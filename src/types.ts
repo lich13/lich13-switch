@@ -4,6 +4,8 @@ export type Preferences = {
   claudeHome?: string;
   cliPath: string;
   theme: "system" | "dark" | "light";
+  quotaRefreshSeconds?: number;
+  systemNotifications?: boolean;
 };
 export type Account = {
   id: string;
@@ -174,6 +176,7 @@ export type ProviderQuota = {
   checkedAt: number | null;
   successAt: number | null;
   retryAt: number | null;
+  nextRefreshAt?: number | null;
   stale: boolean;
   error: string | null;
   keyStatus: string | null;

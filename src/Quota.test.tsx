@@ -48,12 +48,20 @@ function Harness({
   p = provider,
   active = true,
   clientId = "codex",
+  refreshSeconds = 60,
 }: {
   p?: Provider;
   active?: boolean;
   clientId?: ClientId;
+  refreshSeconds?: number;
 }) {
-  const q = useProviderQuota([p], active, "app-visibility", clientId);
+  const q = useProviderQuota(
+    [p],
+    active,
+    "app-visibility",
+    clientId,
+    refreshSeconds,
+  );
   return (
     <>
       <QuotaInfo
@@ -118,6 +126,46 @@ describe("quota display and refresh", () => {
     const count = mock.command.mock.calls.length;
     await act(async () => vi.advanceTimersByTime(120_000));
     expect(mock.command).toHaveBeenCalledTimes(count);
+  });
+  it("uses the configured refresh interval and preserves a zero interval as manual-only", async () => {
+    vi.useFakeTimers();
+    const view = render(<Harness refreshSeconds={10} />);
+    await flush();
+    expect(mock.command).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTime(9_000));
+    expect(mock.command).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(mock.command).toHaveBeenCalledTimes(2);
+
+    view.rerender(<Harness refreshSeconds={0} />);
+    await act(async () => vi.advanceTimersByTime(30_000));
+    expect(mock.command).toHaveBeenCalledTimes(2);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "刷新 " + provider.name + " 额度",
+      }),
+    );
+    await flush();
+    expect(mock.command).toHaveBeenLastCalledWith("query_provider_quota", {
+      clientId: "codex",
+      providerId: provider.id,
+      force: true,
+    });
+  });
+  it("honors an upstream nextRefreshAt that is earlier than the configured interval", async () => {
+    vi.useFakeTimers();
+    mock.command.mockImplementationOnce(async () => ({
+      ...result(),
+      nextRefreshAt: Date.now() / 1000 + 10,
+    }));
+    const view = render(<Harness refreshSeconds={120} />);
+    await flush();
+    expect(mock.command).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTime(9_000));
+    expect(mock.command).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(mock.command).toHaveBeenCalledTimes(2);
+    view.unmount();
   });
   it("manual refresh requests fresh data and details retain the actual quota unit", async () => {
     render(<Harness />);

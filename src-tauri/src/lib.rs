@@ -2,9 +2,11 @@ mod cleanup;
 mod commands;
 mod configuration;
 mod core;
+mod events;
 mod gateway;
 mod links;
 mod login;
+mod notifications;
 mod official;
 mod power;
 #[cfg(target_os = "macos")]
@@ -35,6 +37,7 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 
 struct Runtime {
+    diagnostics: events::Service,
     core: Mutex<Core>,
     data: PathBuf,
     imports: Mutex<links::Imports>,
@@ -56,6 +59,29 @@ struct Runtime {
     official_tx: tokio::sync::Mutex<()>,
 }
 impl Runtime {
+    fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
+        if matches!(
+            error.code.as_str(),
+            "CONFLICT"
+                | "RECOVERY"
+                | "GUARDED"
+                | "CONFIG_CHANGED"
+                | "OFFICIAL_CONFLICT"
+                | "GATEWAY_ACTIVE"
+        ) {
+            self.diagnostics.emit(events::Record::new(
+                Some(client),
+                None,
+                None,
+                events::Reason::ConfigConflict,
+                events::Action::Stopped,
+                None,
+                None,
+            ));
+        }
+        error
+    }
+
     fn gateway(&self, client: gateway::ClientId) -> &gateway::Gateway {
         match client {
             gateway::ClientId::Codex => &self.gateway,
@@ -122,6 +148,7 @@ fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
         .map_err(|_| AppError::new("STATE", "应用状态异常，请重新启动 lich13-switch"))
 }
 fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
+    notifications::on_manual_open(app);
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Regular)
         .map_err(|_| AppError::new("WINDOW", "无法显示主窗口"))?;
@@ -174,10 +201,9 @@ fn open_main(
     provider_id: Option<String>,
     client_id: Option<gateway::ClientId>,
 ) -> Result<()> {
-    if page
-        .as_ref()
-        .is_some_and(|p| !["accounts", "config", "gateway", "settings"].contains(&p.as_str()))
-    {
+    if page.as_ref().is_some_and(|p| {
+        !["accounts", "config", "gateway", "logs", "settings"].contains(&p.as_str())
+    }) {
         return Err(AppError::new("WINDOW", "无效页面"));
     }
     quick::hide_quick(app.clone())?;
@@ -195,6 +221,24 @@ fn open_main(
     }
 }
 fn publish(app: &tauri::AppHandle, state: ViewState) {
+    if state.error.is_some()
+        || state
+            .auth_sync
+            .as_ref()
+            .is_some_and(|s| matches!(s.state.as_str(), "invalid" | "missing" | "error"))
+    {
+        if let Some(r) = app.try_state::<Arc<Runtime>>() {
+            r.diagnostics.emit(events::Record::new(
+                Some(gateway::ClientId::Codex),
+                None,
+                None,
+                events::Reason::AccountSync,
+                events::Action::Stopped,
+                None,
+                None,
+            ));
+        }
+    }
     if let Some(tray) = app.tray_by_id("switch") {
         let current = state
             .accounts
@@ -434,7 +478,8 @@ async fn save_config(
     }
     let doc = r
         .gateway(client)
-        .save_config(&home, &text, &expected_revision)?;
+        .save_config(&home, &text, &expected_revision)
+        .map_err(|e| r.config_failure(client, e))?;
     let _ = app.emit(
         "config-state",
         serde_json::json!({"clientId":client,"revision":doc.revision,"guarded":doc.guarded}),
@@ -469,6 +514,13 @@ fn set_preferences(
         ));
     }
     let s = lock(&r.core)?.set_preferences(preferences)?;
+    r.gateway
+        .set_quota_interval(s.preferences.quota_refresh_seconds);
+    r.claude
+        .set_quota_interval(s.preferences.quota_refresh_seconds);
+    if s.preferences.system_notifications {
+        notifications::on_manual_open(&app);
+    }
     r.gateway.observe_home(&r.home(gateway::ClientId::Codex)?);
     r.claude.observe_home(&r.home(gateway::ClientId::Claude)?);
     publish(&app, s.clone());
@@ -729,12 +781,15 @@ fn update_gateway(
 ) -> Result<gateway::View> {
     let home = r.home(client_id)?;
     let selected = matches!(&edit, gateway::Edit::Select { .. });
-    let result = r.gateway(client_id).edit_checked(
-        edit,
-        &expected_revision,
-        &home,
-        expected_config_revision.as_deref(),
-    )?;
+    let result = r
+        .gateway(client_id)
+        .edit_checked(
+            edit,
+            &expected_revision,
+            &home,
+            expected_config_revision.as_deref(),
+        )
+        .map_err(|e| r.config_failure(client_id, e))?;
     let _ = refresh(&app, &r);
     if selected {
         let _ = app.emit(
@@ -773,7 +828,8 @@ async fn start_gateway(
             &home,
             expected_config_revision.as_deref(),
         )
-        .await?;
+        .await
+        .map_err(|e| r.config_failure(client_id, e))?;
     let _ = refresh(&app, &r);
     let _ = app.emit(
         "switch-notice",
@@ -792,7 +848,8 @@ async fn stop_gateway(
     let result = r
         .gateway(client_id)
         .stop_checked(expected_config_revision.as_deref())
-        .await?;
+        .await
+        .map_err(|e| r.config_failure(client_id, e))?;
     let _ = refresh(&app, &r);
     let _ = app.emit(
         "switch-notice",
@@ -820,6 +877,9 @@ async fn frontend_ready(
     }
     if r.frontend_started.swap(true, Ordering::AcqRel) {
         return Ok(());
+    }
+    if !r.start_silently {
+        notifications::on_manual_open(&app);
     }
     if r.smoke.is_some() {
         let result = (|| -> Result<()> {
@@ -862,6 +922,15 @@ async fn frontend_ready(
                 }
                 if let Err(e) = r.gateway(client).resume(&r.home(client)?).await {
                     let e = AppError::new(&e.code, &format!("{}：{}", client.name(), e.message));
+                    r.diagnostics.emit(events::Record::new(
+                        Some(client),
+                        None,
+                        None,
+                        events::Reason::StartupRecovery,
+                        events::Action::Stopped,
+                        None,
+                        None,
+                    ));
                     *r.startup_error.lock().unwrap() = Some(e.clone());
                     let _ = app.emit("switch-error", e);
                 }
@@ -1060,6 +1129,7 @@ pub fn run() {
                 let _ = show(app, None);
             }
         }))
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(move |app| {
@@ -1107,7 +1177,13 @@ pub fn run() {
             } else {
                 None
             };
+            gateway.set_quota_interval(core.preferences().quota_refresh_seconds);
+            claude.set_quota_interval(core.preferences().quota_refresh_seconds);
+            let diagnostics = events::Service::new(&data);
+            gateway.set_diagnostics(diagnostics.clone());
+            claude.set_diagnostics(diagnostics.clone());
             let runtime = Arc::new(Runtime {
+                diagnostics,
                 core: Mutex::new(core),
                 data,
                 imports: Mutex::new(links::Imports::default()),
@@ -1134,6 +1210,9 @@ pub fn run() {
                 .observe_home(&runtime.home(gateway::ClientId::Claude)?);
             let state = state_for(&runtime)?;
             app.manage(runtime.clone());
+            notifications::connect(app.handle(), &runtime.diagnostics);
+            runtime.gateway.report_diagnostics();
+            runtime.claude.report_diagnostics();
             links::receive(app.handle(), args.iter().cloned());
             quick::Panel::create(app.handle())?;
             #[cfg(target_os = "macos")]
@@ -1146,6 +1225,7 @@ pub fn run() {
                 let r = runtime.clone();
                 tauri::async_runtime::spawn_blocking(move || {
                     if let Err(e) = r.startup.migrate() {
+                        r.diagnostics.emit(events::Record::new(None,None,None,events::Reason::StartupRecovery,events::Action::Stopped,None,None));
                         *r.startup_error.lock().unwrap() = Some(e);
                     }
                 });
@@ -1174,6 +1254,7 @@ pub fn run() {
                     while let Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
                         events.recv().await
                     {
+                        g.report_diagnostics();
                         let _ = handle.emit("gateway-state", g.view());
                     }
                 });
@@ -1376,6 +1457,10 @@ pub fn run() {
             commands::remove_power_helper,
             commands::force_quit_codex_clients,
             commands::get_startup_error,
+            commands::get_app_events,
+            commands::get_app_event,
+            commands::clear_app_events,
+            notifications::notification_permission,
             open_main,
             quick::get_quick,
             quick::set_quick,

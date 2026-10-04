@@ -10,12 +10,14 @@ pub struct Observation {
     pub incomplete: bool,
     pub terminal: Option<Terminal>,
     pub expects_terminal: bool,
+    pub first_event_model_error: Option<bool>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terminal {
     Success,
     Limited,
     Rejected,
+    ModelUnavailable,
     Failure,
     Cancelled,
     Unknown,
@@ -29,7 +31,8 @@ impl Observation {
     pub fn value(&mut self, outer: &Value) {
         let value = outer
             .get("response")
-            .or_else(|| outer.get("message"))
+            .filter(|v| v.is_object())
+            .or_else(|| outer.get("message").filter(|v| v.is_object()))
             .unwrap_or(outer);
         // Only protocol envelopes may contribute an ID, never nested tool/output IDs.
         if (value.get("id").is_some() && outer.get("type").is_none())
@@ -105,6 +108,9 @@ impl Observation {
 }
 
 fn error_terminal(value: &Value) -> Terminal {
+    if super::upstream_error::model_error(value) {
+        return Terminal::ModelUnavailable;
+    }
     let e = value.get("error").unwrap_or(value);
     let code = e
         .get("code")
@@ -156,6 +162,11 @@ impl Sink {
         }
     }
     fn parse(&mut self, data: &[u8]) {
+        if !data.trim_ascii().is_empty() && self.observation.first_event_model_error.is_none() {
+            self.observation.first_event_model_error = Some(
+                serde_json::from_slice(data).is_ok_and(|v| super::upstream_error::model_error(&v)),
+            );
+        }
         if data.trim_ascii() == b"[DONE]" {
             self.observation.terminal.get_or_insert(Terminal::Success);
             return;

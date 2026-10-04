@@ -61,6 +61,7 @@ function QuickContent({
     visible && prefs.tab === "providers",
     "panel-visibility",
     clientId,
+    accounts?.preferences.quotaRefreshSeconds ?? 60,
   );
   useEffect(() => {
     let disposed = false;

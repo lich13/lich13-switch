@@ -14,6 +14,7 @@ export function useProviderQuota(
   active: boolean,
   visibilityEvent = "app-visibility",
   clientId: ClientId = "codex",
+  refreshSeconds = 60,
 ) {
   const latest = useRef(providers);
   latest.current = providers;
@@ -21,6 +22,7 @@ export function useProviderQuota(
   const [nativeVisible, setNativeVisible] = useState(true);
   const [visible, setVisible] = useState(document.visibilityState !== "hidden");
   const flights = useRef(new Set<string>());
+  const snapshots = useRef<Record<string, ProviderQuota>>({});
   const mounted = useRef(true);
   const accept = useCallback((q: ProviderQuota) => {
     if (
@@ -31,6 +33,7 @@ export function useProviderQuota(
       )
     )
       return;
+    snapshots.current = {...snapshots.current, [q.providerId]: q};
     setValues((v) => ({ ...v, [q.providerId]: q }));
   }, []);
   useEffect(() => {
@@ -89,6 +92,7 @@ export function useProviderQuota(
               state: "error",
               stale: Boolean((v[id] ?? provider.quota)?.successAt),
               error: err.message,
+              nextRefreshAt: refreshSeconds > 0 ? Date.now() / 1000 + refreshSeconds : null,
             },
           }));
         }
@@ -96,7 +100,7 @@ export function useProviderQuota(
         flights.current.delete(flight);
       }
     },
-    [accept, clientId],
+    [accept, clientId, refreshSeconds],
   );
   const refreshAll = useCallback(
     (force = true) => {
@@ -105,16 +109,39 @@ export function useProviderQuota(
     [refresh],
   );
   const identity = providers.map((p) => p.id + p.quotaVersion).join("|");
-  useEffect(() => {
-    if (!active || !nativeVisible || !visible || !identity) return;
-    refreshAll(false);
-    const timer = window.setInterval(() => refreshAll(false), 60_000);
-    return () => window.clearInterval(timer);
-  }, [active, nativeVisible, visible, identity, refreshAll]);
   const quotaFor = (p: Provider) => {
     const q = values[p.id];
     return q?.version === p.quotaVersion ? q : (p.quota ?? undefined);
   };
+  useEffect(() => {
+    if (!active || !nativeVisible || !visible || !identity || refreshSeconds === 0) return;
+    let cancelled = false;
+    let timer: number;
+    const tick = async () => {
+      const now = Date.now() / 1000;
+      let next = now + refreshSeconds;
+      const due: Promise<void>[] = [];
+      for (const p of latest.current) {
+        const cached = snapshots.current[p.id];
+        const q = cached?.version === p.quotaVersion ? cached : p.quota;
+        const at = Math.max(q?.nextRefreshAt ?? (q?.checkedAt ? q.checkedAt + refreshSeconds : 0), q?.retryAt ?? 0);
+        if (at <= now) due.push(refresh(p.id, false));
+        else next = Math.min(next, at);
+      }
+      await Promise.all(due);
+      if (!cancelled) {
+        next = Date.now()/1000 + refreshSeconds;
+        for (const p of latest.current) {
+          const cached=snapshots.current[p.id];
+          const q=cached?.version===p.quotaVersion ? cached : p.quota;
+          if(q?.nextRefreshAt) next=Math.min(next, Math.max(q.nextRefreshAt,q.retryAt??0));
+        }
+        timer=window.setTimeout(tick,Math.max(1000,(next-Date.now()/1000)*1000));
+      }
+    };
+    void tick();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [active, nativeVisible, visible, identity, refreshSeconds, refresh]);
   return { quotaFor, refresh, refreshAll };
 }
 function emptyQuota(p: Provider): ProviderQuota {
@@ -164,7 +191,7 @@ export function QuotaInfo({
   const loading = quota?.state === "loading";
   const stale =
     quota?.stale ||
-    Boolean(quota?.successAt && Date.now() / 1000 - quota.successAt >= 60);
+    Boolean(quota?.successAt && quota.nextRefreshAt && Date.now() / 1000 >= quota.nextRefreshAt);
   const headline = quota?.plans[0]
     ? `${quota.plans[0].unlimited ? "" : "剩余 "}${amount(quota.plans[0])}`
     : (quota?.keyStatus ??

@@ -16,6 +16,16 @@ pub struct Preferences {
     pub claude_home: String,
     pub cli_path: String,
     pub theme: String,
+    #[serde(default = "default_quota_refresh")]
+    pub quota_refresh_seconds: u64,
+    #[serde(default = "default_notifications")]
+    pub system_notifications: bool,
+}
+pub fn default_quota_refresh() -> u64 {
+    60
+}
+pub fn default_notifications() -> bool {
+    true
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,6 +316,8 @@ impl Core {
                     claude_home: crate::gateway::claude_home(),
                     cli_path: String::new(),
                     theme: "system".into(),
+                    quota_refresh_seconds: default_quota_refresh(),
+                    system_notifications: true,
                 },
                 seen_roots: vec![],
                 observed_auth_revisions: BTreeMap::new(),
@@ -689,6 +701,10 @@ impl Core {
         self.read_config()
     }
     pub fn set_preferences(&mut self, prefs: Preferences) -> Result<ViewState> {
+        if prefs.quota_refresh_seconds != 0 && !(10..=86400).contains(&prefs.quota_refresh_seconds)
+        {
+            return Err(AppError::new("PREFERENCES", "刷新间隔需为 10–86400 秒"));
+        }
         if !Path::new(&prefs.claude_home).is_absolute() {
             return Err(AppError::new("PATH", "Claude 配置目录必须是绝对路径"));
         }

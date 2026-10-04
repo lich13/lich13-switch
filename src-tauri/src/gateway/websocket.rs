@@ -201,12 +201,45 @@ fn unsupported_status(status: u16) -> bool {
 fn uses_native_websocket(client: super::ClientId, supports_websocket: bool) -> bool {
     client != super::ClientId::Codex || supports_websocket
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct AttemptFailure {
     status: Option<u16>,
     retry: Option<Duration>,
     capacity: bool,
     unsupported: bool,
+    model_unavailable: bool,
+    model_payload: Option<Vec<u8>>,
+}
+fn record_failure(
+    g: &Gateway,
+    route: &Route,
+    model: Option<&str>,
+    failure: &AttemptFailure,
+    action: crate::events::Action,
+    attempt: usize,
+) {
+    use crate::events::Reason;
+    let reason = if failure.model_unavailable {
+        Reason::ModelUnavailable
+    } else if failure.capacity {
+        Reason::Capacity
+    } else if failure.status == Some(429) {
+        Reason::RateLimit
+    } else if matches!(failure.status, Some(401 | 403)) {
+        Reason::Authentication
+    } else if failure.status.is_none() {
+        Reason::Network
+    } else {
+        Reason::UpstreamService
+    };
+    g.record(
+        Some(&route.provider.id),
+        model,
+        reason,
+        action,
+        failure.status,
+        Some(attempt as u32),
+    );
 }
 fn value(frame: &Frame) -> Option<serde_json::Value> {
     if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
@@ -360,6 +393,8 @@ async fn upstream_native(
             retry: None,
             capacity: false,
             unsupported: false,
+            model_unavailable: false,
+            model_payload: None,
         })?;
     *request.headers_mut() = original.clone();
     let headers = request.headers_mut();
@@ -376,6 +411,8 @@ async fn upstream_native(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             })?,
     );
     let key = STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
@@ -399,6 +436,8 @@ async fn upstream_native(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             })
         }
         Err(_) => {
@@ -407,6 +446,8 @@ async fn upstream_native(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             })
         }
     };
@@ -417,45 +458,31 @@ async fn upstream_native(
             .get(header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(circuit::retry_after);
-        let capacity = if route.client_id == super::ClientId::Codex {
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                true
-            } else {
-                let encoding = response
-                    .headers()
-                    .get(header::CONTENT_ENCODING)
-                    .and_then(|h| h.to_str().ok())
-                    .unwrap_or("identity")
-                    .to_owned();
-                let mut body = response.into_body();
-                let prefix =
-                    tokio::time::timeout(Duration::from_secs(settings.first_byte_seconds), async {
-                        let mut bytes = Vec::new();
-                        while bytes.len() < 128 * 1024 {
-                            let Some(Ok(frame)) = body.frame().await else {
-                                break;
-                            };
-                            if let Ok(data) = frame.into_data() {
-                                let count = data.len().min(128 * 1024 - bytes.len());
-                                bytes.extend_from_slice(&data[..count]);
-                            }
-                        }
-                        bytes
-                    })
-                    .await
-                    .unwrap_or_default();
-                let decoded =
-                    replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
-                forward::capacity_message(status, &decoded)
-            }
-        } else {
-            false
-        };
+        let encoding = response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("identity")
+            .to_owned();
+        let prefix = tokio::time::timeout(
+            Duration::from_secs(settings.first_byte_seconds),
+            response_prefix(response.into_body(), 128 * 1024),
+        )
+        .await
+        .unwrap_or_default();
+        let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
+        let model_unavailable = super::upstream_error::model_http(status.as_u16(), &decoded);
+        let capacity = !model_unavailable
+            && route.client_id == super::ClientId::Codex
+            && forward::capacity_message(status, &decoded);
         return Err(AttemptFailure {
             status: Some(status.as_u16()),
             retry,
             capacity,
-            unsupported: route.client_id == super::ClientId::Codex
+            model_payload: model_unavailable.then_some(decoded),
+            model_unavailable,
+            unsupported: !model_unavailable
+                && route.client_id == super::ClientId::Codex
                 && unsupported_status(status.as_u16()),
         });
     }
@@ -473,6 +500,8 @@ async fn upstream_native(
             retry: None,
             capacity: false,
             unsupported: false,
+            model_unavailable: false,
+            model_payload: None,
         });
     }
     let extensions = response
@@ -487,6 +516,8 @@ async fn upstream_native(
             retry: None,
             capacity: false,
             unsupported: false,
+            model_unavailable: false,
+            model_payload: None,
         })?;
     let socket = WebSocket::from_stream_with_extensions(
         TokioIo::new(io),
@@ -499,6 +530,8 @@ async fn upstream_native(
         retry: None,
         capacity: false,
         unsupported: false,
+        model_unavailable: false,
+        model_payload: None,
     })?;
     Ok(Peer::new(
         socket,
@@ -553,6 +586,8 @@ fn decode_reader(reader: BoxReader, encoding: &str) -> Result<BoxReader, Attempt
                 retry: None,
                 capacity: false,
                 unsupported: true,
+                model_unavailable: false,
+                model_payload: None,
             })
         }
     };
@@ -667,7 +702,10 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
     let v = value(frame)?;
     let mut observation = super::protocol::Observation::default();
     observation.value(&v);
-    if observation.terminal != Some(super::protocol::Terminal::Failure) {
+    if !matches!(
+        observation.terminal,
+        Some(super::protocol::Terminal::Failure | super::protocol::Terminal::ModelUnavailable)
+    ) {
         return None;
     }
     let error = v
@@ -703,6 +741,8 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
         retry: None,
         capacity,
         unsupported: false,
+        model_unavailable: super::upstream_error::model_error(&v),
+        model_payload: super::upstream_error::model_error(&v).then(|| frame.payload().to_vec()),
     })
 }
 async fn upstream_bridge(
@@ -718,6 +758,8 @@ async fn upstream_bridge(
         retry: None,
         capacity: false,
         unsupported: false,
+        model_unavailable: false,
+        model_payload: None,
     })?;
     let mut request = Request::new(replay::full(payload.clone()));
     *request.method_mut() = hyper::Method::POST;
@@ -727,6 +769,8 @@ async fn upstream_bridge(
             retry: None,
             capacity: false,
             unsupported: false,
+            model_unavailable: false,
+            model_payload: None,
         })?;
     *request.headers_mut() = original.clone();
     let headers = request.headers_mut();
@@ -753,6 +797,8 @@ async fn upstream_bridge(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             })?,
     );
     headers.insert(
@@ -779,6 +825,8 @@ async fn upstream_bridge(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             });
         }
         Err(_) => {
@@ -787,6 +835,8 @@ async fn upstream_bridge(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             })
         }
     };
@@ -816,7 +866,11 @@ async fn upstream_bridge(
             retry,
             capacity: route.client_id == super::ClientId::Codex
                 && forward::capacity_message(status, &decoded),
-            unsupported: matches!(status.as_u16(), 404 | 405),
+            model_payload: super::upstream_error::model_http(status.as_u16(), &decoded)
+                .then(|| decoded.clone()),
+            model_unavailable: super::upstream_error::model_http(status.as_u16(), &decoded),
+            unsupported: matches!(status.as_u16(), 404 | 405)
+                && !super::upstream_error::model_http(status.as_u16(), &decoded),
         });
     }
     let content_type = response
@@ -834,6 +888,8 @@ async fn upstream_bridge(
             retry,
             capacity: false,
             unsupported: true,
+            model_unavailable: false,
+            model_payload: None,
         });
     }
     let encoding = response
@@ -860,6 +916,8 @@ async fn upstream_bridge(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             });
         }
         Ok(None) | Err(_) => {
@@ -868,6 +926,8 @@ async fn upstream_bridge(
                 retry: None,
                 capacity: false,
                 unsupported: false,
+                model_unavailable: false,
+                model_payload: None,
             });
         }
     }?;
@@ -998,10 +1058,24 @@ async fn session_once(
     let mut capacity_pending = false;
     let mut capacity_retry_after: Option<Duration> = None;
     let mut capacity_sources = Vec::new();
+    let mut last_model_payload: Option<Vec<u8>> = None;
+    let mut previous_provider: Option<String> = None;
     let mut unsupported_seen = false;
     let mut non_unsupported_failure = false;
     let (mut upstream, admission, initial_protocol) = loop {
         if attempts > cfg.max_retries || (unknown_affinity && attempts > 0) {
+            g.record(
+                None,
+                current_model.as_deref(),
+                crate::events::Reason::FailoverExhausted,
+                crate::events::Action::Returned,
+                None,
+                Some(attempts as u32),
+            );
+            if let Some(payload) = last_model_payload.take() {
+                client.send(Frame::text(payload)).await?;
+                return Err((1008, "MODEL_UNAVAILABLE"));
+            }
             return Err(if unsupported_seen && !non_unsupported_failure {
                 (1008, "WS_UNSUPPORTED")
             } else {
@@ -1010,6 +1084,18 @@ async fn session_once(
         }
         if ids.is_empty() {
             if !capacity_pending {
+                g.record(
+                    None,
+                    current_model.as_deref(),
+                    crate::events::Reason::FailoverExhausted,
+                    crate::events::Action::Returned,
+                    None,
+                    Some(attempts as u32),
+                );
+                if let Some(payload) = last_model_payload.take() {
+                    client.send(Frame::text(payload)).await?;
+                    return Err((1008, "MODEL_UNAVAILABLE"));
+                }
                 return Err(if unsupported_seen && !non_unsupported_failure {
                     (1008, "WS_UNSUPPORTED")
                 } else {
@@ -1063,13 +1149,23 @@ async fn session_once(
                 ids.clear();
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if let Some(payload) = last_model_payload.take() {
+                    client.send(Frame::text(payload)).await?;
+                    return Err((1008, "MODEL_UNAVAILABLE"));
+                }
+                return Err(error);
+            }
         };
         if let Err(reason) = admission.commit_rpm() {
             return Err(rejected(reason));
         }
         ids.retain(|id| id != &admission.route.provider.id);
         attempts += 1;
+        let rerouted = previous_provider
+            .as_deref()
+            .is_some_and(|id| id != admission.route.provider.id);
+        previous_provider = Some(admission.route.provider.id.clone());
         let result = while_connecting(client, async {
             if uses_native_websocket(
                 admission.route.client_id,
@@ -1087,16 +1183,48 @@ async fn session_once(
         .await?;
         match result {
             Ok(upstream) => {
+                if rerouted {
+                    g.record(
+                        Some(&admission.route.provider.id),
+                        current_model.as_deref(),
+                        crate::events::Reason::Failover,
+                        crate::events::Action::Routed,
+                        None,
+                        Some(attempts as u32),
+                    );
+                }
                 break (upstream, admission, super::protocol::Protocol::new(true));
             }
             Err(failure) => {
+                if !failure.model_unavailable {
+                    last_model_payload = None;
+                }
                 if failure.unsupported {
                     unsupported_seen = true;
                     admission.permits.neutral(cfg);
                     continue;
                 }
                 non_unsupported_failure = true;
-                let retryable = failure.status.is_none_or(circuit::retryable);
+                let retryable =
+                    failure.model_unavailable || failure.status.is_none_or(circuit::retryable);
+                record_failure(
+                    g,
+                    &admission.route,
+                    current_model.as_deref(),
+                    &failure,
+                    if !ids.is_empty() && !unknown_affinity && attempts <= cfg.max_retries {
+                        crate::events::Action::TryingNext
+                    } else {
+                        crate::events::Action::Returned
+                    },
+                    attempts,
+                );
+                if failure.model_unavailable {
+                    admission.permits.neutral(cfg);
+                    last_model_payload = failure.model_payload;
+                    continue;
+                }
+                last_model_payload = None;
                 if failure.capacity {
                     admission.permits.capacity_limited(cfg, failure.retry);
                 } else if failure.status == Some(429) {
@@ -1206,7 +1334,17 @@ async fn session_once(
                                 u.finish(failure.status, "HTTP");
                             }
                             if let Some(mut admission) = turn.take() {
-                                if failure.capacity {
+                                record_failure(
+                                    g,
+                                    &route,
+                                    current_model.as_deref(),
+                                    &failure,
+                                    crate::events::Action::Returned,
+                                    attempts,
+                                );
+                                if failure.model_unavailable {
+                                    admission.permits.neutral(cfg);
+                                } else if failure.capacity {
                                     admission.permits.capacity_limited(cfg, failure.retry);
                                 } else if failure.status == Some(429) {
                                     admission.permits.rate_limited(cfg, failure.retry);
@@ -1218,7 +1356,12 @@ async fn session_once(
                                     admission.permits.neutral(cfg);
                                 }
                             }
-                            return Err(if failure.unsupported {
+                            if let Some(payload) = failure.model_payload {
+                                client.send(Frame::text(payload)).await?;
+                            }
+                            return Err(if failure.model_unavailable {
+                                (1008, "MODEL_UNAVAILABLE")
+                            } else if failure.unsupported {
                                 (1008, "WS_UNSUPPORTED")
                             } else {
                                 (1013, "bridge request failed")
@@ -1283,7 +1426,7 @@ async fn session_once(
                                 } else if route.client_id == super::ClientId::Codex && first_event_failure(&frame).is_some_and(|failure| failure.capacity) {
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
-                                    forward::settle_protocol(&u, &mut admission.permits, cfg);
+                                    forward::observe_protocol(&u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
                                 }
                                 if u.succeeded() { g.successful_response(&route.provider); }
                             }

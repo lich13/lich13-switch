@@ -43,6 +43,7 @@ type Dialog =
   | { kind: "quota"; item: Provider }
   | null;
 type GatewayProps = {
+  quotaRefreshSeconds?: number;
   notify: (s: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
   focusProvider?: { id: string; sequence: number; clientId?: ClientId } | null;
@@ -74,12 +75,14 @@ export default function Gateway(props: GatewayProps) {
   );
 }
 function GatewayContent({
+  quotaRefreshSeconds = 60,
   clientId,
   onClientChange,
   notify,
   onDirtyChange,
   focusProvider,
 }: {
+  quotaRefreshSeconds?: number;
   clientId: ClientId;
   onClientChange: (id: ClientId) => void;
   notify: (s: string) => void;
@@ -99,6 +102,7 @@ function GatewayContent({
     true,
     "app-visibility",
     clientId,
+    quotaRefreshSeconds,
   );
   useEffect(() => {
     let disposed = false,

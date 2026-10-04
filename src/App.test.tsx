@@ -131,6 +131,8 @@ beforeEach(() => {
             releaseUrl: "https://github.com/lich13/lich13-switch/releases",
             asset: null,
           };
+        case "notification_permission":
+          return { permission: "granted", error: null };
         case "open_github":
         case "open_update_release":
           return;
@@ -508,5 +510,58 @@ describe("user workflows", () => {
       ),
     );
     expect(screen.getByLabelText("TOML 编辑器")).toHaveValue('model="draft"');
+  });
+});
+
+describe("quota and notification settings", () => {
+  it("keeps the default interval at 60 seconds, accepts 10 seconds and can disable auto refresh", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", { name: "账号", level: 1 });
+    expect(document.querySelector(".topbar")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^设置/ }));
+
+    const enabled = screen.getByRole("checkbox", { name: "额度自动刷新" });
+    expect(enabled).toBeChecked();
+    const interval = screen.getByRole("spinbutton", { name: "额度刷新间隔" });
+    expect(interval).toHaveValue(60);
+    expect(interval).toHaveAttribute("min", "10");
+    expect(interval).toHaveAttribute("max", "86400");
+    await user.clear(interval);
+    await user.type(interval, "10");
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() =>
+      expect(mocks.command).toHaveBeenCalledWith("set_preferences", {
+        preferences: expect.objectContaining({ quotaRefreshSeconds: 10 }),
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: /^设置/ }));
+    expect(screen.getByRole("spinbutton", { name: "额度刷新间隔" })).toHaveValue(10);
+    await user.click(screen.getByRole("checkbox", { name: "额度自动刷新" }));
+    expect(screen.queryByRole("spinbutton", { name: "额度刷新间隔" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() =>
+      expect(mocks.command).toHaveBeenLastCalledWith("set_preferences", {
+        preferences: expect.objectContaining({ quotaRefreshSeconds: 0 }),
+      }),
+    );
+  });
+
+  it("persists the system notification switch with the same preferences save", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", { name: "账号", level: 1 });
+    await user.click(screen.getByRole("button", { name: /^设置/ }));
+    const notifications = screen.getByRole("checkbox", { name: "系统提醒" });
+    expect(notifications).toBeChecked();
+    await user.click(notifications);
+    expect(notifications).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() =>
+      expect(mocks.command).toHaveBeenLastCalledWith("set_preferences", {
+        preferences: expect.objectContaining({ systemNotifications: false }),
+      }),
+    );
   });
 });

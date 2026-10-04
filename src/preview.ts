@@ -47,6 +47,8 @@ export const demo: ViewState = {
     codexHome: "~/.codex",
     cliPath: "",
     theme: "system",
+    quotaRefreshSeconds: 60,
+    systemNotifications: true,
   },
   authSource: {
     provider: "openai",
@@ -222,6 +224,16 @@ export async function run(
     return result;
   }
   switch (name) {
+    case "notification_permission": return {permission:"granted",error:null};
+    case "get_app_events": {
+      const filter=(args.filter??{}) as Record<string,unknown>;
+      const rows=demoEvents.filter(r=>Object.entries(filter).every(([key,v])=>!v||key==="page"||(key==="from"?r.lastAt>=Number(v):key==="to"?r.firstAt<=Number(v):r[key as keyof typeof r]===v)));
+      const page=Math.max(1,Math.min(Number(filter.page)||1,Math.ceil(rows.length/50)||1));
+      return {items:rows.slice((page-1)*50,page*50),total:rows.length,page,error:null};
+    }
+    case "get_app_event": return demoEvents.find(r=>r.id===args.id)??null;
+    case "clear_app_events": demoEvents=[];emit("app-event",{});return;
+
     case "get_state":
       return structuredClone(demo);
     case "frontend_ready":
@@ -335,3 +347,8 @@ export async function run(
   emit("switch-state", structuredClone(demo));
   return structuredClone(demo);
 }
+
+let demoEvents = [
+  {id:"fixture-event-1",firstAt:Math.floor(Date.now()/1000)-180,lastAt:Math.floor(Date.now()/1000)-20,count:3,clientId:"codex",providerId:"primary",model:"gpt-example",reason:"model_unavailable",action:"trying_next",level:"warning",status:404,attempt:1},
+  {id:"fixture-event-2",firstAt:Math.floor(Date.now()/1000)-600,lastAt:Math.floor(Date.now()/1000)-600,count:1,clientId:"claude",providerId:null,model:null,reason:"config_conflict",action:"stopped",level:"error",status:null,attempt:null},
+];

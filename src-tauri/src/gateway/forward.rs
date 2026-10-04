@@ -7,6 +7,7 @@ use super::{
     routing::{self, Requirement},
     Active, Gateway, Route,
 };
+use crate::events::{Action, Reason};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Body as _;
 use hyper::{body::Incoming, header, HeaderMap, Request, Response, StatusCode, Uri};
@@ -315,6 +316,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     };
     let mut last = None;
     let mut attempted = 0usize;
+    let mut previous_provider: Option<String> = None;
     let mut last_category = "NO_PROVIDER";
     let mut wait_budget = Budget::new(settings.queue_seconds);
     let mut capacity_pending = false;
@@ -499,6 +501,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             );
         }
         attempted += 1;
+        let rerouted = previous_provider
+            .as_deref()
+            .is_some_and(|id| id != admission.route.provider.id);
+        previous_provider = Some(admission.route.provider.id.clone());
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(stream_hint);
         let deadline = tokio::time::Instant::now()
@@ -516,15 +522,29 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Some(connector::ConnectError::Tls) => "TLS",
                     _ => "NETWORK",
                 };
+                gateway.record(
+                    Some(&route.provider.id),
+                    model.as_deref(),
+                    Reason::Network,
+                    Action::TryingNext,
+                    None,
+                    Some(attempted as u32),
+                );
                 admission.permits.failure(&settings, None);
-
                 protocol.finish(None, last_category);
                 continue;
             }
             Err(_) => {
                 last_category = "FIRST_BYTE_TIMEOUT";
+                gateway.record(
+                    Some(&route.provider.id),
+                    model.as_deref(),
+                    Reason::Network,
+                    Action::TryingNext,
+                    None,
+                    Some(attempted as u32),
+                );
                 admission.permits.failure(&settings, None);
-
                 protocol.finish(None, last_category);
                 continue;
             }
@@ -550,6 +570,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let downstream = downstream_upgrade.expect("upgrade exists");
             let g = gateway.clone();
             let cfg = settings.clone();
+            let provider_for_tunnel = route.provider.clone();
             tokio::spawn(async move {
                 let _active = active;
                 let _slot = slot;
@@ -569,14 +590,24 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         },
                     );
                     if protocol.succeeded() {
-                        g.successful_response(&route.provider);
+                        g.successful_response(&provider_for_tunnel);
                     }
                     permits.neutral(&cfg);
                 }
             });
+            if rerouted {
+                gateway.record(
+                    Some(&route.provider.id),
+                    model.as_deref(),
+                    Reason::Failover,
+                    Action::Routed,
+                    Some(status.as_u16()),
+                    Some(attempted as u32),
+                );
+            }
             return Response::from_parts(response_parts, replay::empty());
         }
-        if circuit::retryable(status.as_u16()) {
+        if status.as_u16() >= 400 {
             let cooldown = response
                 .headers()
                 .get(header::RETRY_AFTER)
@@ -589,29 +620,65 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Replay::capture(body, gateway.0.spool.path()),
             )
             .await;
-            let capacity = route.client_id == super::ClientId::Codex
-                && match &captured {
-                    Ok(Ok(body)) => {
-                        let encoded = body.prefix(128 * 1024).await.unwrap_or_default();
-                        let encoding = response_parts
-                            .headers
-                            .get(header::CONTENT_ENCODING)
-                            .and_then(|h| h.to_str().ok())
-                            .unwrap_or("identity");
-                        let decoded = replay::decode_prefix(&encoded, encoding, 128 * 1024)
-                            .unwrap_or_default();
-                        capacity_message(status, &decoded)
-                    }
-                    _ => capacity_message(status, &[]),
-                };
-            if capacity {
+            let decoded = match &captured {
+                Ok(Ok(body)) => {
+                    let encoded = body.prefix(128 * 1024).await.unwrap_or_default();
+                    let encoding = response_parts
+                        .headers
+                        .get(header::CONTENT_ENCODING)
+                        .and_then(|h| h.to_str().ok())
+                        .unwrap_or("identity");
+                    replay::decode_prefix(&encoded, encoding, 128 * 1024).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            let model_error = super::upstream_error::model_http(status.as_u16(), &decoded);
+            let capacity = !model_error
+                && route.client_id == super::ClientId::Codex
+                && capacity_message(status, &decoded);
+            let retryable = model_error || circuit::retryable(status.as_u16());
+            let will_retry = retryable
+                && !ids.is_empty()
+                && attempted <= settings.max_retries
+                && !unknown_affinity;
+            let reason = if model_error {
+                Reason::ModelUnavailable
+            } else if status == StatusCode::TOO_MANY_REQUESTS {
+                Reason::RateLimit
+            } else if capacity {
+                Reason::Capacity
+            } else if matches!(status.as_u16(), 401 | 403) {
+                Reason::Authentication
+            } else {
+                Reason::UpstreamService
+            };
+            if model_error || circuit::retryable(status.as_u16()) {
+                gateway.record(
+                    Some(&route.provider.id),
+                    model.as_deref(),
+                    reason,
+                    if will_retry {
+                        Action::TryingNext
+                    } else if capacity {
+                        Action::Waiting
+                    } else {
+                        Action::Returned
+                    },
+                    Some(status.as_u16()),
+                    Some(attempted as u32),
+                );
+            }
+            if model_error {
+                admission.permits.neutral(&settings);
+            } else if capacity {
                 admission.permits.capacity_limited(&settings, cooldown);
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 admission.permits.rate_limited(&settings, cooldown);
-            } else {
+            } else if retryable {
                 admission.permits.failure(&settings, cooldown);
+            } else {
+                admission.permits.neutral(&settings);
             }
-
             if let Ok(Ok(body)) = captured {
                 protocol.finish(Some(status.as_u16()), "HTTP");
                 last = Some(Response::from_parts(response_parts, body.body()));
@@ -619,6 +686,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 protocol.finish(Some(status.as_u16()), "STREAM_INTERRUPTED");
             }
             last_category = "HTTP";
+            if !retryable {
+                return last.unwrap_or_else(|| {
+                    error(
+                        StatusCode::BAD_GATEWAY,
+                        "UPSTREAM_BODY",
+                        "上游错误响应读取失败",
+                    )
+                });
+            }
             if capacity {
                 capacity_pending = true;
                 capacity_sources.push(CapacitySource {
@@ -642,18 +718,106 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         } else {
             deadline
         };
-        let first = tokio::time::timeout_at(first_deadline, body.frame()).await;
-        let first = match first {
-            Ok(Some(Ok(frame))) => Some(frame),
-            Ok(None) => None,
-            _ => {
-                admission.permits.failure(&settings, None);
-
-                last_category = "FIRST_BYTE_TIMEOUT";
-                protocol.finish(Some(status.as_u16()), last_category);
-                continue;
+        // Buffer only the first complete SSE event (or bounded JSON); preserve
+        // the original frames and encoding exactly, including comments/trailers.
+        let json = response_parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("json"));
+        let mut prefix = Vec::new();
+        let mut prefix_bytes = 0;
+        let mut ended = false;
+        let mut failed = false;
+        loop {
+            match tokio::time::timeout_at(first_deadline, body.frame()).await {
+                Ok(Some(Ok(frame))) => {
+                    if let Some(bytes) = frame.data_ref() {
+                        prefix_bytes += bytes.len();
+                        protocol.feed(bytes);
+                    }
+                    prefix.push(frame);
+                    if body.is_end_stream() {
+                        ended = true;
+                    }
+                    if ended
+                        || prefix_bytes >= 2 * 1024 * 1024
+                        || (!stream && !json)
+                        || (stream && protocol.observation.first_event_model_error.is_some())
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    ended = true;
+                    break;
+                }
+                _ => {
+                    failed = true;
+                    break;
+                }
             }
+        }
+        if failed {
+            gateway.record(
+                Some(&route.provider.id),
+                model.as_deref(),
+                Reason::Network,
+                Action::TryingNext,
+                Some(status.as_u16()),
+                Some(attempted as u32),
+            );
+            admission.permits.failure(&settings, None);
+            last_category = "FIRST_BYTE_TIMEOUT";
+            continue;
+        }
+        if ended {
+            protocol.finish(
+                Some(status.as_u16()),
+                if status.is_success() { "OK" } else { "HTTP" },
+            );
+        }
+        let initial_model_error = if stream {
+            protocol.observation.first_event_model_error == Some(true)
+        } else {
+            ended && protocol.terminal() == Some(super::protocol::Terminal::ModelUnavailable)
         };
+        if initial_model_error {
+            admission.permits.neutral(&settings);
+            let will_retry =
+                !ids.is_empty() && attempted <= settings.max_retries && !unknown_affinity;
+            gateway.record(
+                Some(&route.provider.id),
+                model.as_deref(),
+                Reason::ModelUnavailable,
+                if will_retry {
+                    Action::TryingNext
+                } else {
+                    Action::Returned
+                },
+                Some(status.as_u16()),
+                Some(attempted as u32),
+            );
+            // Preserve a bounded error prefix. Dropping its unread tail cancels the
+            // rejected attempt; if no alternative succeeds, return the original stream.
+            let error_idle_seconds = settings.idle_seconds;
+            let rejected = async_stream::try_stream! {
+                for frame in prefix {yield frame;}
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(error_idle_seconds),body.frame()).await {
+                        Ok(Some(frame))=>yield frame.map_err(|e|Box::new(e) as BoxError)?,
+                        Ok(None)=>break,
+                        Err(_)=>Err::<(),BoxError>(std::io::Error::other("upstream error stream timeout").into())?,
+                    }
+                }
+            };
+            last = Some(Response::from_parts(
+                response_parts,
+                StreamBody::new(rejected).boxed_unsync(),
+            ));
+            last_category = "MODEL_UNAVAILABLE";
+            continue;
+        }
         let total_deadline = tokio::time::Instant::now()
             + Duration::from_secs(settings.total_seconds)
                 .saturating_sub(began.elapsed().saturating_sub(capacity_waited));
@@ -663,32 +827,40 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let g = gateway.clone();
         let cfg = settings.clone();
         let neutral = status.as_u16() >= 400;
+        if rerouted {
+            gateway.record(
+                Some(&route.provider.id),
+                model.as_deref(),
+                Reason::Failover,
+                Action::Routed,
+                Some(status.as_u16()),
+                Some(attempted as u32),
+            );
+        }
         let output = async_stream::try_stream! {
             let _active=active;
             let _slot=slot;
-            if let Some(frame)=first {
-                if let Some(data)=frame.data_ref(){protocol.feed(data);remember(&protocol,&g,&route,model.as_deref());settle_protocol(&protocol,&mut permits,&cfg);}
-                let complete=body.is_end_stream();
-                if complete {protocol.finish(Some(status.as_u16()),if neutral{"HTTP"}else{"OK"});remember(&protocol,&g,&route,model.as_deref());settle_protocol(&protocol,&mut permits,&cfg);if protocol.succeeded() { g.successful_response(&route.provider); } }
-                yield frame;
-                if complete {return;}
-            }
+            remember(&protocol,&g,&route,model.as_deref());
+            observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);
+            if ended && protocol.succeeded(){g.successful_response(&route.provider);}
+            for frame in prefix {yield frame;}
+            if ended {return;}
             loop {
                 let limit=if stream {tokio::time::Instant::now()+Duration::from_secs(cfg.idle_seconds)}else{total_deadline};
                 match tokio::time::timeout_at(limit,body.frame()).await {
                     Ok(Some(Ok(frame)))=>{
-                        if let Some(data)=frame.data_ref(){protocol.feed(data);remember(&protocol,&g,&route,model.as_deref());settle_protocol(&protocol,&mut permits,&cfg);}
+                        if let Some(data)=frame.data_ref(){protocol.feed(data);remember(&protocol,&g,&route,model.as_deref());observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);}
                         let complete=body.is_end_stream();
-                        if complete {protocol.finish(Some(status.as_u16()),if neutral{"HTTP"}else{"OK"});remember(&protocol,&g,&route,model.as_deref());settle_protocol(&protocol,&mut permits,&cfg);if protocol.succeeded() { g.successful_response(&route.provider); } }
+                        if complete {protocol.finish(Some(status.as_u16()),if neutral{"HTTP"}else{"OK"});remember(&protocol,&g,&route,model.as_deref());observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);if protocol.succeeded() { g.successful_response(&route.provider); } }
                         yield frame;
                         if complete {break;}
                     }
-                    Ok(None)=>{protocol.finish(Some(status.as_u16()),if neutral{"HTTP"}else{"OK"});remember(&protocol,&g,&route,model.as_deref());settle_protocol(&protocol,&mut permits,&cfg);if protocol.succeeded() { g.successful_response(&route.provider); }
+                    Ok(None)=>{protocol.finish(Some(status.as_u16()),if neutral{"HTTP"}else{"OK"});remember(&protocol,&g,&route,model.as_deref());observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);if protocol.succeeded() { g.successful_response(&route.provider); }
                         break;}
                     result=>{
                         let category=if result.is_err(){"STREAM_TIMEOUT"}else{"STREAM_INTERRUPTED"};
                         protocol.finish(Some(status.as_u16()),category);
-                        settle_protocol(&protocol,&mut permits,&cfg);
+                        observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);
                         Err::<(),BoxError>(std::io::Error::other("上游流中断").into())?;
                     }
                 }
@@ -696,6 +868,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         };
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }
+    gateway.record(
+        None,
+        model.as_deref(),
+        Reason::FailoverExhausted,
+        Action::Returned,
+        last.as_ref().map(|r| r.status().as_u16()),
+        Some(attempted as u32),
+    );
     last.unwrap_or_else(|| {
         if last_category == "RPM_LIMIT" {
             let mut response = error(
@@ -737,6 +917,36 @@ fn remember(protocol: &super::protocol::Protocol, g: &Gateway, route: &Route, mo
             protocol.observation.model.as_deref().or(model),
         );
     }
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe_protocol(
+    protocol: &super::protocol::Protocol,
+    permits: &mut Permits,
+    cfg: &Settings,
+    g: &Gateway,
+    route: &Route,
+    model: Option<&str>,
+    status: Option<u16>,
+    attempt: usize,
+) {
+    if permits.provider.is_some() {
+        let reason = match protocol.terminal() {
+            Some(super::protocol::Terminal::ModelUnavailable) => Some(Reason::ModelUnavailable),
+            Some(super::protocol::Terminal::Failure) => Some(Reason::UpstreamService),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            g.record(
+                Some(&route.provider.id),
+                model,
+                reason,
+                Action::Returned,
+                status,
+                Some(attempt as u32),
+            );
+        }
+    }
+    settle_protocol(protocol, permits, cfg);
 }
 pub(super) fn settle_protocol(
     protocol: &super::protocol::Protocol,

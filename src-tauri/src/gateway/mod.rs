@@ -15,6 +15,7 @@ mod protocol_tests;
 mod quota;
 mod replay;
 mod routing;
+mod upstream_error;
 mod websocket;
 pub use quota::QuotaView;
 mod takeover;
@@ -97,6 +98,9 @@ struct Inner {
 }
 struct Shared {
     client: ClientId,
+    diagnostics: Mutex<Option<crate::events::Service>>,
+    diagnostic_health: Mutex<HashMap<String, (circuit::CircuitState, bool)>>,
+    diagnostic_conflict: std::sync::atomic::AtomicBool,
     registry: Arc<registry::Registry>,
     inner: Mutex<Inner>,
     lifecycle: tokio::sync::Mutex<()>,
@@ -122,6 +126,79 @@ fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
 impl Gateway {
+    pub fn report_diagnostics(&self) {
+        use crate::events::{Action, Reason};
+        let view = self.view();
+        let mut old = self.0.diagnostic_health.lock().unwrap();
+        old.retain(|id, _| view.providers.iter().any(|p| &p.id == id));
+        for provider in &view.providers {
+            let h = &provider.health;
+            let faulty = h.failures > 0
+                || h.cooldown_reason.is_some()
+                || h.state != circuit::CircuitState::Closed;
+            let previous = old.insert(provider.id.clone(), (h.state, faulty));
+            if h.state == circuit::CircuitState::Open && previous.is_none_or(|p| p.0 != h.state) {
+                self.record(
+                    Some(&provider.id),
+                    None,
+                    Reason::CircuitOpen,
+                    Action::Stopped,
+                    None,
+                    None,
+                );
+            } else if !faulty && previous.is_some_and(|p| p.1) {
+                self.record(
+                    Some(&provider.id),
+                    None,
+                    Reason::Recovered,
+                    Action::Recovered,
+                    None,
+                    None,
+                );
+            }
+        }
+        let conflict = view.config_error.is_some() || view.error.is_some();
+        if conflict && !self.0.diagnostic_conflict.swap(conflict, Ordering::Relaxed) {
+            self.record(
+                None,
+                None,
+                Reason::ConfigConflict,
+                Action::Stopped,
+                None,
+                None,
+            );
+        } else if !conflict {
+            self.0.diagnostic_conflict.store(false, Ordering::Relaxed);
+        }
+    }
+    pub fn set_diagnostics(&self, events: crate::events::Service) {
+        *self.0.diagnostics.lock().unwrap() = Some(events);
+    }
+    fn record(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+        reason: crate::events::Reason,
+        action: crate::events::Action,
+        status: Option<u16>,
+        attempt: Option<u32>,
+    ) {
+        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
+            events.emit(crate::events::Record::new(
+                Some(self.0.client),
+                provider,
+                model,
+                reason,
+                action,
+                status,
+                attempt,
+            ));
+        }
+    }
+
+    pub fn set_quota_interval(&self, seconds: u64) {
+        self.0.quota.set_interval(seconds);
+    }
     pub fn new(data: PathBuf) -> Result<Self> {
         Self::new_client(data, ClientId::Codex, None)
     }
@@ -157,6 +234,9 @@ impl Gateway {
         admission.configure(&store.providers, false);
         let gateway = Self(Arc::new(Shared {
             client,
+            diagnostics: Mutex::new(None),
+            diagnostic_health: Mutex::new(HashMap::new()),
+            diagnostic_conflict: std::sync::atomic::AtomicBool::new(false),
             registry: registry.clone(),
             inner: Mutex::new(Inner {
                 store,

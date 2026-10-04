@@ -84,3 +84,22 @@ pub fn cleanup_retired_data(r: R<'_>) -> Result<()> {
     *r.cleanup_error.lock().unwrap() = None;
     Ok(())
 }
+
+#[tauri::command]
+pub async fn get_app_events(
+    r: R<'_>,
+    filter: crate::events::Filter,
+) -> Result<crate::events::Page> {
+    let service = r.diagnostics.clone();
+    tauri::async_runtime::spawn_blocking(move || service.query(filter))
+        .await
+        .map_err(|_| AppError::new("LOG_READ", "日志读取失败"))
+}
+#[tauri::command]
+pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::Record> {
+    r.diagnostics.detail(&id)
+}
+#[tauri::command]
+pub async fn clear_app_events(r: R<'_>) -> Result<()> {
+    r.diagnostics.clear().await
+}

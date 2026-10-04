@@ -7,7 +7,10 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, watch, Semaphore};
@@ -46,6 +49,7 @@ pub struct QuotaView {
     pub checked_at: Option<u64>,
     pub success_at: Option<u64>,
     pub retry_at: Option<u64>,
+    pub next_refresh_at: Option<u64>,
     pub stale: bool,
     pub error: Option<String>,
     pub key_status: Option<String>,
@@ -65,6 +69,7 @@ impl QuotaView {
             checked_at: None,
             success_at: None,
             retry_at: None,
+            next_refresh_at: None,
             stale: false,
             error: None,
             key_status: None,
@@ -82,6 +87,7 @@ struct Entry {
 }
 struct Shared {
     entries: Mutex<HashMap<String, Entry>>,
+    interval: AtomicU64,
     permits: Semaphore,
     events: broadcast::Sender<QuotaView>,
 }
@@ -100,12 +106,35 @@ impl Service {
         let (events, _) = broadcast::channel(64);
         Self(Arc::new(Shared {
             entries: Mutex::new(HashMap::new()),
+            interval: AtomicU64::new(60),
             permits: Semaphore::new(3),
             events,
         }))
     }
     pub fn subscribe(&self) -> broadcast::Receiver<QuotaView> {
         self.0.events.subscribe()
+    }
+    pub fn set_interval(&self, seconds: u64) {
+        self.0.interval.store(seconds, Ordering::Relaxed);
+        for e in self.0.entries.lock().unwrap().values_mut() {
+            self.schedule(&mut e.view);
+            let _ = self.0.events.send(e.view.clone());
+        }
+    }
+    fn schedule(&self, v: &mut QuotaView) {
+        let seconds = self.0.interval.load(Ordering::Relaxed);
+        v.next_refresh_at = (seconds > 0).then(|| {
+            v.checked_at
+                .unwrap_or(0)
+                .saturating_add(seconds)
+                .max(v.retry_at.unwrap_or(0))
+        });
+        v.stale = v.success_at.is_some()
+            && (v.state == "error"
+                || v.state == "unsupported"
+                || (seconds > 0
+                    && v.success_at
+                        .is_some_and(|t| now().saturating_sub(t) >= seconds)));
     }
     pub fn cached(&self, id: &str, version: &str) -> Option<QuotaView> {
         self.0
@@ -115,9 +144,9 @@ impl Service {
             .get(id)
             .filter(|e| e.view.version == version)
             .map(|e| {
-                let mut v = e.view.clone();
-                v.stale |= v.success_at.is_some_and(|t| now().saturating_sub(t) >= 60);
-                v
+                let mut view = e.view.clone();
+                self.schedule(&mut view);
+                view
             })
     }
     pub fn retain(&self, versions: &HashMap<String, String>) {
@@ -143,11 +172,11 @@ impl Service {
             if let Some(rx) = &e.flight {
                 rx.clone()
             } else {
+                self.schedule(&mut e.view);
                 if e.view.retry_at.is_some_and(|t| t > now())
                     || (!force
-                        && e.view
-                            .checked_at
-                            .is_some_and(|t| now().saturating_sub(t) < 60))
+                        && (self.0.interval.load(Ordering::Relaxed) == 0
+                            || e.view.next_refresh_at.is_some_and(|t| t > now())))
                 {
                     return Ok(e.view.clone());
                 }
@@ -195,6 +224,7 @@ impl Service {
                             view.stale = view.success_at.is_some();
                         }
                     }
+                    service.schedule(&mut view);
                     let mut entries = service.0.entries.lock().unwrap();
                     if let Some(e) = entries
                         .get_mut(&input.id)

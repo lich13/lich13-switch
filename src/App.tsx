@@ -23,7 +23,7 @@ import {
   MoreHorizontal,
   X,
   Upload,
-  Terminal,
+  ScrollText,
   ExternalLink,
   ChevronRight,
   AlertTriangle,
@@ -38,12 +38,13 @@ import {
   Trash2,
   Pencil,
 } from "lucide-react";
-import { command, subscribe, preview } from "./bridge";
+import { command, subscribe } from "./bridge";
 import AuthSyncNotice from "./AuthSyncNotice";
 import StartupSettings from "./StartupSettings";
 import PowerSettings from "./PowerSettings";
 import LinkSettings from "./LinkSettings";
 import ProviderImports from "./ProviderImports";
+import NotificationPermission from "./NotificationPermission";
 import { version } from "../package.json";
 import {
   errorOf,
@@ -54,6 +55,7 @@ import {
   type LoginState,
   type UpdateInfo,
 } from "./types";
+const EventLog = lazy(() => import("./EventLog"));
 const Gateway = lazy(() => import("./Gateway"));
 const ConfigEditor = lazy(() => import("./ConfigEditor"));
 type Dialog =
@@ -71,7 +73,7 @@ const emptyLogin: LoginState = {
 };
 export default function App() {
   const [state, setState] = useState<ViewState | null>(null),
-    [page, setPage] = useState<"accounts" | "config" | "gateway">("accounts"),
+    [page, setPage] = useState<"accounts" | "config" | "gateway" | "logs">("accounts"),
     [search, setSearch] = useState(""),
     [dialog, setDialog] = useState<Dialog>(null),
     [error, setError] = useState(""),
@@ -100,7 +102,7 @@ export default function App() {
   pageRef.current = page;
   const notify = useCallback((s: string) => setMessage(s), []);
   const navigate = useCallback(
-    async (next: "accounts" | "config" | "gateway") => {
+    async (next: "accounts" | "config" | "gateway" | "logs") => {
       if (next === pageRef.current) return;
       if (
         gatewayDirty.current &&
@@ -273,8 +275,7 @@ export default function App() {
       setState(s);
       notify("官方连接已关闭，配置已恢复");
     });
-  const current = state?.accounts.find((a) => a.current),
-    accounts =
+  const accounts =
       state?.accounts.filter((a) =>
         (a.name + " " + (a.email ?? ""))
           .toLowerCase()
@@ -311,6 +312,9 @@ export default function App() {
             <Network size={17} />
             网关
           </button>
+          <button className={page === "logs" ? "nav-item active" : "nav-item"} onClick={() => navigate("logs")}>
+            <ScrollText size={17} />日志
+          </button>
         </nav>
         <div className="sidebar-bottom">
           <button
@@ -326,22 +330,6 @@ export default function App() {
         </div>
       </aside>
       <main>
-        <div className="topbar">
-          <span>
-            <span className="dot" />
-            {current?.name ??
-              {
-                unsaved: "未保存账号",
-                missing: "尚无登录文件",
-                invalid: "凭据格式无效",
-              }[state?.currentState as "unsaved"] ??
-              "正在读取"}
-          </span>
-          <span className="topbar-right">
-            <Terminal size={13} />
-            Codex{preview && <span className="preview-badge">预览</span>}
-          </span>
-        </div>
         {(error || state?.error) && (
           <div className="banner error global-error" role="alert">
             <AlertTriangle size={16} />
@@ -355,7 +343,7 @@ export default function App() {
             </button>
           </div>
         )}
-        {page === "accounts" ? (
+        {page === "logs" ? (<Suspense fallback={null}><EventLog /></Suspense>) : page === "accounts" ? (
           <section className="accounts-page">
             <div className="page-heading">
               <div>
@@ -565,6 +553,7 @@ export default function App() {
         ) : page === "gateway" ? (
           <Suspense fallback={<div className="empty">正在打开网关…</div>}>
             <Gateway
+              quotaRefreshSeconds={state?.preferences.quotaRefreshSeconds ?? 60}
               focusProvider={focusProvider}
               notify={notify}
               onDirtyChange={gatewayDraftChanged}
@@ -937,6 +926,7 @@ function SettingsForm({
     [busy, setBusy] = useState(false),
     [checking, setChecking] = useState(false),
     [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [quotaInput, setQuotaInput] = useState(String(preferences.quotaRefreshSeconds ?? 60));
   useEffect(() => () => onThemePreview(null), [onThemePreview]);
   const checkForUpdates = () => {
     setChecking(true);
@@ -959,10 +949,17 @@ function SettingsForm({
   return (
     <form
       className="modal-content"
+      noValidate
       onSubmit={(e) => {
         e.preventDefault();
+        const quotaSeconds = prefs.quotaRefreshSeconds === 0 ? 0 : Number(quotaInput);
+        if (quotaSeconds !== 0 && (!Number.isInteger(quotaSeconds) || quotaSeconds < 10 || quotaSeconds > 86400)) {
+          setError("额度刷新间隔需为 10–86400 秒，或关闭自动刷新");
+          return;
+        }
+        const nextPrefs = { ...prefs, quotaRefreshSeconds: quotaSeconds };
         setBusy(true);
-        void command<ViewState>("set_preferences", { preferences: prefs })
+        void command<ViewState>("set_preferences", { preferences: nextPrefs })
           .then(onDone)
           .catch((e) => setError(errorOf(e).message))
           .finally(() => setBusy(false));
@@ -990,6 +987,22 @@ function SettingsForm({
             {{ system: "跟随系统", dark: "深色", light: "浅色" }[t]}
           </button>
         ))}
+      </div>
+      <div className="preference-rows">
+        <label className="setting-row"><span>额度自动刷新</span><input type="checkbox" checked={(prefs.quotaRefreshSeconds ?? 60) !== 0} onChange={(e) => {
+          const enabled = e.target.checked;
+          const candidate = Number(quotaInput);
+          const next = enabled && Number.isInteger(candidate) && candidate >= 10 && candidate <= 86400 ? candidate : enabled ? 60 : 0;
+          if (enabled && next !== candidate) setQuotaInput(String(next));
+          setPrefs({ ...prefs, quotaRefreshSeconds: next });
+        }} /></label>
+        {(prefs.quotaRefreshSeconds ?? 60) !== 0 && <label className="setting-row"><span>间隔 / 秒</span><input aria-label="额度刷新间隔" type="number" min={10} max={86400} step={1} value={quotaInput} onChange={(e) => {
+          const value = e.target.value;
+          setQuotaInput(value);
+          if (value !== "") setPrefs({ ...prefs, quotaRefreshSeconds: Number(value) });
+        }} /></label>}
+        <label className="setting-row"><span>系统提醒</span><input type="checkbox" checked={prefs.systemNotifications ?? true} onChange={(e) => setPrefs({...prefs, systemNotifications:e.target.checked})} /></label>
+        <NotificationPermission />
       </div>
       <StartupSettings />
       <PowerSettings />

@@ -1152,3 +1152,12 @@ mod capacity;
 mod claude_v080;
 #[path = "websocket_bridge_tests.rs"]
 mod websocket_bridge;
+
+#[path = "v013_tests.rs"]
+mod v013;
+
+#[path = "quota_tests.rs"]
+mod quota_v013;
+
+#[path = "../events_tests.rs"]
+mod events_v013;
