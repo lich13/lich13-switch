@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "lich13-switch"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "async-compression",
  "async-stream",

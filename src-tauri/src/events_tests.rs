@@ -130,6 +130,12 @@ async fn sensitive_models_are_omitted_and_pages_are_filtered_and_bounded() {
     assert_eq!(page_two.total, 28);
     assert_eq!(page_two.page, 1);
     assert_eq!(page_two.items.len(), 28);
+
+    let server_errors = service.query(Filter {
+        status_group: Some(crate::events::StatusGroup::ServerError),
+        ..Filter::default()
+    });
+    assert_eq!(server_errors.total, 55);
 }
 
 #[test]
@@ -196,6 +202,10 @@ fn serialization_uses_the_public_camel_case_contract() {
     assert!(value.get("clientId").is_some());
     assert!(value.get("providerId").is_some());
     assert!(value.get("notifiedAt").is_some());
+    assert_eq!(
+        value.get("errorCode").and_then(|v| v.as_str()),
+        Some("NETWORK_ERROR")
+    );
     assert!(value.get("first_at").is_none());
 }
 

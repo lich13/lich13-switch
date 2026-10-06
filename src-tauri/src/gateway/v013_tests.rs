@@ -86,6 +86,40 @@ fn bridge(g: &Gateway, t: &tempfile::TempDir, index: usize) {
 }
 
 #[tokio::test]
+async fn http_200_application_failure_does_not_trip_provider_circuit() {
+    let upstream = server(|_| async {
+        Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(full(
+                serde_json::json!({
+                    "error": {"code": "server_error", "message": "fixture application failure"}
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
+    auto(&g, &t, 1);
+    start(&g, &t).await;
+    let response = request(
+        &g,
+        "/v1/responses",
+        br#"{"model":"exact-model","input":"fixture"}"#.to_vec(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(g.view().providers[0].health.failures, 0);
+    assert_eq!(
+        g.view().providers[0].health.state,
+        circuit::CircuitState::Closed
+    );
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn model_errors_from_400_403_404_503_fail_over_without_circuit_breaking() {
     for (status, message) in [
         (400, "model exact-model does not exist"),

@@ -264,6 +264,7 @@ pub struct Protocol {
     stream: bool,
     status: Option<u16>,
     finished: bool,
+    transport_failure: bool,
 }
 impl Protocol {
     pub fn new(stream: bool) -> Self {
@@ -273,6 +274,7 @@ impl Protocol {
             stream,
             status: None,
             finished: false,
+            transport_failure: false,
         }
     }
     pub fn response(&mut self, status: u16, stream: bool, encoding: &str) {
@@ -298,16 +300,35 @@ impl Protocol {
     pub fn succeeded(&self) -> bool {
         matches!(self.terminal(), Some(Terminal::Success | Terminal::Limited))
     }
+    /// True only for a transport-level failure. Application/protocol errors
+    /// received in an otherwise successful HTTP response must not trip a
+    /// provider circuit.
+    pub fn transport_failure(&self) -> bool {
+        self.transport_failure
+    }
     pub fn finish(&mut self, status: Option<u16>, reason: &str) {
         if self.finished {
             return;
         }
         self.finished = true;
+        self.transport_failure = matches!(
+            reason,
+            "NETWORK" | "TLS" | "FIRST_BYTE_TIMEOUT" | "STREAM_TIMEOUT" | "STREAM_INTERRUPTED"
+        );
         self.status = status.or(self.status);
         if let Some(o) = &mut self.observer {
             self.observation = o.snapshot(matches!(reason, "OK" | "HTTP"));
         }
         if self.observation.terminal.is_none() {
+            if reason == "OK"
+                && self.stream
+                && self.observation.expects_terminal
+                && !self.observation.incomplete
+            {
+                // EOF before a terminal event is a transport/incomplete-stream
+                // failure, unlike an explicit response.failed event.
+                self.transport_failure = true;
+            }
             self.observation.terminal = Some(match reason {
                 "OK" if self.stream && self.observation.expects_terminal => {
                     if self.observation.incomplete {

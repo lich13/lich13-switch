@@ -117,6 +117,10 @@ export default function App() {
       )
         return;
       setPage(next);
+      // Focus requests are created only by explicit provider navigation.
+      // Clear stale requests on normal page navigation so returning to the
+      // gateway never reopens a provider dialog.
+      setFocusProvider(null);
       if (next !== "config") setDirty(false);
     },
     [],
@@ -555,6 +559,7 @@ export default function App() {
             <Gateway
               quotaRefreshSeconds={state?.preferences.quotaRefreshSeconds ?? 60}
               focusProvider={focusProvider}
+              onFocusHandled={() => setFocusProvider(null)}
               notify={notify}
               onDirtyChange={gatewayDraftChanged}
             />

@@ -115,6 +115,21 @@ fn completed_stream_remains_successful_after_disconnect_or_timeout() {
 }
 
 #[test]
+fn application_failures_and_transport_failures_are_distinguished() {
+    let mut application = Protocol::new(false);
+    application.response(200, false, "identity");
+    application.feed(br#"{"error":{"code":"server_error"}}"#);
+    application.finish(Some(200), "OK");
+    assert_eq!(application.terminal(), Some(Terminal::Failure));
+    assert!(!application.transport_failure());
+
+    let mut transport = Protocol::new(true);
+    transport.response(200, true, "identity");
+    transport.finish(Some(200), "STREAM_TIMEOUT");
+    assert!(transport.transport_failure());
+}
+
+#[test]
 fn websocket_values_keep_failure_rejection_cancellation_and_limit_distinct() {
     for (value, expected) in [
         (json!({"status":"completed"}), Terminal::Success),

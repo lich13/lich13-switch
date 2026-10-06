@@ -40,6 +40,7 @@ const record: EventRecord = {
   action: "trying_next",
   level: "warning",
   status: 404,
+  errorCode: "MODEL_UNAVAILABLE",
   attempt: 1,
 };
 
@@ -84,12 +85,15 @@ describe("event log", () => {
     const user = userEvent.setup();
     render(<EventLog />);
     expect(await screen.findByRole("button", { name: /模型不可用/ })).toBeInTheDocument();
+    expect(screen.getByText("HTTP 404")).toBeInTheDocument();
+    expect(screen.getByText("MODEL_UNAVAILABLE")).toBeInTheDocument();
     expect(await screen.findByRole("option", { name: "Fixture Provider" })).toBeInTheDocument();
 
     await user.selectOptions(screen.getByRole("combobox", { name: "客户端" }), "codex");
     await user.selectOptions(screen.getByRole("combobox", { name: "供应商" }), "provider-1");
     await user.selectOptions(screen.getByRole("combobox", { name: "级别" }), "warning");
     await user.selectOptions(screen.getByRole("combobox", { name: "原因" }), "model_unavailable");
+    await user.selectOptions(screen.getByRole("combobox", { name: "状态码" }), "client_error");
     fireEvent.change(screen.getByLabelText("开始时间"), {
       target: { value: "2026-10-05T10:00" },
     });
@@ -105,6 +109,7 @@ describe("event log", () => {
           providerId: "provider-1",
           level: "warning",
           reason: "model_unavailable",
+          statusGroup: "client_error",
           page: 1,
           from: expect.any(Number),
           to: expect.any(Number),

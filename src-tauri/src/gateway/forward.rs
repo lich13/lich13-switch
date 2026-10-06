@@ -932,6 +932,12 @@ pub(super) fn observe_protocol(
     if permits.provider.is_some() {
         let reason = match protocol.terminal() {
             Some(super::protocol::Terminal::ModelUnavailable) => Some(Reason::ModelUnavailable),
+            Some(super::protocol::Terminal::Failure) if protocol.transport_failure() => {
+                Some(Reason::Network)
+            }
+            Some(super::protocol::Terminal::Failure) if status.is_some_and(|value| value < 400) => {
+                Some(Reason::ProtocolError)
+            }
             Some(super::protocol::Terminal::Failure) => Some(Reason::UpstreamService),
             _ => None,
         };
@@ -946,17 +952,23 @@ pub(super) fn observe_protocol(
             );
         }
     }
-    settle_protocol(protocol, permits, cfg);
+    settle_protocol(protocol, permits, cfg, status);
 }
 pub(super) fn settle_protocol(
     protocol: &super::protocol::Protocol,
     permits: &mut Permits,
     cfg: &Settings,
+    status: Option<u16>,
 ) {
     use super::protocol::Terminal;
     match protocol.terminal() {
         Some(Terminal::Success | Terminal::Limited) => permits.success(cfg),
-        Some(Terminal::Failure) => permits.failure(cfg, None),
+        Some(Terminal::Failure)
+            if protocol.transport_failure() || status.is_none_or(|value| value >= 400) =>
+        {
+            permits.failure(cfg, None)
+        }
+        Some(Terminal::Failure) => permits.neutral(cfg),
         Some(_) => permits.neutral(cfg),
         None => (),
     }

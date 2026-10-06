@@ -144,6 +144,10 @@ describe("gateway controls", () => {
     expect(await screen.findByText("HTTP 桥接")).toBeInTheDocument();
     const operations = screen.getByLabelText(`${state.providers[0].name} 操作`);
     await user.click(operations);
+    const rename = within(operations.closest("details")!).getByRole("button", {
+      name: "重命名",
+    });
+    expect(rename.querySelector("svg")).not.toBeNull();
     await user.click(
       within(operations.closest("details")!).getByRole("button", {
         name: "供应商设置",
@@ -164,6 +168,29 @@ describe("gateway controls", () => {
         expectedRevision: state.revision,
       }),
     );
+  });
+
+  it("consumes explicit provider focus after opening the requested editor", async () => {
+    const handled = vi.fn();
+    const providerId = state.providers[0].id;
+    const { rerender } = render(
+      <Gateway
+        notify={() => {}}
+        focusProvider={{ id: providerId, sequence: 9 }}
+        onFocusHandled={handled}
+      />,
+    );
+    expect(
+      await screen.findByRole("checkbox", { name: "原生 WebSocket" }),
+    ).toBeInTheDocument();
+    expect(handled).toHaveBeenCalledTimes(1);
+    rerender(
+      <Gateway notify={() => {}} focusProvider={null} onFocusHandled={handled} />,
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "原生 WebSocket" }),
+    ).toBeInTheDocument();
+    expect(handled).toHaveBeenCalledTimes(1);
   });
 
   it("starts a fresh transport draft after explicit navigation has confirmed discarding it", async () => {

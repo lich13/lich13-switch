@@ -46,6 +46,7 @@ type GatewayProps = {
   quotaRefreshSeconds?: number;
   notify: (s: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onFocusHandled?: () => void;
   focusProvider?: { id: string; sequence: number; clientId?: ClientId } | null;
 };
 export default function Gateway(props: GatewayProps) {
@@ -80,6 +81,7 @@ function GatewayContent({
   onClientChange,
   notify,
   onDirtyChange,
+  onFocusHandled,
   focusProvider,
 }: {
   quotaRefreshSeconds?: number;
@@ -87,6 +89,7 @@ function GatewayContent({
   onClientChange: (id: ClientId) => void;
   notify: (s: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onFocusHandled?: () => void;
   focusProvider?: { id: string; sequence: number } | null;
 }) {
   const [state, setState] = useState<GatewayState | null>(null);
@@ -124,6 +127,7 @@ function GatewayContent({
     };
   }, []);
   const focusHandled = useRef<number | null>(null);
+  const [dialogVersion, setDialogVersion] = useState(0);
   useEffect(() => {
     if (
       focusProvider &&
@@ -131,12 +135,14 @@ function GatewayContent({
       focusHandled.current !== focusProvider.sequence
     ) {
       const p = state.providers.find((p) => p.id === focusProvider.id);
+      focusHandled.current = focusProvider.sequence;
       if (p) {
-        focusHandled.current = focusProvider.sequence;
+        setDialogVersion(focusProvider.sequence);
         setDialog({ kind: "settings", item: p });
       }
+      onFocusHandled?.();
     }
-  }, [focusProvider, state]);
+  }, [focusProvider, onFocusHandled, state]);
   const action = async (fn: () => Promise<void>, surfaceError = true) => {
     setBusy(true);
     setError("");
@@ -405,6 +411,7 @@ function GatewayContent({
                             })
                           }
                         >
+                          <Pencil size={14} />
                           重命名
                         </button>
                         <button
@@ -481,7 +488,7 @@ function GatewayContent({
       </>
       {dialog?.kind === "settings" && (
         <ProviderSettings
-          key={`${dialog.item.id}:${focusProvider?.sequence ?? 0}`}
+          key={`${dialog.item.id}:${dialogVersion}`}
           provider={dialog.item}
           onDirtyChange={onDirtyChange}
           clientId={clientId}

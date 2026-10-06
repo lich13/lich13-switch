@@ -36,6 +36,7 @@ pub enum Reason {
     ConfigConflict,
     StartupRecovery,
     AccountSync,
+    ProtocolError,
 }
 impl Reason {
     pub fn text(self) -> &'static str {
@@ -53,8 +54,45 @@ impl Reason {
             Self::ConfigConflict => "配置发生冲突",
             Self::StartupRecovery => "启动恢复失败",
             Self::AccountSync => "账号同步异常",
+            Self::ProtocolError => "上游协议返回错误",
         }
     }
+    pub fn code(self) -> ErrorCode {
+        match self {
+            Self::ModelUnavailable => ErrorCode::ModelUnavailable,
+            Self::Authentication => ErrorCode::AuthenticationFailed,
+            Self::UpstreamService => ErrorCode::UpstreamServiceError,
+            Self::Network => ErrorCode::NetworkError,
+            Self::RateLimit => ErrorCode::RateLimited,
+            Self::Capacity => ErrorCode::CapacityLimited,
+            Self::FailoverExhausted => ErrorCode::FailoverExhausted,
+            Self::Failover => ErrorCode::Failover,
+            Self::CircuitOpen => ErrorCode::CircuitOpen,
+            Self::Recovered => ErrorCode::Recovered,
+            Self::ConfigConflict => ErrorCode::ConfigConflict,
+            Self::StartupRecovery => ErrorCode::StartupRecoveryFailed,
+            Self::AccountSync => ErrorCode::AccountSyncError,
+            Self::ProtocolError => ErrorCode::ProtocolError,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorCode {
+    ModelUnavailable,
+    AuthenticationFailed,
+    UpstreamServiceError,
+    NetworkError,
+    RateLimited,
+    CapacityLimited,
+    FailoverExhausted,
+    Failover,
+    CircuitOpen,
+    Recovered,
+    ConfigConflict,
+    StartupRecoveryFailed,
+    AccountSyncError,
+    ProtocolError,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +123,24 @@ pub enum Level {
     Error,
     Info,
 }
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusGroup {
+    Success,
+    ClientError,
+    ServerError,
+    NoStatus,
+}
+impl StatusGroup {
+    pub fn matches(self, status: Option<u16>) -> bool {
+        match self {
+            Self::Success => status.is_some_and(|v| (200..300).contains(&v)),
+            Self::ClientError => status.is_some_and(|v| (400..500).contains(&v)),
+            Self::ServerError => status.is_some_and(|v| (500..600).contains(&v)),
+            Self::NoStatus => status.is_none(),
+        }
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Record {
@@ -100,6 +156,9 @@ pub struct Record {
     pub level: Level,
     pub status: Option<u16>,
     pub attempt: Option<u32>,
+    /// Added in v0.13.1. Old JSONL records omit this field and are mapped
+    /// from reason at read time by the frontend.
+    pub error_code: Option<ErrorCode>,
     pub notified_at: u64,
 }
 impl Record {
@@ -135,6 +194,7 @@ impl Record {
             },
             status,
             attempt,
+            error_code: Some(reason.code()),
             notified_at: 0,
         }
     }
@@ -218,6 +278,7 @@ pub struct Filter {
     pub provider_id: Option<String>,
     pub level: Option<Level>,
     pub reason: Option<Reason>,
+    pub status_group: Option<StatusGroup>,
     pub page: Option<usize>,
 }
 #[derive(Serialize)]
@@ -384,6 +445,7 @@ impl Service {
                         .is_none_or(|v| r.provider_id.as_ref() == Some(v))
                     && f.level.is_none_or(|v| r.level == v)
                     && f.reason.is_none_or(|v| r.reason == v)
+                    && f.status_group.is_none_or(|v| v.matches(r.status))
             })
             .cloned()
             .collect();
