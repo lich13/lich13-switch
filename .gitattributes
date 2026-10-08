@@ -1,0 +1,3 @@
+# The bundled catalog must retain the exact bytes of its upstream SHA-256.
+src-tauri/resources/usage-prices.json -text
+src-tauri/resources/usage-prices.sha256 text eol=lf
