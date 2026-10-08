@@ -80,3 +80,26 @@ it("disables management for an isolated native app and hides unsupported devices
     expect(screen.queryByText("电源助手")).not.toBeInTheDocument(),
   );
 });
+it("shows and clears external changes from the actual helper state without issuing a power write", async () => {
+  mock.command.mockResolvedValueOnce({
+    ...initial,
+    helper: "ready",
+    ownership: "mixed",
+    externalChanged: true,
+  });
+  render(<PowerSettings />);
+  await screen.findByText("外部已修改");
+  expect(screen.getByText("已就绪")).toBeInTheDocument();
+  expect(mock.command).toHaveBeenCalledTimes(1);
+  expect(mock.command).toHaveBeenCalledWith("get_clamshell_state");
+
+  act(() => mock.listener({
+    ...initial,
+    helper: "ready",
+    ownership: "application",
+    externalChanged: false,
+  }));
+  expect(screen.queryByText("外部已修改")).not.toBeInTheDocument();
+  expect(screen.getByText("已就绪")).toBeInTheDocument();
+  expect(mock.command).toHaveBeenCalledTimes(1);
+});

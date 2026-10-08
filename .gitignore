@@ -5,6 +5,9 @@ src-tauri/gen/
 artifacts/
 .DS_Store
 *.log
+*.sqlite
+*.sqlite-*
+*.jsonl
 __pycache__/
 auth.json
 config.toml

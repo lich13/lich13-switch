@@ -20,6 +20,7 @@ mod storage;
 #[cfg(target_os = "macos")]
 mod tray_macos;
 mod update;
+mod usage;
 use core::{Core, Preferences, ViewState};
 use std::{
     path::PathBuf,
@@ -38,6 +39,7 @@ use tauri_plugin_dialog::DialogExt;
 
 struct Runtime {
     diagnostics: events::Service,
+    usage: usage::Service,
     core: Mutex<Core>,
     data: PathBuf,
     imports: Mutex<links::Imports>,
@@ -1182,7 +1184,11 @@ pub fn run() {
             let diagnostics = events::Service::new(&data);
             gateway.set_diagnostics(diagnostics.clone());
             claude.set_diagnostics(diagnostics.clone());
+            let usage = usage::Service::new(&data);
+            gateway.set_usage(usage.clone());
+            claude.set_usage(usage.clone());
             let runtime = Arc::new(Runtime {
+                usage,
                 diagnostics,
                 core: Mutex::new(core),
                 data,
@@ -1211,6 +1217,7 @@ pub fn run() {
             let state = state_for(&runtime)?;
             app.manage(runtime.clone());
             notifications::connect(app.handle(), &runtime.diagnostics);
+            usage::commands::connect(app.handle(), &runtime);
             runtime.gateway.report_diagnostics();
             runtime.claude.report_diagnostics();
             links::receive(app.handle(), args.iter().cloned());
@@ -1445,6 +1452,17 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            usage::commands::get_usage_state,
+            usage::commands::get_usage_dashboard,
+            usage::commands::get_usage_logs,
+            usage::commands::get_usage_detail,
+            usage::commands::set_usage_settings,
+            usage::commands::sync_usage,
+            usage::commands::get_pricing,
+            usage::commands::configure_pricing,
+            usage::commands::update_pricing,
+            usage::commands::reload_pricing,
+            usage::commands::open_pricing_directory,
             links::get_link_handler_state,
             links::set_link_handler,
             links::get_provider_imports,

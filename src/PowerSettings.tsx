@@ -7,6 +7,8 @@ export type PowerState = {
   batterySleep: number;
   revision: string;
   helper: string;
+  ownership?: "none" | "external" | "mixed" | "application";
+  externalChanged?: boolean;
 };
 const labels: Record<string, string> = {
   ready: "已就绪",
@@ -76,6 +78,7 @@ export default function PowerSettings() {
           移除
         </button>
       </div>
+      {state?.externalChanged && <span role="status">外部已修改</span>}
       {error && (
         <p className="form-error" role="alert">
           {error}

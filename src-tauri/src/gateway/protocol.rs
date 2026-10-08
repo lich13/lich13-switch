@@ -5,6 +5,7 @@ const MAX_EVENT: usize = 2 * 1024 * 1024;
 
 #[derive(Default, Clone, Debug)]
 pub struct Observation {
+    pub meter: crate::usage::model::Meter,
     pub response_id: Option<String>,
     pub model: Option<String>,
     pub incomplete: bool,
@@ -29,6 +30,7 @@ pub fn identifier(v: Option<&Value>) -> Option<String> {
 }
 impl Observation {
     pub fn value(&mut self, outer: &Value) {
+        self.meter.observe(outer, 0);
         let value = outer
             .get("response")
             .filter(|v| v.is_object())
@@ -257,7 +259,7 @@ pub struct Observer {
     failed: bool,
 }
 
-/// Only completion and response affinity are observed; no usage is collected.
+/// Health observation and bounded usage metadata share decoding, never terminal policy.
 pub struct Protocol {
     observer: Option<Observer>,
     pub observation: Observation,
@@ -265,6 +267,9 @@ pub struct Protocol {
     status: Option<u16>,
     finished: bool,
     transport_failure: bool,
+    usage: Option<crate::usage::AttemptTrace>,
+    started: std::time::Instant,
+    first_usage_ms: Option<u64>,
 }
 impl Protocol {
     pub fn new(stream: bool) -> Self {
@@ -275,7 +280,35 @@ impl Protocol {
             status: None,
             finished: false,
             transport_failure: false,
+            usage: None,
+            started: std::time::Instant::now(),
+            first_usage_ms: None,
         }
+    }
+    pub fn attach_usage(&mut self, usage: crate::usage::AttemptTrace) {
+        self.usage = Some(usage);
+    }
+    fn record_usage(&mut self) {
+        if self.observation.meter.first_token_ms.is_some() && self.first_usage_ms.is_none() {
+            self.first_usage_ms = Some(self.started.elapsed().as_millis() as u64);
+        }
+        let mut meter = self.observation.meter.clone();
+        meter.first_token_ms = self.first_usage_ms;
+        let outcome = self.terminal().map(|t| match t {
+            Terminal::Success => "success",
+            Terminal::Limited => "limited",
+            Terminal::Rejected => "rejected",
+            Terminal::ModelUnavailable => "model_unavailable",
+            Terminal::Cancelled => "cancelled",
+            Terminal::Failure => "failure",
+            Terminal::Unknown => "unknown",
+        });
+        if let Some(usage) = &mut self.usage {
+            usage.update(&meter, self.status, outcome);
+        }
+    }
+    pub fn websocket_status(&mut self, status: u16) {
+        self.status = Some(status);
     }
     pub fn response(&mut self, status: u16, stream: bool, encoding: &str) {
         self.status = Some(status);
@@ -287,9 +320,11 @@ impl Protocol {
             o.feed(bytes);
             self.observation = o.snapshot(false);
         }
+        self.record_usage();
     }
     pub fn value(&mut self, value: &Value) {
         self.observation.value(value);
+        self.record_usage();
     }
     pub fn terminal(&self) -> Option<Terminal> {
         if self.status.is_some_and(|s| s >= 400) {
@@ -315,7 +350,7 @@ impl Protocol {
             reason,
             "NETWORK" | "TLS" | "FIRST_BYTE_TIMEOUT" | "STREAM_TIMEOUT" | "STREAM_INTERRUPTED"
         );
-        self.status = status.or(self.status);
+        self.status = self.status.or(status);
         if let Some(o) = &mut self.observer {
             self.observation = o.snapshot(matches!(reason, "OK" | "HTTP"));
         }
@@ -343,6 +378,7 @@ impl Protocol {
                 _ => Terminal::Failure,
             });
         }
+        self.record_usage();
     }
 }
 impl Observer {

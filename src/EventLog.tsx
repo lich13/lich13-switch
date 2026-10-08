@@ -5,7 +5,7 @@ import { confirmAction } from "./confirmation";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 
 export const reasons = {
-  model_unavailable: "模型不可用",
+  model_unavailable: "模型不支持",
   authentication: "认证失败",
   upstream_service: "上游服务异常",
   network: "连接失败",
@@ -18,7 +18,7 @@ export const reasons = {
   config_conflict: "配置冲突",
   startup_recovery: "启动恢复失败",
   account_sync: "账号同步异常",
-  protocol_error: "上游协议返回错误",
+  protocol_error: "返回了应用错误",
 } as const;
 
 export const errorCodes: Record<keyof typeof reasons, string> = {
@@ -390,10 +390,9 @@ export default function EventLog() {
             <tr>
               <th>时间</th>
               <th>客户端 / 供应商</th>
-              <th>状态码</th>
-              <th>错误码</th>
-              <th>原因</th>
-              <th>处理</th>
+              <th>状态</th>
+              <th>问题</th>
+              <th>处理结果</th>
             </tr>
           </thead>
           <tbody>
@@ -430,18 +429,9 @@ export default function EventLog() {
                         .catch((e) => setError(errorOf(e).message));
                     }}
                   >
-                    {normalizedCode(r)}
-                  </button>
-                </td>
-                <td>
-                  <span className="event-reason-text">
                     {reasons[r.reason]}
-                    {r.count > 1 && (
-                      <span className="event-count">
-                        ×{r.count.toLocaleString()}
-                      </span>
-                    )}
-                  </span>
+                    {r.count > 1 && <span className="event-count">×{r.count.toLocaleString()}</span>}
+                  </button>
                 </td>
                 <td>{actions[r.action]}</td>
               </tr>

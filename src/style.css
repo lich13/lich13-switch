@@ -2428,3 +2428,7 @@ select:focus-visible {
 .event-drawer dt { color: var(--muted); }
 .event-drawer dd { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 800px) { .event-page { padding: 20px; gap: 14px; } .event-table th:first-child { width: 85px; } .event-table td,.event-table th { padding: 10px 8px; } }
+
+/* Exception logs keep the readable issue in the table; stable codes live in detail. */
+.event-code{font-family:inherit;font-size:13px;letter-spacing:normal;max-width:230px;white-space:normal;text-align:left}
+.event-table{min-width:670px}

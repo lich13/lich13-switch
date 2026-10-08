@@ -79,3 +79,16 @@ The field catalog follows Anthropic's official Claude Code settings and model co
 https://code.claude.com/docs/en/settings
 https://code.claude.com/docs/en/model-config
 https://github.com/microsoft/node-jsonc-parser
+
+## Usage statistics and session import
+
+The statistics interface, Codex cumulative-counter and replay-prefix behavior, Claude message-ID merging, and token cache normalization are adapted from CC Switch at `7d8004c40867ec295395840e2c5a0fe42065c086` (MIT, Copyright (c) 2025 Jason Young). The complete MIT notice above applies. Storage, bounded gateway observation, hashed session identities, and cross-source reconciliation are adapted for this application.
+
+https://github.com/farion1231/cc-switch/tree/7d8004c40867ec295395840e2c5a0fe42065c086/src/components/usage
+
+The pricing adapter independently follows the source selection in Wei-Shaw/sub2api at `6db4171cfb7592ee6f81c29a82e9fcba0077155e` (LGPL-3.0). No Sub2API implementation is copied. Public price data is provided by Wei-Shaw/model-price-repo (MIT, Copyright (c) 2026 Wesley Liddick). The complete MIT license bundled at `licenses/model-price-repo-MIT.txt` applies to the bundled initial price JSON.
+
+https://github.com/Wei-Shaw/sub2api/blob/6db4171cfb7592ee6f81c29a82e9fcba0077155e/backend/internal/config/config.go
+https://github.com/Wei-Shaw/model-price-repo
+
+Seed fetched 2026-10-08; SHA-256: `cbecf56c1cd81f32928bbb623c65ab473eae8cb00136399c071c85090549e452`.

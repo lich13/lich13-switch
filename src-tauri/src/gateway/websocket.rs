@@ -1062,6 +1062,7 @@ async fn session_once(
     let mut previous_provider: Option<String> = None;
     let mut unsupported_seen = false;
     let mut non_unsupported_failure = false;
+    let usage_trace = g.usage_trace(current_model.as_deref());
     let (mut upstream, admission, initial_protocol) = loop {
         if attempts > cfg.max_retries || (unknown_affinity && attempts > 0) {
             g.record(
@@ -1166,6 +1167,18 @@ async fn session_once(
             .as_deref()
             .is_some_and(|id| id != admission.route.provider.id);
         previous_provider = Some(admission.route.provider.id.clone());
+        let mut attempt_protocol = super::protocol::Protocol::new(true);
+        let native_mode = uses_native_websocket(
+            admission.route.client_id,
+            admission.route.provider.supports_websocket,
+        );
+        if let Some(trace) = &usage_trace {
+            attempt_protocol.attach_usage(trace.attempt(
+                &admission.route.provider.id,
+                true,
+                if native_mode { "websocket" } else { "bridge" },
+            ));
+        }
         let result = while_connecting(client, async {
             if uses_native_websocket(
                 admission.route.client_id,
@@ -1193,9 +1206,18 @@ async fn session_once(
                         Some(attempts as u32),
                     );
                 }
-                break (upstream, admission, super::protocol::Protocol::new(true));
+                attempt_protocol.websocket_status(if native_mode { 101 } else { 200 });
+                break (upstream, admission, attempt_protocol);
             }
             Err(failure) => {
+                attempt_protocol.finish(
+                    failure.status,
+                    if failure.status.is_some() {
+                        "HTTP"
+                    } else {
+                        "NETWORK"
+                    },
+                );
                 if !failure.model_unavailable {
                     last_model_payload = None;
                 }
@@ -1251,6 +1273,7 @@ async fn session_once(
     };
     let route = admission.route.clone();
     let mut turn = Some(admission);
+    drop(usage_trace);
     let mut protocol = Some(initial_protocol);
     let mut pending: Option<Frame> = None;
     let mut confirmed_model: Option<String> = None;
@@ -1303,7 +1326,24 @@ async fn session_once(
                     Err(error) => return Err(error),
                 }
                 current_model = model;
-                protocol = Some(super::protocol::Protocol::new(true));
+                let mut next_protocol = super::protocol::Protocol::new(true);
+                if let Some(trace) = g.usage_trace(current_model.as_deref()) {
+                    next_protocol.attach_usage(trace.attempt(
+                        &route.provider.id,
+                        true,
+                        if matches!(&upstream, Upstream::Native(_)) {
+                            "websocket"
+                        } else {
+                            "bridge"
+                        },
+                    ));
+                }
+                next_protocol.websocket_status(if matches!(&upstream, Upstream::Native(_)) {
+                    101
+                } else {
+                    200
+                });
+                protocol = Some(next_protocol);
                 received = false;
                 deadline =
                     tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);

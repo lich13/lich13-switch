@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -84,9 +85,14 @@ describe("event log", () => {
   it("filters by client, provider, level, reason and time range", async () => {
     const user = userEvent.setup();
     render(<EventLog />);
-    expect(await screen.findByRole("button", { name: /模型不可用/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /模型不支持/ })).toBeInTheDocument();
     expect(screen.getByText("HTTP 404")).toBeInTheDocument();
-    expect(screen.getByText("MODEL_UNAVAILABLE")).toBeInTheDocument();
+    expect(screen.queryByText("MODEL_UNAVAILABLE")).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole("table"))
+        .getAllByRole("columnheader")
+        .map((header) => header.textContent),
+    ).toEqual(["时间", "客户端 / 供应商", "状态", "问题", "处理结果"]);
     expect(await screen.findByRole("option", { name: "Fixture Provider" })).toBeInTheDocument();
 
     await user.selectOptions(screen.getByRole("combobox", { name: "客户端" }), "codex");
@@ -121,7 +127,7 @@ describe("event log", () => {
   it("paginates independently and pauses event reloads while hidden", async () => {
     const user = userEvent.setup();
     render(<EventLog />);
-    await screen.findByRole("button", { name: /模型不可用/ });
+    await screen.findByRole("button", { name: /模型不支持/ });
     const before = eventCalls().length;
     await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => {
@@ -141,20 +147,23 @@ describe("event log", () => {
   it("opens detail, closes on Escape and returns focus to the reason button", async () => {
     const user = userEvent.setup();
     render(<EventLog />);
-    const reason = await screen.findByRole("button", { name: /模型不可用/ });
+    const reason = await screen.findByRole("button", { name: /模型不支持/ });
     await user.click(reason);
-    const dialog = await screen.findByRole("dialog", { name: "模型不可用" });
+    const dialog = await screen.findByRole("dialog", { name: "模型不支持" });
     expect(dialog).toHaveTextContent("Fixture Provider");
+    expect(within(dialog).getByText("HTTP 404")).toBeInTheDocument();
+    expect(within(dialog).getByText("MODEL_UNAVAILABLE")).toBeInTheDocument();
+    expect(within(dialog).getByText("fixture-model")).toBeInTheDocument();
 
     fireEvent(dialog, new Event("cancel", { bubbles: true, cancelable: true }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "模型不可用" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "模型不支持" })).not.toBeInTheDocument());
     expect(document.activeElement).toBe(reason);
   });
 
   it("clears the journal only after confirmation", async () => {
     const user = userEvent.setup();
     render(<EventLog />);
-    await screen.findByRole("button", { name: /模型不可用/ });
+    await screen.findByRole("button", { name: /模型不支持/ });
     await user.click(screen.getByRole("button", { name: "清空日志" }));
     expect(mock.confirm).toHaveBeenCalledWith("清空全部异常日志？");
     await waitFor(() => expect(mock.command).toHaveBeenCalledWith("clear_app_events"));

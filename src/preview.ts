@@ -1,3 +1,4 @@
+import { usageCommands, usagePreview } from "./usage-preview";
 import { powerCommands, powerPreview } from "./power-preview";
 import { gatewayPreview } from "./gateway-preview";
 import type { ViewState, ConfigDocument, LoginState } from "./types";
@@ -171,6 +172,7 @@ export async function run(
       asset: null,
     };
   if (name === "open_github" || name === "open_update_release") return;
+  if (usageCommands.includes(name)) return usagePreview(name, args, emit);
   if (powerCommands.includes(name)) return powerPreview(name, args, emit);
   if (name === "get_quick") return { ...quick };
   if (name === "set_quick") {

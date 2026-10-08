@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   ArrowLeftRight,
+  ChartNoAxesCombined,
   Copy,
   Network,
   Shield,
@@ -55,6 +56,7 @@ import {
   type LoginState,
   type UpdateInfo,
 } from "./types";
+const Usage = lazy(() => import("./Usage"));
 const EventLog = lazy(() => import("./EventLog"));
 const Gateway = lazy(() => import("./Gateway"));
 const ConfigEditor = lazy(() => import("./ConfigEditor"));
@@ -73,7 +75,7 @@ const emptyLogin: LoginState = {
 };
 export default function App() {
   const [state, setState] = useState<ViewState | null>(null),
-    [page, setPage] = useState<"accounts" | "config" | "gateway" | "logs">("accounts"),
+    [page, setPage] = useState<"accounts" | "config" | "gateway" | "logs" | "usage">("accounts"),
     [search, setSearch] = useState(""),
     [dialog, setDialog] = useState<Dialog>(null),
     [error, setError] = useState(""),
@@ -90,6 +92,8 @@ export default function App() {
   const dirtyRef = useRef(false),
     pageRef = useRef(page);
   const gatewayDirty = useRef(false);
+  const usageDirty = useRef(false);
+  const usageDraftChanged = useCallback((value: boolean) => { usageDirty.current = value; }, []);
   const [focusProvider, setFocusProvider] = useState<{
     id: string;
     clientId?: ClientId;
@@ -102,10 +106,10 @@ export default function App() {
   pageRef.current = page;
   const notify = useCallback((s: string) => setMessage(s), []);
   const navigate = useCallback(
-    async (next: "accounts" | "config" | "gateway" | "logs") => {
+    async (next: "accounts" | "config" | "gateway" | "logs" | "usage") => {
       if (next === pageRef.current) return;
       if (
-        gatewayDirty.current &&
+        (gatewayDirty.current || usageDirty.current) &&
         !(await confirmAction("离开当前页面会丢弃未保存的表单。"))
       )
         return;
@@ -176,7 +180,7 @@ export default function App() {
           p === "settings"
             ? (async () => {
                 if (
-                  (gatewayDirty.current || dirtyRef.current) &&
+                  (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
                   !(await confirmAction("打开设置会丢弃未保存的草稿。"))
                 )
                   return;
@@ -191,7 +195,7 @@ export default function App() {
         "provider-settings",
         async (p) => {
           if (
-            (gatewayDirty.current || dirtyRef.current) &&
+            (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
             !(await confirmAction("打开供应商设置会丢弃未保存的草稿。"))
           )
             return;
@@ -316,6 +320,7 @@ export default function App() {
             <Network size={17} />
             网关
           </button>
+          <button className={page === "usage" ? "nav-item active" : "nav-item"} onClick={() => navigate("usage")}><ChartNoAxesCombined size={18} />用量</button>
           <button className={page === "logs" ? "nav-item active" : "nav-item"} onClick={() => navigate("logs")}>
             <ScrollText size={17} />日志
           </button>
@@ -347,7 +352,7 @@ export default function App() {
             </button>
           </div>
         )}
-        {page === "logs" ? (<Suspense fallback={null}><EventLog /></Suspense>) : page === "accounts" ? (
+        {page === "usage" ? (<Suspense fallback={null}><Usage onDirtyChange={usageDraftChanged} /></Suspense>) : page === "logs" ? (<Suspense fallback={null}><EventLog /></Suspense>) : page === "accounts" ? (
           <section className="accounts-page">
             <div className="page-heading">
               <div>

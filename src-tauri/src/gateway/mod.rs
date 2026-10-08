@@ -99,6 +99,7 @@ struct Inner {
 struct Shared {
     client: ClientId,
     diagnostics: Mutex<Option<crate::events::Service>>,
+    usage: Mutex<Option<crate::usage::Service>>,
     diagnostic_health: Mutex<HashMap<String, (circuit::CircuitState, bool)>>,
     diagnostic_conflict: std::sync::atomic::AtomicBool,
     registry: Arc<registry::Registry>,
@@ -126,6 +127,22 @@ fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
 impl Gateway {
+    pub fn set_usage(&self, service: crate::usage::Service) {
+        *self.0.usage.lock().unwrap() = Some(service);
+    }
+    fn usage_trace(&self, model: Option<&str>) -> Option<crate::usage::Trace> {
+        self.0.usage.lock().unwrap().as_ref().map(|s| {
+            s.begin(
+                if self.0.client == ClientId::Codex {
+                    "codex"
+                } else {
+                    "claude"
+                },
+                model,
+            )
+        })
+    }
+
     pub fn report_diagnostics(&self) {
         use crate::events::{Action, Reason};
         let view = self.view();
@@ -235,6 +252,7 @@ impl Gateway {
         let gateway = Self(Arc::new(Shared {
             client,
             diagnostics: Mutex::new(None),
+            usage: Mutex::new(None),
             diagnostic_health: Mutex::new(HashMap::new()),
             diagnostic_conflict: std::sync::atomic::AtomicBool::new(false),
             registry: registry.clone(),
@@ -1101,3 +1119,9 @@ impl Drop for Active {
         self.0.changed();
     }
 }
+
+#[cfg(test)]
+mod usage_protocol_tests;
+
+#[cfg(test)]
+mod usage_forward_tests;

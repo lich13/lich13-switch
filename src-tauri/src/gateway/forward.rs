@@ -314,6 +314,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     } else {
         Requirement::model(model.as_deref())
     };
+    let usage_trace = if matches!(requirement, Requirement::Resource) {
+        None
+    } else {
+        gateway.usage_trace(model.as_deref())
+    };
     let mut last = None;
     let mut attempted = 0usize;
     let mut previous_provider: Option<String> = None;
@@ -507,6 +512,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         previous_provider = Some(admission.route.provider.id.clone());
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(stream_hint);
+        if let Some(trace) = &usage_trace {
+            protocol.attach_usage(trace.attempt(
+                &route.provider.id,
+                stream_hint,
+                if websocket { "websocket" } else { "http" },
+            ));
+        }
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(if stream_hint {
                 settings.first_byte_seconds
