@@ -86,6 +86,15 @@ The statistics interface, Codex cumulative-counter and replay-prefix behavior, C
 
 https://github.com/farion1231/cc-switch/tree/7d8004c40867ec295395840e2c5a0fe42065c086/src/components/usage
 
+The v0.15 session parsing and cross-source matching review uses CC Switch at `5ae6ad3888ba4543f6fad343c87656a97bd69da4` (MIT). The same notice applies. Codex single-request counters, source snapshot de-duplication, replay-prefix alignment, and Claude message completion are adapted with additional safeguards for counter resets, late cache-only completion, ambiguous one-to-one matches, and missing HTTP status. The reference was statically compared with synthetic fixtures; the upstream importer was not executed against user data.
+
+https://github.com/farion1231/cc-switch/blob/5ae6ad3888ba4543f6fad343c87656a97bd69da4/src-tauri/src/services/session_usage_codex.rs
+https://github.com/farion1231/cc-switch/blob/5ae6ad3888ba4543f6fad343c87656a97bd69da4/src-tauri/src/services/session_usage.rs
+
+The Claude global-file inventory and explicit connection-field catalog were reviewed against `config.rs`, `claude_plugin.rs`, `claude_mcp.rs`, `services/subscription.rs`, and `live/floor.rs` at that commit. Multi-file profile transactions are independently implemented. API approval cleanup is an application-specific initialization measure, not a claim about CC Switch's ordinary provider switching. OAuth credential replacement, machine-identity resets, and vm2api code are not included.
+
+https://github.com/farion1231/cc-switch/blob/5ae6ad3888ba4543f6fad343c87656a97bd69da4/src-tauri/src/live/floor.rs
+
 The pricing adapter independently follows the source selection in Wei-Shaw/sub2api at `6db4171cfb7592ee6f81c29a82e9fcba0077155e` (LGPL-3.0). No Sub2API implementation is copied. Public price data is provided by Wei-Shaw/model-price-repo (MIT, Copyright (c) 2026 Wesley Liddick). The complete MIT license bundled at `licenses/model-price-repo-MIT.txt` applies to the bundled initial price JSON.
 
 https://github.com/Wei-Shaw/sub2api/blob/6db4171cfb7592ee6f81c29a82e9fcba0077155e/backend/internal/config/config.go

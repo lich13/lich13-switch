@@ -15,6 +15,19 @@ use std::{
 
 const DAY: i64 = 86_400_000;
 const BASE: i64 = 20_000 * DAY;
+const DEDUP_WINDOW: i64 = 10 * 60_000;
+const OUTSIDE_DEDUP_WINDOW: i64 = DEDUP_WINDOW + 1;
+
+fn local_boundary(at: i64, day_offset: i64, hour: u32) -> i64 {
+    use chrono::TimeZone;
+    let local = chrono::Local.timestamp_millis_opt(at).single().unwrap();
+    let date = local.date_naive() + chrono::Duration::days(day_offset);
+    chrono::Local
+        .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+        .earliest()
+        .unwrap()
+        .timestamp_millis()
+}
 
 fn fixture() -> (tempfile::TempDir, Store, Pricing) {
     let dir = tempfile::tempdir().unwrap();
@@ -142,6 +155,18 @@ fn install_fixed(prices: &Pricing, entries: &[(&str, Value)]) {
 
 fn cost(snapshot: Option<PriceSnapshot>) -> String {
     snapshot.expect("fixture should be fully priced").cost
+}
+
+fn price_snapshot(cost: &str) -> PriceSnapshot {
+    PriceSnapshot {
+        version: "fixture-price-v1".into(),
+        source: "fixture-catalog".into(),
+        model: "fixture-model".into(),
+        multiplier: "1".into(),
+        rates: BTreeMap::from([("input".into(), "0.00001".into())]),
+        cost: cost.into(),
+        basis: None,
+    }
 }
 
 #[test]
@@ -634,7 +659,146 @@ fn exact_response_id_deduplicates_across_sources_in_either_arrival_order() {
 }
 
 #[test]
-fn fallback_deduplication_requires_exact_tokens_model_client_and_time() {
+fn late_session_usage_completes_gateway_details_and_rebuild_restores_gateway_snapshot() {
+    let (_dir, mut store, _prices) = fixture();
+    let response_id = safe_id("fixture-late-usage-response");
+    let mut gateway = record("fixture-gateway-late-usage", "codex", "proxy", BASE + 100);
+    gateway.attempts[0].response_id = Some(response_id.clone());
+    gateway.attempts[0].tokens = Tokens::default();
+    gateway.attempts[0].status = Some(201);
+    gateway.attempts[0].duration_ms = 425;
+    gateway.attempts[0].price = Some(price_snapshot("0.1234"));
+    store
+        .write_batch(std::slice::from_ref(&gateway), None)
+        .unwrap();
+
+    let original = store.detail(&gateway.id).unwrap();
+    assert_eq!(
+        original.final_attempt().unwrap().response_id,
+        Some(response_id.clone())
+    );
+    assert_eq!(original.final_attempt().unwrap().tokens.total(), None);
+    assert_eq!(original.final_attempt().unwrap().status, Some(201));
+    assert_eq!(original.final_attempt().unwrap().duration_ms, 425);
+
+    let mut session = record("fixture-session-late-usage", "codex", "codex", BASE + 110);
+    session.attempts[0].response_id = Some(response_id);
+    session.attempts[0].tokens = Tokens {
+        input: Some(100),
+        output: Some(7),
+        cache_read: Some(20),
+        ..Tokens::default()
+    };
+    session.attempts[0].price = Some(price_snapshot("9.8765"));
+    store
+        .write_batch(std::slice::from_ref(&session), None)
+        .unwrap();
+
+    let page = store.logs(&Filter::default()).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.rows[0].id, gateway.id);
+    let listed_attempt = page.rows[0].final_attempt().unwrap();
+    assert_eq!(listed_attempt.status, Some(201));
+    assert_eq!(listed_attempt.duration_ms, 425);
+    assert_eq!(listed_attempt.tokens.input, Some(100));
+    assert_eq!(listed_attempt.tokens.output, Some(7));
+    let completed = store.detail(&gateway.id).unwrap();
+    let attempt = completed.final_attempt().unwrap();
+    assert_eq!(attempt.status, Some(201));
+    assert_eq!(attempt.duration_ms, 425);
+    assert_eq!(attempt.tokens.input, Some(100));
+    assert_eq!(attempt.tokens.output, Some(7));
+    assert_eq!(attempt.tokens.cache_read, Some(20));
+    assert_eq!(attempt.price.as_ref().unwrap().cost, "0.1234");
+
+    store.rebuild("codex", &[], &[]).unwrap();
+    assert!(store.detail(&session.id).is_err());
+    let restored = store.detail(&gateway.id).unwrap();
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
+    assert_eq!(restored.final_attempt().unwrap().status, Some(201));
+    assert_eq!(restored.final_attempt().unwrap().duration_ms, 425);
+    assert_eq!(restored.final_attempt().unwrap().tokens.total(), None);
+    assert_eq!(
+        restored
+            .final_attempt()
+            .unwrap()
+            .price
+            .as_ref()
+            .unwrap()
+            .cost,
+        "0.1234"
+    );
+}
+
+#[test]
+fn session_usage_does_not_replace_reported_gateway_zero_tokens() {
+    let (_dir, mut store, _prices) = fixture();
+    let response_id = safe_id("fixture-zero-usage-response");
+    let mut gateway = record("fixture-gateway-zero-usage", "codex", "proxy", BASE + 100);
+    gateway.attempts[0].response_id = Some(response_id.clone());
+    gateway.attempts[0].tokens = Tokens {
+        input: Some(0),
+        output: Some(0),
+        cache_read: Some(0),
+        ..Tokens::default()
+    };
+    let mut session = record(
+        "fixture-session-nonzero-usage",
+        "codex",
+        "codex",
+        BASE + 110,
+    );
+    session.attempts[0].response_id = Some(response_id);
+    session.attempts[0].tokens = Tokens {
+        input: Some(100),
+        output: Some(7),
+        cache_read: Some(20),
+        ..Tokens::default()
+    };
+
+    store
+        .write_batch(&[gateway.clone(), session], None)
+        .unwrap();
+
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
+    let merged = store.detail(&gateway.id).unwrap();
+    assert_eq!(merged.final_attempt().unwrap().tokens.input, Some(0));
+    assert_eq!(merged.final_attempt().unwrap().tokens.output, Some(0));
+    assert_eq!(merged.final_attempt().unwrap().tokens.cache_read, Some(0));
+}
+
+#[test]
+fn two_gateway_rows_without_usage_and_their_session_match_count_once() {
+    let (_dir, mut store, _prices) = fixture();
+    let response_id = safe_id("fixture-no-usage-response");
+    let mut first = record("fixture-gateway-no-usage-a", "codex", "proxy", BASE + 100);
+    first.attempts[0].response_id = Some(response_id.clone());
+    first.attempts[0].tokens = Tokens::default();
+    let mut second = record("fixture-gateway-no-usage-b", "codex", "proxy", BASE + 110);
+    second.attempts[0].response_id = Some(response_id.clone());
+    second.attempts[0].tokens = Tokens::default();
+    let mut session = record("fixture-session-no-usage", "codex", "codex", BASE + 120);
+    session.attempts[0].response_id = Some(response_id);
+    session.attempts[0].tokens = Tokens::default();
+
+    store.write_batch(&[first, second, session], None).unwrap();
+
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
+    assert_eq!(
+        store
+            .detail("fixture-gateway-no-usage-a")
+            .unwrap()
+            .final_attempt()
+            .unwrap()
+            .tokens
+            .total(),
+        None
+    );
+    assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 1);
+}
+
+#[test]
+fn fallback_deduplication_requires_exact_tokens_model_client_and_ten_minute_window() {
     for case in [
         "exact",
         "output",
@@ -649,13 +813,21 @@ fn fallback_deduplication_requires_exact_tokens_model_client_and_time() {
     ] {
         let (_dir, mut store, _prices) = fixture();
         let mut proxy = record("fixture-proxy", "codex", "proxy", BASE + 100);
-        let mut session = record("fixture-session", "codex", "codex", BASE + 2100);
+        let mut session = record(
+            "fixture-session",
+            "codex",
+            "codex",
+            BASE + 100 + DEDUP_WINDOW,
+        );
         proxy.attempts[0].response_id = Some(safe_id("fixture-proxy-response"));
         match case {
             "output" => session.attempts[0].tokens.output = Some(11),
             "cache" => session.attempts[0].tokens.cache_read = None,
             "model" => session.attempts[0].pricing_model = Some("gpt-other-fixture".into()),
-            "time" => session.started_at += 1,
+            "time" => {
+                session.started_at += 1;
+                session.attempts[0].started_at += 1;
+            }
             "client" => session.client = "claude".into(),
             "same-source" => session.source = "proxy".into(),
             "response-id" => {
@@ -707,7 +879,12 @@ fn store_rebuild_rolls_back_after_insert_failure_and_does_not_cross_sources() {
     let originals = vec![
         record("fixture-codex", "codex", "codex", BASE + 100),
         record("fixture-claude", "claude", "claude", BASE + 200),
-        record("fixture-proxy", "codex", "proxy", BASE + 10_000),
+        record(
+            "fixture-proxy",
+            "codex",
+            "proxy",
+            BASE + 100 + OUTSIDE_DEDUP_WINDOW,
+        ),
     ];
     store
         .write_batch(&originals, Some(("fixture-cursor", "old-cursor")))
@@ -741,7 +918,12 @@ fn successful_rebuild_replaces_only_its_source_and_is_idempotent() {
             &[
                 record("fixture-old", "codex", "codex", BASE + 100),
                 record("fixture-claude", "claude", "claude", BASE + 200),
-                record("fixture-proxy", "codex", "proxy", BASE + 10_000),
+                record(
+                    "fixture-proxy",
+                    "codex",
+                    "proxy",
+                    BASE + 100 + 2 * OUTSIDE_DEDUP_WINDOW,
+                ),
             ],
             None,
         )
@@ -780,17 +962,17 @@ fn successful_rebuild_replaces_only_its_source_and_is_idempotent() {
 fn dashboard_trend_step_matches_hourly_and_daily_detail_buckets() {
     let (_dir, mut store, _prices) = fixture();
     let hour = 3_600_000;
+    let base = local_boundary(BASE, 0, 0);
+    let next_day = local_boundary(BASE, 1, 0);
+    let hour_one = local_boundary(BASE, 0, 6);
+    let hour_two = local_boundary(BASE, 0, 7);
+    let next_day_hour = local_boundary(BASE, 1, 8);
     store
         .write_batch(
             &[
-                record("fixture-hour-one", "codex", "proxy", BASE + hour + 1),
-                record("fixture-hour-two", "codex", "proxy", BASE + 2 * hour + 1),
-                record(
-                    "fixture-next-day",
-                    "codex",
-                    "proxy",
-                    BASE + DAY + 3 * hour + 1,
-                ),
+                record("fixture-hour-one", "codex", "proxy", hour_one + 1),
+                record("fixture-hour-two", "codex", "proxy", hour_two + 1),
+                record("fixture-next-day", "codex", "proxy", next_day_hour + 1),
             ],
             None,
         )
@@ -799,18 +981,14 @@ fn dashboard_trend_step_matches_hourly_and_daily_detail_buckets() {
         (
             2 * DAY,
             hour,
-            vec![
-                (BASE + hour, 1),
-                (BASE + 2 * hour, 1),
-                (BASE + DAY + 3 * hour, 1),
-            ],
+            vec![(hour_one, 1), (hour_two, 1), (next_day_hour, 1)],
         ),
-        (2 * DAY + 1, DAY, vec![(BASE, 2), (BASE + DAY, 1)]),
+        (2 * DAY + 1, DAY, vec![(base, 2), (next_day, 1)]),
     ] {
         let dashboard = store
             .dashboard(&Filter {
-                start: Some(BASE),
-                end: Some(BASE + span),
+                start: Some(base),
+                end: Some(base + span),
                 ..Filter::default()
             })
             .unwrap();
@@ -834,19 +1012,21 @@ fn dashboard_trend_step_matches_hourly_and_daily_detail_buckets() {
 #[test]
 fn dashboard_trend_step_remains_daily_for_compacted_two_day_range() {
     let (_dir, mut store, _prices) = fixture();
+    let base = local_boundary(BASE, 0, 0);
+    let next_day = local_boundary(BASE, 1, 0);
     store
         .write_batch(
             &[
-                record("fixture-old-day-one", "codex", "proxy", BASE + 100),
-                record("fixture-old-day-two", "codex", "proxy", BASE + DAY + 100),
+                record("fixture-old-day-one", "codex", "proxy", base + 100),
+                record("fixture-old-day-two", "codex", "proxy", next_day + 100),
             ],
             None,
         )
         .unwrap();
     store.compact(BASE + 40 * DAY).unwrap();
     let filter = Filter {
-        start: Some(BASE),
-        end: Some(BASE + 2 * DAY),
+        start: Some(base),
+        end: Some(base + 2 * DAY),
         ..Filter::default()
     };
     assert_eq!(store.logs(&filter).unwrap().total, 0);
@@ -859,7 +1039,7 @@ fn dashboard_trend_step_remains_daily_for_compacted_two_day_range() {
             .iter()
             .map(|point| (point.time, point.totals.requests))
             .collect::<Vec<_>>(),
-        vec![(BASE, 1), (BASE + DAY, 1)]
+        vec![(base, 1), (next_day, 1)]
     );
     assert_eq!(
         serde_json::to_value(&dashboard).unwrap()["trendStepMs"],
@@ -871,7 +1051,7 @@ fn dashboard_trend_step_remains_daily_for_compacted_two_day_range() {
 fn thirty_day_compaction_keeps_boundary_details_and_does_not_double_count() {
     let (_dir, mut store, _prices) = fixture();
     let at = BASE + 40 * DAY + 43_210;
-    let cutoff = BASE + 10 * DAY;
+    let cutoff = local_boundary(at - 30 * DAY, 0, 0);
     store
         .write_batch(
             &[
@@ -903,8 +1083,9 @@ fn thirty_day_compaction_keeps_boundary_details_and_does_not_double_count() {
             (2, 2, 2)
         );
         assert_eq!(
-            dashboard
-                .heatmap
+            store
+                .heatmap(&all_time())
+                .unwrap()
                 .iter()
                 .map(|p| p.totals.requests)
                 .sum::<u64>(),

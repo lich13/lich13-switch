@@ -1,3 +1,4 @@
+import ClaudeProfile from "./ClaudeProfile";
 import ClientSelection, {
   useClientSelection,
   clientName,
@@ -208,6 +209,7 @@ function GatewayContent({
     e.currentTarget.closest("details")?.removeAttribute("open");
   return (
     <section className="gateway-page">
+      {clientId==="claude"&&<ClaudeProfile disabled={busy||!!dialog} notify={notify}/>}
       <div className="page-heading gateway-heading">
         <ClientSelection
           client={clientId}

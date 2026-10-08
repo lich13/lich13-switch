@@ -1,0 +1,423 @@
+//! Indexed projections for queries. JSON bodies are read only for one detail/page.
+use super::{
+    model::*,
+    store::{Dashboard, Group, Point},
+};
+use crate::storage::Result;
+use chrono::{Datelike, TimeZone};
+use rusqlite::{
+    functions::{Aggregate, Context, FunctionFlags},
+    params,
+    types::Value,
+    Connection, Row,
+};
+use rust_decimal::Decimal;
+use std::collections::BTreeMap;
+const DAY: i64 = 86_400_000;
+fn db<T>(value: rusqlite::Result<T>) -> Result<T> {
+    value.map_err(|_| failure("用量查询失败"))
+}
+struct DecimalSum;
+impl Aggregate<Decimal, String> for DecimalSum {
+    fn init(&self, _: &mut Context<'_>) -> rusqlite::Result<Decimal> {
+        Ok(Decimal::ZERO)
+    }
+    fn step(&self, ctx: &mut Context<'_>, total: &mut Decimal) -> rusqlite::Result<()> {
+        // Borrow SQLite's text. Aggregating each panel must not allocate one
+        // temporary String for every attempt (including the common zero cost).
+        if let Some(value) = ctx
+            .get_raw(0)
+            .as_str()
+            .ok()
+            .filter(|v| *v != "0")
+            .and_then(decimal)
+        {
+            *total = total
+                .checked_add(value)
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+        }
+        Ok(())
+    }
+    fn finalize(&self, _: &mut Context<'_>, total: Option<Decimal>) -> rusqlite::Result<String> {
+        let total = total.unwrap_or_default();
+        Ok(if total.is_zero() {
+            "0".into()
+        } else {
+            total.to_string()
+        })
+    }
+}
+pub fn bucket(at: i64, step: i64) -> i64 {
+    let Some(local) = chrono::Local.timestamp_millis_opt(at).single() else {
+        return at.div_euclid(step) * step;
+    };
+    if step == DAY {
+        return chrono::Local
+            .with_ymd_and_hms(local.year(), local.month(), local.day(), 0, 0, 0)
+            .earliest()
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(at);
+    }
+    let offset = i64::from(local.offset().local_minus_utc()) * 1000;
+    (at + offset).div_euclid(step) * step - offset
+}
+pub fn register(c: &Connection) -> Result<()> {
+    db(c.create_aggregate_function(
+        "decimal_sum",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        DecimalSum,
+    ))?;
+    db(
+        c.create_scalar_function("usage_bucket", 2, FunctionFlags::SQLITE_UTF8, |ctx| {
+            Ok(bucket(ctx.get(0)?, ctx.get(1)?))
+        }),
+    )?;
+    db(
+        c.create_scalar_function("usage_day_end", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
+            let at: i64 = ctx.get(0)?;
+            let next = chrono::Local
+                .timestamp_millis_opt(at)
+                .single()
+                .and_then(|v| v.date_naive().succ_opt())
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .and_then(|t| chrono::Local.from_local_datetime(&t).earliest())
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(at.saturating_add(DAY));
+            Ok(next)
+        }),
+    )
+}
+pub fn schema(c: &Connection) -> Result<()> {
+    db(c.execute_batch("CREATE TABLE IF NOT EXISTS usage_metrics(
+      kind INTEGER NOT NULL,owner TEXT NOT NULL,ordinal INTEGER NOT NULL,
+      provider TEXT,model TEXT,requests INTEGER NOT NULL,attempts INTEGER NOT NULL,
+      success INTEGER NOT NULL,status_known INTEGER NOT NULL,sessions INTEGER NOT NULL,
+      input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,
+      cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
+      cost TEXT NOT NULL,unpriced INTEGER NOT NULL,duration_ms INTEGER NOT NULL,measured_outputs INTEGER NOT NULL,generation_ms INTEGER NOT NULL,
+      PRIMARY KEY(kind,owner,ordinal));
+      CREATE INDEX IF NOT EXISTS usage_filter_client ON records(client,time DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS usage_filter_provider ON records(provider,time DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS usage_filter_model ON records(model,time DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS usage_page ON records(effective,time DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS usage_duplicate ON records(duplicate_of,source);
+      CREATE INDEX IF NOT EXISTS daily_time ON daily(day);"))
+}
+pub fn project(
+    c: &Connection,
+    kind: i64,
+    owner: &str,
+    r: &Record,
+    count: u64,
+    historical: Option<&Totals>,
+) -> Result<()> {
+    db(c.execute(
+        "DELETE FROM usage_metrics WHERE kind=?1 AND owner=?2",
+        params![kind, owner],
+    ))?;
+    let mut stmt=db(c.prepare_cached("INSERT INTO usage_metrics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)"))?;
+    for (i, a) in r.attempts.iter().enumerate() {
+        let final_record = i + 1 == r.attempts.len();
+        let known = final_record && a.status.is_some();
+        let success = known
+            && a.status
+                .is_some_and(|s| (200..300).contains(&s) || s == 101 && r.completed);
+        let duration = if final_record {
+            historical.map_or(a.duration_ms * count, |t| t.duration_ms)
+        } else {
+            0
+        };
+        let generation = a
+            .first_token_ms
+            .filter(|t| a.duration_ms > *t)
+            .map(|t| a.duration_ms - t);
+        let measured = if final_record {
+            historical.map_or(generation.and(a.tokens.output).unwrap_or(0) * count, |t| {
+                t.measured_outputs
+            })
+        } else {
+            0
+        };
+        let generation = if final_record {
+            historical.map_or(generation.unwrap_or(0) * count, |t| t.generation_ms)
+        } else {
+            0
+        };
+        let tokens = &a.tokens;
+        let mul = |n: Option<u64>| n.map(|n| n.saturating_mul(count).min(i64::MAX as u64) as i64);
+        let cost = (a
+            .price
+            .as_ref()
+            .and_then(|p| decimal(&p.cost))
+            .unwrap_or_default()
+            * Decimal::from(count))
+        .to_string();
+        db(stmt.execute(params![
+            kind,
+            owner,
+            i as i64,
+            a.provider,
+            a.pricing_model,
+            if final_record { count } else { 0 },
+            count,
+            if success { count } else { 0 },
+            if known { count } else { 0 },
+            if final_record && r.source != "proxy" {
+                count
+            } else {
+                0
+            },
+            mul(tokens.input),
+            mul(tokens.output),
+            mul(tokens.cache_read),
+            mul(tokens.cache_write),
+            mul(tokens.cache_write_5m),
+            mul(tokens.cache_write_1h),
+            mul(tokens.image_input),
+            mul(tokens.image_output),
+            mul(tokens.audio_input),
+            mul(tokens.audio_output),
+            cost,
+            if a.price.is_none() { count } else { 0 },
+            duration,
+            measured,
+            generation
+        ]))?;
+    }
+    Ok(())
+}
+pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>) {
+    let mut terms = vec![format!("{alias}.time>=?"), format!("{alias}.time<=?")];
+    let mut args = vec![
+        Value::Integer(f.start.unwrap_or(0)),
+        Value::Integer(f.end.unwrap_or(i64::MAX)),
+    ];
+    for (column, value) in [
+        ("client", &f.client),
+        ("provider", &f.provider),
+        ("model", &f.model),
+    ] {
+        if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
+            terms.push(format!("{alias}.{column}=?"));
+            args.push(Value::Text(value.clone()));
+        }
+    }
+    if status {
+        match f.status.as_deref() {
+            Some("none") => terms.push(format!("{alias}.status IS NULL")),
+            Some("2xx") => terms.push(format!("{alias}.status BETWEEN 200 AND 299")),
+            Some("4xx") => terms.push(format!("{alias}.status BETWEEN 400 AND 499")),
+            Some("5xx") => terms.push(format!("{alias}.status BETWEEN 500 AND 599")),
+            Some(v) if !v.is_empty() => {
+                terms.push(format!("{alias}.status=?"));
+                args.push(Value::Integer(v.parse().unwrap_or(-1)));
+            }
+            _ => (),
+        }
+    }
+    (terms.join(" AND "), args)
+}
+const SUM:&str="coalesce(sum(requests),0),coalesce(sum(attempts),0),coalesce(sum(success),0),coalesce(sum(status_known),0),coalesce(sum(sessions),0),sum(input),sum(output),sum(cache_read),sum(cache_write),sum(cache_write_5m),sum(cache_write_1h),sum(image_input),sum(image_output),sum(audio_input),sum(audio_output),decimal_sum(cost),coalesce(sum(unpriced),0),coalesce(sum(duration_ms),0),coalesce(sum(measured_outputs),0),coalesce(sum(generation_ms),0)";
+fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
+    Ok(Totals {
+        requests: row.get(i)?,
+        attempts: row.get(i + 1)?,
+        success: row.get(i + 2)?,
+        status_known: row.get(i + 3)?,
+        sessions: row.get(i + 4)?,
+        tokens: Tokens {
+            input: row.get(i + 5)?,
+            output: row.get(i + 6)?,
+            cache_read: row.get(i + 7)?,
+            cache_write: row.get(i + 8)?,
+            cache_write_5m: row.get(i + 9)?,
+            cache_write_1h: row.get(i + 10)?,
+            image_input: row.get(i + 11)?,
+            image_output: row.get(i + 12)?,
+            audio_input: row.get(i + 13)?,
+            audio_output: row.get(i + 14)?,
+        },
+        cost: row.get(i + 15)?,
+        unpriced: row.get(i + 16)?,
+        duration_ms: row.get(i + 17)?,
+        measured_outputs: row.get(i + 18)?,
+        generation_ms: row.get(i + 19)?,
+    })
+}
+fn selection(f: &Filter) -> (String, Vec<Value>) {
+    let (condition, mut args) = conditions(f, "r", false);
+    let mut daily = vec![
+        "d.day>=?".to_string(),
+        "usage_day_end(d.day)<=?".to_string(),
+    ];
+    args.push(Value::Integer(f.start.unwrap_or(0)));
+    args.push(Value::Integer(f.end.unwrap_or_else(now).saturating_add(1)));
+    for (key, value) in [
+        ("client", &f.client),
+        ("provider", &f.provider),
+        ("model", &f.model),
+    ] {
+        if let Some(v) = value.as_ref().filter(|v| !v.is_empty()) {
+            daily.push(format!("json_extract(d.body,'$.{key}')=?"));
+            args.push(Value::Text(v.clone()));
+        }
+    }
+    let cte=format!("WITH selected AS (SELECT 0 kind,id owner,time,source FROM records r WHERE effective=1 AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.* FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner) ",daily.join(" AND "));
+    (cte, args)
+}
+pub fn points(c: &Connection, f: &Filter, step: i64) -> Result<Vec<Point>> {
+    let (cte, args) = selection(f);
+    let mut stmt = db(c.prepare(&format!(
+        "{cte} SELECT usage_bucket(time,{step}) b,{SUM} FROM m GROUP BY b ORDER BY b"
+    )))?;
+    let rows = db(
+        stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+            Ok(Point {
+                time: r.get(0)?,
+                totals: totals(r, 1)?,
+            })
+        }),
+    )?;
+    db(rows.collect())
+}
+pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
+    let (cte, args) = selection(f);
+    // Each aggregate reads the same narrow materialized projection, rather than
+    // repeating the indexed record/attempt join for every panel.
+    let cte = cte.replace("m AS (", "m AS MATERIALIZED (");
+    let end = f.end.unwrap_or_else(now);
+    let start = f.start.unwrap_or(0);
+    let step = if end - start <= 2 * DAY {
+        3_600_000
+    } else {
+        DAY
+    };
+    let rolled = "EXISTS(SELECT 1 FROM selected WHERE kind=1)";
+    let actual_step = format!("CASE WHEN {rolled} THEN {DAY} ELSE {step} END");
+    // Only the final attempt has a request count. Attribute a missing price to
+    // that row once, consulting earlier attempts only if its own price exists.
+    // This avoids sorting every request ID for a second logical aggregation.
+    let total_sum=SUM.replace("coalesce(sum(unpriced),0)","coalesce(sum(CASE WHEN requests>0 AND (unpriced>0 OR EXISTS(SELECT 1 FROM usage_metrics a WHERE a.kind=m.kind AND a.owner=m.owner AND a.unpriced>0)) THEN requests ELSE 0 END),0)");
+    // Source badges only use request counts, not a full cost/token aggregate.
+    let source_sum="coalesce(sum(requests),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0";
+    let sql=format!("{cte}
+      SELECT 'totals','',{total_sum},{rolled} FROM m
+      UNION ALL SELECT 'provider',coalesce(provider,'session'),{SUM},0 FROM m GROUP BY coalesce(provider,'session')
+      UNION ALL SELECT 'model',coalesce(model,'unknown'),{SUM},0 FROM m GROUP BY coalesce(model,'unknown')
+      UNION ALL SELECT 'source',source,{source_sum},0 FROM m GROUP BY source
+      UNION ALL SELECT 'trend',cast(usage_bucket(time,{actual_step}) AS TEXT),{SUM},0 FROM m GROUP BY usage_bucket(time,{actual_step})");
+    let mut stmt = db(c.prepare(&sql))?;
+    let rows = db(
+        stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                totals(r, 2)?,
+                r.get::<_, bool>(22)?,
+            ))
+        }),
+    )?;
+    let mut total = Totals::default();
+    let mut providers = Vec::new();
+    let mut models = Vec::new();
+    let mut sources = BTreeMap::new();
+    let mut trend = Vec::new();
+    let mut rolled = false;
+    for row in rows {
+        let (kind, id, value, flag) = db(row)?;
+        match kind.as_str() {
+            "totals" => {
+                total = value;
+                rolled = flag;
+            }
+            "provider" => providers.push(Group { id, totals: value }),
+            "model" => models.push(Group { id, totals: value }),
+            "source" => {
+                sources.insert(id, value.requests);
+            }
+            "trend" => trend.push(Point {
+                time: id.parse().map_err(|_| failure("趋势时间无效"))?,
+                totals: value,
+            }),
+            _ => return Err(failure("用量分组无效")),
+        }
+    }
+    let order = |a: &Group, b: &Group| {
+        b.totals
+            .requests
+            .cmp(&a.totals.requests)
+            .then_with(|| a.id.cmp(&b.id))
+    };
+    providers.sort_by(order);
+    models.sort_by(order);
+    trend.sort_by_key(|p| p.time);
+    let (condition, review_args) = conditions(f, "r", false);
+    let review_count = db(c.query_row(
+        &format!("SELECT count(*) FROM records r WHERE effective=2 AND {condition}"),
+        rusqlite::params_from_iter(review_args.iter()),
+        |r| r.get(0),
+    ))?;
+    Ok(Dashboard {
+        totals: total,
+        trend,
+        trend_step_ms: if rolled { DAY } else { step },
+        heatmap: Vec::new(),
+        providers,
+        models,
+        precision: if rolled { "day" } else { "millisecond" }.into(),
+        detail_since,
+        sources,
+        review_count,
+        data_version: version(c)?,
+    })
+}
+
+pub fn overview_key(c: &Connection, f: &Filter) -> Result<String> {
+    let hourly = f
+        .end
+        .unwrap_or_else(now)
+        .saturating_sub(f.start.unwrap_or(0))
+        <= 2 * DAY;
+    let mut f = f.clone();
+    f.status = None;
+    f.page = 0;
+    f.sort = None;
+    // Advancing a live end time beyond the latest stored data does not change
+    // its result. Real writes (including dedup/compaction) change data_version.
+    if let Some(end) = f.end {
+        let latest: i64 = db(
+            c.query_row("SELECT coalesce(max(time),0) FROM records", [], |r| {
+                r.get(0)
+            }),
+        )?;
+        let last_day: Option<i64> =
+            db(c.query_row("SELECT max(day) FROM daily", [], |r| r.get(0)))?;
+        let daily_end = match last_day {
+            Some(day) => {
+                db(c.query_row("SELECT usage_day_end(?1)-1", [day], |r| r.get::<_, i64>(0)))?
+            }
+            None => 0,
+        };
+        f.end = Some(end.min(latest.max(daily_end)));
+    }
+    Ok(format!(
+        "{}:{}:{hourly}:{}",
+        version(c)?,
+        chrono::Local::now().offset().local_minus_utc(),
+        serde_json::to_string(&f).map_err(|_| failure("用量筛选无效"))?
+    ))
+}
+pub fn version(c: &Connection) -> Result<u64> {
+    db(c.query_row(
+        "SELECT coalesce((SELECT value FROM metadata WHERE key='data_version'),'0')",
+        [],
+        |r| {
+            let s: String = r.get(0)?;
+            Ok(s.parse().unwrap_or(0))
+        },
+    ))
+}
+pub fn changed(c: &Connection) -> Result<()> {
+    db(c.execute("INSERT INTO metadata(key,value) VALUES('data_version','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1",[])).map(|_|())
+}

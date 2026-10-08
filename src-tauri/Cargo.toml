@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.14.0"
+version = "0.15.0"
 description = "Independent Codex and Claude Code providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -54,13 +54,13 @@ yawc = { version = "0.4.2", default-features = false, features = ["zlib", "rustl
 auto-launch = "0.5"
 sysinfo = "0.33"
 plist = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "functions"] }
 rust_decimal = { version = "1", features = ["serde-str"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "block2"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString"] }
 block2 = "0.6"
 
 [dev-dependencies]
@@ -72,7 +72,7 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Memory"] }
 winreg = "0.55"
-windows = { version = "0.62", features = ["UI_Notifications"] }
+windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom"] }
 
 [profile.release]
 lto = "thin"

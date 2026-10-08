@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -16,6 +16,12 @@ vi.mock("./bridge", () => ({
   }),
 }));
 import ProviderImports from "./ProviderImports";
+
+const waitForPreview = async (name: string) => {
+  const dialog = await screen.findByRole("dialog", { name: "导入供应商" });
+  await within(dialog).findByText(name);
+  return dialog;
+};
 
 const first = {
   id: "first",
@@ -93,7 +99,8 @@ it("waits for an existing dialog and preserves its unsaved input", async () => {
   ).not.toBeInTheDocument();
   expect(mock.command).not.toHaveBeenCalledWith("get_gateway");
   await user.click(screen.getByRole("button", { name: "关闭当前表单" }));
-  expect(await screen.findByText(first.name)).toBeInTheDocument();
+  const dialog = await waitForPreview(first.name);
+  expect(within(dialog).getByText(first.name)).toBeInTheDocument();
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
   expect(screen.getByText("••••••••")).toBeInTheDocument();
   expect(
@@ -112,16 +119,17 @@ it("does not duplicate a pending import when events or clicks repeat", async () 
   const notify = vi.fn();
   const user = userEvent.setup();
   render(<ProviderImports notify={notify} />);
-  await screen.findByText(first.name);
+  const dialog = await waitForPreview(first.name);
   await act(async () => {
     mock.listeners.get("provider-imports")?.();
     mock.listeners.get("provider-imports")?.();
   });
+  await waitForPreview(first.name);
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  const confirm = screen.getByRole("button", { name: "导入" });
+  const confirm = within(dialog).getByRole("button", { name: "导入" });
   await user.click(confirm);
   expect(confirm).toBeDisabled();
-  expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
   await user.click(confirm);
   await act(async () => mock.listeners.get("provider-imports")?.());
   expect(
@@ -142,15 +150,16 @@ it("keeps the queued preview after a save conflict and retries with the refreshe
   const user = userEvent.setup();
   const notify = vi.fn();
   render(<ProviderImports notify={notify} />);
-  await screen.findByText(first.name);
+  let dialog = await waitForPreview(first.name);
   revision = "after-external-change";
   confirmError = { code: "CONFLICT", message: "设置已被其他窗口修改" };
-  await user.click(screen.getByRole("button", { name: "导入" }));
+  await user.click(within(dialog).getByRole("button", { name: "导入" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "设置已被其他窗口修改",
   );
-  expect(screen.getByText(first.name)).toBeInTheDocument();
-  expect(screen.getByText(first.baseUrl)).toBeInTheDocument();
+  dialog = await waitForPreview(first.name);
+  expect(within(dialog).getByText(first.name)).toBeInTheDocument();
+  expect(within(dialog).getByText(first.baseUrl)).toBeInTheDocument();
   expect(screen.queryByText(second.name)).not.toBeInTheDocument();
   expect(notify).not.toHaveBeenCalled();
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
@@ -158,11 +167,12 @@ it("keeps the queued preview after a save conflict and retries with the refreshe
     expectedRevision: "before-import",
   });
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "导入" })).toBeEnabled(),
+    expect(within(dialog).getByRole("button", { name: "导入" })).toBeEnabled(),
   );
   confirmError = null;
-  await user.click(screen.getByRole("button", { name: "导入" }));
-  await screen.findByText(second.name);
+  await user.click(within(dialog).getByRole("button", { name: "导入" }));
+  dialog = await waitForPreview(second.name);
+  expect(within(dialog).getByText(second.name)).toBeInTheDocument();
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
     id: first.id,
     expectedRevision: "after-external-change",
@@ -174,16 +184,18 @@ it("keeps a failed cancellation visible and advances the queue only after cancel
   const notify = vi.fn();
   const user = userEvent.setup();
   render(<ProviderImports notify={notify} />);
-  await screen.findByText(first.name);
+  let dialog = await waitForPreview(first.name);
   cancelError = { code: "IO", message: "无法取消待导入项" };
-  await user.click(screen.getByRole("button", { name: "取消" }));
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "无法取消待导入项",
   );
-  expect(screen.getByText(first.name)).toBeInTheDocument();
+  dialog = await waitForPreview(first.name);
+  expect(within(dialog).getByText(first.name)).toBeInTheDocument();
   cancelError = null;
-  await user.click(screen.getByRole("button", { name: "取消" }));
-  await screen.findByText(second.name);
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  dialog = await waitForPreview(second.name);
+  expect(within(dialog).getByText(second.name)).toBeInTheDocument();
   expect(mock.command).toHaveBeenCalledWith("cancel_provider_import", {
     id: first.id,
   });

@@ -76,4 +76,39 @@ describe("notification permission", () => {
       expect.objectContaining({ textContent: "通知授权尚未完成" }),
     );
   });
+
+  it("reports test delivery failure and acceptance, shows pending delivery, and opens system settings", async () => {
+    const user = userEvent.setup();
+    render(<NotificationPermission />);
+    expect(await screen.findByRole("status")).toHaveTextContent("已允许");
+    const send = screen.getByRole("button", { name: "发送测试通知" });
+
+    mock.command.mockRejectedValueOnce({
+      code: "NOTIFICATION",
+      message: "测试通知发送失败",
+    });
+    await user.click(send);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("测试通知发送失败"));
+
+    mock.command.mockResolvedValueOnce({
+      permission: "granted",
+      delivery: "accepted",
+      error: null,
+    });
+    await user.click(send);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("系统已接受"));
+
+    act(() =>
+      mock.listeners.get("notification-state")?.({
+        permission: "granted",
+        delivery: "pending",
+        error: null,
+      }),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("等待发送");
+    expect(send).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "系统通知设置" }));
+    expect(mock.command).toHaveBeenLastCalledWith("open_notification_settings", {});
+  });
 });

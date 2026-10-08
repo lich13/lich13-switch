@@ -85,15 +85,19 @@ fn json_error(e: serde_json::Error) -> AppError {
         column: Some(e.column()),
     }
 }
-pub fn validate(client: ClientId, text: &str) -> Result<()> {
-    if client == ClientId::Codex {
-        return crate::core::validate_config(text);
-    }
+pub(crate) fn parse_object(text: &str) -> Result<Value> {
     serde_json::from_str::<Unique>(text).map_err(json_error)?;
     let v: Value = serde_json::from_str(text).map_err(json_error)?;
     if !v.is_object() {
         return Err(AppError::new("JSON", "配置根节点必须是对象"));
     }
+    Ok(v)
+}
+pub fn validate(client: ClientId, text: &str) -> Result<()> {
+    if client == ClientId::Codex {
+        return crate::core::validate_config(text);
+    }
+    let v = parse_object(text)?;
     let check = |path: &str, valid: fn(&Value) -> bool, label: &str| -> Result<()> {
         if v.pointer(path).is_some_and(|x| !valid(x)) {
             return Err(AppError::new("CONFIG_TYPE", &format!("{label}类型无效")));

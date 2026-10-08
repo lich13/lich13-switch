@@ -504,7 +504,7 @@ async fn failed_provider_then_success_keeps_two_attempts_in_one_record() {
                 .status(503)
                 .header("content-type", "application/json")
                 .body(full(
-                    r#"{"error":{"type":"server_error","message":"fixture unavailable"}}"#,
+                    r#"{"error":{"type":"server_error","message":"fixture unavailable"},"usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":5}}}"#,
                 ))
                 .unwrap()
         }
@@ -559,16 +559,28 @@ async fn failed_provider_then_success_keeps_two_attempts_in_one_record() {
     }
     assert_eq!(row.attempts[0].status, Some(503));
     assert_eq!(row.attempts[0].outcome, "rejected");
-    assert_eq!(row.attempts[0].tokens.total(), None);
+    assert_eq!(row.attempts[0].tokens.input, Some(7));
+    assert_eq!(row.attempts[0].tokens.cache_read, Some(5));
+    assert_eq!(row.attempts[0].tokens.output, Some(2));
+    assert_eq!(row.attempts[0].tokens.total(), Some(14));
     assert_eq!(row.attempts[1].status, Some(200));
     assert_eq!(row.attempts[1].outcome, "success");
-    assert_eq!(row.tokens().total(), Some(120));
+    assert_eq!(row.attempts[1].tokens.input, Some(60));
+    assert_eq!(row.attempts[1].tokens.cache_read, Some(40));
+    assert_eq!(row.attempts[1].tokens.output, Some(20));
+    assert_eq!(row.tokens().input, Some(67));
+    assert_eq!(row.tokens().cache_read, Some(45));
+    assert_eq!(row.tokens().output, Some(22));
+    assert_eq!(row.tokens().total(), Some(134));
     let totals = fixture
         .usage
         .query(|store| Ok(store.dashboard(&Filter::default())?.totals))
         .unwrap();
     assert_eq!(totals.requests, 1);
     assert_eq!(totals.success, 1);
+    assert_eq!(totals.tokens.input, Some(67));
+    assert_eq!(totals.tokens.cache_read, Some(45));
+    assert_eq!(totals.tokens.output, Some(22));
     fixture.stop().await;
 }
 

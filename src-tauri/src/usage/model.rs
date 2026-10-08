@@ -268,6 +268,10 @@ pub struct Record {
     pub deduplication: String,
     #[serde(default)]
     pub merged_sources: Vec<String>,
+    /// The gateway's unmodified metadata when a matching local session supplies
+    /// missing usage. Kept separately so rebuilding that source can undo the join.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_reported: Option<Attempt>,
 }
 impl Record {
     pub fn final_attempt(&self) -> Option<&Attempt> {
@@ -294,10 +298,18 @@ impl Record {
             return None;
         }
         let model = a.pricing_model.as_ref()?;
+        let input = a.tokens.input?;
+        let output = a.tokens.output?;
+        // Codex sessions do not report cache writes; retain that uncertainty in
+        // the record, but do not turn it into a different correlation key.
+        let write = if self.client == "codex" {
+            None
+        } else {
+            a.tokens.cache_write
+        };
         Some(safe_id(&format!(
-            "{}:{model}:{}",
-            self.client,
-            serde_json::to_string(&a.tokens).ok()?
+            "{}:{model}:{input}:{output}:{:?}:{write:?}",
+            self.client, a.tokens.cache_read
         )))
     }
 }
@@ -350,6 +362,8 @@ pub struct Filter {
 #[serde(rename_all = "camelCase")]
 pub struct Totals {
     pub requests: u64,
+    #[serde(default)]
+    pub attempts: u64,
     pub success: u64,
     pub status_known: u64,
     pub sessions: u64,
@@ -363,6 +377,7 @@ pub struct Totals {
 impl Totals {
     pub fn add_record(&mut self, r: &Record) {
         self.requests += 1;
+        self.attempts += r.attempts.len() as u64;
         self.tokens.add(&r.tokens());
         let known = r
             .attempts
@@ -393,6 +408,7 @@ impl Totals {
     }
     pub fn add(&mut self, o: &Self) {
         self.requests += o.requests;
+        self.attempts += o.attempts;
         self.success += o.success;
         self.status_known += o.status_known;
         self.sessions += o.sessions;

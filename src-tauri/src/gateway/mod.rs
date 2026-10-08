@@ -127,6 +127,15 @@ fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
 impl Gateway {
+    fn claude_official(&self) -> bool {
+        self.0.client == ClientId::Claude
+            && self
+                .0
+                .data
+                .parent()
+                .is_some_and(crate::claude_profile::blocks)
+    }
+
     pub fn set_usage(&self, service: crate::usage::Service) {
         *self.0.usage.lock().unwrap() = Some(service);
     }
@@ -450,7 +459,9 @@ impl Gateway {
             self.0.client,
             home,
             &self.0.data,
-            s.running || self.0.data.join("gateway-recovery.json").exists(),
+            s.running
+                || self.0.data.join("gateway-recovery.json").exists()
+                || self.claude_official(),
         )
     }
     pub fn previous_config(&self) -> Result<String> {
@@ -464,6 +475,16 @@ impl Gateway {
     ) -> Result<crate::configuration::Document> {
         let s = self.0.inner.lock().unwrap();
         crate::configuration::validate(self.0.client, text)?;
+        if self.0.client == ClientId::Claude {
+            if let Some(data) = self.0.data.parent() {
+                crate::claude_profile::guard_save(
+                    data,
+                    home,
+                    &crate::claude_profile::user_home()?,
+                    text,
+                )?;
+            }
+        }
         let guarded = s.running || self.0.data.join("gateway-recovery.json").exists();
         if guarded {
             let current = takeover::read_for(self.0.client, home)?.1;
@@ -543,6 +564,12 @@ impl Gateway {
             return Err(AppError::new("CLEANUP", "请先处理未完成的升级清理"));
         }
         let direct_select = !s.running && matches!(&edit, Edit::Select { .. });
+        if direct_select && self.claude_official() {
+            return Err(AppError::new(
+                "CLAUDE_OFFICIAL",
+                "请先切换到 Claude API 配置",
+            ));
+        }
         if direct_select
             && self.0.client == ClientId::Codex
             && crate::official::blocks_gateway(&self.0.data, home)
@@ -666,6 +693,12 @@ impl Gateway {
                 "请先关闭官方账号连接，再启动 Codex 网关",
             ));
         }
+        if self.claude_official() {
+            return Err(AppError::new(
+                "CLAUDE_OFFICIAL",
+                "请先切换到 Claude API 配置，再启用网关",
+            ));
+        }
         let _guard = self.0.lifecycle.lock().await;
         let (port, token) = {
             let s = self.0.inner.lock().unwrap();
@@ -751,6 +784,9 @@ impl Gateway {
         self.stop_internal(None, true).await
     }
     pub async fn resume(&self, home: &Path) -> Result<()> {
+        if self.claude_official() {
+            return Ok(());
+        }
         if self.0.inner.lock().unwrap().running {
             return Ok(());
         }

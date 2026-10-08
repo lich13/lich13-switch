@@ -144,10 +144,31 @@ const linkApps = [
     path: "/Applications/lich13studio.app",
   },
 ];
+let claudeProfile = { mode: "api", revision: "preview-profile", initialized: false, conflict: null, files: [], warnings: [] };
+let claudeLogin = { phase: "idle", authenticated: false, error: null };
+let apiProfileText = claudeDoc.text;
+let officialProfileText = '{\n  "env": {}\n}\n';
 export async function run(
   name: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  if (name === "get_claude_profile" || name === "recover_claude_profile") return structuredClone(claudeProfile);
+  if (name === "switch_claude_profile") {
+    const official = args.mode === "official";
+    if (official) apiProfileText = claudeDoc.text; else officialProfileText = claudeDoc.text;
+    claudeDoc = { ...claudeDoc, text: official ? officialProfileText : apiProfileText, guarded: official, revision: `preview-claude-${Date.now()}` };
+    claudeProfile = { ...claudeProfile, mode: official ? "official" : "api", initialized: true, revision: `preview-profile-${Date.now()}` };
+    emit("claude-profile-state", claudeProfile);
+    emit("config-state", { clientId: "claude", revision: claudeDoc.revision, guarded: official });
+    return structuredClone(claudeProfile);
+  }
+  if (name === "claude_login_status") return structuredClone(claudeLogin);
+  if (name === "start_claude_login" || name === "cancel_claude_login") {
+    claudeLogin = { ...claudeLogin, phase: name === "start_claude_login" ? "waiting" : "cancelled" };
+    emit("claude-login-state", claudeLogin);
+    return structuredClone(claudeLogin);
+  }
+
   if (name === "get_link_handler_state")
     return { current: linkHandler, apps: linkApps, systemPicker: false };
   if (name === "set_link_handler") {
@@ -226,7 +247,9 @@ export async function run(
     return result;
   }
   switch (name) {
-    case "notification_permission": return {permission:"granted",error:null};
+    case "notification_permission": return {permission:"granted",error:null,delivery:"idle"};
+    case "test_notification": return {permission:"granted",error:null,delivery:"accepted"};
+    case "open_notification_settings": return;
     case "get_app_events": {
       const filter=(args.filter??{}) as Record<string,unknown>;
       const rows=demoEvents.filter(r=>Object.entries(filter).every(([key,v])=>!v||key==="page"||(key==="from"?r.lastAt>=Number(v):key==="to"?r.firstAt<=Number(v):r[key as keyof typeof r]===v)));

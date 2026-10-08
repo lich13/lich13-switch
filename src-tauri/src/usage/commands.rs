@@ -10,21 +10,28 @@ pub fn get_usage_state(r: R<'_>) -> State {
 #[tauri::command]
 pub async fn get_usage_dashboard(r: R<'_>, filter: Filter) -> Result<store::Dashboard> {
     let s = r.usage.clone();
-    tokio::task::spawn_blocking(move || s.query(|db| db.dashboard(&filter)))
+    tokio::task::spawn_blocking(move || s.read(|db| db.dashboard(&filter)))
         .await
         .map_err(|_| failure("用量查询中断"))?
 }
 #[tauri::command]
+pub async fn get_usage_heatmap(r: R<'_>, filter: Filter) -> Result<Vec<store::Point>> {
+    let s = r.usage.clone();
+    tokio::task::spawn_blocking(move || s.read(|db| db.heatmap(&filter)))
+        .await
+        .map_err(|_| failure("热力图查询中断"))?
+}
+#[tauri::command]
 pub async fn get_usage_logs(r: R<'_>, filter: Filter) -> Result<store::Page> {
     let s = r.usage.clone();
-    tokio::task::spawn_blocking(move || s.query(|db| db.logs(&filter)))
+    tokio::task::spawn_blocking(move || s.read(|db| db.logs(&filter)))
         .await
         .map_err(|_| failure("日志查询中断"))?
 }
 #[tauri::command]
 pub async fn get_usage_detail(r: R<'_>, id: String) -> Result<Record> {
     let s = r.usage.clone();
-    tokio::task::spawn_blocking(move || s.query(|db| db.detail(&id)))
+    tokio::task::spawn_blocking(move || s.read(|db| db.detail(&id)))
         .await
         .map_err(|_| failure("详情查询中断"))?
 }
@@ -54,13 +61,20 @@ pub fn get_pricing(r: R<'_>) -> Result<pricing::View> {
     Ok(r.usage.prices()?.view())
 }
 #[tauri::command]
-pub fn configure_pricing(
+pub async fn configure_pricing(
     r: R<'_>,
     config: pricing::Config,
     expected_revision: String,
     app: tauri::AppHandle,
 ) -> Result<pricing::View> {
     let result = r.usage.prices()?.configure(config, &expected_revision)?;
+    let service = r.usage.clone();
+    tokio::task::spawn_blocking(move || {
+        service.query(|db| db.backfill(service.prices()?, &service.settings().multiplier))
+    })
+    .await
+    .map_err(|_| failure("价格补算中断"))??;
+    let _ = app.emit("usage-state", ());
     let _ = app.emit("pricing-state", ());
     Ok(result)
 }
@@ -71,8 +85,15 @@ pub async fn update_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::
     result
 }
 #[tauri::command]
-pub fn reload_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::View> {
+pub async fn reload_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::View> {
     let result = r.usage.prices()?.reload()?;
+    let service = r.usage.clone();
+    tokio::task::spawn_blocking(move || {
+        service.query(|db| db.backfill(service.prices()?, &service.settings().multiplier))
+    })
+    .await
+    .map_err(|_| failure("价格补算中断"))??;
+    let _ = app.emit("usage-state", ());
     let _ = app.emit("pricing-state", ());
     Ok(result)
 }

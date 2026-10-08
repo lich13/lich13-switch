@@ -1,25 +1,34 @@
 use super::{
+    dedup,
     model::*,
     pricing::{Pricing, Quote},
+    query,
 };
 use crate::storage::{self, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 const DAY: i64 = 86_400_000;
 fn db<T>(r: rusqlite::Result<T>) -> Result<T> {
     r.map_err(|_| failure("用量数据库操作失败"))
 }
 pub struct Store {
     connection: Connection,
+    overview_cache: OverviewCache,
 }
-#[derive(Serialize)]
+pub type OverviewCache = Arc<Mutex<Option<(String, Dashboard)>>>;
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
     pub rows: Vec<Record>,
     pub total: u64,
     pub page: u32,
     pub detail_since: i64,
+    pub data_version: u64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +42,7 @@ pub struct Group {
     pub id: String,
     pub totals: Totals,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dashboard {
     pub totals: Totals,
@@ -45,6 +54,8 @@ pub struct Dashboard {
     pub precision: String,
     pub detail_since: i64,
     pub sources: BTreeMap<String, u64>,
+    pub review_count: u64,
+    pub data_version: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,10 +75,10 @@ impl Store {
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(failure("用量数据库路径无效"));
         }
-        let connection = db(Connection::open(&path))?;
+        let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 2 {
+        if version > 3 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
@@ -82,14 +93,109 @@ impl Store {
           CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL);
           CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
           CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
-          PRAGMA user_version=2;"))?;
+"))?;
+        query::register(&connection)?;
+        query::schema(&connection)?;
+        if version < 3 {
+            let tx = db(connection.transaction())?;
+            let mut after = String::new();
+            loop {
+                let mut stmt = db(
+                    tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 256")
+                )?;
+                let rows = db(stmt.query_map([&after], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                }))?;
+                let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
+                drop(stmt);
+                if rows.is_empty() {
+                    break;
+                }
+                for (id, body) in rows {
+                    let r: Record = serde_json::from_str(&body)
+                        .map_err(|_| failure("旧用量记录无效，已保留原数据库"))?;
+                    query::project(&tx, 0, &id, &r, 1, None)?;
+                    db(tx.execute(
+                        "UPDATE records SET signature=?2 WHERE id=?1",
+                        params![id, r.signature()],
+                    ))?;
+                    after = id;
+                }
+            }
+            let mut stmt = db(tx.prepare("SELECT id,body FROM daily"))?;
+            let rows =
+                db(stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+            let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
+            drop(stmt);
+            for (id, body) in rows {
+                let d: Daily = serde_json::from_str(&body)
+                    .map_err(|_| failure("旧汇总无效，已保留原数据库"))?;
+                query::project(&tx, 1, &id, &d.example, d.totals.requests, Some(&d.totals))?;
+            }
+            if version > 0 {
+                db(tx.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('repair_codex','1'),('repair_claude','1')",[]))?;
+            }
+            db(tx.execute_batch("PRAGMA user_version=3;"))?;
+            db(tx.commit())?;
+        }
         for suffix in ["-wal", "-shm"] {
             let file = dir.join(format!("usage.sqlite{suffix}"));
             if file.exists() {
                 storage::protect(&file, false)?;
             }
         }
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            overview_cache: Default::default(),
+        })
+    }
+    pub fn reader(dir: &Path) -> Result<Self> {
+        let connection = db(Connection::open_with_flags(
+            dir.join("usage.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ))?;
+        query::register(&connection)?;
+        db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
+        Ok(Self {
+            connection,
+            overview_cache: Default::default(),
+        })
+    }
+    pub fn reader_with_cache(dir: &Path, cache: OverviewCache) -> Result<Self> {
+        let mut reader = Self::reader(dir)?;
+        reader.overview_cache = cache;
+        Ok(reader)
+    }
+    pub fn snapshot<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        db(self.connection.execute_batch("BEGIN DEFERRED;"))?;
+        let result = f(self);
+        let end = db(self.connection.execute_batch("ROLLBACK;"));
+        result.and_then(|value| end.map(|()| value))
+    }
+    pub fn needs_repair(&self, source: &str) -> Result<bool> {
+        db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1 AND value='1')",
+            [format!("repair_{source}")],
+            |r| r.get(0),
+        ))
+    }
+    pub fn source_counts(&self, source: &str) -> Result<(u64, u64, i64)> {
+        let merged = db(self.connection.query_row(
+            "SELECT count(*) FROM records WHERE source=?1 AND effective=0",
+            [source],
+            |r| r.get(0),
+        ))?;
+        let pending = db(self.connection.query_row(
+            "SELECT count(*) FROM records WHERE source=?1 AND effective=2",
+            [source],
+            |r| r.get(0),
+        ))?;
+        let historical = db(self.connection.query_row(
+            "SELECT coalesce((SELECT cast(value as integer) FROM metadata WHERE key=?1),0)",
+            [format!("historical_{source}")],
+            |r| r.get(0),
+        ))?;
+        Ok((merged, pending, historical))
     }
     pub fn cursor(&self, id: &str) -> Result<Option<String>> {
         db(self
@@ -104,6 +210,9 @@ impl Store {
         }
         if let Some((id, body)) = cursor {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![id,body]))?;
+        }
+        if !records.is_empty() {
+            query::changed(&tx)?;
         }
         db(tx.commit())
     }
@@ -143,108 +252,49 @@ impl Store {
         Ok(out)
     }
     pub fn logs(&self, f: &Filter) -> Result<Page> {
-        let records = self.records(f, true)?;
-        let total = records.len() as u64;
+        let (condition, args) = query::conditions(f, "r", true);
+        // Ambiguous records remain inspectable, but are excluded from aggregates.
+        let where_sql = format!("r.effective IN (1,2) AND {condition}");
+        let total: u64 = db(self.connection.query_row(
+            &format!("SELECT count(*) FROM records r WHERE {where_sql}"),
+            rusqlite::params_from_iter(args.iter()),
+            |r| r.get(0),
+        ))?;
         let page = f.page.max(1).min((total.div_ceil(20) as u32).max(1));
+        let mut stmt=db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {where_sql} ORDER BY time DESC,id DESC LIMIT 20 OFFSET {}",(page-1)*20)))?;
+        let rows = db(
+            stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            }),
+        )?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (body, duplicate) = db(row)?;
+            let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("用量记录无效"))?;
+            r.duplicate_of = duplicate;
+            records.push(r);
+        }
         Ok(Page {
-            rows: records
-                .into_iter()
-                .skip((page as usize - 1) * 20)
-                .take(20)
-                .collect(),
+            rows: records,
             total,
             page,
             detail_since: self.detail_since()?,
+            data_version: query::version(&self.connection)?,
         })
     }
     pub fn dashboard(&self, f: &Filter) -> Result<Dashboard> {
-        let records = self.records(f, false)?;
-        let end = f.end.unwrap_or_else(now);
-        let start = f
-            .start
-            .unwrap_or_else(|| records.last().map(|r| r.started_at).unwrap_or(end));
-        let step = if end - start <= 2 * DAY {
-            3_600_000
-        } else {
-            DAY
-        };
-        let mut totals = Totals::default();
-        let mut trend = BTreeMap::<i64, Totals>::new();
-        let mut heatmap = BTreeMap::<i64, Totals>::new();
-        let mut providers = BTreeMap::<String, Totals>::new();
-        let mut models = BTreeMap::<String, Totals>::new();
-        let mut sources = BTreeMap::new();
-        for r in records {
-            let Some(a) = r.final_attempt() else {
-                continue;
-            };
-            let mut t = Totals::default();
-            t.add_record(&r);
-            totals.add(&t);
-            trend.entry(r.started_at / step * step).or_default().add(&t);
-            heatmap.entry(r.started_at / DAY * DAY).or_default().add(&t);
-            providers
-                .entry(a.provider.clone().unwrap_or_else(|| "session".into()))
-                .or_default()
-                .add(&t);
-            models
-                .entry(a.pricing_model.clone().unwrap_or_else(|| "unknown".into()))
-                .or_default()
-                .add(&t);
-            *sources.entry(r.source.clone()).or_insert(0) += 1;
-        }
-        let mut statement = db(self
-            .connection
-            .prepare("SELECT day,body FROM daily WHERE day>=?1 AND day+86400000<=?2"))?;
-        let rows = db(statement
-            .query_map(params![f.start.unwrap_or(0), end.saturating_add(1)], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            }))?;
-        let mut rolled = false;
-        for row in rows {
-            let (day, body) = db(row)?;
-            let d: Daily = serde_json::from_str(&body).map_err(|_| failure("日汇总无效"))?;
-            if f.client.as_ref().is_some_and(|v| v != &d.client)
-                || f.provider
-                    .as_ref()
-                    .is_some_and(|v| Some(v) != d.provider.as_ref())
-                || f.model
-                    .as_ref()
-                    .is_some_and(|v| Some(v) != d.model.as_ref())
-            {
-                continue;
+        let key = query::overview_key(&self.connection, f)?;
+        if let Some((saved, view)) = self.overview_cache.lock().unwrap().as_ref() {
+            if saved == &key {
+                return Ok(view.clone());
             }
-            rolled = true;
-            totals.add(&d.totals);
-            trend.entry(day).or_default().add(&d.totals);
-            heatmap.entry(day).or_default().add(&d.totals);
-            providers
-                .entry(d.provider.unwrap_or_else(|| "session".into()))
-                .or_default()
-                .add(&d.totals);
-            models
-                .entry(d.model.unwrap_or_else(|| "unknown".into()))
-                .or_default()
-                .add(&d.totals);
-            *sources.entry(d.source).or_insert(0) += d.totals.requests;
         }
-        Ok(Dashboard {
-            totals,
-            trend_step_ms: if rolled { DAY } else { step },
-            trend: trend
-                .into_iter()
-                .map(|(time, totals)| Point { time, totals })
-                .collect(),
-            heatmap: heatmap
-                .into_iter()
-                .map(|(time, totals)| Point { time, totals })
-                .collect(),
-            providers: groups(providers),
-            models: groups(models),
-            precision: if rolled { "day" } else { "millisecond" }.into(),
-            detail_since: self.detail_since()?,
-            sources,
-        })
+        let view = query::dashboard(&self.connection, f, self.detail_since()?)?;
+        *self.overview_cache.lock().unwrap() = Some((key, view.clone()));
+        Ok(view)
+    }
+    pub fn heatmap(&self, f: &Filter) -> Result<Vec<Point>> {
+        query::points(&self.connection, f, DAY)
     }
     pub fn detail_since(&self) -> Result<i64> {
         let value: Option<String> = db(self
@@ -258,7 +308,16 @@ impl Store {
         Ok(value.and_then(|s| s.parse().ok()).unwrap_or(0))
     }
     pub fn compact(&mut self, at: i64) -> Result<()> {
-        let cutoff = (at - 30 * DAY) / DAY * DAY;
+        let cutoff = query::bucket(at - 30 * DAY, DAY);
+        if cutoff <= self.detail_since()?
+            && !db(self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM records WHERE time<?1)",
+                [cutoff],
+                |r| r.get::<_, bool>(0),
+            ))?
+        {
+            return Ok(());
+        }
         let records = self.records(
             &Filter {
                 end: Some(cutoff - 1),
@@ -268,7 +327,7 @@ impl Store {
         )?;
         let tx = db(self.connection.transaction())?;
         for mut r in records {
-            let day = r.started_at / DAY * DAY;
+            let day = query::bucket(r.started_at, DAY);
             let Some(a) = r.final_attempt() else {
                 continue;
             };
@@ -281,6 +340,7 @@ impl Store {
             r.session_id = None;
             r.started_at = day;
             r.duplicate_of = None;
+            r.gateway_reported = None;
             for a in &mut r.attempts {
                 a.id.clear();
                 a.response_id = None;
@@ -310,21 +370,25 @@ impl Store {
             };
             d.totals.add(&t);
             db(tx.execute("INSERT INTO daily(id,day,body) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![key,day,serde_json::to_string(&d).map_err(|_|failure("汇总失败"))?]))?;
+            query::project(&tx, 1, &key, &d.example, d.totals.requests, Some(&d.totals))?;
         }
         // Keep only irreversible correlation keys after detail expiry. They prevent
         // archived files, late imports and source rebuilds from duplicating daily totals.
         db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective) SELECT id,client,source,time,provider,response,signature,time+coalesce(json_extract(body,'$.attempts[#-1].durationMs'),0),effective FROM records WHERE time<?1",[cutoff]))?;
+        db(tx.execute("DELETE FROM usage_metrics WHERE kind=0 AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
         db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
+        query::changed(&tx)?;
         db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[cutoff.to_string()]))?;
         db(tx.commit())
     }
     pub fn backfill(&mut self, pricing: &Pricing, _multiplier: &str) -> Result<()> {
-        let mut stmt = db(self.connection.prepare("SELECT body FROM records"))?;
+        let mut stmt = db(self.connection.prepare("SELECT body FROM records WHERE EXISTS(SELECT 1 FROM json_each(body,'$.attempts') WHERE json_extract(value,'$.price') IS NULL)"))?;
         let all = db(stmt.query_map([], |r| r.get::<_, String>(0)))?
             .collect::<rusqlite::Result<Vec<_>>>();
         let all = db(all)?;
         drop(stmt);
         let tx = db(self.connection.transaction())?;
+        let mut any_changed = false;
         for body in all {
             let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("记录无效"))?;
             let mut changed = false;
@@ -337,6 +401,8 @@ impl Store {
                 }
             }
             if changed {
+                any_changed = true;
+                query::project(&tx, 0, &r.id, &r, 1, None)?;
                 db(tx.execute(
                     "UPDATE records SET body=?2 WHERE id=?1",
                     params![
@@ -346,7 +412,9 @@ impl Store {
                 ))?;
             }
         }
-        let mut stmt = db(tx.prepare("SELECT id,body FROM daily"))?;
+        let mut stmt = db(
+            tx.prepare("SELECT id,body FROM daily WHERE json_extract(body,'$.totals.unpriced')>0")
+        )?;
         let daily =
             db(stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?
                 .collect::<rusqlite::Result<Vec<_>>>();
@@ -357,6 +425,7 @@ impl Store {
             if d.totals.unpriced == 0 {
                 continue;
             }
+            let before = serde_json::to_string(&d.example).map_err(|_| failure("汇总无效"))?;
             for a in &mut d.example.attempts {
                 if a.price.is_none() {
                     a.price = pricing
@@ -364,6 +433,10 @@ impl Store {
                         .calculate(&a.tokens, a.service_tier.as_deref());
                 }
             }
+            if serde_json::to_string(&d.example).map_err(|_| failure("汇总无效"))? == before {
+                continue;
+            }
+            any_changed = true;
             let known = d
                 .example
                 .attempts
@@ -374,6 +447,7 @@ impl Store {
             if d.example.cost().is_some() {
                 d.totals.unpriced = 0;
             }
+            query::project(&tx, 1, &id, &d.example, d.totals.requests, Some(&d.totals))?;
             db(tx.execute(
                 "UPDATE daily SET body=?2 WHERE id=?1",
                 params![
@@ -381,6 +455,9 @@ impl Store {
                     serde_json::to_string(&d).map_err(|_| failure("汇总无效"))?
                 ],
             ))?;
+        }
+        if any_changed {
+            query::changed(&tx)?;
         }
         db(tx.commit())
     }
@@ -398,7 +475,27 @@ impl Store {
         db(tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS rebuilding(body TEXT); DELETE FROM rebuilding;",
         ))?;
-        for r in records {
+        let archived: bool = db(tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipts WHERE source=?1)",
+            [source],
+            |r| r.get(0),
+        ))?;
+        let cutoff: i64 = db(tx.query_row("SELECT coalesce((SELECT cast(value as integer) FROM metadata WHERE key='detail_since'),0)",[],|r|r.get(0)))?;
+        // Old daily data no longer has per-message price snapshots. Preserve it
+        // verbatim rather than pretending that current prices recreate history.
+        let records = records
+            .iter()
+            .filter(|r| !archived || r.started_at >= cutoff)
+            .map(|r| preserve_existing(&tx, r))
+            .collect::<Result<Vec<_>>>()?;
+        db(tx.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES(?1,?2)",
+            params![
+                format!("historical_{source}"),
+                if archived { cutoff } else { 0 }
+            ],
+        ))?;
+        for r in &records {
             if r.source != source {
                 return Err(failure("重建来源不一致"));
             }
@@ -407,30 +504,24 @@ impl Store {
                 [serde_json::to_string(r).map_err(|_| failure("重建记录无效"))?],
             ))?;
         }
+        dedup::reset_source_supplements(&tx, source)?;
+        db(tx.execute("DELETE FROM usage_metrics WHERE kind=0 AND owner IN (SELECT id FROM records WHERE source=?1)",[source]))?;
         db(tx.execute("DELETE FROM records WHERE source=?1", [source]))?;
-        db(tx.execute("DELETE FROM receipts WHERE source=?1", [source]))?;
-        db(tx.execute(
-            "DELETE FROM daily WHERE json_extract(body,'$.source')=?1",
-            [source],
-        ))?;
-        db(tx.execute("UPDATE records SET effective=1,duplicate_of=NULL WHERE duplicate_of NOT IN (SELECT id FROM records)",[]))?;
-        for r in records {
+        db(tx.execute("UPDATE records SET effective=1,duplicate_of=NULL WHERE duplicate_of NOT IN (SELECT id FROM records UNION SELECT id FROM receipts)",[]))?;
+        for r in &records {
             insert(&tx, r)?;
         }
         for (id, body) in cursors {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![id,body]))?;
         }
         db(tx.execute_batch("DROP TABLE rebuilding;"))?;
+        db(tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [format!("repair_{source}")],
+        ))?;
+        query::changed(&tx)?;
         db(tx.commit())
     }
-}
-fn groups(map: BTreeMap<String, Totals>) -> Vec<Group> {
-    let mut out: Vec<_> = map
-        .into_iter()
-        .map(|(id, totals)| Group { id, totals })
-        .collect();
-    out.sort_by(|a, b| b.totals.requests.cmp(&a.totals.requests));
-    out
 }
 fn status_matches(status: Option<u16>, filter: Option<&str>) -> bool {
     match filter {
@@ -450,6 +541,35 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
     ))? {
         return Ok(());
     }
+    let previous: Option<String> = db(tx
+        .query_row(
+            "SELECT body FROM records WHERE id=?1",
+            [&incoming.id],
+            |r| r.get(0),
+        )
+        .optional())?;
+    let r = preserve_existing(tx, incoming)?;
+    let r = &r;
+    let a = r.final_attempt();
+    let response = a.and_then(|v| v.response_id.as_deref());
+    let signature = r.signature();
+    let provider = a.and_then(|v| v.provider.as_deref());
+    let model = a.and_then(|v| v.pricing_model.as_deref());
+    let status = a.and_then(|v| v.status);
+    let body = serde_json::to_string(r).map_err(|_| failure("用量元数据无效"))?;
+    db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.started_at,provider,model,status,response,signature,body]))?;
+    query::project(tx, 0, &r.id, r, 1, None)?;
+    if let Some(previous) = previous {
+        let old: Record = serde_json::from_str(&previous).map_err(|_| failure("旧用量记录无效"))?;
+        if old.signature() != r.signature() {
+            dedup::reconcile(tx, &old)?;
+        }
+    }
+    dedup::reconcile(tx, r)?;
+    Ok(())
+}
+
+fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<Record> {
     let existing: Option<String> = db(tx
         .query_row(
             "SELECT body FROM records WHERE id=?1",
@@ -465,7 +585,7 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
                 || old.final_attempt().and_then(|a| a.tokens.output)
                     > r.final_attempt().and_then(|a| a.tokens.output)
             {
-                return Ok(());
+                return Ok(old);
             }
             r.started_at = r.started_at.min(old.started_at);
             for (a, b) in r.attempts.iter_mut().zip(&old.attempts) {
@@ -489,121 +609,5 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
             }
         }
     }
-    let r = &r;
-    let a = r.final_attempt();
-    let response = a.and_then(|v| v.response_id.as_deref());
-    let signature = r.signature();
-    let provider = a.and_then(|v| v.provider.as_deref());
-    let model = a.and_then(|v| v.pricing_model.as_deref());
-    let status = a.and_then(|v| v.status);
-    let body = serde_json::to_string(r).map_err(|_| failure("用量元数据无效"))?;
-    db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.started_at,provider,model,status,response,signature,body]))?;
-    let mut archived_stmt=db(tx.prepare("SELECT id,response FROM receipts WHERE client=?1 AND effective=1 AND ((?2 IS NOT NULL AND response=?2 AND (provider IS NULL OR ?3 IS NULL OR provider=?3)) OR (source<>?4 AND (response IS NULL OR ?2 IS NULL) AND ?5 IS NOT NULL AND signature=?5 AND abs(ended-?6)<=2000))"))?;
-    let archived = db(archived_stmt.query_map(
-        params![
-            r.client,
-            response,
-            provider,
-            r.source,
-            signature,
-            r.started_at
-                .saturating_add(a.map(|a| a.duration_ms as i64).unwrap_or(0))
-        ],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-    ))?
-    .collect::<rusqlite::Result<Vec<_>>>();
-    let archived = db(archived)?;
-    drop(archived_stmt);
-    let archived_match = archived
-        .iter()
-        .find(|(_, key)| response.is_some() && key.as_deref() == response)
-        .or_else(|| (archived.len() == 1).then(|| &archived[0]));
-    if let Some((id, _)) = archived_match {
-        db(tx.execute(
-            "UPDATE records SET effective=0,duplicate_of=?2 WHERE id=?1",
-            params![r.id, id],
-        ))?;
-        return Ok(());
-    }
-    let mut stmt=db(tx.prepare("SELECT id,source,response FROM records WHERE id<>?1 AND client=?2 AND effective=1 AND ((?3 IS NOT NULL AND response=?3 AND (provider IS NULL OR ?4 IS NULL OR provider=?4)) OR (source<>?5 AND (response IS NULL OR ?3 IS NULL) AND ?6 IS NOT NULL AND signature=?6 AND abs(time+coalesce(json_extract(body,'$.attempts[#-1].durationMs'),0)-?7)<=2000))"))?;
-    let candidates = db(stmt.query_map(
-        params![
-            r.id,
-            r.client,
-            response,
-            provider,
-            r.source,
-            signature,
-            r.started_at
-                .saturating_add(a.map(|a| a.duration_ms as i64).unwrap_or(0))
-        ],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        },
-    ))?
-    .collect::<rusqlite::Result<Vec<_>>>();
-    let candidates = db(candidates)?;
-    drop(stmt);
-    let exact: Vec<_> = candidates
-        .iter()
-        .filter(|(_, _, id)| response.is_some() && id.as_deref() == response)
-        .collect();
-    let matches = if exact.is_empty() {
-        if candidates.len() == 1 {
-            candidates.iter().collect()
-        } else {
-            Vec::new()
-        }
-    } else {
-        exact
-    };
-    for (id, source, key) in matches {
-        let rule = if response.is_some() && key.as_deref() == response {
-            "response_id"
-        } else {
-            "strict_match"
-        };
-        if r.source == "proxy" && source != "proxy" {
-            db(tx.execute(
-                "UPDATE records SET effective=0,duplicate_of=?2 WHERE id=?1",
-                params![id, r.id],
-            ))?;
-            mark_merged(tx, &r.id, source, rule)?;
-        } else {
-            db(tx.execute(
-                "UPDATE records SET effective=0,duplicate_of=?2 WHERE id=?1",
-                params![r.id, id],
-            ))?;
-            mark_merged(tx, id, &r.source, rule)?;
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn mark_merged(tx: &rusqlite::Transaction<'_>, id: &str, source: &str, rule: &str) -> Result<()> {
-    let body: String = db(
-        tx.query_row("SELECT body FROM records WHERE id=?1", [id], |row| {
-            row.get(0)
-        }),
-    )?;
-    let mut record: Record = serde_json::from_str(&body).map_err(|_| failure("合并记录无效"))?;
-    record.deduplication = rule.into();
-    for item in [record.source.clone(), source.to_string()] {
-        if !record.merged_sources.contains(&item) {
-            record.merged_sources.push(item);
-        }
-    }
-    db(tx.execute(
-        "UPDATE records SET body=?2 WHERE id=?1",
-        params![
-            id,
-            serde_json::to_string(&record).map_err(|_| failure("合并记录无效"))?
-        ],
-    ))?;
-    Ok(())
+    Ok(r)
 }

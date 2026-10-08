@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"fixture-claude-session","uuid":"fixture-subagent-interrupted","parentUuid":"fixture-parent-turn","timestamp":1700000000500,"message":{"id":"fixture-subagent-response","model":"claude-fixture","stop_reason":null,"usage":{"input_tokens":100,"output_tokens":4,"cache_read_input_tokens":40,"cache_creation_input_tokens":20}}}

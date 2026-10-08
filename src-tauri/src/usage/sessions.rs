@@ -5,7 +5,7 @@ use crate::storage::{self, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -28,13 +28,22 @@ struct Cursor {
     boundary: Option<i64>,
     last_output: Option<i64>,
     usage_end: Option<i64>,
+    last_usage_at: Option<i64>,
     chain: BTreeMap<String, (Option<String>, i64)>,
     messages: BTreeMap<String, (i64, Option<u64>, bool)>,
+    message_usage: BTreeMap<String, String>,
+    replay_index: usize,
+    meta_loaded: bool,
 }
 #[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub files: u64,
+    pub total_files: u64,
+    pub merged: u64,
+    pub pending: u64,
+    pub historical_before: i64,
+    pub phase: String,
     pub imported: u64,
     pub skipped: u64,
     pub errors: u64,
@@ -122,7 +131,7 @@ fn line(reader: &mut BufReader<File>) -> Result<Option<Vec<u8>>> {
         }
         return Ok(Some(Vec::new()));
     }
-    if bytes.last() != Some(&b'\n') {
+    if bytes.last() != Some(&b'\n') && serde_json::from_slice::<Value>(&bytes).is_err() {
         return Ok(None);
     }
     Ok(Some(bytes))
@@ -183,20 +192,9 @@ fn has_counters(v: &Value) -> bool {
         .iter()
         .any(|key| v[*key].as_u64().is_some())
 }
-fn high_water(old: &mut Tokens, next: &Tokens) {
-    for (a, b) in [
-        (&mut old.input, next.input),
-        (&mut old.output, next.output),
-        (&mut old.cache_read, next.cache_read),
-    ] {
-        if let Some(b) = b {
-            *a = Some(a.unwrap_or(0).max(b));
-        }
-    }
-}
-fn parent_prefix(path: &Path, cutoff: i64) -> Result<BTreeSet<String>> {
+fn parent_prefix(path: &Path, cutoff: i64) -> Result<Vec<String>> {
     let mut reader = BufReader::new(File::open(path).map_err(storage::io_error)?);
-    let mut signatures = BTreeSet::new();
+    let mut signatures = Vec::new();
     while let Some(bytes) = line(&mut reader)? {
         let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
             continue;
@@ -205,13 +203,43 @@ fn parent_prefix(path: &Path, cutoff: i64) -> Result<BTreeSet<String>> {
             && v["payload"]["type"] == "token_count"
             && timestamp(&v["timestamp"]).is_some_and(|t| t <= cutoff)
         {
-            signatures.insert(signature(&v["payload"]["info"]));
+            let next = signature(&v["payload"]["info"]);
+            if signatures.last() != Some(&next) {
+                signatures.push(next);
+            }
         }
     }
     Ok(signatures)
 }
+pub trait Repository {
+    fn cursor(&self, id: &str) -> Result<Option<String>>;
+    fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()>;
+    fn rebuild(
+        &mut self,
+        source: &str,
+        rows: &[Record],
+        cursors: &[(String, String)],
+    ) -> Result<()>;
+    fn progress(&mut self, _report: &Report) {}
+}
+impl Repository for Store {
+    fn cursor(&self, id: &str) -> Result<Option<String>> {
+        Store::cursor(self, id)
+    }
+    fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
+        Store::write_batch(self, rows, cursor)
+    }
+    fn rebuild(
+        &mut self,
+        source: &str,
+        rows: &[Record],
+        cursors: &[(String, String)],
+    ) -> Result<()> {
+        Store::rebuild(self, source, rows, cursors)
+    }
+}
 pub fn sync(
-    store: &mut Store,
+    store: &mut impl Repository,
     pricing: &Pricing,
     settings: &Settings,
     client: &str,
@@ -227,14 +255,40 @@ pub fn sync(
     }
     paths.sort();
     let mut parents = BTreeMap::new();
+    let mut metadata = BTreeMap::new();
+    let mut report = Report {
+        total_files: paths.len() as u64,
+        phase: "scanning".into(),
+        ..Report::default()
+    };
+    store.progress(&report);
     if client == "codex" {
         for p in &paths {
-            if let Ok((Some(id), _, _)) = meta(p) {
-                parents.insert(id, p.clone());
+            let key = safe_id(&format!("{client}:{}", p.to_string_lossy()));
+            let saved = store
+                .cursor(&key)?
+                .and_then(|s| serde_json::from_str::<Cursor>(&s).ok());
+            let mut file = File::open(p).map_err(storage::io_error)?;
+            let id = identity(&file)?;
+            let size = file.metadata().map_err(storage::io_error)?.len();
+            let stable = saved
+                .as_ref()
+                .filter(|c| c.meta_loaded && c.identity == id && size >= c.offset)
+                .map(|c| tail(&mut file, c.offset).map(|v| v == c.tail))
+                .transpose()?
+                .unwrap_or(false);
+            let value = if let Some(c) = saved.filter(|_| stable) {
+                (c.session, c.parent, c.fork_at)
+            } else {
+                meta(p)?
+            };
+            if let Some(id) = &value.0 {
+                parents.insert(id.clone(), p.clone());
             }
+            metadata.insert(key, value);
         }
     }
-    let mut report = Report::default();
+    let mut prefixes = BTreeMap::new();
     let mut rebuilt = Vec::new();
     let mut cursors = Vec::new();
     for path in paths {
@@ -257,9 +311,10 @@ pub fn sync(
                 c = Cursor::default();
             }
             c.identity = id;
-            let mut prefix = BTreeSet::new();
+            let mut prefix = Vec::new();
             if client == "codex" && c.offset == 0 {
-                let (session, parent, at) = meta(&path)?;
+                let (session, parent, at) = metadata.get(&key).cloned().unwrap_or_default();
+                c.meta_loaded = true;
                 c.session = session;
                 c.parent = parent;
                 c.fork_at = at;
@@ -267,12 +322,17 @@ pub fn sync(
             }
             if c.replay {
                 if let (Some(parent), Some(at)) = (&c.parent, c.fork_at) {
-                    prefix = parent_prefix(
-                        parents
-                            .get(parent)
-                            .ok_or_else(|| failure("分叉父会话暂不可用"))?,
-                        at,
-                    )?;
+                    let parent_key = (parent.clone(), at);
+                    if !prefixes.contains_key(&parent_key) {
+                        let value = parent_prefix(
+                            parents
+                                .get(parent)
+                                .ok_or_else(|| failure("分叉父会话暂不可用"))?,
+                            at,
+                        )?;
+                        prefixes.insert(parent_key.clone(), value);
+                    }
+                    prefix = prefixes[&parent_key].clone();
                 } else {
                     return Err(failure("分叉会话缺少可靠时间"));
                 }
@@ -286,7 +346,10 @@ pub fn sync(
                 let Some(bytes) = line(&mut reader)? else {
                     break;
                 };
-                c.offset = reader.stream_position().map_err(storage::io_error)?;
+                let complete_tail = bytes.last() != Some(&b'\n');
+                if !complete_tail {
+                    c.offset = reader.stream_position().map_err(storage::io_error)?;
+                }
                 let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
                     report.skipped += 1;
                     continue;
@@ -323,6 +386,11 @@ pub fn sync(
                         })
                         .or_insert(r);
                 }
+                // A complete final JSON can be imported before the writer adds
+                // its newline. Hold the byte cursor; stable IDs make replay safe.
+                if complete_tail {
+                    break;
+                }
             }
             c.tail = tail(reader.get_mut(), c.offset)?;
             Ok((
@@ -351,10 +419,16 @@ pub fn sync(
                 }
             }
         }
+        if report.files % 16 == 0 {
+            store.progress(&report);
+        }
     }
     if rebuild {
+        report.phase = "rebuilding".into();
+        store.progress(&report);
         store.rebuild(client, &rebuilt, &cursors)?;
     }
+    report.phase = "complete".into();
     report.completed_at = Some(now());
     Ok(report)
 }
@@ -402,7 +476,7 @@ fn base(
         ..Record::default()
     }
 }
-fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &BTreeSet<String>) -> Option<Record> {
+fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &[String]) -> Option<Record> {
     let p = &v["payload"];
     let typ = v["type"].as_str()?;
     if typ == "turn_context" {
@@ -429,6 +503,8 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &BTreeSet<String>) -> Optio
         c.boundary = Some(at);
         c.last_output = None;
         c.usage_end = None;
+        c.signature = None;
+        c.lanes.clear();
         return None;
     }
     if p["type"] != "token_count" {
@@ -463,17 +539,44 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &BTreeSet<String>) -> Optio
             c.lanes.clear();
         }
     }
-    let mut tokens = last
-        .map(raw)
-        .unwrap_or_else(|| raw(total.unwrap()).delta(&c.total));
-    if let Some(t) = total {
-        high_water(&mut c.total, &raw(t));
-    }
     if duplicate {
         return None;
     }
+    let next_total = total.map(raw);
+    // Cumulative counters restart after compaction/session resets. A decrease
+    // starts a fresh epoch instead of keeping a high-water mark forever.
+    let reset = next_total.as_ref().is_some_and(|n| {
+        [(n.input, c.total.input), (n.output, c.total.output)]
+            .iter()
+            .any(|(a, b)| matches!((a,b),(Some(a),Some(b)) if a < b))
+    });
+    let new_boundary = c
+        .boundary
+        .zip(c.last_usage_at)
+        .is_some_and(|(boundary, used)| boundary > used);
+    if reset && last.is_none() && !new_boundary {
+        // A regressing snapshot without a new turn/compaction boundary is late
+        // telemetry, not evidence that another request consumed the full total.
+        return None;
+    }
+    c.last_usage_at = Some(at);
+    let mut tokens = last.map(raw).unwrap_or_else(|| {
+        let n = next_total.as_ref().unwrap();
+        if reset {
+            n.clone()
+        } else {
+            n.delta(&c.total)
+        }
+    });
+    if let Some(t) = next_total {
+        c.total = t;
+    }
     if c.replay {
-        if prefix.contains(&sig) && c.fork_at.is_some_and(|t| at <= t) {
+        if let Some(relative) = prefix
+            .get(c.replay_index..)
+            .and_then(|tail| tail.iter().position(|s| s == &sig))
+        {
+            c.replay_index += relative + 1;
             return None;
         }
         c.replay = false;
@@ -536,14 +639,18 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
     }
     let complete = m.get("stop_reason").is_some_and(|v| !v.is_null());
     let prior = c.messages.get(&mid).cloned();
+    let usage_hash = storage::digest(serde_json::to_string(&tokens).ok()?.as_bytes());
     if prior.as_ref().is_some_and(|(_, output, done)| {
-        *done && !complete || *done == complete && *output >= tokens.output
+        *done && !complete
+            || *output > tokens.output
+            || *done == complete && c.message_usage.get(&mid) == Some(&usage_hash)
     }) {
         return None;
     }
     let start = prior
         .map(|(at, _, _)| at)
         .or_else(|| parent.and_then(|id| c.chain.get(&id).map(|(_, at)| *at)));
+    c.message_usage.insert(mid.clone(), usage_hash);
     c.messages
         .insert(mid.clone(), (start.unwrap_or(at), tokens.output, complete));
     if c.messages.len() > 128 {
@@ -554,6 +661,7 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
             .map(|(k, _)| k.clone())
         {
             c.messages.remove(&key);
+            c.message_usage.remove(&key);
         }
     }
     let mut r = base(

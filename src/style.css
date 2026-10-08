@@ -2432,3 +2432,13 @@ select:focus-visible {
 /* Exception logs keep the readable issue in the table; stable codes live in detail. */
 .event-code{font-family:inherit;font-size:13px;letter-spacing:normal;max-width:230px;white-space:normal;text-align:left}
 .event-table{min-width:670px}
+
+/* Global Claude profile controls share the existing compact toolbar. */
+.claude-profile { display: grid; gap: 8px; margin-bottom: 14px; }
+.claude-profile-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.claude-profile-controls .segmented { width: auto; }
+.claude-profile-controls > button { display: inline-flex; align-items: center; gap: 6px; }
+.claude-profile .form-error { margin: 0; }
+.claude-profile-warning { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.claude-profile-warning ul { padding-left: 20px; }
+.usage-review { color: var(--warning); }

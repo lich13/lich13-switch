@@ -1,3 +1,4 @@
+mod claude_profile;
 mod cleanup;
 mod commands;
 mod configuration;
@@ -46,6 +47,7 @@ struct Runtime {
     gateway: gateway::Gateway,
     claude: gateway::Gateway,
     login: Mutex<login::Session>,
+    claude_login: Mutex<claude_profile::login::Session>,
     quitting: AtomicBool,
     quit_pending: AtomicBool,
     smoke: Option<PathBuf>,
@@ -477,6 +479,8 @@ async fn save_config(
     let home = r.home(client)?;
     if client == gateway::ClientId::Codex {
         official::guard_save(&r.data, &home, &text)?;
+    } else {
+        claude_profile::guard_save(&r.data, &home, &claude_profile::user_home()?, &text)?;
     }
     let doc = r
         .gateway(client)
@@ -490,11 +494,19 @@ async fn save_config(
     Ok(doc)
 }
 #[tauri::command]
-fn set_preferences(
+async fn set_preferences(
     app: tauri::AppHandle,
     r: tauri::State<'_, Arc<Runtime>>,
     preferences: Preferences,
 ) -> Result<ViewState> {
+    let _official_guard = r.official_tx.lock().await;
+    if matches!(
+        r.claude_login.lock().unwrap().state.phase.as_str(),
+        "waiting" | "cancelling"
+    ) && lock(&r.core)?.preferences().claude_home != preferences.claude_home
+    {
+        return Err(AppError::new("LOGIN_BUSY", "请先完成或取消 Claude 登录"));
+    }
     if login_active(&lock(&r.login)?.state) {
         return Err(AppError::new("LOGIN_BUSY", "请先完成或取消登录"));
     }
@@ -507,7 +519,7 @@ fn set_preferences(
             "更换 Codex 目录前请先停用网关并恢复配置",
         ));
     }
-    if r.claude.guarded_home()
+    if (r.claude.guarded_home() || claude_profile::blocks(&r.data))
         && lock(&r.core)?.preferences().claude_home != preferences.claude_home
     {
         return Err(AppError::new(
@@ -773,7 +785,7 @@ fn get_gateway(client_id: gateway::ClientId, r: tauri::State<'_, Arc<Runtime>>) 
     r.gateway(client_id).view()
 }
 #[tauri::command]
-fn update_gateway(
+async fn update_gateway(
     client_id: gateway::ClientId,
     app: tauri::AppHandle,
     r: tauri::State<'_, Arc<Runtime>>,
@@ -781,6 +793,7 @@ fn update_gateway(
     expected_revision: String,
     expected_config_revision: Option<String>,
 ) -> Result<gateway::View> {
+    let _official_guard = r.official_tx.lock().await;
     let home = r.home(client_id)?;
     let selected = matches!(&edit, gateway::Edit::Select { .. });
     let result = r
@@ -917,8 +930,9 @@ async fn frontend_ready(
     } else {
         if r.startup.preferences()?.restore_gateway {
             for client in [gateway::ClientId::Codex, gateway::ClientId::Claude] {
-                if client == gateway::ClientId::Codex
-                    && official::blocks_gateway(&r.data, &r.home(client)?)
+                if (client == gateway::ClientId::Codex
+                    && official::blocks_gateway(&r.data, &r.home(client)?))
+                    || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
                 {
                     continue;
                 }
@@ -1131,7 +1145,6 @@ pub fn run() {
                 let _ = show(app, None);
             }
         }))
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(move |app| {
@@ -1173,9 +1186,15 @@ pub fn run() {
                 core.set_preferences(preferences)?;
             }
             let claude_import_error = if smoke.is_none() {
-                claude
-                    .import_initial(std::path::Path::new(&core.preferences().claude_home))
-                    .err()
+                let home=std::path::PathBuf::from(core.preferences().claude_home);
+                let recovery=if claude_profile::recovery_pending(&data) && claude_profile::login::running_sessions()? {
+                    Err(AppError::new("CLAUDE_RUNNING","请先退出 Claude Code，再恢复配置切换事务"))
+                } else {claude_profile::recover(&data,&home,&claude_profile::user_home()?)};
+                match recovery {
+                    Err(e)=>Some(e),
+                    Ok(()) if !claude_profile::blocks(&data)=>claude.import_initial(&home).err(),
+                    Ok(())=>None,
+                }
             } else {
                 None
             };
@@ -1196,6 +1215,7 @@ pub fn run() {
                 gateway,
                 claude,
                 login: Mutex::new(Default::default()),
+                claude_login: Mutex::new(Default::default()),
                 quitting: AtomicBool::new(false),
                 quit_pending: AtomicBool::new(false),
                 smoke,
@@ -1454,6 +1474,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             usage::commands::get_usage_state,
             usage::commands::get_usage_dashboard,
+            usage::commands::get_usage_heatmap,
             usage::commands::get_usage_logs,
             usage::commands::get_usage_detail,
             usage::commands::set_usage_settings,
@@ -1478,7 +1499,15 @@ pub fn run() {
             commands::get_app_events,
             commands::get_app_event,
             commands::clear_app_events,
+            claude_profile::commands::get_claude_profile,
+            claude_profile::commands::switch_claude_profile,
+            claude_profile::commands::recover_claude_profile,
+            claude_profile::commands::claude_login_status,
+            claude_profile::commands::start_claude_login,
+            claude_profile::commands::cancel_claude_login,
             notifications::notification_permission,
+            notifications::test_notification,
+            notifications::open_notification_settings,
             open_main,
             quick::get_quick,
             quick::set_quick,

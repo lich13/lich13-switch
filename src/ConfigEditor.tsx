@@ -1,3 +1,4 @@
+import ClaudeProfile from "./ClaudeProfile";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
@@ -337,6 +338,7 @@ function EditorContent({
     }
   return (
     <section className="config-page">
+      {clientId==="claude"&&<ClaudeProfile disabled={busy} beforeChange={async()=>!dirty||await confirmAction("切换配置会丢弃未保存的修改。")} onChanged={()=>void load()} notify={onMessage}/>}
       <div className="config-heading">
         <ClientSelection client={clientId} select={select} disabled={busy} />
         <div className="inline">

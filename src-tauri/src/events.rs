@@ -262,6 +262,7 @@ enum Job {
     Append(Record),
     Clear(oneshot::Sender<Result<()>>),
     Prune,
+    NotificationAccepted(String),
 }
 #[derive(Clone)]
 pub struct Service {
@@ -360,27 +361,20 @@ impl Service {
             let mut notify = false;
             let mut done = None;
             match job {
-                Job::Append(mut r) => {
+                Job::Append(r) => {
                     notify = !matches!(r.reason, Reason::Recovered | Reason::Failover);
                     if let Some(old) =
                         journal.records.iter_mut().rev().find(|old| {
                             old.same(&r) && r.last_at.saturating_sub(old.first_at) < MERGE
                         })
                     {
-                        notify &= r.last_at.saturating_sub(old.notified_at) >= MERGE;
                         old.last_at = r.last_at;
                         old.count = old.count.saturating_add(1);
                         old.status = r.status;
                         old.action = r.action;
                         old.attempt = r.attempt;
-                        if notify {
-                            old.notified_at = r.last_at;
-                        }
                         changed = Some(old.clone());
                     } else {
-                        if notify {
-                            r.notified_at = r.last_at;
-                        }
                         changed = Some(r.clone());
                         journal.records.push_back(r);
                     }
@@ -389,6 +383,12 @@ impl Service {
                     journal.records.clear();
                     journal.error = None;
                     done = Some(tx);
+                }
+                Job::NotificationAccepted(id) => {
+                    if let Some(r) = journal.records.iter_mut().find(|r| r.id == id) {
+                        r.notified_at = now();
+                        changed = Some(r.clone());
+                    }
                 }
                 Job::Prune => (),
             }
@@ -428,6 +428,10 @@ impl Service {
                 notify: false,
             });
         }
+    }
+    pub fn notification_accepted(&self, id: String) {
+        // Failure to persist acknowledgment never blocks gateway delivery.
+        let _ = self.sender.try_send(Job::NotificationAccepted(id));
     }
     pub fn query(&self, f: Filter) -> Page {
         let j = self.journal.lock().unwrap();

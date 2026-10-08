@@ -9,85 +9,34 @@ use std::sync::{
     Arc, Mutex,
 };
 use tauri::{Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+mod delivery;
+mod native;
+use native::permission;
 static ASKING: AtomicBool = AtomicBool::new(false);
+static DELIVERY: Mutex<delivery::Status> = Mutex::new(delivery::Status::Idle);
+static LAST_PERMISSION: Mutex<Option<String>> = Mutex::new(None);
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
     pub permission: String,
     pub error: Option<String>,
-}
-#[cfg(target_os = "macos")]
-fn permission(request: bool, _id: &str) -> Result<String> {
-    use objc2::{
-        class, msg_send,
-        rc::Retained,
-        runtime::{AnyObject, Bool},
-    };
-    #[link(name = "UserNotifications", kind = "framework")]
-    unsafe extern "C" {}
-    let (tx, rx) = std::sync::mpsc::channel();
-    unsafe {
-        let center: Retained<AnyObject> =
-            msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
-        let callback = block2::RcBlock::new(move |settings: *mut AnyObject| {
-            let status: isize = msg_send![settings, authorizationStatus];
-            let _ = tx.send(status);
-        });
-        let _: () = msg_send![&*center, getNotificationSettingsWithCompletionHandler:&*callback];
-        let status = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .map_err(|_| AppError::new("NOTIFICATION", "通知权限读取超时"))?;
-        if status == 0 && request {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let callback = block2::RcBlock::new(move |granted: Bool, _error: *mut AnyObject| {
-                let _ = tx.send(granted.as_bool());
-            });
-            let _: () = msg_send![&*center, requestAuthorizationWithOptions:7usize, completionHandler:&*callback];
-            return rx
-                .recv_timeout(std::time::Duration::from_secs(120))
-                .map(|ok| if ok { "granted" } else { "denied" }.into())
-                .map_err(|_| AppError::new("NOTIFICATION", "通知授权尚未完成"));
-        }
-        Ok(match status {
-            0 => "prompt",
-            1 => "denied",
-            2..=4 => "granted",
-            _ => "unknown",
-        }
-        .into())
-    }
-}
-#[cfg(windows)]
-fn permission(_request: bool, id: &str) -> Result<String> {
-    use windows::{
-        core::HSTRING,
-        UI::Notifications::{NotificationSetting, ToastNotificationManager},
-    };
-    let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id))
-        .and_then(|n| n.Setting())
-        .map_err(|_| AppError::new("NOTIFICATION", "无法读取系统通知设置"))?;
-    Ok(if setting == NotificationSetting::Enabled {
-        "granted"
-    } else {
-        "denied"
-    }
-    .into())
-}
-#[cfg(not(any(target_os = "macos", windows)))]
-fn permission(_request: bool, _id: &str) -> Result<String> {
-    Ok("unknown".into())
+    pub delivery: delivery::Status,
 }
 fn state(app: &tauri::AppHandle, request: bool) -> State {
     match permission(request, &app.config().identifier) {
-        Ok(permission) => State {
-            permission,
-            error: LAST_ERROR.lock().unwrap().clone(),
-        },
+        Ok(permission) => {
+            *LAST_PERMISSION.lock().unwrap() = Some(permission.clone());
+            State {
+                permission,
+                error: LAST_ERROR.lock().unwrap().clone(),
+                delivery: *DELIVERY.lock().unwrap(),
+            }
+        }
         Err(e) => State {
             permission: "unknown".into(),
             error: Some(e.message),
+            delivery: *DELIVERY.lock().unwrap(),
         },
     }
 }
@@ -120,46 +69,138 @@ pub fn on_manual_open(app: &tauri::AppHandle) {
         ASKING.store(false, Ordering::Release);
     });
 }
+fn publish_delivery(app: &tauri::AppHandle, status: delivery::Status, error: Option<String>) {
+    *DELIVERY.lock().unwrap() = status;
+    *LAST_ERROR.lock().unwrap() = error;
+    let _ = app.emit(
+        "notification-state",
+        State {
+            permission: LAST_PERMISSION
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+            error: LAST_ERROR.lock().unwrap().clone(),
+            delivery: status,
+        },
+    );
+}
+async fn submit(app: tauri::AppHandle, body: String) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = permission(false, &app.config().identifier)?;
+        *LAST_PERMISSION.lock().unwrap() = Some(current.clone());
+        if current != "granted" {
+            return Err(AppError::new("NOTIFICATION_DENIED", "系统未允许通知"));
+        }
+        native::send(&app.config().identifier, "lich13-switch", &body)
+    })
+    .await
+    .map_err(|_| AppError::new("NOTIFICATION", "通知发送任务中断"))?
+}
+#[tauri::command]
+pub async fn test_notification(app: tauri::AppHandle) -> Result<State> {
+    publish_delivery(&app, delivery::Status::Pending, None);
+    let result = submit(app.clone(), "测试通知".into()).await;
+    match &result {
+        Ok(()) => publish_delivery(&app, delivery::Status::Accepted, None),
+        Err(e) => publish_delivery(&app, delivery::Status::Failed, Some(e.message.clone())),
+    }
+    tauri::async_runtime::spawn_blocking(move || state(&app, false))
+        .await
+        .map_err(|_| AppError::new("NOTIFICATION", "通知状态读取失败"))
+}
+#[tauri::command]
+pub fn open_notification_settings() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let target = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
+    #[cfg(windows)]
+    let target = "ms-settings:notifications";
+    #[cfg(not(any(target_os = "macos", windows)))]
+    return Err(AppError::new(
+        "NOTIFICATION",
+        "此平台不支持系统通知设置入口",
+    ));
+    #[cfg(any(target_os = "macos", windows))]
+    open::that(target).map_err(|_| AppError::new("NOTIFICATION", "无法打开系统通知设置"))
+}
 pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
+    native::initialize();
     let mut receiver = service.subscribe();
     let app = app.clone();
+    let journal = service.clone();
+    let gate = Arc::new(Mutex::new(delivery::Gate::default()));
     tauri::async_runtime::spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
                     let _ = app.emit("app-event", &event);
-                    if event.notify
-                        && app
-                            .state::<Arc<Runtime>>()
-                            .core
-                            .lock()
-                            .unwrap()
-                            .preferences()
-                            .system_notifications
-                        && app.state::<Arc<Runtime>>().smoke.is_none()
+                    let r = app.state::<Arc<Runtime>>();
+                    if !event.notify
+                        || !r.core.lock().unwrap().preferences().system_notifications
+                        || r.smoke.is_some()
                     {
-                        if let Some(record) = event.record {
-                            let handle = app.clone();
-                            tauri::async_runtime::spawn_blocking(move || {
-                                if permission(false, &handle.config().identifier)
-                                    .is_ok_and(|v| v == "granted")
-                                    && handle
-                                        .notification()
-                                        .builder()
-                                        .title("lich13-switch")
-                                        .body(record.notification())
-                                        .show()
-                                        .is_err()
-                                {
-                                    *LAST_ERROR.lock().unwrap() = Some("系统通知发送失败".into());
-                                    let _ =
-                                        handle.emit("notification-state", state(&handle, false));
-                                }
-                            })
-                            .await
-                            .ok();
-                        }
+                        continue;
                     }
+                    let Some(record) = event.record else { continue };
+                    let current = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if record.notified_at > 0 && current.saturating_sub(record.notified_at) < 300 {
+                        continue;
+                    }
+                    let key = delivery::key(&record);
+                    if !gate.lock().unwrap().begin(&key, std::time::Instant::now()) {
+                        continue;
+                    }
+                    let app = app.clone();
+                    let gate = gate.clone();
+                    let journal = journal.clone();
+                    tauri::async_runtime::spawn(async move {
+                        publish_delivery(&app, delivery::Status::Pending, None);
+                        let mut result = Err(AppError::new("NOTIFICATION", "通知尚未发送"));
+                        for attempt in 0..3 {
+                            if !app
+                                .state::<Arc<Runtime>>()
+                                .core
+                                .lock()
+                                .unwrap()
+                                .preferences()
+                                .system_notifications
+                            {
+                                break;
+                            }
+                            result = submit(app.clone(), record.notification()).await;
+                            if result.is_ok()
+                                || result
+                                    .as_ref()
+                                    .err()
+                                    .is_some_and(|e| e.code == "NOTIFICATION_DENIED")
+                            {
+                                break;
+                            }
+                            if attempt < 2 {
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    if attempt == 0 { 2 } else { 10 },
+                                ))
+                                .await;
+                            }
+                        }
+                        gate.lock().unwrap().finish(
+                            &key,
+                            result.is_ok(),
+                            std::time::Instant::now(),
+                        );
+                        match result {
+                            Ok(()) => {
+                                journal.notification_accepted(record.id);
+                                publish_delivery(&app, delivery::Status::Accepted, None);
+                            }
+                            Err(e) => {
+                                publish_delivery(&app, delivery::Status::Failed, Some(e.message))
+                            }
+                        }
+                    });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => break,
@@ -167,3 +208,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
         }
     });
 }
+
+#[cfg(test)]
+#[path = "notifications/delivery_tests.rs"]
+mod delivery_tests;

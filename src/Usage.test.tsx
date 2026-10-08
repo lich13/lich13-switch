@@ -221,6 +221,8 @@ beforeEach(() => {
         };
       case "get_usage_dashboard":
         return structuredClone(dashboard);
+      case "get_usage_heatmap":
+        return structuredClone(dashboard.heatmap);
       case "get_usage_logs": {
         const filter = args.filter as UsageFilter;
         return { rows: structuredClone(records), total: totalRows, page: filter.page ?? 1, detailSince: 0 };
@@ -271,6 +273,10 @@ async function flush() {
   });
 }
 
+function requestMetric() {
+  return screen.getByText("请求", { selector: ".usage-metrics .usage-metric span" }).parentElement!;
+}
+
 async function renderUsage() {
   const result = render(<Usage />);
   await waitFor(() => {
@@ -281,6 +287,85 @@ async function renderUsage() {
 }
 
 describe("usage records", () => {
+  it("loads the overview while the request log is still pending", async () => {
+    let resolveLogs!: (value: { rows: UsageRecord[]; total: number; page: number; detailSince: number }) => void;
+    const logsResponse = new Promise<{ rows: UsageRecord[]; total: number; page: number; detailSince: number }>((resolve) => {
+      resolveLogs = resolve;
+    });
+    mock.command
+      .mockImplementationOnce(async () => ({
+        ...structuredClone(dashboard),
+        totals: { ...dashboard.totals, requests: 7 },
+      }))
+      .mockImplementationOnce(() => logsResponse);
+
+    render(<Usage />);
+
+    await waitFor(() => expect(requestMetric()).toHaveTextContent("7"));
+    expect(calls("get_usage_dashboard")).toHaveLength(1);
+    expect(calls("get_usage_logs")).toHaveLength(1);
+    expect(screen.getByRole("table").querySelector("tbody")).toBeEmptyDOMElement();
+
+    await act(async () => resolveLogs({ rows: structuredClone(records), total: 1, page: 1, detailSince: 0 }));
+    expect(await within(screen.getByRole("table")).findByText("Fixture Provider")).toBeInTheDocument();
+  });
+
+  it("loads the annual heatmap only when its disclosure is opened", async () => {
+    dashboard.heatmap = [{
+      time: new Date(new Date().getFullYear(), 0, 2).getTime(),
+      totals: structuredClone(dashboard.totals),
+    }];
+    await renderUsage();
+
+    expect(calls("get_usage_heatmap")).toHaveLength(0);
+    fireEvent.click(screen.getByText(`${new Date().getFullYear()} 年度用量`));
+    await waitFor(() => expect(calls("get_usage_heatmap")).toHaveLength(1));
+    const args = calls("get_usage_heatmap")[0][1];
+    expect(args.filter).toMatchObject({
+      start: new Date(new Date().getFullYear(), 0, 1).getTime(),
+    });
+  });
+
+  it("keeps the previous overview and rows visible until a refresh resolves", async () => {
+    await renderUsage();
+    let resolveDashboard!: (value: Dashboard) => void;
+    const dashboardResponse = new Promise<Dashboard>((resolve) => {
+      resolveDashboard = resolve;
+    });
+    mock.command.mockImplementationOnce(() => dashboardResponse);
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新用量" }));
+
+    expect(requestMetric()).toHaveTextContent("1");
+    expect(within(screen.getByRole("table")).getByText("Fixture Provider")).toBeInTheDocument();
+    await act(async () => resolveDashboard({
+      ...structuredClone(dashboard),
+      totals: { ...dashboard.totals, requests: 9 },
+    }));
+    await waitFor(() => expect(requestMetric()).toHaveTextContent("9"));
+    expect(within(screen.getByRole("table")).getByText("Fixture Provider")).toBeInTheDocument();
+  });
+
+  it("discards an older overview response after the selected range changes", async () => {
+    let resolveStale!: (value: Dashboard) => void;
+    const staleResponse = new Promise<Dashboard>((resolve) => {
+      resolveStale = resolve;
+    });
+    mock.command.mockImplementationOnce(() => staleResponse);
+    render(<Usage />);
+
+    await waitFor(() => expect(screen.getByRole("table")).toBeInTheDocument());
+    dashboard = { ...dashboard, totals: { ...dashboard.totals, requests: 7 } };
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "用量时间范围" }), "7");
+    await waitFor(() => expect(requestMetric()).toHaveTextContent("7"));
+
+    await act(async () => resolveStale({
+      ...structuredClone(dashboard),
+      totals: { ...dashboard.totals, requests: 99 },
+    }));
+    expect(requestMetric()).toHaveTextContent("7");
+  });
+
   it("keeps unavailable counts and prices distinct from measured zero", async () => {
     records = [
       record({ id: "fixture-missing", attempts: [attempt({ tokens: absentTokens, price: null })] }),

@@ -1,8 +1,12 @@
 pub mod commands;
+mod dedup;
 pub mod model;
 pub mod pricing;
+mod query;
 mod sessions;
 mod store;
+#[cfg(test)]
+mod v015_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -18,9 +22,11 @@ use tokio::sync::broadcast;
 pub struct Service(Arc<Inner>);
 struct Inner {
     store: Mutex<Option<store::Store>>,
+    overview_cache: store::OverviewCache,
     pub prices: Option<Pricing>,
     settings: RwLock<Settings>,
     path: PathBuf,
+    directory: PathBuf,
     writer: mpsc::SyncSender<Record>,
     error: Mutex<Option<String>>,
     syncing: Mutex<bool>,
@@ -56,9 +62,11 @@ impl Service {
         let (events, _) = broadcast::channel(32);
         let inner = Arc::new(Inner {
             store: Mutex::new(opened.ok()),
+            overview_cache: Default::default(),
             prices: prices.ok(),
             settings: RwLock::new(settings),
             path,
+            directory: dir,
             writer,
             error: Mutex::new(error),
             syncing: Mutex::new(false),
@@ -121,6 +129,13 @@ impl Service {
         let mut guard = self.0.store.lock().unwrap();
         f(guard.as_mut().ok_or_else(|| failure("用量数据库不可用"))?)
     }
+    /// Queries never hold the writer mutex. WAL provides a consistent snapshot
+    /// while session parsing and short write batches continue independently.
+    pub fn read<T>(&self, f: impl FnOnce(&store::Store) -> Result<T>) -> Result<T> {
+        let reader =
+            store::Store::reader_with_cache(&self.0.directory, self.0.overview_cache.clone())?;
+        reader.snapshot(|db| f(db))
+    }
     pub fn maintain(&self) -> Result<()> {
         let result = self.query(|store| store.compact(now()));
         if let Err(error) = &result {
@@ -146,15 +161,31 @@ impl Service {
                 if rebuild.is_some_and(|s| s != client) {
                     continue;
                 }
-                let report = self.query(|store| {
-                    sessions::sync(store, pricing, &settings, client, root, rebuild.is_some())
-                })?;
+                let reader = store::Store::reader(&self.0.directory)?;
+                let repair = rebuild.is_some() || reader.needs_repair(client)?;
+                let mut sink = SessionStore {
+                    service: self.clone(),
+                    reader,
+                    client: client.clone(),
+                };
+                let mut report =
+                    match sessions::sync(&mut sink, pricing, &settings, client, root, repair) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            let mut reports = self.0.report.lock().unwrap();
+                            let report = reports.entry(client.clone()).or_default();
+                            report.phase = "failed".into();
+                            report.errors = report.errors.saturating_add(1);
+                            return Err(error);
+                        }
+                    };
+                let (merged, pending, historical) = sink.reader.source_counts(client)?;
+                report.merged = merged;
+                report.pending = pending;
+                report.historical_before = historical;
                 self.0.report.lock().unwrap().insert(client.clone(), report);
             }
-            self.query(|store| {
-                store.backfill(pricing, &settings.multiplier)?;
-                store.compact(now())
-            })?;
+            self.query(|store| store.compact(now()))?;
             Ok(())
         })();
         *self.0.syncing.lock().unwrap() = false;
@@ -166,7 +197,11 @@ impl Service {
         result.map(|_| self.state())
     }
     pub async fn update_prices(&self, force: bool) -> Result<pricing::View> {
+        let before = self.prices()?.view().version;
         let view = self.prices()?.update(force).await?;
+        if !force && before == view.version {
+            return Ok(view);
+        }
         let s = self.clone();
         tokio::task::spawn_blocking(move || {
             s.query(|store| store.backfill(s.prices()?, &s.settings().multiplier))
@@ -186,6 +221,42 @@ impl Service {
             attempts: Mutex::new(Vec::new()),
             recording: self.settings().recording,
         }))
+    }
+}
+struct SessionStore {
+    service: Service,
+    reader: store::Store,
+    client: String,
+}
+impl sessions::Repository for SessionStore {
+    fn cursor(&self, id: &str) -> Result<Option<String>> {
+        self.reader.cursor(id)
+    }
+    fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
+        for batch in rows.chunks(256) {
+            self.service.query(|db| db.write_batch(batch, None))?;
+        }
+        if cursor.is_some() {
+            self.service.query(|db| db.write_batch(&[], cursor))?;
+        }
+        Ok(())
+    }
+    fn rebuild(
+        &mut self,
+        source: &str,
+        rows: &[Record],
+        cursors: &[(String, String)],
+    ) -> Result<()> {
+        self.service.query(|db| db.rebuild(source, rows, cursors))
+    }
+    fn progress(&mut self, report: &sessions::Report) {
+        self.service
+            .0
+            .report
+            .lock()
+            .unwrap()
+            .insert(self.client.clone(), report.clone());
+        let _ = self.service.0.events.send(());
     }
 }
 /// A trace lives until the downstream body / WS generation releases its final

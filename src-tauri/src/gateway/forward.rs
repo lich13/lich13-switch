@@ -634,7 +634,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .await;
             let decoded = match &captured {
                 Ok(Ok(body)) => {
-                    let encoded = body.prefix(128 * 1024).await.unwrap_or_default();
+                    let encoded = body.prefix(2 * 1024 * 1024).await.unwrap_or_default();
+                    // Error attempts may still report billable tokens. Observe
+                    // their bounded original bytes without changing replay data.
+                    protocol.feed(&encoded);
                     let encoding = response_parts
                         .headers
                         .get(header::CONTENT_ENCODING)

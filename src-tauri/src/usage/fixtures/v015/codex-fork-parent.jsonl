@@ -1,0 +1,3 @@
+{"type":"session_meta","timestamp":1700000000000,"payload":{"id":"00000000-0000-4000-8000-000000000001"}}
+{"type":"event_msg","timestamp":1700000000100,"payload":{"type":"token_count","info":{"model":"gpt-fixture","total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10}}}}
+{"type":"event_msg","timestamp":1700000000200,"payload":{"type":"token_count","info":{"model":"gpt-fixture","total_token_usage":{"input_tokens":200,"cached_input_tokens":80,"output_tokens":20},"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":10}}}}
