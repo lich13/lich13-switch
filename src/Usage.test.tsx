@@ -286,6 +286,10 @@ async function renderUsage() {
   return result;
 }
 
+function cancelDialog(dialog: HTMLElement) {
+  fireEvent(dialog, new Event("cancel", { bubbles: true, cancelable: true }));
+}
+
 describe("usage records", () => {
   it("loads the overview while the request log is still pending", async () => {
     let resolveLogs!: (value: { rows: UsageRecord[]; total: number; page: number; detailSince: number }) => void;
@@ -435,6 +439,66 @@ describe("usage records", () => {
     expect(within(firstSummary.parentElement!).getByText("fixture-first-model")).toBeVisible();
     expect(within(firstSummary.parentElement!).getByText("9,999")).toBeVisible();
     expect(within(dialog).getByText("2 · Fixture Provider · 200")).toBeInTheDocument();
+  });
+
+  it("returns focus to request and source entry points after dialog cancellation", async () => {
+    await renderUsage();
+    const requestRow = within(screen.getByRole("table")).getAllByRole("row")[1];
+    fireEvent.click(requestRow);
+    const detail = await screen.findByRole("dialog");
+    cancelDialog(detail);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(requestRow).toHaveFocus());
+
+    const sourcesButton = screen.getByRole("button", { name: "数据来源与设置" });
+    fireEvent.click(sourcesButton);
+    const sources = await screen.findByRole("dialog");
+    cancelDialog(sources);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(sourcesButton).toHaveFocus());
+  });
+
+  it("labels per-million rates and keeps zero, media, cache, and tier values", async () => {
+    const rates = {
+      input_cost_per_token: "0",
+      output_cost_per_token: "0.000002",
+      cache_read_input_token_cost: "0.000003",
+      cache_creation_input_token_cost: "0.000004",
+      cache_creation_input_token_cost_above_1hr: "0.000005",
+      input_cost_per_image_token: "0.000006",
+      output_cost_per_image_token: "0.000007",
+      input_cost_per_audio_token: "0.000008",
+      output_cost_per_audio_token: "0.000009",
+      input_cost_per_token_above_100k_tokens_priority: "0.00001",
+      output_cost_per_token_above_200k_tokens_flex: "0.000011",
+    };
+    records = [record({ attempts: [attempt({ price: { ...attempt().price!, rates } })] })];
+    await renderUsage();
+    fireEvent.click(within(screen.getByRole("table")).getAllByRole("row")[1]);
+    const dialog = await screen.findByRole("dialog");
+    const summary = within(dialog).getAllByText("单价 / 百万 Token")[0];
+    fireEvent.click(summary);
+    const rateList = summary.closest("details")!;
+    const pairs = [...rateList.querySelector(".usage-detail-grid")!.children];
+
+    expect(pairs).toHaveLength(11);
+    expect(pairs.map((pair) => pair.querySelector("dt")?.textContent)).toEqual([
+      "输入",
+      "输出",
+      "缓存读取",
+      "缓存写入",
+      "缓存写入（1 小时）",
+      "图片输入",
+      "图片输出",
+      "音频输入",
+      "音频输出",
+      "输入 · 上下文 > 100K · 优先",
+      "输出 · 上下文 > 200K · 弹性",
+    ]);
+    expect(pairs.every((pair) => pair.classList.contains("usage-detail-pair"))).toBe(true);
+    expect(pairs.map((pair) => pair.querySelector("dd")?.textContent)).toEqual([
+      "$0", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11",
+    ]);
   });
 
   it("distinguishes measured speed from session estimates and missing first-token timing", async () => {
@@ -732,6 +796,23 @@ describe("usage pricing", () => {
     expect(restoredCells[1]).toHaveTextContent(/^1$/);
     expect(restoredCells[2]).toHaveTextContent(/^2$/);
     expect(restoredCells[5]).toHaveTextContent(/^Sub2API$/);
+  });
+
+  it("returns focus to the price editor and sync entry points after cancellation", async () => {
+    render(<Pricing />);
+    const modelButton = await screen.findByRole("button", { name: "gpt-alpha" });
+    fireEvent.click(modelButton);
+    const editor = await screen.findByRole("dialog");
+    cancelDialog(editor);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(modelButton).toHaveFocus());
+
+    const syncButton = screen.getByRole("button", { name: "自动同步" });
+    fireEvent.click(syncButton);
+    const sync = await screen.findByRole("dialog");
+    cancelDialog(sync);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(syncButton).toHaveFocus());
   });
 
   it("changes only filtered sync selections and saves price sync independently", async () => {
