@@ -2406,7 +2406,7 @@ select:focus-visible {
 .event-table th:nth-child(6) { width: 110px; }
 .event-table td:nth-child(2) span { display: block; color: var(--muted); margin-bottom: 3px; }
 .event-table td:nth-child(2) strong { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.event-status { display: inline-flex; padding: 3px 7px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.event-status { display: inline-flex; flex-direction: column; gap: 2px; max-width: 100%; box-sizing: border-box; padding: 3px 7px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .event-status.success { color: var(--success, #47c991); border-color: color-mix(in srgb, var(--success, #47c991) 50%, var(--line)); }
 .event-status.client { color: var(--warning, #bf841f); border-color: color-mix(in srgb, var(--warning, #bf841f) 50%, var(--line)); }
 .event-status.server { color: var(--danger, #e46b72); border-color: color-mix(in srgb, var(--danger, #e46b72) 50%, var(--line)); }

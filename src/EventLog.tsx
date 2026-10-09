@@ -473,14 +473,17 @@ export default function EventLog() {
                       className={"event-status " + statusTone(r.status)}
                       title={wireStatus(r)}
                     >
-                      {wireStatus(r)}
+                      {r.status != null && <span>{statusText(r.status)}</span>}
+                      {r.details?.wsCloseCode != null && <span>WS {r.details.wsCloseCode}</span>}
+                      {r.status == null && r.details?.wsCloseCode == null && "—"}
                     </span>
                   </td>
                   <td>
                     <button
                       className={"event-code " + r.level}
                       aria-label={reasons[r.reason]}
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.currentTarget.focus({ preventScroll: true });
                         void command<EventRecord | null>("get_app_event", {
                           id: r.id,
                         })
@@ -546,10 +549,19 @@ function EventDetail({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     const focus = document.activeElement as HTMLElement | null;
-    ref.current?.showModal();
-    return () => focus?.focus();
+    const dialog = ref.current;
+    dialog?.showModal();
+    heading.current?.focus({ preventScroll: true });
+    return () => {
+      dialog?.close();
+      queueMicrotask(() => {
+        if (!dialog?.isConnected && focus?.isConnected)
+          focus.focus({ preventScroll: true });
+      });
+    };
   }, []);
 
   return (
@@ -567,7 +579,7 @@ function EventDetail({
     >
       <div className="event-drawer-inner">
         <header>
-          <h2 id="event-title" tabIndex={-1} autoFocus>
+          <h2 ref={heading} id="event-title" tabIndex={-1}>
             {reasons[r.reason]}
           </h2>
           <button
