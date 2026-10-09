@@ -62,6 +62,27 @@ impl Tokens {
             audio_output
         );
     }
+    pub fn fill_missing(&mut self, other: &Self) -> Vec<String> {
+        let mut fields = Vec::new();
+        macro_rules! fill { ($($f:ident),*) => {$(if self.$f.is_none() && other.$f.is_some() { self.$f=other.$f; fields.push(stringify!($f).to_owned()); })*}; }
+        fill!(
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_5m,
+            cache_write_1h,
+            image_input,
+            image_output,
+            audio_input,
+            audio_output
+        );
+        fields
+    }
+    pub fn cache_sample(&self) -> Option<(u64, u64)> {
+        let (input, read, write) = (self.input?, self.cache_read?, self.cache_write?);
+        Some((read, input.saturating_add(read).saturating_add(write)))
+    }
     pub fn add(&mut self, other: &Self) {
         macro_rules! add { ($($f:ident),*) => {$(self.$f=match(self.$f,other.$f){(None,None)=>None,(a,b)=>Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0)))};)*}; }
         add!(
@@ -113,7 +134,11 @@ pub fn parse_tokens(usage: &Value, claude: bool) -> Tokens {
     let write = count(
         usage,
         &["cache_creation_input_tokens", "cache_creation_tokens"],
-    );
+    )
+    .or_else(|| {
+        (!claude && (usage.get("input_tokens").is_some() || usage.get("prompt_tokens").is_some()))
+            .then_some(0)
+    });
     let raw = count(usage, &["input_tokens", "prompt_tokens"]);
     let create = &usage["cache_creation"];
     Tokens {
@@ -141,51 +166,158 @@ pub fn parse_tokens(usage: &Value, claude: bool) -> Tokens {
 #[serde(rename_all = "camelCase")]
 pub struct Meter {
     pub tokens: Tokens,
+    #[serde(skip)]
+    pub inclusive_input: Option<u64>,
+    #[serde(skip)]
+    pub ended_early: bool,
     pub response_id: Option<String>,
     pub model: Option<String>,
     pub service_tier: Option<String>,
     pub first_token_ms: Option<u64>,
+    pub parse_incomplete: bool,
+    pub compaction_kind: Option<String>,
+}
+/// Only protocol envelopes can supply response identity; output/tool IDs cannot.
+pub fn response_id(value: &Value) -> Option<&str> {
+    let mut envelopes = vec![value];
+    let mut cursor = 0;
+    let mut found = None;
+    while cursor < envelopes.len() && cursor < 16 {
+        let node = envelopes[cursor];
+        cursor += 1;
+        let kind = node.get("type").and_then(Value::as_str).unwrap_or("");
+        let object = node.get("object").and_then(Value::as_str).unwrap_or("");
+        let explicit = node.get("response_id").and_then(Value::as_str);
+        let id = explicit.or_else(|| {
+            (kind.is_empty()
+                || kind == "message"
+                || matches!(
+                    object,
+                    "response"
+                        | "response.compaction"
+                        | "chat.completion"
+                        | "chat.completion.chunk"
+                ))
+            .then(|| node.get("id").and_then(Value::as_str))
+            .flatten()
+        });
+        if let Some(id) =
+            id.filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+        {
+            found = Some(id);
+        }
+        for key in ["response", "message", "data", "result"] {
+            if let Some(inner) = node.get(key).filter(|v| v.is_object()) {
+                envelopes.push(inner);
+            }
+        }
+    }
+    found
 }
 impl Meter {
     pub fn observe(&mut self, outer: &Value, elapsed: u64) {
-        let mut v = outer;
-        for _ in 0..4 {
-            let inner = ["response", "message", "data", "result"]
-                .iter()
-                .find_map(|key| v.get(key).filter(|v| v.is_object()));
-            let Some(inner) = inner else {
-                break;
-            };
+        let event = outer["type"].as_str().unwrap_or("");
+        let terminal = matches!(
+            event,
+            "response.completed" | "response.done" | "message_stop"
+        );
+        let mut envelopes = vec![outer];
+        let mut cursor = 0;
+        while cursor < envelopes.len() && cursor < 16 {
+            let v = envelopes[cursor];
+            cursor += 1;
+            let claude = event.starts_with("message_")
+                || v["type"] == "message"
+                || v["usage"].get("cache_creation_input_tokens").is_some()
+                || v["usage"].get("cache_read_input_tokens").is_some();
+            if let Some(u) = v.get("usage").filter(|u| u.is_object()).or_else(|| {
+                matches!(
+                    event,
+                    "usage" | "usage.updated" | "response.usage" | "response.usage.updated"
+                )
+                .then_some(v)
+            }) {
+                let mut parsed = parse_tokens(u, claude);
+                if !claude {
+                    if let Some(raw) = count(u, &["input_tokens", "prompt_tokens"]) {
+                        if !terminal || raw != 0 || self.inclusive_input.is_none_or(|v| v == 0) {
+                            self.inclusive_input = Some(raw);
+                        }
+                    }
+                }
+                if terminal {
+                    // Terminal envelopes sometimes contain zero placeholders for
+                    // counters already reported by earlier cumulative events.
+                    macro_rules! preserve { ($($field:ident),*) => {$(
+                        if parsed.$field == Some(0) && self.tokens.$field.is_some_and(|v| v > 0) {
+                            parsed.$field = None;
+                        }
+                    )*}; }
+                    if count(u, &["input_tokens", "prompt_tokens"]) == Some(0)
+                        && self.tokens.input.is_some_and(|v| v > 0)
+                    {
+                        parsed.input = None;
+                    }
+                    preserve!(
+                        output,
+                        cache_read,
+                        cache_write,
+                        cache_write_5m,
+                        cache_write_1h,
+                        image_input,
+                        image_output,
+                        audio_input,
+                        audio_output
+                    );
+                }
+                self.tokens.merge(&parsed);
+                // Some providers report cache details after the inclusive input
+                // counter. Normalize against that same counter after merging.
+                if !claude {
+                    if let Some(raw) = self.inclusive_input {
+                        self.tokens.input = Some(
+                            raw.saturating_sub(self.tokens.cache_read.unwrap_or(0))
+                                .saturating_sub(self.tokens.cache_write.unwrap_or(0)),
+                        );
+                    }
+                }
+            }
             if let Some(model) = model_id(v["model"].as_str()) {
                 self.model = Some(model);
             }
-            v = inner;
-        }
-        let event = outer["type"].as_str().unwrap_or("");
-        let claude = event.starts_with("message_")
-            || v["type"] == "message"
-            || v["usage"].get("cache_creation_input_tokens").is_some();
-        if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
-            self.tokens.merge(&parse_tokens(u, claude));
-        }
-        if !std::ptr::eq(v, outer) {
-            if let Some(u) = outer.get("usage") {
-                self.tokens.merge(&parse_tokens(u, claude));
+            if let Some(tier) = v["service_tier"].as_str().filter(|s| {
+                matches!(
+                    *s,
+                    "default" | "flex" | "priority" | "standard" | "batch" | "ultrafast"
+                )
+            }) {
+                self.service_tier = Some(tier.into());
+            }
+            if v.get("output")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|i| {
+                        matches!(
+                            i["type"].as_str(),
+                            Some("compaction" | "context_compaction")
+                        )
+                    })
+                })
+                || matches!(
+                    v["item"]["type"].as_str(),
+                    Some("compaction" | "context_compaction")
+                )
+            {
+                self.compaction_kind = Some("server".into());
+            }
+            for key in ["response", "message", "data", "result"] {
+                if let Some(inner) = v.get(key).filter(|v| v.is_object()) {
+                    envelopes.push(inner);
+                }
             }
         }
-        if let Some(model) = model_id(v["model"].as_str().or_else(|| outer["model"].as_str())) {
-            self.model = Some(model);
-        }
-        if let Some(id) = v["id"].as_str().filter(|s| s.len() <= 512) {
+        if let Some(id) = response_id(outer) {
             self.response_id = Some(safe_id(id));
-        }
-        if let Some(tier) = v["service_tier"].as_str().filter(|s| {
-            matches!(
-                *s,
-                "default" | "flex" | "priority" | "standard" | "batch" | "ultrafast"
-            )
-        }) {
-            self.service_tier = Some(tier.into());
         }
         let nonempty = |v: &Value| v.as_str().is_some_and(|s| !s.is_empty());
         let generated = match event {
@@ -236,16 +368,23 @@ pub enum Operation {
     #[default]
     Model,
     WebSearch,
+    Compaction,
 }
 impl Operation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Model => "model",
             Self::WebSearch => "web_search",
+            Self::Compaction => "compaction",
         }
     }
     pub fn for_path(path: &str) -> Self {
         if matches!(
+            path.trim_end_matches('/'),
+            "/responses/compact" | "/v1/responses/compact"
+        ) {
+            Self::Compaction
+        } else if matches!(
             path.trim_end_matches('/'),
             "/v1/alpha/search" | "/alpha/search"
         ) {
@@ -258,6 +397,14 @@ impl Operation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inclusive_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub compaction_kind: Option<String>,
+    #[serde(default)]
+    pub usage_status: String,
+    #[serde(default)]
+    pub usage_sources: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub pricing_basis: Option<String>,
     #[serde(default)]
@@ -374,6 +521,10 @@ impl Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            compaction_kind: None,
+            usage_status: String::new(),
+            usage_sources: Default::default(),
+            inclusive_input_tokens: None,
             pricing_basis: None,
             mapping_revision: None,
             repeat_count: 1,
@@ -565,6 +716,7 @@ pub struct Filter {
     pub status: Option<String>,
     pub page: u32,
     pub sort: Option<String>,
+    pub operation: Option<String>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -585,12 +737,22 @@ pub struct Totals {
     pub first_token_sum_ms: u64,
     #[serde(default)]
     pub first_token_samples: u64,
+    #[serde(default)]
+    pub cache_read_eligible: u64,
+    #[serde(default)]
+    pub cache_input_eligible: u64,
 }
 impl Totals {
     pub fn add_record(&mut self, r: &Record) {
         self.requests += 1;
         self.attempts += r.attempts.iter().map(|a| a.repeat_count).sum::<u64>();
         self.tokens.add(&r.tokens());
+        for attempt in &r.attempts {
+            if let Some((read, input)) = attempt.tokens.cache_sample() {
+                self.cache_read_eligible = self.cache_read_eligible.saturating_add(read);
+                self.cache_input_eligible = self.cache_input_eligible.saturating_add(input);
+            }
+        }
         let known = r
             .attempts
             .iter()
@@ -638,5 +800,11 @@ impl Totals {
         self.generation_ms += o.generation_ms;
         self.first_token_sum_ms = self.first_token_sum_ms.saturating_add(o.first_token_sum_ms);
         self.first_token_samples += o.first_token_samples;
+        self.cache_read_eligible = self
+            .cache_read_eligible
+            .saturating_add(o.cache_read_eligible);
+        self.cache_input_eligible = self
+            .cache_input_eligible
+            .saturating_add(o.cache_input_eligible);
     }
 }

@@ -32,12 +32,6 @@ pub struct Page {
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Point {
-    pub time: i64,
-    pub totals: Totals,
-}
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Group {
     pub id: String,
     pub totals: Totals,
@@ -46,9 +40,6 @@ pub struct Group {
 #[serde(rename_all = "camelCase")]
 pub struct Dashboard {
     pub totals: Totals,
-    pub trend: Vec<Point>,
-    pub trend_step_ms: i64,
-    pub heatmap: Vec<Point>,
     pub providers: Vec<Group>,
     pub models: Vec<Group>,
     pub precision: String,
@@ -81,7 +72,7 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 6 {
+        if version > 7 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
@@ -99,14 +90,19 @@ impl Store {
 "))?;
         query::register(&connection)?;
         query::schema(&connection)?;
-        if version < 6 {
+        if version < 7 {
             let tx = db(connection.transaction())?;
             if version < 4 {
                 db(tx.execute_batch(
                     "ALTER TABLE receipts ADD COLUMN operation TEXT NOT NULL DEFAULT 'model';",
                 ))?;
             }
-            for column in ["first_token_sum_ms", "first_token_samples"] {
+            for column in [
+                "first_token_sum_ms",
+                "first_token_samples",
+                "cache_read_eligible",
+                "cache_input_eligible",
+            ] {
                 let exists: bool = db(tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_metrics') WHERE name=?1)",
                     [column],
@@ -136,6 +132,14 @@ impl Store {
                     let record: Record = serde_json::from_str(&body)
                         .map_err(|_| failure("旧用量记录无效，已保留原数据库"))?;
                     query::project(&tx, 0, &id, &record, 1, None)?;
+                    if version < 7
+                        && record.source == "proxy"
+                        && record
+                            .final_attempt()
+                            .is_some_and(|a| a.response_id.is_some())
+                    {
+                        super::dedup::supplement(&tx, &id)?;
+                    }
                     if version < 5 {
                         db(tx.execute(
                             "UPDATE records SET signature=?2 WHERE id=?1",
@@ -166,10 +170,10 @@ impl Store {
                     Some(&daily.totals),
                 )?;
             }
-            if version > 0 && version < 3 {
+            if version > 0 && version < 7 {
                 db(tx.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('repair_codex','1'),('repair_claude','1')", []))?;
             }
-            db(tx.execute_batch("PRAGMA user_version=6;"))?;
+            db(tx.execute_batch("PRAGMA user_version=7;"))?;
             query::changed(&tx)?;
             db(tx.commit())?;
         }
@@ -331,9 +335,6 @@ impl Store {
         let view = query::dashboard(&self.connection, f, self.detail_since()?)?;
         *self.overview_cache.lock().unwrap() = Some((key, view.clone()));
         Ok(view)
-    }
-    pub fn heatmap(&self, f: &Filter) -> Result<Vec<Point>> {
-        query::points(&self.connection, f, DAY)
     }
     pub fn detail_since(&self) -> Result<i64> {
         let value: Option<String> = db(self

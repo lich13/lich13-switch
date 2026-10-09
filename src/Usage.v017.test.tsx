@@ -116,8 +116,6 @@ function dashboard(source?: Source): Dashboard {
       measuredOutputs: 234000,
       generationMs: 4000,
     },
-    trend: [],
-    heatmap: [],
     providers: [],
     models: [],
     precision: "millisecond",
@@ -156,8 +154,6 @@ beforeEach(() => {
           return dashboard(filter?.source);
         case "get_usage_logs":
           return page(filter);
-        case "get_usage_heatmap":
-          return [];
         case "get_usage_detail":
           return record(
             String(args.id).endsWith("sessions")
@@ -217,7 +213,6 @@ it("renders compact token cells, exposes their full values on focus, and has no 
     screen.getAllByRole("columnheader").map((header) => header.textContent),
   ).toEqual([
     "时间",
-    "客户端",
     "供应商",
     "模型",
     "输入",
@@ -239,7 +234,7 @@ it.each(["Escape", "blur"] as const)(
     render(<Usage />);
     await screen.findByText("fixture-model-all");
     const metric = screen
-      .getByText("实际 Token")
+      .getByText("已报告 Token")
       .closest<HTMLElement>(".usage-metric")!;
     const controls = within(metric);
     const quantity = controls.getByText("1.23M");
@@ -268,7 +263,7 @@ it.each(["Escape", "blur"] as const)(
   },
 );
 
-it("applies source selection to totals, request pages and heatmaps and resets pagination", async () => {
+it("applies source selection to totals and request pages and resets pagination", async () => {
   const user = userEvent.setup();
   render(<Usage />);
   await screen.findByText("fixture-model-all");
@@ -300,11 +295,9 @@ it("applies source selection to totals, request pages and heatmaps and resets pa
     "all",
   );
   await user.click(within(range).getByRole("button", { name: "确定" }));
-  await waitFor(() =>
-    expect(mock.command).toHaveBeenCalledWith("get_usage_heatmap", {
-      filter: expect.objectContaining({ source: "proxy" }),
-    }),
-  );
+  expect(
+    mock.command.mock.calls.filter(([name]) => name === "get_usage_heatmap"),
+  ).toHaveLength(0);
   await user.selectOptions(source, "sessions");
   await screen.findByText("fixture-model-sessions");
   expect(mock.command).toHaveBeenCalledWith("get_usage_dashboard", {

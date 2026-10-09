@@ -15,13 +15,6 @@ pub async fn get_usage_dashboard(r: R<'_>, filter: Filter) -> Result<store::Dash
         .map_err(|_| failure("用量查询中断"))?
 }
 #[tauri::command]
-pub async fn get_usage_heatmap(r: R<'_>, filter: Filter) -> Result<Vec<store::Point>> {
-    let s = r.usage.clone();
-    tokio::task::spawn_blocking(move || s.read(|db| db.heatmap(&filter)))
-        .await
-        .map_err(|_| failure("热力图查询中断"))?
-}
-#[tauri::command]
 pub async fn get_usage_logs(r: R<'_>, filter: Filter) -> Result<store::Page> {
     let s = r.usage.clone();
     tokio::task::spawn_blocking(move || s.read(|db| db.logs(&filter)))
@@ -126,8 +119,41 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
             let _ = handle.emit("usage-state", ());
         }
     });
+    // Price checks must not wait behind a session scan or historical compaction.
+    let price_runtime = Arc::downgrade(r);
+    let price_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut scheduled = tokio::time::interval(std::time::Duration::from_secs(600));
+        scheduled.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        scheduled.tick().await;
+        loop {
+            let Some(runtime) = price_runtime.upgrade() else {
+                break;
+            };
+            let usage = runtime.usage.clone();
+            if runtime.smoke.is_none() {
+                if let Ok(prices) = usage.prices() {
+                    let before = prices.view();
+                    let _ = prices.update(false).await;
+                    let after = prices.view();
+                    if before.version != after.version {
+                        usage.schedule_price_backfill();
+                    }
+                    if before.checked_at != after.checked_at {
+                        let _ = price_handle.emit("pricing-state", ());
+                    }
+                }
+            }
+            drop(runtime);
+            // Coalesce hints from unpriced requests, including high-volume streams.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::select! {
+                _ = scheduled.tick() => {},
+                _ = usage.wait_price_hint() => {},
+            }
+        }
+    });
     let r = Arc::downgrade(r);
-    let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             let Some(r) = r.upgrade() else {
@@ -150,8 +176,6 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                         let _ = tokio::task::spawn_blocking(move || s.sync(&roots, None)).await;
                     }
                 }
-                let _ = r.usage.update_prices(false).await;
-                let _ = handle.emit("pricing-state", ());
             }
             drop(r);
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;

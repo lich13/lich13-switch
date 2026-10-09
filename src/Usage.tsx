@@ -27,7 +27,6 @@ import {
   type Attempt,
   type Dashboard,
   type Group,
-  type Point,
   type UsageFilter,
   type UsagePage,
   type UsageRecord,
@@ -86,13 +85,11 @@ export default function Usage({
     [provider, setProvider] = useState(""),
     [source, setSource] = useState<"" | "proxy" | "sessions">(""),
     [model, setModel] = useState(""),
+    [operation, setOperation] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
-  const [tab, setTab] = useState("requests"),
-    [metric, setMetric] = useState<"requests" | "tokens" | "cost">("cost"),
-    [expanded, setExpanded] = useState(false);
+  const [tab, setTab] = useState("requests");
   const [data, setData] = useState<Dashboard | null>(null),
-    [annual, setAnnual] = useState<Point[]>([]),
     [logs, setLogs] = useState<UsagePage>(empty),
     [state, setState] = useState<UsageState | null>(null);
   const [providers, setProviders] = useState<Record<string, string>>({}),
@@ -100,8 +97,6 @@ export default function Usage({
     [sheet, setSheet] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
-    [heatmapYear, setHeatmapYear] = useState(new Date().getFullYear()),
-    [heatBusy, setHeatBusy] = useState(false),
     [timeOpen, setTimeOpen] = useState(false),
     [rowsBusy, setRowsBusy] = useState(false);
   const [rankings, setRankings] = useState<Record<string, RankingView>>({
@@ -140,8 +135,7 @@ export default function Usage({
   const [visible, setVisible] = useState(document.visibilityState !== "hidden"),
     [nativeVisible, setNativeVisible] = useState(true);
   const sequence = useRef(0),
-    rowsSequence = useRef(0),
-    heatSequence = useRef(0);
+    rowsSequence = useRef(0);
   const pending = useRef(new Map<string, Promise<unknown>>());
   const request = useCallback(
     <T,>(name: string, args: Record<string, unknown> = {}): Promise<T> => {
@@ -175,8 +169,9 @@ export default function Usage({
       client: client || undefined,
       provider: provider || undefined,
       model: model || undefined,
+      operation: operation || undefined,
     };
-  }, [range, from, to, live, client, provider, model, source]);
+  }, [range, from, to, live, client, provider, model, source, operation]);
   const loadOverview = useCallback(async () => {
     const id = ++sequence.current;
     setBusy(true);
@@ -271,46 +266,6 @@ export default function Usage({
     };
   }, []);
   useEffect(() => {
-    if (range !== "all" || !visible || !nativeVisible) return;
-    const id = ++heatSequence.current;
-    const filter = query(),
-      start = new Date(heatmapYear, 0, 1).getTime();
-    setHeatBusy(true);
-    void request<Point[]>("get_usage_heatmap", {
-      filter: {
-        ...filter,
-        start,
-        end: Math.min(
-          Date.now(),
-          new Date(heatmapYear + 1, 0, 1).getTime() - 1,
-        ),
-      },
-    })
-      .then((v) => {
-        if (id === heatSequence.current) {
-          setAnnual(v);
-          setHeatBusy(false);
-        }
-      })
-      .catch((e) => {
-        if (id === heatSequence.current) {
-          setError(errorOf(e).message);
-          setHeatBusy(false);
-        }
-      });
-    return () => {
-      heatSequence.current++;
-    };
-  }, [
-    range,
-    heatmapYear,
-    query,
-    data?.dataVersion,
-    visible,
-    nativeVisible,
-    request,
-  ]);
-  useEffect(() => {
     const changed = () => setVisible(document.visibilityState !== "hidden");
     document.addEventListener("visibilitychange", changed);
     let clean = () => {},
@@ -339,12 +294,8 @@ export default function Usage({
   };
   const name = (id: string | null) =>
     id ? providers[id] || `供应商 ${id.slice(0, 8)}` : "本机会话";
-  const t = data?.totals,
-    cache = t?.tokens.cacheRead,
-    inputs =
-      (t?.tokens.input ?? 0) +
-      (t?.tokens.cacheRead ?? 0) +
-      (t?.tokens.cacheWrite ?? 0);
+  const t = data?.totals;
+  const cacheRate = t?.cacheInputEligible ? (100 * (t.cacheReadEligible ?? 0)) / t.cacheInputEligible : null;
   const open = async (r: UsageRecord) => {
     try {
       setSelected(
@@ -411,6 +362,12 @@ export default function Usage({
           </button>
         </div>
       </header>
+      <div className="usage-metrics">
+        <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
+        <Metric label="已报告 Token" value={t ? compact(tokenTotal(t.tokens)) : "—"} title={t ? numeric(tokenTotal(t.tokens)) : undefined} />
+        <Metric label="缓存命中率" value={cacheRate == null ? "—" : `${cacheRate.toFixed(1)}%`} title={cacheRate == null ? "无有效缓存样本" : `${numeric(t?.cacheReadEligible)} / ${numeric(t?.cacheInputEligible)}`} />
+        <Metric label="平均首字" value={firstTokenLabel(averageFirstToken(t))} title={firstTokenTitle(t)} />
+      </div>
       <div className="usage-filters">
         <select
           aria-label="用量客户端"
@@ -459,6 +416,12 @@ export default function Usage({
           <option value="proxy">本网关</option>
           <option value="sessions">本机会话</option>
         </select>
+        <select aria-label="请求类型" value={operation} onChange={(e) => choose(setOperation, e.target.value)}>
+          <option value="">全部类型</option>
+          <option value="model">生成</option>
+          <option value="compaction">压缩</option>
+          <option value="web_search">搜索</option>
+        </select>
         <button
           ref={timeButton}
           className="usage-time-button"
@@ -495,126 +458,6 @@ export default function Usage({
           {error || state?.error}
         </p>
       )}
-      <div className="usage-metrics">
-        <Metric
-          label="估算费用"
-          value={money(t?.cost)}
-          title={t?.cost}
-          extra={t?.unpriced ? `${t.unpriced} 条未定价` : undefined}
-        />
-        <Metric
-          label="请求"
-          value={compact(t?.requests)}
-          title={numeric(t?.requests)}
-        />
-        <Metric
-          label="实际 Token"
-          value={t ? compact(tokenTotal(t.tokens)) : "—"}
-          title={t ? numeric(tokenTotal(t.tokens)) : undefined}
-        />
-        <Metric
-          label="平均首字"
-          value={firstTokenLabel(averageFirstToken(t))}
-          title={firstTokenTitle(t)}
-        />
-      </div>
-      <button
-        className="usage-more-metrics"
-        aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
-      >
-        更多指标
-        <ChevronDown size={13} />
-      </button>
-      {expanded && t && (
-        <div className="usage-breakdown">
-          <span>
-            缓存命中率
-            <b>
-              {cache != null && inputs
-                ? `${((cache / inputs) * 100).toFixed(1)}%`
-                : "—"}
-            </b>
-          </span>
-          {[
-            ["输入", t.tokens.input],
-            ["输出", t.tokens.output],
-            ["缓存读取", t.tokens.cacheRead],
-            ["缓存写入", t.tokens.cacheWrite],
-          ].map(([n, v]) => (
-            <span key={n}>
-              {n}
-              <b>
-                <NumberValue value={v as number | null} />
-              </b>
-            </span>
-          ))}
-          <span>
-            HTTP 成功率
-            <b>
-              {t.statusKnown
-                ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
-                : "—"}
-            </b>
-          </span>
-          <span>
-            会话记录
-            <b>
-              <NumberValue value={t.sessions} />
-            </b>
-          </span>
-        </div>
-      )}
-      <div className="usage-chart-card">
-        <header>
-          <div role="tablist" aria-label="趋势指标">
-            {(
-              [
-                ["cost", "费用"],
-                ["tokens", "Token"],
-                ["requests", "请求"],
-              ] as const
-            ).map(([v, n]) => (
-              <button
-                role="tab"
-                aria-selected={metric === v}
-                key={v}
-                onClick={() => setMetric(v)}
-              >
-                {n}
-              </button>
-            ))}
-          </div>
-          <span>{range === "all" ? "年度用量" : "用量趋势"}</span>
-        </header>
-        {range === "all" ? (
-          <Heatmap
-            points={annual}
-            year={heatmapYear}
-            metric={metric}
-            busy={heatBusy}
-            firstYear={
-              data?.trend[0]
-                ? new Date(data.trend[0].time).getFullYear()
-                : new Date().getFullYear()
-            }
-            onYear={setHeatmapYear}
-          />
-        ) : (
-          <Trend
-            points={data?.trend ?? []}
-            stepMs={data?.trendStepMs ?? 3600000}
-            metric={metric}
-            onZoom={(start, end) => {
-              setRange("custom");
-              setFrom(local(start));
-              setTo(local(end));
-              setLive(false);
-              resetPages();
-            }}
-          />
-        )}
-      </div>
       <div className="usage-tabs" role="tablist" aria-label="用量明细">
         {[
           ["requests", "请求日志"],
@@ -653,7 +496,6 @@ export default function Usage({
                 <tr>
                   {[
                     "时间",
-                    "客户端",
                     "供应商",
                     "模型",
                     "输入",
@@ -691,9 +533,9 @@ export default function Usage({
                         )}
                         <time>{date(r.startedAt)}</time>
                       </td>
-                      <td>{clientName(r.client)}</td>
-                      <td className="usage-name" title={name(a.provider)}>
-                        {name(a.provider)}
+                      <td className="usage-name" title={`${clientName(r.client)} · ${name(a.provider)}`}>
+                        <span className="usage-provider-name">{name(a.provider)}</span>
+                        <span className="usage-client-tag">{clientName(r.client)}</span>
                       </td>
                       <td
                         className="usage-model"
@@ -832,190 +674,13 @@ function NumberValue({ value }: { value: number | null | undefined }) {
 function Model({ a }: { a: Attempt }) {
   return (
     <>
-      {a.operation === "web_search"
-        ? "网络搜索"
-        : (a.responseModel ?? a.requestedModel ?? "未提供")}
+      <span className="usage-model-name">{a.operation === "web_search" ? "网络搜索" : (a.responseModel ?? a.requestedModel ?? "未提供")}</span>
+      <span className="usage-badges">
+        {a.stream && <span className="usage-badge stream">流式</span>}
+        {(a.operation === "compaction" || a.compactionKind) && <span className="usage-badge compaction">压缩</span>}
+        {a.operation === "web_search" && <span className="usage-badge search">搜索</span>}
+      </span>
     </>
-  );
-}
-function Trend({
-  points,
-  stepMs,
-  metric,
-  onZoom,
-}: {
-  points: Point[];
-  stepMs: number;
-  metric: "requests" | "tokens" | "cost";
-  onZoom: (a: number, b: number) => void;
-}) {
-  const [hover, setHover] = useState<number | null>(null),
-    start = useRef<number | null>(null);
-  const values = points.map((p) =>
-      metric === "cost"
-        ? Number(p.totals.cost)
-        : metric === "tokens"
-          ? (tokenTotal(p.totals.tokens) ?? 0)
-          : p.totals.requests,
-    ),
-    max = Math.max(1, ...values);
-  const first = points[0]?.time ?? 0,
-    last = points.at(-1)?.time ?? 1;
-  const x = (p: Point) =>
-    ((p.time - first) / Math.max(1, last - first)) * 960 + 20;
-  const path = points
-    .map((p, i) => `${i ? "L" : "M"}${x(p)},${142 - (values[i] / max) * 116}`)
-    .join(" ");
-  const index = (e: React.PointerEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const time =
-      first + ((e.clientX - rect.left) / rect.width) * (last - first);
-    return points.reduce(
-      (best, p, i) =>
-        Math.abs(p.time - time) < Math.abs(points[best].time - time) ? i : best,
-      0,
-    );
-  };
-  return (
-    <div className="usage-trend">
-      <svg
-        role="img"
-        aria-label="用量趋势，拖动选择时间范围"
-        viewBox="0 0 1000 175"
-        onPointerMove={(e) => points.length && setHover(index(e))}
-        onPointerLeave={() => setHover(null)}
-        onPointerDown={(e) => {
-          if (points.length) start.current = index(e);
-        }}
-        onPointerUp={(e) => {
-          if (start.current != null && points.length) {
-            const finish = index(e);
-            if (finish !== start.current)
-              onZoom(
-                Math.min(points[start.current].time, points[finish].time),
-                Math.max(points[start.current].time, points[finish].time) +
-                  stepMs,
-              );
-            start.current = null;
-          }
-        }}
-      >
-        <line x1="20" x2="980" y1="142" y2="142" className="usage-grid" />
-        <line x1="20" x2="980" y1="80" y2="80" className="usage-grid" />
-        {path && <path d={path} className="usage-trend-line" />}
-        {points.map((p, i) => (
-          <circle
-            key={p.time}
-            cx={x(p)}
-            cy={142 - (values[i] / max) * 116}
-            r={hover === i ? 5 : 2}
-            className="usage-trend-dot"
-          >
-            <title>
-              {date(p.time)} ·{" "}
-              {metric === "cost" ? money(p.totals.cost) : numeric(values[i])}
-            </title>
-          </circle>
-        ))}
-        {points.length > 0 && (
-          <>
-            <text x="20" y="168">
-              {date(first)}
-            </text>
-            <text x="980" y="168" textAnchor="end">
-              {date(last)}
-            </text>
-          </>
-        )}
-      </svg>
-      {hover != null && points[hover] && (
-        <div className="usage-chart-tooltip">
-          {date(points[hover].time)} ·{" "}
-          {metric === "cost"
-            ? money(points[hover].totals.cost)
-            : numeric(values[hover])}
-        </div>
-      )}
-      {points.length === 0 && (
-        <span className="usage-chart-empty">暂无数据</span>
-      )}
-    </div>
-  );
-}
-function Heatmap({
-  points,
-  year,
-  metric,
-  busy,
-  firstYear,
-  onYear,
-}: {
-  points: Point[];
-  year: number;
-  metric: "requests" | "tokens" | "cost";
-  busy: boolean;
-  firstYear: number;
-  onYear: (year: number) => void;
-}) {
-  const day = (value: number) => local(value).slice(0, 10);
-  const value = (point: Point) =>
-    metric === "cost"
-      ? Number(point.totals.cost)
-      : metric === "tokens"
-        ? (tokenTotal(point.totals.tokens) ?? 0)
-        : point.totals.requests;
-  const map = new Map(points.map((p) => [day(p.time), value(p)]));
-  const days = Math.round(
-    (new Date(year + 1, 0, 1).getTime() - new Date(year, 0, 1).getTime()) /
-      86400000,
-  );
-  const max = Math.max(1, ...map.values());
-  return (
-    <div className="usage-heatmap" aria-busy={busy}>
-      <div className="usage-heatmap-heading">
-        <strong>{year} 年</strong>
-        <div>
-          <button
-            className="icon-button"
-            aria-label="上一年"
-            disabled={year <= firstYear}
-            onClick={() => onYear(year - 1)}
-          >
-            <ChevronLeft size={14} />
-          </button>
-          <button
-            className="icon-button"
-            aria-label="下一年"
-            disabled={year >= new Date().getFullYear()}
-            onClick={() => onYear(year + 1)}
-          >
-            <ChevronRight size={14} />
-          </button>
-        </div>
-      </div>
-      <div
-        className="usage-heatmap-grid"
-        role="img"
-        aria-label={`${year} 年度用量热力图`}
-      >
-        {Array.from({ length: new Date(year, 0, 1).getDay() }, (_, i) => (
-          <i key={`space-${i}`} />
-        ))}
-        {Array.from({ length: days }, (_, i) => {
-          const d = day(new Date(year, 0, i + 1).getTime()),
-            n = map.get(d) ?? 0;
-          return (
-            <span
-              key={d}
-              tabIndex={0}
-              className={n ? "used" : ""}
-              style={{ opacity: n ? 0.25 + (0.75 * n) / max : 1 }}
-              title={`${d} · ${metric === "cost" ? money(String(n)) : numeric(n)}${metric === "tokens" ? " Token" : metric === "requests" ? " 次请求" : ""}`}
-            />
-          );
-        })}
-      </div>
-    </div>
   );
 }
 function TimeRange({
@@ -1540,7 +1205,7 @@ function AttemptDetails({
   metadata?: [string, React.ReactNode][];
 }) {
   const first =
-    source === "proxy" && a.stream && a.operation !== "web_search"
+    source === "proxy" && a.stream && (a.operation ?? "model") === "model"
       ? a.firstTokenMs
       : null;
   return (
@@ -1550,7 +1215,8 @@ function AttemptDetails({
         items={[
           ["供应商", name(a.provider)],
           ["时间", new Date(a.startedAt).toLocaleString()],
-          ["请求类型", a.operation === "web_search" ? "网络搜索" : "模型请求"],
+          ["请求类型", a.operation === "web_search" ? "网络搜索" : a.operation === "compaction" || a.compactionKind ? "压缩" : "生成"],
+          ["用量采集", ({ reported: "上游已报告", partial: "部分字段未报告", upstream_unreported: "上游未报告", ended_early: "提前结束", parse_incomplete: "解析不完整", session_supplemented: "会话补齐" } as Record<string, string>)[a.usageStatus ?? ""] ?? "历史记录"],
           ["请求模型", a.requestedModel],
           ["收到的响应模型", a.responseModel],
           ...metadata,
@@ -1563,6 +1229,7 @@ function AttemptDetails({
           ["输出", numeric(a.tokens.output)],
           ["缓存读取", numeric(a.tokens.cacheRead)],
           ["缓存写入", numeric(a.tokens.cacheWrite)],
+          ...(a.usageSources && Object.keys(a.usageSources).length ? [["补齐字段", Object.keys(a.usageSources).map((key) => ({ input: "输入", output: "输出", cache_read: "缓存读取", cache_write: "缓存写入" } as Record<string, string>)[key] ?? key).join("、")] as [string, string]] : []),
         ]}
       />
       <h3>费用</h3>

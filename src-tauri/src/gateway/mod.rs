@@ -6,8 +6,10 @@ pub use client::{claude_home, ClientId};
 mod admission;
 pub mod catalog;
 mod circuit;
+mod compaction;
 mod connector;
 mod forward;
+pub(crate) mod metadata;
 mod model;
 mod protocol;
 #[cfg(test)]
@@ -16,6 +18,8 @@ mod quota;
 mod replay;
 mod routing;
 mod upstream_error;
+#[cfg(test)]
+mod v019_usage_tests;
 mod websocket;
 pub use quota::QuotaView;
 mod takeover;
@@ -81,6 +85,7 @@ pub struct View {
     pub waiting_requests: usize,
     pub capacity_retries: Vec<admission::CapacityRetry>,
     pub websocket_retries: Vec<admission::CapacityRetry>,
+    pub compaction_pending: Vec<String>,
     pub error: Option<String>,
     pub recovery_pending: bool,
 }
@@ -113,6 +118,7 @@ struct Shared {
     quota: quota::Service,
     catalog: catalog::Service,
     admission: admission::Scheduler,
+    compaction: Arc<compaction::Registry>,
 }
 #[derive(Clone)]
 pub struct Gateway(Arc<Shared>);
@@ -138,9 +144,6 @@ impl Gateway {
 
     pub fn set_usage(&self, service: crate::usage::Service) {
         *self.0.usage.lock().unwrap() = Some(service);
-    }
-    fn usage_trace(&self, model: Option<&str>) -> Option<crate::usage::Trace> {
-        self.usage_operation(model, crate::usage::model::Operation::Model)
     }
     fn usage_operation(
         &self,
@@ -275,6 +278,7 @@ impl Gateway {
             }),
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
+            compaction: compaction::Registry::new(data.join("conversation-owners.json")),
             data,
             spool,
             active: AtomicUsize::new(0),
@@ -441,7 +445,22 @@ impl Gateway {
             waiting_requests: waiting,
             capacity_retries: self.0.admission.capacity_retries(),
             websocket_retries: self.0.admission.websocket_retries(),
-            error: s.error.clone(),
+            compaction_pending: if self.0.client == ClientId::Codex
+                && s.store.mode == "auto"
+                && s.store.settings.handoff_after_compaction
+            {
+                self.0.compaction.pending(
+                    &s.store
+                        .providers
+                        .iter()
+                        .filter(|p| p.queued)
+                        .map(|p| p.id.clone())
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                vec![]
+            },
+            error: s.error.clone().or_else(|| self.0.compaction.error()),
             recovery_pending: s.upgrade_pending
                 || self.0.data.join("gateway-recovery.json").exists(),
         }

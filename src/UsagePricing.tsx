@@ -145,19 +145,6 @@ export default function Pricing({
           <Plus size={15} />
           添加
         </button>
-        <label className="usage-import" tabIndex={0}>
-          <Upload size={15} />
-          导入
-          <input
-            aria-label="导入价格 JSON"
-            type="file"
-            accept="application/json,.json"
-            onChange={(e) => {
-              void importFile(e.target.files?.[0]);
-              e.target.value = "";
-            }}
-          />
-        </label>
         <button
           onClick={(e) => {
             e.currentTarget.focus();
@@ -174,9 +161,29 @@ export default function Pricing({
         >
           计费设置
         </button>
+            <button
+              onClick={() => void action("update_pricing")}
+              disabled={busy}
+            >
+              <Download size={14} />
+              立即更新
+            </button>
         <details className="usage-more">
-          <summary aria-label="定价更多操作">•••</summary>
+          <summary aria-label="定价高级操作">•••</summary>
           <div>
+        <label className="usage-import" tabIndex={0}>
+          <Upload size={15} />
+          导入
+          <input
+            aria-label="导入价格 JSON"
+            type="file"
+            accept="application/json,.json"
+            onChange={(e) => {
+              void importFile(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+        </label>
             <button onClick={() => void action("open_pricing_directory")}>
               <FolderOpen size={14} />
               打开定价目录
@@ -185,13 +192,7 @@ export default function Pricing({
               <RefreshCw size={14} />
               重新载入
             </button>
-            <button
-              onClick={() => void action("update_pricing")}
-              disabled={busy}
-            >
-              <Download size={14} />
-              立即更新
-            </button>
+
           </div>
         </details>
       </div>

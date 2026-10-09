@@ -391,13 +391,13 @@ function QuickContent({
                       {(gateway.websocketRetries?.some(
                         (w) => w.providerId === p.id,
                       ) ||
-                        providerStatus(p)) && (
+                        providerStatus(p) || gateway.compactionPending?.includes(p.id)) && (
                         <span className="quick-provider-alert">
                           {gateway.websocketRetries?.find(
                             (w) => w.providerId === p.id,
                           )
                             ? `重连等待 ${gateway.websocketRetries.find((w) => w.providerId === p.id)!.retryIn}s`
-                            : providerStatus(p)}
+                            : providerStatus(p) || "等待压缩后接管"}
                         </span>
                       )}
                       <div className="quick-provider-secondary">

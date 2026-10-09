@@ -978,95 +978,6 @@ fn successful_rebuild_replaces_only_its_source_and_is_idempotent() {
 }
 
 #[test]
-fn dashboard_trend_step_matches_hourly_and_daily_detail_buckets() {
-    let (_dir, mut store, _prices) = fixture();
-    let hour = 3_600_000;
-    let base = local_boundary(BASE, 0, 0);
-    let next_day = local_boundary(BASE, 1, 0);
-    let hour_one = local_boundary(BASE, 0, 6);
-    let hour_two = local_boundary(BASE, 0, 7);
-    let next_day_hour = local_boundary(BASE, 1, 8);
-    store
-        .write_batch(
-            &[
-                record("fixture-hour-one", "codex", "proxy", hour_one + 1),
-                record("fixture-hour-two", "codex", "proxy", hour_two + 1),
-                record("fixture-next-day", "codex", "proxy", next_day_hour + 1),
-            ],
-            None,
-        )
-        .unwrap();
-    for (span, step, expected) in [
-        (
-            2 * DAY,
-            hour,
-            vec![(hour_one, 1), (hour_two, 1), (next_day_hour, 1)],
-        ),
-        (2 * DAY + 1, DAY, vec![(base, 2), (next_day, 1)]),
-    ] {
-        let dashboard = store
-            .dashboard(&Filter {
-                start: Some(base),
-                end: Some(base + span),
-                ..Filter::default()
-            })
-            .unwrap();
-        assert_eq!(dashboard.trend_step_ms, step);
-        assert_eq!(dashboard.precision, "millisecond");
-        assert_eq!(
-            dashboard
-                .trend
-                .iter()
-                .map(|point| (point.time, point.totals.requests))
-                .collect::<Vec<_>>(),
-            expected
-        );
-        assert_eq!(
-            serde_json::to_value(&dashboard).unwrap()["trendStepMs"],
-            step
-        );
-    }
-}
-
-#[test]
-fn dashboard_trend_step_remains_daily_for_compacted_two_day_range() {
-    let (_dir, mut store, _prices) = fixture();
-    let base = local_boundary(BASE, 0, 0);
-    let next_day = local_boundary(BASE, 1, 0);
-    store
-        .write_batch(
-            &[
-                record("fixture-old-day-one", "codex", "proxy", base + 100),
-                record("fixture-old-day-two", "codex", "proxy", next_day + 100),
-            ],
-            None,
-        )
-        .unwrap();
-    store.compact(BASE + 40 * DAY).unwrap();
-    let filter = Filter {
-        start: Some(base),
-        end: Some(base + 2 * DAY),
-        ..Filter::default()
-    };
-    assert_eq!(store.logs(&filter).unwrap().total, 0);
-    let dashboard = store.dashboard(&filter).unwrap();
-    assert_eq!(dashboard.trend_step_ms, DAY);
-    assert_eq!(dashboard.precision, "day");
-    assert_eq!(
-        dashboard
-            .trend
-            .iter()
-            .map(|point| (point.time, point.totals.requests))
-            .collect::<Vec<_>>(),
-        vec![(base, 1), (next_day, 1)]
-    );
-    assert_eq!(
-        serde_json::to_value(&dashboard).unwrap()["trendStepMs"],
-        DAY
-    );
-}
-
-#[test]
 fn thirty_day_compaction_keeps_boundary_details_and_does_not_double_count() {
     let (_dir, mut store, _prices) = fixture();
     let at = BASE + 40 * DAY + 43_210;
@@ -1100,15 +1011,6 @@ fn thirty_day_compaction_keeps_boundary_details_and_does_not_double_count() {
                 dashboard.totals.sessions
             ),
             (2, 2, 2)
-        );
-        assert_eq!(
-            store
-                .heatmap(&all_time())
-                .unwrap()
-                .iter()
-                .map(|p| p.totals.requests)
-                .sum::<u64>(),
-            4
         );
     }
 }
@@ -1760,7 +1662,7 @@ fn partially_unpriced_attempts_keep_known_cost_in_details_and_daily_totals() {
 }
 
 #[test]
-fn oversized_session_payload_is_skipped_and_later_usage_is_imported() {
+fn oversized_session_payload_is_ignored_and_later_usage_is_imported() {
     let (dir, mut store, prices) = fixture();
     let root = dir.path().join("home");
     let path = root.join("projects/fixture/main.jsonl");
@@ -1799,7 +1701,7 @@ fn oversized_session_payload_is_skipped_and_later_usage_is_imported() {
         .unwrap();
         assert_eq!(
             (report.files, report.imported, report.skipped, report.errors),
-            (1, 2, 1, 0)
+            (1, 2, 0, 0)
         );
         let totals = store.dashboard(&all_time()).unwrap().totals;
         assert_eq!(totals.requests, 2);

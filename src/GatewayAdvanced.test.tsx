@@ -56,6 +56,9 @@ describe("gateway advanced settings", () => {
     await screen.findByRole("button", { name: "添加" });
     await user.click(screen.getByText("高级设置"));
 
+    const handoff = screen.getByRole("checkbox", { name: "压缩后接管" });
+    expect(handoff).toBeChecked();
+    await user.click(handoff);
     const retry = screen.getByRole("spinbutton", { name: "WebSocket 断开等待 / 秒" });
     expect(retry).toHaveValue(60);
     await user.clear(retry);
@@ -69,7 +72,10 @@ describe("gateway advanced settings", () => {
           clientId: "codex",
           edit: {
             op: "settings",
-            settings: expect.objectContaining({ websocketRetrySeconds: 75 }),
+            settings: expect.objectContaining({
+              websocketRetrySeconds: 75,
+              handoffAfterCompaction: false,
+            }),
           },
         }),
       );
@@ -84,6 +90,7 @@ describe("gateway advanced settings", () => {
     await user.click(screen.getByText("高级设置"));
 
     expect(screen.queryByLabelText("WebSocket 断开等待 / 秒")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
   });
 });
 

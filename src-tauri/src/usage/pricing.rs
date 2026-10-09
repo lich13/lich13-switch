@@ -395,7 +395,7 @@ impl Pricing {
             }
         }
         Arc::make_mut(&mut self.state.write().unwrap()).syncing = true;
-        let result = self.download(source, hash_url).await;
+        let result = self.download(source, hash_url, force).await;
         {
             let mut guard = self.state.write().unwrap();
             let s = Arc::make_mut(&mut guard);
@@ -425,7 +425,7 @@ impl Pricing {
             revision: s.revision.clone(),
         }
     }
-    async fn download(&self, source: &str, hash_url: &str) -> Result<()> {
+    async fn download(&self, source: &str, hash_url: &str, force: bool) -> Result<()> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::none())
@@ -437,12 +437,20 @@ impl Pricing {
         };
         let hash_body = fetch(&client, hash_url, None, 1024).await?;
         let hash = String::from_utf8(hash_body.1).map_err(|_| failure("价格校验码无效"))?;
-        let hash = hash
+        let mut hash = hash
             .split_whitespace()
             .next()
             .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
             .ok_or_else(|| failure("价格校验码无效"))?
             .to_ascii_lowercase();
+        if !force && hash == oldhash {
+            let mut cache = self.state.read().unwrap().cache.clone();
+            cache.checked_at = Some(now());
+            let bytes = serde_json::to_vec(&cache).map_err(|_| failure("价格缓存保存失败"))?;
+            storage::atomic_write_bounded(&self.cache_path, &bytes, None, LIMIT)?;
+            Arc::make_mut(&mut self.state.write().unwrap()).cache = cache;
+            return Ok(());
+        }
         let mut response = fetch(&client, source, etag.as_deref(), LIMIT).await?;
         if response.0 == 304 && hash != oldhash {
             response = fetch(&client, source, None, LIMIT).await?;
@@ -450,7 +458,19 @@ impl Pricing {
         let mut cache = self.state.read().unwrap().cache.clone();
         if response.0 != 304 {
             if storage::digest(&response.1) != hash {
-                return Err(failure("价格哈希不匹配，已保留上次有效数据"));
+                // The two public objects may be published at slightly different times.
+                // Retry the pair once; never install unverified data.
+                let retry = fetch(&client, hash_url, None, 1024).await?;
+                hash = String::from_utf8(retry.1)
+                    .ok()
+                    .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+                    .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .ok_or_else(|| failure("价格校验码无效"))?
+                    .to_ascii_lowercase();
+                response = fetch(&client, source, None, LIMIT).await?;
+                if storage::digest(&response.1) != hash {
+                    return Err(failure("价格哈希不匹配，已保留上次有效数据"));
+                }
             }
             let catalog: Catalog =
                 serde_json::from_slice(&response.1).map_err(|_| failure("价格数据无效"))?;

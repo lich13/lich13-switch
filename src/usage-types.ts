@@ -29,7 +29,10 @@ export type Attempt = {
   mappingRevision?: string | null;
   repeatCount?: number;
   compactedUnpriced?: number | null;
-  operation?: "model" | "web_search";
+  operation?: "model" | "web_search" | "compaction";
+  compactionKind?: string | null;
+  usageStatus?: string;
+  usageSources?: Record<string, string>;
   id: string;
   provider: string | null;
   requestedModel: string | null;
@@ -74,11 +77,13 @@ export type Totals = {
   generationMs: number;
   firstTokenSumMs?: number;
   firstTokenSamples?: number;
+  cacheReadEligible?: number;
+  cacheInputEligible?: number;
 };
-export type Point = { time: number; totals: Totals };
 export type Group = { id: string; totals: Totals };
 export type UsageFilter = {
   source?: "proxy" | "sessions";
+  operation?: string;
   start?: number;
   end?: number;
   client?: string;
@@ -92,9 +97,6 @@ export type Dashboard = {
   reviewCount?: number;
   sourceHistoryIncomplete?: boolean;
   totals: Totals;
-  trend: Point[];
-  trendStepMs?: number;
-  heatmap: Point[];
   providers: Group[];
   models: Group[];
   precision: string;

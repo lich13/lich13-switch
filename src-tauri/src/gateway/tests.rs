@@ -1182,3 +1182,6 @@ mod v016;
 
 #[path = "v017_tests.rs"]
 mod v017;
+
+#[path = "v019_compaction_tests.rs"]
+mod v019_compaction;

@@ -10,7 +10,7 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
-const MAX_LINE: u64 = 2 * 1024 * 1024;
+const MAX_LINE: u64 = 256 * 1024 * 1024;
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Cursor {
@@ -104,37 +104,42 @@ fn files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 fn line(reader: &mut BufReader<File>) -> Result<Option<Vec<u8>>> {
-    let mut bytes = Vec::new();
-    let n = (&mut *reader)
-        .take(MAX_LINE + 1)
-        .read_until(b'\n', &mut bytes)
-        .map_err(storage::io_error)?;
-    if n == 0 {
-        return Ok(None);
-    }
-    if bytes.len() as u64 > MAX_LINE {
-        // Large media/tool lines carry no required counters. Discard them without
-        // retaining their contents, then continue reading subsequent metadata.
-        if bytes.last() != Some(&b'\n') {
-            loop {
-                let buffer = reader.fill_buf().map_err(storage::io_error)?;
-                if buffer.is_empty() {
-                    return Ok(None);
-                }
-                let end = buffer.iter().position(|b| *b == b'\n');
-                let length = end.map(|n| n + 1).unwrap_or(buffer.len());
-                reader.consume(length);
-                if end.is_some() {
-                    break;
-                }
-            }
+    let mut projector = crate::gateway::metadata::Projector::default();
+    let mut length = 0u64;
+    let mut newline = false;
+    loop {
+        let buffer = reader.fill_buf().map_err(storage::io_error)?;
+        if buffer.is_empty() {
+            break;
         }
-        return Ok(Some(Vec::new()));
+        let end = buffer.iter().position(|b| *b == b'\n');
+        let consumed = end.map(|n| n + 1).unwrap_or(buffer.len());
+        length = length.saturating_add(consumed as u64);
+        if length > MAX_LINE {
+            return Err(failure("会话单行超过解析限制，已保留同步位置"));
+        }
+        projector.feed(&buffer[..consumed]);
+        reader.consume(consumed);
+        if end.is_some() {
+            newline = true;
+            break;
+        }
     }
-    if bytes.last() != Some(&b'\n') && serde_json::from_slice::<Value>(&bytes).is_err() {
+    if length == 0 {
         return Ok(None);
     }
-    Ok(Some(bytes))
+    match projector.finish() {
+        Some(value) => serde_json::to_vec(&value)
+            .map(|mut bytes| {
+                if newline {
+                    bytes.push(b'\n');
+                }
+                Some(bytes)
+            })
+            .map_err(|_| failure("会话元数据无效")),
+        None if !newline => Ok(None), // A partially appended line is retried next scan.
+        None => Ok(Some(vec![b'\n'])),
+    }
 }
 fn meta(path: &Path) -> Result<(Option<String>, Option<String>, Option<i64>)> {
     let mut reader = BufReader::new(File::open(path).map_err(storage::io_error)?);
@@ -581,6 +586,7 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &[String]) -> Option<Record
         }
         c.replay = false;
     }
+    tokens.cache_write = tokens.input.map(|_| 0);
     tokens.cache_read = tokens.cache_read.map(|n| n.min(tokens.input.unwrap_or(n)));
     tokens.input = tokens
         .input

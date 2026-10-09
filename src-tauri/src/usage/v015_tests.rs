@@ -753,7 +753,7 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert_eq!(
         migrated.detail(&gateway.id).unwrap().attempts[0]
             .price
@@ -1021,8 +1021,6 @@ fn dashboard_cache_key_keeps_the_two_day_granularity_boundary() {
 
     assert_eq!(hourly.totals.requests, 1);
     assert_eq!(daily.totals.requests, 1);
-    assert_eq!(hourly.trend_step_ms, 3_600_000);
-    assert_eq!(daily.trend_step_ms, DAY);
 }
 
 #[test]

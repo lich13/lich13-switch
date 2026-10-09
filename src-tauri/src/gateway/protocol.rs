@@ -1,7 +1,7 @@
 //! Bounded observation only: bytes forwarded by the gateway are never altered.
+use super::metadata::Projector;
 use serde_json::Value;
 use std::io::Write;
-const MAX_EVENT: usize = 2 * 1024 * 1024;
 
 #[derive(Default, Clone, Debug)]
 pub struct Observation {
@@ -15,6 +15,8 @@ pub struct Observation {
     pub first_event_model_error: Option<bool>,
     pub first_event_capacity_error: Option<bool>,
     pub capacity_error: bool,
+    pub compaction_fingerprint: Option<String>,
+    pub compaction_incompatible: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terminal {
@@ -33,7 +35,17 @@ pub fn identifier(v: Option<&Value>) -> Option<String> {
 }
 impl Observation {
     pub fn value(&mut self, outer: &Value) {
+        self.value_projected(outer, false);
+    }
+    fn value_projected(&mut self, outer: &Value, projected: bool) {
+        self.compaction_incompatible |= super::compaction::incompatible(outer);
+        if let Some(fingerprint) = super::compaction::output(outer, projected) {
+            self.compaction_fingerprint = Some(fingerprint);
+        }
         self.meter.observe(outer, 0);
+        if self.meter.model.is_some() {
+            self.model = self.meter.model.clone();
+        }
         let details = super::upstream_error::details_value(outer, false);
         if details != crate::events::Details::default() {
             self.error = details;
@@ -43,20 +55,8 @@ impl Observation {
             .filter(|v| v.is_object())
             .or_else(|| outer.get("message").filter(|v| v.is_object()))
             .unwrap_or(outer);
-        // Only protocol envelopes may contribute an ID, never nested tool/output IDs.
-        if (value.get("id").is_some() && outer.get("type").is_none())
-            || value
-                .get("object")
-                .and_then(Value::as_str)
-                .is_some_and(|v| {
-                    matches!(v, "response" | "chat.completion" | "chat.completion.chunk")
-                })
-            || outer.get("response").is_some()
-            || outer.get("message").is_some()
-        {
-            if let Some(id) = identifier(value.get("id")) {
-                self.response_id = Some(id);
-            }
+        if let Some(id) = crate::usage::model::response_id(outer) {
+            self.response_id = Some(id.into());
         }
         if let Some(model) = identifier(value.get("model")) {
             self.model = Some(model);
@@ -163,105 +163,142 @@ fn incomplete_terminal(value: &Value) -> Terminal {
 }
 struct Sink {
     observation: Observation,
-    buffer: Vec<u8>,
-    data: Vec<u8>,
+    json: Projector,
     stream: bool,
-    overflow: bool,
-    event_overflow: bool,
+    field: Vec<u8>,
+    line_kind: u8,
+    event: String,
+    data_prefix: Vec<u8>,
+    data_len: usize,
+    skip_space: bool,
 }
 impl Sink {
     fn new(stream: bool) -> Self {
         Self {
             observation: Observation::default(),
-            buffer: vec![],
-            data: vec![],
+            json: Projector::default(),
             stream,
-            overflow: false,
-            event_overflow: false,
+            field: vec![],
+            line_kind: 0,
+            event: String::new(),
+            data_prefix: vec![],
+            data_len: 0,
+            skip_space: false,
         }
     }
-    fn parse(&mut self, data: &[u8]) {
-        if !data.trim_ascii().is_empty() && self.observation.first_event_model_error.is_none() {
-            self.observation.first_event_capacity_error = Some(
-                serde_json::from_slice(data)
-                    .is_ok_and(|v| super::upstream_error::temporary_capacity_event(&v)),
-            );
-            self.observation.first_event_model_error = Some(
-                serde_json::from_slice(data).is_ok_and(|v| super::upstream_error::model_error(&v)),
-            );
-        }
-        if data.trim_ascii() == b"[DONE]" {
-            self.observation.terminal.get_or_insert(Terminal::Success);
+    fn data(&mut self, bytes: &[u8]) {
+        self.data_prefix.extend(
+            bytes
+                .iter()
+                .take(16usize.saturating_sub(self.data_prefix.len())),
+        );
+        self.data_len = self.data_len.saturating_add(bytes.len());
+        self.json.feed(bytes);
+    }
+    fn event(&mut self) {
+        if self.data_len == 0 {
+            self.event.clear();
             return;
         }
-        if let Ok(v) = serde_json::from_slice(data) {
-            self.observation.value(&v);
+        let json = std::mem::take(&mut self.json);
+        let first = self.observation.first_event_model_error.is_none();
+        if first {
+            // A complete non-JSON SSE event must also release the response
+            // prefix. Observation failure cannot stall transparent forwarding.
+            self.observation.first_event_model_error = Some(false);
+            self.observation.first_event_capacity_error = Some(false);
         }
-    }
-    fn line(&mut self) {
-        if self.overflow {
-            self.event_overflow = true;
-            self.observation.incomplete = true;
-        } else {
-            let line = self.buffer.strip_suffix(b"\n").unwrap_or(&self.buffer);
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if line.is_empty() {
-                if !self.event_overflow && !self.data.is_empty() {
-                    let data = std::mem::take(&mut self.data);
-                    self.parse(&data);
-                }
-                self.data.clear();
-                self.event_overflow = false;
-            } else if let Some(data) = line.strip_prefix(b"data:") {
-                if self.data.len() + data.len() < MAX_EVENT {
-                    self.data.extend_from_slice(data);
-                    self.data.push(b'\n');
-                } else {
-                    self.event_overflow = true;
-                    self.observation.incomplete = true;
+        if self.data_len <= 16 && self.data_prefix.trim_ascii() == b"[DONE]" {
+            self.observation.terminal.get_or_insert(Terminal::Success);
+        } else if let Some(mut v) = json.finish() {
+            if v.get("type").is_none() && !self.event.is_empty() {
+                if let Some(map) = v.as_object_mut() {
+                    map.insert("type".into(), Value::String(self.event.clone()));
                 }
             }
+            if first {
+                self.observation.first_event_model_error =
+                    Some(super::upstream_error::model_error(&v));
+                self.observation.first_event_capacity_error =
+                    Some(super::upstream_error::temporary_capacity_event(&v));
+            }
+            self.observation.value_projected(&v, true);
+        } else {
+            self.observation.incomplete = true;
         }
-        self.buffer.clear();
-        self.overflow = false;
+        self.data_len = 0;
+        self.data_prefix.clear();
+        self.event.clear();
+    }
+    fn line_end(&mut self) {
+        match self.line_kind {
+            0 if self.field.is_empty() => self.event(),
+            2 => {
+                if let Ok(v) = std::str::from_utf8(&self.field) {
+                    self.event = v.trim().to_owned();
+                }
+            }
+            1 => self.data(b"\n"),
+            _ => {}
+        }
+        self.field.clear();
+        self.line_kind = 0;
+        self.skip_space = false;
     }
     fn finish(&mut self) {
         if self.stream {
-            if !self.buffer.is_empty() {
-                self.line();
+            if self.line_kind != 0 || !self.field.is_empty() {
+                self.line_end();
             }
-            if !self.event_overflow {
-                let data = std::mem::take(&mut self.data);
-                self.parse(&data);
-            }
-        } else if !self.overflow {
-            let data = std::mem::take(&mut self.buffer);
-            self.parse(&data);
+            self.event();
+        } else if let Some(v) = std::mem::take(&mut self.json).finish() {
+            self.observation.value_projected(&v, true);
+        } else {
+            self.observation.incomplete = true;
         }
     }
 }
 impl Write for Sink {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.stream {
-            for segment in bytes.split_inclusive(|b| *b == b'\n') {
-                if !self.overflow && self.buffer.len() + segment.len() <= MAX_EVENT {
-                    self.buffer.extend_from_slice(segment);
-                } else {
-                    self.overflow = true;
-                    self.observation.incomplete = true;
-                    self.buffer.clear();
-                }
-                if segment.ends_with(b"\n") {
-                    self.line();
-                }
+        if !self.stream {
+            self.json.feed(bytes);
+            return Ok(bytes.len());
+        }
+        for &b in bytes {
+            if b == b'\r' {
+                continue;
             }
-        } else if !self.overflow && self.buffer.len() + bytes.len() <= MAX_EVENT {
-            self.buffer.extend_from_slice(bytes);
-        } else {
-            self.overflow = true;
-            self.observation.incomplete = true;
-            self.buffer.clear();
-            return Err(std::io::Error::other("protocol observation limit"));
+            if b == b'\n' {
+                self.line_end();
+                continue;
+            }
+            match self.line_kind {
+                0 => {
+                    if b == b':' {
+                        self.line_kind = match self.field.as_slice() {
+                            b"data" => 1,
+                            b"event" => 2,
+                            _ => 3,
+                        };
+                        self.field.clear();
+                        self.skip_space = true;
+                    } else if self.field.len() < 32 {
+                        self.field.push(b);
+                    } else {
+                        self.line_kind = 3;
+                    }
+                }
+                1 => {
+                    if self.skip_space && b == b' ' {
+                        self.skip_space = false;
+                        continue;
+                    }
+                    self.skip_space = false;
+                    self.data(&[b]);
+                }
+                2 if self.field.len() < 256 => self.field.push(b),
+                _ => {}
+            }
         }
         Ok(bytes.len())
     }
@@ -271,6 +308,7 @@ impl Write for Sink {
 }
 enum Decoder {
     Plain(Sink),
+    Brotli(Box<brotli::DecompressorWriter<Sink>>),
     Gzip(flate2::write::GzDecoder<Sink>),
     Deflate(flate2::write::ZlibDecoder<Sink>),
     Zstd(zstd::stream::write::Decoder<'static, Sink>),
@@ -291,6 +329,7 @@ pub struct Protocol {
     usage: Option<crate::usage::AttemptTrace>,
     started: std::time::Instant,
     first_usage_ms: Option<u64>,
+    ownership: Option<(std::sync::Arc<super::compaction::Lease>, String)>,
 }
 impl Protocol {
     pub fn new(stream: bool) -> Self {
@@ -304,16 +343,31 @@ impl Protocol {
             usage: None,
             started: std::time::Instant::now(),
             first_usage_ms: None,
+            ownership: None,
         }
     }
     pub fn attach_usage(&mut self, usage: crate::usage::AttemptTrace) {
         self.usage = Some(usage);
     }
+    pub fn attach_ownership(
+        &mut self,
+        lease: Option<std::sync::Arc<super::compaction::Lease>>,
+        provider: &str,
+    ) {
+        self.ownership = lease.map(|lease| (lease, provider.into()));
+    }
     fn record_usage(&mut self) {
+        if self.terminal() == Some(Terminal::Success) {
+            if let Some((lease, provider)) = &self.ownership {
+                lease.complete(provider, self.observation.compaction_fingerprint.as_deref());
+            }
+        }
         if self.observation.meter.first_token_ms.is_some() && self.first_usage_ms.is_none() {
             self.first_usage_ms = Some(self.started.elapsed().as_millis() as u64);
         }
         let mut meter = self.observation.meter.clone();
+        meter.parse_incomplete |= self.observation.incomplete;
+        meter.ended_early = self.transport_failure || self.terminal() == Some(Terminal::Cancelled);
         meter.first_token_ms = self.first_usage_ms;
         let outcome = self.terminal().map(|t| match t {
             Terminal::Success => "success",
@@ -411,8 +465,9 @@ impl Observer {
     pub fn new(stream: bool, encoding: &str) -> Self {
         let sink = Sink::new(stream);
         let mut failed = false;
-        let decoder = match encoding {
+        let decoder = match encoding.trim().to_ascii_lowercase().as_str() {
             "" | "identity" => Decoder::Plain(sink),
+            "br" => Decoder::Brotli(Box::new(brotli::DecompressorWriter::new(sink, 4096))),
             "gzip" => Decoder::Gzip(flate2::write::GzDecoder::new(sink)),
             "deflate" => Decoder::Deflate(flate2::write::ZlibDecoder::new(sink)),
             "zstd" => Decoder::Zstd(zstd::stream::write::Decoder::new(sink).expect("zstd decoder")),
@@ -426,6 +481,7 @@ impl Observer {
     fn sink(&mut self) -> &mut Sink {
         match &mut self.decoder {
             Decoder::Plain(s) => s,
+            Decoder::Brotli(d) => d.get_mut(),
             Decoder::Gzip(d) => d.get_mut(),
             Decoder::Deflate(d) => d.get_mut(),
             Decoder::Zstd(d) => d.get_mut(),
@@ -437,6 +493,7 @@ impl Observer {
         }
         let result = match &mut self.decoder {
             Decoder::Plain(s) => s.write_all(bytes),
+            Decoder::Brotli(d) => d.write_all(bytes),
             Decoder::Gzip(d) => d.write_all(bytes),
             Decoder::Deflate(d) => d.write_all(bytes),
             Decoder::Zstd(d) => d.write_all(bytes),
@@ -449,6 +506,7 @@ impl Observer {
         if finish {
             let result = match &mut self.decoder {
                 Decoder::Plain(_) => Ok(()),
+                Decoder::Brotli(d) => d.close(),
                 Decoder::Gzip(d) => d.try_finish(),
                 Decoder::Deflate(d) => d.try_finish(),
                 Decoder::Zstd(d) => d.flush(),

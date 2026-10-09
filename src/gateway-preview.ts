@@ -27,6 +27,7 @@ export const gatewayDemo: GatewayState = {
     rateLimitSeconds: 5,
     capacityRetrySeconds: 60,
     websocketRetrySeconds: 60,
+    handoffAfterCompaction: true,
     errorRate: 0.6,
     minRequests: 10,
     firstByteSeconds: 60,

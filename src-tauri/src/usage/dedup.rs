@@ -214,7 +214,7 @@ fn save_projection(c: &Connection, r: &Record) -> Result<()> {
     ))?;
     query::project(c, 0, &r.id, r, 1, None)
 }
-fn supplement(c: &Connection, id: &str) -> Result<()> {
+pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
     let body: String = db(c.query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
     let mut current: Record = serde_json::from_str(&body).map_err(|_| failure("用量关联无效"))?;
     let previous_price = current.final_attempt().and_then(|a| a.price.clone());
@@ -239,10 +239,12 @@ fn supplement(c: &Connection, id: &str) -> Result<()> {
             current.deduplication = "strict_match".into();
         }
     }
-    if current
-        .final_attempt()
-        .is_some_and(|a| a.tokens.total().is_none())
-    {
+    if current.final_attempt().is_some_and(|a| {
+        a.tokens.input.is_none()
+            || a.tokens.output.is_none()
+            || a.tokens.cache_read.is_none()
+            || a.tokens.cache_write.is_none()
+    }) {
         let donor = peers
             .iter()
             .filter(|p| exact(&current, p))
@@ -255,7 +257,40 @@ fn supplement(c: &Connection, id: &str) -> Result<()> {
                 .cloned()
                 .expect("checked final attempt");
             let last = current.attempts.last_mut().expect("checked final attempt");
-            last.tokens = donor.tokens.clone();
+            let mut fields = last.tokens.fill_missing(&donor.tokens);
+            if let Some(inclusive) = last.inclusive_input_tokens {
+                let cache = last
+                    .tokens
+                    .cache_read
+                    .unwrap_or(0)
+                    .saturating_add(last.tokens.cache_write.unwrap_or(0));
+                if cache <= inclusive {
+                    let input = Some(inclusive - cache);
+                    if last.tokens.input != input {
+                        last.tokens.input = input;
+                        fields.push("input".into());
+                    }
+                } else {
+                    // An inconsistent donor cannot expand a reported inclusive
+                    // total. Preserve the original unknown cache categories.
+                    last.tokens.cache_read = original.tokens.cache_read;
+                    last.tokens.cache_write = original.tokens.cache_write;
+                    last.tokens.cache_write_5m = original.tokens.cache_write_5m;
+                    last.tokens.cache_write_1h = original.tokens.cache_write_1h;
+                    fields.retain(|field| {
+                        !matches!(
+                            field.as_str(),
+                            "cache_read" | "cache_write" | "cache_write_5m" | "cache_write_1h"
+                        )
+                    });
+                }
+            }
+            for field in &fields {
+                last.usage_sources.insert(field.clone(), "session".into());
+            }
+            if !fields.is_empty() {
+                last.usage_status = "session_supplemented".into();
+            }
             if last.response_model.is_none() {
                 last.response_model = donor.response_model.clone();
             }
@@ -264,7 +299,7 @@ fn supplement(c: &Connection, id: &str) -> Result<()> {
             }
             // Existing billed snapshots are immutable. A previously unpriced
             // record uses a matching known rate snapshot with its own multiplier.
-            if last.price.is_none() && last.operation == super::model::Operation::Model {
+            if last.price.is_none() && last.operation != super::model::Operation::WebSearch {
                 last.price = previous_price
                     .as_ref()
                     .or(donor.price.as_ref())

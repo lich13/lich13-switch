@@ -8,6 +8,7 @@ use super::{
     Active, Gateway, Route,
 };
 use crate::events::{Action, Reason};
+use bytes::Bytes;
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Body as _;
 use hyper::{body::Incoming, header, HeaderMap, Request, Response, StatusCode, Uri};
@@ -278,6 +279,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .get(header::ACCEPT)
             .is_some_and(|h| h.as_bytes().windows(17).any(|w| w == b"text/event-stream"));
     let mut model = hints.as_ref().ok().and_then(|h| h.model.clone());
+    let compacted_window = hints.as_ref().ok().and_then(|h| h.compacted_window.clone());
+    let compaction_trigger = hints.as_ref().is_ok_and(|h| h.compaction_trigger);
     let mut pinned = (mode == "manual").then(|| ids.first().cloned()).flatten();
     let mut unknown_affinity = false;
     let continuation = match hints {
@@ -312,13 +315,59 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
         _ => false,
     };
-    let operation = crate::usage::model::Operation::for_path(parts.uri.path());
+    let operation = if compaction_trigger {
+        crate::usage::model::Operation::Compaction
+    } else {
+        crate::usage::model::Operation::for_path(parts.uri.path())
+    };
     let requirement = if operation == crate::usage::model::Operation::WebSearch
         || (!websocket && routing::resource(&parts.method, parts.uri.path()))
     {
         Requirement::Resource
     } else {
         Requirement::model(model.as_deref())
+    };
+    let responses = matches!(
+        parts.uri.path().trim_end_matches('/'),
+        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
+    );
+    let ownership = if gateway.client_id() == super::ClientId::Codex
+        && mode == "auto"
+        && settings.handoff_after_compaction
+        && responses
+        && !unknown_affinity
+    {
+        let eligible: Vec<_> = ids
+            .iter()
+            .filter(|id| {
+                routes
+                    .get(*id)
+                    .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
+            })
+            .cloned()
+            .collect();
+        if let Some(session) =
+            super::compaction::session(&parts.headers).filter(|_| !eligible.is_empty())
+        {
+            let lease = gateway.0.compaction.prepare(
+                session,
+                compacted_window.as_deref(),
+                !continuation && operation == crate::usage::model::Operation::Model,
+                &eligible,
+            );
+            if lease.is_none() {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONVERSATION_OWNERSHIP",
+                    "线程归属记录暂不可用，请检查网关状态",
+                );
+            }
+            lease
+        } else {
+            None
+        }
+    } else {
+        None
     };
     let usage_trace = if matches!(requirement, Requirement::Resource)
         && operation != crate::usage::model::Operation::WebSearch
@@ -384,10 +433,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             break;
         }
-        let candidates: Vec<_> = ids
+        let mut candidates: Vec<_> = ids
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
+        if let Some(owner) = ownership
+            .as_ref()
+            .filter(|lease| !lease.handoff)
+            .and_then(|lease| lease.owner.as_deref())
+        {
+            if let Some(route) = candidates
+                .iter()
+                .find(|route| {
+                    route.provider.id == owner && route.provider_circuit.health().available
+                })
+                .cloned()
+            {
+                // Capacity and RPM keep the current conversation in place. A
+                // real upstream failure can still use the existing failover loop.
+                candidates = vec![route];
+            }
+        }
         let admission_started = Instant::now();
         let mut admission = match gateway
             .0
@@ -537,6 +603,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         previous_provider = Some(admission.route.provider.id.clone());
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(stream_hint);
+        protocol.attach_ownership(ownership.clone(), &route.provider.id);
         if let Some(trace) = &usage_trace {
             protocol.attach_usage(trace.attempt(
                 &route.provider.id,
@@ -674,9 +741,16 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let decoded = match &captured {
                 Ok(Ok(body)) => {
                     let encoded = body.prefix(2 * 1024 * 1024).await.unwrap_or_default();
-                    // Error attempts may still report billable tokens. Observe
-                    // their bounded original bytes without changing replay data.
-                    protocol.feed(&encoded);
+                    // Errors may include a large echoed body before usage. Walk
+                    // the captured spool with the bounded metadata observer;
+                    // the diagnostic prefix and the forwarded bytes stay separate.
+                    let mut observed = body.body();
+                    while let Some(Ok(frame)) = observed.frame().await {
+                        if let Some(bytes) = frame.data_ref() {
+                            protocol.feed(bytes);
+                        }
+                    }
+                    protocol.finish(Some(status.as_u16()), "HTTP");
                     let encoding = response_parts
                         .headers
                         .get(header::CONTENT_ENCODING)
@@ -686,17 +760,32 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 _ => Vec::new(),
             };
-            let model_error = super::upstream_error::model_http(status.as_u16(), &decoded);
+            let compact_error = ownership.as_ref().is_some_and(|lease| {
+                lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
+            }) && protocol.observation.compaction_incompatible;
+            if compact_error {
+                if let Some(owner) = ownership
+                    .as_ref()
+                    .and_then(|lease| lease.owner.as_ref())
+                    .filter(|owner| ids.contains(owner))
+                {
+                    ids = vec![owner.clone()];
+                }
+            }
+            let model_error = protocol.observation.terminal
+                == Some(super::protocol::Terminal::ModelUnavailable)
+                || super::upstream_error::model_http(status.as_u16(), &decoded);
             let capacity = !model_error
                 && route.client_id == super::ClientId::Codex
-                && capacity_message(status, &decoded);
+                && (protocol.observation.capacity_error || capacity_message(status, &decoded));
             if capacity && !websocket {
                 ordinary_attempts = ordinary_attempts.saturating_sub(1);
                 capacity_protected = true;
                 wait_budget.protect_capacity();
                 capacity_waited += started.elapsed();
             }
-            let retryable = model_error
+            let retryable = compact_error
+                || model_error
                 || (circuit::retryable(status.as_u16())
                     && (route.client_id != super::ClientId::Codex
                         || !super::upstream_error::permanent_rejection(&decoded)));
@@ -704,7 +793,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 && !ids.is_empty()
                 && ordinary_attempts <= settings.max_retries
                 && !unknown_affinity;
-            let reason = if model_error {
+            let reason = if compact_error {
+                Reason::ProtocolError
+            } else if model_error {
                 Reason::ModelUnavailable
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 Reason::RateLimit
@@ -716,9 +807,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Reason::UpstreamService
             };
             let mut details = super::upstream_error::details_http(&decoded);
+            if details == crate::events::Details::default() {
+                details = protocol.observation.error.clone();
+            }
             details.phase = Some(crate::events::Phase::Response);
-            details.counted_failure =
-                Some(!model_error && !capacity && status.as_u16() != 429 && retryable);
+            details.counted_failure = Some(
+                !compact_error && !model_error && !capacity && status.as_u16() != 429 && retryable,
+            );
             admission.permits.report(
                 &gateway,
                 &route,
@@ -735,7 +830,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 attempted,
                 details,
             );
-            if model_error {
+            if model_error || compact_error {
                 admission.permits.neutral(&settings);
             } else if capacity {
                 admission.permits.capacity_limited(&settings, cooldown);
@@ -866,6 +961,19 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         } else {
             ended && protocol.terminal() == Some(super::protocol::Terminal::ModelUnavailable)
         };
+        let initial_compact_error = protocol.observation.compaction_incompatible
+            && ownership.as_ref().is_some_and(|lease| {
+                lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
+            });
+        if initial_compact_error {
+            if let Some(owner) = ownership
+                .as_ref()
+                .and_then(|lease| lease.owner.as_ref())
+                .filter(|owner| ids.contains(owner))
+            {
+                ids = vec![owner.clone()];
+            }
+        }
         let initial_capacity = route.client_id == super::ClientId::Codex
             && !websocket
             && !initial_model_error
@@ -874,7 +982,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 ended && protocol.observation.capacity_error
             };
-        if initial_model_error || initial_capacity {
+        if initial_model_error || initial_capacity || initial_compact_error {
             let cooldown = response_parts
                 .headers
                 .get(header::RETRY_AFTER)
@@ -905,7 +1013,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 &gateway,
                 &route,
                 model.as_deref(),
-                if initial_capacity {
+                if initial_compact_error {
+                    Reason::ProtocolError
+                } else if initial_capacity {
                     Reason::Capacity
                 } else {
                     Reason::ModelUnavailable
@@ -964,35 +1074,155 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Some(attempted.min(u32::MAX as usize) as u32),
             );
         }
-        let output = async_stream::try_stream! {
-            let _active=active;
-            let _slot=slot;
-            remember(&protocol,&g,&route,model.as_deref());
-            observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);
-            if ended && protocol.succeeded(){g.successful_response(&route.provider);}
-            for frame in prefix {yield frame;}
-            if ended {return;}
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<Result<hyper::body::Frame<Bytes>, BoxError>>(2);
+        let mut shutdown = gateway
+            .0
+            .inner
+            .lock()
+            .unwrap()
+            .shutdown
+            .as_ref()
+            .map(watch::Sender::subscribe);
+        tokio::spawn(async move {
+            let mut active = Some(active);
+            let mut slot = Some(slot);
+            remember(&protocol, &g, &route, model.as_deref());
+            observe_protocol(
+                &protocol,
+                &mut permits,
+                &cfg,
+                &g,
+                &route,
+                model.as_deref(),
+                Some(status.as_u16()),
+                attempted,
+            );
+            if protocol.terminal().is_some() {
+                slot.take();
+            }
+            let mut disconnected = false;
+            for frame in prefix {
+                tokio::select! {
+                    biased;
+                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "CANCELLED"); permits.neutral(&cfg); return; }
+                    result = sender.send(Ok(frame)) => { if result.is_err() { disconnected = true; break; } }
+                }
+            }
+            if ended {
+                if protocol.succeeded() {
+                    g.successful_response(&route.provider);
+                }
+                return;
+            }
+            let mut drain_deadline = None;
+            let mut drained = 0usize;
             loop {
-                let limit=if stream {tokio::time::Instant::now()+Duration::from_secs(cfg.idle_seconds)}else{total_deadline};
-                match tokio::time::timeout_at(limit,body.frame()).await {
-                    Ok(Some(Ok(frame)))=>{
-                        if let Some(data)=frame.data_ref(){protocol.feed(data);remember(&protocol,&g,&route,model.as_deref());observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);}
-                        let complete=body.is_end_stream();
-                        if complete {protocol.finish(Some(status.as_u16()),if neutral{"HTTP"}else{"OK"});remember(&protocol,&g,&route,model.as_deref());observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);if protocol.succeeded() { g.successful_response(&route.provider); } }
-                        yield frame;
-                        if complete {break;}
+                if protocol.terminal().is_some() {
+                    // Completed generations release concurrency immediately; only
+                    // a small metadata tail may still be observed/forwarded.
+                    slot.take();
+                    drain_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + Duration::from_secs(2)
+                    });
+                    if drained >= 256 * 1024 {
+                        break;
                     }
-                    Ok(None)=>{protocol.finish(Some(status.as_u16()),if neutral{"HTTP"}else{"OK"});remember(&protocol,&g,&route,model.as_deref());observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);if protocol.succeeded() { g.successful_response(&route.provider); }
-                        break;}
-                    result=>{
-                        let category=if result.is_err(){"STREAM_TIMEOUT"}else{"STREAM_INTERRUPTED"};
-                        protocol.finish(Some(status.as_u16()),category);
-                        observe_protocol(&protocol,&mut permits,&cfg,&g,&route,model.as_deref(),Some(status.as_u16()),attempted);
-                        Err::<(),BoxError>(std::io::Error::other("上游流中断").into())?;
+                }
+                if disconnected || sender.is_closed() {
+                    active.take();
+                    if protocol.terminal().is_none() {
+                        protocol.finish(Some(status.as_u16()), "CANCELLED");
+                        permits.neutral(&cfg);
+                        break;
+                    }
+                    disconnected = true;
+                }
+                let limit = drain_deadline.unwrap_or_else(|| {
+                    if stream {
+                        tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds)
+                    } else {
+                        total_deadline
+                    }
+                });
+                let next = tokio::select! {
+                    biased;
+                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "CANCELLED"); permits.neutral(&cfg); break; }
+                    _ = sender.closed(), if !disconnected => { disconnected = true; continue; }
+                    frame = tokio::time::timeout_at(limit, body.frame()) => frame,
+                };
+                match next {
+                    Ok(Some(Ok(frame))) => {
+                        if let Some(data) = frame.data_ref() {
+                            if drain_deadline.is_some() {
+                                drained = drained.saturating_add(data.len());
+                            }
+                            protocol.feed(data);
+                        }
+                        let complete = body.is_end_stream();
+                        if complete {
+                            protocol
+                                .finish(Some(status.as_u16()), if neutral { "HTTP" } else { "OK" });
+                        }
+                        remember(&protocol, &g, &route, model.as_deref());
+                        observe_protocol(
+                            &protocol,
+                            &mut permits,
+                            &cfg,
+                            &g,
+                            &route,
+                            model.as_deref(),
+                            Some(status.as_u16()),
+                            attempted,
+                        );
+                        if !disconnected {
+                            tokio::select! {
+                                biased;
+                                _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "CANCELLED"); permits.neutral(&cfg); break; }
+                                result = sender.send(Ok(frame)) => { disconnected = result.is_err(); }
+                            }
+                        }
+                        if complete {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        protocol.finish(Some(status.as_u16()), if neutral { "HTTP" } else { "OK" });
+                        break;
+                    }
+                    result => {
+                        let category = if result.is_err() {
+                            "STREAM_TIMEOUT"
+                        } else {
+                            "STREAM_INTERRUPTED"
+                        };
+                        protocol.finish(Some(status.as_u16()), category);
+                        if !disconnected && protocol.transport_failure() {
+                            tokio::select! {
+                                _ = stopping(&mut shutdown) => {}
+                                _ = sender.send(Err(std::io::Error::other("上游流中断").into())) => {}
+                            }
+                        }
+                        break;
                     }
                 }
             }
-        };
+            remember(&protocol, &g, &route, model.as_deref());
+            observe_protocol(
+                &protocol,
+                &mut permits,
+                &cfg,
+                &g,
+                &route,
+                model.as_deref(),
+                Some(status.as_u16()),
+                attempted,
+            );
+            if protocol.succeeded() {
+                g.successful_response(&route.provider);
+            }
+        });
+        let output = async_stream::stream! { while let Some(frame) = receiver.recv().await { yield frame; } };
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }
     gateway.record(
@@ -1035,6 +1265,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             )
         }
     })
+}
+async fn stopping(stop: &mut Option<watch::Receiver<bool>>) {
+    if let Some(stop) = stop {
+        if !*stop.borrow() {
+            let _ = stop.changed().await;
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 fn remember(protocol: &super::protocol::Protocol, g: &Gateway, route: &Route, model: Option<&str>) {
     if let Some(id) = &protocol.observation.response_id {

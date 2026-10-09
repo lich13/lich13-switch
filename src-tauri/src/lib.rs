@@ -1520,7 +1520,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             usage::commands::get_usage_state,
             usage::commands::get_usage_dashboard,
-            usage::commands::get_usage_heatmap,
             usage::commands::get_usage_logs,
             usage::commands::get_usage_detail,
             usage::commands::set_usage_settings,

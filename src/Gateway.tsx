@@ -347,7 +347,7 @@ function GatewayContent({
               );
               const status = reconnect
                 ? `重连等待 ${reconnect.retryIn}s`
-                : providerStatus(p);
+                : providerStatus(p) || (state.compactionPending?.includes(p.id) ? "等待压缩后接管" : null);
               return (
                 <>
                   <div className="provider-main">
@@ -592,7 +592,7 @@ function Advanced({
       baseRevision.current = revision;
     }
   }, [settings, revision, editing]);
-  const fields: [keyof GatewaySettings, string][] = [
+  const fields: [Exclude<keyof GatewaySettings, "handoffAfterCompaction">, string][] = [
     ["port", "本地端口"],
     ["maxRetries", "最大重试次数"],
     ["failureThreshold", "连续失败阈值"],
@@ -602,11 +602,11 @@ function Advanced({
     ...(clientId === "codex"
       ? [
           ["websocketRetrySeconds", "WebSocket 断开等待 / 秒"] as [
-            keyof GatewaySettings,
+            Exclude<keyof GatewaySettings, "handoffAfterCompaction">,
             string,
           ],
           ["capacityRetrySeconds", "容量错误等待 / 秒"] as [
-            keyof GatewaySettings,
+            Exclude<keyof GatewaySettings, "handoffAfterCompaction">,
             string,
           ],
         ]
@@ -636,6 +636,14 @@ function Advanced({
           });
       }}
     >
+      {clientId === "codex" && <label className="setting-row">
+        <span>压缩后接管</span>
+        <input type="checkbox" checked={draft.handoffAfterCompaction ?? true} onChange={(e) => {
+          if (!editing) baseRevision.current = revision;
+          setEditing(true); onDirtyChange?.(true);
+          setDraft({ ...draft, handoffAfterCompaction: e.target.checked });
+        }} />
+      </label>}
       <div className="settings-grid">
         {fields.map(([key, label]) => (
           <label key={key}>

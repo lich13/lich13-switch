@@ -32,6 +32,9 @@ const rows: UsageRecord[] = Array.from({ length: 47 }, (_, i) => {
     firstTokenMs: 340,
     stream: true,
     transport: "http",
+    operation: i % 8 === 2 ? "compaction" : "model",
+    compactionKind: i % 8 === 2 ? "request" : null,
+    usageStatus: "reported",
     tokens:
       i % 5 ? { ...tokens } : { ...tokens, input: 0, output: 0, cacheRead: 0 },
     serviceTier: null,
@@ -146,7 +149,7 @@ function total(items: UsageRecord[]): Totals {
     .filter((r) => r.source === "proxy")
     .map((r) => r.attempts.at(-1)!)
     .filter(
-      (a) => a.stream && a.operation !== "web_search" && a.firstTokenMs != null,
+      (a) => a.stream && (a.operation ?? "model") === "model" && a.firstTokenMs != null,
     )
     .map((a) => a.firstTokenMs!);
 
@@ -159,6 +162,8 @@ function total(items: UsageRecord[]): Totals {
   return {
     firstTokenSumMs: first.reduce((sum, v) => sum + v, 0),
     firstTokenSamples: first.length,
+    cacheReadEligible: items.flatMap(r => r.attempts).filter(a => a.tokens.input != null && a.tokens.cacheRead != null && a.tokens.cacheWrite != null).reduce((n, a) => n + a.tokens.cacheRead!, 0),
+    cacheInputEligible: items.flatMap(r => r.attempts).filter(a => a.tokens.input != null && a.tokens.cacheRead != null && a.tokens.cacheWrite != null).reduce((n, a) => n + a.tokens.input! + a.tokens.cacheRead! + a.tokens.cacheWrite!, 0),
     requests: items.length,
     success: items.filter((r) => r.attempts.at(-1)!.status === 200).length,
     statusKnown: items.filter((r) => r.attempts.at(-1)!.status != null).length,
@@ -184,7 +189,6 @@ function total(items: UsageRecord[]): Totals {
 export const usageCommands = [
   "get_usage_state",
   "get_usage_dashboard",
-  "get_usage_heatmap",
   "get_usage_logs",
   "get_usage_detail",
   "set_usage_settings",
@@ -251,7 +255,8 @@ export function usagePreview(
       r.startedAt <= (f.end ?? Infinity) &&
       (!f.client || r.client === f.client) &&
       (!f.provider || r.attempts.at(-1)!.provider === f.provider) &&
-      (!f.model || r.attempts.at(-1)!.pricingModel === f.model),
+      (!f.model || r.attempts.at(-1)!.pricingModel === f.model) &&
+      (!f.operation || (r.attempts.at(-1)!.operation ?? "model") === f.operation),
   );
   if (name === "get_usage_logs") {
     const filtered = selected.filter(
@@ -269,27 +274,17 @@ export function usagePreview(
       detailSince: 0,
     };
   }
-  if (name === "get_usage_heatmap")
-    return [{ time: new Date().setHours(0, 0, 0, 0), totals: total(selected) }];
   if (name === "get_usage_dashboard") {
     const group = (key: (r: UsageRecord) => string) =>
       [...new Set(selected.map(key))].map((id) => ({
         id,
         totals: total(selected.filter((r) => key(r) === id)),
       }));
-    const buckets = group((r) =>
-      String(Math.floor(r.startedAt / 3600000) * 3600000),
-    );
     const d: Dashboard = {
       totals: total(selected),
-      trend: buckets
-        .map(({ id, totals }) => ({ time: Number(id), totals }))
-        .reverse(),
-      heatmap: buckets.map(({ id, totals }) => ({ time: Number(id), totals })),
       providers: group((r) => r.attempts.at(-1)!.provider ?? "session"),
       models: group((r) => r.attempts.at(-1)!.pricingModel ?? "unknown"),
       precision: "millisecond",
-      trendStepMs: 3600000,
       detailSince: 0,
       sources: Object.fromEntries(
         group((r) => r.source).map((g) => [g.id, g.totals.requests]),

@@ -1,7 +1,7 @@
 //! Indexed projections for queries. JSON bodies are read only for one detail/page.
 use super::{
     model::*,
-    store::{Dashboard, Group, Point},
+    store::{Dashboard, Group},
 };
 use crate::storage::Result;
 use chrono::{Datelike, TimeZone};
@@ -69,11 +69,6 @@ pub fn register(c: &Connection) -> Result<()> {
         DecimalSum,
     ))?;
     db(
-        c.create_scalar_function("usage_bucket", 2, FunctionFlags::SQLITE_UTF8, |ctx| {
-            Ok(bucket(ctx.get(0)?, ctx.get(1)?))
-        }),
-    )?;
-    db(
         c.create_scalar_function("usage_day_end", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
             let at: i64 = ctx.get(0)?;
             let next = chrono::Local
@@ -101,6 +96,10 @@ pub fn schema(c: &Connection) -> Result<()> {
       CREATE INDEX IF NOT EXISTS usage_filter_provider ON records(provider,time DESC,id DESC);
       CREATE INDEX IF NOT EXISTS usage_filter_model ON records(model,time DESC,id DESC);
       CREATE INDEX IF NOT EXISTS usage_page ON records(effective,time DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS usage_filter_operation ON records(
+        CASE WHEN json_extract(body,'$.attempts[#-1].operation')='web_search' THEN 'web_search'
+        WHEN json_extract(body,'$.attempts[#-1].operation')='compaction' OR json_extract(body,'$.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END,
+        time DESC,id DESC);
       CREATE INDEX IF NOT EXISTS usage_duplicate ON records(duplicate_of,source);
       CREATE INDEX IF NOT EXISTS daily_time ON daily(day);"))
 }
@@ -121,7 +120,7 @@ pub fn project(
         "DELETE FROM usage_metrics WHERE kind=?1 AND owner=?2",
         params![kind, owner],
     ))?;
-    let mut stmt=db(c.prepare_cached("INSERT INTO usage_metrics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)"))?;
+    let mut stmt=db(c.prepare_cached("INSERT INTO usage_metrics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)"))?;
     for (i, a) in r.attempts.iter().enumerate() {
         let final_record = i + 1 == r.attempts.len();
         let known = final_record && a.status.is_some();
@@ -161,6 +160,21 @@ pub fn project(
             (0, 0)
         };
         let tokens = &a.tokens;
+        let (cache_read, cache_input) = historical.map_or_else(
+            || {
+                tokens
+                    .cache_sample()
+                    .map(|(r, i)| (r.saturating_mul(count), i.saturating_mul(count)))
+                    .unwrap_or_default()
+            },
+            |t| {
+                if final_record {
+                    (t.cache_read_eligible, t.cache_input_eligible)
+                } else {
+                    (0, 0)
+                }
+            },
+        );
         let mul = |n: Option<u64>| n.map(|n| n.saturating_mul(count).min(i64::MAX as u64) as i64);
         let cost = (a
             .price
@@ -200,7 +214,9 @@ pub fn project(
             measured,
             generation,
             first_token_sum,
-            first_token_samples
+            first_token_samples,
+            cache_read,
+            cache_input
         ]))?;
     }
     Ok(())
@@ -237,6 +253,10 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
             args.push(Value::Text(value.clone()));
         }
     }
+    if let Some(operation) = f.operation.as_deref().filter(|v| !v.is_empty()) {
+        terms.push(format!("CASE WHEN json_extract({alias}.body,'$.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract({alias}.body,'$.attempts[#-1].operation')='compaction' OR json_extract({alias}.body,'$.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END=?"));
+        args.push(Value::Text(operation.into()));
+    }
     if status {
         match f.status.as_deref() {
             Some("none") => terms.push(format!("{alias}.status IS NULL")),
@@ -252,7 +272,7 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
     }
     (terms.join(" AND "), args)
 }
-const SUM:&str="coalesce(sum(requests),0),coalesce(sum(attempts),0),coalesce(sum(success),0),coalesce(sum(status_known),0),coalesce(sum(sessions),0),sum(input),sum(output),sum(cache_read),sum(cache_write),sum(cache_write_5m),sum(cache_write_1h),sum(image_input),sum(image_output),sum(audio_input),sum(audio_output),decimal_sum(cost),coalesce(sum(unpriced),0),coalesce(sum(duration_ms),0),coalesce(sum(measured_outputs),0),coalesce(sum(generation_ms),0),coalesce(sum(first_token_sum_ms),0),coalesce(sum(first_token_samples),0)";
+const SUM:&str="coalesce(sum(requests),0),coalesce(sum(attempts),0),coalesce(sum(success),0),coalesce(sum(status_known),0),coalesce(sum(sessions),0),sum(input),sum(output),sum(cache_read),sum(cache_write),sum(cache_write_5m),sum(cache_write_1h),sum(image_input),sum(image_output),sum(audio_input),sum(audio_output),decimal_sum(cost),coalesce(sum(unpriced),0),coalesce(sum(duration_ms),0),coalesce(sum(measured_outputs),0),coalesce(sum(generation_ms),0),coalesce(sum(first_token_sum_ms),0),coalesce(sum(first_token_samples),0),coalesce(sum(cache_read_eligible),0),coalesce(sum(cache_input_eligible),0)";
 fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
     Ok(Totals {
         requests: row.get(i)?,
@@ -279,6 +299,8 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
         generation_ms: row.get(i + 19)?,
         first_token_sum_ms: row.get(i + 20)?,
         first_token_samples: row.get(i + 21)?,
+        cache_read_eligible: row.get(i + 22)?,
+        cache_input_eligible: row.get(i + 23)?,
     })
 }
 fn selection(f: &Filter) -> (String, Vec<Value>) {
@@ -299,6 +321,10 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
             args.push(Value::Text(v.clone()));
         }
     }
+    if let Some(operation) = f.operation.as_deref().filter(|v| !v.is_empty()) {
+        daily.push("CASE WHEN json_extract(d.body,'$.example.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract(d.body,'$.example.attempts[#-1].operation')='compaction' OR json_extract(d.body,'$.example.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END=?".into());
+        args.push(Value::Text(operation.into()));
+    }
     let eligible = eligible(f, "r", false);
     let kind = if f.source.as_deref() == Some("proxy") {
         2
@@ -316,47 +342,25 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
     let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.* FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner) ",daily.join(" AND "));
     (cte, args)
 }
-pub fn points(c: &Connection, f: &Filter, step: i64) -> Result<Vec<Point>> {
-    let (cte, args) = selection(f);
-    let mut stmt = db(c.prepare(&format!(
-        "{cte} SELECT usage_bucket(time,{step}) b,{SUM} FROM m GROUP BY b ORDER BY b"
-    )))?;
-    let rows = db(
-        stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
-            Ok(Point {
-                time: r.get(0)?,
-                totals: totals(r, 1)?,
-            })
-        }),
-    )?;
-    db(rows.collect())
-}
 pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
+    let start = f.start.unwrap_or(0);
+    let end = f.end.unwrap_or_else(now);
     let (cte, args) = selection(f);
     // Each aggregate reads the same narrow materialized projection, rather than
     // repeating the indexed record/attempt join for every panel.
     let cte = cte.replace("m AS (", "m AS MATERIALIZED (");
-    let end = f.end.unwrap_or_else(now);
-    let start = f.start.unwrap_or(0);
-    let step = if end - start <= 2 * DAY {
-        3_600_000
-    } else {
-        DAY
-    };
     let rolled = "EXISTS(SELECT 1 FROM selected WHERE kind=1)";
-    let actual_step = format!("CASE WHEN {rolled} THEN {DAY} ELSE {step} END");
     // Only the final attempt has a request count. Attribute a missing price to
     // that row once, consulting earlier attempts only if its own price exists.
     // This avoids sorting every request ID for a second logical aggregation.
     let total_sum=SUM.replace("coalesce(sum(unpriced),0)","coalesce(sum(CASE WHEN requests>0 AND (unpriced>0 OR EXISTS(SELECT 1 FROM usage_metrics a WHERE a.kind=m.kind AND a.owner=m.owner AND a.unpriced>0)) THEN requests ELSE 0 END),0)");
     // Source badges only use request counts, not a full cost/token aggregate.
-    let source_sum="coalesce(sum(requests),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0,0,0";
+    let source_sum="coalesce(sum(requests),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0,0,0,0,0";
     let sql=format!("{cte}
       SELECT 'totals','',{total_sum},{rolled} FROM m
       UNION ALL SELECT 'provider',coalesce(provider,'session'),{SUM},0 FROM m GROUP BY coalesce(provider,'session')
       UNION ALL SELECT 'model',coalesce(model,'unknown'),{SUM},0 FROM m GROUP BY coalesce(model,'unknown')
-      UNION ALL SELECT 'source',source,{source_sum},0 FROM m GROUP BY source
-      UNION ALL SELECT 'trend',cast(usage_bucket(time,{actual_step}) AS TEXT),{SUM},0 FROM m GROUP BY usage_bucket(time,{actual_step})");
+      UNION ALL SELECT 'source',source,{source_sum},0 FROM m GROUP BY source");
     let mut stmt = db(c.prepare(&sql))?;
     let rows = db(
         stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
@@ -364,7 +368,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 totals(r, 2)?,
-                r.get::<_, bool>(24)?,
+                r.get::<_, bool>(26)?,
             ))
         }),
     )?;
@@ -372,7 +376,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     let mut providers = Vec::new();
     let mut models = Vec::new();
     let mut sources = BTreeMap::new();
-    let mut trend = Vec::new();
     let mut rolled = false;
     for row in rows {
         let (kind, id, value, flag) = db(row)?;
@@ -386,10 +389,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
             "source" => {
                 sources.insert(id, value.requests);
             }
-            "trend" => trend.push(Point {
-                time: id.parse().map_err(|_| failure("趋势时间无效"))?,
-                totals: value,
-            }),
             _ => return Err(failure("用量分组无效")),
         }
     }
@@ -401,7 +400,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     };
     providers.sort_by(order);
     models.sort_by(order);
-    trend.sort_by_key(|p| p.time);
     let (condition, review_args) = conditions(f, "r", false);
     let eligible = eligible(f, "r", true);
     let review_count = db(c.query_row(
@@ -421,9 +419,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     };
     Ok(Dashboard {
         totals: total,
-        trend,
-        trend_step_ms: if rolled { DAY } else { step },
-        heatmap: Vec::new(),
         providers,
         models,
         precision: if rolled { "day" } else { "millisecond" }.into(),
@@ -436,11 +431,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
 }
 
 pub fn overview_key(c: &Connection, f: &Filter) -> Result<String> {
-    let hourly = f
-        .end
-        .unwrap_or_else(now)
-        .saturating_sub(f.start.unwrap_or(0))
-        <= 2 * DAY;
     let mut f = f.clone();
     f.status = None;
     f.page = 0;
@@ -464,7 +454,7 @@ pub fn overview_key(c: &Connection, f: &Filter) -> Result<String> {
         f.end = Some(end.min(latest.max(daily_end)));
     }
     Ok(format!(
-        "{}:{}:{hourly}:{}",
+        "{}:{}:{}",
         version(c)?,
         chrono::Local::now().offset().local_minus_utc(),
         serde_json::to_string(&f).map_err(|_| failure("用量筛选无效"))?

@@ -59,6 +59,8 @@ function totals(overrides: Partial<Totals> = {}): Totals {
     generationMs: 12000,
     firstTokenSumMs: 8000,
     firstTokenSamples: 5,
+    cacheReadEligible: 0,
+    cacheInputEligible: 0,
     ...overrides,
   };
 }
@@ -139,8 +141,6 @@ beforeEach(() => {
   mock.listeners.clear();
   dashboard = {
     totals: totals(),
-    trend: [],
-    heatmap: [],
     providers: [],
     models: [],
     precision: "millisecond",
@@ -197,8 +197,6 @@ beforeEach(() => {
           };
         case "get_usage_dashboard":
           return structuredClone(dashboard);
-        case "get_usage_heatmap":
-          return structuredClone(dashboard.heatmap);
         case "get_usage_logs": {
           const page = (args.filter as UsageFilter).page ?? 1;
           return {
@@ -293,8 +291,12 @@ async function openBilling() {
   return { button, dialog };
 }
 
-describe("v0.18 usage overview", () => {
-  it("shows four primary metrics and computes first-token time from measured samples", async () => {
+describe("v0.19 usage overview", () => {
+  it("shows the four primary metrics and computes cache rate and first-token time from reported samples", async () => {
+    dashboard.totals = totals({
+      cacheReadEligible: 5,
+      cacheInputEligible: 10,
+    });
     dashboard.providers = [
       {
         id: "fixture-provider-1",
@@ -311,12 +313,12 @@ describe("v0.18 usage overview", () => {
       [...document.querySelectorAll(".usage-metrics .usage-metric > span")].map(
         (node) => node.textContent,
       ),
-    ).toEqual(["估算费用", "请求", "实际 Token", "平均首字"]);
+    ).toEqual(["估算费用", "已报告 Token", "缓存命中率", "平均首字"]);
     expect(
       within(metric("估算费用")).getByText("$12.3457"),
     ).toBeInTheDocument();
-    expect(within(metric("请求")).getByText("12")).toBeInTheDocument();
-    expect(within(metric("实际 Token")).getByText("1.55K")).toBeInTheDocument();
+    expect(within(metric("已报告 Token")).getByText("1.55K")).toBeInTheDocument();
+    expect(within(metric("缓存命中率")).getByText("50.0%")).toBeInTheDocument();
     const average = within(metric("平均首字")).getByText("1.60s");
     expect(average).toHaveAttribute("title", "1.600s · 5 个有效样本");
     act(() => average.focus());
@@ -362,23 +364,60 @@ describe("v0.18 usage overview", () => {
     },
   );
 
-  it("opens cache and success statistics from a separate more-metrics button", async () => {
-    const user = userEvent.setup();
+  it("does not render a more-metrics control and leaves unknown cache samples unavailable", async () => {
     await renderUsage();
-    const more = screen.getByRole("button", { name: "更多指标" });
-    expect(more).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("缓存命中率")).not.toBeInTheDocument();
-    await user.click(more);
-    expect(more).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("缓存命中率")).toHaveTextContent("缓存命中率22.2%");
-    expect(screen.getByText("HTTP 成功率")).toHaveTextContent(
-      "HTTP 成功率90.0%",
+    expect(screen.queryByRole("button", { name: "更多指标" })).not.toBeInTheDocument();
+    expect(screen.queryByText("HTTP 成功率")).not.toBeInTheDocument();
+    expect(within(metric("缓存命中率")).getByText("—")).toHaveAttribute(
+      "title",
+      "无有效缓存样本",
     );
-    expect(screen.getByText("缓存读取")).toBeInTheDocument();
-    expect(screen.getByText("缓存写入")).toBeInTheDocument();
-    await user.click(more);
-    expect(screen.queryByText("缓存命中率")).not.toBeInTheDocument();
-    expect(within(metric("平均首字")).getByText("1.60s")).toBeInTheDocument();
+  });
+
+  it("calculates cache hits from known input, read, and write samples only", async () => {
+    dashboard.totals = totals({
+      tokens: { input: null, output: null, cacheRead: null, cacheWrite: null },
+      cacheReadEligible: 3,
+      cacheInputEligible: 8,
+    });
+    await renderUsage();
+    expect(within(metric("已报告 Token")).getByText("未提供")).toBeInTheDocument();
+    expect(within(metric("缓存命中率")).getByText("37.5%")).toHaveAttribute(
+      "title",
+      "3 / 8",
+    );
+  });
+
+  it("filters request types and renders stream, compaction, and search markers", async () => {
+    const user = userEvent.setup();
+    records = [
+      record({
+        id: "fixture-compaction",
+        attempts: [attempt({ operation: "compaction", stream: true })],
+      }),
+      record({
+        id: "fixture-search",
+        attempts: [attempt({ operation: "web_search", stream: false })],
+      }),
+    ];
+    await renderUsage();
+    const operation = screen.getByRole("combobox", { name: "请求类型" });
+    expect(
+      within(operation)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["全部类型", "生成", "压缩", "搜索"]);
+    expect(within(bodyRows()[0]).getByText("流式")).toBeInTheDocument();
+    expect(within(bodyRows()[0]).getByText("压缩")).toBeInTheDocument();
+    expect(within(bodyRows()[1]).getByText("搜索")).toBeInTheDocument();
+
+    await user.selectOptions(operation, "compaction");
+    await waitFor(() =>
+      expect(calls("get_usage_logs").at(-1)![1].filter).toMatchObject({
+        operation: "compaction",
+        page: 1,
+      }),
+    );
   });
 
   it("keeps review and historical-source information in sources and request details", async () => {
@@ -514,60 +553,20 @@ describe("v0.18 time ranges", () => {
     expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 
-  it("uses a yearly heatmap for all time and bounds year navigation at the current year", async () => {
-    const user = userEvent.setup();
-    const year = new Date().getFullYear();
-    dashboard.trend = [
-      { time: new Date(year - 2, 0, 1).getTime(), totals: totals() },
-    ];
-    dashboard.heatmap = [
-      { time: new Date(year, 0, 2).getTime(), totals: totals() },
-    ];
+  it("does not render trend or heatmap content and never queries historical heatmaps", async () => {
     await renderUsage();
-    expect(
-      screen.getByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
     expect(calls("get_usage_heatmap")).toHaveLength(0);
     await chooseRange("all");
-    await waitFor(() => expect(calls("get_usage_heatmap")).toHaveLength(1));
-    expect(
-      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).not.toBeInTheDocument();
-    const heatmap = screen.getByRole("img", { name: `${year} 年度用量热力图` });
-    expect(heatmap.querySelectorAll("span")).toHaveLength(
-      year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 366 : 365,
-    );
-    expect(calls("get_usage_heatmap").at(-1)![1].filter).toMatchObject({
-      start: new Date(year, 0, 1).getTime(),
-    });
-    expect(screen.getByRole("button", { name: "下一年" })).toBeDisabled();
-
-    await user.click(screen.getByRole("button", { name: "上一年" }));
-    await waitFor(() =>
-      expect(calls("get_usage_heatmap").at(-1)![1].filter).toMatchObject({
-        start: new Date(year - 1, 0, 1).getTime(),
-        end: new Date(year, 0, 1).getTime() - 1,
-      }),
-    );
-    expect(
-      screen.getByRole("img", { name: `${year - 1} 年度用量热力图` }),
-    ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "下一年" }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "下一年" })).toBeDisabled(),
-    );
-    await chooseRange("7");
-    expect(
-      screen.getByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("img", { name: /年度用量热力图/ }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 });
 
 describe("v0.18 rankings", () => {
-  it("keeps request columns and separate twenty-row ranking pages when switching tabs", async () => {
+  it("keeps seven request columns and separate twenty-row ranking pages when switching tabs", async () => {
     const user = userEvent.setup();
     dashboard.providers = groups("provider");
     dashboard.models = groups("model");
@@ -576,7 +575,6 @@ describe("v0.18 rankings", () => {
       screen.getAllByRole("columnheader").map((header) => header.textContent),
     ).toEqual([
       "时间",
-      "客户端",
       "供应商",
       "模型",
       "输入",

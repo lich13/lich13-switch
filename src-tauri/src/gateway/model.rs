@@ -37,6 +37,8 @@ pub struct Settings {
     pub capacity_retry_seconds: u64,
     #[serde(default = "default_capacity_retry_seconds")]
     pub websocket_retry_seconds: u64,
+    #[serde(default = "default_websocket_support")]
+    pub handoff_after_compaction: bool,
     pub error_rate: f64,
     pub min_requests: u32,
     pub first_byte_seconds: u64,
@@ -71,6 +73,7 @@ impl Default for Settings {
             rate_limit_seconds: default_rate_limit_seconds(),
             capacity_retry_seconds: default_capacity_retry_seconds(),
             websocket_retry_seconds: default_capacity_retry_seconds(),
+            handoff_after_compaction: true,
             error_rate: 0.6,
             min_requests: 10,
             first_byte_seconds: 60,

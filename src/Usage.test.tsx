@@ -141,8 +141,6 @@ beforeEach(() => {
       measuredOutputs: 400,
       generationMs: 4_000,
     },
-    trend: [],
-    heatmap: [],
     providers: [],
     models: [],
     precision: "millisecond",
@@ -236,8 +234,6 @@ beforeEach(() => {
           };
         case "get_usage_dashboard":
           return structuredClone(dashboard);
-        case "get_usage_heatmap":
-          return structuredClone(dashboard.heatmap);
         case "get_usage_logs": {
           const filter = args.filter as UsageFilter;
           return {
@@ -300,8 +296,8 @@ async function flush() {
   });
 }
 
-function requestMetric() {
-  return screen.getByText("请求", {
+function reportedTokenMetric() {
+  return screen.getByText("已报告 Token", {
     selector: ".usage-metrics .usage-metric span",
   }).parentElement!;
 }
@@ -356,7 +352,7 @@ describe("usage records", () => {
 
     render(<Usage />);
 
-    await waitFor(() => expect(requestMetric()).toHaveTextContent("7"));
+    await waitFor(() => expect(reportedTokenMetric()).toHaveTextContent("420"));
     expect(calls("get_usage_dashboard")).toHaveLength(1);
     expect(calls("get_usage_logs")).toHaveLength(1);
     expect(
@@ -376,22 +372,15 @@ describe("usage records", () => {
     ).toBeInTheDocument();
   });
 
-  it("loads the annual heatmap only when the all-time range is confirmed", async () => {
-    dashboard.heatmap = [
-      {
-        time: new Date(new Date().getFullYear(), 0, 2).getTime(),
-        totals: structuredClone(dashboard.totals),
-      },
-    ];
+  it("does not render a trend or heatmap and never queries historical data", async () => {
     await renderUsage();
-
+    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
     expect(calls("get_usage_heatmap")).toHaveLength(0);
     await chooseRange("all");
-    await waitFor(() => expect(calls("get_usage_heatmap")).toHaveLength(1));
-    const args = calls("get_usage_heatmap")[0][1];
-    expect(args.filter).toMatchObject({
-      start: new Date(new Date().getFullYear(), 0, 1).getTime(),
-    });
+    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 
   it("keeps the previous overview and rows visible until a refresh resolves", async () => {
@@ -404,17 +393,20 @@ describe("usage records", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "刷新用量" }));
 
-    expect(requestMetric()).toHaveTextContent("1");
+    expect(reportedTokenMetric()).toHaveTextContent("420");
     expect(
       within(screen.getByRole("table")).getByText("Fixture Provider"),
     ).toBeInTheDocument();
     await act(async () =>
       resolveDashboard({
         ...structuredClone(dashboard),
-        totals: { ...dashboard.totals, requests: 9 },
+        totals: {
+          ...dashboard.totals,
+          tokens: { ...dashboard.totals.tokens, output: 900 },
+        },
       }),
     );
-    await waitFor(() => expect(requestMetric()).toHaveTextContent("9"));
+    await waitFor(() => expect(reportedTokenMetric()).toHaveTextContent("920"));
     expect(
       within(screen.getByRole("table")).getByText("Fixture Provider"),
     ).toBeInTheDocument();
@@ -429,17 +421,26 @@ describe("usage records", () => {
     render(<Usage />);
 
     await waitFor(() => expect(screen.getByRole("table")).toBeInTheDocument());
-    dashboard = { ...dashboard, totals: { ...dashboard.totals, requests: 7 } };
+    dashboard = {
+      ...dashboard,
+      totals: {
+        ...dashboard.totals,
+        tokens: { ...dashboard.totals.tokens, output: 7000 },
+      },
+    };
     await chooseRange("7");
-    await waitFor(() => expect(requestMetric()).toHaveTextContent("7"));
+    await waitFor(() => expect(reportedTokenMetric()).toHaveTextContent("7.02K"));
 
     await act(async () =>
       resolveStale({
         ...structuredClone(dashboard),
-        totals: { ...dashboard.totals, requests: 99 },
+        totals: {
+          ...dashboard.totals,
+          tokens: { ...dashboard.totals.tokens, output: 9900 },
+        },
       }),
     );
-    expect(requestMetric()).toHaveTextContent("7");
+    expect(reportedTokenMetric()).toHaveTextContent("7.02K");
   });
 
   it("keeps unavailable counts and prices distinct from measured zero", async () => {
@@ -464,13 +465,13 @@ describe("usage records", () => {
     const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
     const unavailable = within(rows[0]).getAllByRole("cell");
     const zero = within(rows[1]).getAllByRole("cell");
-    for (const index of [4, 5, 6]) {
+    for (const index of [3, 4, 5]) {
       expect(unavailable[index]).toHaveTextContent(/^未提供$/);
       expect(zero[index]).toHaveTextContent(/^0$/);
     }
-    expect(unavailable[7]).toHaveTextContent(/^未定价$/);
-    expect(zero[7]).toHaveTextContent(/^\$0\.0000$/);
-    const tokenMetric = screen.getByText("实际 Token").parentElement!;
+    expect(unavailable[6]).toHaveTextContent(/^未定价$/);
+    expect(zero[6]).toHaveTextContent(/^\$0\.0000$/);
+    const tokenMetric = screen.getByText("已报告 Token").parentElement!;
     expect(within(tokenMetric).getByText("未提供")).toBeInTheDocument();
 
     dashboard.totals.tokens = zeroTokens;
@@ -480,7 +481,7 @@ describe("usage records", () => {
     );
   });
 
-  it("shows eight columns from the final attempt and preserves all attempts in detail", async () => {
+  it("shows seven columns from the final attempt and preserves all attempts in detail", async () => {
     const first = attempt({
       id: "fixture-first-attempt",
       provider: "provider-first",
@@ -500,7 +501,6 @@ describe("usage records", () => {
         .map((cell) => cell.textContent),
     ).toEqual([
       "时间",
-      "客户端",
       "供应商",
       "模型",
       "输入",
@@ -510,14 +510,15 @@ describe("usage records", () => {
     ]);
     const row = within(table).getAllByRole("row")[1];
     const cells = within(row).getAllByRole("cell");
-    expect(cells).toHaveLength(8);
-    expect(cells[2]).toHaveTextContent(/^Fixture Provider$/);
-    expect(cells[3]).toHaveTextContent(/^fixture-response-model/);
-    expect(cells[4]).toHaveTextContent(/^0$/);
-    expect(cells[5]).toHaveTextContent(/^400$/);
-    expect(cells[6]).toHaveTextContent(/^20$/);
-    expect(cells[7]).toHaveTextContent("$0.0046×1.5");
-    expect(cells[7]).toHaveAttribute("title", "0.0045678");
+    expect(cells).toHaveLength(7);
+    expect(cells[1]).toHaveTextContent(/^Fixture Provider/);
+    expect(cells[1]).toHaveTextContent(/Codex/);
+    expect(cells[2]).toHaveTextContent(/^fixture-response-model/);
+    expect(cells[3]).toHaveTextContent(/^0$/);
+    expect(cells[4]).toHaveTextContent(/^400$/);
+    expect(cells[5]).toHaveTextContent(/^20$/);
+    expect(cells[6]).toHaveTextContent("$0.0046×1.5");
+    expect(cells[6]).toHaveAttribute("title", "0.0045678");
     expect(within(row).queryByText("First Provider")).not.toBeInTheDocument();
     expect(within(row).queryByTitle("HTTP 503")).not.toBeInTheDocument();
 
@@ -563,10 +564,32 @@ describe("usage records", () => {
 
     const modelCell = within(screen.getByRole("table"))
       .getAllByRole("row")[1]
-      .querySelectorAll("td")[3];
-    expect(modelCell).toHaveTextContent(/^网络搜索$/);
+      .querySelectorAll("td")[2];
+    expect(
+      within(modelCell).getByText("网络搜索", { exact: true }),
+    ).toBeInTheDocument();
     expect(modelCell).not.toHaveTextContent("gpt-request-model");
     expect(modelCell).not.toHaveTextContent("gpt-response-model");
+    expect(within(modelCell).getByText("搜索")).toBeInTheDocument();
+  });
+
+  it("marks streaming and compaction requests in the model cell", async () => {
+    records = [
+      record({
+        id: "fixture-compaction",
+        attempts: [
+          attempt({
+            operation: "compaction",
+            stream: true,
+          }),
+        ],
+      }),
+    ];
+    await renderUsage();
+    const modelCell = within(screen.getByRole("table")).getAllByRole("row")[1]
+      .querySelectorAll("td")[2];
+    expect(within(modelCell).getByText("流式")).toBeInTheDocument();
+    expect(within(modelCell).getByText("压缩")).toBeInTheDocument();
   });
 
   it("returns focus to request and source entry points after dialog cancellation", async () => {
@@ -674,7 +697,6 @@ describe("usage records", () => {
         .map((cell) => cell.textContent),
     ).toEqual([
       "时间",
-      "客户端",
       "供应商",
       "模型",
       "输入",
@@ -770,6 +792,16 @@ describe("usage records", () => {
       }),
     );
     await user.selectOptions(
+      screen.getByRole("combobox", { name: "请求类型" }),
+      "compaction",
+    );
+    await waitFor(() =>
+      expect(lastFilter()).toMatchObject({
+        page: 1,
+        operation: "compaction",
+      }),
+    );
+    await user.selectOptions(
       screen.getByRole("combobox", { name: "用量客户端" }),
       "claude",
     );
@@ -779,92 +811,12 @@ describe("usage records", () => {
     });
   });
 
-  it.each([
-    {
-      label: "daily detail",
-      stepMs: 86_400_000,
-      precision: "millisecond",
-      reverse: false,
-    },
-    {
-      label: "compacted daily history",
-      stepMs: 86_400_000,
-      precision: "day",
-      reverse: true,
-    },
-    {
-      label: "hourly detail",
-      stepMs: 3_600_000,
-      precision: "millisecond",
-      reverse: false,
-    },
-  ])(
-    "includes the entire final $label bucket when dragging the trend",
-    async ({ stepMs, precision, reverse }) => {
-      const first = Date.UTC(2026, 9, 5);
-      dashboard.trendStepMs = stepMs;
-      dashboard.precision = precision;
-      dashboard.trend = [0, 1, 2].map((index) => ({
-        time: first + index * stepMs,
-        totals: structuredClone(dashboard.totals),
-      }));
-      await renderUsage();
-      const chart = screen.getByRole("img", {
-        name: "用量趋势，拖动选择时间范围",
-      });
-      vi.spyOn(chart, "getBoundingClientRect").mockReturnValue({
-        x: 100,
-        y: 0,
-        left: 100,
-        top: 0,
-        right: 1100,
-        bottom: 175,
-        width: 1000,
-        height: 175,
-        toJSON: () => ({}),
-      });
-
-      fireEvent(
-        chart,
-        new MouseEvent("pointerdown", {
-          bubbles: true,
-          clientX: reverse ? 1080 : 120,
-        }),
-      );
-      fireEvent(
-        chart,
-        new MouseEvent("pointerup", {
-          bubbles: true,
-          clientX: reverse ? 120 : 1080,
-        }),
-      );
-
-      await waitFor(() =>
-        expect(lastFilter()).toMatchObject({
-          start: first,
-          end: first + 3 * stepMs,
-          page: 1,
-        }),
-      );
-      expect(mock.command).toHaveBeenCalledWith("get_usage_dashboard", {
-        filter: expect.objectContaining({
-          start: first,
-          end: first + 3 * stepMs,
-        }),
-      });
-      await userEvent.click(
-        screen.getByRole("button", { name: "用量时间范围" }),
-      );
-      const rangeDialog = screen.getByRole("dialog", { name: "选择时间范围" });
-      expect(
-        within(rangeDialog).getByRole("combobox", { name: "用量时间范围" }),
-      ).toHaveValue("custom");
-      expect(
-        within(rangeDialog).getByRole("checkbox", { name: "跟随当前" }),
-      ).not.toBeChecked();
-      expect(within(rangeDialog).getByLabelText("结束时间")).toBeEnabled();
-    },
-  );
+  it("does not expose trend dragging or issue chart queries", async () => {
+    await renderUsage();
+    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(calls("get_usage_heatmap")).toHaveLength(0);
+  });
 
   it("pauses periodic reloads for document and native hiding and respects manual refresh", async () => {
     vi.useFakeTimers();

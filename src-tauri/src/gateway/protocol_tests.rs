@@ -252,8 +252,9 @@ fn json_observation_limit_applies_after_decompression() {
     assert!(!observation.incomplete);
 
     let over_limit = serde_json::to_vec(&json!({
-        "object":"response", "id":"resp-too-large", "status":"completed",
-        "padding":"x".repeat(OBSERVATION_LIMIT)
+        "object":"response", "padding":"x".repeat(OBSERVATION_LIMIT),
+        "id":"resp-too-large", "model":"fixture-model", "status":"completed",
+        "usage":{"input_tokens":100,"output_tokens":7}
     }))
     .unwrap();
     for encoding in ["identity", "gzip", "deflate", "zstd"] {
@@ -262,21 +263,32 @@ fn json_observation_limit_applies_after_decompression() {
             observer.feed(chunk);
         }
         let observation = observer.snapshot(true);
-        assert!(observation.incomplete, "{encoding}");
-        assert_eq!(observation.terminal, None, "{encoding}");
-        assert_eq!(observation.response_id, None, "{encoding}");
+        assert!(!observation.incomplete, "{encoding}");
+        assert_eq!(observation.terminal, Some(Terminal::Success), "{encoding}");
+        assert_eq!(
+            observation.response_id.as_deref(),
+            Some("resp-too-large"),
+            "{encoding}"
+        );
+        assert_eq!(
+            observation.model.as_deref(),
+            Some("fixture-model"),
+            "{encoding}"
+        );
+        assert_eq!(observation.meter.tokens.input, Some(100), "{encoding}");
+        assert_eq!(observation.meter.tokens.output, Some(7), "{encoding}");
     }
 }
 
 #[test]
-fn oversized_sse_line_or_multiline_event_is_skipped_and_next_event_recovers() {
+fn oversized_sse_line_or_multiline_event_keeps_terminal_failure_and_metadata() {
     let line_overflow = format!(
-        "data: {{\"type\":\"response.failed\",\"padding\":\"{}\"}}\n\n",
+        "data: {{\"type\":\"response.failed\",\"padding\":\"{}\",\"response\":{{\"id\":\"resp-failed\",\"model\":\"fixture-model\",\"usage\":{{\"input_tokens\":100,\"output_tokens\":7}}}}}}\n\n",
         "x".repeat(OBSERVATION_LIMIT)
     );
     let event_overflow = format!(
-        "data: {{\"type\":\"response.failed\",\"first\":\"{}\",\n\
-         data: \"second\":\"{}\"}}\n\n",
+        "data: {{\"type\":\"response.failed\",\"padding\":\"{}\",\n\
+         data: \"padding2\":\"{}\",\"response\":{{\"id\":\"resp-failed\",\"model\":\"fixture-model\",\"usage\":{{\"input_tokens\":100,\"output_tokens\":7}}}}}}\n\n",
         "x".repeat(OBSERVATION_LIMIT / 2),
         "y".repeat(OBSERVATION_LIMIT / 2)
     );
@@ -286,15 +298,19 @@ fn oversized_sse_line_or_multiline_event_is_skipped_and_next_event_recovers() {
             observer.feed(chunk);
         }
         let observation = observer.snapshot(false);
-        assert!(observation.incomplete);
-        assert_eq!(observation.terminal, None);
+        assert!(!observation.incomplete);
+        assert_eq!(observation.terminal, Some(Terminal::Failure));
+        assert_eq!(observation.response_id.as_deref(), Some("resp-failed"));
+        assert_eq!(observation.model.as_deref(), Some("fixture-model"));
+        assert_eq!(observation.meter.tokens.input, Some(100));
+        assert_eq!(observation.meter.tokens.output, Some(7));
         observer.feed(
             b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-recovered\"}}\n\n",
         );
         let observation = observer.snapshot(true);
-        assert_eq!(observation.terminal, Some(Terminal::Success));
+        assert_eq!(observation.terminal, Some(Terminal::Failure));
         assert_eq!(observation.response_id.as_deref(), Some("resp-recovered"));
-        assert!(observation.incomplete);
+        assert!(!observation.incomplete);
     }
 }
 
@@ -311,10 +327,12 @@ fn unknown_or_invalid_encoding_marks_observation_incomplete() {
     let mut protocol = Protocol::new(true);
     protocol.response(200, true, "");
     protocol.feed(b"data: {\"type\":\"response.created\"}\n\n");
-    protocol.feed(&vec![b'x'; OBSERVATION_LIMIT + 1]);
+    let unknown_field = format!("trace: {}\n\n", "x".repeat(OBSERVATION_LIMIT + 1));
+    protocol.feed(unknown_field.as_bytes());
     protocol.finish(Some(200), "OK");
-    assert!(protocol.observation.incomplete);
-    assert_eq!(protocol.terminal(), Some(Terminal::Unknown));
+    assert!(!protocol.observation.incomplete);
+    assert_eq!(protocol.terminal(), Some(Terminal::Failure));
+    assert!(protocol.transport_failure());
     assert!(!protocol.succeeded());
 }
 

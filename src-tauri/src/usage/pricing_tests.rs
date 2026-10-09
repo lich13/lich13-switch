@@ -392,8 +392,11 @@ async fn assert_rejected_update_keeps_cache(rejected: Vec<Reply>, expected_error
         ("/prices.json", None),
         ("/prices.sha256", None),
     ];
-    if rejected_count == 2 {
+    if rejected_count >= 2 {
         expected.push(("/prices.json", Some(ETAG)));
+    }
+    if rejected_count == 4 {
+        expected.extend([("/prices.sha256", None), ("/prices.json", None)]);
     }
     source.assert_requests(&expected);
 }
@@ -404,10 +407,56 @@ async fn sha_mismatch_keeps_last_valid_cache() {
         vec![
             hash_reply(b"different fixture bytes"),
             Reply::new(200, catalog("0.000002")),
+            hash_reply(b"different fixture bytes"),
+            Reply::new(200, catalog("0.000002")),
         ],
         "价格哈希不匹配，已保留上次有效数据",
     )
     .await;
+}
+
+#[tokio::test]
+async fn temporarily_out_of_sync_hash_and_json_retry_pair_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let prices = Pricing::new(dir.path()).unwrap();
+    let next = catalog("0.000002");
+    let source = SourceFixture::new(vec![
+        hash_reply(&catalog("0.000001")),
+        Reply::new(200, next.clone()),
+        hash_reply(&next),
+        Reply::new(200, next.clone()).header("ETag", NEXT_ETAG),
+    ]);
+    let view = refresh(&prices, &source, true).await.unwrap();
+    assert_eq!(view.version, storage::digest(&next));
+    source.assert_requests(&[
+        ("/prices.sha256", None),
+        ("/prices.json", None),
+        ("/prices.sha256", None),
+        ("/prices.json", None),
+    ]);
+}
+
+#[tokio::test]
+async fn unchanged_hash_skips_json_download_on_scheduled_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let prices = Pricing::new(dir.path()).unwrap();
+    let body = catalog("0.000001");
+    let mut replies = download_replies(&body, ETAG);
+    replies.push(hash_reply(&body));
+    let source = SourceFixture::new(replies);
+    refresh(&prices, &source, true).await.unwrap();
+    drop(prices);
+    age_cache(dir.path());
+    let prices = Pricing::new(dir.path()).unwrap();
+    let before = prices.view();
+    let after = refresh(&prices, &source, false).await.unwrap();
+    assert_same_prices(&before, &after);
+    assert!(after.checked_at.unwrap() > before.checked_at.unwrap());
+    source.assert_requests(&[
+        ("/prices.sha256", None),
+        ("/prices.json", None),
+        ("/prices.sha256", None),
+    ]);
 }
 
 #[tokio::test]

@@ -323,21 +323,10 @@ fn assert_weighted_dashboard(store: &Store) {
             );
         }
     }
-    for points in [
-        &dashboard.trend,
-        &store.heatmap(&Filter::default()).unwrap(),
-    ] {
-        let mut totals = Totals::default();
-        for point in points {
-            totals.add(&point.totals);
-        }
-        assert_first_token(&totals, 300, 3);
-        assert_eq!(totals.requests, 4);
-    }
 }
 
 #[test]
-fn sql_groups_trends_and_heatmap_keep_final_attempt_weights_after_compaction() {
+fn sql_groups_keep_final_attempt_weights_after_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path()).unwrap();
     store.write_batch(&weighted_records(), None).unwrap();
@@ -560,7 +549,7 @@ fn v5_migration_backfills_details_but_never_invents_first_token_samples_for_old_
     let version: i64 = database
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     drop(database);
     let totals = Store::open(dir.path())
         .unwrap()

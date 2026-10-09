@@ -39,7 +39,7 @@ The native Responses WebSocket scheduling boundary follows the lifecycle describ
 
 https://platform.openai.com/docs/api-reference/responses-streaming
 
-Additional behavioral regression references: Sub2API PRs #5469 (large first frame), #5453 (per-turn admission), #6708 (turn-local quota errors), #6417 (Codex capacity errors), #6293 (request-level policy attribution), #3172 (Ping keepalive), and #4895 (early upstream failure). Tests and fixes are independently written in Rust; no code or tests from these PRs are copied. Native connections remain pinned after Upgrade, and output payloads are not rewritten.
+Additional behavioral regression references: Sub2API PRs #5469 (large first frame), #5453 (per-turn admission), #6708 (turn-local quota errors), #6417 (Codex capacity errors), #6293 (request-level policy attribution), #3172 (Ping keepalive), and #4895 (early upstream failure). Tests and fixes are independently written in Rust; no code or tests from these PRs are copied. Native connections remain pinned within each generation turn, and output payloads are not rewritten. The v0.19 full-window boundary exception is described below.
 
 https://github.com/Wei-Shaw/sub2api/pull/6417
 https://github.com/Wei-Shaw/sub2api/pull/3172
@@ -114,3 +114,11 @@ The v0.17 compact usage layout and decimal K/M/B presentation reference CC Switc
 https://github.com/farion1231/cc-switch/tree/889b797d8aa252299221ed6569f992bda0a31a72/src/components/usage
 
 The v0.18 usage-page organization continues this MIT-licensed interface reference: compact filters, overview, a shared chart, paginated tables, and grouped details. The first-generation-content latency metric and weighted sample aggregation are independently implemented; they replace speed in this application's provider and model tables. Automatic pricing continues to use the Sub2API-selected public source described above.
+
+
+The v0.19 compaction detector and automatic-price scheduling reference mechanisms in Sub2API at `3a6fd1c9db07203ca308aaba69e502bc1f35b307`. They are independently implemented in Rust; no Sub2API source is copied. Compaction-boundary ownership, metadata projection and the ledger-style interface are original adaptations. Native WebSocket payloads remain unchanged; a confirmed full-window boundary may reopen the upstream connection between turns.
+
+https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/openai_compact_body_signal.go
+https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/pricing_service.go
+https://developers.openai.com/api/docs/guides/compaction
+https://developers.openai.com/api/docs/guides/websocket-mode

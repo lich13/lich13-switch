@@ -24,6 +24,7 @@ pub(super) fn decode_prefix(
         "gzip" => Box::new(flate2::read::GzDecoder::new(reader)),
         "deflate" => Box::new(flate2::read::ZlibDecoder::new(reader)),
         "zstd" => Box::new(zstd::stream::read::Decoder::new(reader)?),
+        "br" => Box::new(brotli::Decompressor::new(reader, 4096)),
         _ => return Err(io::Error::other("unsupported inspection encoding").into()),
     };
     let mut text = Vec::new();
@@ -56,6 +57,52 @@ pub struct RequestHints {
     pub model: Option<String>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(skip)]
+    pub compaction_trigger: bool,
+    #[serde(skip)]
+    pub compacted_window: Option<String>,
+}
+impl RequestHints {
+    pub fn from_value(value: serde_json::Value, projected: bool) -> Result<Self, BoxError> {
+        if !value.is_object() {
+            return Err(io::Error::other("invalid request metadata").into());
+        }
+        let mut hints = Self {
+            previous_response_id: value
+                .get("previous_response_id")
+                .filter(|v| !v.is_null())
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| io::Error::other("invalid response cursor"))
+                })
+                .transpose()?,
+            model: value
+                .get("model")
+                .filter(|v| !v.is_null())
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| io::Error::other("invalid model"))
+                })
+                .transpose()?,
+            stream: value
+                .get("stream")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            ..Default::default()
+        };
+        if let Some(input) = value.get("input").and_then(serde_json::Value::as_array) {
+            hints.compaction_trigger = input.iter().any(|v| {
+                v.get("type").and_then(serde_json::Value::as_str) == Some("compaction_trigger")
+            });
+            hints.compacted_window = input
+                .iter()
+                .rev()
+                .find_map(|v| super::compaction::fingerprint(v, projected));
+        }
+        Ok(hints)
+    }
 }
 pub struct Replay {
     payload: Payload,
@@ -152,11 +199,13 @@ impl Replay {
         let content_type = content_type.to_owned();
         tokio::task::spawn_blocking(move || {
             use std::io::Read;
-            let decoded: Box<dyn Read + Send> = match encoding.as_str() {
-                "identity" => reader,
+            let decoded: Box<dyn Read + Send> = match encoding.trim().to_ascii_lowercase().as_str()
+            {
+                "" | "identity" => reader,
                 "gzip" => Box::new(flate2::read::GzDecoder::new(reader)),
                 "deflate" => Box::new(flate2::read::ZlibDecoder::new(reader)),
                 "zstd" => Box::new(zstd::stream::read::Decoder::new(reader)?),
+                "br" => Box::new(brotli::Decompressor::new(reader, 4096)),
                 _ => return Err(io::Error::other("unsupported inspection encoding").into()),
             };
             // serde ignores unknown fields while streaming, including large input arrays.
@@ -213,7 +262,22 @@ impl Replay {
                     Ok(hints)
                 })?
             } else {
-                serde_json::from_reader(decoded)?
+                let mut decoded = decoded;
+                let mut projection = super::metadata::Projector::default();
+                let mut buffer = [0; 64 * 1024];
+                loop {
+                    let count = decoded.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    projection.feed(&buffer[..count]);
+                }
+                RequestHints::from_value(
+                    projection
+                        .finish()
+                        .ok_or_else(|| io::Error::other("invalid request metadata"))?,
+                    true,
+                )?
             };
             if hints
                 .model

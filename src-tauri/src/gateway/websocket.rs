@@ -9,7 +9,7 @@ use super::{
     routing::Requirement,
     Active, Gateway, Route,
 };
-use async_compression::tokio::bufread::{GzipDecoder, ZlibDecoder, ZstdDecoder};
+use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -27,7 +27,7 @@ use yawc::{Frame, OpCode, Options, WebSocket};
 type Failure = (u16, &'static str);
 type BoxReader = Box<dyn AsyncBufRead + Send + Unpin>;
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
-const MAX_SSE_EVENT: usize = 2 * 1024 * 1024;
+const MAX_SSE_EVENT: usize = MAX_MESSAGE;
 const KEEPALIVE: Duration = Duration::from_secs(20);
 // Internal control result, consumed before writing a close frame.
 const TURN_CANCELLED: Failure = (0, "turn cancelled before output");
@@ -209,6 +209,7 @@ struct AttemptFailure {
     capacity: bool,
     unsupported: bool,
     model_unavailable: bool,
+    context_incompatible: bool,
     model_payload: Option<Vec<u8>>,
     details: Box<crate::events::Details>,
 }
@@ -222,7 +223,9 @@ fn record_failure(
     attempt: usize,
 ) {
     use crate::events::Reason;
-    let reason = if failure.model_unavailable {
+    let reason = if failure.context_incompatible {
+        Reason::ProtocolError
+    } else if failure.model_unavailable {
         Reason::ModelUnavailable
     } else if failure.capacity {
         Reason::Capacity
@@ -240,7 +243,8 @@ fn record_failure(
     let mut details = (*failure.details).clone();
     details.phase = Some(crate::events::Phase::WsHandshake);
     details.counted_failure = Some(
-        !failure.model_unavailable
+        !failure.context_incompatible
+            && !failure.model_unavailable
             && !failure.capacity
             && !failure.unsupported
             && failure.status != Some(429)
@@ -410,6 +414,7 @@ async fn upstream_native(
             capacity: false,
             unsupported: false,
             model_unavailable: false,
+            context_incompatible: false,
             model_payload: None,
             details: Default::default(),
         })?;
@@ -429,6 +434,7 @@ async fn upstream_native(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             })?,
@@ -455,6 +461,7 @@ async fn upstream_native(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             })
@@ -466,6 +473,7 @@ async fn upstream_native(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             })
@@ -500,8 +508,11 @@ async fn upstream_native(
             retry,
             capacity,
             details: Box::new(super::upstream_error::details_http(&decoded)),
-            model_payload: model_unavailable.then_some(decoded),
+            model_payload: model_unavailable.then(|| decoded.clone()),
             model_unavailable,
+            context_incompatible: serde_json::from_slice(&decoded)
+                .ok()
+                .is_some_and(|v| super::compaction::incompatible(&v)),
             unsupported: !model_unavailable
                 && route.client_id == super::ClientId::Codex
                 && unsupported_status(status.as_u16()),
@@ -522,6 +533,7 @@ async fn upstream_native(
             capacity: false,
             unsupported: true,
             model_unavailable: false,
+            context_incompatible: false,
             model_payload: None,
             details: Default::default(),
         });
@@ -539,6 +551,7 @@ async fn upstream_native(
             capacity: false,
             unsupported: false,
             model_unavailable: false,
+            context_incompatible: false,
             model_payload: None,
             details: Default::default(),
         })?;
@@ -554,6 +567,7 @@ async fn upstream_native(
         capacity: false,
         unsupported: false,
         model_unavailable: false,
+        context_incompatible: false,
         model_payload: None,
         details: Default::default(),
     })?;
@@ -601,6 +615,7 @@ fn decoded_reader(body: Incoming, encoding: &str) -> Result<BoxReader, AttemptFa
 fn decode_reader(reader: BoxReader, encoding: &str) -> Result<BoxReader, AttemptFailure> {
     let reader: BoxReader = match encoding.trim().to_ascii_lowercase().as_str() {
         "" | "identity" => Box::new(reader),
+        "br" => Box::new(BufReader::new(BrotliDecoder::new(reader))),
         "gzip" => Box::new(BufReader::new(GzipDecoder::new(reader))),
         "deflate" => Box::new(BufReader::new(ZlibDecoder::new(reader))),
         "zstd" => Box::new(BufReader::new(ZstdDecoder::new(reader))),
@@ -611,6 +626,7 @@ fn decode_reader(reader: BoxReader, encoding: &str) -> Result<BoxReader, Attempt
                 capacity: false,
                 unsupported: true,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             })
@@ -620,18 +636,26 @@ fn decode_reader(reader: BoxReader, encoding: &str) -> Result<BoxReader, Attempt
 }
 async fn send_bridge_event(
     data: &[u8],
+    event: &str,
     sender: &mpsc::Sender<Result<Frame, Failure>>,
 ) -> Result<bool, Failure> {
     if data == b"[DONE]" {
         // A transport sentinel is not a Responses completion event.
         return Ok(true);
     }
-    if !serde_json::from_slice::<serde_json::Value>(data).is_ok_and(|v| v.is_object()) {
-        return Err((1011, "bridge returned invalid SSE JSON"));
-    }
-    let payload = std::str::from_utf8(data)
-        .map(str::to_owned)
-        .map_err(|_| (1011, "bridge returned non-UTF8 SSE JSON"))?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(data).map_err(|_| (1011, "bridge returned invalid SSE JSON"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or((1011, "bridge returned invalid SSE JSON"))?;
+    let payload = if !object.contains_key("type") && !event.is_empty() {
+        object.insert("type".into(), serde_json::Value::String(event.into()));
+        serde_json::to_string(&value).map_err(|_| (1011, "bridge event encoding failed"))?
+    } else {
+        std::str::from_utf8(data)
+            .map(str::to_owned)
+            .map_err(|_| (1011, "bridge returned non-UTF8 SSE JSON"))?
+    };
     sender
         .send(Ok(Frame::text(payload)))
         .await
@@ -641,6 +665,7 @@ async fn send_bridge_event(
 async fn bridge_events(mut reader: BoxReader, sender: mpsc::Sender<Result<Frame, Failure>>) {
     let mut line = Vec::with_capacity(256);
     let mut data = Vec::new();
+    let mut event = String::new();
     loop {
         line.clear();
         let read = bounded_line(&mut reader, &mut line).await;
@@ -650,7 +675,7 @@ async fn bridge_events(mut reader: BoxReader, sender: mpsc::Sender<Result<Frame,
         };
         if size == 0 {
             if !data.is_empty() {
-                if let Err(error) = send_bridge_event(&data, &sender).await {
+                if let Err(error) = send_bridge_event(&data, &event, &sender).await {
                     let _ = sender.send(Err(error)).await;
                 }
             }
@@ -664,9 +689,10 @@ async fn bridge_events(mut reader: BoxReader, sender: mpsc::Sender<Result<Frame,
         let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
         if trimmed.is_empty() {
             if !data.is_empty() {
-                match send_bridge_event(&data, &sender).await {
+                match send_bridge_event(&data, &event, &sender).await {
                     Ok(done) => {
                         data.clear();
+                        event.clear();
                         if done {
                             return;
                         }
@@ -678,6 +704,11 @@ async fn bridge_events(mut reader: BoxReader, sender: mpsc::Sender<Result<Frame,
                 }
             }
             continue;
+        }
+        if let Some(value) = trimmed.strip_prefix(b"event:") {
+            if value.len() <= 256 {
+                event = String::from_utf8_lossy(value).trim().to_owned();
+            }
         }
         if let Some(value) = trimmed.strip_prefix(b"data:") {
             let value = value.strip_prefix(b" ").unwrap_or(value);
@@ -727,10 +758,12 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
     let v = value(frame)?;
     let mut observation = super::protocol::Observation::default();
     observation.value(&v);
-    if !matches!(
-        observation.terminal,
-        Some(super::protocol::Terminal::Failure | super::protocol::Terminal::ModelUnavailable)
-    ) {
+    if !observation.compaction_incompatible
+        && !matches!(
+            observation.terminal,
+            Some(super::protocol::Terminal::Failure | super::protocol::Terminal::ModelUnavailable)
+        )
+    {
         return None;
     }
     let error = v
@@ -768,7 +801,10 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
         capacity,
         unsupported: false,
         model_unavailable: super::upstream_error::model_error(&v),
-        model_payload: super::upstream_error::model_error(&v).then(|| frame.payload().to_vec()),
+        context_incompatible: super::compaction::incompatible(&v),
+        model_payload: (super::upstream_error::model_error(&v)
+            || super::compaction::incompatible(&v))
+        .then(|| frame.payload().to_vec()),
         details: Box::new(super::upstream_error::details_value(&v, false)),
     })
 }
@@ -786,6 +822,7 @@ async fn upstream_bridge(
         capacity: false,
         unsupported: false,
         model_unavailable: false,
+        context_incompatible: false,
         model_payload: None,
         details: Default::default(),
     })?;
@@ -798,6 +835,7 @@ async fn upstream_bridge(
             capacity: false,
             unsupported: false,
             model_unavailable: false,
+            context_incompatible: false,
             model_payload: None,
             details: Default::default(),
         })?;
@@ -827,6 +865,7 @@ async fn upstream_bridge(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             })?,
@@ -841,7 +880,7 @@ async fn upstream_bridge(
     );
     headers.insert(
         header::ACCEPT_ENCODING,
-        header::HeaderValue::from_static("gzip, deflate, zstd"),
+        header::HeaderValue::from_static("gzip, deflate, zstd, br"),
     );
     headers.insert(
         header::CONTENT_LENGTH,
@@ -856,6 +895,7 @@ async fn upstream_bridge(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             });
@@ -867,6 +907,7 @@ async fn upstream_bridge(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             })
@@ -899,6 +940,9 @@ async fn upstream_bridge(
             model_payload: super::upstream_error::model_http(status.as_u16(), &decoded)
                 .then(|| decoded.clone()),
             model_unavailable: super::upstream_error::model_http(status.as_u16(), &decoded),
+            context_incompatible: serde_json::from_slice(&decoded)
+                .ok()
+                .is_some_and(|v| super::compaction::incompatible(&v)),
             unsupported: matches!(status.as_u16(), 404 | 405)
                 && !super::upstream_error::model_http(status.as_u16(), &decoded),
         });
@@ -919,6 +963,7 @@ async fn upstream_bridge(
             capacity: false,
             unsupported: true,
             model_unavailable: false,
+            context_incompatible: false,
             model_payload: None,
             details: Default::default(),
         });
@@ -948,6 +993,7 @@ async fn upstream_bridge(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             });
@@ -959,6 +1005,7 @@ async fn upstream_bridge(
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
+                context_incompatible: false,
                 model_payload: None,
                 details: Default::default(),
             });
@@ -1015,21 +1062,57 @@ async fn session(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<(), Failure> {
+    let mut next_turn = None;
+    let mut current_ids = ids;
+    let mut current_routes = routes;
+    let mut current_cfg = cfg.clone();
     loop {
         match session_once(
             g,
             client,
-            cfg,
+            &current_cfg,
             manual,
-            ids.clone(),
-            routes.clone(),
+            current_ids.clone(),
+            current_routes.clone(),
             headers.clone(),
             uri.clone(),
+            &mut next_turn,
         )
         .await
         {
+            Err((1999, "compaction handoff")) => {
+                current_cfg = g.0.inner.lock().unwrap().store.settings.clone();
+                current_ids = g.routing_ids(None);
+                current_routes = current_ids
+                    .iter()
+                    .filter_map(|id| g.route(id).map(|route| (id.clone(), route)))
+                    .collect();
+            }
             Err(TURN_CANCELLED) => cancellation(client).await?,
             result => return result,
+        }
+    }
+}
+async fn drain_completed(
+    upstream: &mut Upstream,
+    protocol: &mut Option<super::protocol::Protocol>,
+) {
+    let Some(protocol) = protocol.as_mut().filter(|p| p.succeeded()) else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut bytes = 0usize;
+    while bytes < 256 * 1024 {
+        let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, next_upstream(upstream)).await
+        else {
+            break;
+        };
+        if frame.opcode() == OpCode::Close {
+            break;
+        }
+        bytes = bytes.saturating_add(frame.payload().len());
+        if let Some(value) = value(&frame) {
+            protocol.value(&value);
         }
     }
 }
@@ -1126,27 +1209,32 @@ async fn session_once(
     mut routes: HashMap<String, Route>,
     headers: HeaderMap,
     uri: Uri,
+    next_turn: &mut Option<Frame>,
 ) -> Result<(), Failure> {
     let first_deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
-    let first = loop {
-        let frame = tokio::time::timeout_at(first_deadline, client.incoming.recv())
-            .await
-            .map_err(|_| (1008, "missing first response.create"))?
-            .ok_or((1000, "client closed"))?;
-        if frame.opcode() == OpCode::Close {
-            return Ok(());
+    let first = if let Some(frame) = next_turn.take() {
+        frame
+    } else {
+        loop {
+            let frame = tokio::time::timeout_at(first_deadline, client.incoming.recv())
+                .await
+                .map_err(|_| (1008, "missing first response.create"))?
+                .ok_or((1000, "client closed"))?;
+            if frame.opcode() == OpCode::Close {
+                return Ok(());
+            }
+            if frame.opcode() == OpCode::Ping {
+                client.send(Frame::pong(frame.payload().to_vec())).await?;
+                continue;
+            }
+            if frame.opcode() == OpCode::Pong {
+                continue;
+            }
+            if !creates(&frame) {
+                return Err((1008, "expected response.create"));
+            }
+            break frame;
         }
-        if frame.opcode() == OpCode::Ping {
-            client.send(Frame::pong(frame.payload().to_vec())).await?;
-            continue;
-        }
-        if frame.opcode() == OpCode::Pong {
-            continue;
-        }
-        if !creates(&frame) {
-            return Err((1008, "expected response.create"));
-        }
-        break frame;
     };
     let mut pinned = manual.then(|| ids.first().cloned()).flatten();
     let mut unknown_affinity = false;
@@ -1170,6 +1258,44 @@ async fn session_once(
     }
     let mut current_model = turn_model(g, &first, None, None)?;
     let requirement = Requirement::model(current_model.as_deref());
+    let first_hints =
+        value(&first).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+    let conversation = super::compaction::session(&headers);
+    let mut ownership = if g.client_id() == super::ClientId::Codex
+        && !manual
+        && cfg.handoff_after_compaction
+        && !unknown_affinity
+    {
+        let eligible: Vec<_> = ids
+            .iter()
+            .filter(|id| {
+                routes
+                    .get(*id)
+                    .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
+            })
+            .cloned()
+            .collect();
+        if let Some(session) = conversation.clone().filter(|_| !eligible.is_empty()) {
+            Some(
+                g.0.compaction
+                    .prepare(
+                        session,
+                        first_hints
+                            .as_ref()
+                            .and_then(|h| h.compacted_window.as_deref()),
+                        first_hints.as_ref().is_some_and(|h| {
+                            h.previous_response_id.is_none() && !h.compaction_trigger
+                        }),
+                        &eligible,
+                    )
+                    .ok_or((1013, "CONVERSATION_OWNERSHIP"))?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut budget = Budget::new(cfg.queue_seconds);
     if pinned.is_some() || unknown_affinity {
         budget.pin_provider();
@@ -1185,7 +1311,14 @@ async fn session_once(
     let mut previous_provider: Option<String> = None;
     let mut unsupported_seen = false;
     let mut non_unsupported_failure = false;
-    let mut usage_trace = g.usage_trace(current_model.as_deref());
+    let mut usage_trace = g.usage_operation(
+        current_model.as_deref(),
+        if first_hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+            crate::usage::model::Operation::Compaction
+        } else {
+            crate::usage::model::Operation::Model
+        },
+    );
     let (mut upstream, admission, initial_protocol) = loop {
         if ordinary_attempts > cfg.max_retries
             || (unknown_affinity && !capacity_protected && attempts > 0)
@@ -1254,10 +1387,25 @@ async fn session_once(
             capacity_sources.clear();
             continue;
         }
-        let candidates: Vec<_> = ids
+        let mut candidates: Vec<_> = ids
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
+        if let Some(owner) = ownership
+            .as_ref()
+            .filter(|lease| !lease.handoff)
+            .and_then(|lease| lease.owner.as_deref())
+        {
+            if let Some(route) = candidates
+                .iter()
+                .find(|route| {
+                    route.provider.id == owner && route.provider_circuit.health().available
+                })
+                .cloned()
+            {
+                candidates = vec![route];
+            }
+        }
         let mut admission = match take_slot(
             g,
             client,
@@ -1299,6 +1447,7 @@ async fn session_once(
             .is_some_and(|id| id != admission.route.provider.id);
         previous_provider = Some(admission.route.provider.id.clone());
         let mut attempt_protocol = super::protocol::Protocol::new(true);
+        attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
         let native_mode = uses_native_websocket(
             admission.route.client_id,
             admission.route.provider.supports_websocket,
@@ -1349,6 +1498,31 @@ async fn session_once(
                         "NETWORK"
                     },
                 );
+                if failure.context_incompatible {
+                    record_failure(
+                        &mut admission.permits,
+                        g,
+                        &admission.route,
+                        current_model.as_deref(),
+                        &failure,
+                        crate::events::Action::TryingNext,
+                        attempts,
+                    );
+                    admission.permits.neutral(cfg);
+                    if let Some(owner) = ownership
+                        .as_ref()
+                        .filter(|lease| lease.handoff)
+                        .and_then(|lease| lease.owner.as_ref())
+                        .filter(|id| ids.contains(id))
+                    {
+                        ids = vec![owner.clone()];
+                        continue;
+                    }
+                    if let Some(payload) = failure.model_payload {
+                        client.send(Frame::text(payload)).await?;
+                    }
+                    return Err((1008, "COMPACTION_CONTEXT_UNSUPPORTED"));
+                }
                 if !failure.model_unavailable {
                     last_model_payload = None;
                 }
@@ -1421,10 +1595,13 @@ async fn session_once(
             }
         }
     };
-    let route = admission.route.clone();
+    let mut route = admission.route.clone();
     let mut turn = Some(admission);
     let mut replay_frame = first.clone();
     let mut retry_pending = false;
+    let mut retry_immediately = false;
+    let mut tail_deadline = None;
+    let mut previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)> = None;
     let mut protocol = Some(initial_protocol);
     let mut pending: Option<Frame> = None;
     let mut confirmed_model: Option<String> = None;
@@ -1456,12 +1633,15 @@ async fn session_once(
     }
     loop {
         if retry_pending {
-            let delay = if retry_capacity {
+            let delay = if retry_immediately {
+                0
+            } else if retry_capacity {
                 cfg.capacity_retry_seconds
             } else {
                 cfg.websocket_retry_seconds
             }
             .max(route.provider_circuit.health().retry_in);
+            retry_immediately = false;
             let waited = while_connecting(
                 client,
                 g.0.admission.wait_websocket(
@@ -1517,6 +1697,7 @@ async fn session_once(
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
+            next.attach_ownership(ownership.clone(), &route.provider.id);
             if let Some(trace) = &usage_trace {
                 next.attach_usage(trace.attempt(
                     &route.provider.id,
@@ -1657,6 +1838,12 @@ async fn session_once(
         }
         if turn.is_none() {
             if let Some(frame) = pending.take() {
+                if let Some(previous) = protocol.take().filter(|p| p.succeeded()) {
+                    previous_usage = Some((
+                        previous,
+                        tokio::time::Instant::now() + Duration::from_secs(2),
+                    ));
+                }
                 let model = turn_model(
                     g,
                     &frame,
@@ -1664,6 +1851,60 @@ async fn session_once(
                     Some(&route.provider.id),
                 )?;
                 let requirement = Requirement::model(model.as_deref());
+                let hints = value(&frame)
+                    .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+                let enabled = {
+                    let state = g.0.inner.lock().unwrap();
+                    state.store.settings.handoff_after_compaction && state.store.mode == "auto"
+                };
+                if g.client_id() == super::ClientId::Codex && !manual && enabled {
+                    let latest: Vec<_> = g
+                        .routing_ids(None)
+                        .into_iter()
+                        .filter_map(|id| g.route(&id))
+                        .filter(|route| {
+                            requirement.allows(route.provider.allowed_models.as_deref())
+                        })
+                        .collect();
+                    let safe_window = hints
+                        .as_ref()
+                        .is_some_and(|h| h.previous_response_id.is_none() && !h.compaction_trigger);
+                    let boundary = safe_window
+                        && conversation.as_ref().is_some_and(|session| {
+                            g.0.compaction.boundary_matches(
+                                session,
+                                hints.as_ref().and_then(|h| h.compacted_window.as_deref()),
+                            )
+                        });
+                    if boundary
+                        && latest
+                            .first()
+                            .is_some_and(|next| next.provider.id != route.provider.id)
+                    {
+                        *next_turn = Some(frame);
+                        return Err((1999, "compaction handoff"));
+                    }
+                    let eligible: Vec<_> = latest.iter().map(|r| r.provider.id.clone()).collect();
+                    ownership = if let Some(session) =
+                        conversation.clone().filter(|_| !eligible.is_empty())
+                    {
+                        Some(
+                            g.0.compaction
+                                .prepare(
+                                    session,
+                                    hints.as_ref().and_then(|h| h.compacted_window.as_deref()),
+                                    safe_window,
+                                    &eligible,
+                                )
+                                .ok_or((1013, "CONVERSATION_OWNERSHIP"))?,
+                        )
+                    } else {
+                        None
+                    };
+                } else {
+                    ownership = None;
+                }
+                tail_deadline = None;
                 let mut budget = Budget::new(cfg.queue_seconds);
                 let acquired = take_slot(
                     g,
@@ -1696,8 +1937,16 @@ async fn session_once(
                 retry_capacity = false;
                 terminal_error = false;
                 replay_frame = frame.clone();
-                usage_trace = g.usage_trace(current_model.as_deref());
+                usage_trace = g.usage_operation(
+                    current_model.as_deref(),
+                    if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+                        crate::usage::model::Operation::Compaction
+                    } else {
+                        crate::usage::model::Operation::Model
+                    },
+                );
                 let mut next_protocol = super::protocol::Protocol::new(true);
+                next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
                 if let Some(trace) = &usage_trace {
                     next_protocol.attach_usage(trace.attempt(
                         &route.provider.id,
@@ -1888,16 +2137,25 @@ async fn session_once(
         }
         tokio::select! {
             biased;
-            event = next_upstream(&mut upstream), if turn.is_some() || matches!(upstream, Upstream::Native(_)) => {
+            _ = async { if let Some((_, at)) = &previous_usage { tokio::time::sleep_until(*at).await } else { std::future::pending::<()>().await } } => { previous_usage = None; },
+            _ = async { if let Some(at) = tail_deadline { tokio::time::sleep_until(at).await } else { std::future::pending::<()>().await } }, if turn.is_none() => {
+                protocol = None;
+                usage_trace = None;
+                tail_deadline = None;
+                if let Upstream::Bridge(active) = &mut upstream { active.take(); }
+            },
+            event = next_upstream(&mut upstream), if turn.is_some() || protocol.is_some() || matches!(upstream, Upstream::Native(_)) => {
                 let disconnected = match &event { None => true, Some(Err(_)) => true, Some(Ok(frame)) => frame.opcode() == OpCode::Close };
                 if disconnected {
                     let close = event.as_ref().and_then(|v| v.as_ref().ok()).filter(|f| f.opcode() == OpCode::Close);
                     // Only a successfully settled/cancelled turn may treat this
                     // as an idle disconnect. An error already sent downstream
                     // must retain the upstream close without a second failure.
-                    if turn.is_none() && !terminal_error && matches!(upstream, Upstream::Native(_)) && route.client_id == super::ClientId::Codex {
-                        upstream = Upstream::Disconnected;
+                    if turn.is_none() && !terminal_error && route.client_id == super::ClientId::Codex {
+                        upstream = if matches!(upstream, Upstream::Native(_)) { Upstream::Disconnected } else { Upstream::Bridge(None) };
                         protocol = None;
+                        usage_trace = None;
+                        tail_deadline = None;
                         continue;
                     }
                     let native = matches!(upstream, Upstream::Native(_));
@@ -1910,6 +2168,35 @@ async fn session_once(
                     return Err((1013, "upstream disconnected before completion"));
                 }
                 let frame = event.unwrap()?;
+                if let Some(v) = value(&frame) {
+                    let mut observed = super::protocol::Observation::default();
+                    observed.value(&v);
+                    let usage_only = matches!(v.get("type").and_then(|v| v.as_str()), Some("usage" | "usage.updated" | "response.usage" | "response.usage.updated"));
+                    let belongs_to_previous = protocol.as_ref().and_then(|u| u.observation.response_id.as_ref()).map_or(usage_only, |id| Some(id) != observed.response_id.as_ref());
+                    if let Some((previous, _)) = previous_usage.as_mut().filter(|(previous, _)| belongs_to_previous && observed.response_id.is_some() && previous.observation.response_id == observed.response_id) {
+                        previous.value(&v);
+                        client.send(frame).await?;
+                        continue;
+                    }
+                }
+                if turn.is_some() && !received && ownership.as_ref().is_some_and(|lease| lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)) && value(&frame).is_some_and(|v| super::compaction::incompatible(&v)) {
+                    if let Some(old) = ownership.as_ref().and_then(|lease| lease.owner.as_ref()).and_then(|id| g.route(id)).filter(|old| old.provider.queued && Requirement::model(current_model.as_deref()).allows(old.provider.allowed_models.as_deref())) {
+                        if ordinary_attempts <= cfg.max_retries {
+                            if let Some(mut admission) = turn.take() {
+                                let details = value(&frame).map(|v| super::upstream_error::details_value(&v, false)).unwrap_or_default();
+                                admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::TryingNext, Some(101), attempts, crate::events::Details { counted_failure: Some(false), ..details });
+                                admission.permits.neutral(cfg);
+                            }
+                            if let Some(mut u) = protocol.take() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), "CLIENT_ERROR"); }
+                            route = old;
+                            upstream = Upstream::Disconnected;
+                            retry_pending = true;
+                            retry_immediately = true;
+                            retry_capacity = false;
+                            continue;
+                        }
+                    }
+                }
                 // After binding, capacity retries stay on this provider and
                 // reuse the original turn only before any business event is sent.
                 if route.client_id == super::ClientId::Codex && turn.is_some() && !received {
@@ -1933,35 +2220,36 @@ async fn session_once(
                     if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
                     if protocol.as_ref().is_some_and(|u| u.terminal().is_some()) || matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error") {
                         if let Some(mut admission) = turn.take() {
-                            if let Some(mut u)=protocol.take() {
+                            if let Some(u)=protocol.as_mut() {
                                 u.finish(Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), "UPSTREAM_ERROR");
                                 terminal_error = !matches!(u.terminal(), Some(super::protocol::Terminal::Success | super::protocol::Terminal::Limited | super::protocol::Terminal::Cancelled));
                                 if route.client_id == super::ClientId::Codex && first_event_failure(&frame).is_some_and(|failure| failure.capacity) {
                                     if let Some(failure) = first_event_failure(&frame) { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts); }
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
-                                    forward::observe_protocol(&u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), attempts);
+                                    forward::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), attempts);
                                 }
                                 if u.succeeded() { g.successful_response(&route.provider); }
                             }
 
                         }
-                        usage_trace = None;
-                        if let Upstream::Bridge(active) = &mut upstream {
-                            active.take();
-                        }
+                        if tail_deadline.is_none() { tail_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(2)); }
                     }
                 }
-                client.send(frame).await?;
+                if let Err(error) = client.send(frame).await {
+                    if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; }
+                    return Err(error);
+                }
             },
             frame = client.incoming.recv() => {
-                let Some(frame) = frame else { return Ok(()); };
+                let Some(frame) = frame else { if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; } return Ok(()); };
                 let closing = frame.opcode() == OpCode::Close;
                 if frame.opcode() == OpCode::Ping && !matches!(upstream, Upstream::Native(_)) {
                     client.send(Frame::pong(frame.payload().to_vec())).await?;
                 } else if frame.opcode() == OpCode::Pong && !matches!(upstream, Upstream::Native(_)) {
                     continue;
                 } else if closing {
+                    if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; return Ok(()); }
                     if let Upstream::Native(peer) = &upstream { peer.send(frame.clone()).await?; }
                     if let Upstream::Bridge(Some(bridge)) = &upstream {
                         bridge.cancel();
@@ -2007,7 +2295,7 @@ async fn session_once(
                     return Err(e);
                 }
             },
-            _ = client.closed.changed() => return Ok(()),
+            _ = client.closed.changed() => { if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; } return Ok(()); },
             _ = tokio::time::sleep_until(deadline), if turn.is_some() => {
                 let native = matches!(upstream, Upstream::Native(_));
                 retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if received { "STREAM_TIMEOUT" } else { "FIRST_BYTE_TIMEOUT" });

@@ -783,13 +783,6 @@ fn check_source_totals(store: &Store) {
             "{source:?}"
         );
         assert_eq!(decimal(&d.totals.cost), decimal(cost), "{source:?}");
-        let mut heatmap = Totals::default();
-        for point in store.heatmap(&selected).unwrap() {
-            heatmap.add(&point.totals);
-        }
-        assert_eq!(heatmap.requests, requests, "{source:?}");
-        assert_eq!(heatmap.tokens, d.totals.tokens, "{source:?}");
-        assert_eq!(decimal(&heatmap.cost), decimal(cost), "{source:?}");
     }
 }
 
@@ -915,7 +908,7 @@ fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempt
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 }
 
 #[test]
