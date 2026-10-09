@@ -423,6 +423,7 @@ async fn bridge_capacity_wait_retries_sole_provider_without_opening() {
 
 #[tokio::test]
 async fn native_capacity_is_turn_local_retryable_and_post_output_is_never_replayed() {
+    const CREATED: &str = r#"{"type":"response.created","response":{"id":"already-output"}}"#;
     for (warmup, output, code) in [
         (false, false, "server_is_overloaded"),
         (true, false, "slow_down"),
@@ -430,13 +431,17 @@ async fn native_capacity_is_turn_local_retryable_and_post_output_is_never_replay
         (false, true, "server_is_overloaded"),
         (false, false, "cyber_policy"),
     ] {
+        let capacity = !output && code != "cyber_policy";
         let error = format!(r#"{{"type":"error","error":{{"code":"{code}"}}}}"#);
         let upstream_error = error.clone();
         let hits = Arc::new(AtomicUsize::new(0));
         let count = hits.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observed = seen.clone();
         let port = server(move |mut request| {
             let error = upstream_error.clone();
             let count = count.clone();
+            let observed = observed.clone();
             async move {
                 let (response, upgrade) = yawc::WebSocket::upgrade(&mut request).unwrap();
                 tokio::spawn(async move {
@@ -445,17 +450,18 @@ async fn native_capacity_is_turn_local_retryable_and_post_output_is_never_replay
                         if frame.opcode().is_control() {
                             continue;
                         }
+                        observed.lock().unwrap().push(frame.payload().to_vec());
                         let n = count.fetch_add(1, Ordering::SeqCst);
                         if warmup && n == 0 {
                             ws.send(yawc::Frame::text(COMPLETED)).await.unwrap();
                             continue;
                         }
+                        if capacity && n >= usize::from(warmup) + 3 {
+                            ws.send(yawc::Frame::text(COMPLETED)).await.unwrap();
+                            continue;
+                        }
                         if output {
-                            ws.send(yawc::Frame::text(
-                                r#"{"type":"response.created","response":{"id":"already-output"}}"#,
-                            ))
-                            .await
-                            .unwrap();
+                            ws.send(yawc::Frame::text(CREATED)).await.unwrap();
                         }
                         ws.send(yawc::Frame::text(error.clone())).await.unwrap();
                     }
@@ -466,26 +472,60 @@ async fn native_capacity_is_turn_local_retryable_and_post_output_is_never_replay
         .await;
         let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
         automatic(&g, &t);
+        let mut settings = g.view().settings;
+        settings.max_retries = 0;
+        update(&g, &t, Edit::Settings { settings });
+        update(
+            &g,
+            &t,
+            Edit::RpmProvider {
+                id: g.view().providers[0].id.clone(),
+                max_rpm: 20,
+            },
+        );
         start(&g, &t).await;
         let mut ws = concurrency::responses_client(&g).await;
         ws.send(yawc::Frame::text(CREATE)).await.unwrap();
         if warmup {
             assert_eq!(next(&mut ws).await.payload().as_ref(), COMPLETED.as_bytes());
             settled(|| g.view().providers[0].active_requests == 0).await;
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            assert_eq!(g.view().providers[0].rpm_used, 1);
+            assert_eq!(g.view().providers[0].health.failures, 0);
+            assert!(g.view().websocket_retries.is_empty());
             ws.send(yawc::Frame::text(CREATE)).await.unwrap();
         }
         if output {
-            assert!(next(&mut ws).await.as_str().contains("response.created"));
+            assert_eq!(next(&mut ws).await.payload().as_ref(), CREATED.as_bytes());
         }
-        let received = next(&mut ws).await;
-        if output || code == "cyber_policy" {
-            assert_eq!(received.payload().as_ref(), error.as_bytes());
+        if capacity {
+            settled(|| !g.view().websocket_retries.is_empty()).await;
+            let view = g.view();
+            assert_eq!(view.providers[0].active_requests, 0, "{code}");
+            assert_eq!(view.providers[0].health.failures, 0, "{code}");
+            let received = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                .await
+                .expect("capacity retries did not complete within ten seconds")
+                .expect("downstream closed before capacity recovery");
+            assert_eq!(received.payload().as_ref(), COMPLETED.as_bytes(), "{code}");
         } else {
-            assert_eq!(received.close_code().map(u16::from), Some(1013));
+            assert_eq!(next(&mut ws).await.payload().as_ref(), error.as_bytes());
         }
         settled(|| g.view().providers[0].active_requests == 0).await;
-        assert_eq!(hits.load(Ordering::SeqCst), if warmup { 2 } else { 1 });
-        assert_eq!(g.view().providers[0].health.failures, 0);
+        let expected_requests = usize::from(warmup) + if capacity { 4 } else { 1 };
+        assert_eq!(hits.load(Ordering::SeqCst), expected_requests, "{code}");
+        let view = g.view();
+        assert_eq!(view.providers[0].rpm_used, expected_requests, "{code}");
+        assert_eq!(view.providers[0].active_requests, 0, "{code}");
+        assert_eq!(view.providers[0].health.failures, 0, "{code}");
+        assert!(view.websocket_retries.is_empty(), "{code}");
+        {
+            let requests = seen.lock().unwrap();
+            assert_eq!(requests.len(), expected_requests, "{code}");
+            for request in requests.iter() {
+                assert_eq!(request.as_slice(), CREATE.as_bytes(), "{code}");
+            }
+        }
         drop(ws);
         g.stop().await.unwrap();
     }

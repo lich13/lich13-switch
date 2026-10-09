@@ -42,6 +42,24 @@ pub enum Reason {
     ProtocolError,
 }
 impl Reason {
+    pub fn notifiable(self, action: Action) -> bool {
+        match self {
+            Self::ModelUnavailable
+            | Self::Authentication
+            | Self::CircuitOpen
+            | Self::FailoverExhausted
+            | Self::ConfigConflict
+            | Self::StartupRecovery
+            | Self::AccountSync => true,
+            Self::Network | Self::UpstreamService | Self::ProtocolError => {
+                matches!(action, Action::Returned | Action::NotRetried)
+            }
+            Self::RateLimit | Self::Capacity => {
+                matches!(action, Action::Returned | Action::NotRetried)
+            }
+            Self::Recovered | Self::Failover => false,
+        }
+    }
     pub fn text(self) -> &'static str {
         match self {
             Self::ModelUnavailable => "指定模型不存在或无权使用",
@@ -398,7 +416,7 @@ impl Service {
                             })
                             .map(|cause| cause.id.clone());
                     }
-                    notify = !matches!(r.reason, Reason::Recovered | Reason::Failover);
+                    notify = r.reason.notifiable(r.action);
                     if let Some(old) =
                         journal.records.iter_mut().rev().find(|old| {
                             old.same(&r) && r.last_at.saturating_sub(old.first_at) < MERGE

@@ -1811,6 +1811,17 @@ select:focus-visible {
   gap: 7px;
   font-size: 13px;
 }
+.provider-settings > label.settings-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+.provider-settings > label.settings-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex: 0 0 auto;
+}
 .provider-settings input[type="number"],
 .provider-settings select {
   width: 100%;

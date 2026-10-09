@@ -161,8 +161,9 @@ describe("gateway controls", () => {
       expect(mock.command).toHaveBeenCalledWith("update_gateway", {
         clientId: "codex",
         edit: {
-          op: "websocketProvider",
+          op: "policyProvider",
           id: state.providers[0].id,
+          allowedModels: null,
           supportsWebsocket: true,
         },
         expectedRevision: state.revision,
@@ -315,7 +316,6 @@ it("keeps model choices and manual entries when discovery fails and events refre
       name: "供应商设置",
     }),
   );
-  await user.click(screen.getByRole("button", { name: /^模型白名单/ }));
   await user.click(await screen.findByRole("checkbox", { name: "gpt-A" }));
   await user.type(
     screen.getByRole("textbox", { name: "手动添加模型 ID" }),
@@ -333,7 +333,8 @@ it("keeps model choices and manual entries when discovery fails and events refre
   expect(screen.getByRole("checkbox", { name: "custom-model" })).toBeChecked();
   discoveryFailed = true;
   await user.click(screen.getByRole("button", { name: "刷新模型列表" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent(
+  const dialog = screen.getByRole("dialog", { name: state.providers[0].name });
+  expect(await within(dialog).findByRole("status")).toHaveTextContent(
     "模型列表读取失败",
   );
   expect(screen.getByRole("checkbox", { name: "gpt-A" })).toBeChecked();
@@ -344,9 +345,10 @@ it("keeps model choices and manual entries when discovery fails and events refre
   expect(mock.command).toHaveBeenCalledWith("update_gateway", {
     clientId: "codex",
     edit: {
-      op: "modelsProvider",
+      op: "policyProvider",
       id: "primary",
       allowedModels: ["gpt-A", "custom-model"],
+      supportsWebsocket: state.providers[0].supportsWebsocket,
     },
     expectedRevision: state.revision,
   });

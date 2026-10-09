@@ -14,6 +14,7 @@ export type Account = {
   email: string | null;
   current: boolean;
   updatedAt: number;
+  credentialRevision?: string;
 };
 export type ViewState = {
   accounts: Account[];
@@ -60,6 +61,7 @@ export type LoginState = {
   code: string | null;
   message: string;
   callbackReady: boolean;
+  targetAccountId?: string | null;
 };
 export type AppError = {
   code: string;

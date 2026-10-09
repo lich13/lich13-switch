@@ -605,12 +605,22 @@ fn start_login(
     app: tauri::AppHandle,
     r: tauri::State<'_, Arc<Runtime>>,
     mode: String,
+    target_account_id: Option<String>,
+    expected_credential_revision: Option<String>,
 ) -> Result<login::LoginState> {
     if !["browser", "device"].contains(&mode.as_str()) {
         return Err(AppError::new("LOGIN_MODE", "登录方式无效"));
     }
     let prefs = lock(&r.core)?.preferences();
     let cli = login::resolve_cli(&prefs.cli_path)?;
+    let target = match target_account_id.as_deref() {
+        Some(id) if mode == "device" => Some(lock(&r.core)?.login_target(
+            id,
+            expected_credential_revision.as_deref().unwrap_or_default(),
+        )?),
+        Some(_) => return Err(AppError::new("LOGIN_MODE", "指定账号刷新请使用设备码登录")),
+        None => None,
+    };
     let mut session = lock(&r.login)?;
     if login_active(&session.state) {
         return Err(AppError::new("LOGIN_BUSY", "已有登录正在进行"));
@@ -625,6 +635,7 @@ fn start_login(
         message: "正在启动官方登录…".into(),
         callback_ready: false,
         callback_port: None,
+        target_account_id: target_account_id.clone(),
         ..Default::default()
     };
     let initial = session.state.clone();
@@ -636,10 +647,11 @@ fn start_login(
         tokio::pin!(task);
         let result = loop {
             tokio::select! {
-                Some(state) = events.recv() => {
+                Some(mut state) = events.recv() => {
                     if let Ok(mut s) = runtime.login.lock() {
                         // Buffered CLI prompts must not revive a cancelled session.
                         if s.cancel.is_some() {
+                            state.target_account_id = target_account_id.clone();
                             s.state = state.clone();
                             let _ = app.emit("login-state", state);
                         }
@@ -648,12 +660,23 @@ fn start_login(
                 result = &mut task => break result,
             }
         };
-        let final_state = match result {
-            Ok(Some(raw)) => match lock(&runtime.core).and_then(|mut c| c.complete_login(&raw)) {
+        let mut final_state = match result {
+            Ok(Some(raw)) => match lock(&runtime.login).and_then(|s| {
+                if s.cancel.is_none() {
+                    return Err(AppError::new("LOGIN_CANCELLED", "登录已取消"));
+                }
+                let mut c = lock(&runtime.core)?;
+                match target.as_ref() {
+                    Some(target) => c.complete_target_login(&raw, target),
+                    None => c.complete_login(&raw),
+                }
+            }) {
                 Ok(updated) => login::LoginState {
                     phase: "success".into(),
                     mode: mode.clone(),
-                    message: if updated {
+                    message: if target.is_some() {
+                        "指定账号凭据已更新"
+                    } else if updated {
                         "当前账号凭据已更新"
                     } else {
                         "账号已添加，选择后即可切换"
@@ -681,6 +704,7 @@ fn start_login(
                 ..Default::default()
             },
         };
+        final_state.target_account_id = target_account_id;
         if let Ok(mut s) = runtime.login.lock() {
             s.state = final_state.clone();
             s.cancel = None;

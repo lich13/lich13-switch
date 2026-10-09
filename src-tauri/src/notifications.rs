@@ -11,6 +11,9 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 mod delivery;
 mod native;
+#[cfg(test)]
+#[path = "events_v017_tests.rs"]
+mod v017_tests;
 use native::permission;
 static ASKING: AtomicBool = AtomicBool::new(false);
 static DELIVERY: Mutex<delivery::Status> = Mutex::new(delivery::Status::Idle);

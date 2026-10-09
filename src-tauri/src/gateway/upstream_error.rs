@@ -150,6 +150,12 @@ fn is_model(error: &Value) -> bool {
 pub fn model_error(value: &Value) -> bool {
     envelope(value, false, 0).is_some_and(is_model)
 }
+pub fn temporary_capacity_event(value: &Value) -> bool {
+    envelope(value, false, 0).is_some_and(|error| {
+        !strings(error).any(|s| permanent_rejection(s.as_bytes()))
+            && strings(error).any(capacity_message)
+    })
+}
 pub fn model_http(status: u16, bytes: &[u8]) -> bool {
     if status < 400 || status == 429 || bytes.len() > LIMIT {
         return false;
@@ -192,4 +198,27 @@ pub fn details_http(bytes: &[u8]) -> Details {
             ..Default::default()
         },
     }
+}
+/// Explicit billing/account denials cannot recover by retrying every minute.
+/// Status 429 alone is deliberately insufficient to classify a permanent denial.
+pub(super) fn permanent_rejection(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(&body[..body.len().min(128 * 1024)]).to_ascii_lowercase();
+    [
+        "insufficient_quota",
+        "insufficient_balance",
+        "credit_balance_too_low",
+        "billing_hard_limit_reached",
+        "account_disabled",
+        "account_deactivated",
+        "insufficient credits",
+        "insufficient balance",
+        "credit balance is too low",
+        "account has been disabled",
+        "余额不足",
+        "余额已耗尽",
+        "账号已禁用",
+        "账户已禁用",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }

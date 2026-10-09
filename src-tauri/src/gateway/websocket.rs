@@ -748,19 +748,20 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
         .and_then(|v| v.as_u64())
         .and_then(|v| u16::try_from(v).ok())
         .unwrap_or(502);
-    let capacity = matches!(
-        code,
-        "rate_limit_exceeded"
-            | "rate_limit_error"
-            | "overloaded_error"
-            | "model_capacity_exceeded"
-            | "server_is_overloaded"
-            | "slow_down"
-            | "usage_limit_reached"
-    ) || forward::capacity_message(
-        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-        frame.payload(),
-    );
+    let capacity = !super::upstream_error::permanent_rejection(frame.payload())
+        && (matches!(
+            code,
+            "rate_limit_exceeded"
+                | "rate_limit_error"
+                | "overloaded_error"
+                | "model_capacity_exceeded"
+                | "server_is_overloaded"
+                | "slow_down"
+                | "usage_limit_reached"
+        ) || forward::capacity_message(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            frame.payload(),
+        ));
     Some(AttemptFailure {
         status: Some(101),
         retry: None,
@@ -884,13 +885,10 @@ async fn upstream_bridge(
             .and_then(|h| h.to_str().ok())
             .unwrap_or("identity")
             .to_owned();
-        let prefix = if status == StatusCode::TOO_MANY_REQUESTS {
-            Vec::new()
-        } else {
+        let prefix =
             tokio::time::timeout_at(deadline, response_prefix(response.into_body(), 128 * 1024))
                 .await
-                .unwrap_or_default()
-        };
+                .unwrap_or_default();
         let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
         return Err(AttemptFailure {
             status: Some(status.as_u16()),
@@ -1047,6 +1045,7 @@ fn disconnect_turn(
     protocol: &mut Option<super::protocol::Protocol>,
     received: bool,
     attempts: usize,
+    ordinary_attempts: usize,
     can_replay: bool,
     close: Option<&Frame>,
     phase: crate::events::Phase,
@@ -1064,7 +1063,7 @@ fn disconnect_turn(
     let retry = route.client_id == super::ClientId::Codex
         && !received
         && can_replay
-        && attempts <= cfg.max_retries
+        && ordinary_attempts <= cfg.max_retries
         && transport;
     let mut details = observed
         .as_ref()
@@ -1172,7 +1171,13 @@ async fn session_once(
     let mut current_model = turn_model(g, &first, None, None)?;
     let requirement = Requirement::model(current_model.as_deref());
     let mut budget = Budget::new(cfg.queue_seconds);
-    let mut attempts = 0;
+    if pinned.is_some() || unknown_affinity {
+        budget.pin_provider();
+    }
+    let mut attempts = 0usize;
+    let mut ordinary_attempts = 0usize;
+    let mut capacity_protected = false;
+    let mut retry_capacity = false;
     let mut capacity_pending = false;
     let mut capacity_retry_after: Option<Duration> = None;
     let mut capacity_sources = Vec::new();
@@ -1182,14 +1187,16 @@ async fn session_once(
     let mut non_unsupported_failure = false;
     let mut usage_trace = g.usage_trace(current_model.as_deref());
     let (mut upstream, admission, initial_protocol) = loop {
-        if attempts > cfg.max_retries || (unknown_affinity && attempts > 0) {
+        if ordinary_attempts > cfg.max_retries
+            || (unknown_affinity && !capacity_protected && attempts > 0)
+        {
             g.record(
-                None,
+                previous_provider.as_deref(),
                 current_model.as_deref(),
                 crate::events::Reason::FailoverExhausted,
                 crate::events::Action::Returned,
                 None,
-                Some(attempts as u32),
+                Some(attempts.min(u32::MAX as usize) as u32),
             );
             if let Some(payload) = last_model_payload.take() {
                 client.send(Frame::text(payload)).await?;
@@ -1204,12 +1211,12 @@ async fn session_once(
         if ids.is_empty() {
             if !capacity_pending {
                 g.record(
-                    None,
+                    previous_provider.as_deref(),
                     current_model.as_deref(),
                     crate::events::Reason::FailoverExhausted,
                     crate::events::Action::Returned,
                     None,
-                    Some(attempts as u32),
+                    Some(attempts.min(u32::MAX as usize) as u32),
                 );
                 if let Some(payload) = last_model_payload.take() {
                     client.send(Frame::text(payload)).await?;
@@ -1239,6 +1246,9 @@ async fn session_once(
                 .iter()
                 .filter_map(|id| g.route(id).map(|r| (id.clone(), r)))
                 .collect();
+            if ids.is_empty() {
+                return Err((1013, "provider queue is empty"));
+            }
             capacity_pending = false;
             capacity_retry_after = None;
             capacity_sources.clear();
@@ -1262,8 +1272,7 @@ async fn session_once(
         {
             Ok(admission) => admission,
             Err((code, reason))
-                if capacity_pending
-                    && (code == 1013 || (code == 1008 && reason == requirement.code())) =>
+                if capacity_pending && code == 1013 && reason != "RPM ledger unavailable" =>
             {
                 ids.clear();
                 continue;
@@ -1280,7 +1289,11 @@ async fn session_once(
             return Err(rejected(reason));
         }
         ids.retain(|id| id != &admission.route.provider.id);
-        attempts += 1;
+        attempts = attempts.saturating_add(1);
+        ordinary_attempts = ordinary_attempts.saturating_add(1);
+        if unknown_affinity {
+            pinned = Some(admission.route.provider.id.clone());
+        }
         let rerouted = previous_provider
             .as_deref()
             .is_some_and(|id| id != admission.route.provider.id);
@@ -1321,7 +1334,7 @@ async fn session_once(
                         crate::events::Reason::Failover,
                         crate::events::Action::Routed,
                         None,
-                        Some(attempts as u32),
+                        Some(attempts.min(u32::MAX as usize) as u32),
                     );
                 }
                 attempt_protocol.websocket_status(if native_mode { 101 } else { 200 });
@@ -1354,6 +1367,11 @@ async fn session_once(
                     continue;
                 }
                 non_unsupported_failure = true;
+                if failure.capacity {
+                    ordinary_attempts = ordinary_attempts.saturating_sub(1);
+                    capacity_protected = true;
+                    budget.protect_capacity();
+                }
                 let retryable = failure.model_unavailable
                     || failure.capacity
                     || failure.status.is_none_or(circuit::retryable);
@@ -1363,8 +1381,11 @@ async fn session_once(
                     &admission.route,
                     current_model.as_deref(),
                     &failure,
-                    if !ids.is_empty() && !unknown_affinity && attempts <= cfg.max_retries {
+                    if !ids.is_empty() && !unknown_affinity && ordinary_attempts <= cfg.max_retries
+                    {
                         crate::events::Action::TryingNext
+                    } else if failure.capacity {
+                        crate::events::Action::Waiting
                     } else {
                         crate::events::Action::Returned
                     },
@@ -1408,6 +1429,7 @@ async fn session_once(
     let mut pending: Option<Frame> = None;
     let mut confirmed_model: Option<String> = None;
     let mut received = false;
+    let mut terminal_error = false;
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
     if let Upstream::Native(peer) = &mut upstream {
         if let Err(e) = peer.send(first).await {
@@ -1420,6 +1442,7 @@ async fn session_once(
                 &mut protocol,
                 false,
                 attempts,
+                ordinary_attempts,
                 !unknown_affinity,
                 None,
                 crate::events::Phase::WsSend,
@@ -1433,9 +1456,12 @@ async fn session_once(
     }
     loop {
         if retry_pending {
-            let delay = cfg
-                .websocket_retry_seconds
-                .max(route.provider_circuit.health().retry_in);
+            let delay = if retry_capacity {
+                cfg.capacity_retry_seconds
+            } else {
+                cfg.websocket_retry_seconds
+            }
+            .max(route.provider_circuit.health().retry_in);
             let waited = while_connecting(
                 client,
                 g.0.admission.wait_websocket(
@@ -1463,6 +1489,10 @@ async fn session_once(
                 Some(&route.provider.id),
             )?;
             let mut budget = Budget::new(cfg.queue_seconds);
+            budget.pin_provider();
+            if capacity_protected {
+                budget.protect_capacity();
+            }
             let acquired = take_slot(
                 g,
                 client,
@@ -1484,15 +1514,34 @@ async fn session_once(
                 result => result?,
             };
             admission.commit_rpm().map_err(rejected)?;
-            attempts += 1;
+            attempts = attempts.saturating_add(1);
+            ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
             if let Some(trace) = &usage_trace {
-                next.attach_usage(trace.attempt(&route.provider.id, true, "websocket"));
+                next.attach_usage(trace.attempt(
+                    &route.provider.id,
+                    true,
+                    if uses_native_websocket(route.client_id, route.provider.supports_websocket) {
+                        "websocket"
+                    } else {
+                        "bridge"
+                    },
+                ));
             }
             protocol = Some(next);
             turn = Some(admission);
-            let opened =
-                while_connecting(client, upstream_native(&route, &uri, &headers, cfg)).await;
+            let opened = while_connecting(client, async {
+                if uses_native_websocket(route.client_id, route.provider.supports_websocket) {
+                    upstream_native(&route, &uri, &headers, cfg)
+                        .await
+                        .map(Upstream::Native)
+                } else {
+                    upstream_bridge(&route, &uri, &headers, cfg, &replay_frame)
+                        .await
+                        .map(|turn| Upstream::Bridge(Some(turn)))
+                }
+            })
+            .await;
             match opened {
                 Err(TURN_CANCELLED) => {
                     turn = None;
@@ -1511,7 +1560,17 @@ async fn session_once(
                         &route,
                         current_model.as_deref(),
                         &failure,
-                        crate::events::Action::Returned,
+                        if failure.capacity {
+                            crate::events::Action::Waiting
+                        } else if !failure.model_unavailable
+                            && !failure.unsupported
+                            && failure.status.is_none_or(circuit::retryable)
+                            && ordinary_attempts <= cfg.max_retries
+                        {
+                            crate::events::Action::Reconnecting
+                        } else {
+                            crate::events::Action::Returned
+                        },
                         attempts,
                     );
                     if let Some(mut u) = protocol.take() {
@@ -1524,11 +1583,17 @@ async fn session_once(
                             },
                         );
                     }
+                    if failure.capacity {
+                        ordinary_attempts = ordinary_attempts.saturating_sub(1);
+                        capacity_protected = true;
+                    }
+                    retry_capacity = failure.capacity;
                     if failure.model_unavailable
                         || failure.unsupported
-                        || failure
-                            .status
-                            .is_some_and(|s| s < 400 || !circuit::retryable(s))
+                        || (!failure.capacity
+                            && failure
+                                .status
+                                .is_some_and(|s| s < 400 || !circuit::retryable(s)))
                     {
                         admission.permits.neutral(cfg);
                         if let Some(payload) = failure.model_payload {
@@ -1543,20 +1608,29 @@ async fn session_once(
                     } else {
                         admission.permits.failure(cfg, failure.retry);
                     }
-                    if attempts > cfg.max_retries {
+                    if ordinary_attempts > cfg.max_retries {
                         return Err((1013, "websocket reconnect retries exhausted"));
                     }
                     continue;
                 }
-                Ok(Ok(peer)) => {
+                Ok(Ok(opened)) => {
                     if let Some(u) = &mut protocol {
-                        u.websocket_status(101);
+                        u.websocket_status(if matches!(opened, Upstream::Native(_)) {
+                            101
+                        } else {
+                            200
+                        });
                     }
-                    upstream = Upstream::Native(peer);
+                    upstream = opened;
                 }
             }
             retry_pending = false;
-            if let Err(error) = send_to_upstream(&mut upstream, replay_frame.clone()).await {
+            retry_capacity = false;
+            if let Err(error) = if matches!(upstream, Upstream::Native(_)) {
+                send_to_upstream(&mut upstream, replay_frame.clone()).await
+            } else {
+                Ok(())
+            } {
                 retry_pending = disconnect_turn(
                     g,
                     &route,
@@ -1566,6 +1640,7 @@ async fn session_once(
                     &mut protocol,
                     false,
                     attempts,
+                    ordinary_attempts,
                     !unknown_affinity,
                     None,
                     crate::events::Phase::WsSend,
@@ -1616,6 +1691,10 @@ async fn session_once(
                 }
                 current_model = model;
                 attempts = 1;
+                ordinary_attempts = 1;
+                capacity_protected = false;
+                retry_capacity = false;
+                terminal_error = false;
                 replay_frame = frame.clone();
                 usage_trace = g.usage_trace(current_model.as_deref());
                 let mut next_protocol = super::protocol::Protocol::new(true);
@@ -1642,7 +1721,7 @@ async fn session_once(
                 received = false;
                 deadline =
                     tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
-                if matches!(&upstream, Upstream::Bridge(_))
+                if !uses_native_websocket(route.client_id, route.provider.supports_websocket)
                     && route.client_id == super::ClientId::Codex
                 {
                     let opened = while_connecting(
@@ -1675,7 +1754,11 @@ async fn session_once(
                                     &route,
                                     current_model.as_deref(),
                                     &failure,
-                                    crate::events::Action::Returned,
+                                    if failure.capacity {
+                                        crate::events::Action::Waiting
+                                    } else {
+                                        crate::events::Action::Returned
+                                    },
                                     attempts,
                                 );
                                 if failure.model_unavailable {
@@ -1691,6 +1774,15 @@ async fn session_once(
                                 } else {
                                     admission.permits.neutral(cfg);
                                 }
+                            }
+                            if failure.capacity {
+                                ordinary_attempts = ordinary_attempts.saturating_sub(1);
+                                capacity_protected = true;
+                                retry_capacity = true;
+                                retry_pending = true;
+                                protocol = None;
+                                upstream = Upstream::Disconnected;
+                                continue;
                             }
                             if let Some(payload) = failure.model_payload {
                                 client.send(Frame::text(payload)).await?;
@@ -1718,7 +1810,17 @@ async fn session_once(
                                         &route,
                                         current_model.as_deref(),
                                         &failure,
-                                        crate::events::Action::Returned,
+                                        if failure.capacity {
+                                            crate::events::Action::Waiting
+                                        } else if !failure.model_unavailable
+                                            && !failure.unsupported
+                                            && failure.status.is_none_or(circuit::retryable)
+                                            && ordinary_attempts <= cfg.max_retries
+                                        {
+                                            crate::events::Action::Reconnecting
+                                        } else {
+                                            crate::events::Action::Returned
+                                        },
                                         attempts,
                                     );
                                     if let Some(mut u) = protocol.take() {
@@ -1746,7 +1848,12 @@ async fn session_once(
                                         return Err((1008, "upstream rejected websocket"));
                                     }
                                 }
-                                retry_pending = attempts <= cfg.max_retries;
+                                if failure.capacity {
+                                    ordinary_attempts = ordinary_attempts.saturating_sub(1);
+                                    capacity_protected = true;
+                                }
+                                retry_capacity = failure.capacity;
+                                retry_pending = ordinary_attempts <= cfg.max_retries;
                                 if !retry_pending {
                                     return Err((1013, "websocket reconnect retries exhausted"));
                                 }
@@ -1764,6 +1871,7 @@ async fn session_once(
                             &mut protocol,
                             false,
                             attempts,
+                            ordinary_attempts,
                             !unknown_affinity,
                             None,
                             crate::events::Phase::WsSend,
@@ -1784,14 +1892,17 @@ async fn session_once(
                 let disconnected = match &event { None => true, Some(Err(_)) => true, Some(Ok(frame)) => frame.opcode() == OpCode::Close };
                 if disconnected {
                     let close = event.as_ref().and_then(|v| v.as_ref().ok()).filter(|f| f.opcode() == OpCode::Close);
-                    if turn.is_none() && matches!(upstream, Upstream::Native(_)) && route.client_id == super::ClientId::Codex {
+                    // Only a successfully settled/cancelled turn may treat this
+                    // as an idle disconnect. An error already sent downstream
+                    // must retain the upstream close without a second failure.
+                    if turn.is_none() && !terminal_error && matches!(upstream, Upstream::Native(_)) && route.client_id == super::ClientId::Codex {
                         upstream = Upstream::Disconnected;
                         protocol = None;
                         continue;
                     }
                     let native = matches!(upstream, Upstream::Native(_));
                     let unfinished_native_turn = native && turn.is_some() && !received && route.client_id == super::ClientId::Codex;
-                    retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, native && !unknown_affinity, close, crate::events::Phase::WsReceive, "STREAM_INTERRUPTED");
+                    retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, close, crate::events::Phase::WsReceive, "STREAM_INTERRUPTED");
                     upstream = Upstream::Disconnected;
                     if retry_pending { continue; }
                     if unfinished_native_turn { return Err((1013, "websocket reconnect retries exhausted")); }
@@ -1799,13 +1910,16 @@ async fn session_once(
                     return Err((1013, "upstream disconnected before completion"));
                 }
                 let frame = event.unwrap()?;
-                // Native upstreams are pinned after Upgrade. Turn-local
-                // capacity errors before output close retryably instead of
-                // sending Codex a fatal overload event or replaying context.
+                // After binding, capacity retries stay on this provider and
+                // reuse the original turn only before any business event is sent.
                 if route.client_id == super::ClientId::Codex && turn.is_some() && !received {
                     if let Some(failure) = first_event_failure(&frame).filter(|f| f.capacity) {
-                        if let Some(mut admission) = turn.take() { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts); admission.permits.capacity_limited(cfg, failure.retry); }
-                        return Err((1013, "upstream capacity; reconnect to retry"));
+                        if let Some(mut admission) = turn.take() { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Waiting, attempts); admission.permits.capacity_limited(cfg, failure.retry); }
+                        if let Some(mut u) = protocol.take() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(if matches!(upstream, Upstream::Native(_)) {101} else {200}), "UPSTREAM_ERROR"); }
+                        ordinary_attempts = ordinary_attempts.saturating_sub(1);
+                        capacity_protected = true; retry_capacity = true; retry_pending = true;
+                        upstream = Upstream::Disconnected;
+                        continue;
                     }
                 }
                 if !frame.opcode().is_control() {
@@ -1821,6 +1935,7 @@ async fn session_once(
                         if let Some(mut admission) = turn.take() {
                             if let Some(mut u)=protocol.take() {
                                 u.finish(Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), "UPSTREAM_ERROR");
+                                terminal_error = !matches!(u.terminal(), Some(super::protocol::Terminal::Success | super::protocol::Terminal::Limited | super::protocol::Terminal::Cancelled));
                                 if route.client_id == super::ClientId::Codex && first_event_failure(&frame).is_some_and(|failure| failure.capacity) {
                                     if let Some(failure) = first_event_failure(&frame) { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts); }
                                     admission.permits.capacity_limited(cfg, None);
@@ -1887,7 +2002,7 @@ async fn session_once(
                         }
                     } else {
                         // A client control/message send failure cannot safely replay a generation.
-                        disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, false, None, crate::events::Phase::WsSend, "NETWORK");
+                        disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, false, None, crate::events::Phase::WsSend, "NETWORK");
                     }
                     return Err(e);
                 }
@@ -1895,7 +2010,7 @@ async fn session_once(
             _ = client.closed.changed() => return Ok(()),
             _ = tokio::time::sleep_until(deadline), if turn.is_some() => {
                 let native = matches!(upstream, Upstream::Native(_));
-                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if received { "STREAM_TIMEOUT" } else { "FIRST_BYTE_TIMEOUT" });
+                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if received { "STREAM_TIMEOUT" } else { "FIRST_BYTE_TIMEOUT" });
                 upstream = Upstream::Disconnected;
                 if retry_pending { continue; }
                 return Err((1013, "upstream timeout"));

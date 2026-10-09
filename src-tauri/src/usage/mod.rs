@@ -9,6 +9,8 @@ mod store;
 mod v015_tests;
 #[cfg(test)]
 mod v016_tests;
+#[cfg(test)]
+mod v017_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -372,17 +374,33 @@ impl AttemptTrace {
                 self.done = true;
             }
         }
-        self.attempt.pricing_model = if self.settings.pricing_model == "request" {
-            self.attempt
-                .requested_model
-                .clone()
-                .or(self.attempt.response_model.clone())
-        } else {
-            self.attempt
-                .response_model
-                .clone()
-                .or(self.attempt.requested_model.clone())
-        };
+        let (model, basis, mapping) = self
+            .prices
+            .as_ref()
+            .map(|p| {
+                p.resolve(
+                    &self.trace.0.client,
+                    self.attempt.provider.as_deref(),
+                    self.attempt.requested_model.as_deref(),
+                    self.attempt.response_model.as_deref(),
+                    &self.settings.pricing_model,
+                )
+            })
+            .unwrap_or_else(|| {
+                let requested = self.settings.pricing_model == "request"
+                    && self.attempt.requested_model.is_some();
+                let (model, basis) = if requested {
+                    (self.attempt.requested_model.clone(), "request")
+                } else if self.attempt.response_model.is_some() {
+                    (self.attempt.response_model.clone(), "response")
+                } else {
+                    (self.attempt.requested_model.clone(), "request_fallback")
+                };
+                (model, basis.into(), None)
+            });
+        self.attempt.pricing_model = model;
+        self.attempt.pricing_basis = Some(basis);
+        self.attempt.mapping_revision = mapping;
         if self.attempt.operation == Operation::WebSearch {
             self.attempt.price = self.attempt.search_price();
             return;
@@ -411,12 +429,19 @@ impl Drop for AttemptTrace {
             self.attempt.outcome = "cancelled".into();
             self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
         }
-        self.trace
-            .0
-            .attempts
-            .lock()
-            .unwrap()
-            .push(self.attempt.clone());
+        let mut attempts = self.trace.0.attempts.lock().unwrap();
+        if attempts.len() >= 128 {
+            let pair = (1..attempts.len())
+                .find_map(|j| {
+                    (0..j)
+                        .find(|&i| attempts[i].same_dimensions(&attempts[j]))
+                        .map(|i| (i, j))
+                })
+                .unwrap_or((0, 1));
+            let next = attempts.remove(pair.1);
+            attempts[pair.0].compact(next);
+        }
+        attempts.push(self.attempt.clone());
     }
 }
 

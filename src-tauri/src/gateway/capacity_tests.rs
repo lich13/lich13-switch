@@ -69,19 +69,27 @@ fn retry_after_floor_and_legacy_settings() {
 }
 
 #[tokio::test]
-async fn retries_use_entire_budget_and_preserve_last_real_error() {
+async fn capacity_retries_exceed_old_budget_and_preserve_the_permanent_last_error() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let copy = seen.clone();
     let upstream = server(move |req| {
         let copy = copy.clone();
         async move {
             let body = req.into_body().collect().await.unwrap().to_bytes();
-            copy.lock().unwrap().push(body);
+            let attempts = {
+                let mut seen = copy.lock().unwrap();
+                seen.push(body);
+                seen.len()
+            };
             Response::builder()
                 .status(429)
                 .header("retry-after", "0")
                 .header("x-original", "preserved")
-                .body(full("selected model is at capacity — original error"))
+                .body(full(if attempts <= 5 {
+                    "selected model is at capacity"
+                } else {
+                    r#"{"error":{"code":"insufficient_quota","message":"insufficient balance — original error"}}"#
+                }))
                 .unwrap()
         }
     })
@@ -90,21 +98,25 @@ async fn retries_use_entire_budget_and_preserve_last_real_error() {
     configure(&g, &t, 2);
     start(&g, &t).await;
     let original = br#"{ "model": "exact-ID", "input":["original"], "future": {"x": 7} }"#.to_vec();
-    let response = request(
-        &g,
-        "/v1/responses?future=keep",
-        original.clone(),
-        vec![("content-type", "application/json")],
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        request(
+            &g,
+            "/v1/responses?future=keep",
+            original.clone(),
+            vec![("content-type", "application/json")],
+        ),
     )
-    .await;
+    .await
+    .expect("capacity retries did not reach the permanent response");
     assert_eq!(response.status(), 429);
     assert_eq!(response.headers()["retry-after"], "0");
     assert_eq!(response.headers()["x-original"], "preserved");
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
-        "selected model is at capacity — original error"
+        r#"{"error":{"code":"insufficient_quota","message":"insufficient balance — original error"}}"#
     );
-    assert_eq!(seen.lock().unwrap().len(), 3);
+    assert_eq!(seen.lock().unwrap().len(), 6);
     assert!(seen
         .lock()
         .unwrap()
@@ -483,17 +495,25 @@ async fn service_and_network_errors_do_not_open_sole_automatic_provider() {
 }
 
 #[tokio::test]
-async fn manual_and_known_context_retry_only_owner_unknown_context_once() {
+async fn manual_and_known_or_unknown_context_retry_original_provider_until_recovery() {
     for mode in ["manual", "known", "unknown"] {
         let hits = Arc::new(AtomicUsize::new(0));
         let h = hits.clone();
+        let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
         let upstream = server(move |_| {
-            h.fetch_add(1, Ordering::SeqCst);
-            async {
-                Response::builder()
-                    .status(429)
-                    .body(full("limited"))
-                    .unwrap()
+            let attempt = h.fetch_add(1, Ordering::SeqCst) + 1;
+            let (release, released) = tokio::sync::oneshot::channel();
+            attempt_tx.send((attempt, release)).unwrap();
+            async move {
+                released.await.unwrap();
+                if attempt <= 3 {
+                    Response::builder()
+                        .status(429)
+                        .body(full("limited"))
+                        .unwrap()
+                } else {
+                    Response::new(full("recovered"))
+                }
             }
         })
         .await;
@@ -510,6 +530,16 @@ async fn manual_and_known_context_retry_only_owner_unknown_context_once() {
         ])
         .await;
         configure(&g, &t, 1);
+        for provider in g.view().providers {
+            update(
+                &g,
+                &t,
+                Edit::RpmProvider {
+                    id: provider.id,
+                    max_rpm: 20,
+                },
+            );
+        }
         if mode == "manual" {
             update(
                 &g,
@@ -528,21 +558,36 @@ async fn manual_and_known_context_retry_only_owner_unknown_context_once() {
         } else {
             br#"{"model":"test","previous_response_id":"cursor-fixture"}"#.to_vec()
         };
-        assert_eq!(
-            request(
-                &g,
-                "/v1/responses",
-                body,
-                vec![("content-type", "application/json")]
+        let (response_body, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                async {
+                    let response = request(
+                        &g,
+                        "/v1/responses",
+                        body,
+                        vec![("content-type", "application/json")],
+                    )
+                    .await;
+                    assert_eq!(response.status(), 200, "{mode}");
+                    response.into_body().collect().await.unwrap().to_bytes()
+                },
+                async {
+                    for expected_attempt in 1..=4 {
+                        let (attempt, release) = attempts.recv().await.unwrap();
+                        assert_eq!(attempt, expected_attempt, "{mode}");
+                        let view = g.view();
+                        assert_eq!(view.providers[0].rpm_used, expected_attempt, "{mode}");
+                        assert_eq!(view.providers[1].rpm_used, 0, "{mode}");
+                        assert_eq!(backup_hits.load(Ordering::SeqCst), 0, "{mode}");
+                        release.send(()).unwrap();
+                    }
+                }
             )
-            .await
-            .status(),
-            429
-        );
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            if mode == "unknown" { 1 } else { 2 }
-        );
+        })
+        .await
+        .expect("original provider did not recover after three capacity responses");
+        assert_eq!(response_body, "recovered", "{mode}");
+        assert_eq!(hits.load(Ordering::SeqCst), 4, "{mode}");
         assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
         assert!(!g.view().providers[0].health.protected_single_provider);
         g.stop().await.unwrap();
@@ -724,7 +769,7 @@ async fn capacity_errors_preserve_compressed_spooled_multipart_and_stream_payloa
 }
 
 #[tokio::test]
-async fn responses_ws_capacity_wait_cancels_and_exhaustion_closes_1013() {
+async fn responses_ws_capacity_wait_cancels_and_exceeds_old_budget_until_stopped() {
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
     let port = server(move |_| {
@@ -766,16 +811,54 @@ async fn responses_ws_capacity_wait_cancels_and_exhaustion_closes_1013() {
     ))
     .await
     .unwrap();
-    let frame = tokio::time::timeout(Duration::from_secs(3), ws.next())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(frame.close_code().map(u16::from), Some(1013));
-    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            let view = g.view();
+            if hits.load(Ordering::SeqCst) >= 4
+                && view.waiting_requests == 1
+                && !view.capacity_retries.is_empty()
+                && view.providers[0].active_requests == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("capacity wait did not exceed the old retry budget");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err(),
+        "capacity wait emitted a business event or closed before gateway stop"
+    );
+    let view = g.view();
+    assert_eq!(view.waiting_requests, 1);
+    assert_eq!(view.active_connections, 1);
+    assert_eq!(view.providers[0].active_requests, 0);
+    assert!(!view.capacity_retries.is_empty());
+    assert!(hits.load(Ordering::SeqCst) >= 4);
     assert_eq!(
-        g.view().providers[0].health.state,
+        view.providers[0].health.state,
         circuit::CircuitState::Closed
     );
+    tokio::time::timeout(Duration::from_secs(3), g.stop())
+        .await
+        .expect("gateway stop did not finish")
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("gateway stop did not close the waiting WebSocket")
+        .unwrap();
+    assert_eq!(frame.opcode(), yawc::OpCode::Close);
+    assert_eq!(frame.close_code().map(u16::from), Some(1012));
     drop(ws);
-    g.stop().await.unwrap();
+    until(|| {
+        let view = g.view();
+        view.waiting_requests == 0
+            && view.active_connections == 0
+            && view.providers.iter().all(|p| p.active_requests == 0)
+    })
+    .await;
+    assert!(g.view().capacity_retries.is_empty());
 }

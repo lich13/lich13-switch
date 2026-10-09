@@ -125,9 +125,9 @@ async fn cooldown_timeout_returns_503_without_another_upstream_attempt() {
         h.fetch_add(1, Ordering::SeqCst);
         async {
             Response::builder()
-                .status(429)
+                .status(502)
                 .header("retry-after", "120")
-                .body(full("upstream-429"))
+                .body(full("upstream-502"))
                 .unwrap()
         }
     })
@@ -138,14 +138,24 @@ async fn cooldown_timeout_returns_503_without_another_upstream_attempt() {
     settings.queue_seconds = 1;
     update(&g, &t, Edit::Settings { settings });
     start(&g, &t).await;
-    let first = request(&g, "/v1/responses", vec![], vec![]).await;
-    assert_eq!(first.status(), 429);
+    let first = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(&g, "/v1/responses", vec![], vec![]),
+    )
+    .await
+    .expect("upstream failure response timed out");
+    assert_eq!(first.status(), 502);
     assert_eq!(first.headers()["retry-after"], "120");
     assert_eq!(
         first.into_body().collect().await.unwrap().to_bytes(),
-        "upstream-429"
+        "upstream-502"
     );
-    let response = request(&g, "/v1/responses", vec![], vec![]).await;
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(&g, "/v1/responses", vec![], vec![]),
+    )
+    .await
+    .expect("cooldown response timed out");
     assert_eq!(response.status(), 503);
     assert!(response.headers().contains_key("retry-after"));
     let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -154,10 +164,10 @@ async fn cooldown_timeout_returns_503_without_another_upstream_attempt() {
     let view = g.view();
     let health = &view.providers[0].health;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    assert_eq!(health.failures, 0);
-    assert_eq!(health.requests, 0);
+    assert_eq!(health.failures, 1);
+    assert_eq!(health.requests, 1);
     assert_eq!(health.state, super::super::circuit::CircuitState::Closed);
-    assert_eq!(health.cooldown_reason.as_deref(), Some("capacity_retry"));
+    assert_eq!(health.cooldown_reason.as_deref(), Some("retry_after"));
     assert!(!health.available);
     assert!(!health.probe_in_flight);
     g.stop().await.unwrap();

@@ -15,6 +15,17 @@ const LIMIT: u64 = 8 * 1024 * 1024;
 type Catalog = BTreeMap<String, Value>;
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMapping {
+    pub client: String,
+    pub provider: String,
+    pub enabled: bool,
+    pub match_on: String,
+    pub from_model: String,
+    pub to_model: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
     pub auto_update: bool,
@@ -22,6 +33,7 @@ pub struct Config {
     pub excluded: BTreeSet<String>,
     pub fixed: Catalog,
     pub aliases: BTreeMap<String, String>,
+    pub provider_mappings: Vec<ProviderMapping>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -31,6 +43,7 @@ impl Default for Config {
             excluded: BTreeSet::new(),
             fixed: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            provider_mappings: Vec::new(),
         }
     }
 }
@@ -132,6 +145,29 @@ fn number_text(v: &Value) -> String {
         .unwrap_or_else(|| v.to_string())
 }
 fn valid_config(c: &Config) -> Result<()> {
+    let mut keys = BTreeSet::new();
+    if c.provider_mappings.len() > 4096
+        || c.provider_mappings.iter().any(|rule| {
+            !matches!(rule.client.as_str(), "codex" | "claude")
+                || rule.provider.is_empty()
+                || rule.provider.len() > 128
+                || !rule
+                    .provider
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+                || !matches!(rule.match_on.as_str(), "request" | "response")
+                || model_id(Some(&rule.from_model)).is_none()
+                || model_id(Some(&rule.to_model)).is_none()
+                || !keys.insert((
+                    &rule.client,
+                    &rule.provider,
+                    &rule.match_on,
+                    &rule.from_model,
+                ))
+        })
+    {
+        return Err(failure("供应商计价映射无效或重复"));
+    }
     if !c.fixed.is_empty() {
         validate(&c.fixed)?;
     }
@@ -289,6 +325,48 @@ impl Pricing {
             data,
             multiplier: multiplier.into(),
         }
+    }
+    pub fn resolve(
+        &self,
+        client: &str,
+        provider: Option<&str>,
+        request: Option<&str>,
+        response: Option<&str>,
+        preference: &str,
+    ) -> (Option<String>, String, Option<String>) {
+        let s = self.state.read().unwrap();
+        // Response-specific rules take precedence over request rules. A rule is
+        // explicit user knowledge, never an inference about hidden upstream models.
+        for match_on in ["response", "request"] {
+            let visible = if match_on == "response" {
+                response
+            } else {
+                request
+            };
+            if let Some(rule) = s.config.provider_mappings.iter().find(|rule| {
+                rule.enabled
+                    && rule.client == client
+                    && Some(rule.provider.as_str()) == provider
+                    && rule.match_on == match_on
+                    && Some(rule.from_model.as_str()) == visible
+            }) {
+                return (
+                    Some(rule.to_model.clone()),
+                    "provider_mapping".into(),
+                    Some(storage::digest(
+                        serde_json::to_vec(rule).unwrap_or_default().as_slice(),
+                    )),
+                );
+            }
+        }
+        let (model, basis) = if preference == "request" && request.is_some() {
+            (request, "request")
+        } else if response.is_some() {
+            (response, "response")
+        } else {
+            (request, "request")
+        };
+        (model.map(str::to_owned), basis.into(), None)
     }
     pub async fn update(&self, force: bool) -> Result<View> {
         self.update_from(force, SOURCE, HASH).await

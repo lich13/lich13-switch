@@ -55,11 +55,14 @@ pub struct Dashboard {
     pub detail_since: i64,
     pub sources: BTreeMap<String, u64>,
     pub review_count: u64,
+    pub source_history_incomplete: bool,
     pub data_version: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Daily {
+    #[serde(default)]
+    scope: Option<String>,
     client: String,
     provider: Option<String>,
     model: Option<String>,
@@ -78,7 +81,7 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 4 {
+        if version > 5 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
@@ -141,6 +144,37 @@ impl Store {
         if version < 4 {
             let tx = db(connection.transaction())?;
             db(tx.execute_batch("ALTER TABLE receipts ADD COLUMN operation TEXT NOT NULL DEFAULT 'model'; PRAGMA user_version=4;"))?;
+            db(tx.commit())?;
+        }
+        if version < 5 {
+            let tx = db(connection.transaction())?;
+            let mut after = String::new();
+            loop {
+                let rows = {
+                    let mut stmt = db(
+                        tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 256")
+                    )?;
+                    let rows = db(stmt.query_map([&after], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    }))?;
+                    db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+                };
+                if rows.is_empty() {
+                    break;
+                }
+                for (id, body) in rows {
+                    let record: Record =
+                        serde_json::from_str(&body).map_err(|_| failure("旧用量记录无效"))?;
+                    query::project(&tx, 0, &id, &record, 1, None)?;
+                    db(tx.execute(
+                        "UPDATE records SET signature=?2 WHERE id=?1",
+                        params![id, record.signature()],
+                    ))?;
+                    after = id;
+                }
+            }
+            db(tx.execute_batch("PRAGMA user_version=5;"))?;
+            query::changed(&tx)?;
             db(tx.commit())?;
         }
         for suffix in ["-wal", "-shm"] {
@@ -229,22 +263,22 @@ impl Store {
         serde_json::from_str(&body).map_err(|_| failure("记录无效"))
     }
     fn records(&self, f: &Filter, with_status: bool) -> Result<Vec<Record>> {
-        let mut statement=db(self.connection.prepare("SELECT body,duplicate_of FROM records WHERE effective=1 AND time>=?1 AND time<=?2 AND (?3 IS NULL OR client=?3) AND (?4 IS NULL OR provider=?4) AND (?5 IS NULL OR model=?5) ORDER BY time DESC,id DESC"))?;
-        let rows = db(statement.query_map(
-            params![
-                f.start.unwrap_or(0),
-                f.end.unwrap_or(i64::MAX),
-                f.client,
-                f.provider,
-                f.model
-            ],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-        ))?;
+        let (condition, args) = query::conditions(f, "r", with_status);
+        let eligible = query::eligible(f, "r", false);
+        let mut statement = db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {eligible} AND {condition} ORDER BY time DESC,id DESC")))?;
+        let rows = db(
+            statement.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            }),
+        )?;
         let mut out = Vec::new();
         for row in rows {
             let (body, duplicate) = db(row)?;
             let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("记录无效"))?;
             r.duplicate_of = duplicate;
+            if f.source.as_deref() == Some("proxy") {
+                r.gateway_only();
+            }
             if !with_status
                 || status_matches(
                     r.final_attempt().and_then(|a| a.status),
@@ -259,7 +293,8 @@ impl Store {
     pub fn logs(&self, f: &Filter) -> Result<Page> {
         let (condition, args) = query::conditions(f, "r", true);
         // Ambiguous records remain inspectable, but are excluded from aggregates.
-        let where_sql = format!("r.effective IN (1,2) AND {condition}");
+        let eligible = query::eligible(f, "r", true);
+        let where_sql = format!("{eligible} AND {condition}");
         let total: u64 = db(self.connection.query_row(
             &format!("SELECT count(*) FROM records r WHERE {where_sql}"),
             rusqlite::params_from_iter(args.iter()),
@@ -277,6 +312,9 @@ impl Store {
             let (body, duplicate) = db(row)?;
             let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("用量记录无效"))?;
             r.duplicate_of = duplicate;
+            if f.source.as_deref() == Some("proxy") {
+                r.gateway_only();
+            }
             records.push(r);
         }
         Ok(Page {
@@ -323,15 +361,20 @@ impl Store {
         {
             return Ok(());
         }
-        let records = self.records(
-            &Filter {
-                end: Some(cutoff - 1),
-                ..Filter::default()
-            },
-            false,
-        )?;
+        let mut records = Vec::new();
+        for scope in [None, Some("proxy"), Some("sessions")] {
+            let selected = self.records(
+                &Filter {
+                    end: Some(cutoff - 1),
+                    source: scope.map(str::to_owned),
+                    ..Filter::default()
+                },
+                false,
+            )?;
+            records.extend(selected.into_iter().map(|r| (scope.map(str::to_owned), r)));
+        }
         let tx = db(self.connection.transaction())?;
-        for mut r in records {
+        for (scope, mut r) in records {
             let day = query::bucket(r.started_at, DAY);
             let Some(a) = r.final_attempt() else {
                 continue;
@@ -354,7 +397,8 @@ impl Store {
                 a.first_token_ms = None;
             }
             // Exact token/tier/price dimensions are retained for safe future backfill.
-            let key = safe_id(&serde_json::to_string(&r).map_err(|_| failure("汇总失败"))?);
+            let key =
+                safe_id(&serde_json::to_string(&(&scope, &r)).map_err(|_| failure("汇总失败"))?);
             let old: Option<String> = db(tx
                 .query_row("SELECT body FROM daily WHERE id=?1", [&key], |row| {
                     row.get(0)
@@ -364,6 +408,7 @@ impl Store {
                 serde_json::from_str::<Daily>(&body).map_err(|_| failure("汇总无效"))?
             } else {
                 Daily {
+                    scope: Some(scope.unwrap_or_else(|| "all".into())),
                     client: r.client.clone(),
                     provider,
                     model,
@@ -380,7 +425,7 @@ impl Store {
         // Keep only irreversible correlation keys after detail expiry. They prevent
         // archived files, late imports and source rebuilds from duplicating daily totals.
         db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time+coalesce(json_extract(body,'$.attempts[#-1].durationMs'),0),effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
-        db(tx.execute("DELETE FROM usage_metrics WHERE kind=0 AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
+        db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
         db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
         query::changed(&tx)?;
         db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[cutoff.to_string()]))?;
@@ -398,7 +443,7 @@ impl Store {
             let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("记录无效"))?;
             let mut changed = false;
             for a in &mut r.attempts {
-                if a.price.is_none() {
+                if a.price.is_none() && a.compacted_unpriced.is_none() {
                     a.price = a.calculate_price(pricing);
                     changed |= a.price.is_some();
                 }
@@ -430,7 +475,7 @@ impl Store {
             }
             let before = serde_json::to_string(&d.example).map_err(|_| failure("汇总无效"))?;
             for a in &mut d.example.attempts {
-                if a.price.is_none() {
+                if a.price.is_none() && a.compacted_unpriced.is_none() {
                     a.price = a.calculate_price(pricing);
                 }
             }
@@ -506,7 +551,7 @@ impl Store {
             ))?;
         }
         dedup::reset_source_supplements(&tx, source)?;
-        db(tx.execute("DELETE FROM usage_metrics WHERE kind=0 AND owner IN (SELECT id FROM records WHERE source=?1)",[source]))?;
+        db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE source=?1)",[source]))?;
         db(tx.execute("DELETE FROM records WHERE source=?1", [source]))?;
         db(tx.execute("UPDATE records SET effective=1,duplicate_of=NULL WHERE duplicate_of NOT IN (SELECT id FROM records UNION SELECT id FROM receipts)",[]))?;
         for r in &records {

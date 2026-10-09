@@ -29,11 +29,19 @@ pub async fn get_usage_logs(r: R<'_>, filter: Filter) -> Result<store::Page> {
         .map_err(|_| failure("日志查询中断"))?
 }
 #[tauri::command]
-pub async fn get_usage_detail(r: R<'_>, id: String) -> Result<Record> {
+pub async fn get_usage_detail(r: R<'_>, id: String, source: Option<String>) -> Result<Record> {
     let s = r.usage.clone();
-    tokio::task::spawn_blocking(move || s.read(|db| db.detail(&id)))
-        .await
-        .map_err(|_| failure("详情查询中断"))?
+    tokio::task::spawn_blocking(move || {
+        s.read(|db| {
+            let mut record = db.detail(&id)?;
+            if source.as_deref() == Some("proxy") {
+                record.gateway_only();
+            }
+            Ok(record)
+        })
+    })
+    .await
+    .map_err(|_| failure("详情查询中断"))?
 }
 #[tauri::command]
 pub fn set_usage_settings(r: R<'_>, settings: Settings) -> Result<State> {

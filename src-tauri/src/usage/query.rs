@@ -112,6 +112,11 @@ pub fn project(
     count: u64,
     historical: Option<&Totals>,
 ) -> Result<()> {
+    if kind == 0 && r.source == "proxy" {
+        let mut original = r.clone();
+        original.gateway_only();
+        project(c, 2, owner, &original, count, historical)?;
+    }
     db(c.execute(
         "DELETE FROM usage_metrics WHERE kind=?1 AND owner=?2",
         params![kind, owner],
@@ -160,7 +165,7 @@ pub fn project(
             a.provider,
             a.grouping_model(),
             if final_record { count } else { 0 },
-            count,
+            count.saturating_mul(a.repeat_count),
             if success { count } else { 0 },
             if known { count } else { 0 },
             if final_record && r.source != "proxy" {
@@ -179,13 +184,25 @@ pub fn project(
             mul(tokens.audio_input),
             mul(tokens.audio_output),
             cost,
-            if a.price.is_none() { count } else { 0 },
+            count.saturating_mul(a.unpriced_count()),
             duration,
             measured,
             generation
         ]))?;
     }
     Ok(())
+}
+pub fn eligible(f: &Filter, alias: &str, review: bool) -> String {
+    let effective = if review {
+        format!("{alias}.effective IN (1,2)")
+    } else {
+        format!("{alias}.effective=1")
+    };
+    match f.source.as_deref() {
+        Some("proxy") => format!("{effective} AND {alias}.source='proxy'"),
+        Some("sessions") => format!("{alias}.source<>'proxy' AND ({effective} OR ({alias}.effective=0 AND {alias}.duplicate_of IN (SELECT id FROM records WHERE source='proxy' UNION SELECT id FROM receipts WHERE source='proxy') AND NOT EXISTS(SELECT 1 FROM records peer WHERE peer.source<>'proxy' AND peer.duplicate_of={alias}.duplicate_of AND (peer.time<{alias}.time OR (peer.time={alias}.time AND peer.id<{alias}.id)))))"),
+        _ => effective,
+    }
 }
 pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>) {
     let mut terms = vec![format!("{alias}.time>=?"), format!("{alias}.time<=?")];
@@ -199,7 +216,11 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
         ("model", &f.model),
     ] {
         if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
-            terms.push(format!("{alias}.{column}=?"));
+            if column == "model" && f.source.as_deref() == Some("proxy") {
+                terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics original WHERE original.kind=2 AND original.owner={alias}.id AND original.requests>0 AND original.model=?)"));
+            } else {
+                terms.push(format!("{alias}.{column}=?"));
+            }
             args.push(Value::Text(value.clone()));
         }
     }
@@ -263,7 +284,21 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
             args.push(Value::Text(v.clone()));
         }
     }
-    let cte=format!("WITH selected AS (SELECT 0 kind,id owner,time,source FROM records r WHERE effective=1 AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.* FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner) ",daily.join(" AND "));
+    let eligible = eligible(f, "r", false);
+    let kind = if f.source.as_deref() == Some("proxy") {
+        2
+    } else {
+        0
+    };
+    daily.push("coalesce(json_extract(d.body,'$.scope'),'all')=?".into());
+    args.push(Value::Text(
+        f.source
+            .as_deref()
+            .filter(|s| matches!(*s, "proxy" | "sessions"))
+            .unwrap_or("all")
+            .into(),
+    ));
+    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.* FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner) ",daily.join(" AND "));
     (cte, args)
 }
 pub fn points(c: &Connection, f: &Filter, step: i64) -> Result<Vec<Point>> {
@@ -353,11 +388,22 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     models.sort_by(order);
     trend.sort_by_key(|p| p.time);
     let (condition, review_args) = conditions(f, "r", false);
+    let eligible = eligible(f, "r", true);
     let review_count = db(c.query_row(
-        &format!("SELECT count(*) FROM records r WHERE effective=2 AND {condition}"),
+        &format!("SELECT count(*) FROM records r WHERE effective=2 AND {eligible} AND {condition}"),
         rusqlite::params_from_iter(review_args.iter()),
         |r| r.get(0),
     ))?;
+    // Old daily totals have already lost the original source associations.
+    // Keep them in the combined view and explicitly flag source-only history.
+    let source_history_incomplete = if f.source.is_some() {
+        db(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM daily WHERE json_extract(body,'$.scope') IS NULL AND day>=?1 AND day<=?2)",
+            params![start, end], |r| r.get(0),
+        ))?
+    } else {
+        false
+    };
     Ok(Dashboard {
         totals: total,
         trend,
@@ -369,6 +415,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
         detail_since,
         sources,
         review_count,
+        source_history_incomplete,
         data_version: version(c)?,
     })
 }

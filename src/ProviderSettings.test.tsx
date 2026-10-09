@@ -1,8 +1,23 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
+const mock = vi.hoisted(() => ({ command: vi.fn() }));
+vi.mock("./bridge", () => ({ command: mock.command }));
 import ProviderSettings from "./ProviderSettings";
 import { gatewayDemo } from "./gateway-preview";
+
+beforeEach(() => {
+  mock.command.mockReset();
+  mock.command.mockResolvedValue({
+    providerId: gatewayDemo.providers[0].id,
+    version: "fixture-catalog",
+    models: ["fixture-model"],
+    checkedAt: null,
+    stale: false,
+    error: null,
+    retryAt: null,
+  });
+});
 
 it("preserves a transport draft across events and retries a conflict with the refreshed revision", async () => {
   const user = userEvent.setup();
@@ -19,7 +34,6 @@ it("preserves a transport draft across events and retries a conflict with the re
     revision: "before",
     save,
     close: vi.fn(),
-    models: vi.fn(),
     onDirtyChange: dirty,
   };
   const { rerender } = render(<ProviderSettings {...props} />);
@@ -38,14 +52,14 @@ it("preserves a transport draft across events and retries a conflict with the re
   await user.click(screen.getByRole("button", { name: "保存" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("网关设置已变化");
   expect(save).toHaveBeenLastCalledWith(
-    { op: "websocketProvider", id: provider.id, supportsWebsocket: false },
+    { op: "policyProvider", id: provider.id, supportsWebsocket: false, allowedModels: null },
     "before",
   );
   expect(checkbox).not.toBeChecked();
   rerender(<ProviderSettings {...props} revision="refreshed" />);
   await user.click(screen.getByRole("button", { name: "重试" }));
   expect(save).toHaveBeenLastCalledWith(
-    { op: "websocketProvider", id: provider.id, supportsWebsocket: false },
+    { op: "policyProvider", id: provider.id, supportsWebsocket: false, allowedModels: null },
     null,
   );
   rerender(
@@ -79,19 +93,19 @@ it("blocks duplicate transport saves and keeps the draft until completion", asyn
       revision="1"
       save={save}
       close={() => {}}
-      models={() => {}}
     />,
   );
-  await user.click(screen.getByRole("checkbox"));
+  await user.click(screen.getByRole("checkbox", { name: "原生 WebSocket" }));
   await user.click(screen.getByRole("button", { name: "保存" }));
-  expect(screen.getByRole("checkbox")).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: "原生 WebSocket" })).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: "fixture-model" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "保存中…" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "关闭" })).toBeDisabled();
   expect(save).toHaveBeenCalledTimes(1);
   await act(async () => resolve());
 });
 
-it("does not expose transport controls for Claude", () => {
+it("does not expose transport controls for Claude", async () => {
   const provider = structuredClone(gatewayDemo.providers[0]);
   render(
     <ProviderSettings
@@ -101,8 +115,8 @@ it("does not expose transport controls for Claude", () => {
       revision="1"
       save={vi.fn()}
       close={() => {}}
-      models={() => {}}
     />,
   );
-  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
+  expect(await screen.findByRole("checkbox", { name: "fixture-model" })).toBeEnabled();
 });

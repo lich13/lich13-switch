@@ -23,6 +23,8 @@ struct State {
     epoch: u64,
     next: u64,
     limits: HashMap<String, u32>,
+    order: HashMap<String, usize>,
+    queued: std::collections::HashSet<String>,
     rpm_limits: HashMap<String, u32>,
     models: HashMap<String, Option<Vec<String>>>,
     active: HashMap<String, usize>,
@@ -41,6 +43,8 @@ impl State {
             epoch: 0,
             next: 0,
             limits: HashMap::new(),
+            order: HashMap::new(),
+            queued: Default::default(),
             rpm_limits: HashMap::new(),
             models: HashMap::new(),
             active: HashMap::new(),
@@ -155,6 +159,8 @@ pub enum Rejected {
 }
 pub struct Budget {
     remaining: Duration,
+    protected_capacity: bool,
+    fixed_provider: bool,
 }
 impl Admission {
     pub fn commit_rpm(&mut self) -> Result<(), Rejected> {
@@ -235,9 +241,17 @@ fn persist_rpm(path: &Path, rpm: &HashMap<String, VecDeque<RateStamp>>) -> stora
     storage::atomic_write(path, &bytes, None)
 }
 impl Budget {
+    pub fn protect_capacity(&mut self) {
+        self.protected_capacity = true;
+    }
+    pub fn pin_provider(&mut self) {
+        self.fixed_provider = true;
+    }
     pub fn new(seconds: u64) -> Self {
         Self {
             remaining: Duration::from_secs(seconds),
+            protected_capacity: false,
+            fixed_provider: false,
         }
     }
 }
@@ -267,6 +281,16 @@ impl Scheduler {
         s.models = providers
             .iter()
             .map(|p| (p.id.clone(), p.allowed_models.clone()))
+            .collect();
+        s.order = providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id.clone(), i))
+            .collect();
+        s.queued = providers
+            .iter()
+            .filter(|p| p.queued)
+            .map(|p| p.id.clone())
             .collect();
         let ids: std::collections::HashSet<_> = providers.iter().map(|p| p.id.as_str()).collect();
         let before = s.rpm.len();
@@ -554,10 +578,21 @@ impl Scheduler {
                 if !s.running || s.epoch != epoch {
                     break Err(Rejected::Stopped);
                 }
-                let matching: Vec<_> = routes
+                let mut matching: Vec<_> = routes
                     .iter()
                     .filter(|r| s.limits.contains_key(&r.provider.id))
+                    .filter(|r| {
+                        !budget.protected_capacity
+                            || budget.fixed_provider
+                            || manual
+                            || s.queued.contains(&r.provider.id)
+                    })
                     .collect();
+                if budget.protected_capacity && !budget.fixed_provider && !manual {
+                    matching.sort_by_key(|r| {
+                        s.order.get(&r.provider.id).copied().unwrap_or(usize::MAX)
+                    });
+                }
                 if matching.is_empty() {
                     break Err(Rejected::Unavailable);
                 }
@@ -679,7 +714,7 @@ impl Scheduler {
                     break Ok(admission);
                 }
                 if s.rpm_error {
-                    if immediate {
+                    if immediate || budget.protected_capacity {
                         break Err(Rejected::RateLedger);
                     }
                     if waiting.is_none() {
@@ -742,7 +777,7 @@ impl Scheduler {
             }
             tokio::select! {
                 _ = notified => {},
-                _ = tokio::time::sleep_until(deadline) => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else if ledger_error { Rejected::RateLedger } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
+                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else if ledger_error { Rejected::RateLedger } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
                 // Circuit cooldowns may expire without a separate request or UI event.
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {},
             }

@@ -27,7 +27,16 @@ pub fn key(r: &Record) -> String {
         r.client_id,
         r.provider_id.as_deref().unwrap_or(""),
         r.model.as_deref().unwrap_or(""),
-        r.reason
+        match r.reason {
+            crate::events::Reason::CircuitOpen
+            | crate::events::Reason::FailoverExhausted
+            | crate::events::Reason::Network
+            | crate::events::Reason::UpstreamService
+            | crate::events::Reason::ProtocolError
+            | crate::events::Reason::RateLimit
+            | crate::events::Reason::Capacity => "terminal_failure".to_string(),
+            reason => format!("{reason:?}"),
+        }
     )
 }
 impl Gate {

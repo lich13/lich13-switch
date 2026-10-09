@@ -19,6 +19,8 @@ pub struct LoginState {
     pub code: Option<String>,
     pub message: String,
     pub callback_ready: bool,
+    #[serde(default)]
+    pub target_account_id: Option<String>,
     #[serde(skip)]
     pub callback_port: Option<u16>,
     /// The complete authorization URL stays in the Rust session so it is not

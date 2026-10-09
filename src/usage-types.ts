@@ -25,6 +25,10 @@ export type PriceSnapshot = {
   };
 };
 export type Attempt = {
+  pricingBasis?: string | null;
+  mappingRevision?: string | null;
+  repeatCount?: number;
+  compactedUnpriced?: number | null;
   operation?: "model" | "web_search";
   id: string;
   provider: string | null;
@@ -72,6 +76,7 @@ export type Totals = {
 export type Point = { time: number; totals: Totals };
 export type Group = { id: string; totals: Totals };
 export type UsageFilter = {
+  source?: "proxy" | "sessions";
   start?: number;
   end?: number;
   client?: string;
@@ -83,6 +88,7 @@ export type UsageFilter = {
 export type Dashboard = {
   dataVersion?: number;
   reviewCount?: number;
+  sourceHistoryIncomplete?: boolean;
   totals: Totals;
   trend: Point[];
   trendStepMs?: number;
@@ -127,7 +133,12 @@ export type UsageState = {
   >;
   error: string | null;
 };
+export type ProviderPriceMapping = {
+  client: "codex" | "claude"; provider: string; enabled: boolean;
+  matchOn: "request" | "response"; fromModel: string; toModel: string;
+};
 export type PricingConfig = {
+  providerMappings?: ProviderPriceMapping[];
   autoUpdate: boolean;
   selected: string[] | null;
   excluded: string[];
@@ -147,13 +158,15 @@ export type PricingView = {
 };
 export const numeric = (n: number | null | undefined) =>
   n == null ? "未提供" : n.toLocaleString("zh-CN");
-export const compact = (n: number | null | undefined) =>
-  n == null
-    ? "未提供"
-    : new Intl.NumberFormat("zh-CN", {
-        notation: "compact",
-        maximumFractionDigits: 1,
-      }).format(n);
+export const compact = (n: number | null | undefined) => {
+  if (n == null || !Number.isFinite(n)) return "未提供";
+  if (Math.abs(n) < 1000) return numeric(n);
+  const units = ["", "K", "M", "B"];
+  let power = Math.min(3, Math.floor(Math.log10(Math.abs(n)) / 3));
+  let value = Number((n / 1000 ** power).toPrecision(3));
+  if (Math.abs(value) >= 1000 && power < 3) { power++; value = Number((value / 1000).toPrecision(3)); }
+  return `${value}${units[power]}`;
+};
 export const money = (n: string | null | undefined) =>
   n == null ? "未定价" : "$" + Number(n).toFixed(4);
 export const tokenTotal = (t: Tokens) =>

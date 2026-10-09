@@ -108,3 +108,7 @@ The v0.16 request-table layout, request/response/pricing model distinction, and 
 https://github.com/farion1231/cc-switch/blob/2db86e94da13365caae55bb08d09295e31500d21/src/components/usage/RequestLogTable.tsx
 https://github.com/farion1231/cc-switch/blob/2db86e94da13365caae55bb08d09295e31500d21/src-tauri/src/proxy/usage/logger.rs
 https://github.com/farion1231/cc-switch/blob/2db86e94da13365caae55bb08d09295e31500d21/src-tauri/src/proxy/handlers.rs
+
+The v0.17 compact usage layout and decimal K/M/B presentation reference CC Switch at `889b797d8aa252299221ed6569f992bda0a31a72` (MIT), under the notice above. Client/provider-specific pricing mappings and bounded capacity retry accounting are independently implemented. Provider-hidden model substitutions cannot be inferred from client-visible responses; costs remain estimates.
+
+https://github.com/farion1231/cc-switch/tree/889b797d8aa252299221ed6569f992bda0a31a72/src/components/usage

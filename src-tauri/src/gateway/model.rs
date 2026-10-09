@@ -189,6 +189,11 @@ pub enum Edit {
         id: String,
         allowed_models: Option<Vec<String>>,
     },
+    PolicyProvider {
+        id: String,
+        supports_websocket: bool,
+        allowed_models: Option<Vec<String>>,
+    },
     WebsocketProvider {
         id: String,
         supports_websocket: bool,
@@ -403,6 +408,20 @@ impl Store {
                     })
                     .transpose()?;
                 self.provider_mut(&id)?.allowed_models = allowed;
+            }
+            Edit::PolicyProvider {
+                id,
+                supports_websocket,
+                allowed_models,
+            } => {
+                self.edit(
+                    Edit::ModelsProvider {
+                        id: id.clone(),
+                        allowed_models,
+                    },
+                    running,
+                )?;
+                self.provider_mut(&id)?.supports_websocket = supports_websocket;
             }
             Edit::WebsocketProvider {
                 id,

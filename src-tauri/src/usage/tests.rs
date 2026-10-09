@@ -799,17 +799,20 @@ fn two_gateway_rows_without_usage_and_their_session_match_count_once() {
 
 #[test]
 fn fallback_deduplication_requires_exact_tokens_model_client_and_ten_minute_window() {
-    for case in [
-        "exact",
-        "output",
-        "cache",
-        "model",
-        "time",
-        "client",
-        "same-source",
-        "response-id",
-        "unknown-model",
-        "unknown-tokens",
+    for (case, expected_total) in [
+        ("exact", 1),
+        ("pricing-only", 1),
+        ("output", 2),
+        ("cache", 2),
+        ("model", 2),
+        ("requested-model", 2),
+        ("legacy-model", 2),
+        ("time", 2),
+        ("client", 2),
+        ("same-source", 2),
+        ("response-id", 2),
+        ("unknown-model", 2),
+        ("unknown-tokens", 2),
     ] {
         let (_dir, mut store, _prices) = fixture();
         let mut proxy = record("fixture-proxy", "codex", "proxy", BASE + 100);
@@ -823,7 +826,20 @@ fn fallback_deduplication_requires_exact_tokens_model_client_and_ten_minute_wind
         match case {
             "output" => session.attempts[0].tokens.output = Some(11),
             "cache" => session.attempts[0].tokens.cache_read = None,
-            "model" => session.attempts[0].pricing_model = Some("gpt-other-fixture".into()),
+            "model" => session.attempts[0].response_model = Some("gpt-other-fixture".into()),
+            "pricing-only" => session.attempts[0].pricing_model = Some("gpt-other-fixture".into()),
+            "requested-model" => {
+                session.attempts[0].response_model = None;
+                proxy.attempts[0].response_model = None;
+                session.attempts[0].requested_model = Some("gpt-other-fixture".into());
+            }
+            "legacy-model" => {
+                for attempt in [&mut session.attempts[0], &mut proxy.attempts[0]] {
+                    attempt.response_model = None;
+                    attempt.requested_model = None;
+                }
+                session.attempts[0].pricing_model = Some("gpt-other-fixture".into());
+            }
             "time" => {
                 session.started_at += 1;
                 session.attempts[0].started_at += 1;
@@ -834,8 +850,11 @@ fn fallback_deduplication_requires_exact_tokens_model_client_and_ten_minute_wind
                 session.attempts[0].response_id = Some(safe_id("fixture-distinct-response"))
             }
             "unknown-model" => {
-                session.attempts[0].pricing_model = None;
-                proxy.attempts[0].pricing_model = None;
+                for attempt in [&mut session.attempts[0], &mut proxy.attempts[0]] {
+                    attempt.response_model = None;
+                    attempt.requested_model = None;
+                    attempt.pricing_model = None;
+                }
             }
             "unknown-tokens" => {
                 session.attempts[0].tokens = Tokens::default();
@@ -846,7 +865,7 @@ fn fallback_deduplication_requires_exact_tokens_model_client_and_ten_minute_wind
         store.write_batch(&[proxy, session], None).unwrap();
         assert_eq!(
             store.logs(&Filter::default()).unwrap().total,
-            if case == "exact" { 1 } else { 2 },
+            expected_total,
             "case={case}"
         );
     }
@@ -1315,6 +1334,7 @@ fn fixed_prices_override_catalog_selection_and_aliases_resolve_to_fixed_models()
             json!({"input_cost_per_token": "0.1", "output_cost_per_token": "0.2"}),
         )]),
         aliases: BTreeMap::from([("fixture-alias".into(), "gpt-4o".into())]),
+        provider_mappings: Vec::new(),
     };
     let saved = prices.configure(config, &view.revision).unwrap();
     let tokens = Tokens {

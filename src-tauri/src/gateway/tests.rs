@@ -474,14 +474,15 @@ async fn streaming_first_byte_retry_no_splicing_and_cancel_releases_activity() {
 async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
     let port = server(|_| async {
         Response::builder()
-            .status(429)
+            .status(502)
             .header("retry-after", "120")
-            .body(full("limited"))
+            .body(full("upstream-502"))
             .unwrap()
     })
     .await;
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
     let mut settings = g.view().settings;
+    settings.failure_threshold = 1;
     settings.max_retries = 0;
     settings.queue_seconds = 1;
     update(&g, &t, Edit::Settings { settings });
@@ -499,10 +500,28 @@ async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
         },
     );
     start(&g, &t).await;
-    assert_eq!(request(&g, "/v1/a", vec![], vec![]).await.status(), 429);
-    assert_eq!(request(&g, "/v1/a", vec![], vec![]).await.status(), 503);
-    assert!(g.view().providers[0].health.retry_in >= 118);
-    assert_eq!(g.view().providers[0].health.failures, 0);
+    let first_status = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(&g, "/v1/a", vec![], vec![]),
+    )
+    .await
+    .expect("upstream failure response timed out")
+    .status();
+    assert_eq!(first_status, 502);
+    let cooldown_status = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(&g, "/v1/a", vec![], vec![]),
+    )
+    .await
+    .expect("cooldown response timed out")
+    .status();
+    assert_eq!(cooldown_status, 503);
+    let view = g.view();
+    let health = &view.providers[0].health;
+    assert!(health.retry_in >= 118);
+    assert_eq!(health.failures, 1);
+    assert_eq!(health.state, super::circuit::CircuitState::Closed);
+    assert!(health.protected_single_provider);
     g.stop().await.unwrap();
     let (_, pair) = takeover::read(t.path()).unwrap();
     takeover::attach(
@@ -1164,3 +1183,6 @@ mod events_v013;
 
 #[path = "v016_tests.rs"]
 mod v016;
+
+#[path = "v017_tests.rs"]
+mod v017;

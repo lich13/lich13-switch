@@ -64,6 +64,7 @@ export default function Usage({
     [live, setLive] = useState(true);
   const [client, setClient] = useState(""),
     [provider, setProvider] = useState(""),
+    [source, setSource] = useState<"" | "proxy" | "sessions">(""),
     [model, setModel] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
@@ -136,11 +137,12 @@ export default function Usage({
     return {
       start,
       end,
+      source: source || undefined,
       client: client || undefined,
       provider: provider || undefined,
       model: model || undefined,
     };
-  }, [range, from, to, live, client, provider, model]);
+  }, [range, from, to, live, client, provider, model, source]);
   const loadOverview = useCallback(async () => {
     const id = ++sequence.current;
     setBusy(true);
@@ -275,7 +277,7 @@ export default function Usage({
     );
     return () => clearInterval(t);
   }, [visible, nativeVisible, state?.settings.refreshSeconds, load]);
-  const choose = (setter: (s: string) => void, value: string) => {
+  const choose = <T extends string,>(setter: (s: T) => void, value: T) => {
     setter(value);
     setPage(1);
   };
@@ -289,7 +291,7 @@ export default function Usage({
       (t?.tokens.cacheWrite ?? 0);
   const open = async (r: UsageRecord) => {
     try {
-      setSelected(await command<UsageRecord>("get_usage_detail", { id: r.id }));
+      setSelected(await command<UsageRecord>("get_usage_detail", { id: r.id, source: source || undefined }));
     } catch (e) {
       setError(errorOf(e).message);
     }
@@ -385,6 +387,9 @@ export default function Usage({
             </option>
           ))}
         </select>
+        <select aria-label="用量来源" value={source} onChange={(e) => choose(setSource, e.target.value as typeof source)}>
+          <option value="">全部（去重）</option><option value="proxy">本网关</option><option value="sessions">本机会话</option>
+        </select>
         <input
           aria-label="计价模型筛选"
           list="usage-models"
@@ -475,7 +480,7 @@ export default function Usage({
           ].map(([n, v]) => (
             <span key={n}>
               {n}
-              <b>{numeric(v as number | null)}</b>
+              <b><NumberValue value={v as number | null} /></b>
             </span>
           ))}
           <span>
@@ -487,7 +492,7 @@ export default function Usage({
             </b>
           </span>
           <span>
-            会话记录<b>{numeric(t.sessions)}</b>
+            会话记录<b><NumberValue value={t.sessions} /></b>
           </span>
         </div>
       )}
@@ -528,9 +533,10 @@ export default function Usage({
       </div>
       {!!data?.reviewCount && (
         <div role="status" className="usage-review">
-          {numeric(data.reviewCount)} 条用量待核对
+          {compact(data.reviewCount)} 条用量待核对
         </div>
       )}
+      {data?.sourceHistoryIncomplete && <div role="status" className="usage-review">部分历史汇总无法按来源拆分</div>}
       <Heatmap points={annual} onToggle={setHeatmapOpen} />
       <div className="usage-tabs" role="tablist" aria-label="用量明细">
         {[
@@ -624,11 +630,9 @@ export default function Usage({
                       >
                         <Model a={a} />
                       </td>
-                      <td title={numeric(a.tokens.input)}>
-                        {compact(a.tokens.input)}
-                      </td>
-                      <td>{compact(a.tokens.output)}</td>
-                      <td>{compact(a.tokens.cacheRead)}</td>
+                      <td><NumberValue value={a.tokens.input} /></td>
+                      <td><NumberValue value={a.tokens.output} /></td>
+                      <td><NumberValue value={a.tokens.cacheRead} /></td>
                       <td title={a.price?.cost}>
                         {money(a.price?.cost)}
                         {a.price && Number(a.price.multiplier) !== 1 && (
@@ -697,13 +701,22 @@ function Metric({
   title?: string;
   extra?: string;
 }) {
+  const [focused, setFocused] = useState(false);
   return (
     <div className="usage-metric">
       <span>{label}</span>
-      <strong title={title}>{value}</strong>
+      <strong tabIndex={0} title={title} aria-label={title}
+        onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+        onKeyDown={(event) => { if (event.key === "Escape") setFocused(false); }}>{value}</strong>
+      {focused && title && <span className="usage-exact-value" role="tooltip">{title}</span>}
       {extra && <em>{extra}</em>}
     </div>
   );
+}
+function NumberValue({ value }: { value: number | null | undefined }) {
+  const [focused, setFocused] = useState(false);
+  return <span className="usage-number" tabIndex={0} title={numeric(value)} aria-label={numeric(value)}
+    onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}>{focused ? numeric(value) : compact(value)}</span>;
 }
 function Model({ a }: { a: Attempt }) {
   return (
@@ -869,7 +882,7 @@ export function Pagination({
     .sort((a, b) => a - b);
   return (
     <div className="usage-pagination">
-      <span>{numeric(total)} 条</span>
+      <span title={numeric(total)}>{compact(total)} 条</span>
       <button
         className="icon-button"
         aria-label="上一页"
@@ -970,10 +983,10 @@ function Ranking({
           {sorted.map(({ id, totals: t }) => (
             <tr key={id}>
               <td title={name(id)}>{name(id)}</td>
-              <td>{numeric(t.requests)}</td>
+              <td><NumberValue value={t.requests} /></td>
               <td>{money(t.cost)}</td>
-              <td>{numeric(tokenTotal(t.tokens))}</td>
-              <td>{numeric(t.attempts)}</td>
+              <td><NumberValue value={tokenTotal(t.tokens)} /></td>
+              <td><NumberValue value={t.attempts} /></td>
               <td>
                 {t.statusKnown
                   ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
@@ -1020,6 +1033,7 @@ export function Drawer({
     <dialog
       ref={ref}
       className="usage-drawer"
+      aria-label={title}
       onCancel={(e) => {
         e.preventDefault();
         onClose();
@@ -1090,15 +1104,15 @@ function Detail({
         </dd>
         <dt>全部尝试费用</dt>
         <dd>
-          {r.attempts.some((a) => !a.price) ? "含未定价项 · " : ""}
+          {r.attempts.some((a) => !a.price || a.compactedUnpriced) ? "含未定价项 · " : ""}
           {money(String(total))}
         </dd>
       </dl>
-      <h3>尝试 · {r.attempts.length}</h3>
+      <h3>尝试 · {compact(r.attempts.reduce((sum, a) => sum + (a.repeatCount ?? 1), 0))}</h3>
       {r.attempts.map((attempt, i) => (
         <details key={attempt.id}>
           <summary>
-            {i + 1} · {name(attempt.provider)} · {attempt.status ?? "—"}
+            {i + 1} · {name(attempt.provider)} · {attempt.status ?? "—"}{(attempt.repeatCount ?? 1) > 1 ? ` · 合并 ${compact(attempt.repeatCount)} 次` : ""}
           </summary>
           <AttemptDetails a={attempt} name={name} />
         </details>
@@ -1153,8 +1167,10 @@ function AttemptDetails({
           ["请求类型", a.operation === "web_search" ? "网络搜索" : "模型请求"],
           ["时间", new Date(a.startedAt).toLocaleString()],
           ["请求模型", a.requestedModel],
-          ["响应模型", a.responseModel],
+          ["收到的响应模型", a.responseModel],
           ["计价模型", a.pricingModel],
+          ["计价依据", a.pricingBasis === "provider_mapping" ? "供应商精确映射（估算）" : a.pricingBasis === "compacted" ? "重试消耗汇总（估算）" : a.pricingBasis === "request" ? "请求模型（估算）" : "收到的响应模型（估算）"],
+          ["映射版本", a.mappingRevision],
           ["输入", numeric(a.tokens.input)],
           ["输出", numeric(a.tokens.output)],
           ["缓存读取", numeric(a.tokens.cacheRead)],

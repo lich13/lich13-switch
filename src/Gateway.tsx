@@ -13,7 +13,6 @@ import ProviderNameEditor from "./ProviderNameEditor";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import Modal from "./Modal";
 import { providerStatus } from "./provider-status";
-import ModelPolicyDialog from "./ModelPolicyDialog";
 import { QuotaInfo, useProviderQuota } from "./Quota";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -40,7 +39,6 @@ import {
 type Edit = Record<string, unknown>;
 type Dialog =
   | { kind: "provider"; item?: Provider }
-  | { kind: "models"; item: Provider }
   | { kind: "settings"; item: Provider }
   | { kind: "quota"; item: Provider }
   | null;
@@ -534,14 +532,9 @@ function GatewayContent({
             state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item
           }
           close={() => setDialog(null)}
-          models={() => setDialog({ kind: "models", item: dialog.item })}
           save={async (payload, revision) => {
             await edit(payload, revision);
-            notify(
-              payload.supportsWebsocket
-                ? "已启用原生 WebSocket"
-                : "已启用 HTTP 桥接",
-            );
+            notify("供应商设置已保存");
           }}
         />
       )}
@@ -556,30 +549,6 @@ function GatewayContent({
             refresh={() => void quota.refresh(dialog.item.id)}
           />
         </Modal>
-      )}
-      {dialog?.kind === "models" && (
-        <ModelPolicyDialog
-          clientId={clientId}
-          provider={dialog.item}
-          revision={state.revision}
-          version={
-            state.providers.find((p) => p.id === dialog.item.id)
-              ?.quotaVersion ?? "deleted"
-          }
-          onDirtyChange={markDialog}
-          close={() => setDialog(null)}
-          save={async (allowedModels, revision) => {
-            await edit(
-              {
-                op: "modelsProvider",
-                id: dialog.item.id,
-                allowedModels,
-              },
-              revision,
-            );
-            setDialog(null);
-          }}
-        />
       )}
       {dialog?.kind === "provider" && (
         <GatewayDialog

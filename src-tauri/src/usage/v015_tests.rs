@@ -753,7 +753,7 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert_eq!(
         migrated.detail(&gateway.id).unwrap().attempts[0]
             .price

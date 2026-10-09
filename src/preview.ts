@@ -2,6 +2,7 @@ import { usageCommands, usagePreview } from "./usage-preview";
 import { powerCommands, powerPreview } from "./power-preview";
 import { gatewayPreview } from "./gateway-preview";
 import type { ViewState, ConfigDocument, LoginState } from "./types";
+import { densePreview } from "./preview-fixtures";
 const callbacks = new Map<string, Set<(p: never) => void>>();
 export function subscribe<T>(event: string, fn: (p: T) => void) {
   if (!callbacks.has(event)) callbacks.set(event, new Set());
@@ -68,6 +69,16 @@ export const demo: ViewState = {
     error: null,
   },
 };
+if (densePreview) {
+  demo.accounts.push(...Array.from({ length: 12 }, (_, index) => ({
+    id: `fixture-account-${index + 1}`,
+    name: `团队工作空间 ${index + 1} · 长名称账号`,
+    kind: "chatgpt" as const,
+    email: null,
+    current: false,
+    updatedAt: 0,
+  })));
+}
 let doc: ConfigDocument = {
   clientId: "codex",
   guarded: false,
@@ -411,6 +422,7 @@ export async function run(
       return login;
     case "start_login":
       login = {
+        targetAccountId: args.targetAccountId as string | undefined,
         phase: "waiting",
         mode: String(args.mode),
         url: "https://auth.openai.com/codex/device",

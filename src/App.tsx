@@ -64,6 +64,7 @@ type Dialog =
   | "add"
   | "settings"
   | { action: "rename" | "delete"; account: Account }
+  | { action: "refresh"; account: Account }
   | null;
 const emptyLogin: LoginState = {
   phase: "idle",
@@ -523,6 +524,10 @@ export default function App() {
                           </button>
                         )
                       )}
+                      {a.kind === "chatgpt" && <button className="text-button" disabled={busy || ["starting", "waiting", "cancelling"].includes(login.phase)}
+                        onClick={() => setDialog({ action: "refresh", account: a })}>
+                        <RefreshCw size={14} />设备码刷新
+                      </button>}
                       <details className="account-menu">
                         <summary aria-label={"管理 " + a.name}>
                           <MoreHorizontal size={18} />
@@ -605,17 +610,20 @@ export default function App() {
               ? "添加账号"
               : dialog === "settings"
                 ? "设置"
-                : dialog.action === "rename"
+                : dialog.action === "refresh" ? "刷新账号凭据" : dialog.action === "rename"
                   ? "重命名账号"
                   : "删除账号"
           }
           onClose={() => {
             if (dialog === "settings") setThemePreview(null);
+            if (typeof dialog === "object" && dialog?.action === "refresh" && ["starting", "waiting"].includes(login.phase))
+              void command("cancel_login").catch((e) => setError(errorOf(e).message));
             setDialog(null);
           }}
         >
-          {dialog === "add" ? (
+          {dialog === "add" || (typeof dialog === "object" && dialog.action === "refresh") ? (
             <AddAccount
+              target={typeof dialog === "object" ? dialog.account : undefined}
               login={login}
               setLogin={setLogin}
               onDone={(s) => {
@@ -664,6 +672,7 @@ function Modal({
     <dialog
       ref={ref}
       className="modal"
+      aria-label={title}
       onCancel={(e) => {
         e.preventDefault();
         onClose();
@@ -687,18 +696,30 @@ function Modal({
   );
 }
 function AddAccount({
+  target,
   login,
   setLogin,
   onDone,
 }: {
+  target?: Account;
   login: LoginState;
-  setLogin: (s: LoginState) => void;
+  setLogin: React.Dispatch<React.SetStateAction<LoginState>>;
   onDone: (s: ViewState) => void;
 }) {
   const [tab, setTab] = useState<"login" | "import">("login"),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const running = ["starting", "waiting", "cancelling"].includes(login.phase);
+  const started = useRef(false);
+  const startDevice = async () => setLogin(await command<LoginState>("start_login", {
+    mode: "device", ...(target ? { targetAccountId: target.id, expectedCredentialRevision: target.credentialRevision } : {}),
+  }));
+  useEffect(() => {
+    if (!target || started.current) return;
+    started.current = true;
+    setBusy(true);
+    void startDevice().catch((e) => setError(errorOf(e).message)).finally(() => setBusy(false));
+  }, []);
   const [copied, setCopied] = useState<"url" | "code" | null>(null);
   const [callbackDraft, setCallbackDraft] = useState("");
   useEffect(() => setCopied(null), [login.phase, login.url, login.code]);
@@ -724,7 +745,7 @@ function AddAccount({
   };
   return (
     <div className="modal-content">
-      <div className="segments">
+      {!target && <div className="segments">
         {(["login", "import"] as const).map((t) => (
           <button
             key={t}
@@ -734,7 +755,7 @@ function AddAccount({
             {t === "login" ? "ChatGPT 登录" : "导入凭据"}
           </button>
         ))}
-      </div>
+      </div>}
       {tab === "login" ? (
         <>
           <div className="login-illustration">
@@ -744,7 +765,7 @@ function AddAccount({
               <UserRound size={24} />
             </div>
           </div>
-          <h3 className="center">连接你的 ChatGPT 账号</h3>
+          <h3 className="center">{target ? target.name : "连接你的 ChatGPT 账号"}</h3>
           {login.message && login.phase !== "idle" && (
             <div
               className={"banner " + (login.phase === "error" ? "error" : "")}
@@ -837,12 +858,18 @@ function AddAccount({
                   disabled={busy || login.phase === "cancelling"}
                   onClick={() =>
                     void perform(async () => {
-                      await command("cancel_login");
-                      setLogin({
+                      const cancelling: LoginState = {
                         ...login,
                         phase: "cancelling",
                         message: "正在取消登录…",
-                      });
+                      };
+                      setLogin(cancelling);
+                      try {
+                        await command("cancel_login");
+                      } catch (error) {
+                        setLogin((current) => current === cancelling ? login : current);
+                        throw error;
+                      }
                     })
                   }
                 >
@@ -851,29 +878,15 @@ function AddAccount({
               </>
             ) : (
               <>
-                <button
-                  className="primary"
-                  disabled={busy}
-                  onClick={() =>
-                    void perform(async () =>
-                      setLogin(
-                        await command("start_login", { mode: "browser" }),
-                      ),
-                    )
-                  }
-                >
-                  <LogIn size={16} />
-                  使用浏览器登录
-                </button>
+                {!target && <button className="primary" disabled={busy} onClick={() => void perform(async () =>
+                  setLogin(await command("start_login", { mode: "browser" })))}>
+                  <LogIn size={16} />使用浏览器登录
+                </button>}
                 <button
                   className="text-button"
                   disabled={busy}
                   onClick={() =>
-                    void perform(async () =>
-                      setLogin(
-                        await command("start_login", { mode: "device" }),
-                      ),
-                    )
+                    void perform(startDevice)
                   }
                 >
                   使用设备码

@@ -13,6 +13,8 @@ pub struct Observation {
     pub terminal: Option<Terminal>,
     pub expects_terminal: bool,
     pub first_event_model_error: Option<bool>,
+    pub first_event_capacity_error: Option<bool>,
+    pub capacity_error: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terminal {
@@ -71,6 +73,7 @@ impl Observation {
             )
             || outer.get("choices").is_some();
         if self.terminal.is_none() {
+            self.capacity_error = super::upstream_error::temporary_capacity_event(outer);
             let status = value.get("status").and_then(Value::as_str).unwrap_or("");
             let terminal = if super::upstream_error::model_error(outer) {
                 Some(Terminal::ModelUnavailable)
@@ -179,6 +182,10 @@ impl Sink {
     }
     fn parse(&mut self, data: &[u8]) {
         if !data.trim_ascii().is_empty() && self.observation.first_event_model_error.is_none() {
+            self.observation.first_event_capacity_error = Some(
+                serde_json::from_slice(data)
+                    .is_ok_and(|v| super::upstream_error::temporary_capacity_event(&v)),
+            );
             self.observation.first_event_model_error = Some(
                 serde_json::from_slice(data).is_ok_and(|v| super::upstream_error::model_error(&v)),
             );

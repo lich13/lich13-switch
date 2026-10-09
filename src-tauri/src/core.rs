@@ -59,6 +59,17 @@ pub struct Account {
     pub email: Option<String>,
     pub current: bool,
     pub updated_at: u64,
+    pub credential_revision: String,
+}
+/// A login may only replace the account and disk version explicitly selected
+/// when it started. This guard never crosses IPC or contains credentials.
+pub struct LoginTarget {
+    id: String,
+    identity: String,
+    credential_revision: String,
+    home: PathBuf,
+    auth_revision: String,
+    current: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -467,6 +478,123 @@ impl Core {
         }
         Ok(active)
     }
+    pub fn login_target(&self, id: &str, expected: &str) -> Result<LoginTarget> {
+        let profile = self
+            .store
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| AppError::new("ACCOUNT", "账号已被删除"))?;
+        if profile.kind != "chatgpt" {
+            return Err(AppError::new("LOGIN_AUTH", "仅 ChatGPT 账号支持设备码刷新"));
+        }
+        let revision = storage::digest(profile.auth.as_bytes());
+        if revision != expected {
+            return Err(AppError::new(
+                "CONFLICT",
+                "该账号凭据已更新，请刷新列表后重试",
+            ));
+        }
+        let disk = storage::read_optional(&self.home().join("auth.json"))?;
+        let current = disk
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|raw| auth_info(raw).ok())
+            .is_some_and(|info| info.identity == profile.identity);
+        Ok(LoginTarget {
+            id: id.into(),
+            identity: profile.identity.clone(),
+            credential_revision: revision,
+            home: self.home(),
+            auth_revision: storage::revision(disk.as_deref()),
+            current,
+        })
+    }
+    pub fn complete_target_login(&mut self, raw: &str, target: &LoginTarget) -> Result<bool> {
+        let info = auth_info(raw)?;
+        if info.kind != "chatgpt" || info.identity != target.identity {
+            return Err(AppError::new(
+                "LOGIN_IDENTITY",
+                "登录账号或工作区不一致，未更新指定账号",
+            ));
+        }
+        let index = self
+            .store
+            .profiles
+            .iter()
+            .position(|p| p.id == target.id)
+            .ok_or_else(|| AppError::new("ACCOUNT", "登录期间账号已被删除，未保存新凭据"))?;
+        if storage::digest(self.store.profiles[index].auth.as_bytes()) != target.credential_revision
+            || self.home() != target.home
+        {
+            return Err(AppError::new(
+                "CONFLICT",
+                "登录期间账号凭据或配置目录已变化，未覆盖",
+            ));
+        }
+        let path = target.home.join("auth.json");
+        let before = storage::read_optional(&path)?;
+        if storage::revision(before.as_deref()) != target.auth_revision {
+            return Err(AppError::new(
+                "CONFLICT",
+                "登录期间当前账号文件已变化，未覆盖",
+            ));
+        }
+        // Preserve extension fields while trusting credentials produced by this
+        // successful official login, regardless of legacy refresh timestamps.
+        fn merge(previous: &mut Value, next: Value) {
+            match (previous, next) {
+                (Value::Object(previous), Value::Object(next)) => {
+                    for (key, value) in next {
+                        merge(previous.entry(key).or_insert(Value::Null), value);
+                    }
+                }
+                (previous, next) => *previous = next,
+            }
+        }
+        let mut value: Value = serde_json::from_str(&self.store.profiles[index].auth)
+            .map_err(|_| AppError::new("AUTH", "已保存凭据格式无效"))?;
+        merge(
+            &mut value,
+            serde_json::from_str(raw).map_err(|_| AppError::new("AUTH", "新凭据格式无效"))?,
+        );
+        let merged = serde_json::to_string_pretty(&value)
+            .map_err(|_| AppError::new("AUTH", "无法保存新凭据"))?;
+        let old = self.store.clone();
+        if target.current {
+            storage::atomic_write(&path, merged.as_bytes(), Some(&target.auth_revision))?;
+            self.store.observed_auth_revisions.insert(
+                self.store.preferences.codex_home.clone(),
+                storage::digest(merged.as_bytes()),
+            );
+        }
+        let profile = &mut self.store.profiles[index];
+        profile.auth = merged.clone();
+        profile.email = info.email;
+        profile.updated_at = now();
+        if let Err(error) = self.persist() {
+            self.store = old;
+            if target.current {
+                let revision = storage::digest(merged.as_bytes());
+                if storage::atomic_write(
+                    &path,
+                    before.as_deref().unwrap_or_default(),
+                    Some(&revision),
+                )
+                .is_err()
+                {
+                    return Err(AppError::new(
+                        "CONFLICT",
+                        "账号库保存失败，当前凭据已变化，未覆盖现场",
+                    ));
+                }
+            }
+            return Err(error);
+        }
+        self.checked_auth = None;
+        self.set_sync("updated", Some(target.id.clone()), "指定账号凭据已更新");
+        Ok(target.current)
+    }
     pub fn add_api_key(&mut self, name: &str, key: &str) -> Result<String> {
         if key.trim().is_empty() || key.contains(['\n', '\r']) {
             return Err(AppError::new("KEY", "请输入单行有效 API Key"));
@@ -676,6 +804,7 @@ impl Core {
                 email: p.email.clone(),
                 current: Some(p.identity.as_str()) == identity,
                 updated_at: p.updated_at,
+                credential_revision: storage::digest(p.auth.as_bytes()),
             })
             .collect();
         let status = if auth.is_none() {
@@ -1135,3 +1264,7 @@ mod tests {
 #[cfg(test)]
 #[path = "core_v016_tests.rs"]
 mod v016_tests;
+
+#[cfg(test)]
+#[path = "auth_refresh_v017_tests.rs"]
+mod auth_refresh_v017_tests;

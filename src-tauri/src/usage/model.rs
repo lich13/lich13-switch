@@ -242,6 +242,14 @@ impl Operation {
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
     #[serde(default)]
+    pub pricing_basis: Option<String>,
+    #[serde(default)]
+    pub mapping_revision: Option<String>,
+    #[serde(default = "one_attempt")]
+    pub repeat_count: u64,
+    #[serde(default)]
+    pub compacted_unpriced: Option<u64>,
+    #[serde(default)]
     pub operation: Operation,
     #[serde(default = "one")]
     pub cost_multiplier: String,
@@ -262,9 +270,97 @@ pub struct Attempt {
     pub service_tier: Option<String>,
     pub price: Option<PriceSnapshot>,
 }
+fn one_attempt() -> u64 {
+    1
+}
+impl Attempt {
+    pub fn unpriced_count(&self) -> u64 {
+        self.compacted_unpriced
+            .unwrap_or(u64::from(self.price.is_none()))
+    }
+    pub fn same_dimensions(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && self.operation == other.operation
+            && self.requested_model == other.requested_model
+            && self.response_model == other.response_model
+            && self.pricing_model == other.pricing_model
+            && self.mapping_revision == other.mapping_revision
+            && self.cost_multiplier == other.cost_multiplier
+            && self.service_tier == other.service_tier
+            && match (&self.price, &other.price) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.version == b.version
+                        && a.source == b.source
+                        && a.model == b.model
+                        && a.multiplier == b.multiplier
+                        && a.rates == b.rates
+                        && a.basis == b.basis
+                }
+                _ => false,
+            }
+    }
+    /// Bound retry metadata independently of the request lifetime. Preserve all
+    /// reported consumption; mixed price/provider dimensions remain explicitly unknown.
+    pub fn compact(&mut self, next: Self) {
+        let same = self.same_dimensions(&next);
+        let unpriced = self.unpriced_count().saturating_add(next.unpriced_count());
+        let cost = self
+            .price
+            .as_ref()
+            .and_then(|p| decimal(&p.cost))
+            .unwrap_or_default()
+            + next
+                .price
+                .as_ref()
+                .and_then(|p| decimal(&p.cost))
+                .unwrap_or_default();
+        self.tokens.add(&next.tokens);
+        self.repeat_count = self.repeat_count.saturating_add(next.repeat_count);
+        self.compacted_unpriced = Some(unpriced);
+        self.duration_ms = self.duration_ms.saturating_add(next.duration_ms);
+        if self.provider != next.provider {
+            self.provider = None;
+        }
+        if self.pricing_model != next.pricing_model {
+            self.pricing_model = None;
+        }
+        if self.response_model != next.response_model {
+            self.response_model = None;
+        }
+        self.response_id = None;
+        if same {
+            if let Some(price) = &mut self.price {
+                price.cost = cost.to_string();
+            }
+            return;
+        }
+        self.mapping_revision = None;
+        self.pricing_basis = Some("compacted".into());
+        self.price = if self.price.is_some() || next.price.is_some() {
+            Some(PriceSnapshot {
+                version: "retry-summary-v1".into(),
+                source: "compacted".into(),
+                model: self.pricing_model.clone().unwrap_or_default(),
+                multiplier: "1".into(),
+                rates: Default::default(),
+                cost: cost.to_string(),
+                basis: Some(
+                    serde_json::json!({"attempts": self.repeat_count, "unpriced": unpriced}),
+                ),
+            })
+        } else {
+            None
+        };
+    }
+}
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            pricing_basis: None,
+            mapping_revision: None,
+            repeat_count: 1,
+            compacted_unpriced: None,
             operation: Operation::Model,
             cost_multiplier: one(),
             id: String::new(),
@@ -348,6 +444,14 @@ pub struct Record {
     pub gateway_reported: Option<Attempt>,
 }
 impl Record {
+    pub fn gateway_only(&mut self) {
+        if let (Some(original), Some(last)) =
+            (self.gateway_reported.take(), self.attempts.last_mut())
+        {
+            *last = original;
+        }
+    }
+
     pub fn final_attempt(&self) -> Option<&Attempt> {
         self.attempts.last()
     }
@@ -359,7 +463,7 @@ impl Record {
         t
     }
     pub fn cost(&self) -> Option<Decimal> {
-        if self.attempts.is_empty() || self.attempts.iter().any(|a| a.price.is_none()) {
+        if self.attempts.is_empty() || self.attempts.iter().any(|a| a.unpriced_count() > 0) {
             return None;
         }
         self.attempts.iter().try_fold(Decimal::ZERO, |sum, a| {
@@ -371,7 +475,11 @@ impl Record {
         if a.operation == Operation::WebSearch || a.tokens.total().is_none_or(|n| n == 0) {
             return None;
         }
-        let model = a.pricing_model.as_ref()?;
+        let model = a
+            .response_model
+            .as_ref()
+            .or(a.requested_model.as_ref())
+            .or(a.pricing_model.as_ref())?;
         let input = a.tokens.input?;
         let output = a.tokens.output?;
         // Codex sessions do not report cache writes; retain that uncertainty in
@@ -423,6 +531,7 @@ impl Settings {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Filter {
+    pub source: Option<String>,
     pub start: Option<i64>,
     pub end: Option<i64>,
     pub client: Option<String>,
@@ -451,7 +560,7 @@ pub struct Totals {
 impl Totals {
     pub fn add_record(&mut self, r: &Record) {
         self.requests += 1;
-        self.attempts += r.attempts.len() as u64;
+        self.attempts += r.attempts.iter().map(|a| a.repeat_count).sum::<u64>();
         self.tokens.add(&r.tokens());
         let known = r
             .attempts

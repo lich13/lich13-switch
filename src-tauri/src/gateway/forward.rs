@@ -139,6 +139,9 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
             == 0
 }
 pub(super) fn capacity_message(status: StatusCode, body: &[u8]) -> bool {
+    if super::upstream_error::permanent_rejection(body) {
+        return false;
+    }
     if status == StatusCode::TOO_MANY_REQUESTS {
         return true;
     }
@@ -326,25 +329,31 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     };
     let mut last = None;
     let mut attempted = 0usize;
+    let mut ordinary_attempts = 0usize;
+    let mut capacity_protected = false;
     let mut previous_provider: Option<String> = None;
     let mut last_category = "NO_PROVIDER";
     let mut wait_budget = Budget::new(settings.queue_seconds);
+    if pinned.is_some() || unknown_affinity {
+        wait_budget.pin_provider();
+    }
     let mut capacity_pending = false;
     let mut capacity_retry_after: Option<Duration> = None;
     let mut rpm_retry_after: Option<Duration> = None;
     let mut capacity_sources = Vec::new();
     let mut capacity_waited = Duration::ZERO;
-    while attempted <= settings.max_retries {
+    while ordinary_attempts <= settings.max_retries {
         // An unknown previous_response_id has no safe owner to replay against;
         // preserve the existing one-attempt rule instead of silently
         // repeating the request on an arbitrary provider.
-        if (unknown_affinity || (gateway.client_id() == super::ClientId::Claude && continuation))
+        if ((unknown_affinity && !capacity_protected)
+            || (gateway.client_id() == super::ClientId::Claude && continuation))
             && attempted > 0
         {
             break;
         }
         if ids.is_empty() {
-            if capacity_pending && attempted <= settings.max_retries {
+            if capacity_pending && ordinary_attempts <= settings.max_retries {
                 let delay = capacity_delay(&settings, capacity_retry_after);
                 let waiting_since = Instant::now();
                 match gateway
@@ -365,6 +374,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     .iter()
                     .filter_map(|id| gateway.route(id).map(|r| (id.clone(), r)))
                     .collect();
+                if ids.is_empty() {
+                    break;
+                }
                 capacity_pending = false;
                 capacity_retry_after = None;
                 capacity_sources.clear();
@@ -376,6 +388,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
+        let admission_started = Instant::now();
         let mut admission = match gateway
             .0
             .admission
@@ -474,7 +487,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 break;
             }
         };
+        if capacity_protected {
+            capacity_waited += admission_started.elapsed();
+        }
         let route = admission.route.clone();
+        if unknown_affinity {
+            pinned = Some(route.provider.id.clone());
+        }
         let reset_generation = admission.reset_generation;
         ids.retain(|id| id != &route.provider.id);
         let uri = match target_for(route.client_id, &route.provider.base_url, &parts.uri) {
@@ -510,7 +529,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 "RPM 状态暂不可用，请稍后重试",
             );
         }
-        attempted += 1;
+        attempted = attempted.saturating_add(1);
+        ordinary_attempts = ordinary_attempts.saturating_add(1);
         let rerouted = previous_provider
             .as_deref()
             .is_some_and(|id| id != admission.route.provider.id);
@@ -633,7 +653,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Reason::Failover,
                     Action::Routed,
                     Some(status.as_u16()),
-                    Some(attempted as u32),
+                    Some(attempted.min(u32::MAX as usize) as u32),
                 );
             }
             return Response::from_parts(response_parts, replay::empty());
@@ -670,10 +690,19 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let capacity = !model_error
                 && route.client_id == super::ClientId::Codex
                 && capacity_message(status, &decoded);
-            let retryable = model_error || circuit::retryable(status.as_u16());
+            if capacity && !websocket {
+                ordinary_attempts = ordinary_attempts.saturating_sub(1);
+                capacity_protected = true;
+                wait_budget.protect_capacity();
+                capacity_waited += started.elapsed();
+            }
+            let retryable = model_error
+                || (circuit::retryable(status.as_u16())
+                    && (route.client_id != super::ClientId::Codex
+                        || !super::upstream_error::permanent_rejection(&decoded)));
             let will_retry = retryable
                 && !ids.is_empty()
-                && attempted <= settings.max_retries
+                && ordinary_attempts <= settings.max_retries
                 && !unknown_affinity;
             let reason = if model_error {
                 Reason::ModelUnavailable
@@ -837,10 +866,38 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         } else {
             ended && protocol.terminal() == Some(super::protocol::Terminal::ModelUnavailable)
         };
-        if initial_model_error {
-            admission.permits.neutral(&settings);
+        let initial_capacity = route.client_id == super::ClientId::Codex
+            && !websocket
+            && !initial_model_error
+            && if stream {
+                protocol.observation.first_event_capacity_error == Some(true)
+            } else {
+                ended && protocol.observation.capacity_error
+            };
+        if initial_model_error || initial_capacity {
+            let cooldown = response_parts
+                .headers
+                .get(header::RETRY_AFTER)
+                .and_then(|h| h.to_str().ok())
+                .and_then(circuit::retry_after);
+            if initial_capacity {
+                ordinary_attempts = ordinary_attempts.saturating_sub(1);
+                capacity_protected = true;
+                wait_budget.protect_capacity();
+                capacity_waited += started.elapsed();
+                admission.permits.capacity_limited(&settings, cooldown);
+                capacity_pending = true;
+                capacity_sources.push(CapacitySource {
+                    provider_id: route.provider.id.clone(),
+                    reset_generation,
+                });
+                capacity_retry_after = capacity_retry_after.max(cooldown);
+            } else {
+                admission.permits.neutral(&settings);
+            }
+            protocol.finish(Some(status.as_u16()), "HTTP");
             let will_retry =
-                !ids.is_empty() && attempted <= settings.max_retries && !unknown_affinity;
+                !ids.is_empty() && ordinary_attempts <= settings.max_retries && !unknown_affinity;
             let mut details = protocol.observation.error.clone();
             details.phase = Some(crate::events::Phase::Response);
             details.counted_failure = Some(false);
@@ -848,9 +905,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 &gateway,
                 &route,
                 model.as_deref(),
-                Reason::ModelUnavailable,
+                if initial_capacity {
+                    Reason::Capacity
+                } else {
+                    Reason::ModelUnavailable
+                },
                 if will_retry {
                     Action::TryingNext
+                } else if initial_capacity {
+                    Action::Waiting
                 } else {
                     Action::Returned
                 },
@@ -875,7 +938,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 response_parts,
                 StreamBody::new(rejected).boxed_unsync(),
             ));
-            last_category = "MODEL_UNAVAILABLE";
+            last_category = if initial_capacity {
+                "CAPACITY"
+            } else {
+                "MODEL_UNAVAILABLE"
+            };
             continue;
         }
         let total_deadline = tokio::time::Instant::now()
@@ -894,7 +961,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Reason::Failover,
                 Action::Routed,
                 Some(status.as_u16()),
-                Some(attempted as u32),
+                Some(attempted.min(u32::MAX as usize) as u32),
             );
         }
         let output = async_stream::try_stream! {
@@ -929,12 +996,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }
     gateway.record(
-        None,
+        previous_provider.as_deref(),
         model.as_deref(),
         Reason::FailoverExhausted,
         Action::Returned,
         last.as_ref().map(|r| r.status().as_u16()),
-        Some(attempted as u32),
+        Some(attempted.min(u32::MAX as usize) as u32),
     );
     last.unwrap_or_else(|| {
         if last_category == "RPM_LIMIT" {
@@ -1067,7 +1134,7 @@ impl Permits {
             reason,
             action,
             status,
-            Some(attempt as u32),
+            Some(attempt.min(u32::MAX as usize) as u32),
         );
         event.details = details.sanitized();
         if let Some(p) = &mut self.provider {

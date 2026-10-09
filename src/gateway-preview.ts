@@ -1,4 +1,5 @@
 import type { GatewayState, GatewaySettings, ProviderQuota } from "./types";
+import { densePreview } from "./preview-fixtures";
 const healthy = {
   state: "closed" as const,
   failures: 0,
@@ -77,6 +78,14 @@ export const gatewayDemo: GatewayState = {
   error: null,
   recoveryPending: false,
 };
+if (densePreview) {
+  gatewayDemo.providers.push(...Array.from({ length: 12 }, (_, index) => ({
+    ...structuredClone(gatewayDemo.providers[index % 2]),
+    id: `fixture-provider-${index + 1}`,
+    name: `团队供应商 ${index + 1} · 跨区域研发与长名称显示`,
+    baseUrl: "https://provider.example.invalid/v1",
+  })));
+}
 export const claudeGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo),
   clientId: "claude",
@@ -184,9 +193,9 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           supportsWebsocket: true,
         });
     }
-    if (e.op === "modelsProvider" && p)
+    if (["modelsProvider", "policyProvider"].includes(e.op as string) && p)
       p.allowedModels = e.allowedModels as string[] | null;
-    if (e.op === "websocketProvider" && p)
+    if (["websocketProvider", "policyProvider"].includes(e.op as string) && p)
       p.supportsWebsocket = Boolean(e.supportsWebsocket);
     if (e.op === "settings") s.settings = e.settings as GatewaySettings;
     if (e.op === "import") throw new Error("预览模式无法读取真实客户端配置");
