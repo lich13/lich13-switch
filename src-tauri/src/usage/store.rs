@@ -81,7 +81,7 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 5 {
+        if version > 6 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
@@ -99,55 +99,25 @@ impl Store {
 "))?;
         query::register(&connection)?;
         query::schema(&connection)?;
-        if version < 3 {
+        if version < 6 {
             let tx = db(connection.transaction())?;
-            let mut after = String::new();
-            loop {
-                let mut stmt = db(
-                    tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 256")
-                )?;
-                let rows = db(stmt.query_map([&after], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                }))?;
-                let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-                drop(stmt);
-                if rows.is_empty() {
-                    break;
-                }
-                for (id, body) in rows {
-                    let r: Record = serde_json::from_str(&body)
-                        .map_err(|_| failure("旧用量记录无效，已保留原数据库"))?;
-                    query::project(&tx, 0, &id, &r, 1, None)?;
-                    db(tx.execute(
-                        "UPDATE records SET signature=?2 WHERE id=?1",
-                        params![id, r.signature()],
-                    ))?;
-                    after = id;
+            if version < 4 {
+                db(tx.execute_batch(
+                    "ALTER TABLE receipts ADD COLUMN operation TEXT NOT NULL DEFAULT 'model';",
+                ))?;
+            }
+            for column in ["first_token_sum_ms", "first_token_samples"] {
+                let exists: bool = db(tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_metrics') WHERE name=?1)",
+                    [column],
+                    |r| r.get(0),
+                ))?;
+                if !exists {
+                    db(tx.execute_batch(&format!(
+                        "ALTER TABLE usage_metrics ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"
+                    )))?;
                 }
             }
-            let mut stmt = db(tx.prepare("SELECT id,body FROM daily"))?;
-            let rows =
-                db(stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-            let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-            drop(stmt);
-            for (id, body) in rows {
-                let d: Daily = serde_json::from_str(&body)
-                    .map_err(|_| failure("旧汇总无效，已保留原数据库"))?;
-                query::project(&tx, 1, &id, &d.example, d.totals.requests, Some(&d.totals))?;
-            }
-            if version > 0 {
-                db(tx.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('repair_codex','1'),('repair_claude','1')",[]))?;
-            }
-            db(tx.execute_batch("PRAGMA user_version=3;"))?;
-            db(tx.commit())?;
-        }
-        if version < 4 {
-            let tx = db(connection.transaction())?;
-            db(tx.execute_batch("ALTER TABLE receipts ADD COLUMN operation TEXT NOT NULL DEFAULT 'model'; PRAGMA user_version=4;"))?;
-            db(tx.commit())?;
-        }
-        if version < 5 {
-            let tx = db(connection.transaction())?;
             let mut after = String::new();
             loop {
                 let rows = {
@@ -163,17 +133,43 @@ impl Store {
                     break;
                 }
                 for (id, body) in rows {
-                    let record: Record =
-                        serde_json::from_str(&body).map_err(|_| failure("旧用量记录无效"))?;
+                    let record: Record = serde_json::from_str(&body)
+                        .map_err(|_| failure("旧用量记录无效，已保留原数据库"))?;
                     query::project(&tx, 0, &id, &record, 1, None)?;
-                    db(tx.execute(
-                        "UPDATE records SET signature=?2 WHERE id=?1",
-                        params![id, record.signature()],
-                    ))?;
+                    if version < 5 {
+                        db(tx.execute(
+                            "UPDATE records SET signature=?2 WHERE id=?1",
+                            params![id, record.signature()],
+                        ))?;
+                    }
                     after = id;
                 }
             }
-            db(tx.execute_batch("PRAGMA user_version=5;"))?;
+            // Old daily summaries contain no reconstructible TTFT; serde defaults
+            // their sample count to zero without altering stored prices or bodies.
+            let rows = {
+                let mut stmt = db(tx.prepare("SELECT id,body FROM daily"))?;
+                let rows =
+                    db(stmt
+                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+                db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+            };
+            for (id, body) in rows {
+                let daily: Daily = serde_json::from_str(&body)
+                    .map_err(|_| failure("旧汇总无效，已保留原数据库"))?;
+                query::project(
+                    &tx,
+                    1,
+                    &id,
+                    &daily.example,
+                    daily.totals.requests,
+                    Some(&daily.totals),
+                )?;
+            }
+            if version > 0 && version < 3 {
+                db(tx.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('repair_codex','1'),('repair_claude','1')", []))?;
+            }
+            db(tx.execute_batch("PRAGMA user_version=6;"))?;
             query::changed(&tx)?;
             db(tx.commit())?;
         }

@@ -145,6 +145,11 @@ function emitLogin(update: Partial<LoginState>) {
 async function mount() {
   render(<App />);
   await screen.findByRole("heading", { name: "账号", level: 1 });
+  await waitFor(() =>
+    expect(document.querySelectorAll(".account-row")).toHaveLength(
+      state.accounts.length,
+    ),
+  );
 }
 
 async function openRefresh(

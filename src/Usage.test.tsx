@@ -183,77 +183,104 @@ beforeEach(() => {
     configurable: true,
     value: "visible",
   });
-  mock.command.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
-    switch (name) {
-      case "get_state":
-        return {
-          accounts: [],
-          authRevision: "fixture-auth-revision",
-          configRevision: "fixture-config-revision",
-          currentState: "missing",
-          preferences: { codexHome: "/fixture/codex", cliPath: "", theme: "dark" },
-          authSource: {
-            provider: "openai",
-            credentialStore: "file",
-            inlineToken: false,
-            envKey: false,
-            commandAuth: false,
-            requiresOpenaiAuth: true,
-            warning: null,
-          },
-          error: null,
-        };
-      case "get_login":
-        return { phase: "idle", mode: "", url: null, code: null, message: "", callbackReady: false };
-      case "get_provider_imports":
-        return [];
-      case "frontend_ready":
-        return undefined;
-      case "get_app_events":
-        return { items: [], total: 0, page: 1, error: null };
-      case "get_gateway":
-        return {
-          clientId: args.clientId,
-          providers: args.clientId === "codex" ? [
-            { id: "provider-first", name: "First Provider" },
-            { id: "provider-final", name: "Fixture Provider" },
-          ] : [],
-        };
-      case "get_usage_dashboard":
-        return structuredClone(dashboard);
-      case "get_usage_heatmap":
-        return structuredClone(dashboard.heatmap);
-      case "get_usage_logs": {
-        const filter = args.filter as UsageFilter;
-        return { rows: structuredClone(records), total: totalRows, page: filter.page ?? 1, detailSince: 0 };
-      }
-      case "get_usage_detail":
-        return structuredClone(records.find((row) => row.id === args.id));
-      case "get_usage_state":
-      case "sync_usage":
-        return structuredClone(state);
-      case "set_usage_settings":
-        state = { ...state, settings: structuredClone(args.settings as UsageSettings) };
-        return structuredClone(state);
-      case "get_pricing":
-        return structuredClone(pricing);
-      case "configure_pricing": {
-        if (args.expectedRevision !== pricing.revision) {
-          throw { code: "CONFLICT", message: "价格配置已被外部修改，请重新保存" };
+  mock.command.mockImplementation(
+    async (name: string, args: Record<string, unknown> = {}) => {
+      switch (name) {
+        case "get_state":
+          return {
+            accounts: [],
+            authRevision: "fixture-auth-revision",
+            configRevision: "fixture-config-revision",
+            currentState: "missing",
+            preferences: {
+              codexHome: "/fixture/codex",
+              cliPath: "",
+              theme: "dark",
+            },
+            authSource: {
+              provider: "openai",
+              credentialStore: "file",
+              inlineToken: false,
+              envKey: false,
+              commandAuth: false,
+              requiresOpenaiAuth: true,
+              warning: null,
+            },
+            error: null,
+          };
+        case "get_login":
+          return {
+            phase: "idle",
+            mode: "",
+            url: null,
+            code: null,
+            message: "",
+            callbackReady: false,
+          };
+        case "get_provider_imports":
+          return [];
+        case "frontend_ready":
+          return undefined;
+        case "get_app_events":
+          return { items: [], total: 0, page: 1, error: null };
+        case "get_gateway":
+          return {
+            clientId: args.clientId,
+            providers:
+              args.clientId === "codex"
+                ? [
+                    { id: "provider-first", name: "First Provider" },
+                    { id: "provider-final", name: "Fixture Provider" },
+                  ]
+                : [],
+          };
+        case "get_usage_dashboard":
+          return structuredClone(dashboard);
+        case "get_usage_heatmap":
+          return structuredClone(dashboard.heatmap);
+        case "get_usage_logs": {
+          const filter = args.filter as UsageFilter;
+          return {
+            rows: structuredClone(records),
+            total: totalRows,
+            page: filter.page ?? 1,
+            detailSince: 0,
+          };
         }
-        const config = structuredClone(args.config as PricingConfig);
-        pricing = {
-          ...pricing,
-          config,
-          models: { ...structuredClone(automaticPrices), ...config.fixed },
-          revision: `fixture-revision-${++pricingRevision}`,
-        };
-        return structuredClone(pricing);
+        case "get_usage_detail":
+          return structuredClone(records.find((row) => row.id === args.id));
+        case "get_usage_state":
+        case "sync_usage":
+          return structuredClone(state);
+        case "set_usage_settings":
+          state = {
+            ...state,
+            settings: structuredClone(args.settings as UsageSettings),
+          };
+          return structuredClone(state);
+        case "get_pricing":
+          return structuredClone(pricing);
+        case "configure_pricing": {
+          if (args.expectedRevision !== pricing.revision) {
+            throw {
+              code: "CONFLICT",
+              message: "价格配置已被外部修改，请重新保存",
+            };
+          }
+          const config = structuredClone(args.config as PricingConfig);
+          pricing = {
+            ...pricing,
+            config,
+            models: { ...structuredClone(automaticPrices), ...config.fixed },
+            revision: `fixture-revision-${++pricingRevision}`,
+          };
+          return structuredClone(pricing);
+        }
+        default:
+          throw new Error(`Unexpected fixture command: ${name}`);
       }
-      default:
-        throw new Error(`Unexpected fixture command: ${name}`);
-    }
-  });
+    },
+  );
 });
 
 afterEach(() => vi.useRealTimers());
@@ -274,13 +301,17 @@ async function flush() {
 }
 
 function requestMetric() {
-  return screen.getByText("请求", { selector: ".usage-metrics .usage-metric span" }).parentElement!;
+  return screen.getByText("请求", {
+    selector: ".usage-metrics .usage-metric span",
+  }).parentElement!;
 }
 
 async function renderUsage() {
   const result = render(<Usage />);
   await waitFor(() => {
-    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(records.length + 1);
+    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(
+      records.length + 1,
+    );
     expect(screen.getByRole("button", { name: "刷新用量" })).toBeEnabled();
   });
   return result;
@@ -290,10 +321,30 @@ function cancelDialog(dialog: HTMLElement) {
   fireEvent(dialog, new Event("cancel", { bubbles: true, cancelable: true }));
 }
 
+async function chooseRange(value: string) {
+  await userEvent.click(screen.getByRole("button", { name: "用量时间范围" }));
+  const dialog = screen.getByRole("dialog", { name: "选择时间范围" });
+  await userEvent.selectOptions(
+    within(dialog).getByRole("combobox", { name: "用量时间范围" }),
+    value,
+  );
+  await userEvent.click(within(dialog).getByRole("button", { name: "确定" }));
+}
+
 describe("usage records", () => {
   it("loads the overview while the request log is still pending", async () => {
-    let resolveLogs!: (value: { rows: UsageRecord[]; total: number; page: number; detailSince: number }) => void;
-    const logsResponse = new Promise<{ rows: UsageRecord[]; total: number; page: number; detailSince: number }>((resolve) => {
+    let resolveLogs!: (value: {
+      rows: UsageRecord[];
+      total: number;
+      page: number;
+      detailSince: number;
+    }) => void;
+    const logsResponse = new Promise<{
+      rows: UsageRecord[];
+      total: number;
+      page: number;
+      detailSince: number;
+    }>((resolve) => {
       resolveLogs = resolve;
     });
     mock.command
@@ -308,21 +359,34 @@ describe("usage records", () => {
     await waitFor(() => expect(requestMetric()).toHaveTextContent("7"));
     expect(calls("get_usage_dashboard")).toHaveLength(1);
     expect(calls("get_usage_logs")).toHaveLength(1);
-    expect(screen.getByRole("table").querySelector("tbody")).toBeEmptyDOMElement();
+    expect(
+      screen.getByRole("table").querySelector("tbody"),
+    ).toBeEmptyDOMElement();
 
-    await act(async () => resolveLogs({ rows: structuredClone(records), total: 1, page: 1, detailSince: 0 }));
-    expect(await within(screen.getByRole("table")).findByText("Fixture Provider")).toBeInTheDocument();
+    await act(async () =>
+      resolveLogs({
+        rows: structuredClone(records),
+        total: 1,
+        page: 1,
+        detailSince: 0,
+      }),
+    );
+    expect(
+      await within(screen.getByRole("table")).findByText("Fixture Provider"),
+    ).toBeInTheDocument();
   });
 
-  it("loads the annual heatmap only when its disclosure is opened", async () => {
-    dashboard.heatmap = [{
-      time: new Date(new Date().getFullYear(), 0, 2).getTime(),
-      totals: structuredClone(dashboard.totals),
-    }];
+  it("loads the annual heatmap only when the all-time range is confirmed", async () => {
+    dashboard.heatmap = [
+      {
+        time: new Date(new Date().getFullYear(), 0, 2).getTime(),
+        totals: structuredClone(dashboard.totals),
+      },
+    ];
     await renderUsage();
 
     expect(calls("get_usage_heatmap")).toHaveLength(0);
-    fireEvent.click(screen.getByText(`${new Date().getFullYear()} 年度用量`));
+    await chooseRange("all");
     await waitFor(() => expect(calls("get_usage_heatmap")).toHaveLength(1));
     const args = calls("get_usage_heatmap")[0][1];
     expect(args.filter).toMatchObject({
@@ -341,13 +405,19 @@ describe("usage records", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新用量" }));
 
     expect(requestMetric()).toHaveTextContent("1");
-    expect(within(screen.getByRole("table")).getByText("Fixture Provider")).toBeInTheDocument();
-    await act(async () => resolveDashboard({
-      ...structuredClone(dashboard),
-      totals: { ...dashboard.totals, requests: 9 },
-    }));
+    expect(
+      within(screen.getByRole("table")).getByText("Fixture Provider"),
+    ).toBeInTheDocument();
+    await act(async () =>
+      resolveDashboard({
+        ...structuredClone(dashboard),
+        totals: { ...dashboard.totals, requests: 9 },
+      }),
+    );
     await waitFor(() => expect(requestMetric()).toHaveTextContent("9"));
-    expect(within(screen.getByRole("table")).getByText("Fixture Provider")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("table")).getByText("Fixture Provider"),
+    ).toBeInTheDocument();
   });
 
   it("discards an older overview response after the selected range changes", async () => {
@@ -360,20 +430,33 @@ describe("usage records", () => {
 
     await waitFor(() => expect(screen.getByRole("table")).toBeInTheDocument());
     dashboard = { ...dashboard, totals: { ...dashboard.totals, requests: 7 } };
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "用量时间范围" }), "7");
+    await chooseRange("7");
     await waitFor(() => expect(requestMetric()).toHaveTextContent("7"));
 
-    await act(async () => resolveStale({
-      ...structuredClone(dashboard),
-      totals: { ...dashboard.totals, requests: 99 },
-    }));
+    await act(async () =>
+      resolveStale({
+        ...structuredClone(dashboard),
+        totals: { ...dashboard.totals, requests: 99 },
+      }),
+    );
     expect(requestMetric()).toHaveTextContent("7");
   });
 
   it("keeps unavailable counts and prices distinct from measured zero", async () => {
     records = [
-      record({ id: "fixture-missing", attempts: [attempt({ tokens: absentTokens, price: null })] }),
-      record({ id: "fixture-zero", attempts: [attempt({ tokens: zeroTokens, price: { ...attempt().price!, cost: "0", multiplier: "1" } })] }),
+      record({
+        id: "fixture-missing",
+        attempts: [attempt({ tokens: absentTokens, price: null })],
+      }),
+      record({
+        id: "fixture-zero",
+        attempts: [
+          attempt({
+            tokens: zeroTokens,
+            price: { ...attempt().price!, cost: "0", multiplier: "1" },
+          }),
+        ],
+      }),
     ];
     totalRows = 2;
     dashboard.totals.tokens = absentTokens;
@@ -392,7 +475,9 @@ describe("usage records", () => {
 
     dashboard.totals.tokens = zeroTokens;
     fireEvent.click(screen.getByRole("button", { name: "刷新用量" }));
-    await waitFor(() => expect(within(tokenMetric).getByText("0")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(within(tokenMetric).getByText("0")).toBeInTheDocument(),
+    );
   });
 
   it("shows eight columns from the final attempt and preserves all attempts in detail", async () => {
@@ -409,8 +494,19 @@ describe("usage records", () => {
     records = [record({ attempts: [first, attempt()] })];
     await renderUsage();
     const table = screen.getByRole("table");
-    expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
-      "时间", "客户端", "供应商", "模型", "输入", "输出", "缓存", "费用",
+    expect(
+      within(table)
+        .getAllByRole("columnheader")
+        .map((cell) => cell.textContent),
+    ).toEqual([
+      "时间",
+      "客户端",
+      "供应商",
+      "模型",
+      "输入",
+      "输出",
+      "缓存",
+      "费用",
     ]);
     const row = within(table).getAllByRole("row")[1];
     const cells = within(row).getAllByRole("cell");
@@ -427,27 +523,46 @@ describe("usage records", () => {
 
     fireEvent.keyDown(row, { key: "Enter" });
     const dialog = await screen.findByRole("dialog");
-    expect(mock.command).toHaveBeenCalledWith("get_usage_detail", { id: "fixture-request" });
+    expect(mock.command).toHaveBeenCalledWith("get_usage_detail", {
+      id: "fixture-request",
+    });
     expect(within(dialog).getByText("HTTP 200")).toBeInTheDocument();
     expect(within(dialog).getByText("已完成")).toBeInTheDocument();
-    expect(within(dialog).getByText("尝试 · 2")).toBeInTheDocument();
-    expect(within(dialog).getByText("全部尝试费用").nextElementSibling).toHaveTextContent("$0.0060");
+    expect(
+      within(dialog).getByRole("heading", { name: "尝试记录" }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("实际尝试").nextElementSibling,
+    ).toHaveTextContent(/^2$/);
+    expect(
+      within(dialog).getByText("全部尝试费用").nextElementSibling,
+    ).toHaveTextContent("$0.0060");
     const firstSummary = within(dialog).getByText("1 · First Provider · 503");
     fireEvent.click(firstSummary);
-    expect(within(firstSummary.parentElement!).getByText("fixture-first-model")).toBeVisible();
-    expect(within(firstSummary.parentElement!).getByText("9,999")).toBeVisible();
-    expect(within(dialog).getByText("2 · Fixture Provider · 200")).toBeInTheDocument();
+    expect(
+      within(firstSummary.parentElement!).getByText("fixture-first-model"),
+    ).toBeVisible();
+    expect(
+      within(firstSummary.parentElement!).getByText("9,999"),
+    ).toBeVisible();
+    expect(
+      within(dialog).getByText("2 · Fixture Provider · 200"),
+    ).toBeInTheDocument();
   });
 
   it("labels web search operations instead of showing their model", async () => {
     const search = {
-      ...attempt({ requestedModel: "gpt-request-model", responseModel: "gpt-response-model" }),
+      ...attempt({
+        requestedModel: "gpt-request-model",
+        responseModel: "gpt-response-model",
+      }),
       operation: "web_search" as const,
     };
     records = [record({ attempts: [search] })];
     await renderUsage();
 
-    const modelCell = within(screen.getByRole("table")).getAllByRole("row")[1]
+    const modelCell = within(screen.getByRole("table"))
+      .getAllByRole("row")[1]
       .querySelectorAll("td")[3];
     expect(modelCell).toHaveTextContent(/^网络搜索$/);
     expect(modelCell).not.toHaveTextContent("gpt-request-model");
@@ -460,14 +575,18 @@ describe("usage records", () => {
     fireEvent.click(requestRow);
     const detail = await screen.findByRole("dialog");
     cancelDialog(detail);
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     await waitFor(() => expect(requestRow).toHaveFocus());
 
-    const sourcesButton = screen.getByRole("button", { name: "数据来源与设置" });
+    const sourcesButton = screen.getByRole("button", { name: "数据来源" });
     fireEvent.click(sourcesButton);
     const sources = await screen.findByRole("dialog");
     cancelDialog(sources);
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     await waitFor(() => expect(sourcesButton).toHaveFocus());
   });
 
@@ -485,7 +604,11 @@ describe("usage records", () => {
       input_cost_per_token_above_100k_tokens_priority: "0.00001",
       output_cost_per_token_above_200k_tokens_flex: "0.000011",
     };
-    records = [record({ attempts: [attempt({ price: { ...attempt().price!, rates } })] })];
+    records = [
+      record({
+        attempts: [attempt({ price: { ...attempt().price!, rates } })],
+      }),
+    ];
     await renderUsage();
     fireEvent.click(within(screen.getByRole("table")).getAllByRole("row")[1]);
     const dialog = await screen.findByRole("dialog");
@@ -508,9 +631,21 @@ describe("usage records", () => {
       "输入 · 上下文 > 100K · 优先",
       "输出 · 上下文 > 200K · 弹性",
     ]);
-    expect(pairs.every((pair) => pair.classList.contains("usage-detail-pair"))).toBe(true);
+    expect(
+      pairs.every((pair) => pair.classList.contains("usage-detail-pair")),
+    ).toBe(true);
     expect(pairs.map((pair) => pair.querySelector("dd")?.textContent)).toEqual([
-      "$0", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11",
+      "$0",
+      "$2",
+      "$3",
+      "$4",
+      "$5",
+      "$6",
+      "$7",
+      "$8",
+      "$9",
+      "$10",
+      "$11",
     ]);
   });
 
@@ -520,14 +655,32 @@ describe("usage records", () => {
         id: "fixture-session",
         source: "codex",
         estimatedSpeed: true,
-        attempts: [attempt({ provider: null, firstTokenMs: null, status: null, outcome: "completed" })],
+        attempts: [
+          attempt({
+            provider: null,
+            firstTokenMs: null,
+            status: null,
+            outcome: "completed",
+          }),
+        ],
       }),
     ];
     totalRows = records.length;
     await renderUsage();
     const table = screen.getByRole("table");
-    expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
-      "时间", "客户端", "供应商", "模型", "输入", "输出", "缓存", "费用",
+    expect(
+      within(table)
+        .getAllByRole("columnheader")
+        .map((cell) => cell.textContent),
+    ).toEqual([
+      "时间",
+      "客户端",
+      "供应商",
+      "模型",
+      "输入",
+      "输出",
+      "缓存",
+      "费用",
     ]);
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows).toHaveLength(1);
@@ -537,9 +690,13 @@ describe("usage records", () => {
     fireEvent.click(rows[0]);
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("会话完成")).toBeInTheDocument();
-    expect(within(dialog).queryByText("速度", { selector: "dt" })).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText("速度", { selector: "dt" }),
+    ).not.toBeInTheDocument();
     expect(within(dialog).queryByText(/Token\/s/)).not.toBeInTheDocument();
-    const firstTokenLabels = within(dialog).getAllByText("首 Token", { selector: "dt" });
+    const firstTokenLabels = within(dialog).getAllByText("首字", {
+      selector: "dt",
+    });
     expect(firstTokenLabels).toHaveLength(2);
     for (const label of firstTokenLabels) {
       expect(label.nextElementSibling).toHaveTextContent("未提供");
@@ -551,37 +708,71 @@ describe("usage records", () => {
     totalRows = 61;
     await renderUsage();
     const initial = calls("get_usage_logs").length;
-    fireEvent.change(screen.getByRole("spinbutton", { name: "跳转页码" }), { target: { value: "5" } });
-    fireEvent.keyDown(screen.getByRole("spinbutton", { name: "跳转页码" }), { key: "Enter" });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "跳转页码" }), {
+      target: { value: "5" },
+    });
+    fireEvent.keyDown(screen.getByRole("spinbutton", { name: "跳转页码" }), {
+      key: "Enter",
+    });
     await flush();
     expect(calls("get_usage_logs")).toHaveLength(initial);
-    fireEvent.change(screen.getByRole("spinbutton", { name: "跳转页码" }), { target: { value: "4" } });
-    fireEvent.keyDown(screen.getByRole("spinbutton", { name: "跳转页码" }), { key: "Enter" });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "跳转页码" }), {
+      target: { value: "4" },
+    });
+    fireEvent.keyDown(screen.getByRole("spinbutton", { name: "跳转页码" }), {
+      key: "Enter",
+    });
     await waitFor(() => {
       expect(lastFilter().page).toBe(4);
-      expect(screen.getByRole("button", { name: "4" })).toHaveAttribute("aria-current", "page");
+      expect(screen.getByRole("button", { name: "4" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
       expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
     });
     await user.click(screen.getByRole("button", { name: "上一页" }));
     await waitFor(() => {
       expect(lastFilter().page).toBe(3);
-      expect(screen.getByRole("button", { name: "3" })).toHaveAttribute("aria-current", "page");
+      expect(screen.getByRole("button", { name: "3" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
     });
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "用量客户端" }), "codex");
-    await waitFor(() => expect(lastFilter()).toMatchObject({ page: 1, client: "codex" }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "用量供应商" }), "provider-final");
-    fireEvent.change(screen.getByLabelText("计价模型筛选"), { target: { value: "fixture-response-model" } });
-    await waitFor(() => expect(lastFilter().model).toBe("fixture-response-model"));
-    await user.selectOptions(screen.getByRole("combobox", { name: "请求状态" }), "5xx");
-    await waitFor(() => expect(lastFilter()).toMatchObject({
-      page: 1,
-      client: "codex",
-      provider: "provider-final",
-      model: "fixture-response-model",
-      status: "5xx",
-    }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "用量客户端" }), "claude");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "用量客户端" }),
+      "codex",
+    );
+    await waitFor(() =>
+      expect(lastFilter()).toMatchObject({ page: 1, client: "codex" }),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "用量供应商" }),
+      "provider-final",
+    );
+    fireEvent.change(screen.getByLabelText("计价模型筛选"), {
+      target: { value: "fixture-response-model" },
+    });
+    await waitFor(() =>
+      expect(lastFilter().model).toBe("fixture-response-model"),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "请求状态" }),
+      "5xx",
+    );
+    await waitFor(() =>
+      expect(lastFilter()).toMatchObject({
+        page: 1,
+        client: "codex",
+        provider: "provider-final",
+        model: "fixture-response-model",
+        status: "5xx",
+      }),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "用量客户端" }),
+      "claude",
+    );
     await waitFor(() => {
       expect(lastFilter().client).toBe("claude");
       expect(lastFilter().provider).toBeUndefined();
@@ -589,43 +780,91 @@ describe("usage records", () => {
   });
 
   it.each([
-    { label: "daily detail", stepMs: 86_400_000, precision: "millisecond", reverse: false },
-    { label: "compacted daily history", stepMs: 86_400_000, precision: "day", reverse: true },
-    { label: "hourly detail", stepMs: 3_600_000, precision: "millisecond", reverse: false },
-  ])("includes the entire final $label bucket when dragging the trend", async ({ stepMs, precision, reverse }) => {
-    const first = Date.UTC(2026, 9, 5);
-    dashboard.trendStepMs = stepMs;
-    dashboard.precision = precision;
-    dashboard.trend = [0, 1, 2].map((index) => ({
-      time: first + index * stepMs,
-      totals: structuredClone(dashboard.totals),
-    }));
-    await renderUsage();
-    const chart = screen.getByRole("img", { name: "用量趋势，拖动选择时间范围" });
-    vi.spyOn(chart, "getBoundingClientRect").mockReturnValue({
-      x: 100, y: 0, left: 100, top: 0, right: 1100, bottom: 175,
-      width: 1000, height: 175, toJSON: () => ({}),
-    });
+    {
+      label: "daily detail",
+      stepMs: 86_400_000,
+      precision: "millisecond",
+      reverse: false,
+    },
+    {
+      label: "compacted daily history",
+      stepMs: 86_400_000,
+      precision: "day",
+      reverse: true,
+    },
+    {
+      label: "hourly detail",
+      stepMs: 3_600_000,
+      precision: "millisecond",
+      reverse: false,
+    },
+  ])(
+    "includes the entire final $label bucket when dragging the trend",
+    async ({ stepMs, precision, reverse }) => {
+      const first = Date.UTC(2026, 9, 5);
+      dashboard.trendStepMs = stepMs;
+      dashboard.precision = precision;
+      dashboard.trend = [0, 1, 2].map((index) => ({
+        time: first + index * stepMs,
+        totals: structuredClone(dashboard.totals),
+      }));
+      await renderUsage();
+      const chart = screen.getByRole("img", {
+        name: "用量趋势，拖动选择时间范围",
+      });
+      vi.spyOn(chart, "getBoundingClientRect").mockReturnValue({
+        x: 100,
+        y: 0,
+        left: 100,
+        top: 0,
+        right: 1100,
+        bottom: 175,
+        width: 1000,
+        height: 175,
+        toJSON: () => ({}),
+      });
 
-    fireEvent(chart, new MouseEvent("pointerdown", {
-      bubbles: true, clientX: reverse ? 1080 : 120,
-    }));
-    fireEvent(chart, new MouseEvent("pointerup", {
-      bubbles: true, clientX: reverse ? 120 : 1080,
-    }));
+      fireEvent(
+        chart,
+        new MouseEvent("pointerdown", {
+          bubbles: true,
+          clientX: reverse ? 1080 : 120,
+        }),
+      );
+      fireEvent(
+        chart,
+        new MouseEvent("pointerup", {
+          bubbles: true,
+          clientX: reverse ? 120 : 1080,
+        }),
+      );
 
-    await waitFor(() => expect(lastFilter()).toMatchObject({
-      start: first,
-      end: first + 3 * stepMs,
-      page: 1,
-    }));
-    expect(mock.command).toHaveBeenCalledWith("get_usage_dashboard", {
-      filter: expect.objectContaining({ start: first, end: first + 3 * stepMs }),
-    });
-    expect(screen.getByRole("combobox", { name: "用量时间范围" })).toHaveValue("custom");
-    expect(screen.getByRole("checkbox", { name: "跟随当前" })).not.toBeChecked();
-    expect(screen.getByLabelText("结束时间")).toBeEnabled();
-  });
+      await waitFor(() =>
+        expect(lastFilter()).toMatchObject({
+          start: first,
+          end: first + 3 * stepMs,
+          page: 1,
+        }),
+      );
+      expect(mock.command).toHaveBeenCalledWith("get_usage_dashboard", {
+        filter: expect.objectContaining({
+          start: first,
+          end: first + 3 * stepMs,
+        }),
+      });
+      await userEvent.click(
+        screen.getByRole("button", { name: "用量时间范围" }),
+      );
+      const rangeDialog = screen.getByRole("dialog", { name: "选择时间范围" });
+      expect(
+        within(rangeDialog).getByRole("combobox", { name: "用量时间范围" }),
+      ).toHaveValue("custom");
+      expect(
+        within(rangeDialog).getByRole("checkbox", { name: "跟随当前" }),
+      ).not.toBeChecked();
+      expect(within(rangeDialog).getByLabelText("结束时间")).toBeEnabled();
+    },
+  );
 
   it("pauses periodic reloads for document and native hiding and respects manual refresh", async () => {
     vi.useFakeTimers();
@@ -636,12 +875,18 @@ describe("usage records", () => {
     await act(async () => vi.advanceTimersByTime(5_000));
     expect(calls("get_usage_logs")).toHaveLength(initial + 1);
 
-    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     const documentHidden = calls("get_usage_logs").length;
     await act(async () => vi.advanceTimersByTime(15_000));
     expect(calls("get_usage_logs")).toHaveLength(documentHidden);
-    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     await flush();
     expect(calls("get_usage_logs")).toHaveLength(documentHidden + 1);
@@ -655,7 +900,9 @@ describe("usage records", () => {
     await flush();
     expect(calls("get_usage_logs")).toHaveLength(nativeHidden + 1);
 
-    fireEvent.change(screen.getByRole("combobox", { name: "用量刷新频率" }), { target: { value: "0" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "用量刷新频率" }), {
+      target: { value: "0" },
+    });
     await flush();
     expect(state.settings.refreshSeconds).toBe(0);
     const manual = calls("get_usage_logs").length;
@@ -670,25 +917,44 @@ describe("usage records", () => {
   it("saves recording and automatic session sync as independent switches", async () => {
     const user = userEvent.setup();
     await renderUsage();
-    await user.click(screen.getByRole("button", { name: "数据来源与设置" }));
+    await user.click(screen.getByRole("button", { name: "数据来源" }));
     const dialog = screen.getByRole("dialog");
-    const recording = within(dialog).getByRole("checkbox", { name: "记录网关用量" });
-    const autoSync = within(dialog).getByRole("checkbox", { name: "自动同步会话" });
+    const recording = within(dialog).getByRole("checkbox", {
+      name: "记录网关用量",
+    });
+    const autoSync = within(dialog).getByRole("checkbox", {
+      name: "自动同步会话",
+    });
     expect(recording).toBeChecked();
     expect(autoSync).toBeChecked();
     await user.click(recording);
     expect(autoSync).toBeChecked();
     expect(calls("set_usage_settings")).toHaveLength(0);
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(state.settings).toMatchObject({ recording: false, autoSync: true }));
+    await waitFor(() =>
+      expect(state.settings).toMatchObject({
+        recording: false,
+        autoSync: true,
+      }),
+    );
 
     await user.click(autoSync);
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(state.settings).toMatchObject({ recording: false, autoSync: false }));
+    await waitFor(() =>
+      expect(state.settings).toMatchObject({
+        recording: false,
+        autoSync: false,
+      }),
+    );
     await user.click(recording);
     expect(autoSync).not.toBeChecked();
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(state.settings).toMatchObject({ recording: true, autoSync: false }));
+    await waitFor(() =>
+      expect(state.settings).toMatchObject({
+        recording: true,
+        autoSync: false,
+      }),
+    );
     expect(calls("sync_usage")).toHaveLength(0);
     expect(calls("configure_pricing")).toHaveLength(0);
   });
@@ -699,29 +965,41 @@ describe("usage records", () => {
     const onDirtyChange = vi.fn();
     render(<Usage onDirtyChange={onDirtyChange} />);
     await flush();
-    fireEvent.click(screen.getByRole("button", { name: "数据来源与设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "数据来源" }));
     const dialog = screen.getByRole("dialog");
-    const recording = within(dialog).getByRole("checkbox", { name: "记录网关用量" });
-    const autoSync = within(dialog).getByRole("checkbox", { name: "自动同步会话" });
-    const multiplier = within(dialog).getByRole("spinbutton", { name: "成本倍率" });
-    const model = within(dialog).getByRole("combobox", { name: "计价模型" });
+    const recording = within(dialog).getByRole("checkbox", {
+      name: "记录网关用量",
+    });
+    const autoSync = within(dialog).getByRole("checkbox", {
+      name: "自动同步会话",
+    });
+    expect(
+      within(dialog).queryByRole("spinbutton", { name: "成本倍率" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("combobox", { name: "计价模型" }),
+    ).not.toBeInTheDocument();
     fireEvent.click(recording);
     fireEvent.click(autoSync);
-    fireEvent.change(multiplier, { target: { value: "2.5" } });
-    fireEvent.change(model, { target: { value: "request" } });
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
     state = {
       ...state,
-      settings: { ...state.settings, multiplier: "9" },
-      reports: { codex: { files: 4, imported: 2, skipped: 0, errors: 2, completedAt: timestamp } },
+      settings: { ...state.settings, multiplier: "9", pricingModel: "request" },
+      reports: {
+        codex: {
+          files: 4,
+          imported: 2,
+          skipped: 0,
+          errors: 2,
+          completedAt: timestamp,
+        },
+      },
     };
     await act(async () => vi.advanceTimersByTime(5_000));
     expect(within(dialog).getByText("2 个文件未同步")).toBeInTheDocument();
     expect(recording).not.toBeChecked();
     expect(autoSync).not.toBeChecked();
-    expect(multiplier).toHaveValue(2.5);
-    expect(model).toHaveValue("request");
     expect(calls("set_usage_settings")).toHaveLength(0);
 
     fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
@@ -731,7 +1009,7 @@ describe("usage records", () => {
       recording: false,
       autoSync: false,
       refreshSeconds: 5,
-      multiplier: "2.5",
+      multiplier: "9",
       pricingModel: "request",
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
@@ -753,12 +1031,20 @@ describe("usage records", () => {
     mock.confirm.mockResolvedValueOnce(false);
     await user.click(screen.getByRole("tab", { name: "供应商" }));
     expect(mock.confirm).toHaveBeenCalledWith("离开定价会丢弃未保存的修改。");
-    expect(screen.getByRole("tab", { name: "定价" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "定价" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(input).toHaveValue("2.5");
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
     await user.click(screen.getByRole("tab", { name: "供应商" }));
-    await waitFor(() => expect(screen.getByRole("tab", { name: "供应商" })).toHaveAttribute("aria-selected", "true"));
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "供应商" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
     expect(calls("configure_pricing")).toHaveLength(0);
@@ -769,7 +1055,9 @@ describe("usage pricing", () => {
   it("filters model prices and preserves zero and missing rate displays", async () => {
     render(<Pricing />);
     await screen.findByRole("button", { name: "gpt-alpha" });
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索价格模型" }), { target: { value: "GPT-ALPHA" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索价格模型" }), {
+      target: { value: "GPT-ALPHA" },
+    });
     const rows = within(screen.getByRole("table")).getAllByRole("row");
     expect(rows).toHaveLength(2);
     const cells = within(rows[1]).getAllByRole("cell");
@@ -777,8 +1065,12 @@ describe("usage pricing", () => {
     expect(cells[2]).toHaveTextContent(/^2$/);
     expect(cells[3]).toHaveTextContent(/^0$/);
     expect(cells[4]).toHaveTextContent(/^—$/);
-    expect(screen.queryByRole("button", { name: "gpt-beta" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "claude-gamma" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "gpt-beta" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "claude-gamma" }),
+    ).not.toBeInTheDocument();
     expect(calls("configure_pricing")).toHaveLength(0);
   });
 
@@ -788,10 +1080,16 @@ describe("usage pricing", () => {
     render(<Pricing />);
     await user.click(await screen.findByRole("button", { name: "gpt-alpha" }));
     const editor = screen.getByRole("dialog");
-    fireEvent.change(within(editor).getByLabelText("输入 · USD / 百万 Token"), { target: { value: "0" } });
-    fireEvent.change(within(editor).getByLabelText("输出 · USD / 百万 Token"), { target: { value: "2.75" } });
+    fireEvent.change(within(editor).getByLabelText("输入 · USD / 百万 Token"), {
+      target: { value: "0" },
+    });
+    fireEvent.change(within(editor).getByLabelText("输出 · USD / 百万 Token"), {
+      target: { value: "2.75" },
+    });
     await user.click(within(editor).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     const firstSave = calls("configure_pricing")[0][1];
     expect(firstSave.expectedRevision).toBe("fixture-revision-1");
     expect(firstSave.config.fixed["gpt-alpha"]).toMatchObject({
@@ -800,20 +1098,32 @@ describe("usage pricing", () => {
       cache_read_input_token_cost: "0.000000",
       output_cost_per_image: "0.01",
     });
-    expect(firstSave.config.fixed["gpt-alpha"]).not.toHaveProperty("cache_creation_input_token_cost");
+    expect(firstSave.config.fixed["gpt-alpha"]).not.toHaveProperty(
+      "cache_creation_input_token_cost",
+    );
     expect(firstSave.config.excluded).toEqual(["claude-gamma"]);
-    const fixedRow = screen.getByRole("button", { name: "gpt-alpha" }).closest("tr")!;
+    const fixedRow = screen
+      .getByRole("button", { name: "gpt-alpha" })
+      .closest("tr")!;
     expect(within(fixedRow).getByText("固定")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "gpt-alpha" }));
-    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "恢复自动价格" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "恢复自动价格",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     const restored = calls("configure_pricing")[1][1];
     expect(restored.expectedRevision).toBe("fixture-revision-2");
     expect(restored.config.fixed).not.toHaveProperty("gpt-alpha");
     expect(restored.config.excluded).toEqual(["claude-gamma"]);
     expect(restored.config.aliases).toEqual({ "fixture-alias": "gpt-alpha" });
-    const restoredCells = within(screen.getByRole("button", { name: "gpt-alpha" }).closest("tr")!).getAllByRole("cell");
+    const restoredCells = within(
+      screen.getByRole("button", { name: "gpt-alpha" }).closest("tr")!,
+    ).getAllByRole("cell");
     expect(restoredCells[1]).toHaveTextContent(/^1$/);
     expect(restoredCells[2]).toHaveTextContent(/^2$/);
     expect(restoredCells[5]).toHaveTextContent(/^Sub2API$/);
@@ -821,18 +1131,24 @@ describe("usage pricing", () => {
 
   it("returns focus to the price editor and sync entry points after cancellation", async () => {
     render(<Pricing />);
-    const modelButton = await screen.findByRole("button", { name: "gpt-alpha" });
+    const modelButton = await screen.findByRole("button", {
+      name: "gpt-alpha",
+    });
     fireEvent.click(modelButton);
     const editor = await screen.findByRole("dialog");
     cancelDialog(editor);
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     await waitFor(() => expect(modelButton).toHaveFocus());
 
     const syncButton = screen.getByRole("button", { name: "自动同步" });
     fireEvent.click(syncButton);
     const sync = await screen.findByRole("dialog");
     cancelDialog(sync);
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     await waitFor(() => expect(syncButton).toHaveFocus());
   });
 
@@ -842,18 +1158,36 @@ describe("usage pricing", () => {
     await screen.findByRole("button", { name: "gpt-alpha" });
     await user.click(screen.getByRole("button", { name: "自动同步" }));
     const dialog = screen.getByRole("dialog");
-    fireEvent.change(within(dialog).getByRole("textbox", { name: "搜索同步模型" }), { target: { value: "GPT-" } });
-    expect(within(dialog).queryByRole("checkbox", { name: /claude-gamma/ })).not.toBeInTheDocument();
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "搜索同步模型" }),
+      { target: { value: "GPT-" } },
+    );
+    expect(
+      within(dialog).queryByRole("checkbox", { name: /claude-gamma/ }),
+    ).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "清空结果" }));
-    expect(within(dialog).getByRole("checkbox", { name: /gpt-alpha/ })).not.toBeChecked();
-    expect(within(dialog).getByRole("checkbox", { name: /gpt-beta/ })).not.toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", { name: /gpt-alpha/ }),
+    ).not.toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", { name: /gpt-beta/ }),
+    ).not.toBeChecked();
     await user.click(within(dialog).getByRole("button", { name: "全选结果" }));
-    await user.click(within(dialog).getByRole("checkbox", { name: /gpt-beta/ }));
-    await user.click(within(dialog).getByRole("checkbox", { name: "自动更新" }));
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: /gpt-beta/ }),
+    );
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "自动更新" }),
+    );
     expect(calls("configure_pricing")).toHaveLength(0);
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(pricing.config.selected?.slice().sort()).toEqual(["claude-gamma", "gpt-alpha"]);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(pricing.config.selected?.slice().sort()).toEqual([
+      "claude-gamma",
+      "gpt-alpha",
+    ]);
     expect(pricing.config.autoUpdate).toBe(false);
     expect(pricing.config.excluded).toEqual([]);
     expect(pricing.config.aliases).toEqual({ "fixture-alias": "gpt-alpha" });
@@ -870,22 +1204,43 @@ describe("usage pricing", () => {
     fireEvent.change(input, { target: { value: "2.5" } });
     pricing = {
       ...pricing,
-      config: { ...pricing.config, excluded: ["claude-gamma"], aliases: { "external-alias": "gpt-beta" } },
-      models: { ...pricing.models, "gpt-alpha": { ...pricing.models["gpt-alpha"], input_cost_per_token: "0.000099" } },
+      config: {
+        ...pricing.config,
+        excluded: ["claude-gamma"],
+        aliases: { "external-alias": "gpt-beta" },
+      },
+      models: {
+        ...pricing.models,
+        "gpt-alpha": {
+          ...pricing.models["gpt-alpha"],
+          input_cost_per_token: "0.000099",
+        },
+      },
       revision: `fixture-revision-${++pricingRevision}`,
     };
     act(() => mock.listeners.get("pricing-state")?.(pricing));
-    const row = screen.getByRole("button", { name: "gpt-alpha" }).closest("tr")!;
-    await waitFor(() => expect(within(row).getAllByRole("cell")[1]).toHaveTextContent(/^99$/));
+    const row = screen
+      .getByRole("button", { name: "gpt-alpha" })
+      .closest("tr")!;
+    await waitFor(() =>
+      expect(within(row).getAllByRole("cell")[1]).toHaveTextContent(/^99$/),
+    );
     expect(input).toHaveValue("2.5");
     expect(calls("configure_pricing")).toHaveLength(0);
 
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     expect(calls("configure_pricing")[0][1]).toMatchObject({
       expectedRevision: "fixture-revision-2",
       config: {
-        fixed: { "gpt-alpha": { input_cost_per_token: "0.0000025", output_cost_per_image: "0.01" } },
+        fixed: {
+          "gpt-alpha": {
+            input_cost_per_token: "0.0000025",
+            output_cost_per_image: "0.01",
+          },
+        },
         excluded: ["claude-gamma"],
         aliases: { "external-alias": "gpt-beta" },
       },
@@ -912,20 +1267,29 @@ describe("usage pricing", () => {
       revision: `fixture-revision-${++pricingRevision}`,
     };
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("价格配置已被外部修改，请重新保存");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "价格配置已被外部修改，请重新保存",
+    );
     expect(calls("get_pricing")).toHaveLength(2);
-    expect(calls("configure_pricing")[0][1].expectedRevision).toBe("fixture-revision-1");
+    expect(calls("configure_pricing")[0][1].expectedRevision).toBe(
+      "fixture-revision-1",
+    );
     expect(output).toHaveValue("2.75");
     expect(pricing.config.fixed).not.toHaveProperty("gpt-alpha");
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     expect(calls("configure_pricing")).toHaveLength(2);
     expect(calls("configure_pricing")[1][1]).toMatchObject({
       expectedRevision: "fixture-revision-2",
       config: {
-        fixed: { "gpt-alpha": { output_cost_per_token: "0.00000275" }, "gpt-beta": externalPrice },
+        fixed: {
+          "gpt-alpha": { output_cost_per_token: "0.00000275" },
+          "gpt-beta": externalPrice,
+        },
         aliases: { "external-alias": "gpt-beta" },
       },
     });
@@ -939,7 +1303,9 @@ describe("usage pricing", () => {
     await screen.findByRole("button", { name: "gpt-alpha" });
     await user.click(screen.getByRole("button", { name: "自动同步" }));
     const dialog = screen.getByRole("dialog");
-    const automatic = within(dialog).getByRole("checkbox", { name: "自动更新" });
+    const automatic = within(dialog).getByRole("checkbox", {
+      name: "自动更新",
+    });
     const beta = within(dialog).getByRole("checkbox", { name: /gpt-beta/ });
     await user.click(automatic);
     await user.click(beta);
@@ -953,22 +1319,35 @@ describe("usage pricing", () => {
     expect(calls("get_pricing")).toHaveLength(2);
     expect(automatic).not.toBeChecked();
     expect(beta).not.toBeChecked();
-    expect(within(dialog).getByRole("checkbox", { name: /gpt-alpha/ })).toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", { name: /gpt-alpha/ }),
+    ).toBeChecked();
     expect(calls("configure_pricing")).toHaveLength(0);
 
     pricing = { ...pricing, revision: `fixture-revision-${++pricingRevision}` };
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("价格配置已被外部修改，请重新保存");
-    expect(calls("configure_pricing")[0][1].expectedRevision).toBe("fixture-revision-2");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "价格配置已被外部修改，请重新保存",
+    );
+    expect(calls("configure_pricing")[0][1].expectedRevision).toBe(
+      "fixture-revision-2",
+    );
     expect(calls("get_pricing")).toHaveLength(3);
     expect(automatic).not.toBeChecked();
     expect(beta).not.toBeChecked();
 
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(calls("configure_pricing")[1][1].expectedRevision).toBe("fixture-revision-3");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(calls("configure_pricing")[1][1].expectedRevision).toBe(
+      "fixture-revision-3",
+    );
     expect(pricing.config.autoUpdate).toBe(false);
-    expect(pricing.config.selected?.slice().sort()).toEqual(["claude-gamma", "gpt-alpha"]);
+    expect(pricing.config.selected?.slice().sort()).toEqual([
+      "claude-gamma",
+      "gpt-alpha",
+    ]);
   });
 });
 
@@ -976,26 +1355,46 @@ describe("usage navigation", () => {
   it("opens usage and logs from the sidebar and protects price drafts from page and native navigation", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await waitFor(() => expect(mock.command).toHaveBeenCalledWith("frontend_ready"));
+    await waitFor(() =>
+      expect(mock.command).toHaveBeenCalledWith("frontend_ready"),
+    );
     const navigation = screen.getByRole("navigation", { name: "主导航" });
     await user.click(within(navigation).getByRole("button", { name: "用量" }));
     await screen.findByRole("tab", { name: "请求日志" });
     await user.click(screen.getByRole("tab", { name: "定价" }));
     await user.click(await screen.findByRole("button", { name: "gpt-alpha" }));
-    const input = within(screen.getByRole("dialog")).getByLabelText("输入 · USD / 百万 Token");
+    const input = within(screen.getByRole("dialog")).getByLabelText(
+      "输入 · USD / 百万 Token",
+    );
     fireEvent.change(input, { target: { value: "2.5" } });
     mock.confirm.mockResolvedValue(false);
 
     await user.click(within(navigation).getByRole("button", { name: "日志" }));
-    expect(mock.confirm).toHaveBeenLastCalledWith("离开当前页面会丢弃未保存的表单。");
+    expect(mock.confirm).toHaveBeenLastCalledWith(
+      "离开当前页面会丢弃未保存的表单。",
+    );
     await act(async () => mock.listeners.get("navigate")?.("settings"));
-    expect(mock.confirm).toHaveBeenLastCalledWith("打开设置会丢弃未保存的草稿。");
-    await act(async () => mock.listeners.get("provider-settings")?.({ id: "provider-final", clientId: "codex" }));
-    expect(mock.confirm).toHaveBeenLastCalledWith("打开供应商设置会丢弃未保存的草稿。");
+    expect(mock.confirm).toHaveBeenLastCalledWith(
+      "打开设置会丢弃未保存的草稿。",
+    );
+    await act(async () =>
+      mock.listeners.get("provider-settings")?.({
+        id: "provider-final",
+        clientId: "codex",
+      }),
+    );
+    expect(mock.confirm).toHaveBeenLastCalledWith(
+      "打开供应商设置会丢弃未保存的草稿。",
+    );
     await act(async () => mock.listeners.get("navigate")?.("accounts"));
-    expect(mock.confirm).toHaveBeenLastCalledWith("离开当前页面会丢弃未保存的表单。");
+    expect(mock.confirm).toHaveBeenLastCalledWith(
+      "离开当前页面会丢弃未保存的表单。",
+    );
     expect(input).toHaveValue("2.5");
-    expect(screen.getByRole("tab", { name: "定价" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "定价" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(calls("configure_pricing")).toHaveLength(0);
 
     mock.confirm.mockResolvedValue(true);
@@ -1005,7 +1404,9 @@ describe("usage navigation", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     const confirmations = mock.confirm.mock.calls.length;
     await user.click(within(navigation).getByRole("button", { name: "用量" }));
-    expect(await screen.findByRole("tab", { name: "请求日志" })).toHaveAttribute("aria-selected", "true");
+    expect(
+      await screen.findByRole("tab", { name: "请求日志" }),
+    ).toHaveAttribute("aria-selected", "true");
     expect(mock.confirm).toHaveBeenCalledTimes(confirmations);
   });
 });

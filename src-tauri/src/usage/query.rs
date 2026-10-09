@@ -121,7 +121,7 @@ pub fn project(
         "DELETE FROM usage_metrics WHERE kind=?1 AND owner=?2",
         params![kind, owner],
     ))?;
-    let mut stmt=db(c.prepare_cached("INSERT INTO usage_metrics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)"))?;
+    let mut stmt=db(c.prepare_cached("INSERT INTO usage_metrics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)"))?;
     for (i, a) in r.attempts.iter().enumerate() {
         let final_record = i + 1 == r.attempts.len();
         let known = final_record && a.status.is_some();
@@ -148,6 +148,17 @@ pub fn project(
             historical.map_or(generation.unwrap_or(0) * count, |t| t.generation_ms)
         } else {
             0
+        };
+        let (first_token_sum, first_token_samples) = if final_record {
+            historical.map_or_else(
+                || {
+                    r.measured_first_token_ms()
+                        .map_or((0, 0), |ms| (ms.saturating_mul(count), count))
+                },
+                |t| (t.first_token_sum_ms, t.first_token_samples),
+            )
+        } else {
+            (0, 0)
         };
         let tokens = &a.tokens;
         let mul = |n: Option<u64>| n.map(|n| n.saturating_mul(count).min(i64::MAX as u64) as i64);
@@ -187,7 +198,9 @@ pub fn project(
             count.saturating_mul(a.unpriced_count()),
             duration,
             measured,
-            generation
+            generation,
+            first_token_sum,
+            first_token_samples
         ]))?;
     }
     Ok(())
@@ -239,7 +252,7 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
     }
     (terms.join(" AND "), args)
 }
-const SUM:&str="coalesce(sum(requests),0),coalesce(sum(attempts),0),coalesce(sum(success),0),coalesce(sum(status_known),0),coalesce(sum(sessions),0),sum(input),sum(output),sum(cache_read),sum(cache_write),sum(cache_write_5m),sum(cache_write_1h),sum(image_input),sum(image_output),sum(audio_input),sum(audio_output),decimal_sum(cost),coalesce(sum(unpriced),0),coalesce(sum(duration_ms),0),coalesce(sum(measured_outputs),0),coalesce(sum(generation_ms),0)";
+const SUM:&str="coalesce(sum(requests),0),coalesce(sum(attempts),0),coalesce(sum(success),0),coalesce(sum(status_known),0),coalesce(sum(sessions),0),sum(input),sum(output),sum(cache_read),sum(cache_write),sum(cache_write_5m),sum(cache_write_1h),sum(image_input),sum(image_output),sum(audio_input),sum(audio_output),decimal_sum(cost),coalesce(sum(unpriced),0),coalesce(sum(duration_ms),0),coalesce(sum(measured_outputs),0),coalesce(sum(generation_ms),0),coalesce(sum(first_token_sum_ms),0),coalesce(sum(first_token_samples),0)";
 fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
     Ok(Totals {
         requests: row.get(i)?,
@@ -264,6 +277,8 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
         duration_ms: row.get(i + 17)?,
         measured_outputs: row.get(i + 18)?,
         generation_ms: row.get(i + 19)?,
+        first_token_sum_ms: row.get(i + 20)?,
+        first_token_samples: row.get(i + 21)?,
     })
 }
 fn selection(f: &Filter) -> (String, Vec<Value>) {
@@ -335,7 +350,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     // This avoids sorting every request ID for a second logical aggregation.
     let total_sum=SUM.replace("coalesce(sum(unpriced),0)","coalesce(sum(CASE WHEN requests>0 AND (unpriced>0 OR EXISTS(SELECT 1 FROM usage_metrics a WHERE a.kind=m.kind AND a.owner=m.owner AND a.unpriced>0)) THEN requests ELSE 0 END),0)");
     // Source badges only use request counts, not a full cost/token aggregate.
-    let source_sum="coalesce(sum(requests),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0";
+    let source_sum="coalesce(sum(requests),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0,0,0";
     let sql=format!("{cte}
       SELECT 'totals','',{total_sum},{rolled} FROM m
       UNION ALL SELECT 'provider',coalesce(provider,'session'),{SUM},0 FROM m GROUP BY coalesce(provider,'session')
@@ -349,7 +364,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 totals(r, 2)?,
-                r.get::<_, bool>(22)?,
+                r.get::<_, bool>(24)?,
             ))
         }),
     )?;

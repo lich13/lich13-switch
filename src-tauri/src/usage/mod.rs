@@ -11,6 +11,8 @@ mod v015_tests;
 mod v016_tests;
 #[cfg(test)]
 mod v017_tests;
+#[cfg(test)]
+mod v018_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -363,7 +365,10 @@ impl AttemptTrace {
         if m.service_tier.is_some() {
             self.attempt.service_tier = m.service_tier.clone();
         }
-        if m.first_token_ms.is_some() {
+        if self.attempt.first_token_ms.is_none()
+            && self.attempt.stream
+            && self.attempt.operation == Operation::Model
+        {
             self.attempt.first_token_ms = m.first_token_ms;
         }
         self.attempt.status = status.or(self.attempt.status);

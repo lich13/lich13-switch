@@ -72,6 +72,8 @@ export type Totals = {
   durationMs: number;
   measuredOutputs: number;
   generationMs: number;
+  firstTokenSumMs?: number;
+  firstTokenSamples?: number;
 };
 export type Point = { time: number; totals: Totals };
 export type Group = { id: string; totals: Totals };
@@ -134,8 +136,12 @@ export type UsageState = {
   error: string | null;
 };
 export type ProviderPriceMapping = {
-  client: "codex" | "claude"; provider: string; enabled: boolean;
-  matchOn: "request" | "response"; fromModel: string; toModel: string;
+  client: "codex" | "claude";
+  provider: string;
+  enabled: boolean;
+  matchOn: "request" | "response";
+  fromModel: string;
+  toModel: string;
 };
 export type PricingConfig = {
   providerMappings?: ProviderPriceMapping[];
@@ -164,7 +170,10 @@ export const compact = (n: number | null | undefined) => {
   const units = ["", "K", "M", "B"];
   let power = Math.min(3, Math.floor(Math.log10(Math.abs(n)) / 3));
   let value = Number((n / 1000 ** power).toPrecision(3));
-  if (Math.abs(value) >= 1000 && power < 3) { power++; value = Number((value / 1000).toPrecision(3)); }
+  if (Math.abs(value) >= 1000 && power < 3) {
+    power++;
+    value = Number((value / 1000).toPrecision(3));
+  }
   return `${value}${units[power]}`;
 };
 export const money = (n: string | null | undefined) =>
@@ -187,4 +196,21 @@ export function speed(a: Attempt, estimated: boolean) {
   return a.tokens.output != null && a.tokens.output > 0 && ms > 0
     ? `${((a.tokens.output / ms) * 1000).toFixed(1)}${estimated ? "（估算）" : ""}`
     : "—";
+}
+
+export function averageFirstToken(
+  t: Pick<Totals, "firstTokenSumMs" | "firstTokenSamples"> | null | undefined,
+): number | null {
+  return t?.firstTokenSamples
+    ? (t.firstTokenSumMs ?? 0) / t.firstTokenSamples
+    : null;
+}
+export function firstTokenLabel(ms: number | null | undefined): string {
+  return ms == null ? "—" : `${(ms / 1000).toFixed(2)}s`;
+}
+export function firstTokenTitle(t: Totals | null | undefined): string {
+  const ms = averageFirstToken(t);
+  return ms == null
+    ? "无首字样本"
+    : `${(ms / 1000).toFixed(3)}s · ${numeric(t?.firstTokenSamples)} 个有效样本`;
 }

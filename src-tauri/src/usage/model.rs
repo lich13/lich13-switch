@@ -187,14 +187,31 @@ impl Meter {
         }) {
             self.service_tier = Some(tier.into());
         }
-        let generated = event == "response.output_text.delta"
-            || event == "response.reasoning_text.delta"
-            || event == "response.reasoning_summary_text.delta"
-            || event == "response.function_call_arguments.delta"
-            || event == "content_block_delta"
-            || outer["choices"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|v| v["delta"]["content"].is_string()));
+        let nonempty = |v: &Value| v.as_str().is_some_and(|s| !s.is_empty());
+        let generated = match event {
+            "response.output_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.function_call_arguments.delta" => nonempty(&outer["delta"]),
+            "content_block_delta" => ["text", "thinking", "partial_json"]
+                .iter()
+                .any(|key| nonempty(&outer["delta"][key])),
+            "error" | "response.failed" => false,
+            _ => outer["choices"].as_array().is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    let delta = &choice["delta"];
+                    ["content", "reasoning_content", "reasoning"]
+                        .iter()
+                        .any(|key| nonempty(&delta[key]))
+                        || nonempty(&delta["function_call"]["arguments"])
+                        || delta["tool_calls"].as_array().is_some_and(|tools| {
+                            tools
+                                .iter()
+                                .any(|tool| nonempty(&tool["function"]["arguments"]))
+                        })
+                })
+            }),
+        } && outer.get("error").is_none_or(Value::is_null);
         if generated && self.first_token_ms.is_none() {
             self.first_token_ms = Some(elapsed);
         }
@@ -444,6 +461,14 @@ pub struct Record {
     pub gateway_reported: Option<Attempt>,
 }
 impl Record {
+    /// Only real gateway generations supply latency samples, including merged records.
+    pub fn measured_first_token_ms(&self) -> Option<u64> {
+        let a = self.final_attempt()?;
+        (self.source == "proxy" && a.stream && a.operation == Operation::Model)
+            .then_some(a.first_token_ms)
+            .flatten()
+    }
+
     pub fn gateway_only(&mut self) {
         if let (Some(original), Some(last)) =
             (self.gateway_reported.take(), self.attempts.last_mut())
@@ -556,6 +581,10 @@ pub struct Totals {
     pub duration_ms: u64,
     pub measured_outputs: u64,
     pub generation_ms: u64,
+    #[serde(default)]
+    pub first_token_sum_ms: u64,
+    #[serde(default)]
+    pub first_token_samples: u64,
 }
 impl Totals {
     pub fn add_record(&mut self, r: &Record) {
@@ -573,6 +602,10 @@ impl Totals {
         }
         if let Some(a) = r.final_attempt() {
             self.duration_ms += a.duration_ms;
+            if let Some(first) = r.measured_first_token_ms() {
+                self.first_token_sum_ms = self.first_token_sum_ms.saturating_add(first);
+                self.first_token_samples += 1;
+            }
             if let Some(s) = a.status {
                 self.status_known += 1;
                 if (200..300).contains(&s) || s == 101 && r.completed {
@@ -603,5 +636,7 @@ impl Totals {
         self.duration_ms += o.duration_ms;
         self.measured_outputs += o.measured_outputs;
         self.generation_ms += o.generation_ms;
+        self.first_token_sum_ms = self.first_token_sum_ms.saturating_add(o.first_token_sum_ms);
+        self.first_token_samples += o.first_token_samples;
     }
 }

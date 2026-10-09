@@ -2452,4 +2452,3 @@ select:focus-visible {
 .claude-profile .form-error { margin: 0; }
 .claude-profile-warning { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .claude-profile-warning ul { padding-left: 20px; }
-.usage-review { color: var(--warning); }

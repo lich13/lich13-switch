@@ -112,3 +112,5 @@ https://github.com/farion1231/cc-switch/blob/2db86e94da13365caae55bb08d09295e315
 The v0.17 compact usage layout and decimal K/M/B presentation reference CC Switch at `889b797d8aa252299221ed6569f992bda0a31a72` (MIT), under the notice above. Client/provider-specific pricing mappings and bounded capacity retry accounting are independently implemented. Provider-hidden model substitutions cannot be inferred from client-visible responses; costs remain estimates.
 
 https://github.com/farion1231/cc-switch/tree/889b797d8aa252299221ed6569f992bda0a31a72/src/components/usage
+
+The v0.18 usage-page organization continues this MIT-licensed interface reference: compact filters, overview, a shared chart, paginated tables, and grouped details. The first-generation-content latency metric and weighted sample aggregation are independently implemented; they replace speed in this application's provider and model tables. Automatic pricing continues to use the Sub2API-selected public source described above.

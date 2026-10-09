@@ -128,7 +128,10 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
             state(c, r, 2, None, "ambiguous", vec![])?;
             continue;
         }
-        let mut same: Vec<_> = all.iter().filter(|b| exact(r, b)).collect();
+        // The seed's candidate window may omit a peer's already-linked proxy.
+        // Resolve each row against its own IDs before changing its effective state.
+        let peers = rows(c, r)?;
+        let mut same: Vec<_> = peers.iter().filter(|b| exact(r, b)).collect();
         same.sort_by(|a, b| (a.source != "proxy", &a.id).cmp(&(b.source != "proxy", &b.id)));
         if let Some(canonical) = same.first().filter(|_| same.len() > 1) {
             let mut sources: Vec<_> = same.iter().map(|r| r.source.clone()).collect();
@@ -152,7 +155,7 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
             state(c, r, 1, None, "", vec![])?;
             continue;
         }
-        let candidates: Vec<_> = all
+        let candidates: Vec<_> = peers
             .iter()
             .filter(|b| b.id != r.id && fingerprint(r, b))
             .collect();
