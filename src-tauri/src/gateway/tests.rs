@@ -500,21 +500,17 @@ async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
         },
     );
     start(&g, &t).await;
-    let first_status = tokio::time::timeout(
-        Duration::from_secs(5),
-        request(&g, "/v1/a", vec![], vec![]),
-    )
-    .await
-    .expect("upstream failure response timed out")
-    .status();
+    let first_status =
+        tokio::time::timeout(Duration::from_secs(5), request(&g, "/v1/a", vec![], vec![]))
+            .await
+            .expect("upstream failure response timed out")
+            .status();
     assert_eq!(first_status, 502);
-    let cooldown_status = tokio::time::timeout(
-        Duration::from_secs(5),
-        request(&g, "/v1/a", vec![], vec![]),
-    )
-    .await
-    .expect("cooldown response timed out")
-    .status();
+    let cooldown_status =
+        tokio::time::timeout(Duration::from_secs(5), request(&g, "/v1/a", vec![], vec![]))
+            .await
+            .expect("cooldown response timed out")
+            .status();
     assert_eq!(cooldown_status, 503);
     let view = g.view();
     let health = &view.providers[0].health;
