@@ -187,43 +187,60 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
         email,
     })
 }
-fn older(incoming: &str, stored: &str) -> bool {
-    fn timestamps(raw: &str) -> (Option<i64>, Option<i64>) {
-        let Ok(v) = serde_json::from_str::<Value>(raw) else {
-            return (None, None);
-        };
-        let refresh = v
-            .get("last_refresh")
-            .and_then(|v| {
-                v.as_i64()
-                    .and_then(|n| n.checked_mul(1_000_000))
-                    .or_else(|| {
-                        v.as_str().and_then(|s| {
-                            chrono::DateTime::parse_from_rfc3339(s)
-                                .ok()
-                                .map(|d| d.timestamp_micros())
-                        })
+fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return (None, None);
+    };
+    let limit = (now() as i64 + 300).saturating_mul(1_000_000);
+    let refresh = value
+        .get("last_refresh")
+        .and_then(|v| {
+            v.as_i64()
+                .and_then(|n| {
+                    // Older CLI versions and imports may use seconds or milliseconds.
+                    if n >= 1_000_000_000_000 {
+                        n.checked_mul(1_000)
+                    } else {
+                        n.checked_mul(1_000_000)
+                    }
+                })
+                .or_else(|| {
+                    v.as_str().and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(s)
+                            .ok()
+                            .map(|d| d.timestamp_micros())
                     })
-            })
-            .filter(|t| *t > 0);
-        let issued = ["access_token", "id_token"].iter().find_map(|key| {
-            v.get("tokens")
-                .and_then(|v| v.get(key))
-                .and_then(Value::as_str)
-                .and_then(claims)
-                .and_then(|v| v.get("iat").and_then(Value::as_i64))
-                .filter(|t| *t > 0)
-        });
-        (refresh, issued)
-    }
-    let (a, ai) = timestamps(incoming);
-    let (b, bi) = timestamps(stored);
-    if let (Some(a), Some(b)) = (a, b) {
+                })
+        })
+        .filter(|t| *t > 0 && *t <= limit);
+    let issued = ["access_token", "id_token"]
+        .iter()
+        .filter_map(|key| {
+            value
+                .get("tokens")?
+                .get(key)?
+                .as_str()
+                .and_then(claims)?
+                .get("iat")?
+                .as_i64()
+        })
+        .filter(|t| *t > 0 && *t <= now() as i64 + 300)
+        .max();
+    (refresh, issued)
+}
+fn token_is_newer(incoming: &str, stored: &str) -> bool {
+    matches!((credential_times(incoming).1, credential_times(stored).1), (Some(a), Some(b)) if a > b)
+}
+fn older(incoming: &str, stored: &str) -> bool {
+    let (a, ai) = credential_times(incoming);
+    let (b, bi) = credential_times(stored);
+    // A rotated token is stronger evidence than the local refresh clock.
+    if let (Some(a), Some(b)) = (ai, bi) {
         if a != b {
             return a < b;
         }
     }
-    matches!((ai, bi), (Some(a), Some(b)) if a < b)
+    matches!((a, b), (Some(a), Some(b)) if a < b)
 }
 pub fn validate_config(text: &str) -> Result<()> {
     if text.len() > 2 * 1024 * 1024 {
@@ -411,6 +428,45 @@ impl Core {
         }
         Ok(id)
     }
+    /// Only called after our isolated official CLI reports a completed login.
+    /// Refresh the active identity in place; signing in another identity only saves it.
+    pub fn complete_login(&mut self, raw: &str) -> Result<bool> {
+        let info = auth_info(raw)?;
+        if info.kind != "chatgpt" {
+            return Err(AppError::new(
+                "LOGIN_AUTH",
+                "官方登录未生成完整 ChatGPT 凭据",
+            ));
+        }
+        let path = self.home().join("auth.json");
+        let previous = storage::read_optional(&path)?;
+        let expected = storage::revision(previous.as_deref());
+        let active = previous
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|raw| auth_info(raw).ok())
+            .is_some_and(|current| current.identity == info.identity);
+        let id = self.import_raw(raw, None)?;
+        if active {
+            if let Some(previous) = &previous {
+                storage::atomic_write(&self.data_dir.join("previous-auth.json"), previous, None)?;
+            }
+            storage::atomic_write(&path, raw.as_bytes(), Some(&expected)).map_err(|error| {
+                AppError::new(
+                    &error.code,
+                    "新凭据已保存，当前账号文件未能更新，请重新选择该账号",
+                )
+            })?;
+            self.store.observed_auth_revisions.insert(
+                self.store.preferences.codex_home.clone(),
+                storage::digest(raw.as_bytes()),
+            );
+            self.checked_auth = None;
+            self.persist()?;
+            self.set_sync("updated", Some(id), "当前账号凭据已更新");
+        }
+        Ok(active)
+    }
     pub fn add_api_key(&mut self, name: &str, key: &str) -> Result<String> {
         if key.trim().is_empty() || key.contains(['\n', '\r']) {
             return Err(AppError::new("KEY", "请输入单行有效 API Key"));
@@ -483,7 +539,20 @@ impl Core {
             .map(|i| i.identity.as_str());
         let auth_revision = storage::revision(auth.as_deref());
         let root = self.store.preferences.codex_home.clone();
-        let changed = self.store.observed_auth_revisions.get(&root) != Some(&auth_revision);
+        // Reconsider a previously rejected revision when its token is provably newer.
+        // Deleted identities remain suppressed, and explicit imports are not undone.
+        let newer_token = auth
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .is_some_and(|raw| {
+                self.store
+                    .profiles
+                    .iter()
+                    .find(|p| Some(p.identity.as_str()) == identity)
+                    .is_some_and(|p| token_is_newer(raw, &p.auth))
+            });
+        let changed =
+            self.store.observed_auth_revisions.get(&root) != Some(&auth_revision) || newer_token;
         let old = self.store.clone();
         if changed {
             // A valid intermediate JSON document can still be part of a non-atomic write.
@@ -699,6 +768,20 @@ impl Core {
         }
         storage::atomic_write(&path, text.as_bytes(), Some(expected))?;
         self.read_config()
+    }
+    pub fn set_quota_refresh(&mut self, seconds: u64, expected: u64) -> Result<ViewState> {
+        if seconds != 0 && !(10..=86400).contains(&seconds) {
+            return Err(AppError::new("PREFERENCES", "刷新间隔需为 10–86400 秒"));
+        }
+        if self.store.preferences.quota_refresh_seconds != expected {
+            return Err(AppError::new("CONFLICT", "额度刷新设置已变化，请重试"));
+        }
+        self.store.preferences.quota_refresh_seconds = seconds;
+        if let Err(e) = self.persist() {
+            self.store.preferences.quota_refresh_seconds = expected;
+            return Err(e);
+        }
+        self.state()
     }
     pub fn set_preferences(&mut self, prefs: Preferences) -> Result<ViewState> {
         if prefs.quota_refresh_seconds != 0 && !(10..=86400).contains(&prefs.quota_refresh_seconds)
@@ -1048,3 +1131,7 @@ mod tests {
         assert!(!t.path().join("victim").exists());
     }
 }
+
+#[cfg(test)]
+#[path = "core_v016_tests.rs"]
+mod v016_tests;

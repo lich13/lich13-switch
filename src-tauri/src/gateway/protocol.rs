@@ -6,6 +6,7 @@ const MAX_EVENT: usize = 2 * 1024 * 1024;
 #[derive(Default, Clone, Debug)]
 pub struct Observation {
     pub meter: crate::usage::model::Meter,
+    pub error: crate::events::Details,
     pub response_id: Option<String>,
     pub model: Option<String>,
     pub incomplete: bool,
@@ -31,6 +32,10 @@ pub fn identifier(v: Option<&Value>) -> Option<String> {
 impl Observation {
     pub fn value(&mut self, outer: &Value) {
         self.meter.observe(outer, 0);
+        let details = super::upstream_error::details_value(outer, false);
+        if details != crate::events::Details::default() {
+            self.error = details;
+        }
         let value = outer
             .get("response")
             .filter(|v| v.is_object())
@@ -67,24 +72,33 @@ impl Observation {
             || outer.get("choices").is_some();
         if self.terminal.is_none() {
             let status = value.get("status").and_then(Value::as_str).unwrap_or("");
-            let terminal = match event {
-                "response.completed" | "response.done" | "message_stop" => Some(Terminal::Success),
-                "response.cancelled" | "response.canceled" => Some(Terminal::Cancelled),
-                "response.failed" | "error" => Some(error_terminal(value)),
-                "response.incomplete" => Some(incomplete_terminal(value)),
-                "message" if value.get("stop_reason").is_some_and(|v| !v.is_null()) => {
-                    Some(Terminal::Success)
-                }
-                _ => match status {
-                    "completed" => Some(Terminal::Success),
-                    "failed" => Some(error_terminal(value)),
-                    "incomplete" => Some(incomplete_terminal(value)),
-                    "cancelled" => Some(Terminal::Cancelled),
-                    _ if value.get("error").is_some_and(|e| !e.is_null()) => {
-                        Some(error_terminal(value))
+            let terminal = if super::upstream_error::model_error(outer) {
+                Some(Terminal::ModelUnavailable)
+            } else {
+                match event {
+                    "response.completed" | "response.done" | "message_stop" => {
+                        Some(Terminal::Success)
                     }
-                    _ => None,
-                },
+                    "response.cancelled" | "response.canceled" => Some(Terminal::Cancelled),
+                    "response.failed" | "error" => Some(error_terminal(value)),
+                    "response.incomplete" => Some(incomplete_terminal(value)),
+                    "message" if value.get("stop_reason").is_some_and(|v| !v.is_null()) => {
+                        Some(Terminal::Success)
+                    }
+                    _ => match status {
+                        "completed" => Some(Terminal::Success),
+                        "failed" => Some(error_terminal(value)),
+                        "incomplete" => Some(incomplete_terminal(value)),
+                        "cancelled" => Some(Terminal::Cancelled),
+                        _ if value.get("error").is_some_and(|e| !e.is_null()) => {
+                            Some(error_terminal(value))
+                        }
+                        _ if self.error != crate::events::Details::default() => {
+                            Some(error_terminal(outer))
+                        }
+                        _ => None,
+                    },
+                }
             };
             // A chat completion finishes only once all reported choices finish.
             let choices = outer.get("choices").and_then(Value::as_array);
@@ -346,13 +360,17 @@ impl Protocol {
             return;
         }
         self.finished = true;
-        self.transport_failure = matches!(
-            reason,
-            "NETWORK" | "TLS" | "FIRST_BYTE_TIMEOUT" | "STREAM_TIMEOUT" | "STREAM_INTERRUPTED"
-        );
         self.status = self.status.or(status);
         if let Some(o) = &mut self.observer {
-            self.observation = o.snapshot(matches!(reason, "OK" | "HTTP"));
+            self.observation = o.snapshot(true);
+        }
+        self.transport_failure = self.observation.terminal.is_none()
+            && matches!(
+                reason,
+                "NETWORK" | "TLS" | "FIRST_BYTE_TIMEOUT" | "STREAM_TIMEOUT" | "STREAM_INTERRUPTED"
+            );
+        if self.transport_failure {
+            self.observation.error.upstream_code = Some(reason.into());
         }
         if self.observation.terminal.is_none() {
             if reason == "OK"
@@ -363,6 +381,7 @@ impl Protocol {
                 // EOF before a terminal event is a transport/incomplete-stream
                 // failure, unlike an explicit response.failed event.
                 self.transport_failure = true;
+                self.observation.error.upstream_code = Some("STREAM_INTERRUPTED".into());
             }
             self.observation.terminal = Some(match reason {
                 "OK" if self.stream && self.observation.expects_terminal => {

@@ -514,38 +514,16 @@ describe("user workflows", () => {
 });
 
 describe("quota and notification settings", () => {
-  it("keeps the default interval at 60 seconds, accepts 10 seconds and can disable auto refresh", async () => {
+  it("does not show quota refresh controls in application settings", async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole("heading", { name: "账号", level: 1 });
     expect(document.querySelector(".topbar")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /^设置/ }));
 
-    const enabled = screen.getByRole("checkbox", { name: "额度自动刷新" });
-    expect(enabled).toBeChecked();
-    const interval = screen.getByRole("spinbutton", { name: "额度刷新间隔" });
-    expect(interval).toHaveValue(60);
-    expect(interval).toHaveAttribute("min", "10");
-    expect(interval).toHaveAttribute("max", "86400");
-    await user.clear(interval);
-    await user.type(interval, "10");
-    await user.click(screen.getByRole("button", { name: "保存设置" }));
-    await waitFor(() =>
-      expect(mocks.command).toHaveBeenCalledWith("set_preferences", {
-        preferences: expect.objectContaining({ quotaRefreshSeconds: 10 }),
-      }),
-    );
-
-    await user.click(screen.getByRole("button", { name: /^设置/ }));
-    expect(screen.getByRole("spinbutton", { name: "额度刷新间隔" })).toHaveValue(10);
-    await user.click(screen.getByRole("checkbox", { name: "额度自动刷新" }));
+    expect(screen.queryByRole("checkbox", { name: "额度自动刷新" })).not.toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: "额度刷新间隔" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "保存设置" }));
-    await waitFor(() =>
-      expect(mocks.command).toHaveBeenLastCalledWith("set_preferences", {
-        preferences: expect.objectContaining({ quotaRefreshSeconds: 0 }),
-      }),
-    );
+    expect(screen.queryByRole("button", { name: "保存刷新设置" })).not.toBeInTheDocument();
   });
 
   it("persists the system notification switch with the same preferences save", async () => {

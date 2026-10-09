@@ -78,7 +78,7 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 3 {
+        if version > 4 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
@@ -136,6 +136,11 @@ impl Store {
                 db(tx.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('repair_codex','1'),('repair_claude','1')",[]))?;
             }
             db(tx.execute_batch("PRAGMA user_version=3;"))?;
+            db(tx.commit())?;
+        }
+        if version < 4 {
+            let tx = db(connection.transaction())?;
+            db(tx.execute_batch("ALTER TABLE receipts ADD COLUMN operation TEXT NOT NULL DEFAULT 'model'; PRAGMA user_version=4;"))?;
             db(tx.commit())?;
         }
         for suffix in ["-wal", "-shm"] {
@@ -332,7 +337,7 @@ impl Store {
                 continue;
             };
             let provider = a.provider.clone();
-            let model = a.pricing_model.clone();
+            let model = a.grouping_model().map(str::to_owned);
             let status = a.status;
             let mut t = Totals::default();
             t.add_record(&r);
@@ -374,7 +379,7 @@ impl Store {
         }
         // Keep only irreversible correlation keys after detail expiry. They prevent
         // archived files, late imports and source rebuilds from duplicating daily totals.
-        db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective) SELECT id,client,source,time,provider,response,signature,time+coalesce(json_extract(body,'$.attempts[#-1].durationMs'),0),effective FROM records WHERE time<?1",[cutoff]))?;
+        db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time+coalesce(json_extract(body,'$.attempts[#-1].durationMs'),0),effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
         db(tx.execute("DELETE FROM usage_metrics WHERE kind=0 AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
         db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
         query::changed(&tx)?;
@@ -394,9 +399,7 @@ impl Store {
             let mut changed = false;
             for a in &mut r.attempts {
                 if a.price.is_none() {
-                    a.price = pricing
-                        .quote(a.pricing_model.as_deref(), &a.cost_multiplier)
-                        .calculate(&a.tokens, a.service_tier.as_deref());
+                    a.price = a.calculate_price(pricing);
                     changed |= a.price.is_some();
                 }
             }
@@ -428,9 +431,7 @@ impl Store {
             let before = serde_json::to_string(&d.example).map_err(|_| failure("汇总无效"))?;
             for a in &mut d.example.attempts {
                 if a.price.is_none() {
-                    a.price = pricing
-                        .quote(a.pricing_model.as_deref(), &a.cost_multiplier)
-                        .calculate(&a.tokens, a.service_tier.as_deref());
+                    a.price = a.calculate_price(pricing);
                 }
             }
             if serde_json::to_string(&d.example).map_err(|_| failure("汇总无效"))? == before {
@@ -554,7 +555,7 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
     let response = a.and_then(|v| v.response_id.as_deref());
     let signature = r.signature();
     let provider = a.and_then(|v| v.provider.as_deref());
-    let model = a.and_then(|v| v.pricing_model.as_deref());
+    let model = a.and_then(|v| v.grouping_model());
     let status = a.and_then(|v| v.status);
     let body = serde_json::to_string(r).map_err(|_| failure("用量元数据无效"))?;
     db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.started_at,provider,model,status,response,signature,body]))?;

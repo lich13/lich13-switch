@@ -309,15 +309,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
         _ => false,
     };
-    let requirement = if !websocket && routing::resource(&parts.method, parts.uri.path()) {
+    let operation = crate::usage::model::Operation::for_path(parts.uri.path());
+    let requirement = if operation == crate::usage::model::Operation::WebSearch
+        || (!websocket && routing::resource(&parts.method, parts.uri.path()))
+    {
         Requirement::Resource
     } else {
         Requirement::model(model.as_deref())
     };
-    let usage_trace = if matches!(requirement, Requirement::Resource) {
+    let usage_trace = if matches!(requirement, Requirement::Resource)
+        && operation != crate::usage::model::Operation::WebSearch
+    {
         None
     } else {
-        gateway.usage_trace(model.as_deref())
+        gateway.usage_operation(model.as_deref(), operation)
     };
     let mut last = None;
     let mut attempted = 0usize;
@@ -534,13 +539,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Some(connector::ConnectError::Tls) => "TLS",
                     _ => "NETWORK",
                 };
-                gateway.record(
-                    Some(&route.provider.id),
+                admission.permits.report(
+                    &gateway,
+                    &route,
                     model.as_deref(),
                     Reason::Network,
                     Action::TryingNext,
                     None,
-                    Some(attempted as u32),
+                    attempted,
+                    crate::events::Details {
+                        phase: Some(crate::events::Phase::Connect),
+                        upstream_code: Some(last_category.into()),
+                        counted_failure: Some(true),
+                        ..Default::default()
+                    },
                 );
                 admission.permits.failure(&settings, None);
                 protocol.finish(None, last_category);
@@ -548,13 +560,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             Err(_) => {
                 last_category = "FIRST_BYTE_TIMEOUT";
-                gateway.record(
-                    Some(&route.provider.id),
+                admission.permits.report(
+                    &gateway,
+                    &route,
                     model.as_deref(),
                     Reason::Network,
                     Action::TryingNext,
                     None,
-                    Some(attempted as u32),
+                    attempted,
+                    crate::events::Details {
+                        phase: Some(crate::events::Phase::Headers),
+                        upstream_code: Some("FIRST_BYTE_TIMEOUT".into()),
+                        counted_failure: Some(true),
+                        ..Default::default()
+                    },
                 );
                 admission.permits.failure(&settings, None);
                 protocol.finish(None, last_category);
@@ -667,22 +686,26 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 Reason::UpstreamService
             };
-            if model_error || circuit::retryable(status.as_u16()) {
-                gateway.record(
-                    Some(&route.provider.id),
-                    model.as_deref(),
-                    reason,
-                    if will_retry {
-                        Action::TryingNext
-                    } else if capacity {
-                        Action::Waiting
-                    } else {
-                        Action::Returned
-                    },
-                    Some(status.as_u16()),
-                    Some(attempted as u32),
-                );
-            }
+            let mut details = super::upstream_error::details_http(&decoded);
+            details.phase = Some(crate::events::Phase::Response);
+            details.counted_failure =
+                Some(!model_error && !capacity && status.as_u16() != 429 && retryable);
+            admission.permits.report(
+                &gateway,
+                &route,
+                model.as_deref(),
+                reason,
+                if will_retry {
+                    Action::TryingNext
+                } else if capacity {
+                    Action::Waiting
+                } else {
+                    Action::Returned
+                },
+                Some(status.as_u16()),
+                attempted,
+                details,
+            );
             if model_error {
                 admission.permits.neutral(&settings);
             } else if capacity {
@@ -744,6 +767,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let mut prefix_bytes = 0;
         let mut ended = false;
         let mut failed = false;
+        let mut failure_kind = "FIRST_BYTE_TIMEOUT";
         loop {
             match tokio::time::timeout_at(first_deadline, body.frame()).await {
                 Ok(Some(Ok(frame))) => {
@@ -767,25 +791,41 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     ended = true;
                     break;
                 }
-                _ => {
+                result => {
                     failed = true;
+                    failure_kind = if result.is_err() {
+                        "FIRST_BYTE_TIMEOUT"
+                    } else {
+                        "STREAM_INTERRUPTED"
+                    };
                     break;
                 }
             }
         }
         if failed {
-            gateway.record(
-                Some(&route.provider.id),
+            protocol.finish(Some(status.as_u16()), failure_kind);
+        }
+        if failed && protocol.transport_failure() {
+            admission.permits.report(
+                &gateway,
+                &route,
                 model.as_deref(),
                 Reason::Network,
                 Action::TryingNext,
                 Some(status.as_u16()),
-                Some(attempted as u32),
+                attempted,
+                crate::events::Details {
+                    phase: Some(crate::events::Phase::Response),
+                    upstream_code: Some(failure_kind.into()),
+                    counted_failure: Some(true),
+                    ..Default::default()
+                },
             );
             admission.permits.failure(&settings, None);
-            last_category = "FIRST_BYTE_TIMEOUT";
+            last_category = failure_kind;
             continue;
         }
+        ended |= failed;
         if ended {
             protocol.finish(
                 Some(status.as_u16()),
@@ -801,8 +841,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             admission.permits.neutral(&settings);
             let will_retry =
                 !ids.is_empty() && attempted <= settings.max_retries && !unknown_affinity;
-            gateway.record(
-                Some(&route.provider.id),
+            let mut details = protocol.observation.error.clone();
+            details.phase = Some(crate::events::Phase::Response);
+            details.counted_failure = Some(false);
+            admission.permits.report(
+                &gateway,
+                &route,
                 model.as_deref(),
                 Reason::ModelUnavailable,
                 if will_retry {
@@ -811,7 +855,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Action::Returned
                 },
                 Some(status.as_u16()),
-                Some(attempted as u32),
+                attempted,
+                details,
             );
             // Preserve a bounded error prefix. Dropping its unread tail cancels the
             // rejected attempt; if no alternative succeeds, return the original stream.
@@ -954,16 +999,27 @@ pub(super) fn observe_protocol(
                 Some(Reason::ProtocolError)
             }
             Some(super::protocol::Terminal::Failure) => Some(Reason::UpstreamService),
+            Some(super::protocol::Terminal::Rejected)
+                if protocol.observation.error != crate::events::Details::default() =>
+            {
+                Some(Reason::ProtocolError)
+            }
             _ => None,
         };
         if let Some(reason) = reason {
-            g.record(
-                Some(&route.provider.id),
+            let mut details = protocol.observation.error.clone();
+            details.phase = Some(crate::events::Phase::Stream);
+            details.counted_failure =
+                Some(reason == Reason::Network || reason == Reason::UpstreamService);
+            permits.report(
+                g,
+                route,
                 model,
                 reason,
                 Action::Returned,
                 status,
-                Some(attempt as u32),
+                attempt,
+                details,
             );
         }
     }
@@ -992,6 +1048,36 @@ pub(super) struct Permits {
     provider: Option<Permit>,
 }
 impl Permits {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn report(
+        &mut self,
+        g: &Gateway,
+        route: &Route,
+        model: Option<&str>,
+        reason: Reason,
+        action: Action,
+        status: Option<u16>,
+        attempt: usize,
+        details: crate::events::Details,
+    ) {
+        let mut event = crate::events::Record::new(
+            Some(g.0.client),
+            Some(&route.provider.id),
+            model,
+            reason,
+            action,
+            status,
+            Some(attempt as u32),
+        );
+        event.details = details.sanitized();
+        if let Some(p) = &mut self.provider {
+            p.set_failure_event(event.clone());
+        }
+        if let Some(service) = g.0.diagnostics.lock().unwrap().as_ref() {
+            service.emit(event);
+        }
+    }
+
     pub(super) fn capacity_limited(&mut self, cfg: &Settings, retry: Option<Duration>) {
         if let Some(p) = self.provider.take() {
             p.finish(Outcome::CapacityLimited(retry), cfg);

@@ -144,7 +144,14 @@ const linkApps = [
     path: "/Applications/lich13studio.app",
   },
 ];
-let claudeProfile = { mode: "api", revision: "preview-profile", initialized: false, conflict: null, files: [], warnings: [] };
+let claudeProfile = {
+  mode: "api",
+  revision: "preview-profile",
+  initialized: false,
+  conflict: null,
+  files: [],
+  warnings: [],
+};
 let claudeLogin = { phase: "idle", authenticated: false, error: null };
 let apiProfileText = claudeDoc.text;
 let officialProfileText = '{\n  "env": {}\n}\n';
@@ -152,19 +159,38 @@ export async function run(
   name: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  if (name === "get_claude_profile" || name === "recover_claude_profile") return structuredClone(claudeProfile);
+  if (name === "get_claude_profile" || name === "recover_claude_profile")
+    return structuredClone(claudeProfile);
   if (name === "switch_claude_profile") {
     const official = args.mode === "official";
-    if (official) apiProfileText = claudeDoc.text; else officialProfileText = claudeDoc.text;
-    claudeDoc = { ...claudeDoc, text: official ? officialProfileText : apiProfileText, guarded: official, revision: `preview-claude-${Date.now()}` };
-    claudeProfile = { ...claudeProfile, mode: official ? "official" : "api", initialized: true, revision: `preview-profile-${Date.now()}` };
+    if (official) apiProfileText = claudeDoc.text;
+    else officialProfileText = claudeDoc.text;
+    claudeDoc = {
+      ...claudeDoc,
+      text: official ? officialProfileText : apiProfileText,
+      guarded: official,
+      revision: `preview-claude-${Date.now()}`,
+    };
+    claudeProfile = {
+      ...claudeProfile,
+      mode: official ? "official" : "api",
+      initialized: true,
+      revision: `preview-profile-${Date.now()}`,
+    };
     emit("claude-profile-state", claudeProfile);
-    emit("config-state", { clientId: "claude", revision: claudeDoc.revision, guarded: official });
+    emit("config-state", {
+      clientId: "claude",
+      revision: claudeDoc.revision,
+      guarded: official,
+    });
     return structuredClone(claudeProfile);
   }
   if (name === "claude_login_status") return structuredClone(claudeLogin);
   if (name === "start_claude_login" || name === "cancel_claude_login") {
-    claudeLogin = { ...claudeLogin, phase: name === "start_claude_login" ? "waiting" : "cancelled" };
+    claudeLogin = {
+      ...claudeLogin,
+      phase: name === "start_claude_login" ? "waiting" : "cancelled",
+    };
     emit("claude-login-state", claudeLogin);
     return structuredClone(claudeLogin);
   }
@@ -247,17 +273,49 @@ export async function run(
     return result;
   }
   switch (name) {
-    case "notification_permission": return {permission:"granted",error:null,delivery:"idle"};
-    case "test_notification": return {permission:"granted",error:null,delivery:"accepted"};
-    case "open_notification_settings": return;
+    case "notification_permission":
+      return { permission: "granted", error: null, delivery: "idle" };
+    case "test_notification":
+      return { permission: "granted", error: null, delivery: "accepted" };
+    case "open_notification_settings":
+      return;
     case "get_app_events": {
-      const filter=(args.filter??{}) as Record<string,unknown>;
-      const rows=demoEvents.filter(r=>Object.entries(filter).every(([key,v])=>!v||key==="page"||(key==="from"?r.lastAt>=Number(v):key==="to"?r.firstAt<=Number(v):r[key as keyof typeof r]===v)));
-      const page=Math.max(1,Math.min(Number(filter.page)||1,Math.ceil(rows.length/50)||1));
-      return {items:rows.slice((page-1)*50,page*50),total:rows.length,page,error:null};
+      const filter = (args.filter ?? {}) as Record<string, unknown>;
+      const rows = demoEvents.filter(
+        (r) =>
+          r.reason !== "recovered" &&
+          Object.entries(filter).every(
+            ([key, v]) =>
+              !v ||
+              key === "page" ||
+              (key === "statusGroup"
+                ? v === "no_status"
+                  ? r.status == null
+                  : r.status != null && Math.floor(r.status / 100) === ({ success: 2, client_error: 4, server_error: 5 } as Record<string, number>)[String(v)]
+                : key === "from"
+                ? r.lastAt >= Number(v)
+                : key === "to"
+                  ? r.firstAt <= Number(v)
+                  : r[key as keyof typeof r] === v),
+          ),
+      );
+      const page = Math.max(
+        1,
+        Math.min(Number(filter.page) || 1, Math.ceil(rows.length / 50) || 1),
+      );
+      return {
+        items: rows.slice((page - 1) * 50, page * 50),
+        total: rows.length,
+        page,
+        error: null,
+      };
     }
-    case "get_app_event": return demoEvents.find(r=>r.id===args.id)??null;
-    case "clear_app_events": demoEvents=[];emit("app-event",{});return;
+    case "get_app_event":
+      return demoEvents.find((r) => r.id === args.id) ?? null;
+    case "clear_app_events":
+      demoEvents = [];
+      emit("app-event", {});
+      return;
 
     case "get_state":
       return structuredClone(demo);
@@ -330,8 +388,24 @@ export async function run(
       });
       return { ...next };
     }
+    case "set_quota_refresh":
+      if (
+        args.seconds !== 0 &&
+        (!Number.isInteger(args.seconds) ||
+          Number(args.seconds) < 10 ||
+          Number(args.seconds) > 86400)
+      )
+        throw { code: "PREFERENCES", message: "刷新间隔需为 10–86400 秒" };
+      if (demo.preferences.quotaRefreshSeconds !== args.expectedSeconds)
+        throw new Error("额度刷新设置已变化，请重试");
+      demo.preferences.quotaRefreshSeconds = args.seconds as number;
+      emit("switch-state", structuredClone(demo));
+      return structuredClone(demo);
     case "set_preferences":
-      demo.preferences = args.preferences as ViewState["preferences"];
+      demo.preferences = {
+        ...(args.preferences as ViewState["preferences"]),
+        quotaRefreshSeconds: demo.preferences.quotaRefreshSeconds,
+      };
       break;
     case "get_login":
       return login;
@@ -351,14 +425,30 @@ export async function run(
       emit("login-state", login);
       return login;
     case "copy_login_value": {
-      const value = args.kind === "url" ? login.url : args.kind === "code" ? login.code : null;
-      if (login.mode !== "device" || !["starting", "waiting"].includes(login.phase) || !value)
+      const value =
+        args.kind === "url"
+          ? login.url
+          : args.kind === "code"
+            ? login.code
+            : null;
+      if (
+        login.mode !== "device" ||
+        !["starting", "waiting"].includes(login.phase) ||
+        !value
+      )
         throw new Error("登录链接或设备码不可用");
       await navigator.clipboard.writeText(value);
       return;
     }
     case "cancel_login":
-      login = { ...login, phase: "cancelled", url: null, code: null, callbackReady: false, message: "登录已取消" };
+      login = {
+        ...login,
+        phase: "cancelled",
+        url: null,
+        code: null,
+        callbackReady: false,
+        message: "登录已取消",
+      };
       emit("login-state", login);
       return;
     case "pick_path":
@@ -374,6 +464,90 @@ export async function run(
 }
 
 let demoEvents = [
-  {id:"fixture-event-1",firstAt:Math.floor(Date.now()/1000)-180,lastAt:Math.floor(Date.now()/1000)-20,count:3,clientId:"codex",providerId:"primary",model:"gpt-example",reason:"model_unavailable",action:"trying_next",level:"warning",status:404,attempt:1},
-  {id:"fixture-event-2",firstAt:Math.floor(Date.now()/1000)-600,lastAt:Math.floor(Date.now()/1000)-600,count:1,clientId:"claude",providerId:null,model:null,reason:"config_conflict",action:"stopped",level:"error",status:null,attempt:null},
+  {
+    id: "fixture-event-1",
+    firstAt: Math.floor(Date.now() / 1000) - 180,
+    lastAt: Math.floor(Date.now() / 1000) - 20,
+    count: 3,
+    clientId: "codex",
+    providerId: "primary",
+    model: "gpt-example",
+    reason: "model_unavailable",
+    action: "trying_next",
+    level: "warning",
+    status: 404,
+    attempt: 1,
+    details: {
+      upstreamCode: "model_not_found",
+      upstreamType: "invalid_request_error",
+      parameter: "model",
+      message: "指定模型不存在或当前渠道不支持",
+      phase: "response",
+      countedFailure: false,
+    },
+  },
+  {
+    id: "fixture-event-2",
+    firstAt: Math.floor(Date.now() / 1000) - 600,
+    lastAt: Math.floor(Date.now() / 1000) - 600,
+    count: 1,
+    clientId: "claude",
+    providerId: null,
+    model: null,
+    reason: "config_conflict",
+    action: "stopped",
+    level: "error",
+    status: null,
+    attempt: null,
+  },
+  {
+    id: "fixture-event-ws",
+    firstAt: Math.floor(Date.now() / 1000) - 30,
+    lastAt: Math.floor(Date.now() / 1000) - 30,
+    count: 1,
+    clientId: "codex",
+    providerId: "primary",
+    model: "gpt-example",
+    reason: "network",
+    action: "reconnecting",
+    level: "warning",
+    status: 101,
+    attempt: 1,
+    details: {
+      phase: "ws_receive",
+      wsCloseCode: 1011,
+      message: "上游在生成完成前关闭连接",
+      countedFailure: true,
+      waitSeconds: 60,
+    },
+  },
+  {
+    id: "fixture-event-circuit",
+    firstAt: Math.floor(Date.now() / 1000) - 120,
+    lastAt: Math.floor(Date.now() / 1000) - 120,
+    count: 1,
+    clientId: "claude",
+    providerId: "primary",
+    model: "claude-example",
+    reason: "circuit_open",
+    action: "stopped",
+    level: "error",
+    status: 503,
+    attempt: 4,
+    details: {
+      upstreamCode: "service_unavailable",
+      phase: "headers",
+      message: "上游服务暂时不可用",
+      countedFailure: true,
+      circuit: {
+        failures: 4,
+        failureThreshold: 4,
+        failedRequests: 4,
+        requests: 8,
+        errorRate: 0.6,
+        minRequests: 10,
+        trigger: "consecutive_failures",
+      },
+    },
+  },
 ];

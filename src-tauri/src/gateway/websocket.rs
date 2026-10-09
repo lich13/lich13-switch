@@ -136,6 +136,7 @@ impl Drop for Peer {
 }
 enum Upstream {
     Native(Peer),
+    Disconnected,
     Bridge(Option<BridgeTurn>),
 }
 struct BridgeTurn {
@@ -172,7 +173,7 @@ async fn next_upstream(upstream: &mut Upstream) -> Option<Result<Frame, Failure>
                 turn.incoming.recv().await
             }
         }
-        Upstream::Bridge(None) => None,
+        Upstream::Bridge(None) | Upstream::Disconnected => None,
     }
 }
 async fn send_to_upstream(upstream: &mut Upstream, frame: Frame) -> Result<(), Failure> {
@@ -192,7 +193,7 @@ async fn send_to_upstream(upstream: &mut Upstream, frame: Frame) -> Result<(), F
             }
             Err((1008, "event is not supported by HTTP bridge"))
         }
-        Upstream::Bridge(None) => Err((1011, "bridge turn is not active")),
+        Upstream::Bridge(None) | Upstream::Disconnected => Err((1011, "bridge turn is not active")),
     }
 }
 fn unsupported_status(status: u16) -> bool {
@@ -209,8 +210,10 @@ struct AttemptFailure {
     unsupported: bool,
     model_unavailable: bool,
     model_payload: Option<Vec<u8>>,
+    details: Box<crate::events::Details>,
 }
 fn record_failure(
+    permits: &mut forward::Permits,
     g: &Gateway,
     route: &Route,
     model: Option<&str>,
@@ -227,18 +230,31 @@ fn record_failure(
         Reason::RateLimit
     } else if matches!(failure.status, Some(401 | 403)) {
         Reason::Authentication
+    } else if failure.status.is_some_and(|s| s < 400) || failure.unsupported {
+        Reason::ProtocolError
     } else if failure.status.is_none() {
         Reason::Network
     } else {
         Reason::UpstreamService
     };
-    g.record(
-        Some(&route.provider.id),
+    let mut details = (*failure.details).clone();
+    details.phase = Some(crate::events::Phase::WsHandshake);
+    details.counted_failure = Some(
+        !failure.model_unavailable
+            && !failure.capacity
+            && !failure.unsupported
+            && failure.status != Some(429)
+            && failure.status.is_none_or(circuit::retryable),
+    );
+    permits.report(
+        g,
+        route,
         model,
         reason,
         action,
         failure.status,
-        Some(attempt as u32),
+        attempt,
+        details,
     );
 }
 fn value(frame: &Frame) -> Option<serde_json::Value> {
@@ -395,6 +411,7 @@ async fn upstream_native(
             unsupported: false,
             model_unavailable: false,
             model_payload: None,
+            details: Default::default(),
         })?;
     *request.headers_mut() = original.clone();
     let headers = request.headers_mut();
@@ -413,6 +430,7 @@ async fn upstream_native(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             })?,
     );
     let key = STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
@@ -438,6 +456,7 @@ async fn upstream_native(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             })
         }
         Err(_) => {
@@ -448,6 +467,7 @@ async fn upstream_native(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             })
         }
     };
@@ -479,6 +499,7 @@ async fn upstream_native(
             status: Some(status.as_u16()),
             retry,
             capacity,
+            details: Box::new(super::upstream_error::details_http(&decoded)),
             model_payload: model_unavailable.then_some(decoded),
             model_unavailable,
             unsupported: !model_unavailable
@@ -496,12 +517,13 @@ async fn upstream_native(
         != Some(&expected)
     {
         return Err(AttemptFailure {
-            status: Some(502),
+            status: Some(response.status().as_u16()),
             retry: None,
             capacity: false,
-            unsupported: false,
+            unsupported: true,
             model_unavailable: false,
             model_payload: None,
+            details: Default::default(),
         });
     }
     let extensions = response
@@ -518,6 +540,7 @@ async fn upstream_native(
             unsupported: false,
             model_unavailable: false,
             model_payload: None,
+            details: Default::default(),
         })?;
     let socket = WebSocket::from_stream_with_extensions(
         TokioIo::new(io),
@@ -532,6 +555,7 @@ async fn upstream_native(
         unsupported: false,
         model_unavailable: false,
         model_payload: None,
+        details: Default::default(),
     })?;
     Ok(Peer::new(
         socket,
@@ -588,6 +612,7 @@ fn decode_reader(reader: BoxReader, encoding: &str) -> Result<BoxReader, Attempt
                 unsupported: true,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             })
         }
     };
@@ -737,12 +762,13 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
         frame.payload(),
     );
     Some(AttemptFailure {
-        status: Some(if capacity { 429 } else { status }),
+        status: Some(101),
         retry: None,
         capacity,
         unsupported: false,
         model_unavailable: super::upstream_error::model_error(&v),
         model_payload: super::upstream_error::model_error(&v).then(|| frame.payload().to_vec()),
+        details: Box::new(super::upstream_error::details_value(&v, false)),
     })
 }
 async fn upstream_bridge(
@@ -753,13 +779,14 @@ async fn upstream_bridge(
     first: &Frame,
 ) -> Result<BridgeTurn, AttemptFailure> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds);
-    let payload = bridge_payload(first).map_err(|(status, _)| AttemptFailure {
-        status: Some(status),
+    let payload = bridge_payload(first).map_err(|_| AttemptFailure {
+        status: None,
         retry: None,
         capacity: false,
         unsupported: false,
         model_unavailable: false,
         model_payload: None,
+        details: Default::default(),
     })?;
     let mut request = Request::new(replay::full(payload.clone()));
     *request.method_mut() = hyper::Method::POST;
@@ -771,6 +798,7 @@ async fn upstream_bridge(
             unsupported: false,
             model_unavailable: false,
             model_payload: None,
+            details: Default::default(),
         })?;
     *request.headers_mut() = original.clone();
     let headers = request.headers_mut();
@@ -799,6 +827,7 @@ async fn upstream_bridge(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             })?,
     );
     headers.insert(
@@ -827,6 +856,7 @@ async fn upstream_bridge(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             });
         }
         Err(_) => {
@@ -837,6 +867,7 @@ async fn upstream_bridge(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             })
         }
     };
@@ -866,6 +897,7 @@ async fn upstream_bridge(
             retry,
             capacity: route.client_id == super::ClientId::Codex
                 && forward::capacity_message(status, &decoded),
+            details: Box::new(super::upstream_error::details_http(&decoded)),
             model_payload: super::upstream_error::model_http(status.as_u16(), &decoded)
                 .then(|| decoded.clone()),
             model_unavailable: super::upstream_error::model_http(status.as_u16(), &decoded),
@@ -890,6 +922,7 @@ async fn upstream_bridge(
             unsupported: true,
             model_unavailable: false,
             model_payload: None,
+            details: Default::default(),
         });
     }
     let encoding = response
@@ -918,6 +951,7 @@ async fn upstream_bridge(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             });
         }
         Ok(None) | Err(_) => {
@@ -928,11 +962,13 @@ async fn upstream_bridge(
                 unsupported: false,
                 model_unavailable: false,
                 model_payload: None,
+                details: Default::default(),
             });
         }
     }?;
     if let Some(mut failure) = first_event_failure(&first) {
         failure.retry = retry;
+        failure.status = Some(status.as_u16());
         return Err(failure);
     }
     turn.first = Some(Ok(first));
@@ -999,6 +1035,88 @@ async fn session(
         }
     }
 }
+// The terminal is settled once before reconnecting. A received application
+// error remains neutral even when the peer closes immediately afterwards.
+#[allow(clippy::too_many_arguments)]
+fn disconnect_turn(
+    g: &Gateway,
+    route: &Route,
+    cfg: &Settings,
+    model: Option<&str>,
+    turn: &mut Option<Admission>,
+    protocol: &mut Option<super::protocol::Protocol>,
+    received: bool,
+    attempts: usize,
+    can_replay: bool,
+    close: Option<&Frame>,
+    phase: crate::events::Phase,
+    category: &str,
+) -> bool {
+    let Some(mut admission) = turn.take() else {
+        return false;
+    };
+    let mut observed = protocol.take();
+    if let Some(u) = &mut observed {
+        u.finish(Some(101), category);
+    }
+    let terminal = observed.as_ref().and_then(|u| u.terminal());
+    let transport = observed.as_ref().is_none_or(|u| u.transport_failure());
+    let retry = route.client_id == super::ClientId::Codex
+        && !received
+        && can_replay
+        && attempts <= cfg.max_retries
+        && transport;
+    let mut details = observed
+        .as_ref()
+        .map(|u| u.observation.error.clone())
+        .unwrap_or_default();
+    details.phase = Some(phase);
+    details.ws_close_code = close.and_then(close_code);
+    if details.message.is_none() {
+        details.message = close
+            .and_then(|frame| std::str::from_utf8(frame.payload().get(2..)?).ok())
+            .and_then(crate::events::safe_message);
+    }
+    details.counted_failure = Some(transport);
+    details.wait_seconds = retry.then_some(cfg.websocket_retry_seconds);
+    if details.upstream_code.is_none() {
+        details.upstream_code = Some(category.into());
+    }
+    let reason = if terminal == Some(super::protocol::Terminal::ModelUnavailable) {
+        crate::events::Reason::ModelUnavailable
+    } else if transport {
+        crate::events::Reason::Network
+    } else {
+        crate::events::Reason::ProtocolError
+    };
+    admission.permits.report(
+        g,
+        route,
+        model,
+        reason,
+        if retry {
+            crate::events::Action::Reconnecting
+        } else if received {
+            crate::events::Action::NotRetried
+        } else {
+            crate::events::Action::Returned
+        },
+        Some(101),
+        attempts,
+        details,
+    );
+    if let Some(u) = &observed {
+        forward::settle_protocol(u, &mut admission.permits, cfg, Some(101));
+    } else {
+        admission.permits.failure(cfg, None);
+    }
+    retry
+}
+fn close_code(frame: &Frame) -> Option<u16> {
+    let bytes = frame.payload();
+    (bytes.len() >= 2).then(|| u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn session_once(
     g: &Gateway,
@@ -1062,7 +1180,7 @@ async fn session_once(
     let mut previous_provider: Option<String> = None;
     let mut unsupported_seen = false;
     let mut non_unsupported_failure = false;
-    let usage_trace = g.usage_trace(current_model.as_deref());
+    let mut usage_trace = g.usage_trace(current_model.as_deref());
     let (mut upstream, admission, initial_protocol) = loop {
         if attempts > cfg.max_retries || (unknown_affinity && attempts > 0) {
             g.record(
@@ -1223,13 +1341,24 @@ async fn session_once(
                 }
                 if failure.unsupported {
                     unsupported_seen = true;
+                    record_failure(
+                        &mut admission.permits,
+                        g,
+                        &admission.route,
+                        current_model.as_deref(),
+                        &failure,
+                        crate::events::Action::TryingNext,
+                        attempts,
+                    );
                     admission.permits.neutral(cfg);
                     continue;
                 }
                 non_unsupported_failure = true;
-                let retryable =
-                    failure.model_unavailable || failure.status.is_none_or(circuit::retryable);
+                let retryable = failure.model_unavailable
+                    || failure.capacity
+                    || failure.status.is_none_or(circuit::retryable);
                 record_failure(
+                    &mut admission.permits,
                     g,
                     &admission.route,
                     current_model.as_deref(),
@@ -1273,7 +1402,8 @@ async fn session_once(
     };
     let route = admission.route.clone();
     let mut turn = Some(admission);
-    drop(usage_trace);
+    let mut replay_frame = first.clone();
+    let mut retry_pending = false;
     let mut protocol = Some(initial_protocol);
     let mut pending: Option<Frame> = None;
     let mut confirmed_model: Option<String> = None;
@@ -1281,16 +1411,175 @@ async fn session_once(
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
     if let Upstream::Native(peer) = &mut upstream {
         if let Err(e) = peer.send(first).await {
-            if let Some(u) = &mut protocol {
-                u.finish(Some(101), "NETWORK");
+            retry_pending = disconnect_turn(
+                g,
+                &route,
+                cfg,
+                current_model.as_deref(),
+                &mut turn,
+                &mut protocol,
+                false,
+                attempts,
+                !unknown_affinity,
+                None,
+                crate::events::Phase::WsSend,
+                "NETWORK",
+            );
+            if !retry_pending {
+                return Err(e);
             }
-            if let Some(mut admission) = turn.take() {
-                admission.permits.failure(cfg, None);
-            }
-            return Err(e);
+            upstream = Upstream::Disconnected;
         }
     }
     loop {
+        if retry_pending {
+            let delay = cfg
+                .websocket_retry_seconds
+                .max(route.provider_circuit.health().retry_in);
+            let waited = while_connecting(
+                client,
+                g.0.admission.wait_websocket(
+                    &route.provider.id,
+                    Duration::from_secs(delay),
+                    cfg.max_waiting,
+                ),
+            )
+            .await;
+            match waited {
+                Err(TURN_CANCELLED) => {
+                    retry_pending = false;
+                    protocol = None;
+                    usage_trace = None;
+                    cancellation(client).await?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+                Ok(result) => result.map_err(rejected)?,
+            }
+            current_model = turn_model(
+                g,
+                &replay_frame,
+                confirmed_model.as_deref(),
+                Some(&route.provider.id),
+            )?;
+            let mut budget = Budget::new(cfg.queue_seconds);
+            let acquired = take_slot(
+                g,
+                client,
+                std::slice::from_ref(&route),
+                manual,
+                cfg,
+                &mut budget,
+                &Requirement::model(current_model.as_deref()),
+                false,
+            )
+            .await;
+            let mut admission = match acquired {
+                Err(TURN_CANCELLED) => {
+                    retry_pending = false;
+                    usage_trace = None;
+                    cancellation(client).await?;
+                    continue;
+                }
+                result => result?,
+            };
+            admission.commit_rpm().map_err(rejected)?;
+            attempts += 1;
+            let mut next = super::protocol::Protocol::new(true);
+            if let Some(trace) = &usage_trace {
+                next.attach_usage(trace.attempt(&route.provider.id, true, "websocket"));
+            }
+            protocol = Some(next);
+            turn = Some(admission);
+            let opened =
+                while_connecting(client, upstream_native(&route, &uri, &headers, cfg)).await;
+            match opened {
+                Err(TURN_CANCELLED) => {
+                    turn = None;
+                    protocol = None;
+                    usage_trace = None;
+                    retry_pending = false;
+                    cancellation(client).await?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+                Ok(Err(failure)) => {
+                    let mut admission = turn.take().unwrap();
+                    record_failure(
+                        &mut admission.permits,
+                        g,
+                        &route,
+                        current_model.as_deref(),
+                        &failure,
+                        crate::events::Action::Returned,
+                        attempts,
+                    );
+                    if let Some(mut u) = protocol.take() {
+                        u.finish(
+                            failure.status,
+                            if failure.status.is_some() {
+                                "HTTP"
+                            } else {
+                                "NETWORK"
+                            },
+                        );
+                    }
+                    if failure.model_unavailable
+                        || failure.unsupported
+                        || failure
+                            .status
+                            .is_some_and(|s| s < 400 || !circuit::retryable(s))
+                    {
+                        admission.permits.neutral(cfg);
+                        if let Some(payload) = failure.model_payload {
+                            client.send(Frame::text(payload)).await?;
+                        }
+                        return Err((1008, "upstream rejected reconnected turn"));
+                    }
+                    if failure.capacity {
+                        admission.permits.capacity_limited(cfg, failure.retry);
+                    } else if failure.status == Some(429) {
+                        admission.permits.rate_limited(cfg, failure.retry);
+                    } else {
+                        admission.permits.failure(cfg, failure.retry);
+                    }
+                    if attempts > cfg.max_retries {
+                        return Err((1013, "websocket reconnect retries exhausted"));
+                    }
+                    continue;
+                }
+                Ok(Ok(peer)) => {
+                    if let Some(u) = &mut protocol {
+                        u.websocket_status(101);
+                    }
+                    upstream = Upstream::Native(peer);
+                }
+            }
+            retry_pending = false;
+            if let Err(error) = send_to_upstream(&mut upstream, replay_frame.clone()).await {
+                retry_pending = disconnect_turn(
+                    g,
+                    &route,
+                    cfg,
+                    current_model.as_deref(),
+                    &mut turn,
+                    &mut protocol,
+                    false,
+                    attempts,
+                    !unknown_affinity,
+                    None,
+                    crate::events::Phase::WsSend,
+                    "NETWORK",
+                );
+                upstream = Upstream::Disconnected;
+                if !retry_pending {
+                    return Err(error);
+                }
+                continue;
+            }
+            received = false;
+            deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
+        }
         if turn.is_none() {
             if let Some(frame) = pending.take() {
                 let model = turn_model(
@@ -1326,23 +1615,29 @@ async fn session_once(
                     Err(error) => return Err(error),
                 }
                 current_model = model;
+                attempts = 1;
+                replay_frame = frame.clone();
+                usage_trace = g.usage_trace(current_model.as_deref());
                 let mut next_protocol = super::protocol::Protocol::new(true);
-                if let Some(trace) = g.usage_trace(current_model.as_deref()) {
+                if let Some(trace) = &usage_trace {
                     next_protocol.attach_usage(trace.attempt(
                         &route.provider.id,
                         true,
-                        if matches!(&upstream, Upstream::Native(_)) {
+                        if uses_native_websocket(route.client_id, route.provider.supports_websocket)
+                        {
                             "websocket"
                         } else {
                             "bridge"
                         },
                     ));
                 }
-                next_protocol.websocket_status(if matches!(&upstream, Upstream::Native(_)) {
-                    101
-                } else {
-                    200
-                });
+                next_protocol.websocket_status(
+                    if uses_native_websocket(route.client_id, route.provider.supports_websocket) {
+                        101
+                    } else {
+                        200
+                    },
+                );
                 protocol = Some(next_protocol);
                 received = false;
                 deadline =
@@ -1375,6 +1670,7 @@ async fn session_once(
                             }
                             if let Some(mut admission) = turn.take() {
                                 record_failure(
+                                    &mut admission.permits,
                                     g,
                                     &route,
                                     current_model.as_deref(),
@@ -1408,43 +1704,107 @@ async fn session_once(
                             });
                         }
                     }
-                } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
-                    if let Some(u) = protocol.as_mut() {
-                        u.finish(Some(101), "NETWORK");
+                } else {
+                    if matches!(upstream, Upstream::Disconnected) {
+                        match while_connecting(client, upstream_native(&route, &uri, &headers, cfg))
+                            .await?
+                        {
+                            Ok(peer) => upstream = Upstream::Native(peer),
+                            Err(failure) => {
+                                if let Some(mut admission) = turn.take() {
+                                    record_failure(
+                                        &mut admission.permits,
+                                        g,
+                                        &route,
+                                        current_model.as_deref(),
+                                        &failure,
+                                        crate::events::Action::Returned,
+                                        attempts,
+                                    );
+                                    if let Some(mut u) = protocol.take() {
+                                        u.finish(
+                                            failure.status,
+                                            if failure.status.is_some() {
+                                                "HTTP"
+                                            } else {
+                                                "NETWORK"
+                                            },
+                                        );
+                                    }
+                                    if failure.model_unavailable || failure.unsupported {
+                                        admission.permits.neutral(cfg);
+                                        return Err((1008, "upstream rejected websocket"));
+                                    }
+                                    if failure.capacity {
+                                        admission.permits.capacity_limited(cfg, failure.retry);
+                                    } else if failure.status == Some(429) {
+                                        admission.permits.rate_limited(cfg, failure.retry);
+                                    } else if failure.status.is_none_or(circuit::retryable) {
+                                        admission.permits.failure(cfg, failure.retry);
+                                    } else {
+                                        admission.permits.neutral(cfg);
+                                        return Err((1008, "upstream rejected websocket"));
+                                    }
+                                }
+                                retry_pending = attempts <= cfg.max_retries;
+                                if !retry_pending {
+                                    return Err((1013, "websocket reconnect retries exhausted"));
+                                }
+                                continue;
+                            }
+                        }
                     }
-                    if let Some(mut admission) = turn.take() {
-                        admission.permits.failure(cfg, None);
+                    if let Err(e) = send_to_upstream(&mut upstream, frame).await {
+                        retry_pending = disconnect_turn(
+                            g,
+                            &route,
+                            cfg,
+                            current_model.as_deref(),
+                            &mut turn,
+                            &mut protocol,
+                            false,
+                            attempts,
+                            !unknown_affinity,
+                            None,
+                            crate::events::Phase::WsSend,
+                            "NETWORK",
+                        );
+                        upstream = Upstream::Disconnected;
+                        if !retry_pending {
+                            return Err(e);
+                        }
+                        continue;
                     }
-                    return Err(e);
                 }
             }
         }
         tokio::select! {
             biased;
             event = next_upstream(&mut upstream), if turn.is_some() || matches!(upstream, Upstream::Native(_)) => {
-                let Some(event) = event else {
-                    if let Some(mut u)=protocol.take(){u.finish(Some(101),"STREAM_INTERRUPTED");}
-                    if let Some(mut admission) = turn.take() { admission.permits.failure(cfg, None);  }
-                    return Err((1013, "upstream disconnected"));
-                };
-                let frame = match event {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        if let Some(mut admission) = turn.take() { admission.permits.failure(cfg, None); }
-                        return Err(error);
-                    },
-                };
-                let closing = frame.opcode() == OpCode::Close;
-                if closing {
-                    if let Some(mut u)=protocol.take(){u.finish(Some(101),"STREAM_INTERRUPTED");}
-                    if let Some(mut admission) = turn.take() { admission.permits.failure(cfg, None);  }
+                let disconnected = match &event { None => true, Some(Err(_)) => true, Some(Ok(frame)) => frame.opcode() == OpCode::Close };
+                if disconnected {
+                    let close = event.as_ref().and_then(|v| v.as_ref().ok()).filter(|f| f.opcode() == OpCode::Close);
+                    if turn.is_none() && matches!(upstream, Upstream::Native(_)) && route.client_id == super::ClientId::Codex {
+                        upstream = Upstream::Disconnected;
+                        protocol = None;
+                        continue;
+                    }
+                    let native = matches!(upstream, Upstream::Native(_));
+                    let unfinished_native_turn = native && turn.is_some() && !received && route.client_id == super::ClientId::Codex;
+                    retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, native && !unknown_affinity, close, crate::events::Phase::WsReceive, "STREAM_INTERRUPTED");
+                    upstream = Upstream::Disconnected;
+                    if retry_pending { continue; }
+                    if unfinished_native_turn { return Err((1013, "websocket reconnect retries exhausted")); }
+                    if let Some(Ok(frame)) = event { client.send(frame).await?; return Ok(()); }
+                    return Err((1013, "upstream disconnected before completion"));
                 }
+                let frame = event.unwrap()?;
                 // Native upstreams are pinned after Upgrade. Turn-local
                 // capacity errors before output close retryably instead of
                 // sending Codex a fatal overload event or replaying context.
                 if route.client_id == super::ClientId::Codex && turn.is_some() && !received {
                     if let Some(failure) = first_event_failure(&frame).filter(|f| f.capacity) {
-                        if let Some(mut admission) = turn.take() { admission.permits.capacity_limited(cfg, failure.retry); }
+                        if let Some(mut admission) = turn.take() { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts); admission.permits.capacity_limited(cfg, failure.retry); }
                         return Err((1013, "upstream capacity; reconnect to retry"));
                     }
                 }
@@ -1457,35 +1817,34 @@ async fn session_once(
                     if let Some(id) = v.pointer("/response/id").or_else(|| v.get("response_id")).and_then(|v| v.as_str()) { g.remember_model(id, &route.provider.id, current_model.as_deref()); }
                     let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
-                    if matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error") {
+                    if protocol.as_ref().is_some_and(|u| u.terminal().is_some()) || matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error") {
                         if let Some(mut admission) = turn.take() {
                             if let Some(mut u)=protocol.take() {
-                                u.finish(Some(101), "UPSTREAM_ERROR");
-                                if route.client_id == super::ClientId::Codex && policy_rejection(&frame) {
-                                    admission.permits.neutral(cfg);
-                                } else if route.client_id == super::ClientId::Codex && first_event_failure(&frame).is_some_and(|failure| failure.capacity) {
+                                u.finish(Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), "UPSTREAM_ERROR");
+                                if route.client_id == super::ClientId::Codex && first_event_failure(&frame).is_some_and(|failure| failure.capacity) {
+                                    if let Some(failure) = first_event_failure(&frame) { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts); }
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
-                                    forward::observe_protocol(&u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
+                                    forward::observe_protocol(&u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), attempts);
                                 }
                                 if u.succeeded() { g.successful_response(&route.provider); }
                             }
 
                         }
+                        usage_trace = None;
                         if let Upstream::Bridge(active) = &mut upstream {
                             active.take();
                         }
                     }
                 }
                 client.send(frame).await?;
-                if closing { return Ok(()); }
             },
             frame = client.incoming.recv() => {
                 let Some(frame) = frame else { return Ok(()); };
                 let closing = frame.opcode() == OpCode::Close;
-                if frame.opcode() == OpCode::Ping && matches!(upstream, Upstream::Bridge(_)) {
+                if frame.opcode() == OpCode::Ping && !matches!(upstream, Upstream::Native(_)) {
                     client.send(Frame::pong(frame.payload().to_vec())).await?;
-                } else if frame.opcode() == OpCode::Pong && matches!(upstream, Upstream::Bridge(_)) {
+                } else if frame.opcode() == OpCode::Pong && !matches!(upstream, Upstream::Native(_)) {
                     continue;
                 } else if closing {
                     if let Upstream::Native(peer) = &upstream { peer.send(frame.clone()).await?; }
@@ -1494,7 +1853,7 @@ async fn session_once(
                     }
                     if let Some(mut admission) = turn.take() {
                         if let Some(mut u) = protocol.take() {
-                            u.finish(Some(1000), "CANCELLED");
+                            u.finish(None, "CANCELLED");
                             admission.permits.neutral(cfg);
                         }
                     }
@@ -1518,24 +1877,27 @@ async fn session_once(
                     if let Upstream::Bridge(active) = &mut upstream {
                         active.take();
                     }
+                    usage_trace = None;
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
-                    if let Some(mut u) = protocol.take() { u.finish(Some(101), "NETWORK"); }
-                    if let Some(mut admission) = turn.take() {
-                        if e.0 == 1008 { admission.permits.neutral(cfg); } else { admission.permits.failure(cfg, None); }
+                    if e.0 == 1008 {
+                        if let Some(mut admission) = turn.take() {
+                            admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::Returned, Some(101), attempts,
+                                crate::events::Details { phase: Some(crate::events::Phase::WsSend), counted_failure: Some(false), upstream_code: Some("UNSUPPORTED_EVENT".into()), ..Default::default() });
+                            admission.permits.neutral(cfg);
+                        }
+                    } else {
+                        // A client control/message send failure cannot safely replay a generation.
+                        disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, false, None, crate::events::Phase::WsSend, "NETWORK");
                     }
                     return Err(e);
                 }
             },
             _ = client.closed.changed() => return Ok(()),
             _ = tokio::time::sleep_until(deadline), if turn.is_some() => {
-                if let Some(mut u)=protocol.take(){u.finish(Some(101),if received {"STREAM_TIMEOUT"}else{"FIRST_BYTE_TIMEOUT"});}
-                if let Some(mut admission) = turn.take() { admission.permits.failure(cfg, None); }
-
-                if let Upstream::Native(peer) = &upstream {
-                    peer.close(1011, "upstream timeout").await;
-                } else if let Upstream::Bridge(Some(bridge)) = &upstream {
-                    bridge.cancel();
-                }
+                let native = matches!(upstream, Upstream::Native(_));
+                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if received { "STREAM_TIMEOUT" } else { "FIRST_BYTE_TIMEOUT" });
+                upstream = Upstream::Disconnected;
+                if retry_pending { continue; }
                 return Err((1013, "upstream timeout"));
             },
         }

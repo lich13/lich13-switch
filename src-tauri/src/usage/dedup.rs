@@ -20,6 +20,7 @@ fn provider(r: &Record) -> Option<&str> {
 }
 fn compatible(a: &Record, b: &Record) -> bool {
     a.client == b.client
+        && a.final_attempt().map(|a| a.operation) == b.final_attempt().map(|a| a.operation)
         && (provider(a).is_none() || provider(b).is_none() || provider(a) == provider(b))
 }
 fn exact(a: &Record, b: &Record) -> bool {
@@ -96,7 +97,7 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
         all.extend(connected);
     }
     for r in &all {
-        let mut archived_stmt=db(c.prepare("SELECT id,response FROM (SELECT id,response FROM receipts WHERE effective=1 AND client=?1 AND ?2 IS NOT NULL AND response=?2 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) UNION SELECT id,response FROM receipts WHERE effective=1 AND client=?1 AND ?5 IS NOT NULL AND signature=?5 AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=?2 THEN 0 ELSE 1 END,id LIMIT 3"))?;
+        let mut archived_stmt=db(c.prepare("SELECT id,response FROM (SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?2 IS NOT NULL AND response=?2 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) UNION SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?5 IS NOT NULL AND signature=?5 AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=?2 THEN 0 ELSE 1 END,id LIMIT 3"))?;
         let archived = db(archived_stmt.query_map(
             params![
                 r.client,
@@ -105,7 +106,11 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
                 r.source,
                 r.signature(),
                 end(r) - WINDOW,
-                end(r) + WINDOW
+                end(r) + WINDOW,
+                r.final_attempt()
+                    .map(|a| a.operation)
+                    .unwrap_or_default()
+                    .as_str()
             ],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
         ))?;
@@ -201,7 +206,7 @@ fn save_projection(c: &Connection, r: &Record) -> Result<()> {
             r.id,
             body,
             r.signature(),
-            r.final_attempt().and_then(|a| a.pricing_model.as_deref())
+            r.final_attempt().and_then(|a| a.grouping_model())
         ],
     ))?;
     query::project(c, 0, &r.id, r, 1, None)
@@ -256,7 +261,7 @@ fn supplement(c: &Connection, id: &str) -> Result<()> {
             }
             // Existing billed snapshots are immutable. A previously unpriced
             // record uses a matching known rate snapshot with its own multiplier.
-            if last.price.is_none() {
+            if last.price.is_none() && last.operation == super::model::Operation::Model {
                 last.price = previous_price
                     .as_ref()
                     .or(donor.price.as_ref())

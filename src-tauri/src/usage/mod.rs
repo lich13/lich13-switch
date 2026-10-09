@@ -7,6 +7,8 @@ mod sessions;
 mod store;
 #[cfg(test)]
 mod v015_tests;
+#[cfg(test)]
+mod v016_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -211,11 +213,21 @@ impl Service {
         let _ = self.0.events.send(());
         Ok(view)
     }
+    #[cfg(test)]
     pub fn begin(&self, client: &str, model: Option<&str>) -> Trace {
+        self.begin_operation(client, model, Operation::Model)
+    }
+    pub fn begin_operation(
+        &self,
+        client: &str,
+        model: Option<&str>,
+        operation: Operation,
+    ) -> Trace {
         Trace(Arc::new(TraceInner {
             service: self.clone(),
             client: client.into(),
             requested: model_id(model),
+            operation,
             id: uuid::Uuid::new_v4().to_string(),
             at: now(),
             attempts: Mutex::new(Vec::new()),
@@ -267,6 +279,7 @@ struct TraceInner {
     service: Service,
     client: String,
     requested: Option<String>,
+    operation: Operation,
     id: String,
     at: i64,
     attempts: Mutex<Vec<Attempt>>,
@@ -325,6 +338,7 @@ impl Trace {
                 stream,
                 transport: transport.into(),
                 cost_multiplier: settings.multiplier.clone(),
+                operation: self.0.operation,
                 ..Attempt::default()
             },
             started: Instant::now(),
@@ -337,11 +351,19 @@ impl Trace {
 }
 impl AttemptTrace {
     pub fn update(&mut self, m: &Meter, status: Option<u16>, outcome: Option<&str>) {
-        self.attempt.tokens = m.tokens.clone();
-        self.attempt.response_id = m.response_id.clone();
-        self.attempt.response_model = m.model.clone();
-        self.attempt.service_tier = m.service_tier.clone();
-        self.attempt.first_token_ms = m.first_token_ms;
+        self.attempt.tokens.merge(&m.tokens);
+        if m.response_id.is_some() {
+            self.attempt.response_id = m.response_id.clone();
+        }
+        if m.model.is_some() {
+            self.attempt.response_model = m.model.clone();
+        }
+        if m.service_tier.is_some() {
+            self.attempt.service_tier = m.service_tier.clone();
+        }
+        if m.first_token_ms.is_some() {
+            self.attempt.first_token_ms = m.first_token_ms;
+        }
         self.attempt.status = status.or(self.attempt.status);
         if !self.done {
             if let Some(outcome) = outcome {
@@ -351,10 +373,20 @@ impl AttemptTrace {
             }
         }
         self.attempt.pricing_model = if self.settings.pricing_model == "request" {
-            self.attempt.requested_model.clone().or(m.model.clone())
+            self.attempt
+                .requested_model
+                .clone()
+                .or(self.attempt.response_model.clone())
         } else {
-            m.model.clone().or(self.attempt.requested_model.clone())
+            self.attempt
+                .response_model
+                .clone()
+                .or(self.attempt.requested_model.clone())
         };
+        if self.attempt.operation == Operation::WebSearch {
+            self.attempt.price = self.attempt.search_price();
+            return;
+        }
         if self
             .quote
             .as_ref()
@@ -370,7 +402,7 @@ impl AttemptTrace {
         self.attempt.price = self
             .quote
             .as_ref()
-            .and_then(|q| q.calculate(&m.tokens, m.service_tier.as_deref()));
+            .and_then(|q| q.calculate(&self.attempt.tokens, self.attempt.service_tier.as_deref()));
     }
 }
 impl Drop for AttemptTrace {

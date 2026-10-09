@@ -562,7 +562,7 @@ async fn bridge_large_first_message_does_not_bypass_the_selected_transport() {
 }
 
 #[tokio::test]
-async fn native_early_disconnect_is_retryable_without_replaying_established_upstream() {
+async fn native_early_disconnect_exhausts_zero_retries_without_switching_provider() {
     let hits = Arc::new(AtomicUsize::new(0));
     let observed = hits.clone();
     let port = server(move |mut request| {
@@ -597,6 +597,9 @@ async fn native_early_disconnect_is_retryable_without_replaying_established_upst
     .await;
     bridge(&g, &t, 1);
     automatic(&g, &t);
+    let mut settings = g.view().settings;
+    settings.max_retries = 0;
+    update(&g, &t, Edit::Settings { settings });
     start(&g, &t).await;
     let mut ws = concurrency::responses_client(&g).await;
     ws.send(yawc::Frame::text(CREATE)).await.unwrap();

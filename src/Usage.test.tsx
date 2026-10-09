@@ -387,7 +387,6 @@ describe("usage records", () => {
     }
     expect(unavailable[7]).toHaveTextContent(/^未定价$/);
     expect(zero[7]).toHaveTextContent(/^\$0\.0000$/);
-    expect(unavailable[8]).toHaveTextContent(/^—$/);
     const tokenMetric = screen.getByText("实际 Token").parentElement!;
     expect(within(tokenMetric).getByText("未提供")).toBeInTheDocument();
 
@@ -396,7 +395,7 @@ describe("usage records", () => {
     await waitFor(() => expect(within(tokenMetric).getByText("0")).toBeInTheDocument());
   });
 
-  it("shows nine columns from the final attempt and preserves all attempts in detail", async () => {
+  it("shows eight columns from the final attempt and preserves all attempts in detail", async () => {
     const first = attempt({
       id: "fixture-first-attempt",
       provider: "provider-first",
@@ -411,19 +410,18 @@ describe("usage records", () => {
     await renderUsage();
     const table = screen.getByRole("table");
     expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
-      "时间", "客户端", "供应商", "模型", "输入", "输出", "缓存", "费用", "速度",
+      "时间", "客户端", "供应商", "模型", "输入", "输出", "缓存", "费用",
     ]);
     const row = within(table).getAllByRole("row")[1];
     const cells = within(row).getAllByRole("cell");
-    expect(cells).toHaveLength(9);
+    expect(cells).toHaveLength(8);
     expect(cells[2]).toHaveTextContent(/^Fixture Provider$/);
-    expect(cells[3]).toHaveTextContent("fixture-request-model→ fixture-response-model");
+    expect(cells[3]).toHaveTextContent(/^fixture-response-model/);
     expect(cells[4]).toHaveTextContent(/^0$/);
     expect(cells[5]).toHaveTextContent(/^400$/);
     expect(cells[6]).toHaveTextContent(/^20$/);
     expect(cells[7]).toHaveTextContent("$0.0046×1.5");
     expect(cells[7]).toHaveAttribute("title", "0.0045678");
-    expect(cells[8]).toHaveTextContent(/^100\.0$/);
     expect(within(row).queryByText("First Provider")).not.toBeInTheDocument();
     expect(within(row).queryByTitle("HTTP 503")).not.toBeInTheDocument();
 
@@ -439,6 +437,21 @@ describe("usage records", () => {
     expect(within(firstSummary.parentElement!).getByText("fixture-first-model")).toBeVisible();
     expect(within(firstSummary.parentElement!).getByText("9,999")).toBeVisible();
     expect(within(dialog).getByText("2 · Fixture Provider · 200")).toBeInTheDocument();
+  });
+
+  it("labels web search operations instead of showing their model", async () => {
+    const search = {
+      ...attempt({ requestedModel: "gpt-request-model", responseModel: "gpt-response-model" }),
+      operation: "web_search" as const,
+    };
+    records = [record({ attempts: [search] })];
+    await renderUsage();
+
+    const modelCell = within(screen.getByRole("table")).getAllByRole("row")[1]
+      .querySelectorAll("td")[3];
+    expect(modelCell).toHaveTextContent(/^网络搜索$/);
+    expect(modelCell).not.toHaveTextContent("gpt-request-model");
+    expect(modelCell).not.toHaveTextContent("gpt-response-model");
   });
 
   it("returns focus to request and source entry points after dialog cancellation", async () => {
@@ -501,10 +514,8 @@ describe("usage records", () => {
     ]);
   });
 
-  it("distinguishes measured speed from session estimates and missing first-token timing", async () => {
+  it("omits speed from request rows and details while retaining first-token timing", async () => {
     records = [
-      record({ id: "fixture-measured" }),
-      record({ id: "fixture-no-timing", attempts: [attempt({ firstTokenMs: null })] }),
       record({
         id: "fixture-session",
         source: "codex",
@@ -514,20 +525,25 @@ describe("usage records", () => {
     ];
     totalRows = records.length;
     await renderUsage();
-    const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
-    const measured = within(rows[0]).getAllByRole("cell")[8];
-    const unavailable = within(rows[1]).getAllByRole("cell")[8];
-    const estimated = within(rows[2]).getAllByRole("cell")[8];
-    expect(measured).toHaveTextContent(/^100\.0$/);
-    expect(measured).toHaveAttribute("title", "Token/s");
-    expect(unavailable).toHaveTextContent(/^—$/);
-    expect(estimated).toHaveTextContent(/^80\.0（估算）$/);
-    expect(estimated).toHaveAttribute("title", "估算 Token/s");
+    const table = screen.getByRole("table");
+    expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
+      "时间", "客户端", "供应商", "模型", "输入", "输出", "缓存", "费用",
+    ]);
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(1);
+    expect(screen.queryByText("Token/s")).not.toBeInTheDocument();
+    expect(screen.queryByText("估算 Token/s")).not.toBeInTheDocument();
 
-    fireEvent.click(rows[2]);
+    fireEvent.click(rows[0]);
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("会话完成")).toBeInTheDocument();
-    expect(within(dialog).getAllByText("80.0（估算） Token/s")).toHaveLength(2);
+    expect(within(dialog).queryByText("速度", { selector: "dt" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/Token\/s/)).not.toBeInTheDocument();
+    const firstTokenLabels = within(dialog).getAllByText("首 Token", { selector: "dt" });
+    expect(firstTokenLabels).toHaveLength(2);
+    for (const label of firstTokenLabels) {
+      expect(label.nextElementSibling).toHaveTextContent("未提供");
+    }
   });
 
   it("jumps only to valid pages and resets the page when filters change", async () => {

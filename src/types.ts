@@ -90,6 +90,7 @@ export type GatewaySettings = {
   cooldownSeconds: number;
   rateLimitSeconds: number;
   capacityRetrySeconds: number;
+  websocketRetrySeconds: number;
   errorRate: number;
   minRequests: number;
   firstByteSeconds: number;
@@ -145,6 +146,7 @@ export type GatewayState = {
   activeConnections: number;
   waitingRequests: number;
   capacityRetries: { providerId: string; retryIn: number }[];
+  websocketRetries?: { providerId: string; retryIn: number }[];
   error: string | null;
   recoveryPending: boolean;
 };

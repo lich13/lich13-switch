@@ -101,3 +101,10 @@ https://github.com/Wei-Shaw/sub2api/blob/6db4171cfb7592ee6f81c29a82e9fcba0077155
 https://github.com/Wei-Shaw/model-price-repo
 
 Seed fetched 2026-10-08; SHA-256: `cbecf56c1cd81f32928bbb623c65ab473eae8cb00136399c071c85090549e452`.
+
+
+The v0.16 request-table layout, request/response/pricing model distinction, and Alpha Search route review use CC Switch at `2db86e94da13365caae55bb08d09295e31500d21` (MIT), under the notice above. The eight-column layout intentionally omits speed. The USD 0.01 per confirmed search rule is specific to this application; it is not represented as an upstream price rule.
+
+https://github.com/farion1231/cc-switch/blob/2db86e94da13365caae55bb08d09295e31500d21/src/components/usage/RequestLogTable.tsx
+https://github.com/farion1231/cc-switch/blob/2db86e94da13365caae55bb08d09295e31500d21/src-tauri/src/proxy/usage/logger.rs
+https://github.com/farion1231/cc-switch/blob/2db86e94da13365caae55bb08d09295e31500d21/src-tauri/src/proxy/handlers.rs

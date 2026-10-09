@@ -45,8 +45,10 @@ const record: EventRecord = {
   attempt: 1,
 };
 
+let eventRecords: EventRecord[];
+
 const page = (requestedPage: number) => ({
-  items: [record],
+  items: structuredClone(eventRecords),
   total: 51,
   page: requestedPage,
   error: null,
@@ -57,6 +59,7 @@ beforeEach(() => {
   mock.listeners.clear();
   mock.confirm.mockReset();
   mock.confirm.mockResolvedValue(true);
+  eventRecords = [record];
   mock.command.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
     if (name === "get_gateway") {
       return {
@@ -68,7 +71,9 @@ beforeEach(() => {
       const filter = args.filter as { page?: number } | undefined;
       return page(Number(filter?.page ?? 1));
     }
-    if (name === "get_app_event") return record;
+    if (name === "get_app_event") {
+      return eventRecords.find((item) => item.id === args.id) ?? record;
+    }
     return undefined;
   });
   Object.defineProperty(document, "visibilityState", {
@@ -92,7 +97,7 @@ describe("event log", () => {
       within(screen.getByRole("table"))
         .getAllByRole("columnheader")
         .map((header) => header.textContent),
-    ).toEqual(["时间", "客户端 / 供应商", "状态", "问题", "处理结果"]);
+    ).toEqual(["时间", "客户端 / 供应商", "状态", "错误摘要", "处理结果"]);
     expect(await screen.findByRole("option", { name: "Fixture Provider" })).toBeInTheDocument();
 
     await user.selectOptions(screen.getByRole("combobox", { name: "客户端" }), "codex");
@@ -158,6 +163,72 @@ describe("event log", () => {
     fireEvent(dialog, new Event("cancel", { bubbles: true, cancelable: true }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "模型不支持" })).not.toBeInTheDocument());
     expect(document.activeElement).toBe(reason);
+  });
+
+  it("shows upstream details and distinguishes WebSocket close codes from HTTP status", async () => {
+    const detailed = {
+      ...record,
+      id: "event-upstream-details",
+      reason: "upstream_service",
+      action: "returned",
+      level: "error",
+      status: 502,
+      errorCode: "UPSTREAM_SERVICE_ERROR",
+      details: {
+        upstreamCode: "overloaded_error",
+        upstreamType: "server_error",
+        parameter: "model",
+        message: "上游暂时不可用；请求内容已隐去",
+        phase: "response",
+        wsCloseCode: 1006,
+        countedFailure: true,
+        waitSeconds: 45,
+        causeId: "11111111-2222-4333-8444-555555555555",
+        circuit: {
+          failures: 3,
+          failureThreshold: 3,
+          failedRequests: 3,
+          requests: 3,
+          errorRate: 1,
+          minRequests: 1,
+          trigger: "consecutive_failures",
+        },
+      },
+    } as EventRecord;
+    eventRecords = [detailed];
+
+    const user = userEvent.setup();
+    render(<EventLog />);
+    const reason = await screen.findByRole("button", { name: /上游服务异常/ });
+    await user.click(reason);
+    const dialog = await screen.findByRole("dialog", { name: "上游服务异常" });
+
+    expect(within(dialog).getByText(/HTTP 502/)).toBeInTheDocument();
+    expect(within(dialog).getByText("overloaded_error")).toBeInTheDocument();
+    expect(within(dialog).getByText("server_error")).toBeInTheDocument();
+    expect(within(dialog).getByText("上游暂时不可用；请求内容已隐去")).toBeInTheDocument();
+    expect(within(dialog).getByText("状态码").nextElementSibling).toHaveTextContent("HTTP 502 · WS 1006");
+    expect(within(dialog).getByText(/计入熔断/).nextElementSibling).toHaveTextContent("是");
+  });
+
+  it("filters legacy recovered records from the visible journal", async () => {
+    eventRecords = [
+      record,
+      {
+        ...record,
+        id: "legacy-recovered-event",
+        reason: "recovered",
+        action: "recovered",
+        level: "info",
+        status: null,
+        errorCode: "RECOVERED",
+      },
+    ];
+    render(<EventLog />);
+    await screen.findByRole("button", { name: /模型不支持/ });
+
+    expect(screen.queryByRole("button", { name: /供应商恢复/ })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(2);
   });
 
   it("clears the journal only after confirmation", async () => {

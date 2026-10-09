@@ -158,7 +158,7 @@ pub fn project(
             owner,
             i as i64,
             a.provider,
-            a.pricing_model,
+            a.grouping_model(),
             if final_record { count } else { 0 },
             count,
             if success { count } else { 0 },

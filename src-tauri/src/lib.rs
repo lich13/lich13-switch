@@ -494,10 +494,23 @@ async fn save_config(
     Ok(doc)
 }
 #[tauri::command]
+fn set_quota_refresh(
+    app: tauri::AppHandle,
+    r: tauri::State<'_, Arc<Runtime>>,
+    seconds: u64,
+    expected_seconds: u64,
+) -> Result<ViewState> {
+    let state = lock(&r.core)?.set_quota_refresh(seconds, expected_seconds)?;
+    r.gateway.set_quota_interval(seconds);
+    r.claude.set_quota_interval(seconds);
+    publish(&app, state.clone());
+    Ok(state)
+}
+#[tauri::command]
 async fn set_preferences(
     app: tauri::AppHandle,
     r: tauri::State<'_, Arc<Runtime>>,
-    preferences: Preferences,
+    mut preferences: Preferences,
 ) -> Result<ViewState> {
     let _official_guard = r.official_tx.lock().await;
     if matches!(
@@ -527,7 +540,11 @@ async fn set_preferences(
             "请先停止 Claude Code 网关并处理恢复事务",
         ));
     }
-    let s = lock(&r.core)?.set_preferences(preferences)?;
+    let s = {
+        let mut core = lock(&r.core)?;
+        preferences.quota_refresh_seconds = core.preferences().quota_refresh_seconds;
+        core.set_preferences(preferences)?
+    };
     r.gateway
         .set_quota_interval(s.preferences.quota_refresh_seconds);
     r.claude
@@ -632,11 +649,16 @@ fn start_login(
             }
         };
         let final_state = match result {
-            Ok(Some(raw)) => match lock(&runtime.core).and_then(|mut c| c.import_raw(&raw, None)) {
-                Ok(_) => login::LoginState {
+            Ok(Some(raw)) => match lock(&runtime.core).and_then(|mut c| c.complete_login(&raw)) {
+                Ok(updated) => login::LoginState {
                     phase: "success".into(),
                     mode: mode.clone(),
-                    message: "账号已添加，选择后即可切换".into(),
+                    message: if updated {
+                        "当前账号凭据已更新"
+                    } else {
+                        "账号已添加，选择后即可切换"
+                    }
+                    .into(),
                     ..Default::default()
                 },
                 Err(e) => login::LoginState {
@@ -1532,6 +1554,7 @@ pub fn run() {
             validate_config,
             save_config,
             set_preferences,
+            set_quota_refresh,
             get_startup,
             set_startup,
             pick_path,

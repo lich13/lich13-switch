@@ -1,3 +1,4 @@
+import QuotaRefreshSettings from "./QuotaRefreshSettings";
 import ClaudeProfile from "./ClaudeProfile";
 import ClientSelection, {
   useClientSelection,
@@ -93,6 +94,28 @@ function GatewayContent({
   onFocusHandled?: () => void;
   focusProvider?: { id: string; sequence: number } | null;
 }) {
+  const dirtyParts = useRef({ quota: false, advanced: false, dialog: false });
+  const markQuota = useCallback(
+    (value: boolean) => {
+      dirtyParts.current.quota = value;
+      onDirtyChange?.(Object.values(dirtyParts.current).some(Boolean));
+    },
+    [onDirtyChange],
+  );
+  const markAdvanced = useCallback(
+    (value: boolean) => {
+      dirtyParts.current.advanced = value;
+      onDirtyChange?.(Object.values(dirtyParts.current).some(Boolean));
+    },
+    [onDirtyChange],
+  );
+  const markDialog = useCallback(
+    (value: boolean) => {
+      dirtyParts.current.dialog = value;
+      onDirtyChange?.(Object.values(dirtyParts.current).some(Boolean));
+    },
+    [onDirtyChange],
+  );
   const [state, setState] = useState<GatewayState | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -209,7 +232,9 @@ function GatewayContent({
     e.currentTarget.closest("details")?.removeAttribute("open");
   return (
     <section className="gateway-page">
-      {clientId==="claude"&&<ClaudeProfile disabled={busy||!!dialog} notify={notify}/>}
+      {clientId === "claude" && (
+        <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
+      )}
       <div className="page-heading gateway-heading">
         <ClientSelection
           client={clientId}
@@ -319,7 +344,12 @@ function GatewayContent({
             {(p, priority, handle, rowBusy) => {
               const selected =
                 state.mode === "manual" && state.selected === p.id;
-              const status = providerStatus(p);
+              const reconnect = state.websocketRetries?.find(
+                (w) => w.providerId === p.id,
+              );
+              const status = reconnect
+                ? `重连等待 ${reconnect.retryIn}s`
+                : providerStatus(p);
               return (
                 <>
                   <div className="provider-main">
@@ -475,9 +505,13 @@ function GatewayContent({
                     ?.name ?? "未匹配供应商")}
             </span>
           </div>
+          <QuotaRefreshSettings
+            seconds={quotaRefreshSeconds}
+            onDirtyChange={markQuota}
+          />
           <Advanced
             clientId={clientId}
-            onDirtyChange={onDirtyChange}
+            onDirtyChange={markAdvanced}
             settings={state.settings}
             revision={state.revision}
             busy={busy}
@@ -492,7 +526,7 @@ function GatewayContent({
         <ProviderSettings
           key={`${dialog.item.id}:${dialogVersion}`}
           provider={dialog.item}
-          onDirtyChange={onDirtyChange}
+          onDirtyChange={markDialog}
           clientId={clientId}
           revision={state.revision}
           disabled={busy}
@@ -532,14 +566,17 @@ function GatewayContent({
             state.providers.find((p) => p.id === dialog.item.id)
               ?.quotaVersion ?? "deleted"
           }
-          onDirtyChange={onDirtyChange}
+          onDirtyChange={markDialog}
           close={() => setDialog(null)}
           save={async (allowedModels, revision) => {
-            await edit({
-              op: "modelsProvider",
-              id: dialog.item.id,
-              allowedModels,
-            }, revision);
+            await edit(
+              {
+                op: "modelsProvider",
+                id: dialog.item.id,
+                allowedModels,
+              },
+              revision,
+            );
             setDialog(null);
           }}
         />
@@ -549,7 +586,7 @@ function GatewayContent({
           clientId={clientId}
           dialog={dialog}
           revision={state.revision}
-          onDirtyChange={onDirtyChange}
+          onDirtyChange={markDialog}
           close={() => setDialog(null)}
           save={async (payload, revision) => {
             await edit(payload, revision);
@@ -595,6 +632,10 @@ function Advanced({
     ["rateLimitSeconds", "429 默认冷却 / 秒"],
     ...(clientId === "codex"
       ? [
+          ["websocketRetrySeconds", "WebSocket 断开等待 / 秒"] as [
+            keyof GatewaySettings,
+            string,
+          ],
           ["capacityRetrySeconds", "容量错误等待 / 秒"] as [
             keyof GatewaySettings,
             string,
@@ -634,7 +675,12 @@ function Advanced({
               type="number"
               required
               min={key === "maxRetries" ? 0 : key === "errorRate" ? 0.01 : 1}
-              max={key === "capacityRetrySeconds" ? 86400 : undefined}
+              max={
+                key === "capacityRetrySeconds" ||
+                key === "websocketRetrySeconds"
+                  ? 86400
+                  : undefined
+              }
               step={key === "errorRate" ? 0.01 : 1}
               value={draft[key]}
               onChange={(e) => {
@@ -681,7 +727,9 @@ function GatewayDialog({
     [token, setToken] = useState("");
   const initialDraft = useRef(JSON.stringify([name, baseUrl, token]));
   useEffect(() => {
-    onDirtyChange?.(JSON.stringify([name, baseUrl, token]) !== initialDraft.current);
+    onDirtyChange?.(
+      JSON.stringify([name, baseUrl, token]) !== initialDraft.current,
+    );
   }, [name, baseUrl, token, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const title = `${dialog.item ? "编辑" : "添加"}供应商`;

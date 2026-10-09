@@ -5,7 +5,7 @@ use super::{
     ClientId, Edit, Gateway, HttpClient, Settings,
 };
 use crate::usage::{
-    model::{safe_id, Filter, Record},
+    model::{safe_id, Filter, Operation, Record},
     Service,
 };
 use bytes::Bytes;
@@ -407,6 +407,116 @@ async fn http_usage_preserves_request_and_response_bytes() {
     assert_eq!(attempt.tokens.cache_read, Some(40));
     assert_eq!(attempt.tokens.output, Some(20));
     assert_eq!(attempt.tokens.total(), Some(120));
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn http_search_routes_charge_each_success_once_without_token_surcharge() {
+    for path in ["/v1/alpha/search", "/alpha/search"] {
+        for with_tokens in [false, true] {
+            search_usage_case(path, 200, with_tokens).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_search_routes_keep_failed_searches_unpriced_even_with_tokens() {
+    for path in ["/v1/alpha/search", "/alpha/search"] {
+        for with_tokens in [false, true] {
+            search_usage_case(path, 400, with_tokens).await;
+        }
+    }
+}
+
+async fn search_usage_case(path: &str, status: u16, with_tokens: bool) {
+    const SEARCH_REQUEST: &[u8] = br#"{"model":"fixture-search-model","query":"fixture search"}"#;
+    let mut payload = json!({
+        "id": "fixture-search-response",
+        "model": "fixture-search-model",
+        "results": []
+    });
+    if status >= 400 {
+        payload["error"] = json!({
+            "type": "invalid_request_error",
+            "message": "fixture search rejected"
+        });
+    }
+    if with_tokens {
+        payload["usage"] = json!({"input_tokens": 100, "output_tokens": 20});
+    }
+    let expected_response = serde_json::to_vec(&payload).unwrap();
+    let response_payload = expected_response.clone();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    let upstream = server(move |request, _| {
+        let observed = observed.clone();
+        let payload = response_payload.clone();
+        async move {
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            observed.lock().unwrap().push(body);
+            Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(full(payload))
+                .unwrap()
+        }
+    })
+    .await;
+    let fixture = Fixture::new(ClientId::Codex, &[upstream.url("")]).await;
+    let mut settings = fixture.gateway.view().settings;
+    settings.max_retries = 0;
+    fixture.edit(Edit::Settings { settings });
+    let pricing = fixture.usage.prices().unwrap();
+    let view = pricing.view();
+    let mut config = view.config;
+    config.auto_update = false;
+    config.fixed.insert(
+        "fixture-search-model".into(),
+        json!({"input_cost_per_token": "0.1", "output_cost_per_token": "0.2"}),
+    );
+    pricing.configure(config, &view.revision).unwrap();
+    fixture.start().await;
+
+    let response = request(&fixture.gateway, path, SEARCH_REQUEST).await;
+    assert_eq!(response.status().as_u16(), status, "{path}");
+    assert_eq!(response_bytes(response).await.as_ref(), expected_response);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Bytes::from_static(SEARCH_REQUEST)]
+    );
+    let rows = recorded(&fixture.usage, 1).await;
+    let row = &rows[0];
+    assert_eq!(row.client, "codex");
+    assert_eq!(row.source, "proxy");
+    assert_eq!(row.completed, status == 200);
+    assert_eq!(row.attempts.len(), 1);
+    let attempt = &row.attempts[0];
+    assert_eq!(attempt.operation, Operation::WebSearch);
+    assert_eq!(attempt.status, Some(status));
+    assert_eq!(attempt.transport, "http");
+    assert_eq!(attempt.tokens.total(), with_tokens.then_some(120));
+    let totals = fixture
+        .usage
+        .query(|store| Ok(store.dashboard(&Filter::default())?.totals))
+        .unwrap();
+    assert_eq!(totals.requests, 1);
+    assert_eq!(totals.attempts, 1);
+    if status == 200 {
+        assert_eq!(attempt.outcome, "success");
+        let price = attempt.price.as_ref().unwrap();
+        assert_eq!(price.source, "endpoint");
+        assert_eq!(price.model, "web_search");
+        assert_eq!(price.cost, "0.01");
+        assert_eq!(row.cost().unwrap().to_string(), "0.01");
+        assert_eq!(totals.cost, "0.01");
+        assert_eq!(totals.unpriced, 0);
+    } else {
+        assert_ne!(attempt.outcome, "success");
+        assert!(attempt.price.is_none());
+        assert!(row.cost().is_none());
+        assert_eq!(totals.cost, "0");
+        assert_eq!(totals.unpriced, 1);
+    }
     fixture.stop().await;
 }
 

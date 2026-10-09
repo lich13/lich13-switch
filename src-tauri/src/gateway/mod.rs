@@ -80,6 +80,7 @@ pub struct View {
     pub active_connections: usize,
     pub waiting_requests: usize,
     pub capacity_retries: Vec<admission::CapacityRetry>,
+    pub websocket_retries: Vec<admission::CapacityRetry>,
     pub error: Option<String>,
     pub recovery_pending: bool,
 }
@@ -100,7 +101,6 @@ struct Shared {
     client: ClientId,
     diagnostics: Mutex<Option<crate::events::Service>>,
     usage: Mutex<Option<crate::usage::Service>>,
-    diagnostic_health: Mutex<HashMap<String, (circuit::CircuitState, bool)>>,
     diagnostic_conflict: std::sync::atomic::AtomicBool,
     registry: Arc<registry::Registry>,
     inner: Mutex<Inner>,
@@ -140,14 +140,22 @@ impl Gateway {
         *self.0.usage.lock().unwrap() = Some(service);
     }
     fn usage_trace(&self, model: Option<&str>) -> Option<crate::usage::Trace> {
+        self.usage_operation(model, crate::usage::model::Operation::Model)
+    }
+    fn usage_operation(
+        &self,
+        model: Option<&str>,
+        operation: crate::usage::model::Operation,
+    ) -> Option<crate::usage::Trace> {
         self.0.usage.lock().unwrap().as_ref().map(|s| {
-            s.begin(
+            s.begin_operation(
                 if self.0.client == ClientId::Codex {
                     "codex"
                 } else {
                     "claude"
                 },
                 model,
+                operation,
             )
         })
     }
@@ -155,32 +163,20 @@ impl Gateway {
     pub fn report_diagnostics(&self) {
         use crate::events::{Action, Reason};
         let view = self.view();
-        let mut old = self.0.diagnostic_health.lock().unwrap();
-        old.retain(|id, _| view.providers.iter().any(|p| &p.id == id));
-        for provider in &view.providers {
-            let h = &provider.health;
-            let faulty = h.failures > 0
-                || h.cooldown_reason.is_some()
-                || h.state != circuit::CircuitState::Closed;
-            let previous = old.insert(provider.id.clone(), (h.state, faulty));
-            if h.state == circuit::CircuitState::Open && previous.is_none_or(|p| p.0 != h.state) {
-                self.record(
-                    Some(&provider.id),
-                    None,
-                    Reason::CircuitOpen,
-                    Action::Stopped,
-                    None,
-                    None,
-                );
-            } else if !faulty && previous.is_some_and(|p| p.1) {
-                self.record(
-                    Some(&provider.id),
-                    None,
-                    Reason::Recovered,
-                    Action::Recovered,
-                    None,
-                    None,
-                );
+        let circuits: Vec<_> = self
+            .0
+            .inner
+            .lock()
+            .unwrap()
+            .circuits
+            .values()
+            .cloned()
+            .collect();
+        for circuit in circuits {
+            if let Some(event) = circuit.take_open_event() {
+                if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
+                    events.emit(event);
+                }
             }
         }
         let conflict = view.config_error.is_some() || view.error.is_some();
@@ -262,7 +258,6 @@ impl Gateway {
             client,
             diagnostics: Mutex::new(None),
             usage: Mutex::new(None),
-            diagnostic_health: Mutex::new(HashMap::new()),
             diagnostic_conflict: std::sync::atomic::AtomicBool::new(false),
             registry: registry.clone(),
             inner: Mutex::new(Inner {
@@ -445,6 +440,7 @@ impl Gateway {
             active_connections: self.0.active.load(Ordering::Relaxed),
             waiting_requests: waiting,
             capacity_retries: self.0.admission.capacity_retries(),
+            websocket_retries: self.0.admission.websocket_retries(),
             error: s.error.clone(),
             recovery_pending: s.upgrade_pending
                 || self.0.data.join("gateway-recovery.json").exists(),

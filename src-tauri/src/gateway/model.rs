@@ -35,6 +35,8 @@ pub struct Settings {
     pub rate_limit_seconds: u64,
     #[serde(default = "default_capacity_retry_seconds")]
     pub capacity_retry_seconds: u64,
+    #[serde(default = "default_capacity_retry_seconds")]
+    pub websocket_retry_seconds: u64,
     pub error_rate: f64,
     pub min_requests: u32,
     pub first_byte_seconds: u64,
@@ -68,6 +70,7 @@ impl Default for Settings {
             cooldown_seconds: 60,
             rate_limit_seconds: default_rate_limit_seconds(),
             capacity_retry_seconds: default_capacity_retry_seconds(),
+            websocket_retry_seconds: default_capacity_retry_seconds(),
             error_rate: 0.6,
             min_requests: 10,
             first_byte_seconds: 60,
@@ -93,6 +96,7 @@ impl Settings {
                 self.cooldown_seconds,
                 self.rate_limit_seconds,
                 self.capacity_retry_seconds,
+                self.websocket_retry_seconds,
                 self.first_byte_seconds,
                 self.idle_seconds,
                 self.total_seconds,

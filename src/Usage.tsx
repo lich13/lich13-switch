@@ -1,81 +1,1368 @@
-import {useCallback,useEffect,useRef,useState} from "react";
-import {ArrowDown,ArrowUp,ChevronLeft,ChevronRight,Database,RefreshCw,Settings2,X} from "lucide-react";
-import {command,subscribe} from "./bridge";
-import {errorOf,type GatewayState} from "./types";
-import {confirmAction} from "./confirmation";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  RefreshCw,
+  Settings2,
+  X,
+} from "lucide-react";
+import { command, subscribe } from "./bridge";
+import { errorOf, type GatewayState } from "./types";
+import { confirmAction } from "./confirmation";
 import Pricing from "./UsagePricing";
-import {clientName,compact,money,numeric,speed,tokenTotal,type Attempt,type Dashboard,type Group,type Point,type UsageFilter,type UsagePage,type UsageRecord,type UsageState} from "./usage-types";
+import {
+  clientName,
+  compact,
+  money,
+  numeric,
+  tokenTotal,
+  type Attempt,
+  type Dashboard,
+  type Group,
+  type Point,
+  type UsageFilter,
+  type UsagePage,
+  type UsageRecord,
+  type UsageState,
+} from "./usage-types";
 import "./usage.css";
-const date=(n:number)=>new Date(n).toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false});
-const local=(n:number)=>{const d=new Date(n);return new Date(n-d.getTimezoneOffset()*60000).toISOString().slice(0,16);};
-const empty:UsagePage={rows:[],page:1,total:0,detailSince:0};
-const outcomes:Record<string,string>={success:"已完成",limited:"正常结束",rejected:"请求被拒绝",model_unavailable:"模型不支持",cancelled:"已取消",failure:"请求失败",unknown:"结果未确认",completed:"会话完成",reported:"会话已报告"};
-export default function Usage({onDirtyChange}:{onDirtyChange?:(dirty:boolean)=>void}){
- const [range,setRange]=useState("today"),[from,setFrom]=useState(local(Date.now()-86400000)),[to,setTo]=useState(local(Date.now())),[live,setLive]=useState(true);
- const [client,setClient]=useState(""),[provider,setProvider]=useState(""),[model,setModel]=useState(""),[status,setStatus]=useState(""),[page,setPage]=useState(1);
- const [tab,setTab]=useState("requests"),[metric,setMetric]=useState<"requests"|"tokens"|"cost">("cost"),[expanded,setExpanded]=useState(false);
- const [data,setData]=useState<Dashboard|null>(null),[annual,setAnnual]=useState<Point[]>([]),[logs,setLogs]=useState<UsagePage>(empty),[state,setState]=useState<UsageState|null>(null);
- const [providers,setProviders]=useState<Record<string,string>>({}),[selected,setSelected]=useState<UsageRecord|null>(null),[sheet,setSheet]=useState(false),[error,setError]=useState(""),[busy,setBusy]=useState(false),[heatmapOpen,setHeatmapOpen]=useState(false),[rowsBusy,setRowsBusy]=useState(false);
- const pricingDirty=useRef(false);
- useEffect(()=>{onDirtyChange?.(sheet||pricingDirty.current);return()=>onDirtyChange?.(false);},[sheet,onDirtyChange]);
- const priceDirty=useCallback((dirty:boolean)=>{pricingDirty.current=dirty;onDirtyChange?.(dirty||sheet);},[onDirtyChange,sheet]);
- const selectTab=async(next:string)=>{if(next!==tab&&pricingDirty.current&&!(await confirmAction("离开定价会丢弃未保存的修改。")))return;setTab(next);};
- const [visible,setVisible]=useState(document.visibilityState!=="hidden"),[nativeVisible,setNativeVisible]=useState(true);const sequence=useRef(0),rowsSequence=useRef(0),heatSequence=useRef(0);
- const pending=useRef(new Map<string,Promise<unknown>>());
- const request=useCallback(<T,>(name:string,args:Record<string,unknown>={}):Promise<T>=>{const key=name+JSON.stringify(args);let promise=pending.current.get(key);if(!promise){promise=command<T>(name,args).finally(()=>pending.current.delete(key));pending.current.set(key,promise);}return promise as Promise<T>;},[]);
- const query=useCallback(():UsageFilter=>{const end=live?Math.floor(Date.now()/1000)*1000:new Date(to).getTime();let start:number|undefined;if(range==="today"){const d=new Date(end);d.setHours(0,0,0,0);start=d.getTime();}else if(range==="custom")start=new Date(from).getTime();else if(range!=="all")start=end-Number(range)*86400000;return{start,end,client:client||undefined,provider:provider||undefined,model:model||undefined};},[range,from,to,live,client,provider,model]);
- const loadOverview=useCallback(async()=>{const id=++sequence.current;setBusy(true);try{const filter=query();if(filter.start!=null&&(!Number.isFinite(filter.start)||filter.start>(filter.end??Date.now())))throw new Error("请选择有效时间范围");const overview=await request<Dashboard>("get_usage_dashboard",{filter});if(id===sequence.current){setData(overview);setError("");}}catch(e){if(id===sequence.current)setError(errorOf(e).message);}finally{if(id===sequence.current)setBusy(false);}},[query,request]);
- const loadRows=useCallback(async()=>{const id=++rowsSequence.current;setRowsBusy(true);try{const rows=await request<UsagePage>("get_usage_logs",{filter:{...query(),status:status||undefined,page}});if(id===rowsSequence.current)setLogs(rows);}catch(e){if(id===rowsSequence.current)setError(errorOf(e).message);}finally{if(id===rowsSequence.current)setRowsBusy(false);}},[query,status,page,request]);
- const loadState=useCallback(async()=>{try{setState(await request<UsageState>("get_usage_state"));}catch(e){setError(errorOf(e).message);}},[request]);
- const load=useCallback(()=>Promise.all([loadOverview(),loadRows(),loadState()]),[loadOverview,loadRows,loadState]);
- useEffect(()=>{if(visible&&nativeVisible)void loadOverview();return()=>{sequence.current++;};},[loadOverview,visible,nativeVisible]);
- useEffect(()=>{if(visible&&nativeVisible&&tab==="requests")void loadRows();return()=>{rowsSequence.current++;};},[loadRows,visible,nativeVisible,tab]);
- useEffect(()=>{void loadState();let gone=false;let clean=()=>{};void subscribe("usage-state",()=>void loadState()).then(fn=>gone?fn():clean=fn);return()=>{gone=true;clean();};},[loadState]);
- useEffect(()=>{let gone=false;void Promise.all([command<GatewayState>("get_gateway",{clientId:"codex"}),command<GatewayState>("get_gateway",{clientId:"claude"})]).then(g=>{if(!gone)setProviders(Object.fromEntries(g.flatMap(s=>s.providers.map(p=>[p.id,p.name]))));}).catch(()=>{});return()=>{gone=true;sequence.current++;};},[]);
- useEffect(()=>{if(!heatmapOpen||!visible||!nativeVisible)return;const id=++heatSequence.current;const filter=query(),start=new Date(new Date().getFullYear(),0,1).getTime();void request<Point[]>("get_usage_heatmap",{filter:{...filter,start,end:Date.now()}}).then(v=>{if(id===heatSequence.current)setAnnual(v);}).catch(e=>{if(id===heatSequence.current)setError(errorOf(e).message);});return()=>{heatSequence.current++;};},[heatmapOpen,query,data?.dataVersion,visible,nativeVisible,request]);
- useEffect(()=>{const changed=()=>setVisible(document.visibilityState!=="hidden");document.addEventListener("visibilitychange",changed);let clean=()=>{},disposed=false;void subscribe<boolean>("app-visibility",setNativeVisible).then(c=>{if(disposed)c();else clean=c;});return()=>{disposed=true;document.removeEventListener("visibilitychange",changed);clean();};},[]);
- useEffect(()=>{if(!visible||!nativeVisible||!state?.settings.refreshSeconds)return;const t=setInterval(()=>void load(),state.settings.refreshSeconds*1000);return()=>clearInterval(t);},[visible,nativeVisible,state?.settings.refreshSeconds,load]);
- const choose=(setter:(s:string)=>void,value:string)=>{setter(value);setPage(1);};
- const name=(id:string|null)=>id?providers[id]||`供应商 ${id.slice(0,8)}`:"本机会话";
- const t=data?.totals,cache=t?.tokens.cacheRead,inputs=(t?.tokens.input??0)+(t?.tokens.cacheRead??0)+(t?.tokens.cacheWrite??0);
- const open=async(r:UsageRecord)=>{try{setSelected(await command<UsageRecord>("get_usage_detail",{id:r.id}));}catch(e){setError(errorOf(e).message);}};
- return <section className="usage-page">
-  <header className="usage-heading"><h1>用量</h1><div className="usage-actions"><select aria-label="用量刷新频率" value={state?.settings.refreshSeconds??30} onChange={e=>{if(state)void command<UsageState>("set_usage_settings",{settings:{...state.settings,refreshSeconds:Number(e.target.value)}}).then(setState).catch(e=>setError(errorOf(e).message));}}>{[0,5,10,30,60].map(n=><option key={n} value={n}>{n?`${n} 秒刷新`:"手动刷新"}</option>)}</select><button className="icon-button" title="数据来源与设置" aria-label="数据来源与设置" onClick={e=>{e.currentTarget.focus();setSheet(true);}}><Database size={17}/></button><button className="icon-button" aria-label="刷新用量" disabled={busy} onClick={()=>void load()}><RefreshCw size={17}/></button></div></header>
-  <div className="usage-filters"><select aria-label="用量时间范围" value={range} onChange={e=>choose(setRange,e.target.value)}>{[["today","今日"],["1","最近 24 小时"],["7","最近 7 天"],["14","最近 14 天"],["30","最近 30 天"],["all","全部"],["custom","自定义"]].map(([v,n])=><option key={v} value={v}>{n}</option>)}</select><select aria-label="用量客户端" value={client} onChange={e=>{choose(setClient,e.target.value);setProvider("");}}><option value="">全部客户端</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><select aria-label="用量供应商" value={provider} onChange={e=>choose(setProvider,e.target.value)}><option value="">全部供应商</option>{Object.entries(providers).map(([id,n])=><option key={id} value={id}>{n}</option>)}</select><input aria-label="计价模型筛选" list="usage-models" placeholder="计价模型" value={model} onChange={e=>choose(setModel,e.target.value)}/><datalist id="usage-models">{data?.models.filter(m=>m.id!=="unknown").map(m=><option key={m.id} value={m.id}/>)}</datalist></div>
-  {range==="custom"&&<div className="usage-dates"><input aria-label="开始时间" type="datetime-local" value={from} onChange={e=>choose(setFrom,e.target.value)}/><span>至</span><input aria-label="结束时间" type="datetime-local" value={to} disabled={live} onChange={e=>choose(setTo,e.target.value)}/><label><input type="checkbox" checked={live} onChange={e=>{setLive(e.target.checked);setPage(1);}}/>跟随当前</label></div>}
-  {(error||state?.error)&&<p role="alert" className="form-error">{error||state?.error}</p>}
-  <div className="usage-metrics"><Metric label="估算费用" value={money(t?.cost)} title={t?.cost} extra={t?.unpriced?`${t.unpriced} 条未定价`:undefined}/><Metric label="请求" value={compact(t?.requests)} title={numeric(t?.requests)}/><Metric label="实际 Token" value={t?compact(tokenTotal(t.tokens)):"—"} title={t?numeric(tokenTotal(t.tokens)):undefined}/><button className="usage-metric" aria-expanded={expanded} onClick={()=>setExpanded(!expanded)}><span>缓存命中率</span><strong>{cache!=null&&inputs?`${(cache/inputs*100).toFixed(1)}%`:"—"}</strong><Settings2 size={14}/></button></div>
-  {expanded&&t&&<div className="usage-breakdown">{[["输入",t.tokens.input],["输出",t.tokens.output],["缓存读取",t.tokens.cacheRead],["缓存写入",t.tokens.cacheWrite]].map(([n,v])=><span key={n}>{n}<b>{numeric(v as number|null)}</b></span>)}<span>HTTP 成功率<b>{t.statusKnown?`${(t.success/t.statusKnown*100).toFixed(1)}%`:"—"}</b></span><span>会话记录<b>{numeric(t.sessions)}</b></span></div>}
-  <div className="usage-chart-card"><header><div role="tablist" aria-label="趋势指标">{([["cost","费用"],["tokens","Token"],["requests","请求"]] as const).map(([v,n])=><button role="tab" aria-selected={metric===v} key={v} onClick={()=>setMetric(v)}>{n}</button>)}</div><span>{data?.precision==="day"?"历史按整日汇总":"趋势"}</span></header><Trend points={data?.trend??[]} stepMs={data?.trendStepMs??3600000} metric={metric} onZoom={(start,end)=>{setRange("custom");setFrom(local(start));setTo(local(end));setLive(false);setPage(1);}}/></div>
-  {!!data?.reviewCount&&<div role="status" className="usage-review">{numeric(data.reviewCount)} 条用量待核对</div>}
-  <Heatmap points={annual} onToggle={setHeatmapOpen}/>
-  <div className="usage-tabs" role="tablist" aria-label="用量明细">{[["requests","请求日志"],["providers","供应商"],["models","模型"],["pricing","定价"]].map(([id,n])=><button role="tab" aria-selected={tab===id} key={id} onClick={()=>void selectTab(id)}>{n}</button>)}{tab==="requests"&&<select aria-label="请求状态" value={status} onChange={e=>choose(setStatus,e.target.value)}><option value="">全部状态</option>{["2xx","4xx","5xx"].map(v=><option key={v}>{v}</option>)}<option value="none">会话 / 无状态码</option></select>}</div>
-  {tab==="requests"?<><div className="usage-table-scroll"><table className="usage-table" aria-busy={rowsBusy}><thead><tr>{["时间","客户端","供应商","模型","输入","输出","缓存","费用","速度"].map(v=><th key={v}>{v}</th>)}</tr></thead><tbody>{logs.rows.map(r=>{const a=r.attempts.at(-1);if(!a)return null;return <tr key={r.id} tabIndex={0} onClick={e=>{e.currentTarget.focus();void open(r);}} onKeyDown={e=>{if(e.key==="Enter")void open(r);}} aria-label={`${date(r.startedAt)} ${name(a.provider)} 请求详情`}><td title={new Date(r.startedAt).toLocaleString()}>{a.status!=null&&a.status>=400&&<span className="usage-error-dot" title={`HTTP ${a.status}`}/>}<time>{date(r.startedAt)}</time></td><td>{clientName(r.client)}</td><td className="usage-name" title={name(a.provider)}>{name(a.provider)}</td><td className="usage-model" title={a.responseModel??a.requestedModel??"未提供"}><Model a={a}/></td><td>{numeric(a.tokens.input)}</td><td>{numeric(a.tokens.output)}</td><td>{numeric(a.tokens.cacheRead)}</td><td title={a.price?.cost}>{money(a.price?.cost)}{a.price&&Number(a.price.multiplier)!==1&&<span className="usage-multiplier">×{a.price.multiplier}</span>}</td><td title={r.estimatedSpeed?"估算 Token/s":"Token/s"}>{speed(a,r.estimatedSpeed)}</td></tr>;})}</tbody></table>{logs.rows.length===0&&<div className="usage-empty">暂无请求</div>}</div><Pagination page={logs.page} total={logs.total} onChange={setPage}/></>:tab==="pricing"?<Pricing onDirtyChange={priceDirty}/>:<Ranking groups={tab==="providers"?data?.providers??[]:data?.models??[]} name={id=>tab==="providers"?name(id==="session"?null:id):id} kind={tab==="providers"?"供应商":"模型"}/>}
-  {selected&&<Detail record={selected} name={name} onClose={()=>setSelected(null)}/>}
-  {sheet&&state&&<Sources state={state} counts={data?.sources??{}} onClose={()=>setSheet(false)} onChange={s=>{setState(s);void load();}}/>}
- </section>;
+const date = (n: number) =>
+  new Date(n).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+const local = (n: number) => {
+  const d = new Date(n);
+  return new Date(n - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+};
+const empty: UsagePage = { rows: [], page: 1, total: 0, detailSince: 0 };
+const outcomes: Record<string, string> = {
+  success: "已完成",
+  limited: "正常结束",
+  rejected: "请求被拒绝",
+  model_unavailable: "模型不支持",
+  cancelled: "已取消",
+  failure: "请求失败",
+  unknown: "结果未确认",
+  completed: "会话完成",
+  reported: "会话已报告",
+};
+export default function Usage({
+  onDirtyChange,
+}: {
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
+  const [range, setRange] = useState("today"),
+    [from, setFrom] = useState(local(Date.now() - 86400000)),
+    [to, setTo] = useState(local(Date.now())),
+    [live, setLive] = useState(true);
+  const [client, setClient] = useState(""),
+    [provider, setProvider] = useState(""),
+    [model, setModel] = useState(""),
+    [status, setStatus] = useState(""),
+    [page, setPage] = useState(1);
+  const [tab, setTab] = useState("requests"),
+    [metric, setMetric] = useState<"requests" | "tokens" | "cost">("cost"),
+    [expanded, setExpanded] = useState(false);
+  const [data, setData] = useState<Dashboard | null>(null),
+    [annual, setAnnual] = useState<Point[]>([]),
+    [logs, setLogs] = useState<UsagePage>(empty),
+    [state, setState] = useState<UsageState | null>(null);
+  const [providers, setProviders] = useState<Record<string, string>>({}),
+    [selected, setSelected] = useState<UsageRecord | null>(null),
+    [sheet, setSheet] = useState(false),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false),
+    [heatmapOpen, setHeatmapOpen] = useState(false),
+    [rowsBusy, setRowsBusy] = useState(false);
+  const pricingDirty = useRef(false);
+  useEffect(() => {
+    onDirtyChange?.(sheet || pricingDirty.current);
+    return () => onDirtyChange?.(false);
+  }, [sheet, onDirtyChange]);
+  const priceDirty = useCallback(
+    (dirty: boolean) => {
+      pricingDirty.current = dirty;
+      onDirtyChange?.(dirty || sheet);
+    },
+    [onDirtyChange, sheet],
+  );
+  const selectTab = async (next: string) => {
+    if (
+      next !== tab &&
+      pricingDirty.current &&
+      !(await confirmAction("离开定价会丢弃未保存的修改。"))
+    )
+      return;
+    setTab(next);
+  };
+  const [visible, setVisible] = useState(document.visibilityState !== "hidden"),
+    [nativeVisible, setNativeVisible] = useState(true);
+  const sequence = useRef(0),
+    rowsSequence = useRef(0),
+    heatSequence = useRef(0);
+  const pending = useRef(new Map<string, Promise<unknown>>());
+  const request = useCallback(
+    <T,>(name: string, args: Record<string, unknown> = {}): Promise<T> => {
+      const key = name + JSON.stringify(args);
+      let promise = pending.current.get(key);
+      if (!promise) {
+        promise = command<T>(name, args).finally(() =>
+          pending.current.delete(key),
+        );
+        pending.current.set(key, promise);
+      }
+      return promise as Promise<T>;
+    },
+    [],
+  );
+  const query = useCallback((): UsageFilter => {
+    const end = live
+      ? Math.floor(Date.now() / 1000) * 1000
+      : new Date(to).getTime();
+    let start: number | undefined;
+    if (range === "today") {
+      const d = new Date(end);
+      d.setHours(0, 0, 0, 0);
+      start = d.getTime();
+    } else if (range === "custom") start = new Date(from).getTime();
+    else if (range !== "all") start = end - Number(range) * 86400000;
+    return {
+      start,
+      end,
+      client: client || undefined,
+      provider: provider || undefined,
+      model: model || undefined,
+    };
+  }, [range, from, to, live, client, provider, model]);
+  const loadOverview = useCallback(async () => {
+    const id = ++sequence.current;
+    setBusy(true);
+    try {
+      const filter = query();
+      if (
+        filter.start != null &&
+        (!Number.isFinite(filter.start) ||
+          filter.start > (filter.end ?? Date.now()))
+      )
+        throw new Error("请选择有效时间范围");
+      const overview = await request<Dashboard>("get_usage_dashboard", {
+        filter,
+      });
+      if (id === sequence.current) {
+        setData(overview);
+        setError("");
+      }
+    } catch (e) {
+      if (id === sequence.current) setError(errorOf(e).message);
+    } finally {
+      if (id === sequence.current) setBusy(false);
+    }
+  }, [query, request]);
+  const loadRows = useCallback(async () => {
+    const id = ++rowsSequence.current;
+    setRowsBusy(true);
+    try {
+      const rows = await request<UsagePage>("get_usage_logs", {
+        filter: { ...query(), status: status || undefined, page },
+      });
+      if (id === rowsSequence.current) setLogs(rows);
+    } catch (e) {
+      if (id === rowsSequence.current) setError(errorOf(e).message);
+    } finally {
+      if (id === rowsSequence.current) setRowsBusy(false);
+    }
+  }, [query, status, page, request]);
+  const loadState = useCallback(async () => {
+    try {
+      setState(await request<UsageState>("get_usage_state"));
+    } catch (e) {
+      setError(errorOf(e).message);
+    }
+  }, [request]);
+  const load = useCallback(
+    () => Promise.all([loadOverview(), loadRows(), loadState()]),
+    [loadOverview, loadRows, loadState],
+  );
+  useEffect(() => {
+    if (visible && nativeVisible) void loadOverview();
+    return () => {
+      sequence.current++;
+    };
+  }, [loadOverview, visible, nativeVisible]);
+  useEffect(() => {
+    if (visible && nativeVisible && tab === "requests") void loadRows();
+    return () => {
+      rowsSequence.current++;
+    };
+  }, [loadRows, visible, nativeVisible, tab]);
+  useEffect(() => {
+    void loadState();
+    let gone = false;
+    let clean = () => {};
+    void subscribe("usage-state", () => void loadState()).then((fn) =>
+      gone ? fn() : (clean = fn),
+    );
+    return () => {
+      gone = true;
+      clean();
+    };
+  }, [loadState]);
+  useEffect(() => {
+    let gone = false;
+    void Promise.all([
+      command<GatewayState>("get_gateway", { clientId: "codex" }),
+      command<GatewayState>("get_gateway", { clientId: "claude" }),
+    ])
+      .then((g) => {
+        if (!gone)
+          setProviders(
+            Object.fromEntries(
+              g.flatMap((s) => s.providers.map((p) => [p.id, p.name])),
+            ),
+          );
+      })
+      .catch(() => {});
+    return () => {
+      gone = true;
+      sequence.current++;
+    };
+  }, []);
+  useEffect(() => {
+    if (!heatmapOpen || !visible || !nativeVisible) return;
+    const id = ++heatSequence.current;
+    const filter = query(),
+      start = new Date(new Date().getFullYear(), 0, 1).getTime();
+    void request<Point[]>("get_usage_heatmap", {
+      filter: { ...filter, start, end: Date.now() },
+    })
+      .then((v) => {
+        if (id === heatSequence.current) setAnnual(v);
+      })
+      .catch((e) => {
+        if (id === heatSequence.current) setError(errorOf(e).message);
+      });
+    return () => {
+      heatSequence.current++;
+    };
+  }, [heatmapOpen, query, data?.dataVersion, visible, nativeVisible, request]);
+  useEffect(() => {
+    const changed = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", changed);
+    let clean = () => {},
+      disposed = false;
+    void subscribe<boolean>("app-visibility", setNativeVisible).then((c) => {
+      if (disposed) c();
+      else clean = c;
+    });
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", changed);
+      clean();
+    };
+  }, []);
+  useEffect(() => {
+    if (!visible || !nativeVisible || !state?.settings.refreshSeconds) return;
+    const t = setInterval(
+      () => void load(),
+      state.settings.refreshSeconds * 1000,
+    );
+    return () => clearInterval(t);
+  }, [visible, nativeVisible, state?.settings.refreshSeconds, load]);
+  const choose = (setter: (s: string) => void, value: string) => {
+    setter(value);
+    setPage(1);
+  };
+  const name = (id: string | null) =>
+    id ? providers[id] || `供应商 ${id.slice(0, 8)}` : "本机会话";
+  const t = data?.totals,
+    cache = t?.tokens.cacheRead,
+    inputs =
+      (t?.tokens.input ?? 0) +
+      (t?.tokens.cacheRead ?? 0) +
+      (t?.tokens.cacheWrite ?? 0);
+  const open = async (r: UsageRecord) => {
+    try {
+      setSelected(await command<UsageRecord>("get_usage_detail", { id: r.id }));
+    } catch (e) {
+      setError(errorOf(e).message);
+    }
+  };
+  return (
+    <section className="usage-page">
+      <header className="usage-heading">
+        <h1>用量</h1>
+        <div className="usage-actions">
+          <select
+            aria-label="用量刷新频率"
+            value={state?.settings.refreshSeconds ?? 30}
+            onChange={(e) => {
+              if (state)
+                void command<UsageState>("set_usage_settings", {
+                  settings: {
+                    ...state.settings,
+                    refreshSeconds: Number(e.target.value),
+                  },
+                })
+                  .then(setState)
+                  .catch((e) => setError(errorOf(e).message));
+            }}
+          >
+            {[0, 5, 10, 30, 60].map((n) => (
+              <option key={n} value={n}>
+                {n ? `${n} 秒刷新` : "手动刷新"}
+              </option>
+            ))}
+          </select>
+          <button
+            className="icon-button"
+            title="数据来源与设置"
+            aria-label="数据来源与设置"
+            onClick={(e) => {
+              e.currentTarget.focus();
+              setSheet(true);
+            }}
+          >
+            <Database size={17} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label="刷新用量"
+            disabled={busy}
+            onClick={() => void load()}
+          >
+            <RefreshCw size={17} />
+          </button>
+        </div>
+      </header>
+      <div className="usage-filters">
+        <select
+          aria-label="用量时间范围"
+          value={range}
+          onChange={(e) => choose(setRange, e.target.value)}
+        >
+          {[
+            ["today", "今日"],
+            ["1", "最近 24 小时"],
+            ["7", "最近 7 天"],
+            ["14", "最近 14 天"],
+            ["30", "最近 30 天"],
+            ["all", "全部"],
+            ["custom", "自定义"],
+          ].map(([v, n]) => (
+            <option key={v} value={v}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="用量客户端"
+          value={client}
+          onChange={(e) => {
+            choose(setClient, e.target.value);
+            setProvider("");
+          }}
+        >
+          <option value="">全部客户端</option>
+          <option value="codex">Codex</option>
+          <option value="claude">Claude Code</option>
+        </select>
+        <select
+          aria-label="用量供应商"
+          value={provider}
+          onChange={(e) => choose(setProvider, e.target.value)}
+        >
+          <option value="">全部供应商</option>
+          {Object.entries(providers).map(([id, n]) => (
+            <option key={id} value={id}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <input
+          aria-label="计价模型筛选"
+          list="usage-models"
+          placeholder="计价模型"
+          value={model}
+          onChange={(e) => choose(setModel, e.target.value)}
+        />
+        <datalist id="usage-models">
+          {data?.models
+            .filter((m) => m.id !== "unknown")
+            .map((m) => (
+              <option key={m.id} value={m.id} />
+            ))}
+        </datalist>
+      </div>
+      {range === "custom" && (
+        <div className="usage-dates">
+          <input
+            aria-label="开始时间"
+            type="datetime-local"
+            value={from}
+            onChange={(e) => choose(setFrom, e.target.value)}
+          />
+          <span>至</span>
+          <input
+            aria-label="结束时间"
+            type="datetime-local"
+            value={to}
+            disabled={live}
+            onChange={(e) => choose(setTo, e.target.value)}
+          />
+          <label>
+            <input
+              type="checkbox"
+              checked={live}
+              onChange={(e) => {
+                setLive(e.target.checked);
+                setPage(1);
+              }}
+            />
+            跟随当前
+          </label>
+        </div>
+      )}
+      {(error || state?.error) && (
+        <p role="alert" className="form-error">
+          {error || state?.error}
+        </p>
+      )}
+      <div className="usage-metrics">
+        <Metric
+          label="估算费用"
+          value={money(t?.cost)}
+          title={t?.cost}
+          extra={t?.unpriced ? `${t.unpriced} 条未定价` : undefined}
+        />
+        <Metric
+          label="请求"
+          value={compact(t?.requests)}
+          title={numeric(t?.requests)}
+        />
+        <Metric
+          label="实际 Token"
+          value={t ? compact(tokenTotal(t.tokens)) : "—"}
+          title={t ? numeric(tokenTotal(t.tokens)) : undefined}
+        />
+        <button
+          className="usage-metric"
+          aria-expanded={expanded}
+          onClick={() => setExpanded(!expanded)}
+        >
+          <span>缓存命中率</span>
+          <strong>
+            {cache != null && inputs
+              ? `${((cache / inputs) * 100).toFixed(1)}%`
+              : "—"}
+          </strong>
+          <Settings2 size={14} />
+        </button>
+      </div>
+      {expanded && t && (
+        <div className="usage-breakdown">
+          {[
+            ["输入", t.tokens.input],
+            ["输出", t.tokens.output],
+            ["缓存读取", t.tokens.cacheRead],
+            ["缓存写入", t.tokens.cacheWrite],
+          ].map(([n, v]) => (
+            <span key={n}>
+              {n}
+              <b>{numeric(v as number | null)}</b>
+            </span>
+          ))}
+          <span>
+            HTTP 成功率
+            <b>
+              {t.statusKnown
+                ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
+                : "—"}
+            </b>
+          </span>
+          <span>
+            会话记录<b>{numeric(t.sessions)}</b>
+          </span>
+        </div>
+      )}
+      <div className="usage-chart-card">
+        <header>
+          <div role="tablist" aria-label="趋势指标">
+            {(
+              [
+                ["cost", "费用"],
+                ["tokens", "Token"],
+                ["requests", "请求"],
+              ] as const
+            ).map(([v, n]) => (
+              <button
+                role="tab"
+                aria-selected={metric === v}
+                key={v}
+                onClick={() => setMetric(v)}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <span>{data?.precision === "day" ? "历史按整日汇总" : "趋势"}</span>
+        </header>
+        <Trend
+          points={data?.trend ?? []}
+          stepMs={data?.trendStepMs ?? 3600000}
+          metric={metric}
+          onZoom={(start, end) => {
+            setRange("custom");
+            setFrom(local(start));
+            setTo(local(end));
+            setLive(false);
+            setPage(1);
+          }}
+        />
+      </div>
+      {!!data?.reviewCount && (
+        <div role="status" className="usage-review">
+          {numeric(data.reviewCount)} 条用量待核对
+        </div>
+      )}
+      <Heatmap points={annual} onToggle={setHeatmapOpen} />
+      <div className="usage-tabs" role="tablist" aria-label="用量明细">
+        {[
+          ["requests", "请求日志"],
+          ["providers", "供应商"],
+          ["models", "模型"],
+          ["pricing", "定价"],
+        ].map(([id, n]) => (
+          <button
+            role="tab"
+            aria-selected={tab === id}
+            key={id}
+            onClick={() => void selectTab(id)}
+          >
+            {n}
+          </button>
+        ))}
+        {tab === "requests" && (
+          <select
+            aria-label="请求状态"
+            value={status}
+            onChange={(e) => choose(setStatus, e.target.value)}
+          >
+            <option value="">全部状态</option>
+            {["2xx", "4xx", "5xx"].map((v) => (
+              <option key={v}>{v}</option>
+            ))}
+            <option value="none">会话 / 无状态码</option>
+          </select>
+        )}
+      </div>
+      {tab === "requests" ? (
+        <>
+          <div className="usage-table-scroll">
+            <table className="usage-table" aria-busy={rowsBusy}>
+              <thead>
+                <tr>
+                  {[
+                    "时间",
+                    "客户端",
+                    "供应商",
+                    "模型",
+                    "输入",
+                    "输出",
+                    "缓存",
+                    "费用",
+                  ].map((v) => (
+                    <th key={v}>{v}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {logs.rows.map((r) => {
+                  const a = r.attempts.at(-1);
+                  if (!a) return null;
+                  return (
+                    <tr
+                      key={r.id}
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.currentTarget.focus();
+                        void open(r);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void open(r);
+                      }}
+                      aria-label={`${date(r.startedAt)} ${name(a.provider)} 请求详情`}
+                    >
+                      <td title={new Date(r.startedAt).toLocaleString()}>
+                        {a.status != null && a.status >= 400 && (
+                          <span
+                            className="usage-error-dot"
+                            title={`HTTP ${a.status}`}
+                          />
+                        )}
+                        <time>{date(r.startedAt)}</time>
+                      </td>
+                      <td>{clientName(r.client)}</td>
+                      <td className="usage-name" title={name(a.provider)}>
+                        {name(a.provider)}
+                      </td>
+                      <td
+                        className="usage-model"
+                        title={
+                          a.requestedModel &&
+                          a.responseModel &&
+                          a.requestedModel !== a.responseModel
+                            ? `${a.requestedModel} → ${a.responseModel}`
+                            : (a.responseModel ?? a.requestedModel ?? "未提供")
+                        }
+                      >
+                        <Model a={a} />
+                      </td>
+                      <td title={numeric(a.tokens.input)}>
+                        {compact(a.tokens.input)}
+                      </td>
+                      <td>{compact(a.tokens.output)}</td>
+                      <td>{compact(a.tokens.cacheRead)}</td>
+                      <td title={a.price?.cost}>
+                        {money(a.price?.cost)}
+                        {a.price && Number(a.price.multiplier) !== 1 && (
+                          <span className="usage-multiplier">
+                            ×{a.price.multiplier}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {logs.rows.length === 0 && (
+              <div className="usage-empty">暂无请求</div>
+            )}
+          </div>
+          <Pagination page={logs.page} total={logs.total} onChange={setPage} />
+        </>
+      ) : tab === "pricing" ? (
+        <Pricing onDirtyChange={priceDirty} />
+      ) : (
+        <Ranking
+          groups={
+            tab === "providers" ? (data?.providers ?? []) : (data?.models ?? [])
+          }
+          name={(id) =>
+            tab === "providers"
+              ? name(id === "session" ? null : id)
+              : id === "web_search"
+                ? "网络搜索"
+                : id
+          }
+          kind={tab === "providers" ? "供应商" : "模型"}
+        />
+      )}
+      {selected && (
+        <Detail
+          record={selected}
+          name={name}
+          onClose={() => setSelected(null)}
+        />
+      )}
+      {sheet && state && (
+        <Sources
+          state={state}
+          counts={data?.sources ?? {}}
+          onClose={() => setSheet(false)}
+          onChange={(s) => {
+            setState(s);
+            void load();
+          }}
+        />
+      )}
+    </section>
+  );
 }
-function Metric({label,value,title,extra}:{label:string;value:string;title?:string;extra?:string}){return <div className="usage-metric"><span>{label}</span><strong title={title}>{value}</strong>{extra&&<em>{extra}</em>}</div>;}
-function Model({a}:{a:Attempt}){return <>{a.requestedModel??a.responseModel??"未提供"}{a.responseModel&&a.requestedModel&&a.responseModel!==a.requestedModel&&<span className="usage-model-response">→ {a.responseModel}</span>}</>;}
-function Trend({points,stepMs,metric,onZoom}:{points:Point[];stepMs:number;metric:"requests"|"tokens"|"cost";onZoom:(a:number,b:number)=>void}){
- const [hover,setHover]=useState<number|null>(null),start=useRef<number|null>(null);const values=points.map(p=>metric==="cost"?Number(p.totals.cost):metric==="tokens"?tokenTotal(p.totals.tokens)??0:p.totals.requests),max=Math.max(1,...values);const first=points[0]?.time??0,last=points.at(-1)?.time??1;const x=(p:Point)=>(p.time-first)/Math.max(1,last-first)*960+20;
- const path=points.map((p,i)=>`${i?"L":"M"}${x(p)},${142-values[i]/max*116}`).join(" ");
- const index=(e:React.PointerEvent<SVGSVGElement>)=>{const rect=e.currentTarget.getBoundingClientRect();const time=first+(e.clientX-rect.left)/rect.width*(last-first);return points.reduce((best,p,i)=>Math.abs(p.time-time)<Math.abs(points[best].time-time)?i:best,0);};
- return <div className="usage-trend"><svg role="img" aria-label="用量趋势，拖动选择时间范围" viewBox="0 0 1000 175" onPointerMove={e=>points.length&&setHover(index(e))} onPointerLeave={()=>setHover(null)} onPointerDown={e=>{if(points.length)start.current=index(e);}} onPointerUp={e=>{if(start.current!=null&&points.length){const finish=index(e);if(finish!==start.current)onZoom(Math.min(points[start.current].time,points[finish].time),Math.max(points[start.current].time,points[finish].time)+stepMs);start.current=null;}}}><line x1="20" x2="980" y1="142" y2="142" className="usage-grid"/><line x1="20" x2="980" y1="80" y2="80" className="usage-grid"/>{path&&<path d={path} className="usage-trend-line"/>}{points.map((p,i)=><circle key={p.time} cx={x(p)} cy={142-values[i]/max*116} r={hover===i?5:2} className="usage-trend-dot"><title>{date(p.time)} · {metric==="cost"?money(p.totals.cost):numeric(values[i])}</title></circle>)}{points.length>0&&<><text x="20" y="168">{date(first)}</text><text x="980" y="168" textAnchor="end">{date(last)}</text></>}</svg>{hover!=null&&points[hover]&&<div className="usage-chart-tooltip">{date(points[hover].time)} · {metric==="cost"?money(points[hover].totals.cost):numeric(values[hover])}</div>}{points.length===0&&<span className="usage-chart-empty">暂无数据</span>}</div>;
+function Metric({
+  label,
+  value,
+  title,
+  extra,
+}: {
+  label: string;
+  value: string;
+  title?: string;
+  extra?: string;
+}) {
+  return (
+    <div className="usage-metric">
+      <span>{label}</span>
+      <strong title={title}>{value}</strong>
+      {extra && <em>{extra}</em>}
+    </div>
+  );
 }
-function Heatmap({points,onToggle}:{points:Point[];onToggle:(open:boolean)=>void}){const year=new Date().getFullYear(),start=new Date(year,0,1).getTime(),days=Math.round((new Date(year+1,0,1).getTime()-start)/86400000),day=(value:number)=>local(value).slice(0,10),map=new Map(points.map(p=>[day(p.time),p.totals.requests])),max=Math.max(1,...map.values());return <details className="usage-heatmap" onToggle={e=>onToggle(e.currentTarget.open)}><summary>{year} 年度用量</summary><div className="usage-heatmap-grid">{Array.from({length:days},(_,i)=>{const d=day(new Date(year,0,1+i).getTime()),n=map.get(d)??0;return <span key={d} style={{opacity:n?.25+.75*n/max:1}} className={n?"used":""} title={`${d} · ${numeric(n)} 次请求`}/>;})}</div></details>;}
-export function Pagination({page,total,onChange}:{page:number;total:number;onChange:(page:number)=>void}){const count=Math.max(1,Math.ceil(total/20));const pages=[1,page-1,page,page+1,count].filter((n,i,a)=>n>0&&n<=count&&a.indexOf(n)===i).sort((a,b)=>a-b);return <div className="usage-pagination"><span>{numeric(total)} 条</span><button className="icon-button" aria-label="上一页" disabled={page<=1} onClick={()=>onChange(page-1)}><ChevronLeft size={16}/></button>{pages.map((n,i)=><span key={n}>{i>0&&n-pages[i-1]>1&&<span>…</span>}<button aria-current={n===page?"page":undefined} onClick={()=>onChange(n)}>{n}</button></span>)}<button className="icon-button" aria-label="下一页" disabled={page>=count} onClick={()=>onChange(page+1)}><ChevronRight size={16}/></button><input aria-label="跳转页码" type="number" min="1" max={count} key={`${page}-${count}`} defaultValue={page} onKeyDown={e=>{if(e.key==="Enter"){const n=Number(e.currentTarget.value);if(Number.isInteger(n)&&n>0&&n<=count)onChange(n);}}}/></div>;}
-function Ranking({groups,name,kind}:{groups:Group[];name:(id:string)=>string;kind:string}){const [sort,setSort]=useState<"requests"|"cost"|"tokens">("requests"),[asc,setAsc]=useState(false);const sorted=[...groups].sort((a,b)=>{const value=(g:Group)=>sort==="cost"?Number(g.totals.cost):sort==="tokens"?tokenTotal(g.totals.tokens)??0:g.totals.requests;return(value(a)-value(b))*(asc?1:-1);});return <div className="usage-table-scroll"><table className="usage-table usage-ranking"><thead><tr><th>{kind}</th>{([["requests","请求"],["cost","费用"],["tokens","Token"]] as const).map(([s,n])=><th key={s}><button onClick={()=>{setSort(s);setAsc(sort===s?!asc:false);}}>{n}{sort===s&&(asc?<ArrowUp size={12}/>:<ArrowDown size={12}/>)}</button></th>)}<th>上游尝试</th><th>成功率</th><th>平均耗时</th><th>Token/s</th><th>平均费用</th></tr></thead><tbody>{sorted.map(({id,totals:t})=><tr key={id}><td title={name(id)}>{name(id)}</td><td>{numeric(t.requests)}</td><td>{money(t.cost)}</td><td>{numeric(tokenTotal(t.tokens))}</td><td>{numeric(t.attempts)}</td><td>{t.statusKnown?`${(t.success/t.statusKnown*100).toFixed(1)}%`:"—"}</td><td>{t.requests?(t.durationMs/t.requests/1000).toFixed(2)+"s":"—"}</td><td>{t.generationMs?(t.measuredOutputs/t.generationMs*1000).toFixed(1):"—"}</td><td>{t.requests?money(String(Number(t.cost)/t.requests)):"—"}</td></tr>)}</tbody></table></div>;}
-export function Drawer({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){const ref=useRef<HTMLDialogElement>(null);useEffect(()=>{const focus=document.activeElement as HTMLElement|null;const dialog=ref.current;dialog?.showModal();return()=>{dialog?.close();queueMicrotask(()=>{if(!dialog?.isConnected&&focus?.isConnected)focus.focus({preventScroll:true});});};},[]);return <dialog ref={ref} className="usage-drawer" onCancel={e=>{e.preventDefault();onClose();}} onClick={e=>{if(e.target===e.currentTarget){const r=e.currentTarget.getBoundingClientRect();if(e.clientX<r.left)onClose();}}}><header><h2>{title}</h2><button className="icon-button" aria-label="关闭详情" onClick={onClose}><X size={18}/></button></header><div className="usage-drawer-body">{children}</div></dialog>;}
-function Detail({record:r,name,onClose}:{record:UsageRecord;name:(id:string|null)=>string;onClose:()=>void}){const a=r.attempts.at(-1)!;const total=r.attempts.reduce((sum,a)=>sum+Number(a.price?.cost??0),0);return <Drawer title="请求详情" onClose={onClose}><div className="usage-detail-status"><b>{a.status==null?(r.source==="proxy"?"—":"会话"):`HTTP ${a.status}`}</b><span>{outcomes[a.outcome]??"结果未确认"}</span><span>{clientName(r.client)}</span></div><AttemptDetails a={a} name={name} estimated={r.estimatedSpeed}/><dl className="usage-detail-grid"><dt>来源</dt><dd>{r.source==="proxy"?"网关":clientName(r.source)+" 会话"}</dd><dt>请求 ID</dt><dd>{r.id}</dd><dt>去重</dt><dd>{r.deduplication==="ambiguous"?"待核对（不计入合计）":r.duplicateOf?"已合并":r.deduplication==="response_id"?"响应 ID 合并":r.deduplication==="strict_match"?"严格匹配合并":"独立记录"}</dd><dt>全部尝试费用</dt><dd>{r.attempts.some(a=>!a.price)?"含未定价项 · ":""}{money(String(total))}</dd></dl><h3>尝试 · {r.attempts.length}</h3>{r.attempts.map((attempt,i)=><details key={attempt.id}><summary>{i+1} · {name(attempt.provider)} · {attempt.status??"—"}</summary><AttemptDetails a={attempt} name={name} estimated={r.estimatedSpeed}/></details>)}</Drawer>;}
-function rateLabel(key:string){
- const labels:Record<string,string>={input_cost_per_token:"输入",output_cost_per_token:"输出",cache_read_input_token_cost:"缓存读取",cache_creation_input_token_cost:"缓存写入",cache_creation_input_token_cost_above_1hr:"缓存写入（1 小时）",input_cost_per_image_token:"图片输入",output_cost_per_image_token:"图片输出",input_cost_per_audio_token:"音频输入",output_cost_per_audio_token:"音频输出"};
- const tiers:Record<string,string>={batches:"批处理",flex:"弹性",priority:"优先",ultrafast:"极速"};
- const tier=key.match(/_(batches|flex|priority|ultrafast)$/)?.[1];
- const base=tier?key.slice(0,-tier.length-1):key;
- const threshold=base.match(/_above_(100|200|272)k_tokens$/)?.[1];
- const name=threshold?base.replace(/_above_(100|200|272)k_tokens$/,""):base;
- return [labels[name]??"其他",threshold?`上下文 > ${threshold}K`:null,tier?tiers[tier]:null].filter(Boolean).join(" · ");
+function Model({ a }: { a: Attempt }) {
+  return (
+    <>
+      {a.operation === "web_search"
+        ? "网络搜索"
+        : (a.responseModel ?? a.requestedModel ?? "未提供")}
+    </>
+  );
 }
-function AttemptDetails({a,name,estimated}:{a:Attempt;name:(id:string|null)=>string;estimated:boolean}){return <><dl className="usage-detail-grid">{[["供应商",name(a.provider)],["时间",new Date(a.startedAt).toLocaleString()],["请求模型",a.requestedModel],["响应模型",a.responseModel],["计价模型",a.pricingModel],["输入",numeric(a.tokens.input)],["输出",numeric(a.tokens.output)],["缓存读取",numeric(a.tokens.cacheRead)],["缓存写入",numeric(a.tokens.cacheWrite)],["耗时",a.durationMs?(a.durationMs/1000).toFixed(3)+"s":"未提供"],["首 Token",a.firstTokenMs!=null?(a.firstTokenMs/1000).toFixed(3)+"s":"未提供"],["速度",speed(a,estimated)+" Token/s"],["传输",a.transport],["流式",a.stream?"是":"否"],["费用",money(a.price?.cost)],["倍率",a.price?.multiplier],["价格版本",a.price?.version]].map(([k,v])=><div className="usage-detail-pair" key={k}><dt>{k}</dt><dd>{v??"未提供"}</dd></div>)}</dl>{a.price&&<details><summary>单价 / 百万 Token</summary><dl className="usage-detail-grid">{Object.entries(a.price.rates).map(([k,v])=><div className="usage-detail-pair" key={k}><dt title={k}>{rateLabel(k)}</dt><dd>${(Number(v)*1e6).toLocaleString("zh-CN",{maximumFractionDigits:8})}</dd></div>)}</dl></details>}</>;}
-function Sources({state,counts,onClose,onChange}:{state:UsageState;counts:Record<string,number>;onClose:()=>void;onChange:(v:UsageState)=>void}){const [draft,setDraft]=useState(state.settings),[busy,setBusy]=useState(false),[error,setError]=useState("");const run=async(name:string,args:Record<string,unknown>={})=>{setBusy(true);setError("");try{onChange(await command<UsageState>(name,args));}catch(e){setError(errorOf(e).message);}finally{setBusy(false);}};return <Drawer title="数据来源与设置" onClose={onClose}><div className="usage-source-list">{["proxy","codex","claude"].map(id=><div key={id}><b>{id==="proxy"?"网关":clientName(id)}</b><span>{numeric(counts[id]??0)} 条</span>{state.reports[id]&&<span>导入 {numeric(state.reports[id].imported)} · 合并 {numeric(state.reports[id].merged??0)} · 待核对 {numeric(state.reports[id].pending??0)}{state.syncing?` · ${state.reports[id].files}/${state.reports[id].totalFiles??0}`:""}</span>}{!!state.reports[id]?.historicalBefore&&<span>历史日汇总已保留</span>}{state.reports[id]?.completedAt&&<time>{date(state.reports[id].completedAt!)}</time>}{!!state.reports[id]?.errors&&<span className="form-error">{state.reports[id].errors} 个文件未同步</span>}</div>)}</div><div className="usage-actions"><button disabled={busy||state.syncing} onClick={()=>void run("sync_usage")}>同步会话</button><button disabled={busy||state.syncing} onClick={()=>void confirmAction("重建 Codex 会话用量？网关记录会保留。").then(ok=>{if(ok)return run("sync_usage",{rebuild:"codex"});})}>重建 Codex 用量</button><button disabled={busy||state.syncing} onClick={()=>void confirmAction("重建 Claude Code 会话用量？网关记录会保留。").then(ok=>{if(ok)return run("sync_usage",{rebuild:"claude"});})}>重建 Claude 用量</button></div><form onSubmit={e=>{e.preventDefault();void run("set_usage_settings",{settings:draft});}}><label className="usage-setting">记录网关用量<input type="checkbox" checked={draft.recording} onChange={e=>setDraft({...draft,recording:e.target.checked})}/></label><label className="usage-setting">自动同步会话<input type="checkbox" checked={draft.autoSync} onChange={e=>setDraft({...draft,autoSync:e.target.checked})}/></label><label className="usage-setting">计价模型<select value={draft.pricingModel} onChange={e=>setDraft({...draft,pricingModel:e.target.value as "request"|"response"})}><option value="response">优先响应模型</option><option value="request">优先请求模型</option></select></label><label className="usage-setting">成本倍率<input type="number" min="0" max="10000" step="any" value={draft.multiplier} onChange={e=>setDraft({...draft,multiplier:e.target.value})}/></label>{error&&<p role="alert" className="form-error">{error}</p>}<div className="usage-form-actions"><button type="button" onClick={onClose}>关闭</button><button className="primary" disabled={busy}>保存</button></div></form></Drawer>;}
+function Trend({
+  points,
+  stepMs,
+  metric,
+  onZoom,
+}: {
+  points: Point[];
+  stepMs: number;
+  metric: "requests" | "tokens" | "cost";
+  onZoom: (a: number, b: number) => void;
+}) {
+  const [hover, setHover] = useState<number | null>(null),
+    start = useRef<number | null>(null);
+  const values = points.map((p) =>
+      metric === "cost"
+        ? Number(p.totals.cost)
+        : metric === "tokens"
+          ? (tokenTotal(p.totals.tokens) ?? 0)
+          : p.totals.requests,
+    ),
+    max = Math.max(1, ...values);
+  const first = points[0]?.time ?? 0,
+    last = points.at(-1)?.time ?? 1;
+  const x = (p: Point) =>
+    ((p.time - first) / Math.max(1, last - first)) * 960 + 20;
+  const path = points
+    .map((p, i) => `${i ? "L" : "M"}${x(p)},${142 - (values[i] / max) * 116}`)
+    .join(" ");
+  const index = (e: React.PointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const time =
+      first + ((e.clientX - rect.left) / rect.width) * (last - first);
+    return points.reduce(
+      (best, p, i) =>
+        Math.abs(p.time - time) < Math.abs(points[best].time - time) ? i : best,
+      0,
+    );
+  };
+  return (
+    <div className="usage-trend">
+      <svg
+        role="img"
+        aria-label="用量趋势，拖动选择时间范围"
+        viewBox="0 0 1000 175"
+        onPointerMove={(e) => points.length && setHover(index(e))}
+        onPointerLeave={() => setHover(null)}
+        onPointerDown={(e) => {
+          if (points.length) start.current = index(e);
+        }}
+        onPointerUp={(e) => {
+          if (start.current != null && points.length) {
+            const finish = index(e);
+            if (finish !== start.current)
+              onZoom(
+                Math.min(points[start.current].time, points[finish].time),
+                Math.max(points[start.current].time, points[finish].time) +
+                  stepMs,
+              );
+            start.current = null;
+          }
+        }}
+      >
+        <line x1="20" x2="980" y1="142" y2="142" className="usage-grid" />
+        <line x1="20" x2="980" y1="80" y2="80" className="usage-grid" />
+        {path && <path d={path} className="usage-trend-line" />}
+        {points.map((p, i) => (
+          <circle
+            key={p.time}
+            cx={x(p)}
+            cy={142 - (values[i] / max) * 116}
+            r={hover === i ? 5 : 2}
+            className="usage-trend-dot"
+          >
+            <title>
+              {date(p.time)} ·{" "}
+              {metric === "cost" ? money(p.totals.cost) : numeric(values[i])}
+            </title>
+          </circle>
+        ))}
+        {points.length > 0 && (
+          <>
+            <text x="20" y="168">
+              {date(first)}
+            </text>
+            <text x="980" y="168" textAnchor="end">
+              {date(last)}
+            </text>
+          </>
+        )}
+      </svg>
+      {hover != null && points[hover] && (
+        <div className="usage-chart-tooltip">
+          {date(points[hover].time)} ·{" "}
+          {metric === "cost"
+            ? money(points[hover].totals.cost)
+            : numeric(values[hover])}
+        </div>
+      )}
+      {points.length === 0 && (
+        <span className="usage-chart-empty">暂无数据</span>
+      )}
+    </div>
+  );
+}
+function Heatmap({
+  points,
+  onToggle,
+}: {
+  points: Point[];
+  onToggle: (open: boolean) => void;
+}) {
+  const year = new Date().getFullYear(),
+    start = new Date(year, 0, 1).getTime(),
+    days = Math.round((new Date(year + 1, 0, 1).getTime() - start) / 86400000),
+    day = (value: number) => local(value).slice(0, 10),
+    map = new Map(points.map((p) => [day(p.time), p.totals.requests])),
+    max = Math.max(1, ...map.values());
+  return (
+    <details
+      className="usage-heatmap"
+      onToggle={(e) => onToggle(e.currentTarget.open)}
+    >
+      <summary>{year} 年度用量</summary>
+      <div className="usage-heatmap-grid">
+        {Array.from({ length: days }, (_, i) => {
+          const d = day(new Date(year, 0, 1 + i).getTime()),
+            n = map.get(d) ?? 0;
+          return (
+            <span
+              key={d}
+              style={{ opacity: n ? 0.25 + (0.75 * n) / max : 1 }}
+              className={n ? "used" : ""}
+              title={`${d} · ${numeric(n)} 次请求`}
+            />
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+export function Pagination({
+  page,
+  total,
+  onChange,
+}: {
+  page: number;
+  total: number;
+  onChange: (page: number) => void;
+}) {
+  const count = Math.max(1, Math.ceil(total / 20));
+  const pages = [1, page - 1, page, page + 1, count]
+    .filter((n, i, a) => n > 0 && n <= count && a.indexOf(n) === i)
+    .sort((a, b) => a - b);
+  return (
+    <div className="usage-pagination">
+      <span>{numeric(total)} 条</span>
+      <button
+        className="icon-button"
+        aria-label="上一页"
+        disabled={page <= 1}
+        onClick={() => onChange(page - 1)}
+      >
+        <ChevronLeft size={16} />
+      </button>
+      {pages.map((n, i) => (
+        <span key={n}>
+          {i > 0 && n - pages[i - 1] > 1 && <span>…</span>}
+          <button
+            aria-current={n === page ? "page" : undefined}
+            onClick={() => onChange(n)}
+          >
+            {n}
+          </button>
+        </span>
+      ))}
+      <button
+        className="icon-button"
+        aria-label="下一页"
+        disabled={page >= count}
+        onClick={() => onChange(page + 1)}
+      >
+        <ChevronRight size={16} />
+      </button>
+      <input
+        aria-label="跳转页码"
+        type="number"
+        min="1"
+        max={count}
+        key={`${page}-${count}`}
+        defaultValue={page}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            const n = Number(e.currentTarget.value);
+            if (Number.isInteger(n) && n > 0 && n <= count) onChange(n);
+          }
+        }}
+      />
+    </div>
+  );
+}
+function Ranking({
+  groups,
+  name,
+  kind,
+}: {
+  groups: Group[];
+  name: (id: string) => string;
+  kind: string;
+}) {
+  const [sort, setSort] = useState<"requests" | "cost" | "tokens">("requests"),
+    [asc, setAsc] = useState(false);
+  const sorted = [...groups].sort((a, b) => {
+    const value = (g: Group) =>
+      sort === "cost"
+        ? Number(g.totals.cost)
+        : sort === "tokens"
+          ? (tokenTotal(g.totals.tokens) ?? 0)
+          : g.totals.requests;
+    return (value(a) - value(b)) * (asc ? 1 : -1);
+  });
+  return (
+    <div className="usage-table-scroll">
+      <table className="usage-table usage-ranking">
+        <thead>
+          <tr>
+            <th>{kind}</th>
+            {(
+              [
+                ["requests", "请求"],
+                ["cost", "费用"],
+                ["tokens", "Token"],
+              ] as const
+            ).map(([s, n]) => (
+              <th key={s}>
+                <button
+                  onClick={() => {
+                    setSort(s);
+                    setAsc(sort === s ? !asc : false);
+                  }}
+                >
+                  {n}
+                  {sort === s &&
+                    (asc ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
+                </button>
+              </th>
+            ))}
+            <th>上游尝试</th>
+            <th>成功率</th>
+            <th>平均耗时</th>
+            <th>平均费用</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map(({ id, totals: t }) => (
+            <tr key={id}>
+              <td title={name(id)}>{name(id)}</td>
+              <td>{numeric(t.requests)}</td>
+              <td>{money(t.cost)}</td>
+              <td>{numeric(tokenTotal(t.tokens))}</td>
+              <td>{numeric(t.attempts)}</td>
+              <td>
+                {t.statusKnown
+                  ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
+                  : "—"}
+              </td>
+              <td>
+                {t.requests
+                  ? (t.durationMs / t.requests / 1000).toFixed(2) + "s"
+                  : "—"}
+              </td>
+              <td>
+                {t.requests ? money(String(Number(t.cost) / t.requests)) : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+export function Drawer({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const focus = document.activeElement as HTMLElement | null;
+    const dialog = ref.current;
+    dialog?.showModal();
+    return () => {
+      dialog?.close();
+      queueMicrotask(() => {
+        if (!dialog?.isConnected && focus?.isConnected)
+          focus.focus({ preventScroll: true });
+      });
+    };
+  }, []);
+  return (
+    <dialog
+      ref={ref}
+      className="usage-drawer"
+      onCancel={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          const r = e.currentTarget.getBoundingClientRect();
+          if (e.clientX < r.left) onClose();
+        }
+      }}
+    >
+      <header>
+        <h2>{title}</h2>
+        <button className="icon-button" aria-label="关闭详情" onClick={onClose}>
+          <X size={18} />
+        </button>
+      </header>
+      <div className="usage-drawer-body">{children}</div>
+    </dialog>
+  );
+}
+function Detail({
+  record: r,
+  name,
+  onClose,
+}: {
+  record: UsageRecord;
+  name: (id: string | null) => string;
+  onClose: () => void;
+}) {
+  const a = r.attempts.at(-1)!;
+  const total = r.attempts.reduce(
+    (sum, a) => sum + Number(a.price?.cost ?? 0),
+    0,
+  );
+  return (
+    <Drawer title="请求详情" onClose={onClose}>
+      <div className="usage-detail-status">
+        <b>
+          {a.status == null
+            ? r.source === "proxy"
+              ? "—"
+              : "会话"
+            : `HTTP ${a.status}`}
+        </b>
+        <span>{outcomes[a.outcome] ?? "结果未确认"}</span>
+        <span>{clientName(r.client)}</span>
+      </div>
+      <AttemptDetails a={a} name={name} />
+      <dl className="usage-detail-grid">
+        <dt>来源</dt>
+        <dd>
+          {r.source === "proxy" ? "网关" : clientName(r.source) + " 会话"}
+        </dd>
+        <dt>请求 ID</dt>
+        <dd>{r.id}</dd>
+        <dt>去重</dt>
+        <dd>
+          {r.deduplication === "ambiguous"
+            ? "待核对（不计入合计）"
+            : r.duplicateOf
+              ? "已合并"
+              : r.deduplication === "response_id"
+                ? "响应 ID 合并"
+                : r.deduplication === "strict_match"
+                  ? "严格匹配合并"
+                  : "独立记录"}
+        </dd>
+        <dt>全部尝试费用</dt>
+        <dd>
+          {r.attempts.some((a) => !a.price) ? "含未定价项 · " : ""}
+          {money(String(total))}
+        </dd>
+      </dl>
+      <h3>尝试 · {r.attempts.length}</h3>
+      {r.attempts.map((attempt, i) => (
+        <details key={attempt.id}>
+          <summary>
+            {i + 1} · {name(attempt.provider)} · {attempt.status ?? "—"}
+          </summary>
+          <AttemptDetails a={attempt} name={name} />
+        </details>
+      ))}
+    </Drawer>
+  );
+}
+function rateLabel(key: string) {
+  const labels: Record<string, string> = {
+    input_cost_per_token: "输入",
+    output_cost_per_token: "输出",
+    cache_read_input_token_cost: "缓存读取",
+    cache_creation_input_token_cost: "缓存写入",
+    cache_creation_input_token_cost_above_1hr: "缓存写入（1 小时）",
+    input_cost_per_image_token: "图片输入",
+    output_cost_per_image_token: "图片输出",
+    input_cost_per_audio_token: "音频输入",
+    output_cost_per_audio_token: "音频输出",
+  };
+  const tiers: Record<string, string> = {
+    batches: "批处理",
+    flex: "弹性",
+    priority: "优先",
+    ultrafast: "极速",
+  };
+  const tier = key.match(/_(batches|flex|priority|ultrafast)$/)?.[1];
+  const base = tier ? key.slice(0, -tier.length - 1) : key;
+  const threshold = base.match(/_above_(100|200|272)k_tokens$/)?.[1];
+  const name = threshold
+    ? base.replace(/_above_(100|200|272)k_tokens$/, "")
+    : base;
+  return [
+    labels[name] ?? "其他",
+    threshold ? `上下文 > ${threshold}K` : null,
+    tier ? tiers[tier] : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+function AttemptDetails({
+  a,
+  name,
+}: {
+  a: Attempt;
+  name: (id: string | null) => string;
+}) {
+  return (
+    <>
+      <dl className="usage-detail-grid">
+        {[
+          ["供应商", name(a.provider)],
+          ["请求类型", a.operation === "web_search" ? "网络搜索" : "模型请求"],
+          ["时间", new Date(a.startedAt).toLocaleString()],
+          ["请求模型", a.requestedModel],
+          ["响应模型", a.responseModel],
+          ["计价模型", a.pricingModel],
+          ["输入", numeric(a.tokens.input)],
+          ["输出", numeric(a.tokens.output)],
+          ["缓存读取", numeric(a.tokens.cacheRead)],
+          ["缓存写入", numeric(a.tokens.cacheWrite)],
+          [
+            "耗时",
+            a.durationMs ? (a.durationMs / 1000).toFixed(3) + "s" : "未提供",
+          ],
+          [
+            "首 Token",
+            a.firstTokenMs != null
+              ? (a.firstTokenMs / 1000).toFixed(3) + "s"
+              : "未提供",
+          ],
+          ["传输", a.transport],
+          ["流式", a.stream ? "是" : "否"],
+          ["费用", money(a.price?.cost)],
+          ["倍率", a.price?.multiplier],
+          ["价格版本", a.price?.version],
+        ].map(([k, v]) => (
+          <div className="usage-detail-pair" key={k}>
+            <dt>{k}</dt>
+            <dd>{v ?? "未提供"}</dd>
+          </div>
+        ))}
+      </dl>
+      {a.price && (
+        <details>
+          <summary>
+            {a.operation === "web_search" ? "按次计费" : "单价 / 百万 Token"}
+          </summary>
+          {a.operation === "web_search" && (
+            <p>
+              {a.price.basis?.quantity ?? 1} 次 × $0.01 × {a.price.multiplier}
+            </p>
+          )}
+          <dl className="usage-detail-grid">
+            {Object.entries(a.price.rates).map(([k, v]) => (
+              <div className="usage-detail-pair" key={k}>
+                <dt title={k}>
+                  {k === "cost_per_request" ? "每次搜索" : rateLabel(k)}
+                </dt>
+                <dd>
+                  $
+                  {(
+                    Number(v) * (k === "cost_per_request" ? 1 : 1e6)
+                  ).toLocaleString("zh-CN", { maximumFractionDigits: 8 })}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </details>
+      )}
+    </>
+  );
+}
+function Sources({
+  state,
+  counts,
+  onClose,
+  onChange,
+}: {
+  state: UsageState;
+  counts: Record<string, number>;
+  onClose: () => void;
+  onChange: (v: UsageState) => void;
+}) {
+  const [draft, setDraft] = useState(state.settings),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const run = async (name: string, args: Record<string, unknown> = {}) => {
+    setBusy(true);
+    setError("");
+    try {
+      onChange(await command<UsageState>(name, args));
+    } catch (e) {
+      setError(errorOf(e).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Drawer title="数据来源与设置" onClose={onClose}>
+      <div className="usage-source-list">
+        {["proxy", "codex", "claude"].map((id) => (
+          <div key={id}>
+            <b>{id === "proxy" ? "网关" : clientName(id)}</b>
+            <span>{numeric(counts[id] ?? 0)} 条</span>
+            {state.reports[id] && (
+              <span>
+                导入 {numeric(state.reports[id].imported)} · 合并{" "}
+                {numeric(state.reports[id].merged ?? 0)} · 待核对{" "}
+                {numeric(state.reports[id].pending ?? 0)}
+                {state.syncing
+                  ? ` · ${state.reports[id].files}/${state.reports[id].totalFiles ?? 0}`
+                  : ""}
+              </span>
+            )}
+            {!!state.reports[id]?.historicalBefore && (
+              <span>历史日汇总已保留</span>
+            )}
+            {state.reports[id]?.completedAt && (
+              <time>{date(state.reports[id].completedAt!)}</time>
+            )}
+            {!!state.reports[id]?.errors && (
+              <span className="form-error">
+                {state.reports[id].errors} 个文件未同步
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="usage-actions">
+        <button
+          disabled={busy || state.syncing}
+          onClick={() => void run("sync_usage")}
+        >
+          同步会话
+        </button>
+        <button
+          disabled={busy || state.syncing}
+          onClick={() =>
+            void confirmAction("重建 Codex 会话用量？网关记录会保留。").then(
+              (ok) => {
+                if (ok) return run("sync_usage", { rebuild: "codex" });
+              },
+            )
+          }
+        >
+          重建 Codex 用量
+        </button>
+        <button
+          disabled={busy || state.syncing}
+          onClick={() =>
+            void confirmAction(
+              "重建 Claude Code 会话用量？网关记录会保留。",
+            ).then((ok) => {
+              if (ok) return run("sync_usage", { rebuild: "claude" });
+            })
+          }
+        >
+          重建 Claude 用量
+        </button>
+      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void run("set_usage_settings", { settings: draft });
+        }}
+      >
+        <label className="usage-setting">
+          记录网关用量
+          <input
+            type="checkbox"
+            checked={draft.recording}
+            onChange={(e) =>
+              setDraft({ ...draft, recording: e.target.checked })
+            }
+          />
+        </label>
+        <label className="usage-setting">
+          自动同步会话
+          <input
+            type="checkbox"
+            checked={draft.autoSync}
+            onChange={(e) => setDraft({ ...draft, autoSync: e.target.checked })}
+          />
+        </label>
+        <label className="usage-setting">
+          计价模型
+          <select
+            value={draft.pricingModel}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                pricingModel: e.target.value as "request" | "response",
+              })
+            }
+          >
+            <option value="response">优先响应模型</option>
+            <option value="request">优先请求模型</option>
+          </select>
+        </label>
+        <label className="usage-setting">
+          成本倍率
+          <input
+            type="number"
+            min="0"
+            max="10000"
+            step="any"
+            value={draft.multiplier}
+            onChange={(e) => setDraft({ ...draft, multiplier: e.target.value })}
+          />
+        </label>
+        {error && (
+          <p role="alert" className="form-error">
+            {error}
+          </p>
+        )}
+        <div className="usage-form-actions">
+          <button type="button" onClick={onClose}>
+            关闭
+          </button>
+          <button className="primary" disabled={busy}>
+            保存
+          </button>
+        </div>
+      </form>
+    </Drawer>
+  );
+}

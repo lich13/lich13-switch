@@ -45,6 +45,8 @@ const actions = {
   stopped: "需要处理",
   routed: "已切换供应商",
   recovered: "已恢复可用",
+  reconnecting: "等待后重新连接",
+  not_retried: "已输出，未重试",
 } as const;
 
 export type EventRecord = {
@@ -61,6 +63,26 @@ export type EventRecord = {
   level: "warning" | "error" | "info";
   status: number | null;
   attempt: number | null;
+  details?: {
+    upstreamCode?: string | null;
+    upstreamType?: string | null;
+    parameter?: string | null;
+    message?: string | null;
+    phase?: string | null;
+    wsCloseCode?: number | null;
+    countedFailure?: boolean | null;
+    waitSeconds?: number | null;
+    causeId?: string | null;
+    circuit?: {
+      failures: number;
+      failureThreshold: number;
+      failedRequests: number;
+      requests: number;
+      errorRate: number;
+      minRequests: number;
+      trigger: string;
+    } | null;
+  };
 };
 
 type EventPage = {
@@ -70,7 +92,12 @@ type EventPage = {
   error: string | null;
 };
 
-type StatusGroup = "" | "success" | "client_error" | "server_error" | "no_status";
+type StatusGroup =
+  | ""
+  | "success"
+  | "client_error"
+  | "server_error"
+  | "no_status";
 
 const client = (id: ClientId | null) =>
   id === "codex" ? "Codex" : id === "claude" ? "Claude Code" : "应用";
@@ -107,10 +134,35 @@ function statusTone(status: number | null) {
 }
 
 function normalizedCode(record: EventRecord) {
+  return record.errorCode || errorCodes[record.reason] || "UNKNOWN_ERROR";
+}
+
+const phases: Record<string, string> = {
+  connect: "建立连接",
+  headers: "等待响应头",
+  response: "读取响应",
+  stream: "流式响应",
+  ws_handshake: "WebSocket 握手",
+  ws_send: "WebSocket 发送",
+  ws_receive: "WebSocket 接收",
+  ws_wait: "等待重连",
+};
+function summary(r: EventRecord) {
+  return [r.details?.upstreamCode, r.details?.message || reasons[r.reason]]
+    .filter(Boolean)
+    .join(" · ");
+}
+function actionText(r: EventRecord) {
+  return `${r.details?.countedFailure === false ? "未计入熔断，" : ""}${r.details?.waitSeconds ? `等待 ${r.details.waitSeconds} 秒${r.action === "reconnecting" ? "重连" : "重试"}` : actions[r.action]}`;
+}
+function wireStatus(r: EventRecord) {
   return (
-    record.errorCode ||
-    errorCodes[record.reason] ||
-    "UNKNOWN_ERROR"
+    [
+      r.status == null ? null : statusText(r.status),
+      r.details?.wsCloseCode ? `WS ${r.details.wsCloseCode}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "—"
   );
 }
 
@@ -245,7 +297,10 @@ export default function EventLog() {
       : "系统";
 
   const providerOptions = Object.entries(providers)
-    .filter(([, provider]) => !filters.clientId || provider.clientId === filters.clientId)
+    .filter(
+      ([, provider]) =>
+        !filters.clientId || provider.clientId === filters.clientId,
+    )
     .reduce<{ id: string; name: string }[]>((items, [key, provider]) => {
       const id = key.split(":").slice(1).join(":");
       if (!items.some((item) => item.id === id))
@@ -253,7 +308,9 @@ export default function EventLog() {
       return items;
     }, []);
 
-  const knownProviderIds = new Set(providerOptions.map((provider) => provider.id));
+  const knownProviderIds = new Set(
+    providerOptions.map((provider) => provider.id),
+  );
   const unknownProviderIds = [
     ...new Set(
       data.items
@@ -372,11 +429,13 @@ export default function EventLog() {
           onChange={(e) => change("reason", e.target.value)}
         >
           <option value="">全部原因</option>
-          {Object.entries(reasons).map(([key, label]) => (
-            <option key={key} value={key}>
-              {label}
-            </option>
-          ))}
+          {Object.entries(reasons)
+            .filter(([key]) => key !== "recovered")
+            .map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
         </select>
       </div>
       {(error || data.error) && (
@@ -391,51 +450,55 @@ export default function EventLog() {
               <th>时间</th>
               <th>客户端 / 供应商</th>
               <th>状态</th>
-              <th>问题</th>
+              <th>错误摘要</th>
               <th>处理结果</th>
             </tr>
           </thead>
           <tbody>
-            {data.items.map((r) => (
-              <tr key={r.id}>
-                <td>
-                  <time
-                    title={new Date(r.lastAt * 1000).toISOString()}
-                  >
-                    {time(r.lastAt)}
-                  </time>
-                </td>
-                <td>
-                  <span>{client(r.clientId)}</span>
-                  <strong title={name(r)}>{name(r)}</strong>
-                </td>
-                <td>
-                  <span
-                    className={"event-status " + statusTone(r.status)}
-                    title={statusText(r.status)}
-                  >
-                    {statusText(r.status)}
-                  </span>
-                </td>
-                <td>
-                  <button
-                    className={"event-code " + r.level}
-                    aria-label={reasons[r.reason]}
-                    onClick={() => {
-                      void command<EventRecord | null>("get_app_event", {
-                        id: r.id,
-                      })
-                        .then((value) => setSelected(value || r))
-                        .catch((e) => setError(errorOf(e).message));
-                    }}
-                  >
-                    {reasons[r.reason]}
-                    {r.count > 1 && <span className="event-count">×{r.count.toLocaleString()}</span>}
-                  </button>
-                </td>
-                <td>{actions[r.action]}</td>
-              </tr>
-            ))}
+            {data.items
+              .filter((r) => r.reason !== "recovered")
+              .map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <time title={new Date(r.lastAt * 1000).toISOString()}>
+                      {time(r.lastAt)}
+                    </time>
+                  </td>
+                  <td>
+                    <span>{client(r.clientId)}</span>
+                    <strong title={name(r)}>{name(r)}</strong>
+                  </td>
+                  <td>
+                    <span
+                      className={"event-status " + statusTone(r.status)}
+                      title={wireStatus(r)}
+                    >
+                      {wireStatus(r)}
+                    </span>
+                  </td>
+                  <td>
+                    <button
+                      className={"event-code " + r.level}
+                      aria-label={reasons[r.reason]}
+                      onClick={() => {
+                        void command<EventRecord | null>("get_app_event", {
+                          id: r.id,
+                        })
+                          .then((value) => setSelected(value || r))
+                          .catch((e) => setError(errorOf(e).message));
+                      }}
+                    >
+                      {summary(r)}
+                      {r.count > 1 && (
+                        <span className="event-count">
+                          ×{r.count.toLocaleString()}
+                        </span>
+                      )}
+                    </button>
+                  </td>
+                  <td>{actionText(r)}</td>
+                </tr>
+              ))}
           </tbody>
         </table>
         {data.items.length === 0 && <div className="event-empty">暂无日志</div>}
@@ -517,11 +580,51 @@ function EventDetail({
         </header>
         <dl>
           {[
-            ["状态码", statusText(r.status)],
+            ["状态码", wireStatus(r)],
+            ["上游错误码", r.details?.upstreamCode ?? "未提供"],
+            ["上游错误类型", r.details?.upstreamType ?? "未提供"],
+            ["错误摘要", r.details?.message ?? reasons[r.reason]],
+            ["参数", r.details?.parameter ?? "未提供"],
+            ["阶段", phases[r.details?.phase ?? ""] ?? "未提供"],
+            [
+              "计入熔断",
+              r.details?.countedFailure == null
+                ? "历史未记录"
+                : r.details.countedFailure
+                  ? "是"
+                  : "否",
+            ],
             ["错误码", normalizedCode(r)],
             ["客户端", client(r.clientId)],
             ["供应商", provider],
-            ["处理结果", actions[r.action]],
+            ["处理结果", actionText(r)],
+            ...(r.details?.circuit
+              ? [
+                  [
+                    "连续失败",
+                    `${r.details.circuit.failures} / ${r.details.circuit.failureThreshold}`,
+                  ],
+                  [
+                    "失败请求",
+                    `${r.details.circuit.failedRequests} / ${r.details.circuit.requests}`,
+                  ],
+                  [
+                    "触发条件",
+                    (
+                      {
+                        consecutive_failures: "连续失败达到阈值",
+                        error_rate: "错误率达到阈值",
+                        probe_failed: "恢复探测失败",
+                      } as Record<string, string>
+                    )[r.details.circuit.trigger],
+                  ],
+                  [
+                    "错误率阈值",
+                    `${r.details.circuit.errorRate * 100}% / 最少 ${r.details.circuit.minRequests} 次`,
+                  ],
+                ]
+              : []),
+            ...(r.details?.causeId ? [["触发事件", r.details.causeId]] : []),
             ["模型", r.model || "未提供"],
             ["尝试次数", r.attempt ?? "—"],
             ["首次发生", time(r.firstAt)],

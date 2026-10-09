@@ -147,7 +147,10 @@ function QuickContent({
     }
   };
   const run = (fn: () => Promise<void>) => void action(fn).catch(() => {});
-  const edit = async (edit: Record<string, unknown>, expected?: EditRevision) => {
+  const edit = async (
+    edit: Record<string, unknown>,
+    expected?: EditRevision,
+  ) => {
     if (!gateway) return;
     await saveGatewayEdit(clientId, gateway, edit, expected, setGateway);
     if (edit.op === "select")
@@ -385,9 +388,16 @@ function QuickContent({
                           <Settings2 size={14} />
                         </button>
                       </div>
-                      {providerStatus(p) && (
+                      {(gateway.websocketRetries?.some(
+                        (w) => w.providerId === p.id,
+                      ) ||
+                        providerStatus(p)) && (
                         <span className="quick-provider-alert">
-                          {providerStatus(p)}
+                          {gateway.websocketRetries?.find(
+                            (w) => w.providerId === p.id,
+                          )
+                            ? `重连等待 ${gateway.websocketRetries.find((w) => w.providerId === p.id)!.retryIn}s`
+                            : providerStatus(p)}
                         </span>
                       )}
                       <div className="quick-provider-secondary">

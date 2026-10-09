@@ -148,11 +148,19 @@ pub struct Meter {
 }
 impl Meter {
     pub fn observe(&mut self, outer: &Value, elapsed: u64) {
-        let v = outer
-            .get("response")
-            .or_else(|| outer.get("message"))
-            .filter(|v| v.is_object())
-            .unwrap_or(outer);
+        let mut v = outer;
+        for _ in 0..4 {
+            let inner = ["response", "message", "data", "result"]
+                .iter()
+                .find_map(|key| v.get(key).filter(|v| v.is_object()));
+            let Some(inner) = inner else {
+                break;
+            };
+            if let Some(model) = model_id(v["model"].as_str()) {
+                self.model = Some(model);
+            }
+            v = inner;
+        }
         let event = outer["type"].as_str().unwrap_or("");
         let claude = event.starts_with("message_")
             || v["type"] == "message"
@@ -165,7 +173,7 @@ impl Meter {
                 self.tokens.merge(&parse_tokens(u, claude));
             }
         }
-        if let Some(model) = model_id(v["model"].as_str()) {
+        if let Some(model) = model_id(v["model"].as_str().or_else(|| outer["model"].as_str())) {
             self.model = Some(model);
         }
         if let Some(id) = v["id"].as_str().filter(|s| s.len() <= 512) {
@@ -205,9 +213,36 @@ pub struct PriceSnapshot {
     #[serde(default)]
     pub basis: Option<Value>,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    #[default]
+    Model,
+    WebSearch,
+}
+impl Operation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::WebSearch => "web_search",
+        }
+    }
+    pub fn for_path(path: &str) -> Self {
+        if matches!(
+            path.trim_end_matches('/'),
+            "/v1/alpha/search" | "/alpha/search"
+        ) {
+            Self::WebSearch
+        } else {
+            Self::Model
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
+    #[serde(default)]
+    pub operation: Operation,
     #[serde(default = "one")]
     pub cost_multiplier: String,
     pub id: String,
@@ -230,6 +265,7 @@ pub struct Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            operation: Operation::Model,
             cost_multiplier: one(),
             id: String::new(),
             provider: None,
@@ -247,6 +283,44 @@ impl Default for Attempt {
             tokens: Tokens::default(),
             service_tier: None,
             price: None,
+        }
+    }
+}
+impl Attempt {
+    pub fn grouping_model(&self) -> Option<&str> {
+        if self.operation == Operation::WebSearch {
+            Some("web_search")
+        } else {
+            self.pricing_model.as_deref()
+        }
+    }
+    pub fn search_price(&self) -> Option<PriceSnapshot> {
+        if self.operation != Operation::WebSearch
+            || !matches!(self.outcome.as_str(), "success" | "limited")
+            || !self.status.is_some_and(|s| (200..300).contains(&s))
+        {
+            return None;
+        }
+        let multiplier = decimal(&self.cost_multiplier)?;
+        Some(PriceSnapshot {
+            version: "web-search-v1".into(),
+            source: "endpoint".into(),
+            model: "web_search".into(),
+            multiplier: self.cost_multiplier.clone(),
+            rates: std::collections::BTreeMap::from([("cost_per_request".into(), "0.01".into())]),
+            cost: (Decimal::new(1, 2) * multiplier).normalize().to_string(),
+            basis: Some(
+                serde_json::json!({"operation":"web_search","unit":"request","quantity":1,"cost_per_request":"0.01"}),
+            ),
+        })
+    }
+    pub fn calculate_price(&self, pricing: &super::pricing::Pricing) -> Option<PriceSnapshot> {
+        if self.operation == Operation::WebSearch {
+            self.search_price()
+        } else {
+            pricing
+                .quote(self.pricing_model.as_deref(), &self.cost_multiplier)
+                .calculate(&self.tokens, self.service_tier.as_deref())
         }
     }
 }
@@ -294,7 +368,7 @@ impl Record {
     }
     pub fn signature(&self) -> Option<String> {
         let a = self.final_attempt()?;
-        if a.tokens.total().is_none_or(|n| n == 0) {
+        if a.operation == Operation::WebSearch || a.tokens.total().is_none_or(|n| n == 0) {
             return None;
         }
         let model = a.pricing_model.as_ref()?;

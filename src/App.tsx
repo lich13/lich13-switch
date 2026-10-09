@@ -936,7 +936,6 @@ function SettingsForm({
     [busy, setBusy] = useState(false),
     [checking, setChecking] = useState(false),
     [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [quotaInput, setQuotaInput] = useState(String(preferences.quotaRefreshSeconds ?? 60));
   useEffect(() => () => onThemePreview(null), [onThemePreview]);
   const checkForUpdates = () => {
     setChecking(true);
@@ -962,14 +961,8 @@ function SettingsForm({
       noValidate
       onSubmit={(e) => {
         e.preventDefault();
-        const quotaSeconds = prefs.quotaRefreshSeconds === 0 ? 0 : Number(quotaInput);
-        if (quotaSeconds !== 0 && (!Number.isInteger(quotaSeconds) || quotaSeconds < 10 || quotaSeconds > 86400)) {
-          setError("额度刷新间隔需为 10–86400 秒，或关闭自动刷新");
-          return;
-        }
-        const nextPrefs = { ...prefs, quotaRefreshSeconds: quotaSeconds };
         setBusy(true);
-        void command<ViewState>("set_preferences", { preferences: nextPrefs })
+        void command<ViewState>("set_preferences", { preferences: prefs })
           .then(onDone)
           .catch((e) => setError(errorOf(e).message))
           .finally(() => setBusy(false));
@@ -999,18 +992,6 @@ function SettingsForm({
         ))}
       </div>
       <div className="preference-rows">
-        <label className="setting-row"><span>额度自动刷新</span><input type="checkbox" checked={(prefs.quotaRefreshSeconds ?? 60) !== 0} onChange={(e) => {
-          const enabled = e.target.checked;
-          const candidate = Number(quotaInput);
-          const next = enabled && Number.isInteger(candidate) && candidate >= 10 && candidate <= 86400 ? candidate : enabled ? 60 : 0;
-          if (enabled && next !== candidate) setQuotaInput(String(next));
-          setPrefs({ ...prefs, quotaRefreshSeconds: next });
-        }} /></label>
-        {(prefs.quotaRefreshSeconds ?? 60) !== 0 && <label className="setting-row"><span>间隔 / 秒</span><input aria-label="额度刷新间隔" type="number" min={10} max={86400} step={1} value={quotaInput} onChange={(e) => {
-          const value = e.target.value;
-          setQuotaInput(value);
-          if (value !== "") setPrefs({ ...prefs, quotaRefreshSeconds: Number(value) });
-        }} /></label>}
         <label className="setting-row"><span>系统提醒</span><input type="checkbox" checked={prefs.systemNotifications ?? true} onChange={(e) => setPrefs({...prefs, systemNotifications:e.target.checked})} /></label>
         <NotificationPermission />
       </div>

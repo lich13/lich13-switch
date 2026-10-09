@@ -44,6 +44,7 @@ struct State {
     protected_single_provider: bool,
     protection: Option<Duration>,
     revision: u64,
+    open_event: Option<crate::events::Record>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -63,6 +64,7 @@ impl Default for State {
             protected_single_provider: false,
             protection: None,
             revision: 0,
+            open_event: None,
         }
     }
 }
@@ -98,8 +100,12 @@ pub struct Permit {
     retry_generation: u64,
     retry_probe: bool,
     complete: bool,
+    failure_event: Option<crate::events::Record>,
 }
 impl Circuit {
+    pub fn take_open_event(&self) -> Option<crate::events::Record> {
+        self.0.lock().unwrap().open_event.take()
+    }
     pub fn health(&self) -> Health {
         let s = self.0.lock().unwrap();
         let now = Instant::now();
@@ -150,6 +156,7 @@ impl Circuit {
             retry_generation: s.retry_generation,
             retry_probe,
             complete: false,
+            failure_event: None,
         })
     }
     pub fn set_single_provider_protection(&self, protection: Option<Duration>) {
@@ -188,6 +195,9 @@ impl Circuit {
     }
 }
 impl Permit {
+    pub fn set_failure_event(&mut self, event: crate::events::Record) {
+        self.failure_event = Some(event);
+    }
     pub fn finish(mut self, outcome: Outcome, cfg: &Settings) {
         let mut s = self.circuit.0.lock().unwrap();
         let protected_single_provider = s.protection.is_some();
@@ -278,6 +288,37 @@ impl Permit {
                         || (s.total >= cfg.min_requests
                             && f64::from(s.failed) / f64::from(s.total) >= cfg.error_rate))
                 {
+                    if let Some(cause) = self.failure_event.take() {
+                        use crate::events::{Action, CircuitEvidence, Reason, Record};
+                        let mut event = Record::new(
+                            cause.client_id,
+                            cause.provider_id.as_deref(),
+                            cause.model.as_deref(),
+                            Reason::CircuitOpen,
+                            Action::Stopped,
+                            cause.status,
+                            cause.attempt,
+                        );
+                        event.details = cause.details;
+                        event.details.cause_id = Some(cause.id);
+                        event.details.circuit = Some(CircuitEvidence {
+                            failures: s.failures,
+                            failure_threshold: cfg.failure_threshold,
+                            failed_requests: s.failed,
+                            requests: s.total,
+                            error_rate: cfg.error_rate,
+                            min_requests: cfg.min_requests,
+                            trigger: if s.phase != CircuitState::Closed {
+                                "probe_failed"
+                            } else if s.failures >= cfg.failure_threshold {
+                                "consecutive_failures"
+                            } else {
+                                "error_rate"
+                            }
+                            .into(),
+                        });
+                        s.open_event = Some(event);
+                    }
                     s.phase = CircuitState::Open;
                     s.probe = false;
                     s.generation += 1;

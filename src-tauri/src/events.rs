@@ -1,8 +1,11 @@
-//! Exception-only journal. No upstream text, URLs, credentials or account data cross this boundary.
+//! Exception-only journal. Only bounded, sanitized error details cross this boundary.
+#[path = "event_details.rs"]
+mod details;
 use crate::{
     gateway::ClientId,
     storage::{self, AppError, Result},
 };
+pub use details::{safe_message, CircuitEvidence, Details, Phase};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -103,6 +106,8 @@ pub enum Action {
     Stopped,
     Recovered,
     Routed,
+    Reconnecting,
+    NotRetried,
 }
 impl Action {
     pub fn text(self) -> &'static str {
@@ -113,6 +118,8 @@ impl Action {
             Self::Stopped => "需要处理",
             Self::Routed => "已切换供应商",
             Self::Recovered => "已恢复可用",
+            Self::Reconnecting => "等待后重新连接",
+            Self::NotRetried => "已输出，未重试",
         }
     }
 }
@@ -160,6 +167,8 @@ pub struct Record {
     /// from reason at read time by the frontend.
     pub error_code: Option<ErrorCode>,
     pub notified_at: u64,
+    #[serde(default)]
+    pub details: Details,
 }
 impl Record {
     pub fn new(
@@ -196,6 +205,7 @@ impl Record {
             attempt,
             error_code: Some(reason.code()),
             notified_at: 0,
+            details: Details::default(),
         }
     }
     pub fn notification(&self) -> String {
@@ -219,6 +229,9 @@ impl Record {
             && self.provider_id == other.provider_id
             && self.model == other.model
             && self.reason == other.reason
+            && self.status == other.status
+            && self.action == other.action
+            && self.details == other.details
     }
 }
 fn safe_id(s: &str) -> Option<String> {
@@ -259,7 +272,7 @@ struct Journal {
     error: Option<String>,
 }
 enum Job {
-    Append(Record),
+    Append(Box<Record>),
     Clear(oneshot::Sender<Result<()>>),
     Prune,
     NotificationAccepted(String),
@@ -296,7 +309,7 @@ fn load(path: &Path) -> Journal {
         Ok(Some(bytes)) => {
             for line in bytes.split(|b| *b == b'\n').filter(|b| !b.is_empty()) {
                 match serde_json::from_slice::<Record>(line) {
-                    Ok(r)
+                    Ok(mut r)
                         if uuid::Uuid::parse_str(&r.id).is_ok()
                             && r.provider_id
                                 .as_deref()
@@ -304,7 +317,10 @@ fn load(path: &Path) -> Journal {
                             && r.model.as_deref().is_none_or(|s| safe_model(s).is_some())
                             && r.last_at <= now().saturating_add(60) =>
                     {
-                        if r.last_at >= now().saturating_sub(RETENTION) {
+                        r.details = r.details.sanitized();
+                        if r.reason != Reason::Recovered
+                            && r.last_at >= now().saturating_sub(RETENTION)
+                        {
                             j.records.push_back(r)
                         }
                     }
@@ -362,6 +378,26 @@ impl Service {
             let mut done = None;
             match job {
                 Job::Append(r) => {
+                    let mut r = *r;
+                    if r.reason == Reason::CircuitOpen {
+                        // A repeated cause may already have been merged into an earlier row.
+                        r.details.cause_id = journal
+                            .records
+                            .iter()
+                            .rev()
+                            .find(|old| {
+                                old.reason != Reason::CircuitOpen
+                                    && old.details.counted_failure == Some(true)
+                                    && old.client_id == r.client_id
+                                    && old.provider_id == r.provider_id
+                                    && old.model == r.model
+                                    && old.status == r.status
+                                    && old.details.upstream_code == r.details.upstream_code
+                                    && old.details.message == r.details.message
+                                    && old.details.phase == r.details.phase
+                            })
+                            .map(|cause| cause.id.clone());
+                    }
                     notify = !matches!(r.reason, Reason::Recovered | Reason::Failover);
                     if let Some(old) =
                         journal.records.iter_mut().rev().find(|old| {
@@ -418,8 +454,12 @@ impl Service {
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
         self.events.subscribe()
     }
-    pub fn emit(&self, r: Record) {
-        if self.sender.try_send(Job::Append(r)).is_err() {
+    pub fn emit(&self, mut r: Record) {
+        if r.reason == Reason::Recovered {
+            return;
+        }
+        r.details = r.details.sanitized();
+        if self.sender.try_send(Job::Append(Box::new(r))).is_err() {
             let mut j = self.journal.lock().unwrap();
             j.error = Some("日志队列已满，部分事件未记录".into());
             let _ = self.events.send(Change {
@@ -440,7 +480,8 @@ impl Service {
             .records
             .iter()
             .filter(|r| {
-                r.last_at >= cutoff
+                r.reason != Reason::Recovered
+                    && r.last_at >= cutoff
                     && f.from.is_none_or(|t| r.last_at >= t)
                     && f.to.is_none_or(|t| r.first_at <= t)
                     && f.client_id.is_none_or(|v| r.client_id == Some(v))
@@ -469,7 +510,11 @@ impl Service {
             .unwrap()
             .records
             .iter()
-            .find(|r| r.id == id && r.last_at >= now().saturating_sub(RETENTION))
+            .find(|r| {
+                r.reason != Reason::Recovered
+                    && r.id == id
+                    && r.last_at >= now().saturating_sub(RETENTION)
+            })
             .cloned()
     }
     pub async fn clear(&self) -> Result<()> {
@@ -479,5 +524,72 @@ impl Service {
             .map_err(|_| AppError::new("LOG_BUSY", "日志繁忙，请重试"))?;
         rx.await
             .map_err(|_| AppError::new("LOG_WRITE", "日志清空失败"))?
+    }
+}
+
+#[cfg(test)]
+mod v016_tests {
+    use super::*;
+    #[test]
+    fn distinct_error_codes_statuses_and_actions_do_not_merge() {
+        let mut a = Record::new(
+            None,
+            None,
+            Some("fixture-model"),
+            Reason::ModelUnavailable,
+            Action::TryingNext,
+            Some(404),
+            Some(1),
+        );
+        a.details.upstream_code = Some("model_not_found".into());
+        a.details.counted_failure = Some(false);
+        let mut b = a.clone();
+        assert!(a.same(&b));
+        b.status = Some(403);
+        assert!(!a.same(&b));
+        b = a.clone();
+        b.details.upstream_code = Some("unsupported_model".into());
+        assert!(!a.same(&b));
+        b = a.clone();
+        b.action = Action::Returned;
+        assert!(!a.same(&b));
+        b = a.clone();
+        b.details.ws_close_code = Some(1013);
+        assert!(!a.same(&b));
+    }
+    #[test]
+    fn legacy_records_read_without_details_and_recoveries_are_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.jsonl");
+        let a = Record::new(
+            None,
+            None,
+            None,
+            Reason::ModelUnavailable,
+            Action::Returned,
+            Some(200),
+            None,
+        );
+        let mut old = serde_json::to_value(&a).unwrap();
+        old.as_object_mut().unwrap().remove("details");
+        let recovered = Record::new(
+            None,
+            None,
+            None,
+            Reason::Recovered,
+            Action::Recovered,
+            None,
+            None,
+        );
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n", old, serde_json::to_string(&recovered).unwrap()),
+        )
+        .unwrap();
+        let loaded = load(&path);
+        assert!(loaded.error.is_none());
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.records[0].status, Some(200));
+        assert_eq!(loaded.records[0].details, Details::default());
     }
 }
