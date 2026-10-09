@@ -557,11 +557,16 @@ describe("usage records", () => {
     expect(calls("get_usage_logs")).toHaveLength(initial);
     fireEvent.change(screen.getByRole("spinbutton", { name: "跳转页码" }), { target: { value: "4" } });
     fireEvent.keyDown(screen.getByRole("spinbutton", { name: "跳转页码" }), { key: "Enter" });
-    await waitFor(() => expect(lastFilter().page).toBe(4));
-    expect(screen.getByRole("button", { name: "4" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+    await waitFor(() => {
+      expect(lastFilter().page).toBe(4);
+      expect(screen.getByRole("button", { name: "4" })).toHaveAttribute("aria-current", "page");
+      expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+    });
     await user.click(screen.getByRole("button", { name: "上一页" }));
-    await waitFor(() => expect(lastFilter().page).toBe(3));
+    await waitFor(() => {
+      expect(lastFilter().page).toBe(3);
+      expect(screen.getByRole("button", { name: "3" })).toHaveAttribute("aria-current", "page");
+    });
 
     await user.selectOptions(screen.getByRole("combobox", { name: "用量客户端" }), "codex");
     await waitFor(() => expect(lastFilter()).toMatchObject({ page: 1, client: "codex" }));
