@@ -122,3 +122,7 @@ https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b30
 https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/pricing_service.go
 https://developers.openai.com/api/docs/guides/compaction
 https://developers.openai.com/api/docs/guides/websocket-mode
+
+The Codex ordinary API login compatibility review references CC Switch at `00db3eef0431f8e981f5063151e2ac10bd8da79e` (MIT), under the notice above. `OPENAI_API_KEY` and credential-store precedence inform detection; connection selection, byte-preserving base_url edits, and recovery transactions are independently implemented. This integration does not normalize provider IDs, change models, or manage keyring entries.
+
+https://github.com/farion1231/cc-switch/blob/00db3eef0431f8e981f5063151e2ac10bd8da79e/src-tauri/src/codex_config.rs

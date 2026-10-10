@@ -52,14 +52,28 @@ it("preserves a transport draft across events and retries a conflict with the re
   await user.click(screen.getByRole("button", { name: "保存" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("网关设置已变化");
   expect(save).toHaveBeenLastCalledWith(
-    { op: "policyProvider", id: provider.id, supportsWebsocket: false, allowedModels: null },
+    {
+      op: "policyProvider",
+      id: provider.id,
+      supportsWebsocket: false,
+      handoffAfterCompaction: true,
+      takeNewThreads: false,
+      allowedModels: null,
+    },
     "before",
   );
   expect(checkbox).not.toBeChecked();
   rerender(<ProviderSettings {...props} revision="refreshed" />);
   await user.click(screen.getByRole("button", { name: "重试" }));
   expect(save).toHaveBeenLastCalledWith(
-    { op: "policyProvider", id: provider.id, supportsWebsocket: false, allowedModels: null },
+    {
+      op: "policyProvider",
+      id: provider.id,
+      supportsWebsocket: false,
+      handoffAfterCompaction: true,
+      takeNewThreads: false,
+      allowedModels: null,
+    },
     null,
   );
   rerender(

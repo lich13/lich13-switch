@@ -1,4 +1,8 @@
+#[cfg(test)]
+mod api_login_v020_tests;
 mod claude_config;
+mod codex_api;
+pub(crate) use takeover::manages_auth;
 mod client;
 mod registry;
 mod retired;
@@ -20,6 +24,8 @@ mod routing;
 mod upstream_error;
 #[cfg(test)]
 mod v019_usage_tests;
+#[cfg(test)]
+mod v020_tests;
 mod websocket;
 pub use quota::QuotaView;
 mod takeover;
@@ -63,6 +69,8 @@ pub struct ProviderView {
     pub rpm_ledger_error: bool,
     pub allowed_models: Option<Vec<String>>,
     pub supports_websocket: bool,
+    pub handoff_after_compaction: bool,
+    pub take_new_threads: bool,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -79,12 +87,14 @@ pub struct View {
     pub config_state: String,
     pub config_error: Option<String>,
     pub config_warning: Option<String>,
+    pub connection_mode: String,
     pub providers: Vec<ProviderView>,
     pub settings: Settings,
     pub active_connections: usize,
     pub waiting_requests: usize,
     pub capacity_retries: Vec<admission::CapacityRetry>,
     pub websocket_retries: Vec<admission::CapacityRetry>,
+    pub transient_retries: Vec<admission::CapacityRetry>,
     pub compaction_pending: Vec<String>,
     pub error: Option<String>,
     pub recovery_pending: bool,
@@ -221,6 +231,32 @@ impl Gateway {
         }
     }
 
+    fn record_final(
+        &self,
+        cause: Option<&crate::events::Record>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        status: Option<u16>,
+        attempt: usize,
+    ) {
+        use crate::events::{Action, Reason};
+        let mut event = crate::events::Record::new(
+            Some(self.0.client),
+            provider,
+            model,
+            Reason::FailoverExhausted,
+            Action::Returned,
+            cause.and_then(|c| c.status).or(status),
+            Some(attempt.min(u32::MAX as usize) as u32),
+        );
+        if let Some(cause) = cause {
+            event.details = cause.details.clone();
+            event.details.cause_id = Some(cause.id.clone());
+        }
+        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
+            service.emit(event);
+        }
+    }
     pub fn set_quota_interval(&self, seconds: u64) {
         self.0.quota.set_interval(seconds);
     }
@@ -291,9 +327,6 @@ impl Gateway {
         Ok(gateway)
     }
     pub fn import_initial(&self, home: &Path) -> Result<()> {
-        if self.0.client != ClientId::Claude {
-            return Ok(());
-        }
         let _guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
         s.home = Some(home.to_owned());
@@ -304,17 +337,28 @@ impl Gateway {
             return Ok(());
         }
         let mut next = s.store.clone();
+        if self.0.client == ClientId::Codex {
+            // Existing stores keep their historical Bearer behavior. Only a new
+            // install imports the authentication route already in use.
+            if s.revision != "missing" {
+                return Ok(());
+            }
+            let Ok(connection) = codex_api::detect(home) else {
+                return Ok(());
+            };
+            next.connection = connection;
+        }
         if next.providers.is_empty() {
             if !self.0.client.config(home).exists() {
                 return Ok(());
             }
-            let (_, pair) = takeover::read_for(self.0.client, home)?;
+            let (_, pair) = takeover::read_connection(self.0.client, home, &next.connection)?;
             if pair.base_url.as_deref().is_none_or(str::is_empty)
                 && pair.token.as_deref().is_none_or(str::is_empty)
             {
                 return Ok(());
             }
-            let (base_url, token) = takeover::import_for(self.0.client, home)?;
+            let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
             for port in self.0.registry.ports.lock().unwrap().iter() {
                 model::base_url(&base_url, *port)?;
             }
@@ -327,12 +371,48 @@ impl Gateway {
                 },
                 false,
             )?;
+            if self.0.client == ClientId::Codex {
+                let websocket = match &next.connection {
+                    codex_api::Connection::ApiKey { provider } => {
+                        codex_api::websocket(home, provider)?
+                    }
+                    _ => takeover::websocket_support_for(self.0.client, home)?,
+                }
+                .unwrap_or(true);
+                if let Some(provider) = next.providers.last_mut() {
+                    provider.supports_websocket = websocket;
+                }
+            }
         }
         next.initialized = true;
         s.revision = next.persist(&self.0.data.join("gateway.json"), &s.revision)?;
         s.store = next;
         self.0.admission.configure(&s.store.providers, false);
         Ok(())
+    }
+    fn import_pair(
+        client: ClientId,
+        home: &Path,
+        connection: &codex_api::Connection,
+    ) -> Result<(String, String)> {
+        if let (ClientId::Codex, codex_api::Connection::ApiKey { provider }) = (client, connection)
+        {
+            let (_, pair) = codex_api::read(home, provider)?;
+            let base = pair
+                .base_url
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::new("IMPORT", "配置缺少供应商地址"))?;
+            let token = pair
+                .token
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::new("IMPORT", "auth.json 缺少 API Key"))?;
+            if token.starts_with("gs_") && base.contains("127.0.0.1") {
+                return Err(AppError::new("MANAGED", "不能导入网关的本地凭据"));
+            }
+            Ok((base, token))
+        } else {
+            takeover::import_for(client, home)
+        }
     }
     pub fn client_id(&self) -> ClientId {
         self.0.client
@@ -344,6 +424,7 @@ impl Gateway {
         let editable = (
             self.0.client,
             &s.store.providers,
+            &s.store.connection,
             &s.store.settings,
             &s.store.mode,
             &s.store.selected,
@@ -367,7 +448,7 @@ impl Gateway {
         let config = s
             .home
             .as_ref()
-            .map(|h| takeover::read_for(self.0.client, h));
+            .map(|h| takeover::read_connection(self.0.client, h, &s.store.connection));
         let config_revision = config
             .as_ref()
             .and_then(|r| r.as_ref().ok())
@@ -399,6 +480,11 @@ impl Gateway {
             config_provider,
             config_state: config_state.into(),
             config_error: config.and_then(|r| r.err()).map(|e| e.message),
+            connection_mode: match &s.store.connection {
+                codex_api::Connection::Bearer => "bearer",
+                _ => "apiKey",
+            }
+            .into(),
             config_warning: if self.0.client == ClientId::Claude {
                 s.home.as_ref().and_then(|h| claude_config::warning(h))
             } else {
@@ -429,6 +515,8 @@ impl Gateway {
                         max_rpm: p.max_rpm,
                         allowed_models: p.allowed_models.clone(),
                         supports_websocket: p.supports_websocket,
+                        handoff_after_compaction: p.handoff_after_compaction,
+                        take_new_threads: p.take_new_threads,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
                         rpm_used,
                         rpm_retry_in,
@@ -445,16 +533,14 @@ impl Gateway {
             waiting_requests: waiting,
             capacity_retries: self.0.admission.capacity_retries(),
             websocket_retries: self.0.admission.websocket_retries(),
-            compaction_pending: if self.0.client == ClientId::Codex
-                && s.store.mode == "auto"
-                && s.store.settings.handoff_after_compaction
-            {
-                self.0.compaction.pending(
+            transient_retries: self.0.admission.transient_retries(),
+            compaction_pending: if self.0.client == ClientId::Codex && s.store.mode == "auto" {
+                self.0.compaction.pending_policy(
                     &s.store
                         .providers
                         .iter()
                         .filter(|p| p.queued)
-                        .map(|p| p.id.clone())
+                        .cloned()
                         .collect::<Vec<_>>(),
                 )
             } else {
@@ -502,9 +588,15 @@ impl Gateway {
         }
         let guarded = s.running || self.0.data.join("gateway-recovery.json").exists();
         if guarded {
-            let current = takeover::read_for(self.0.client, home)?.1;
-            let next = takeover::pair_for(self.0.client, text)?;
-            if current != next {
+            let current = takeover::read_connection(self.0.client, home, &s.store.connection)?.1;
+            let unchanged = if let (ClientId::Codex, codex_api::Connection::ApiKey { provider }) =
+                (self.0.client, &s.store.connection)
+            {
+                codex_api::base(text, provider)? == current.base_url
+            } else {
+                current == takeover::pair_for(self.0.client, text)?
+            };
+            if !unchanged {
                 return Err(AppError::new(
                     "GATEWAY_ACTIVE",
                     "请先停用网关并处理恢复事务，再修改连接地址或 Token",
@@ -596,10 +688,37 @@ impl Gateway {
         }
         let mut next = s.store.clone();
         match edit {
+            Edit::Connection { mode } => {
+                if self.0.client != ClientId::Codex || s.running {
+                    return Err(AppError::new(
+                        "GATEWAY_ACTIVE",
+                        "请先关闭 Codex 网关再修改连接方式",
+                    ));
+                }
+                if crate::official::blocks_gateway(&self.0.data, home) {
+                    return Err(AppError::new("OFFICIAL_MODE", "请先关闭官方账号连接"));
+                }
+                next.connection = match mode.as_str() {
+                    "auto" => codex_api::detect(home)?,
+                    "apiKey" => codex_api::binding(home)?,
+                    "bearer" => {
+                        takeover::read_for(ClientId::Codex, home)?;
+                        codex_api::Connection::Bearer
+                    }
+                    _ => return Err(AppError::new("SETTINGS", "连接方式无效")),
+                };
+            }
             Edit::Import => {
-                let supports_websocket =
-                    takeover::websocket_support_for(self.0.client, home)?.unwrap_or(true);
-                let (base_url, token) = takeover::import_for(self.0.client, home)?;
+                let supports_websocket = match &next.connection {
+                    codex_api::Connection::ApiKey { provider }
+                        if self.0.client == ClientId::Codex =>
+                    {
+                        codex_api::websocket(home, provider)?
+                    }
+                    _ => takeover::websocket_support_for(self.0.client, home)?,
+                }
+                .unwrap_or(true);
+                let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
                 next.edit(
                     Edit::SaveProvider {
                         id: None,
@@ -749,7 +868,7 @@ impl Gateway {
             }
             let p = Self::exit_provider(&s.store, None)?;
             let exit = takeover::Pair::new(&p.base_url, &p.token);
-            let (current, _) = takeover::read_for(self.0.client, home)?;
+            let (current, _) = takeover::read_connection(self.0.client, home, &s.store.connection)?;
             let mut next = s.store.clone();
             next.resume = Some(model::Resume {
                 home: home.to_owned(),
@@ -805,9 +924,13 @@ impl Gateway {
         if self.0.inner.lock().unwrap().running {
             return Ok(());
         }
-        let (revision, intent) = {
+        let (revision, intent, connection) = {
             let s = self.0.inner.lock().unwrap();
-            (self.view_revision(&s), s.store.resume.clone())
+            (
+                self.view_revision(&s),
+                s.store.resume.clone(),
+                s.store.connection.clone(),
+            )
         };
         let Some(intent) = intent.filter(|i| i.desired) else {
             return Ok(());
@@ -819,7 +942,8 @@ impl Gateway {
                     "客户端目录已变化，自动恢复已停止",
                 ));
             }
-            let (config_revision, pair) = takeover::read_for(self.0.client, home)?;
+            let (config_revision, pair) =
+                takeover::read_connection(self.0.client, home, &connection)?;
             if pair.fingerprint() != intent.pair_hash {
                 return Err(AppError::new(
                     "RESUME_CONFLICT",
@@ -846,7 +970,9 @@ impl Gateway {
         let listener_task = {
             let mut s = self.0.inner.lock().unwrap();
             if let (Some(expected), Some(home)) = (expected_config, &s.home) {
-                if takeover::read_for(self.0.client, home)?.0 != expected {
+                if takeover::read_connection(self.0.client, home, &s.store.connection)?.0
+                    != expected
+                {
                     return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
                 }
             }
@@ -863,7 +989,11 @@ impl Gateway {
                         let target = match exit.as_ref() {
                             Some(pair) => pair.clone(),
                             None => {
-                                let (_, pair) = takeover::read_for(self.0.client, home)?;
+                                let (_, pair) = takeover::read_connection(
+                                    self.0.client,
+                                    home,
+                                    &s.store.connection,
+                                )?;
                                 if pair.fingerprint() != intent.pair_hash {
                                     return Err(AppError::new(
                                         "RECOVERY",

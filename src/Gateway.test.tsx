@@ -165,6 +165,8 @@ describe("gateway controls", () => {
           id: state.providers[0].id,
           allowedModels: null,
           supportsWebsocket: true,
+          handoffAfterCompaction: state.providers[0].handoffAfterCompaction ?? true,
+          takeNewThreads: state.providers[0].takeNewThreads ?? false,
         },
         expectedRevision: state.revision,
       }),
@@ -349,6 +351,8 @@ it("keeps model choices and manual entries when discovery fails and events refre
       id: "primary",
       allowedModels: ["gpt-A", "custom-model"],
       supportsWebsocket: state.providers[0].supportsWebsocket,
+      handoffAfterCompaction: state.providers[0].handoffAfterCompaction ?? true,
+      takeNewThreads: state.providers[0].takeNewThreads ?? false,
     },
     expectedRevision: state.revision,
   });

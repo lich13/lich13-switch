@@ -483,6 +483,7 @@ async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
     let mut settings = g.view().settings;
     settings.failure_threshold = 1;
+    settings.transient_failure_threshold = 1;
     settings.max_retries = 0;
     settings.queue_seconds = 1;
     update(&g, &t, Edit::Settings { settings });

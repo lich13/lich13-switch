@@ -22,12 +22,12 @@ export const gatewayDemo: GatewayState = {
     port: 15722,
     maxRetries: 3,
     failureThreshold: 4,
+    transientFailureThreshold: 6,
     successThreshold: 2,
     cooldownSeconds: 60,
     rateLimitSeconds: 5,
     capacityRetrySeconds: 60,
     websocketRetrySeconds: 60,
-    handoffAfterCompaction: true,
     errorRate: 0.6,
     minRequests: 10,
     firstByteSeconds: 60,
@@ -54,6 +54,8 @@ export const gatewayDemo: GatewayState = {
       rpmLimited: false,
       allowedModels: null,
       supportsWebsocket: true,
+          handoffAfterCompaction: true,
+          takeNewThreads: false,
     },
     {
       id: "backup",
@@ -71,6 +73,8 @@ export const gatewayDemo: GatewayState = {
       rpmLimited: false,
       allowedModels: null,
       supportsWebsocket: true,
+          handoffAfterCompaction: true,
+          takeNewThreads: false,
     },
   ],
   activeConnections: 0,
@@ -192,12 +196,23 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           rpmLimited: false,
           allowedModels: null,
           supportsWebsocket: true,
+          handoffAfterCompaction: true,
+          takeNewThreads: false,
         });
     }
     if (["modelsProvider", "policyProvider"].includes(e.op as string) && p)
       p.allowedModels = e.allowedModels as string[] | null;
     if (["websocketProvider", "policyProvider"].includes(e.op as string) && p)
       p.supportsWebsocket = Boolean(e.supportsWebsocket);
+    if (e.op === "policyProvider" && p) {
+      p.handoffAfterCompaction = e.handoffAfterCompaction == null ? p.handoffAfterCompaction : Boolean(e.handoffAfterCompaction);
+      p.takeNewThreads = e.takeNewThreads == null ? p.takeNewThreads : Boolean(e.takeNewThreads);
+    }
+    if (e.op === "connection") {
+      if (s.clientId !== "codex" || s.running) throw new Error("请先关闭 Codex 网关再修改连接方式");
+      if (e.mode !== "auto" && e.mode !== "apiKey" && e.mode !== "bearer") throw new Error("连接方式无效");
+      if (e.mode !== "auto") s.connectionMode = e.mode;
+    }
     if (e.op === "settings") s.settings = e.settings as GatewaySettings;
     if (e.op === "import") throw new Error("预览模式无法读取真实客户端配置");
     s.revision = crypto.randomUUID();

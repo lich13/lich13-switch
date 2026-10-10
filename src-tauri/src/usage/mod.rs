@@ -15,6 +15,8 @@ mod v017_tests;
 mod v018_tests;
 #[cfg(test)]
 mod v019_tests;
+#[cfg(test)]
+mod v020_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -41,6 +43,7 @@ struct Inner {
     backfilling: std::sync::atomic::AtomicBool,
     error: Mutex<Option<String>>,
     write_error: Mutex<Option<String>>,
+    repair_error: Mutex<Option<String>>,
     pending_error: Mutex<Option<String>>,
     syncing: Mutex<bool>,
     report: Mutex<std::collections::BTreeMap<String, sessions::Report>>,
@@ -174,6 +177,7 @@ impl Service {
             backfilling: std::sync::atomic::AtomicBool::new(false),
             error: Mutex::new(error),
             write_error: Mutex::new(write_error),
+            repair_error: Mutex::new(None),
             pending_error: Mutex::new(None),
             syncing: Mutex::new(false),
             report: Mutex::new(Default::default()),
@@ -196,6 +200,22 @@ impl Service {
                     let _ = inner.events.send(());
                 }
                 batch.extend(pending.iter().map(|(_, r)| r.clone()));
+                // One bounded metadata batch per writer iteration, including idle periods.
+                let repair = inner
+                    .store
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .map(store::Store::repair_metadata_batch);
+                let repair_failed = repair
+                    .as_ref()
+                    .and_then(|v| v.as_ref().err())
+                    .map(|e| e.message.clone());
+                let repair_changed = *inner.repair_error.lock().unwrap() != repair_failed;
+                *inner.repair_error.lock().unwrap() = repair_failed;
+                if repair_changed || matches!(repair, Some(Ok(true))) {
+                    let _ = inner.events.send(());
+                }
                 if batch.is_empty() {
                     continue;
                 }
@@ -269,6 +289,7 @@ impl Service {
                 .unwrap()
                 .clone()
                 .or_else(|| self.0.pending_error.lock().unwrap().clone())
+                .or_else(|| self.0.repair_error.lock().unwrap().clone())
                 .or_else(|| self.0.error.lock().unwrap().clone()),
         }
     }
@@ -526,6 +547,9 @@ impl Trace {
     }
 }
 impl AttemptTrace {
+    pub fn is_claude(&self) -> bool {
+        self.trace.0.client == "claude"
+    }
     pub fn update(&mut self, m: &Meter, status: Option<u16>, outcome: Option<&str>) {
         self.attempt.tokens.merge(&m.tokens);
         if m.inclusive_input.is_some() {
@@ -629,6 +653,7 @@ impl Drop for AttemptTrace {
             }
             self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
         }
+        self.attempt.annotate_availability("proxy");
         let mut attempts = self.trace.0.attempts.lock().unwrap();
         if attempts.len() >= 128 {
             let pair = (1..attempts.len())

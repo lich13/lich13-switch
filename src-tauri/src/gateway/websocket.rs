@@ -213,6 +213,44 @@ struct AttemptFailure {
     model_payload: Option<Vec<u8>>,
     details: Box<crate::events::Details>,
 }
+impl AttemptFailure {
+    fn hard_rejection(&self) -> bool {
+        [
+            &self.details.upstream_code,
+            &self.details.upstream_type,
+            &self.details.message,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| super::upstream_error::permanent_rejection(value.as_bytes()))
+    }
+    fn transport_failure(&self) -> bool {
+        self.status.is_none()
+            || matches!(
+                self.details.local_code.as_deref(),
+                Some(
+                    "CONNECT_TIMEOUT"
+                        | "TLS_HANDSHAKE_FAILED"
+                        | "CONNECTION_FAILED"
+                        | "FIRST_BYTE_TIMEOUT"
+                        | "STREAM_INTERRUPTED"
+                        | "STREAM_TIMEOUT"
+                        | "WS_UPGRADE_FAILED"
+                )
+            )
+    }
+    fn retryable(&self) -> bool {
+        (self.hard_rejection() && self.status.is_some_and(|s| s >= 400))
+            || self.transport_failure()
+            || self.status.is_some_and(circuit::retryable)
+    }
+}
+fn local_failure(code: &str) -> Box<crate::events::Details> {
+    Box::new(crate::events::Details {
+        local_code: Some(code.into()),
+        ..Default::default()
+    })
+}
 fn record_failure(
     permits: &mut forward::Permits,
     g: &Gateway,
@@ -221,7 +259,7 @@ fn record_failure(
     failure: &AttemptFailure,
     action: crate::events::Action,
     attempt: usize,
-) {
+) -> crate::events::Record {
     use crate::events::Reason;
     let reason = if failure.context_incompatible {
         Reason::ProtocolError
@@ -233,22 +271,25 @@ fn record_failure(
         Reason::RateLimit
     } else if matches!(failure.status, Some(401 | 403)) {
         Reason::Authentication
+    } else if failure.transport_failure() {
+        Reason::Network
     } else if failure.status.is_some_and(|s| s < 400) || failure.unsupported {
         Reason::ProtocolError
-    } else if failure.status.is_none() {
-        Reason::Network
     } else {
         Reason::UpstreamService
     };
     let mut details = (*failure.details).clone();
-    details.phase = Some(crate::events::Phase::WsHandshake);
+    details
+        .phase
+        .get_or_insert(crate::events::Phase::WsHandshake);
     details.counted_failure = Some(
         !failure.context_incompatible
+            && !failure.hard_rejection()
             && !failure.model_unavailable
             && !failure.capacity
             && !failure.unsupported
             && failure.status != Some(429)
-            && failure.status.is_none_or(circuit::retryable),
+            && failure.retryable(),
     );
     permits.report(
         g,
@@ -259,7 +300,7 @@ fn record_failure(
         failure.status,
         attempt,
         details,
-    );
+    )
 }
 fn value(frame: &Frame) -> Option<serde_json::Value> {
     if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
@@ -454,7 +495,7 @@ async fn upstream_native(
     .await
     {
         Ok(Ok(response)) => response,
-        Ok(Err(_)) => {
+        Ok(Err(error)) => {
             return Err(AttemptFailure {
                 status: None,
                 retry: None,
@@ -463,7 +504,7 @@ async fn upstream_native(
                 model_unavailable: false,
                 context_incompatible: false,
                 model_payload: None,
-                details: Default::default(),
+                details: local_failure(super::connector::diagnostic_code(&error)),
             })
         }
         Err(_) => {
@@ -475,7 +516,7 @@ async fn upstream_native(
                 model_unavailable: false,
                 context_incompatible: false,
                 model_payload: None,
-                details: Default::default(),
+                details: local_failure("FIRST_BYTE_TIMEOUT"),
             })
         }
     };
@@ -514,6 +555,7 @@ async fn upstream_native(
                 .ok()
                 .is_some_and(|v| super::compaction::incompatible(&v)),
             unsupported: !model_unavailable
+                && !super::upstream_error::permanent_rejection(&decoded)
                 && route.client_id == super::ClientId::Codex
                 && unsupported_status(status.as_u16()),
         });
@@ -546,14 +588,14 @@ async fn upstream_native(
     let io = hyper::upgrade::on(&mut response)
         .await
         .map_err(|_| AttemptFailure {
-            status: None,
+            status: Some(101),
             retry: None,
             capacity: false,
             unsupported: false,
             model_unavailable: false,
             context_incompatible: false,
             model_payload: None,
-            details: Default::default(),
+            details: local_failure("WS_UPGRADE_FAILED"),
         })?;
     let socket = WebSocket::from_stream_with_extensions(
         TokioIo::new(io),
@@ -562,14 +604,14 @@ async fn upstream_native(
         options(),
     )
     .map_err(|_| AttemptFailure {
-        status: None,
+        status: Some(101),
         retry: None,
         capacity: false,
-        unsupported: false,
+        unsupported: true,
         model_unavailable: false,
         context_incompatible: false,
         model_payload: None,
-        details: Default::default(),
+        details: local_failure("WS_EXTENSION_UNSUPPORTED"),
     })?;
     Ok(Peer::new(
         socket,
@@ -888,7 +930,7 @@ async fn upstream_bridge(
     );
     let response = match tokio::time::timeout_at(deadline, route.client.request(request)).await {
         Ok(Ok(response)) => response,
-        Ok(Err(_error)) => {
+        Ok(Err(error)) => {
             return Err(AttemptFailure {
                 status: None,
                 retry: None,
@@ -897,7 +939,7 @@ async fn upstream_bridge(
                 model_unavailable: false,
                 context_incompatible: false,
                 model_payload: None,
-                details: Default::default(),
+                details: local_failure(super::connector::diagnostic_code(&error)),
             });
         }
         Err(_) => {
@@ -909,7 +951,7 @@ async fn upstream_bridge(
                 model_unavailable: false,
                 context_incompatible: false,
                 model_payload: None,
-                details: Default::default(),
+                details: local_failure("FIRST_BYTE_TIMEOUT"),
             })
         }
     };
@@ -944,6 +986,7 @@ async fn upstream_bridge(
                 .ok()
                 .is_some_and(|v| super::compaction::incompatible(&v)),
             unsupported: matches!(status.as_u16(), 404 | 405)
+                && !super::upstream_error::permanent_rejection(&decoded)
                 && !super::upstream_error::model_http(status.as_u16(), &decoded),
         });
     }
@@ -985,32 +1028,27 @@ async fn upstream_bridge(
         task,
     };
     let first = match tokio::time::timeout_at(deadline, turn.incoming.recv()).await {
-        Ok(Some(Ok(frame))) => Ok(frame),
-        Ok(Some(Err(_error))) => {
+        Ok(Some(Ok(frame))) => frame,
+        outcome => {
+            let code = match outcome {
+                Ok(Some(Err((1009, _)))) => "PROTOCOL_BUFFER_LIMIT",
+                Err(_) => "FIRST_BYTE_TIMEOUT",
+                _ => "STREAM_INTERRUPTED",
+            };
+            let mut details = local_failure(code);
+            details.phase = Some(crate::events::Phase::Stream);
             return Err(AttemptFailure {
-                status: None,
-                retry: None,
+                status: Some(status.as_u16()),
+                retry,
                 capacity: false,
                 unsupported: false,
                 model_unavailable: false,
                 context_incompatible: false,
                 model_payload: None,
-                details: Default::default(),
+                details,
             });
         }
-        Ok(None) | Err(_) => {
-            return Err(AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
-                details: Default::default(),
-            });
-        }
-    }?;
+    };
     if let Some(mut failure) = first_event_failure(&first) {
         failure.retry = retry;
         failure.status = Some(status.as_u16());
@@ -1161,8 +1199,8 @@ fn disconnect_turn(
     }
     details.counted_failure = Some(transport);
     details.wait_seconds = retry.then_some(cfg.websocket_retry_seconds);
-    if details.upstream_code.is_none() {
-        details.upstream_code = Some(category.into());
+    if transport && details.local_code.is_none() {
+        details.local_code = Some(category.into());
     }
     let reason = if terminal == Some(super::protocol::Terminal::ModelUnavailable) {
         crate::events::Reason::ModelUnavailable
@@ -1261,11 +1299,7 @@ async fn session_once(
     let first_hints =
         value(&first).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
     let conversation = super::compaction::session(&headers);
-    let mut ownership = if g.client_id() == super::ClientId::Codex
-        && !manual
-        && cfg.handoff_after_compaction
-        && !unknown_affinity
-    {
+    let mut ownership = if g.client_id() == super::ClientId::Codex && !manual && !unknown_affinity {
         let eligible: Vec<_> = ids
             .iter()
             .filter(|id| {
@@ -1273,16 +1307,14 @@ async fn session_once(
                     .get(*id)
                     .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
             })
-            .cloned()
+            .filter_map(|id| routes.get(id).map(|r| r.provider.clone()))
             .collect();
         if let Some(session) = conversation.clone().filter(|_| !eligible.is_empty()) {
             Some(
                 g.0.compaction
-                    .prepare(
+                    .prepare_policy(
                         session,
-                        first_hints
-                            .as_ref()
-                            .and_then(|h| h.compacted_window.as_deref()),
+                        first_hints.as_ref(),
                         first_hints.as_ref().is_some_and(|h| {
                             h.previous_response_id.is_none() && !h.compaction_trigger
                         }),
@@ -1302,11 +1334,14 @@ async fn session_once(
     }
     let mut attempts = 0usize;
     let mut ordinary_attempts = 0usize;
+    let mut transient_retries = 0;
+    let mut retry_owner: Option<String> = None;
     let mut capacity_protected = false;
     let mut retry_capacity = false;
     let mut capacity_pending = false;
     let mut capacity_retry_after: Option<Duration> = None;
     let mut capacity_sources = Vec::new();
+    let mut last_error: Option<crate::events::Record> = None;
     let mut last_model_payload: Option<Vec<u8>> = None;
     let mut previous_provider: Option<String> = None;
     let mut unsupported_seen = false;
@@ -1323,13 +1358,12 @@ async fn session_once(
         if ordinary_attempts > cfg.max_retries
             || (unknown_affinity && !capacity_protected && attempts > 0)
         {
-            g.record(
+            g.record_final(
+                last_error.as_ref(),
                 previous_provider.as_deref(),
                 current_model.as_deref(),
-                crate::events::Reason::FailoverExhausted,
-                crate::events::Action::Returned,
                 None,
-                Some(attempts.min(u32::MAX as usize) as u32),
+                attempts,
             );
             if let Some(payload) = last_model_payload.take() {
                 client.send(Frame::text(payload)).await?;
@@ -1343,13 +1377,12 @@ async fn session_once(
         }
         if ids.is_empty() {
             if !capacity_pending {
-                g.record(
+                g.record_final(
+                    last_error.as_ref(),
                     previous_provider.as_deref(),
                     current_model.as_deref(),
-                    crate::events::Reason::FailoverExhausted,
-                    crate::events::Action::Returned,
                     None,
-                    Some(attempts.min(u32::MAX as usize) as u32),
+                    attempts,
                 );
                 if let Some(payload) = last_model_payload.take() {
                     client.send(Frame::text(payload)).await?;
@@ -1391,20 +1424,10 @@ async fn session_once(
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
-        if let Some(owner) = ownership
-            .as_ref()
-            .filter(|lease| !lease.handoff)
-            .and_then(|lease| lease.owner.as_deref())
-        {
-            if let Some(route) = candidates
-                .iter()
-                .find(|route| {
-                    route.provider.id == owner && route.provider_circuit.health().available
-                })
-                .cloned()
-            {
-                candidates = vec![route];
-            }
+        if let Some(owner) = retry_owner.take() {
+            candidates.retain(|route| route.provider.id == owner);
+        } else if let Some(lease) = &ownership {
+            candidates = lease.candidates(candidates);
         }
         let mut admission = match take_slot(
             g,
@@ -1433,6 +1456,16 @@ async fn session_once(
                 return Err(error);
             }
         };
+        if ownership
+            .as_ref()
+            .is_some_and(|lease| !lease.admitted(&admission.route.provider.id))
+        {
+            admission.permits.neutral(cfg);
+            if g.0.compaction.error().is_some() {
+                return Err((1013, "CONVERSATION_OWNERSHIP"));
+            }
+            continue;
+        }
         if let Err(reason) = admission.commit_rpm() {
             return Err(rejected(reason));
         }
@@ -1492,14 +1525,14 @@ async fn session_once(
             Err(failure) => {
                 attempt_protocol.finish(
                     failure.status,
-                    if failure.status.is_some() {
-                        "HTTP"
-                    } else {
+                    if failure.transport_failure() {
                         "NETWORK"
+                    } else {
+                        "HTTP"
                     },
                 );
                 if failure.context_incompatible {
-                    record_failure(
+                    last_error = Some(record_failure(
                         &mut admission.permits,
                         g,
                         &admission.route,
@@ -1507,7 +1540,7 @@ async fn session_once(
                         &failure,
                         crate::events::Action::TryingNext,
                         attempts,
-                    );
+                    ));
                     admission.permits.neutral(cfg);
                     if let Some(owner) = ownership
                         .as_ref()
@@ -1528,7 +1561,7 @@ async fn session_once(
                 }
                 if failure.unsupported {
                     unsupported_seen = true;
-                    record_failure(
+                    last_error = Some(record_failure(
                         &mut admission.permits,
                         g,
                         &admission.route,
@@ -1536,7 +1569,7 @@ async fn session_once(
                         &failure,
                         crate::events::Action::TryingNext,
                         attempts,
-                    );
+                    ));
                     admission.permits.neutral(cfg);
                     continue;
                 }
@@ -1546,16 +1579,37 @@ async fn session_once(
                     capacity_protected = true;
                     budget.protect_capacity();
                 }
-                let retryable = failure.model_unavailable
-                    || failure.capacity
-                    || failure.status.is_none_or(circuit::retryable);
-                record_failure(
+                let retryable =
+                    failure.model_unavailable || failure.capacity || failure.retryable();
+                let retry_delay = if admission.route.client_id == super::ClientId::Codex
+                    && failure.status.is_some_and(circuit::is_server_error)
+                    && !failure.model_unavailable
+                    && !failure.capacity
+                    && !failure.hard_rejection()
+                    && !unknown_affinity
+                    && ordinary_attempts <= cfg.max_retries
+                    && (pinned.as_deref() == Some(&admission.route.provider.id)
+                        || ownership
+                            .as_ref()
+                            .is_some_and(|lease| lease.owns(&admission.route.provider.id)))
+                {
+                    super::routing::transient_delay(&mut transient_retries, failure.retry)
+                } else {
+                    None
+                };
+                let mut failure = failure;
+                failure.details.wait_seconds = retry_delay.map(|delay| delay.as_secs());
+                last_error = Some(record_failure(
                     &mut admission.permits,
                     g,
                     &admission.route,
                     current_model.as_deref(),
                     &failure,
-                    if !ids.is_empty() && !unknown_affinity && ordinary_attempts <= cfg.max_retries
+                    if retry_delay.is_some() {
+                        crate::events::Action::RetryingSame
+                    } else if !ids.is_empty()
+                        && !unknown_affinity
+                        && ordinary_attempts <= cfg.max_retries
                     {
                         crate::events::Action::TryingNext
                     } else if failure.capacity {
@@ -1564,14 +1618,16 @@ async fn session_once(
                         crate::events::Action::Returned
                     },
                     attempts,
-                );
+                ));
                 if failure.model_unavailable {
                     admission.permits.neutral(cfg);
                     last_model_payload = failure.model_payload;
                     continue;
                 }
                 last_model_payload = None;
-                if failure.capacity {
+                if failure.hard_rejection() {
+                    admission.permits.neutral(cfg);
+                } else if failure.capacity {
                     admission.permits.capacity_limited(cfg, failure.retry);
                 } else if failure.status == Some(429) {
                     admission.permits.rate_limited(cfg, failure.retry);
@@ -1583,6 +1639,25 @@ async fn session_once(
 
                 if !retryable {
                     return Err((1008, "upstream rejected websocket handshake"));
+                }
+                if let Some(delay) = retry_delay {
+                    let source = CapacitySource {
+                        provider_id: admission.route.provider.id.clone(),
+                        reset_generation: admission.reset_generation,
+                    };
+                    let provider_id = source.provider_id.clone();
+                    drop(admission);
+                    while_connecting(
+                        client,
+                        g.0.admission.wait_transient(source, delay, cfg.max_waiting),
+                    )
+                    .await?
+                    .map_err(rejected)?;
+                    if g.routing_ids(pinned.as_deref()).contains(&provider_id) {
+                        ids.insert(0, provider_id.clone());
+                        retry_owner = Some(provider_id);
+                    }
+                    continue;
                 }
                 if failure.capacity {
                     capacity_pending = true;
@@ -1745,7 +1820,8 @@ async fn session_once(
                             crate::events::Action::Waiting
                         } else if !failure.model_unavailable
                             && !failure.unsupported
-                            && failure.status.is_none_or(circuit::retryable)
+                            && !failure.hard_rejection()
+                            && failure.retryable()
                             && ordinary_attempts <= cfg.max_retries
                         {
                             crate::events::Action::Reconnecting
@@ -1757,10 +1833,10 @@ async fn session_once(
                     if let Some(mut u) = protocol.take() {
                         u.finish(
                             failure.status,
-                            if failure.status.is_some() {
-                                "HTTP"
-                            } else {
+                            if failure.transport_failure() {
                                 "NETWORK"
+                            } else {
+                                "HTTP"
                             },
                         );
                     }
@@ -1771,10 +1847,8 @@ async fn session_once(
                     retry_capacity = failure.capacity;
                     if failure.model_unavailable
                         || failure.unsupported
-                        || (!failure.capacity
-                            && failure
-                                .status
-                                .is_some_and(|s| s < 400 || !circuit::retryable(s)))
+                        || failure.hard_rejection()
+                        || (!failure.capacity && !failure.retryable())
                     {
                         admission.permits.neutral(cfg);
                         if let Some(payload) = failure.model_payload {
@@ -1855,7 +1929,7 @@ async fn session_once(
                     .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
                 let enabled = {
                     let state = g.0.inner.lock().unwrap();
-                    state.store.settings.handoff_after_compaction && state.store.mode == "auto"
+                    state.store.mode == "auto"
                 };
                 if g.client_id() == super::ClientId::Codex && !manual && enabled {
                     let latest: Vec<_> = g
@@ -1878,24 +1952,20 @@ async fn session_once(
                         });
                     if boundary
                         && latest
-                            .first()
-                            .is_some_and(|next| next.provider.id != route.provider.id)
+                            .iter()
+                            .take_while(|r| r.provider.id != route.provider.id)
+                            .any(|r| r.provider.handoff_after_compaction)
                     {
                         *next_turn = Some(frame);
                         return Err((1999, "compaction handoff"));
                     }
-                    let eligible: Vec<_> = latest.iter().map(|r| r.provider.id.clone()).collect();
+                    let eligible: Vec<_> = latest.iter().map(|r| r.provider.clone()).collect();
                     ownership = if let Some(session) =
                         conversation.clone().filter(|_| !eligible.is_empty())
                     {
                         Some(
                             g.0.compaction
-                                .prepare(
-                                    session,
-                                    hints.as_ref().and_then(|h| h.compacted_window.as_deref()),
-                                    safe_window,
-                                    &eligible,
-                                )
+                                .prepare_policy(session, hints.as_ref(), safe_window, &eligible)
                                 .ok_or((1013, "CONVERSATION_OWNERSHIP"))?,
                         )
                     } else {
@@ -2010,7 +2080,7 @@ async fn session_once(
                                     },
                                     attempts,
                                 );
-                                if failure.model_unavailable {
+                                if failure.model_unavailable || failure.hard_rejection() {
                                     admission.permits.neutral(cfg);
                                 } else if failure.capacity {
                                     admission.permits.capacity_limited(cfg, failure.retry);
@@ -2018,7 +2088,7 @@ async fn session_once(
                                     admission.permits.rate_limited(cfg, failure.retry);
                                 } else if failure.unsupported {
                                     admission.permits.neutral(cfg);
-                                } else if failure.status.is_none_or(circuit::retryable) {
+                                } else if failure.retryable() {
                                     admission.permits.failure(cfg, failure.retry);
                                 } else {
                                     admission.permits.neutral(cfg);
@@ -2063,7 +2133,8 @@ async fn session_once(
                                             crate::events::Action::Waiting
                                         } else if !failure.model_unavailable
                                             && !failure.unsupported
-                                            && failure.status.is_none_or(circuit::retryable)
+                                            && !failure.hard_rejection()
+                                            && failure.retryable()
                                             && ordinary_attempts <= cfg.max_retries
                                         {
                                             crate::events::Action::Reconnecting
@@ -2075,14 +2146,17 @@ async fn session_once(
                                     if let Some(mut u) = protocol.take() {
                                         u.finish(
                                             failure.status,
-                                            if failure.status.is_some() {
-                                                "HTTP"
-                                            } else {
+                                            if failure.transport_failure() {
                                                 "NETWORK"
+                                            } else {
+                                                "HTTP"
                                             },
                                         );
                                     }
-                                    if failure.model_unavailable || failure.unsupported {
+                                    if failure.model_unavailable
+                                        || failure.unsupported
+                                        || failure.hard_rejection()
+                                    {
                                         admission.permits.neutral(cfg);
                                         return Err((1008, "upstream rejected websocket"));
                                     }
@@ -2090,7 +2164,7 @@ async fn session_once(
                                         admission.permits.capacity_limited(cfg, failure.retry);
                                     } else if failure.status == Some(429) {
                                         admission.permits.rate_limited(cfg, failure.retry);
-                                    } else if failure.status.is_none_or(circuit::retryable) {
+                                    } else if failure.retryable() {
                                         admission.permits.failure(cfg, failure.retry);
                                     } else {
                                         admission.permits.neutral(cfg);
@@ -2285,7 +2359,7 @@ async fn session_once(
                     if e.0 == 1008 {
                         if let Some(mut admission) = turn.take() {
                             admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::Returned, Some(101), attempts,
-                                crate::events::Details { phase: Some(crate::events::Phase::WsSend), counted_failure: Some(false), upstream_code: Some("UNSUPPORTED_EVENT".into()), ..Default::default() });
+                                crate::events::Details { phase: Some(crate::events::Phase::WsSend), counted_failure: Some(false), local_code: Some("UNSUPPORTED_EVENT".into()), ..Default::default() });
                             admission.permits.neutral(cfg);
                         }
                     } else {

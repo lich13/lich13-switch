@@ -1911,7 +1911,19 @@ select:focus-visible {
 }
 .quick-provider-alert {
   display: block;
+  max-width: calc(100% - 30px);
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
   margin: 3px 0 2px 30px;
+}
+.quick-provider-alert:hover {
+  background: none;
+  text-decoration: underline;
 }
 .quick-name strong {
   font-size: 13px;

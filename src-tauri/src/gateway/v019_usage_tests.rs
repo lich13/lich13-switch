@@ -214,4 +214,5 @@ fn terminal_placeholder_zero_does_not_erase_known_positive_usage() {
     assert_eq!(observation.meter.tokens.input, Some(100));
     assert_eq!(observation.meter.tokens.output, Some(7));
     assert_eq!(observation.meter.tokens.cache_read, Some(20));
+    assert_eq!(observation.meter.tokens.inclusive_input, None);
 }

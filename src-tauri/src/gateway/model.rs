@@ -19,6 +19,10 @@ pub struct Provider {
     pub allowed_models: Option<Vec<String>>,
     #[serde(default = "default_websocket_support")]
     pub supports_websocket: bool,
+    #[serde(default = "default_websocket_support")]
+    pub handoff_after_compaction: bool,
+    #[serde(default)]
+    pub take_new_threads: bool,
 }
 fn default_websocket_support() -> bool {
     true
@@ -29,6 +33,8 @@ pub struct Settings {
     pub port: u16,
     pub max_retries: usize,
     pub failure_threshold: u32,
+    #[serde(default = "default_transient_failure_threshold")]
+    pub transient_failure_threshold: u32,
     pub success_threshold: u32,
     pub cooldown_seconds: u64,
     #[serde(default = "default_rate_limit_seconds")]
@@ -37,8 +43,6 @@ pub struct Settings {
     pub capacity_retry_seconds: u64,
     #[serde(default = "default_capacity_retry_seconds")]
     pub websocket_retry_seconds: u64,
-    #[serde(default = "default_websocket_support")]
-    pub handoff_after_compaction: bool,
     pub error_rate: f64,
     pub min_requests: u32,
     pub first_byte_seconds: u64,
@@ -52,6 +56,9 @@ pub struct Settings {
 }
 fn default_wait_seconds() -> u64 {
     30
+}
+fn default_transient_failure_threshold() -> u32 {
+    6
 }
 fn default_rate_limit_seconds() -> u64 {
     5
@@ -68,12 +75,12 @@ impl Default for Settings {
             port: 15722,
             max_retries: 3,
             failure_threshold: 4,
+            transient_failure_threshold: default_transient_failure_threshold(),
             success_threshold: 2,
             cooldown_seconds: 60,
             rate_limit_seconds: default_rate_limit_seconds(),
             capacity_retry_seconds: default_capacity_retry_seconds(),
             websocket_retry_seconds: default_capacity_retry_seconds(),
-            handoff_after_compaction: true,
             error_rate: 0.6,
             min_requests: 10,
             first_byte_seconds: 60,
@@ -90,6 +97,7 @@ impl Settings {
         if self.port == 0
             || self.max_retries > 15
             || self.failure_threshold == 0
+            || !(1..=1000).contains(&self.transient_failure_threshold)
             || self.success_threshold == 0
             || self.min_requests == 0
             || self.max_waiting == 0
@@ -120,6 +128,8 @@ pub struct Store {
     pub schema: u32,
     #[serde(default)]
     pub initialized: bool,
+    #[serde(default)]
+    pub connection: super::codex_api::Connection,
     pub providers: Vec<Provider>,
     pub settings: Settings,
     pub mode: String,
@@ -140,6 +150,7 @@ impl Default for Store {
         Self {
             schema: 2,
             initialized: false,
+            connection: Default::default(),
             providers: vec![],
             settings: Settings::default(),
             mode: "manual".into(),
@@ -196,6 +207,10 @@ pub enum Edit {
         id: String,
         supports_websocket: bool,
         allowed_models: Option<Vec<String>>,
+        #[serde(default)]
+        handoff_after_compaction: Option<bool>,
+        #[serde(default)]
+        take_new_threads: Option<bool>,
     },
     WebsocketProvider {
         id: String,
@@ -215,6 +230,9 @@ pub enum Edit {
     },
     Reset {
         id: String,
+    },
+    Connection {
+        mode: String,
     },
     Import,
 }
@@ -256,8 +274,24 @@ impl Store {
     pub fn load(path: &Path) -> Result<(Self, String)> {
         let raw = storage::read_optional(path)?;
         let store: Self = match &raw {
-            Some(raw) => serde_json::from_slice(raw)
-                .map_err(|_| AppError::new("STORE", "网关存储无法读取，请保留原文件"))?,
+            Some(raw) => {
+                let invalid = || AppError::new("STORE", "网关存储无法读取，请保留原文件");
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(raw).map_err(|_| invalid())?;
+                let legacy = value["settings"]["handoffAfterCompaction"]
+                    .as_bool()
+                    .unwrap_or(true);
+                if let Some(providers) = value["providers"].as_array_mut() {
+                    for provider in providers {
+                        if let Some(fields) = provider.as_object_mut() {
+                            fields
+                                .entry("handoffAfterCompaction")
+                                .or_insert(legacy.into());
+                        }
+                    }
+                }
+                serde_json::from_value(value).map_err(|_| invalid())?
+            }
             None => Self::default(),
         };
         if !matches!(store.schema, 1 | 2) {
@@ -350,6 +384,8 @@ impl Store {
                         max_rpm: 0,
                         allowed_models: None,
                         supports_websocket: default_websocket_support(),
+                        handoff_after_compaction: true,
+                        take_new_threads: false,
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);
@@ -416,6 +452,8 @@ impl Store {
                 id,
                 supports_websocket,
                 allowed_models,
+                handoff_after_compaction,
+                take_new_threads,
             } => {
                 self.edit(
                     Edit::ModelsProvider {
@@ -424,7 +462,14 @@ impl Store {
                     },
                     running,
                 )?;
-                self.provider_mut(&id)?.supports_websocket = supports_websocket;
+                let provider = self.provider_mut(&id)?;
+                provider.supports_websocket = supports_websocket;
+                if let Some(value) = handoff_after_compaction {
+                    provider.handoff_after_compaction = value;
+                }
+                if let Some(value) = take_new_threads {
+                    provider.take_new_threads = value;
+                }
             }
             Edit::WebsocketProvider {
                 id,
@@ -468,7 +513,9 @@ impl Store {
                 }
                 self.settings = settings;
             }
-            Edit::Import | Edit::Reset { .. } => unreachable!("handled by gateway"),
+            Edit::Import | Edit::Reset { .. } | Edit::Connection { .. } => {
+                unreachable!("handled by gateway")
+            }
         }
         Ok(())
     }

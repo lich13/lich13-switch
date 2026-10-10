@@ -170,7 +170,11 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
         return Details::default();
     };
     Details {
-        upstream_code: error.get("code").and_then(Value::as_str).map(str::to_owned),
+        upstream_code: error.get("code").and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) if n.is_i64() || n.is_u64() => Some(n.to_string()),
+            _ => None,
+        }),
         upstream_type: error.get("type").and_then(Value::as_str).map(str::to_owned),
         parameter: error
             .get("param")

@@ -206,13 +206,24 @@ impl Projector {
                 }
                 frame.state = 3;
                 // Request/response content is unnecessary except for compaction markers.
-                let compact_array = matches!(frame.role.as_str(), "input" | "output");
+                let compact_array = frame.role == "output";
                 let compact = value.get("type").and_then(Value::as_str).is_some_and(|t| {
                     matches!(
                         t,
                         "compaction" | "context_compaction" | "compaction_trigger"
                     )
                 });
+                if frame.keep && frame.role == "input" && items.len() >= ITEMS {
+                    // Overflow is not a valid first-turn proof.
+                    if let Some(last) = items.last_mut() {
+                        *last = serde_json::json!({"type":"unknown"});
+                    }
+                }
+                let value = if frame.role == "input" && !compact {
+                    serde_json::json!({"type":value.get("type").cloned().unwrap_or(Value::String("message".into())),"role":value.get("role")})
+                } else {
+                    value
+                };
                 if frame.keep && items.len() < ITEMS && (!compact_array || compact) {
                     self.retained_bytes = self
                         .retained_bytes
@@ -262,7 +273,7 @@ impl Projector {
             } else {
                 Value::Null
             }
-        } else if content(&role) {
+        } else if content(&role) || role == "input" {
             Value::String(if nonempty { "x" } else { "" }.into())
         } else if large {
             Value::Null

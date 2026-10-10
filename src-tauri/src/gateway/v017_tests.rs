@@ -608,6 +608,16 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
         }
         let (t, g) = fixture(urls).await;
         configure(&g, &t, retries);
+        update(
+            &g,
+            &t,
+            Edit::Settings {
+                settings: Settings {
+                    transient_failure_threshold: 1,
+                    ..g.view().settings
+                },
+            },
+        );
         if provider_count == 2 {
             update(
                 &g,

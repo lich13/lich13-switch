@@ -178,6 +178,7 @@ fn counter_value(v: &Value) -> Value {
 }
 fn raw(v: &Value) -> Tokens {
     Tokens {
+        inclusive_input: v["input_tokens"].as_u64(),
         input: v["input_tokens"].as_u64(),
         output: v["output_tokens"].as_u64(),
         cache_read: v["cached_input_tokens"]
@@ -586,7 +587,6 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &[String]) -> Option<Record
         }
         c.replay = false;
     }
-    tokens.cache_write = tokens.input.map(|_| 0);
     tokens.cache_read = tokens.cache_read.map(|n| n.min(tokens.input.unwrap_or(n)));
     tokens.input = tokens
         .input

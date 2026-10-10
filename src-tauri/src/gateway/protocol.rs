@@ -347,6 +347,7 @@ impl Protocol {
         }
     }
     pub fn attach_usage(&mut self, usage: crate::usage::AttemptTrace) {
+        self.observation.meter.anthropic = Some(usage.is_claude());
         self.usage = Some(usage);
     }
     pub fn attach_ownership(
@@ -388,7 +389,9 @@ impl Protocol {
     pub fn response(&mut self, status: u16, stream: bool, encoding: &str) {
         self.status = Some(status);
         self.stream = stream;
-        self.observer = Some(Observer::new(stream, encoding));
+        let mut observer = Observer::new(stream, encoding);
+        observer.sink().observation.meter.anthropic = self.observation.meter.anthropic;
+        self.observer = Some(observer);
     }
     pub fn feed(&mut self, bytes: &[u8]) {
         if let Some(o) = &mut self.observer {
@@ -431,7 +434,14 @@ impl Protocol {
                 "NETWORK" | "TLS" | "FIRST_BYTE_TIMEOUT" | "STREAM_TIMEOUT" | "STREAM_INTERRUPTED"
             );
         if self.transport_failure {
-            self.observation.error.upstream_code = Some(reason.into());
+            self.observation.error.local_code = Some(
+                match reason {
+                    "TLS" => "TLS_HANDSHAKE_FAILED",
+                    "NETWORK" => "CONNECTION_FAILED",
+                    other => other,
+                }
+                .into(),
+            );
         }
         if self.observation.terminal.is_none() {
             if reason == "OK"
@@ -442,7 +452,7 @@ impl Protocol {
                 // EOF before a terminal event is a transport/incomplete-stream
                 // failure, unlike an explicit response.failed event.
                 self.transport_failure = true;
-                self.observation.error.upstream_code = Some("STREAM_INTERRUPTED".into());
+                self.observation.error.local_code = Some("STREAM_INTERRUPTED".into());
             }
             self.observation.terminal = Some(match reason {
                 "OK" if self.stream && self.observation.expects_terminal => {

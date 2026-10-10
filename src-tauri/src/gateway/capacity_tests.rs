@@ -461,6 +461,16 @@ async fn service_and_network_errors_do_not_open_sole_automatic_provider() {
         .await;
         let (t, g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
         configure(&g, &t, 0);
+        update(
+            &g,
+            &t,
+            Edit::Settings {
+                settings: Settings {
+                    transient_failure_threshold: 1,
+                    ..g.view().settings
+                },
+            },
+        );
         start(&g, &t).await;
         for _ in 0..3 {
             let r = request(&g, "/v1/responses", vec![], vec![]).await;
@@ -481,6 +491,16 @@ async fn service_and_network_errors_do_not_open_sole_automatic_provider() {
     drop(socket);
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
     configure(&g, &t, 0);
+    update(
+        &g,
+        &t,
+        Edit::Settings {
+            settings: Settings {
+                transient_failure_threshold: 1,
+                ..g.view().settings
+            },
+        },
+    );
     start(&g, &t).await;
     assert_eq!(
         request(&g, "/v1/responses", vec![], vec![]).await.status(),

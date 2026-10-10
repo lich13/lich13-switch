@@ -4,9 +4,21 @@
 use super::model::Settings;
 use serde::Serialize;
 use std::{
+    collections::VecDeque,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+const FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_HEALTH_SAMPLES: usize = 1024;
+
+#[derive(Clone, Copy, PartialEq)]
+enum SampleKind {
+    Success,
+    EarlierSuccess,
+    Failure,
+    Transient,
+}
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +39,37 @@ pub struct Health {
     pub probe_in_flight: bool,
     pub available: bool,
     pub revision: u64,
+    pub cause: Option<Cause>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cause {
+    pub event_id: String,
+    pub code: String,
+    pub reason: crate::events::Reason,
+    pub status: Option<u16>,
+    pub ws_close_code: Option<u16>,
+}
+impl Cause {
+    fn from_event(event: &crate::events::Record) -> Self {
+        Self {
+            event_id: event.id.clone(),
+            code: event
+                .details
+                .upstream_code
+                .clone()
+                .or(event.details.local_code.clone())
+                .unwrap_or_else(|| {
+                    serde_json::to_value(event.reason.code())
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_default()
+                }),
+            reason: event.reason,
+            status: event.status,
+            ws_close_code: event.details.ws_close_code,
+        }
+    }
 }
 struct State {
     phase: CircuitState,
@@ -34,6 +77,7 @@ struct State {
     successes: u32,
     total: u32,
     failed: u32,
+    samples: VecDeque<(Instant, SampleKind)>,
     until: Option<Instant>,
     probe: bool,
     generation: u64,
@@ -45,6 +89,7 @@ struct State {
     protection: Option<Duration>,
     revision: u64,
     open_event: Option<crate::events::Record>,
+    cause: Option<Cause>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -54,6 +99,7 @@ impl Default for State {
             successes: 0,
             total: 0,
             failed: 0,
+            samples: VecDeque::new(),
             until: None,
             probe: false,
             generation: 0,
@@ -65,10 +111,61 @@ impl Default for State {
             protection: None,
             revision: 0,
             open_event: None,
+            cause: None,
         }
     }
 }
 impl State {
+    fn refresh_samples(&mut self, now: Instant) {
+        while self
+            .samples
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= FAILURE_WINDOW)
+        {
+            self.samples.pop_front();
+        }
+        self.total = self.samples.len() as u32;
+        self.failed = self
+            .samples
+            .iter()
+            .filter(|(_, kind)| matches!(kind, SampleKind::Failure | SampleKind::Transient))
+            .count() as u32;
+        self.failures = self
+            .samples
+            .iter()
+            .rev()
+            .find(|(_, kind)| *kind != SampleKind::EarlierSuccess)
+            .map_or(0, |(_, last)| {
+                if *last == SampleKind::Success {
+                    return 0;
+                }
+                self.samples
+                    .iter()
+                    .rev()
+                    .filter(|(_, kind)| *kind != SampleKind::EarlierSuccess)
+                    .take_while(|(_, kind)| kind == last)
+                    .count() as u32
+            });
+    }
+    fn record(&mut self, kind: SampleKind) {
+        let now = Instant::now();
+        self.samples.push_back((now, kind));
+        while self.samples.len() > MAX_HEALTH_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.refresh_samples(now);
+    }
+    fn fault_rate(&self) -> (u32, u32) {
+        // Intermittent 5xx responses have their own consecutive threshold.
+        // They must not later trip the generic error-rate path indirectly.
+        self.samples
+            .iter()
+            .fold((0, 0), |(total, failed), (_, kind)| match kind {
+                SampleKind::Success | SampleKind::EarlierSuccess => (total + 1, failed),
+                SampleKind::Failure => (total + 1, failed + 1),
+                SampleKind::Transient => (total, failed),
+            })
+    }
     fn available(&self) -> bool {
         let now = Instant::now();
         !self.probe
@@ -107,8 +204,9 @@ impl Circuit {
         self.0.lock().unwrap().open_event.take()
     }
     pub fn health(&self) -> Health {
-        let s = self.0.lock().unwrap();
+        let mut s = self.0.lock().unwrap();
         let now = Instant::now();
+        s.refresh_samples(now);
         let retry = [
             s.until.filter(|_| s.phase == CircuitState::Open),
             s.retry_until,
@@ -132,6 +230,7 @@ impl Circuit {
             probe_in_flight: s.probe || s.retry_probe,
             available: s.available(),
             revision: s.revision,
+            cause: s.cause.clone(),
         }
     }
     pub fn acquire(&self, _manual: bool) -> Option<Permit> {
@@ -142,6 +241,12 @@ impl Circuit {
         if s.phase == CircuitState::Open {
             s.phase = CircuitState::HalfOpen;
             s.successes = 0;
+            // A recovery probe starts a new failure streak; old failures must
+            // not turn a single transient response into an immediate reopen.
+            s.samples.clear();
+            s.failures = 0;
+            s.failed = 0;
+            s.total = 0;
             s.generation += 1;
         }
         let half_open = s.phase == CircuitState::HalfOpen;
@@ -212,6 +317,9 @@ impl Permit {
             s.probe = false;
         }
         s.revision += 1;
+        if !matches!(outcome, Outcome::Neutral | Outcome::Success) {
+            s.cause = self.failure_event.as_ref().map(Cause::from_event);
+        }
         match outcome {
             Outcome::Neutral => (),
             Outcome::RateLimited(retry) => {
@@ -249,17 +357,14 @@ impl Permit {
                 }
                 // An earlier request completing successfully cannot erase a
                 // newer cooldown or release its recovery probe.
-                if self.retry_generation != s.retry_generation
-                    && matches!(
-                        s.retry_reason,
-                        Some("capacity_retry" | "single_provider_protected")
-                    )
-                {
+                if self.retry_generation != s.retry_generation && s.retry_until.is_some() {
+                    s.record(SampleKind::EarlierSuccess);
                     return;
                 }
+                s.record(SampleKind::Success);
+                s.cause = None;
                 s.failures = 0;
                 s.protected_single_provider = false;
-                s.total = s.total.saturating_add(1);
                 if s.phase == CircuitState::HalfOpen {
                     s.successes += 1;
                     if s.successes >= cfg.success_threshold {
@@ -267,27 +372,44 @@ impl Permit {
                         s.until = None;
                         s.total = 0;
                         s.failed = 0;
+                        s.samples.clear();
                         s.generation += 1;
                     }
                 }
             }
             Outcome::Failure(retry) => {
-                if protected_single_provider {
+                let transient = self.failure_event.as_ref().is_some_and(|event| {
+                    event.reason == crate::events::Reason::UpstreamService
+                        && event.status.is_some_and(is_server_error)
+                });
+                s.record(if transient {
+                    SampleKind::Transient
+                } else {
+                    SampleKind::Failure
+                });
+                let threshold = if transient {
+                    cfg.transient_failure_threshold
+                } else {
+                    cfg.failure_threshold
+                };
+                let consecutive = s.failures >= threshold;
+                let (rate_total, rate_failed) = s.fault_rate();
+                let rate_exceeded = rate_total >= cfg.min_requests
+                    && f64::from(rate_failed) / f64::from(rate_total) >= cfg.error_rate;
+                let should_open = if transient {
+                    consecutive
+                } else {
+                    s.phase != CircuitState::Closed || consecutive || rate_exceeded
+                };
+                s.successes = 0;
+                if protected_single_provider && (!transient || consecutive) {
                     let delay = retry.unwrap_or_default().max(s.protection.unwrap());
                     s.cooldown(delay, "single_provider_protected");
                     s.protected_single_provider = true;
                 } else if let Some(retry) = retry {
                     s.cooldown(retry, "retry_after");
                 }
-                s.failures = s.failures.saturating_add(1);
-                s.failed = s.failed.saturating_add(1);
-                s.total = s.total.saturating_add(1);
-                if !protected_single_provider
-                    && (s.phase != CircuitState::Closed
-                        || s.failures >= cfg.failure_threshold
-                        || (s.total >= cfg.min_requests
-                            && f64::from(s.failed) / f64::from(s.total) >= cfg.error_rate))
-                {
+                if !protected_single_provider && should_open {
                     if let Some(cause) = self.failure_event.take() {
                         use crate::events::{Action, CircuitEvidence, Reason, Record};
                         let mut event = Record::new(
@@ -303,14 +425,24 @@ impl Permit {
                         event.details.cause_id = Some(cause.id);
                         event.details.circuit = Some(CircuitEvidence {
                             failures: s.failures,
-                            failure_threshold: cfg.failure_threshold,
-                            failed_requests: s.failed,
-                            requests: s.total,
+                            failure_threshold: threshold,
+                            failed_requests: if !transient && !consecutive {
+                                rate_failed
+                            } else {
+                                s.failed
+                            },
+                            requests: if !transient && !consecutive {
+                                rate_total
+                            } else {
+                                s.total
+                            },
                             error_rate: cfg.error_rate,
                             min_requests: cfg.min_requests,
-                            trigger: if s.phase != CircuitState::Closed {
+                            trigger: if transient {
+                                "transient_failures"
+                            } else if s.phase != CircuitState::Closed {
                                 "probe_failed"
-                            } else if s.failures >= cfg.failure_threshold {
+                            } else if consecutive {
                                 "consecutive_failures"
                             } else {
                                 "error_rate"
@@ -343,7 +475,10 @@ impl Drop for Permit {
     }
 }
 pub fn retryable(status: u16) -> bool {
-    status >= 400 && ![400, 405, 406, 413, 414, 415, 422, 501].contains(&status)
+    status >= 400 && ![400, 405, 406, 413, 414, 415, 422].contains(&status)
+}
+pub fn is_server_error(status: u16) -> bool {
+    (500..=599).contains(&status)
 }
 pub fn retry_after(value: &str) -> Option<Duration> {
     value
@@ -408,10 +543,10 @@ mod tests {
     }
     #[test]
     fn classification_and_retry_after() {
-        for s in [400, 405, 406, 413, 414, 415, 422, 501] {
+        for s in [400, 405, 406, 413, 414, 415, 422] {
             assert!(!retryable(s));
         }
-        for s in [401, 403, 408, 429, 500, 502, 503, 504] {
+        for s in [401, 403, 408, 429, 500, 501, 502, 503, 504, 507, 599] {
             assert!(retryable(s));
         }
         let c = Circuit::default();
@@ -528,5 +663,202 @@ mod cooldown_tests {
         assert!(!c.health().protected_single_provider);
         assert!(c.health().cooldown_reason.is_none());
         assert_eq!(c.health().state, CircuitState::Closed);
+    }
+}
+
+#[cfg(test)]
+mod v020_tolerance_tests {
+    use super::*;
+    use crate::events::{Action, Reason, Record};
+
+    fn event(reason: Reason, status: Option<u16>) -> Record {
+        Record::new(
+            None,
+            Some("fixture-provider"),
+            Some("fixture-model"),
+            reason,
+            Action::Returned,
+            status,
+            Some(1),
+        )
+    }
+
+    fn finish_failure(
+        circuit: &Circuit,
+        cfg: &Settings,
+        reason: Reason,
+        status: Option<u16>,
+        retry: Option<Duration>,
+    ) {
+        let mut permit = circuit.acquire(false).expect("fixture circuit permit");
+        permit.set_failure_event(event(reason, status));
+        permit.finish(Outcome::Failure(retry), cfg);
+    }
+
+    fn finish_transient(circuit: &Circuit, cfg: &Settings, status: u16) {
+        finish_failure(circuit, cfg, Reason::UpstreamService, Some(status), None);
+    }
+
+    fn expire_retry(circuit: &Circuit) {
+        circuit.0.lock().unwrap().retry_until = Some(Instant::now());
+    }
+
+    #[test]
+    fn transient_errors_need_six_consecutive_samples_and_record_the_threshold() {
+        let circuit = Circuit::default();
+        let cfg = Settings {
+            failure_threshold: 50,
+            transient_failure_threshold: 6,
+            ..Settings::default()
+        };
+
+        for status in [502, 503, 502, 503, 502] {
+            finish_transient(&circuit, &cfg, status);
+            assert_eq!(circuit.health().state, CircuitState::Closed);
+            assert_eq!(circuit.health().cooldown_reason, None);
+        }
+        finish_transient(&circuit, &cfg, 503);
+        let health = circuit.health();
+        assert_eq!(health.state, CircuitState::Open);
+        assert_eq!(health.failures, 6);
+        assert_eq!(health.requests, 6);
+        let opened = circuit.take_open_event().expect("transient open event");
+        assert_eq!(opened.reason, Reason::CircuitOpen);
+        let evidence = opened.details.circuit.expect("circuit evidence");
+        assert_eq!(evidence.failure_threshold, 6);
+        assert_eq!(evidence.failed_requests, 6);
+        assert_eq!(evidence.requests, 6);
+        assert_eq!(evidence.trigger, "transient_failures");
+
+        let spaced = Circuit::default();
+        for status in [502, 503, 502, 503, 502, 503, 502] {
+            finish_transient(&spaced, &cfg, status);
+            spaced
+                .acquire(false)
+                .unwrap()
+                .finish(Outcome::Success, &cfg);
+        }
+        let health = spaced.health();
+        assert_eq!(health.state, CircuitState::Closed);
+        assert!(health.available);
+        assert_eq!(health.cooldown_reason, None);
+        assert!(spaced.take_open_event().is_none());
+    }
+
+    #[test]
+    fn single_provider_stays_closed_while_sixth_transient_failure_applies_cooldown() {
+        let circuit = Circuit::default();
+        let cfg = Settings {
+            transient_failure_threshold: 6,
+            ..Settings::default()
+        };
+        circuit.set_single_provider_protection(Some(Duration::from_secs(30)));
+        for status in [502, 503, 502, 503, 502] {
+            finish_transient(&circuit, &cfg, status);
+            assert_eq!(circuit.health().state, CircuitState::Closed);
+            expire_retry(&circuit);
+        }
+        finish_transient(&circuit, &cfg, 503);
+        let health = circuit.health();
+        assert_eq!(health.state, CircuitState::Closed);
+        assert!(health.protected_single_provider);
+        assert_eq!(
+            health.cooldown_reason.as_deref(),
+            Some("single_provider_protected")
+        );
+        assert!(health.retry_in >= 29);
+        assert!(circuit.take_open_event().is_none());
+
+        let retry = Circuit::default();
+        finish_transient(&retry, &cfg, 502);
+        expire_retry(&retry);
+        let mut permit = retry.acquire(false).unwrap();
+        permit.set_failure_event(event(Reason::UpstreamService, Some(503)));
+        permit.finish(Outcome::Failure(retry_after("30")), &cfg);
+        assert_eq!(retry.health().state, CircuitState::Closed);
+        assert_eq!(
+            retry.health().cooldown_reason.as_deref(),
+            Some("retry_after")
+        );
+        assert!(retry.health().retry_in >= 29);
+
+        retry
+            .0
+            .lock()
+            .unwrap()
+            .samples
+            .iter_mut()
+            .for_each(|(at, _)| {
+                *at = Instant::now() - FAILURE_WINDOW - Duration::from_secs(1);
+            });
+        expire_retry(&retry);
+        let health = retry.health();
+        assert_eq!(health.requests, 0);
+        assert_eq!(health.failures, 0);
+        assert!(health.available);
+    }
+
+    #[test]
+    fn half_open_transient_failure_and_other_error_classes_keep_separate_rules() {
+        let cfg = Settings {
+            failure_threshold: 1,
+            transient_failure_threshold: 6,
+            ..Settings::default()
+        };
+        let half_open = Circuit::default();
+        finish_failure(&half_open, &cfg, Reason::Authentication, Some(401), None);
+        assert_eq!(half_open.health().state, CircuitState::Open);
+        half_open.take_open_event();
+        half_open.0.lock().unwrap().until = Some(Instant::now());
+        finish_transient(&half_open, &cfg, 503);
+        assert_eq!(half_open.health().state, CircuitState::HalfOpen);
+        assert!(half_open.health().available);
+
+        let network = Circuit::default();
+        finish_failure(&network, &cfg, Reason::Network, None, None);
+        assert_eq!(network.health().state, CircuitState::Open);
+
+        let capacity = Circuit::default();
+        let permit = capacity.acquire(false).unwrap();
+        permit.finish(
+            Outcome::CapacityLimited(Some(Duration::from_secs(30))),
+            &cfg,
+        );
+        let health = capacity.health();
+        assert_eq!(health.state, CircuitState::Closed);
+        assert_eq!(health.requests, 0);
+        assert_eq!(health.failures, 0);
+        assert_eq!(health.cooldown_reason.as_deref(), Some("capacity_retry"));
+        expire_retry(&capacity);
+        capacity
+            .acquire(false)
+            .unwrap()
+            .finish(Outcome::Neutral, &cfg);
+        assert_eq!(capacity.health().requests, 0);
+    }
+
+    #[test]
+    fn half_open_probe_tolerates_one_transient_failure_after_six_closed_failures() {
+        let cfg = Settings {
+            failure_threshold: 50,
+            transient_failure_threshold: 6,
+            ..Settings::default()
+        };
+        let circuit = Circuit::default();
+        for status in [502, 503, 502, 503, 502, 503] {
+            finish_transient(&circuit, &cfg, status);
+        }
+        assert_eq!(circuit.health().state, CircuitState::Open);
+        circuit
+            .take_open_event()
+            .expect("initial circuit-open event");
+
+        circuit.0.lock().unwrap().until = Some(Instant::now());
+        finish_transient(&circuit, &cfg, 503);
+        let health = circuit.health();
+        assert_eq!(health.state, CircuitState::HalfOpen);
+        assert_eq!(health.failures, 1);
+        assert!(health.available);
+        assert!(circuit.take_open_event().is_none());
     }
 }

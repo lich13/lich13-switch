@@ -393,6 +393,9 @@ impl Core {
                 .and_then(|raw| auth_info(raw).ok())
                 .is_some_and(|disk| disk.identity == info.identity)
             {
+                if crate::gateway::manages_auth(&self.data_dir, &self.home()) {
+                    return Err(AppError::new("MANAGED", "网关临时凭据不能保存为账号"));
+                }
                 self.store.observed_auth_revisions.insert(
                     self.store.preferences.codex_home.clone(),
                     storage::digest(&bytes),
@@ -657,8 +660,10 @@ impl Core {
     pub fn state(&mut self) -> Result<ViewState> {
         let auth = storage::read_optional(&self.home().join("auth.json"))?;
         let config = storage::read_optional(&self.home().join("config.toml"))?;
+        let managed = crate::gateway::manages_auth(&self.data_dir, &self.home());
         let info = auth
             .as_deref()
+            .filter(|_| !managed)
             .and_then(|b| std::str::from_utf8(b).ok())
             .map(auth_info);
         let identity = info
@@ -679,8 +684,9 @@ impl Core {
                     .find(|p| Some(p.identity.as_str()) == identity)
                     .is_some_and(|p| token_is_newer(raw, &p.auth))
             });
-        let changed =
-            self.store.observed_auth_revisions.get(&root) != Some(&auth_revision) || newer_token;
+        let changed = !managed
+            && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
+                || newer_token);
         let old = self.store.clone();
         if changed {
             // A valid intermediate JSON document can still be part of a non-atomic write.
@@ -807,7 +813,9 @@ impl Core {
                 credential_revision: storage::digest(p.auth.as_bytes()),
             })
             .collect();
-        let status = if auth.is_none() {
+        let status = if managed {
+            "gateway"
+        } else if auth.is_none() {
             "missing"
         } else if info.as_ref().is_none_or(|i| i.is_err()) {
             "invalid"
@@ -824,7 +832,11 @@ impl Core {
             auth_source: source(config.as_deref()),
             preferences: self.preferences(),
             error: None,
-            auth_sync: self.auth_sync.clone(),
+            auth_sync: if managed {
+                None
+            } else {
+                self.auth_sync.clone()
+            },
             official_mode: crate::official::OfficialModeView::default(),
         })
     }
@@ -844,6 +856,12 @@ impl Core {
         });
     }
     pub fn switch_account(&mut self, id: &str, expected: &str) -> Result<ViewState> {
+        if crate::gateway::manages_auth(&self.data_dir, &self.home()) {
+            return Err(AppError::new(
+                "GATEWAY_ACTIVE",
+                "请先关闭普通 API 网关并处理恢复事务，再切换账号",
+            ));
+        }
         let state = self.state()?;
         if state.auth_revision != expected {
             return Err(AppError::new(
@@ -1268,3 +1286,7 @@ mod v016_tests;
 #[cfg(test)]
 #[path = "auth_refresh_v017_tests.rs"]
 mod auth_refresh_v017_tests;
+
+#[cfg(test)]
+#[path = "core_api_v020_tests.rs"]
+mod core_api_v020_tests;

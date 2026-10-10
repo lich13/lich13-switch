@@ -125,6 +125,7 @@ pub enum Action {
     Recovered,
     Routed,
     Reconnecting,
+    RetryingSame,
     NotRetried,
 }
 impl Action {
@@ -137,6 +138,7 @@ impl Action {
             Self::Routed => "已切换供应商",
             Self::Recovered => "已恢复可用",
             Self::Reconnecting => "等待后重新连接",
+            Self::RetryingSame => "原供应商等待重试",
             Self::NotRetried => "已输出，未重试",
         }
     }
@@ -287,6 +289,9 @@ pub struct Change {
 #[derive(Default, Clone)]
 struct Journal {
     records: VecDeque<Record>,
+    // Runtime health can refer to a just-merged event. Keep bounded aliases for
+    // those links; persisted terminal events use the canonical row ID.
+    aliases: VecDeque<(String, String)>,
     error: Option<String>,
 }
 enum Job {
@@ -368,6 +373,9 @@ fn persist(j: &mut Journal, path: &Path) -> Result<()> {
             break;
         }
     }
+    let retained: std::collections::HashSet<_> = j.records.iter().map(|r| r.id.as_str()).collect();
+    j.aliases
+        .retain(|(_, target)| retained.contains(target.as_str()));
     let mut bytes = Vec::with_capacity(size);
     for line in lines {
         bytes.extend(line);
@@ -397,20 +405,37 @@ impl Service {
             match job {
                 Job::Append(r) => {
                     let mut r = *r;
-                    if r.reason == Reason::CircuitOpen {
+                    if let Some((_, target)) = journal
+                        .aliases
+                        .iter()
+                        .rev()
+                        .find(|(id, _)| r.details.cause_id.as_ref() == Some(id))
+                    {
+                        r.details.cause_id = Some(target.clone());
+                    }
+                    if matches!(r.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
+                        && r.details
+                            .cause_id
+                            .as_ref()
+                            .is_none_or(|id| !journal.records.iter().any(|old| &old.id == id))
+                    {
                         // A repeated cause may already have been merged into an earlier row.
                         r.details.cause_id = journal
                             .records
                             .iter()
                             .rev()
                             .find(|old| {
-                                old.reason != Reason::CircuitOpen
-                                    && old.details.counted_failure == Some(true)
+                                !matches!(
+                                    old.reason,
+                                    Reason::CircuitOpen | Reason::FailoverExhausted
+                                ) && (r.reason != Reason::CircuitOpen
+                                    || old.details.counted_failure == Some(true))
                                     && old.client_id == r.client_id
                                     && old.provider_id == r.provider_id
                                     && old.model == r.model
                                     && old.status == r.status
                                     && old.details.upstream_code == r.details.upstream_code
+                                    && old.details.local_code == r.details.local_code
                                     && old.details.message == r.details.message
                                     && old.details.phase == r.details.phase
                             })
@@ -428,6 +453,11 @@ impl Service {
                         old.action = r.action;
                         old.attempt = r.attempt;
                         changed = Some(old.clone());
+                        let target = old.id.clone();
+                        journal.aliases.push_back((r.id, target));
+                        while journal.aliases.len() > 4096 {
+                            journal.aliases.pop_front();
+                        }
                     } else {
                         changed = Some(r.clone());
                         journal.records.push_back(r);
@@ -435,6 +465,7 @@ impl Service {
                 }
                 Job::Clear(tx) => {
                     journal.records.clear();
+                    journal.aliases.clear();
                     journal.error = None;
                     done = Some(tx);
                 }
@@ -450,6 +481,7 @@ impl Service {
             if result.is_err() {
                 if done.is_some() {
                     journal.records = previous.records;
+                    journal.aliases = previous.aliases;
                 }
                 journal.error = Some("日志写入失败，请检查文件权限与空间".into());
             }
@@ -523,14 +555,20 @@ impl Service {
         }
     }
     pub fn detail(&self, id: &str) -> Option<Record> {
-        self.journal
-            .lock()
-            .unwrap()
+        let journal = self.journal.lock().unwrap();
+        let target = journal
+            .aliases
+            .iter()
+            .rev()
+            .find(|(alias, _)| alias == id)
+            .map(|(_, target)| target.as_str())
+            .unwrap_or(id);
+        journal
             .records
             .iter()
             .find(|r| {
                 r.reason != Reason::Recovered
-                    && r.id == id
+                    && r.id == target
                     && r.last_at >= now().saturating_sub(RETENTION)
             })
             .cloned()

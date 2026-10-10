@@ -544,19 +544,19 @@ export default function Usage({
                           a.responseModel &&
                           a.requestedModel !== a.responseModel
                             ? `${a.requestedModel} → ${a.responseModel}`
-                            : (a.responseModel ?? a.requestedModel ?? "未提供")
+                            : (a.responseModel ?? a.requestedModel ?? "—")
                         }
                       >
                         <Model a={a} />
                       </td>
                       <td>
-                        <NumberValue value={a.tokens.input} />
+                        <NumberValue value={a.tokens.input} missing={missingReason(a, "input", r.source)} />
                       </td>
                       <td>
-                        <NumberValue value={a.tokens.output} />
+                        <NumberValue value={a.tokens.output} missing={missingReason(a, "output", r.source)} />
                       </td>
                       <td>
-                        <NumberValue value={a.tokens.cacheRead} />
+                        <NumberValue value={a.tokens.cacheRead} missing={missingReason(a, "cache_read", r.source)} />
                       </td>
                       <td title={a.price?.cost}>
                         {money(a.price?.cost)}
@@ -656,25 +656,25 @@ function Metric({
     </div>
   );
 }
-function NumberValue({ value }: { value: number | null | undefined }) {
+function NumberValue({ value, missing = "历史缺失" }: { value: number | null | undefined; missing?: string }) {
   const [focused, setFocused] = useState(false);
   return (
     <span
       className="usage-number"
       tabIndex={0}
-      title={numeric(value)}
-      aria-label={numeric(value)}
+      title={value == null ? missing : numeric(value)}
+      aria-label={value == null ? missing : numeric(value)}
       onFocus={() => setFocused(true)}
       onBlur={() => setFocused(false)}
     >
-      {focused ? numeric(value) : compact(value)}
+      {value == null ? "—" : focused ? numeric(value) : compact(value)}
     </span>
   );
 }
 function Model({ a }: { a: Attempt }) {
   return (
     <>
-      <span className="usage-model-name">{a.operation === "web_search" ? "网络搜索" : (a.responseModel ?? a.requestedModel ?? "未提供")}</span>
+      <span className="usage-model-name">{a.operation === "web_search" ? "网络搜索" : (a.responseModel ?? a.requestedModel ?? "—")}</span>
       <span className="usage-badges">
         {a.stream && <span className="usage-badge stream">流式</span>}
         {(a.operation === "compaction" || a.compactionKind) && <span className="usage-badge compaction">压缩</span>}
@@ -1181,13 +1181,22 @@ function rateLabel(key: string) {
     .filter(Boolean)
     .join(" · ");
 }
+function missingReason(a: Attempt, field: string, source: string): string {
+  if (field === "first_token" && (source !== "proxy" || !a.stream || (a.operation ?? "model") !== "model")) return "不适用";
+  const kind = a.availability?.[field] ?? a.usageStatus ?? "historical_missing";
+  return ({ upstream_unreported: "上游未报告", partial: "上游未报告", reported: "上游未报告", ended_early: "提前结束", parse_incomplete: "解析不完整", historical_missing: "历史缺失", not_applicable: "不适用", session_supplemented: "会话补齐" } as Record<string, string>)[kind] ?? "历史缺失";
+}
+function TokenField({ a, field, value, source }: { a: Attempt; field: string; value: number | null; source: string }) {
+  const reason = value == null ? missingReason(a, field, source) : a.usageSources?.[field] ? "会话补齐" : source === "proxy" ? "上游已报告" : "会话已报告";
+  return <span tabIndex={0} title={reason} aria-label={`${numeric(value)} · ${reason}`}>{numeric(value)}</span>;
+}
 function DetailFields({ items }: { items: [string, React.ReactNode][] }) {
   return (
     <dl className="usage-detail-grid">
       {items.map(([label, value]) => (
         <div key={label} className="usage-detail-pair">
           <dt>{label}</dt>
-          <dd>{value ?? "未提供"}</dd>
+          <dd>{value ?? "—"}</dd>
         </div>
       ))}
     </dl>
@@ -1225,11 +1234,11 @@ function AttemptDetails({
       <h3>Token</h3>
       <DetailFields
         items={[
-          ["输入", numeric(a.tokens.input)],
-          ["输出", numeric(a.tokens.output)],
-          ["缓存读取", numeric(a.tokens.cacheRead)],
-          ["缓存写入", numeric(a.tokens.cacheWrite)],
-          ...(a.usageSources && Object.keys(a.usageSources).length ? [["补齐字段", Object.keys(a.usageSources).map((key) => ({ input: "输入", output: "输出", cache_read: "缓存读取", cache_write: "缓存写入" } as Record<string, string>)[key] ?? key).join("、")] as [string, string]] : []),
+          ["输入", <TokenField a={a} field="input" value={a.tokens.input} source={source} />],
+          ["输出", <TokenField a={a} field="output" value={a.tokens.output} source={source} />],
+          ["缓存读取", <TokenField a={a} field="cache_read" value={a.tokens.cacheRead} source={source} />],
+          ["缓存写入", <TokenField a={a} field="cache_write" value={a.tokens.cacheWrite} source={source} />],
+          ...(a.usageSources && Object.keys(a.usageSources).length ? [["补齐字段", Object.keys(a.usageSources).map((key) => ({ inclusive_input: "完整输入", input: "输入", output: "输出", cache_read: "缓存读取", cache_write: "缓存写入", cache_write_5m: "短时缓存写入", cache_write_1h: "长时缓存写入", image_input: "图片输入", image_output: "图片输出", audio_input: "音频输入", audio_output: "音频输出" } as Record<string, string>)[key] ?? key).join("、")] as [string, string]] : []),
         ]}
       />
       <h3>费用</h3>
@@ -1279,9 +1288,9 @@ function AttemptDetails({
         items={[
           [
             "总耗时",
-            a.durationMs ? `${(a.durationMs / 1000).toFixed(3)}s` : "未提供",
+            a.durationMs != null ? `${(a.durationMs / 1000).toFixed(3)}s` : <span tabIndex={0} title="历史缺失">—</span>,
           ],
-          ["首字", first != null ? `${(first / 1000).toFixed(3)}s` : "未提供"],
+          ["首字", first != null ? `${(first / 1000).toFixed(3)}s` : <span tabIndex={0} title={missingReason(a, "first_token", source)}>—</span>],
           ["传输", a.transport],
           ["流式", a.stream ? "是" : "否"],
         ]}

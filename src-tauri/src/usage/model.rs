@@ -29,6 +29,8 @@ pub fn model_id(value: Option<&str>) -> Option<String> {
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tokens {
+    #[serde(default)]
+    pub inclusive_input: Option<u64>,
     pub input: Option<u64>,
     pub output: Option<u64>,
     pub cache_read: Option<u64>,
@@ -50,6 +52,7 @@ impl Tokens {
     pub fn merge(&mut self, other: &Self) {
         macro_rules! merge { ($($f:ident),*) => {$(if other.$f.is_some() { self.$f=other.$f; })*}; }
         merge!(
+            inclusive_input,
             input,
             output,
             cache_read,
@@ -66,6 +69,7 @@ impl Tokens {
         let mut fields = Vec::new();
         macro_rules! fill { ($($f:ident),*) => {$(if self.$f.is_none() && other.$f.is_some() { self.$f=other.$f; fields.push(stringify!($f).to_owned()); })*}; }
         fill!(
+            inclusive_input,
             input,
             output,
             cache_read,
@@ -80,12 +84,20 @@ impl Tokens {
         fields
     }
     pub fn cache_sample(&self) -> Option<(u64, u64)> {
-        let (input, read, write) = (self.input?, self.cache_read?, self.cache_write?);
-        Some((read, input.saturating_add(read).saturating_add(write)))
+        let read = self.cache_read?;
+        let input = self.inclusive_input.or_else(|| {
+            Some(
+                self.input?
+                    .saturating_add(read)
+                    .saturating_add(self.cache_write?),
+            )
+        })?;
+        (read <= input).then_some((read, input))
     }
     pub fn add(&mut self, other: &Self) {
         macro_rules! add { ($($f:ident),*) => {$(self.$f=match(self.$f,other.$f){(None,None)=>None,(a,b)=>Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0)))};)*}; }
         add!(
+            inclusive_input,
             input,
             output,
             cache_read,
@@ -102,6 +114,7 @@ impl Tokens {
         let mut next = self.clone();
         macro_rules! delta { ($($f:ident),*) => {$(next.$f=self.$f.map(|v|v.saturating_sub(old.$f.unwrap_or(0)));)*}; }
         delta!(
+            inclusive_input,
             input,
             output,
             cache_read,
@@ -134,14 +147,11 @@ pub fn parse_tokens(usage: &Value, claude: bool) -> Tokens {
     let write = count(
         usage,
         &["cache_creation_input_tokens", "cache_creation_tokens"],
-    )
-    .or_else(|| {
-        (!claude && (usage.get("input_tokens").is_some() || usage.get("prompt_tokens").is_some()))
-            .then_some(0)
-    });
+    );
     let raw = count(usage, &["input_tokens", "prompt_tokens"]);
     let create = &usage["cache_creation"];
     Tokens {
+        inclusive_input: (!claude).then_some(raw).flatten(),
         input: raw.map(|v| {
             if claude {
                 v
@@ -170,6 +180,8 @@ pub struct Meter {
     pub inclusive_input: Option<u64>,
     #[serde(skip)]
     pub ended_early: bool,
+    #[serde(skip)]
+    pub(crate) anthropic: Option<bool>,
     pub response_id: Option<String>,
     pub model: Option<String>,
     pub service_tier: Option<String>,
@@ -226,10 +238,21 @@ impl Meter {
         while cursor < envelopes.len() && cursor < 16 {
             let v = envelopes[cursor];
             cursor += 1;
-            let claude = event.starts_with("message_")
-                || v["type"] == "message"
-                || v["usage"].get("cache_creation_input_tokens").is_some()
-                || v["usage"].get("cache_read_input_tokens").is_some();
+            if event.starts_with("message_") || v["type"] == "message" {
+                self.anthropic = Some(true);
+            } else if event.starts_with("response.")
+                || v["object"] == "response"
+                || v["object"]
+                    .as_str()
+                    .is_some_and(|v| v.starts_with("chat.completion"))
+                || v.get("choices").is_some()
+            {
+                self.anthropic = Some(false);
+            }
+            let claude = self.anthropic.unwrap_or_else(|| {
+                v["usage"].get("cache_creation_input_tokens").is_some()
+                    || v["usage"].get("cache_read_input_tokens").is_some()
+            });
             if let Some(u) = v.get("usage").filter(|u| u.is_object()).or_else(|| {
                 matches!(
                     event,
@@ -238,9 +261,16 @@ impl Meter {
                 .then_some(v)
             }) {
                 let mut parsed = parse_tokens(u, claude);
+                let zero_input_placeholder = terminal
+                    && count(u, &["input_tokens", "prompt_tokens"]) == Some(0)
+                    && self.tokens.input.is_some_and(|v| v > 0);
                 if !claude {
                     if let Some(raw) = count(u, &["input_tokens", "prompt_tokens"]) {
-                        if !terminal || raw != 0 || self.inclusive_input.is_none_or(|v| v == 0) {
+                        if !zero_input_placeholder
+                            && (!terminal
+                                || raw != 0
+                                || self.inclusive_input.is_none_or(|v| v == 0))
+                        {
                             self.inclusive_input = Some(raw);
                         }
                     }
@@ -253,12 +283,12 @@ impl Meter {
                             parsed.$field = None;
                         }
                     )*}; }
-                    if count(u, &["input_tokens", "prompt_tokens"]) == Some(0)
-                        && self.tokens.input.is_some_and(|v| v > 0)
-                    {
+                    if zero_input_placeholder {
                         parsed.input = None;
+                        parsed.inclusive_input = None;
                     }
                     preserve!(
+                        inclusive_input,
                         output,
                         cache_read,
                         cache_write,
@@ -404,6 +434,8 @@ pub struct Attempt {
     #[serde(default)]
     pub usage_status: String,
     #[serde(default)]
+    pub availability: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     pub usage_sources: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub pricing_basis: Option<String>,
@@ -438,6 +470,43 @@ fn one_attempt() -> u64 {
     1
 }
 impl Attempt {
+    pub fn annotate_availability(&mut self, source: &str) {
+        if self.tokens.inclusive_input.is_none() {
+            self.tokens.inclusive_input = self.inclusive_input_tokens;
+        }
+        let missing = match self.usage_status.as_str() {
+            "parse_incomplete" => "parse_incomplete",
+            "ended_early" => "ended_early",
+            "" => "historical_missing",
+            _ => "upstream_unreported",
+        };
+        for (key, value) in [
+            ("input", self.tokens.input),
+            ("output", self.tokens.output),
+            ("cache_read", self.tokens.cache_read),
+            ("cache_write", self.tokens.cache_write),
+        ] {
+            let status = if self.usage_sources.contains_key(key) {
+                "session_supplemented"
+            } else if value.is_some() {
+                "reported"
+            } else {
+                missing
+            };
+            self.availability.insert(key.into(), status.into());
+        }
+        self.availability.insert(
+            "first_token".into(),
+            if source != "proxy" || !self.stream || self.operation != Operation::Model {
+                "not_applicable"
+            } else if self.first_token_ms.is_some() {
+                "reported"
+            } else {
+                missing
+            }
+            .into(),
+        );
+    }
     pub fn unpriced_count(&self) -> u64 {
         self.compacted_unpriced
             .unwrap_or(u64::from(self.price.is_none()))
@@ -523,6 +592,7 @@ impl Default for Attempt {
         Self {
             compaction_kind: None,
             usage_status: String::new(),
+            availability: Default::default(),
             usage_sources: Default::default(),
             inclusive_input_tokens: None,
             pricing_basis: None,

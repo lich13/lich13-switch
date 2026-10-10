@@ -33,7 +33,7 @@ struct State {
     rpm_path: PathBuf,
     rpm_error: bool,
     waiting: VecDeque<(u64, Vec<String>)>,
-    capacity_waits: HashMap<u64, (String, Instant, bool)>,
+    capacity_waits: HashMap<u64, (String, Instant, WaitKind)>,
     resets: HashMap<String, u64>,
 }
 impl State {
@@ -115,6 +115,12 @@ fn load_rpm(path: &Path) -> (HashMap<String, VecDeque<RateStamp>>, bool) {
 pub struct CapacitySource {
     pub provider_id: String,
     pub reset_generation: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitKind {
+    Capacity,
+    Websocket,
+    Transient,
 }
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -391,17 +397,20 @@ impl Scheduler {
         (s.active.clone(), s.waiting.len() + s.capacity_waits.len())
     }
     pub fn capacity_retries(&self) -> Vec<CapacityRetry> {
-        self.retries(false)
+        self.retries(WaitKind::Capacity)
     }
     pub fn websocket_retries(&self) -> Vec<CapacityRetry> {
-        self.retries(true)
+        self.retries(WaitKind::Websocket)
     }
-    fn retries(&self, websocket: bool) -> Vec<CapacityRetry> {
+    pub fn transient_retries(&self) -> Vec<CapacityRetry> {
+        self.retries(WaitKind::Transient)
+    }
+    fn retries(&self, kind: WaitKind) -> Vec<CapacityRetry> {
         let s = self.0.state.lock().unwrap();
         let mut result: Vec<_> = s
             .capacity_waits
             .values()
-            .filter(|(_, _, ws)| *ws == websocket)
+            .filter(|(_, _, wait)| *wait == kind)
             .map(|(id, until, _)| CapacityRetry {
                 provider_id: id.clone(),
                 retry_in: until
@@ -423,7 +432,17 @@ impl Scheduler {
         delay: Duration,
         max_waiting: usize,
     ) -> Result<(), Rejected> {
-        self.wait_kind(sources, delay, max_waiting, false).await
+        self.wait_kind(sources, delay, max_waiting, WaitKind::Capacity)
+            .await
+    }
+    pub async fn wait_transient(
+        &self,
+        source: CapacitySource,
+        delay: Duration,
+        max_waiting: usize,
+    ) -> Result<(), Rejected> {
+        self.wait_kind(&[source], delay, max_waiting, WaitKind::Transient)
+            .await
     }
     pub async fn wait_websocket(
         &self,
@@ -447,7 +466,7 @@ impl Scheduler {
             }],
             delay,
             max_waiting,
-            true,
+            WaitKind::Websocket,
         )
         .await
     }
@@ -456,7 +475,7 @@ impl Scheduler {
         sources: &[CapacitySource],
         delay: Duration,
         max_waiting: usize,
-        websocket: bool,
+        kind: WaitKind,
     ) -> Result<(), Rejected> {
         let until = Instant::now() + delay;
         let (ticket, epoch) = {
@@ -480,7 +499,7 @@ impl Scheduler {
                         .map(|s| s.provider_id.clone())
                         .unwrap_or_default(),
                     until,
-                    websocket,
+                    kind,
                 ),
             );
             (ticket, s.epoch)

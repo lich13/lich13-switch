@@ -58,7 +58,14 @@ it("saves WebSocket and an exact model whitelist as one explicit provider policy
   await user.click(screen.getByRole("button", { name: "保存" }));
   await waitFor(() => expect(p.close).toHaveBeenCalledOnce());
   expect(p.save).toHaveBeenCalledExactlyOnceWith(
-    { op: "policyProvider", id: p.provider.id, supportsWebsocket: false, allowedModels: ["fixture-listed", "fixture-custom"] },
+    {
+      op: "policyProvider",
+      id: p.provider.id,
+      supportsWebsocket: false,
+      handoffAfterCompaction: true,
+      takeNewThreads: false,
+      allowedModels: ["fixture-listed", "fixture-custom"],
+    },
     "fixture-open-revision",
   );
 });
@@ -82,7 +89,14 @@ it("keeps both policy drafts through background catalog failure and a save confl
 
   expect(await screen.findByRole("alert")).toHaveTextContent("网关设置已变化");
   expect(p.close).not.toHaveBeenCalled();
-  const policy = { op: "policyProvider", id: p.provider.id, supportsWebsocket: false, allowedModels: ["fixture-listed", "fixture-manual"] };
+  const policy = {
+    op: "policyProvider",
+    id: p.provider.id,
+    supportsWebsocket: false,
+    handoffAfterCompaction: true,
+    takeNewThreads: false,
+    allowedModels: ["fixture-listed", "fixture-manual"],
+  };
   expect(p.save).toHaveBeenLastCalledWith(policy, "fixture-open-revision");
   rerender(<ProviderSettings {...p} revision="fixture-latest-revision" />);
   expect(screen.getByRole("checkbox", { name: "fixture-manual" })).toBeChecked();
@@ -130,7 +144,14 @@ it("saves Claude model restrictions without exposing a WebSocket control", async
   await user.click(screen.getByRole("button", { name: "不限模型" }));
   await user.click(screen.getByRole("button", { name: "保存" }));
   expect(p.save).toHaveBeenCalledExactlyOnceWith(
-    { op: "policyProvider", id: p.provider.id, supportsWebsocket: false, allowedModels: null },
+    {
+      op: "policyProvider",
+      id: p.provider.id,
+      supportsWebsocket: false,
+      handoffAfterCompaction: true,
+      takeNewThreads: false,
+      allowedModels: null,
+    },
     "fixture-open-revision",
   );
   expect(screen.getByRole("button", { name: "保存中…" })).toBeDisabled();

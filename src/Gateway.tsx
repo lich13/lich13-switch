@@ -12,7 +12,7 @@ import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import Modal from "./Modal";
-import { providerStatus } from "./provider-status";
+import { providerRuntimeStatus } from "./provider-status";
 import { QuotaInfo, useProviderQuota } from "./Quota";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -342,12 +342,7 @@ function GatewayContent({
             {(p, priority, handle, rowBusy) => {
               const selected =
                 state.mode === "manual" && state.selected === p.id;
-              const reconnect = state.websocketRetries?.find(
-                (w) => w.providerId === p.id,
-              );
-              const status = reconnect
-                ? `重连等待 ${reconnect.retryIn}s`
-                : providerStatus(p) || (state.compactionPending?.includes(p.id) ? "等待压缩后接管" : null);
+              const status = providerRuntimeStatus(p, state);
               return (
                 <>
                   <div className="provider-main">
@@ -368,7 +363,7 @@ function GatewayContent({
                     {status && (
                       <button
                         className="provider-alert"
-                        onClick={() => setDialog({ kind: "settings", item: p })}
+                        onClick={() => void command("open_main", { page: "logs", eventId: p.health.cause?.eventId ?? null, providerId: p.health.cause ? p.id : null, clientId })}
                       >
                         {status}
                       </button>
@@ -503,6 +498,27 @@ function GatewayContent({
                     ?.name ?? "未匹配供应商")}
             </span>
           </div>
+          {clientId === "codex" && (
+            <label className="setting-row">
+              连接方式
+              <select
+                aria-label="Codex 连接方式"
+                value={state.connectionMode ?? "bearer"}
+                disabled={busy || state.running || state.recoveryPending}
+                onChange={(e) => {
+                  const mode = e.target.value;
+                  run(async () => {
+                    await edit({ op: "connection", mode });
+                    notify("连接方式已保存");
+                  });
+                }}
+              >
+                <option value="auto">重新识别</option>
+                <option value="bearer">独立 Bearer Token</option>
+                <option value="apiKey">普通 API 登录</option>
+              </select>
+            </label>
+          )}
           <QuotaRefreshSettings
             seconds={quotaRefreshSeconds}
             onDirtyChange={markQuota}
@@ -553,6 +569,7 @@ function GatewayContent({
       {dialog?.kind === "provider" && (
         <GatewayDialog
           clientId={clientId}
+          connectionMode={state.connectionMode}
           dialog={dialog}
           revision={state.revision}
           onDirtyChange={markDialog}
@@ -592,21 +609,22 @@ function Advanced({
       baseRevision.current = revision;
     }
   }, [settings, revision, editing]);
-  const fields: [Exclude<keyof GatewaySettings, "handoffAfterCompaction">, string][] = [
+  const fields: [keyof GatewaySettings, string][] = [
     ["port", "本地端口"],
     ["maxRetries", "最大重试次数"],
     ["failureThreshold", "连续失败阈值"],
+    ["transientFailureThreshold", "5xx 连续失败阈值"],
     ["successThreshold", "恢复成功次数"],
     ["cooldownSeconds", "熔断等待 / 秒"],
     ["rateLimitSeconds", "429 默认冷却 / 秒"],
     ...(clientId === "codex"
       ? [
           ["websocketRetrySeconds", "WebSocket 断开等待 / 秒"] as [
-            Exclude<keyof GatewaySettings, "handoffAfterCompaction">,
+            keyof GatewaySettings,
             string,
           ],
           ["capacityRetrySeconds", "容量错误等待 / 秒"] as [
-            Exclude<keyof GatewaySettings, "handoffAfterCompaction">,
+            keyof GatewaySettings,
             string,
           ],
         ]
@@ -636,14 +654,6 @@ function Advanced({
           });
       }}
     >
-      {clientId === "codex" && <label className="setting-row">
-        <span>压缩后接管</span>
-        <input type="checkbox" checked={draft.handoffAfterCompaction ?? true} onChange={(e) => {
-          if (!editing) baseRevision.current = revision;
-          setEditing(true); onDirtyChange?.(true);
-          setDraft({ ...draft, handoffAfterCompaction: e.target.checked });
-        }} />
-      </label>}
       <div className="settings-grid">
         {fields.map(([key, label]) => (
           <label key={key}>
@@ -656,10 +666,11 @@ function Advanced({
                 key === "capacityRetrySeconds" ||
                 key === "websocketRetrySeconds"
                   ? 86400
+                  : key === "transientFailureThreshold" ? 1000
                   : undefined
               }
               step={key === "errorRate" ? 0.01 : 1}
-              value={draft[key]}
+              value={draft[key] ?? (key === "transientFailureThreshold" ? 6 : "")}
               onChange={(e) => {
                 if (!editing) baseRevision.current = revision;
                 setEditing(true);
@@ -683,6 +694,7 @@ function Advanced({
 }
 function GatewayDialog({
   clientId,
+  connectionMode,
   dialog,
   revision,
   close,
@@ -690,6 +702,7 @@ function GatewayDialog({
   onDirtyChange,
 }: {
   clientId: ClientId;
+  connectionMode?: "bearer" | "apiKey";
   dialog: Extract<NonNullable<Dialog>, { kind: "provider" }>;
   close: () => void;
   revision: string;
@@ -764,7 +777,7 @@ function GatewayDialog({
           <label>
             {clientId === "claude"
               ? "ANTHROPIC_AUTH_TOKEN"
-              : "experimental_bearer_token"}
+              : connectionMode === "apiKey" ? "OPENAI_API_KEY" : "experimental_bearer_token"}
             <input
               required={!dialog.item}
               type="password"

@@ -549,7 +549,7 @@ fn v5_migration_backfills_details_but_never_invents_first_token_samples_for_old_
     let version: i64 = database
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     drop(database);
     let totals = Store::open(dir.path())
         .unwrap()

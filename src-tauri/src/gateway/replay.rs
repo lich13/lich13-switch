@@ -61,6 +61,8 @@ pub struct RequestHints {
     pub compaction_trigger: bool,
     #[serde(skip)]
     pub compacted_window: Option<String>,
+    #[serde(skip)]
+    pub first_turn: bool,
 }
 impl RequestHints {
     pub fn from_value(value: serde_json::Value, projected: bool) -> Result<Self, BoxError> {
@@ -101,7 +103,37 @@ impl RequestHints {
                 .rev()
                 .find_map(|v| super::compaction::fingerprint(v, projected));
         }
+        hints.first_turn = hints.previous_response_id.is_none()
+            && !hints.compaction_trigger
+            && hints.compacted_window.is_none()
+            && first_turn_input(value.get("input"));
         Ok(hints)
+    }
+}
+// Structural evidence only. Unknown/truncated arrays never prove a new conversation.
+fn first_turn_input(input: Option<&serde_json::Value>) -> bool {
+    use serde_json::Value;
+    match input {
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut users = 0;
+            for item in items {
+                let kind = item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("message");
+                if !matches!(kind, "message" | "input_message") {
+                    return false;
+                }
+                match item.get("role").and_then(Value::as_str) {
+                    Some("user") => users += 1,
+                    Some("system" | "developer") => (),
+                    _ => return false,
+                }
+            }
+            users == 1
+        }
+        _ => false,
     }
 }
 pub struct Replay {

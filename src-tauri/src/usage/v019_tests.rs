@@ -211,6 +211,7 @@ fn protocol_tokens_keep_missing_and_real_zero_distinct() {
     assert_eq!(
         zero,
         Tokens {
+            inclusive_input: Some(0),
             input: Some(0),
             output: Some(0),
             cache_read: Some(0),
@@ -250,6 +251,7 @@ fn exact_response_id_supplements_only_missing_token_fields() {
         "fixture-v019-partial-gateway",
         "proxy",
         Tokens {
+            inclusive_input: Some(100),
             input: Some(100),
             output: Some(7),
             cache_read: None,

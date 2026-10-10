@@ -17,6 +17,8 @@ pub enum Phase {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Details {
     pub upstream_code: Option<String>,
+    #[serde(default)]
+    pub local_code: Option<String>,
     pub upstream_type: Option<String>,
     pub parameter: Option<String>,
     pub message: Option<String>,
@@ -170,6 +172,7 @@ pub fn safe_message(value: &str) -> Option<String> {
 impl Details {
     pub fn sanitized(mut self) -> Self {
         self.upstream_code = code(self.upstream_code);
+        self.local_code = code(self.local_code);
         self.upstream_type = code(self.upstream_type);
         self.parameter = self.parameter.filter(|v| {
             [
@@ -188,7 +191,13 @@ impl Details {
             .and_then(|v| uuid::Uuid::parse_str(&v).ok().map(|id| id.to_string()));
         self.ws_close_code = self.ws_close_code.filter(|v| (1000..=4999).contains(v));
         if let Some(c) = &mut self.circuit {
-            if !["consecutive_failures", "error_rate", "probe_failed"].contains(&c.trigger.as_str())
+            if ![
+                "consecutive_failures",
+                "transient_failures",
+                "error_rate",
+                "probe_failed",
+            ]
+            .contains(&c.trigger.as_str())
             {
                 c.trigger = "consecutive_failures".into();
             }

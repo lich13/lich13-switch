@@ -466,13 +466,13 @@ describe("usage records", () => {
     const unavailable = within(rows[0]).getAllByRole("cell");
     const zero = within(rows[1]).getAllByRole("cell");
     for (const index of [3, 4, 5]) {
-      expect(unavailable[index]).toHaveTextContent(/^未提供$/);
+      expect(unavailable[index]).toHaveTextContent(/^—$/);
       expect(zero[index]).toHaveTextContent(/^0$/);
     }
     expect(unavailable[6]).toHaveTextContent(/^未定价$/);
     expect(zero[6]).toHaveTextContent(/^\$0\.0000$/);
     const tokenMetric = screen.getByText("已报告 Token").parentElement!;
-    expect(within(tokenMetric).getByText("未提供")).toBeInTheDocument();
+    expect(within(tokenMetric).getByText("—")).toBeInTheDocument();
 
     dashboard.totals.tokens = zeroTokens;
     fireEvent.click(screen.getByRole("button", { name: "刷新用量" }));
@@ -721,7 +721,7 @@ describe("usage records", () => {
     });
     expect(firstTokenLabels).toHaveLength(2);
     for (const label of firstTokenLabels) {
-      expect(label.nextElementSibling).toHaveTextContent("未提供");
+      expect(label.nextElementSibling).toHaveTextContent("—");
     }
   });
 

@@ -1,6 +1,9 @@
-//! Only the two credential values in the existing `custom` provider belong to us.
+//! Bearer mode owns two `custom` values; API mode owns auth.json and the active base_url.
 //! Edits use parser byte spans: unrelated TOML is never serialized again.
-use super::ClientId;
+use super::{
+    codex_api::{self, Connection},
+    ClientId,
+};
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,6 +34,8 @@ struct Journal {
     #[serde(default)]
     client: ClientId,
     version: u32,
+    #[serde(default)]
+    connection: Connection,
     path: PathBuf,
     before: Pair,
     applied: Pair,
@@ -83,6 +88,61 @@ fn pair(doc: &Document<&str>) -> Result<Pair> {
         base_url: read(KEYS[0])?,
         token: read(KEYS[1])?,
     })
+}
+pub fn read_connection(
+    client: ClientId,
+    home: &Path,
+    connection: &Connection,
+) -> Result<(String, Pair)> {
+    match (client, connection) {
+        (ClientId::Codex, Connection::ApiKey { provider }) => codex_api::read(home, provider),
+        _ => read_for(client, home),
+    }
+}
+fn stored_connection(store: Option<&str>) -> Result<Connection> {
+    let Some(store) = store else {
+        return Ok(Connection::Bearer);
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(store).map_err(|_| AppError::new("STORE", "网关连接方式无效"))?;
+    value
+        .get("connection")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map(|v| v.unwrap_or_default())
+        .map_err(|_| AppError::new("STORE", "网关连接方式无效"))
+}
+fn write_record(
+    data: &Path,
+    record: &Journal,
+    target: &Pair,
+    expected: Option<&str>,
+    allowed: Option<&[&Pair]>,
+) -> Result<()> {
+    if let (ClientId::Codex, Connection::ApiKey { provider }) = (record.client, &record.connection)
+    {
+        let home = record
+            .path
+            .parent()
+            .ok_or_else(|| AppError::new("RECOVERY", "API 恢复路径无效"))?;
+        codex_api::write(data, home, provider, target, expected, allowed)
+    } else {
+        write_pair(record.client, &record.path, target, expected, allowed)
+    }
+}
+/// Account synchronization must never adopt the gateway's local API credential.
+/// An unresolved transaction also owns auth.json until recovery succeeds.
+pub(crate) fn manages_auth(data: &Path, home: &Path) -> bool {
+    match load(data) {
+        Ok(Some(record)) => {
+            record.client == ClientId::Codex
+                && matches!(record.connection, Connection::ApiKey { .. })
+                && record.path == home.join("config.toml")
+        }
+        Ok(None) => data.join("gateway-api-write.json").exists(),
+        Err(_) => true,
+    }
 }
 pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
     let raw = storage::read_optional(&client.config(home))?;
@@ -332,12 +392,14 @@ pub fn attach_store_for(
     if data.join(FILE).exists() {
         return Err(AppError::new("RECOVERY", "请先处理现有配置事务"));
     }
-    let (revision, before) = read_for(client, home)?;
+    let connection = stored_connection(store.as_ref().map(|(_, after)| after.as_str()))?;
+    let (revision, before) = read_connection(client, home, &connection)?;
     if revision != expected {
         return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
     }
     let mut record = Journal {
         version: 2,
+        connection,
         client,
         path: client.config(home),
         before,
@@ -349,14 +411,11 @@ pub fn attach_store_for(
         store_after: store.map(|(_, after)| after),
     };
     save(data, &record)?;
-    if let Err(e) = write_pair(
-        record.client,
-        &record.path,
-        &record.applied,
-        Some(expected),
-        None,
-    ) {
-        if read_for(client, home).is_ok_and(|(_, p)| p != record.applied) {
+    if let Err(e) = write_record(data, &record, &record.applied, Some(expected), None) {
+        if !data.join("gateway-api-write.json").exists()
+            && read_connection(client, home, &record.connection)
+                .is_ok_and(|(_, p)| p != record.applied)
+        {
             fs::remove_file(data.join(FILE)).map_err(storage::io_error)?;
         }
         return Err(e);
@@ -384,7 +443,7 @@ pub fn commit_store_for(
         if record.store_after.is_some() {
             return Err(AppError::new("RECOVERY", "请先停止网关并完成待处理事务"));
         }
-        let (_, current) = read_for(client, home)?;
+        let (_, current) = read_connection(client, home, &record.connection)?;
         if current != record.applied {
             return Err(AppError::new("CONFLICT", "受管地址或 Token 已被外部修改"));
         }
@@ -393,12 +452,14 @@ pub fn commit_store_for(
         if data.join(FILE).exists() {
             return Err(AppError::new("RECOVERY", "请先处理待恢复的配置事务"));
         }
-        let (revision, before) = read_for(client, home)?;
+        let connection = stored_connection(Some(&after_store))?;
+        let (revision, before) = read_connection(client, home, &connection)?;
         if expected_config.is_some_and(|e| e != revision) {
             return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
         }
         Journal {
             version: 2,
+            connection,
             client,
             path: client.config(home),
             before,
@@ -415,9 +476,9 @@ pub fn commit_store_for(
     record.store_after = Some(after_store);
     save(data, &record)?;
     if !running {
-        write_pair(
-            record.client,
-            &record.path,
+        write_record(
+            data,
+            &record,
             &record.applied,
             expected_config,
             Some(&[&record.before, &record.applied]),
@@ -453,17 +514,12 @@ pub fn detach(data: &Path) -> Result<()> {
     } else {
         vec![&record.before, &record.applied, &record.exit]
     };
-    write_pair(
-        record.client,
-        &record.path,
-        &record.exit,
-        None,
-        Some(&allowed),
-    )?;
+    write_record(data, &record, &record.exit, None, Some(&allowed))?;
     complete_store(data, &mut record)?;
     fs::remove_file(data.join(FILE)).map_err(storage::io_error)
 }
 pub fn recover(data: &Path) -> Result<()> {
+    codex_api::recover_write(data)?;
     let Some(raw) = storage::read_optional(&data.join(FILE))? else {
         return Ok(());
     };
@@ -650,6 +706,7 @@ mod tests {
         let new = Pair::new("https://next.test", "new");
         let mut record = Journal {
             client: ClientId::Codex,
+            connection: Connection::Bearer,
             version: 2,
             path: path.clone(),
             before: old,

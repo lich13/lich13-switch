@@ -192,7 +192,7 @@ describe("decimal compact quantities", () => {
   it.each([null, undefined, Number.NaN, Number.POSITIVE_INFINITY])(
     "keeps an unavailable quantity unknown (%s)",
     (value) => {
-      expect(compact(value)).toBe("未提供");
+      expect(compact(value)).toBe("—");
     },
   );
 });

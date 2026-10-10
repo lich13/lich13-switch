@@ -1,4 +1,17 @@
 //! Model policy is independent of transport versions, health and capacity.
+/// Give an established conversation two short, cancellable retries on its
+/// owner before ordinary failover. These still consume the normal retry budget.
+pub fn transient_delay(
+    retries: &mut u8,
+    retry_after: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    if *retries >= 2 {
+        return None;
+    }
+    *retries += 1;
+    Some(std::time::Duration::from_secs(u64::from(*retries)).max(retry_after.unwrap_or_default()))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Requirement {
     Resource,

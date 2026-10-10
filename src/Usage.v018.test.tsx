@@ -381,7 +381,7 @@ describe("v0.19 usage overview", () => {
       cacheInputEligible: 8,
     });
     await renderUsage();
-    expect(within(metric("已报告 Token")).getByText("未提供")).toBeInTheDocument();
+    expect(within(metric("已报告 Token")).getByText("—")).toBeInTheDocument();
     expect(within(metric("缓存命中率")).getByText("37.5%")).toHaveAttribute(
       "title",
       "3 / 8",
@@ -713,7 +713,7 @@ describe("v0.18 request details and sources", () => {
       stream: true,
       operation: "model" as const,
       firstTokenMs: null,
-      expected: "未提供",
+      expected: "—",
     },
     {
       label: "session duration",
@@ -721,7 +721,7 @@ describe("v0.18 request details and sources", () => {
       stream: true,
       operation: "model" as const,
       firstTokenMs: 1250,
-      expected: "未提供",
+      expected: "—",
     },
     {
       label: "non-streaming duration",
@@ -729,7 +729,7 @@ describe("v0.18 request details and sources", () => {
       stream: false,
       operation: "model" as const,
       firstTokenMs: 1250,
-      expected: "未提供",
+      expected: "—",
     },
     {
       label: "web search duration",
@@ -737,7 +737,7 @@ describe("v0.18 request details and sources", () => {
       stream: true,
       operation: "web_search" as const,
       firstTokenMs: 1250,
-      expected: "未提供",
+      expected: "—",
     },
   ])(
     "groups detail fields and treats $label correctly",

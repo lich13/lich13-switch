@@ -1,4 +1,5 @@
 export type Tokens = {
+  inclusiveInput?: number | null;
   input: number | null;
   output: number | null;
   cacheRead: number | null;
@@ -32,6 +33,7 @@ export type Attempt = {
   operation?: "model" | "web_search" | "compaction";
   compactionKind?: string | null;
   usageStatus?: string;
+  availability?: Record<string, string>;
   usageSources?: Record<string, string>;
   id: string;
   provider: string | null;
@@ -165,9 +167,9 @@ export type PricingView = {
   revision: string;
 };
 export const numeric = (n: number | null | undefined) =>
-  n == null ? "未提供" : n.toLocaleString("zh-CN");
+  n == null ? "—" : n.toLocaleString("zh-CN");
 export const compact = (n: number | null | undefined) => {
-  if (n == null || !Number.isFinite(n)) return "未提供";
+  if (n == null || !Number.isFinite(n)) return "—";
   if (Math.abs(n) < 1000) return numeric(n);
   const units = ["", "K", "M", "B"];
   let power = Math.min(3, Math.floor(Math.log10(Math.abs(n)) / 3));

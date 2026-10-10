@@ -56,6 +56,7 @@ impl Connection for Transport {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ConnectError {
     TargetConnect,
+    TargetTimeout,
     Tls,
     Loop,
 }
@@ -63,6 +64,7 @@ impl std::fmt::Display for ConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::TargetConnect => "上游目标连接失败或超时",
+            Self::TargetTimeout => "上游连接超时",
             Self::Tls => "上游 TLS 验证失败",
             Self::Loop => "上游指向本网关",
         })
@@ -78,6 +80,14 @@ pub fn classify(error: &(dyn std::error::Error + 'static)) -> Option<ConnectErro
         current = e.source();
     }
     None
+}
+pub fn diagnostic_code(error: &(dyn std::error::Error + 'static)) -> &'static str {
+    match classify(error) {
+        Some(ConnectError::TargetTimeout) => "CONNECT_TIMEOUT",
+        Some(ConnectError::Tls) => "TLS_HANDSHAKE_FAILED",
+        Some(ConnectError::Loop) => "GATEWAY_LOOP",
+        _ => "CONNECTION_FAILED",
+    }
 }
 #[derive(Clone)]
 pub struct Connector {
@@ -144,7 +154,7 @@ impl Connector {
                 stream.ok_or(ConnectError::TargetConnect)
             })
             .await
-            .map_err(|_| ConnectError::TargetConnect)??
+            .map_err(|_| ConnectError::TargetTimeout)??
         };
         let _ = tcp.set_nodelay(true);
         let stream: Box<dyn Stream> = if tls {

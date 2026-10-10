@@ -1183,6 +1183,7 @@ fn service_tier_prices_and_multiplier_use_exact_decimal_arithmetic() {
 #[test]
 fn cache_durations_and_media_subsets_are_charged_once() {
     let tokens = Tokens {
+        inclusive_input: None,
         input: Some(100),
         output: Some(20),
         cache_read: Some(50),
@@ -1736,6 +1737,9 @@ fn maintenance_compacts_history_when_session_auto_sync_is_disabled() {
     );
     for row in &mut rows {
         row.attempts[0].price = price.calculate(&row.attempts[0].tokens, None);
+        for attempt in &mut row.attempts {
+            attempt.annotate_availability(&row.source);
+        }
     }
     service
         .query(|store| store.write_batch(&rows, None))

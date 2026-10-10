@@ -56,13 +56,17 @@ describe("gateway advanced settings", () => {
     await screen.findByRole("button", { name: "添加" });
     await user.click(screen.getByText("高级设置"));
 
-    const handoff = screen.getByRole("checkbox", { name: "压缩后接管" });
-    expect(handoff).toBeChecked();
-    await user.click(handoff);
+    expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
     const retry = screen.getByRole("spinbutton", { name: "WebSocket 断开等待 / 秒" });
     expect(retry).toHaveValue(60);
+    const transient = screen.getByRole("spinbutton", { name: "5xx 连续失败阈值" });
+    expect(transient).toHaveValue(6);
+    expect(transient).toHaveAttribute("min", "1");
+    expect(transient).toHaveAttribute("max", "1000");
     await user.clear(retry);
     await user.type(retry, "75");
+    await user.clear(transient);
+    await user.type(transient, "9");
     await user.click(screen.getByRole("button", { name: "保存参数" }));
 
     await waitFor(() => {
@@ -74,12 +78,14 @@ describe("gateway advanced settings", () => {
             op: "settings",
             settings: expect.objectContaining({
               websocketRetrySeconds: 75,
-              handoffAfterCompaction: false,
+              transientFailureThreshold: 9,
             }),
           },
         }),
       );
     });
+    const update = mock.command.mock.calls.find(([name]) => name === "update_gateway");
+    expect(update?.[1].edit.settings).not.toHaveProperty("handoffAfterCompaction");
   });
 
   it("does not expose WebSocket retry settings to Claude", async () => {
@@ -91,6 +97,23 @@ describe("gateway advanced settings", () => {
 
     expect(screen.queryByLabelText("WebSocket 断开等待 / 秒")).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
+    const transient = screen.getByRole("spinbutton", { name: "5xx 连续失败阈值" });
+    expect(transient).toHaveValue(6);
+    await user.clear(transient);
+    await user.type(transient, "8");
+    await user.click(screen.getByRole("button", { name: "保存参数" }));
+    await waitFor(() =>
+      expect(mock.command).toHaveBeenCalledWith(
+        "update_gateway",
+        expect.objectContaining({
+          clientId: "claude",
+          edit: expect.objectContaining({
+            op: "settings",
+            settings: expect.objectContaining({ transientFailureThreshold: 8 }),
+          }),
+        }),
+      ),
+    );
   });
 });
 

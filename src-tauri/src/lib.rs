@@ -204,6 +204,7 @@ fn open_main(
     page: Option<String>,
     provider_id: Option<String>,
     client_id: Option<gateway::ClientId>,
+    event_id: Option<String>,
 ) -> Result<()> {
     if page.as_ref().is_some_and(|p| {
         !["accounts", "config", "gateway", "logs", "settings"].contains(&p.as_str())
@@ -211,7 +212,14 @@ fn open_main(
         return Err(AppError::new("WINDOW", "无效页面"));
     }
     quick::hide_quick(app.clone())?;
-    if let Some(id) = provider_id {
+    if let Some(id) = event_id {
+        uuid::Uuid::parse_str(&id).map_err(|_| AppError::new("EVENT", "日志标识无效"))?;
+        show(&app, None)?;
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.emit("event-log", serde_json::json!({"id":id,"clientId":client_id.unwrap_or_default(),"providerId":provider_id}));
+        }
+        Ok(())
+    } else if let Some(id) = provider_id {
         show(&app, None)?;
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.emit(
@@ -285,12 +293,13 @@ fn get_state(r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
     state_for(r.inner())
 }
 #[tauri::command]
-fn switch_account(
+async fn switch_account(
     app: tauri::AppHandle,
     r: tauri::State<'_, Arc<Runtime>>,
     id: String,
     expected_revision: String,
 ) -> Result<ViewState> {
+    let _connection_guard = r.official_tx.lock().await;
     let official_view = official::view(&r.data, &r.home(gateway::ClientId::Codex)?);
     if official::blocks_gateway(&r.data, &r.home(gateway::ClientId::Codex)?)
         && official_view.account_id.as_deref() != Some(id.as_str())
@@ -660,6 +669,7 @@ fn start_login(
                 result = &mut task => break result,
             }
         };
+        let _connection_guard = runtime.official_tx.lock().await;
         let mut final_state = match result {
             Ok(Some(raw)) => match lock(&runtime.login).and_then(|s| {
                 if s.cancel.is_none() {
@@ -1231,6 +1241,7 @@ pub fn run() {
                     fixture.path().join("claude").to_string_lossy().into_owned();
                 core.set_preferences(preferences)?;
             }
+            let codex_import_error = if smoke.is_none() { gateway.import_initial(&core.home()).err() } else { None };
             let claude_import_error = if smoke.is_none() {
                 let home=std::path::PathBuf::from(core.preferences().claude_home);
                 let recovery=if claude_profile::recovery_pending(&data) && claude_profile::login::running_sessions()? {
@@ -1272,7 +1283,7 @@ pub fn run() {
                 power,
                 frontend_started: AtomicBool::new(false),
                 force_quitting: AtomicBool::new(false),
-                startup_error: Mutex::new(claude_import_error),
+                startup_error: Mutex::new(codex_import_error.or(claude_import_error)),
                 cleanup_error: Mutex::new(cleanup_error),
                 official_tx: tokio::sync::Mutex::new(()),
             });
@@ -1393,10 +1404,10 @@ pub fn run() {
                 .on_menu_event(|app, e| match e.id().as_ref() {
                     "quit" => quit(app, &app.state::<Arc<Runtime>>()),
                     "open" => {
-                        let _ = open_main(app.clone(), None, None, None);
+                        let _ = open_main(app.clone(), None, None, None, None);
                     }
                     "config" | "gateway" | "settings" => {
-                        let _ = open_main(app.clone(), Some(e.id().as_ref().into()), None, None);
+                        let _ = open_main(app.clone(), Some(e.id().as_ref().into()), None, None, None);
                     }
                     "github" => {
                         let _ = update::open_repository();

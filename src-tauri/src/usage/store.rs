@@ -72,7 +72,7 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 7 {
+        if version > 8 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
@@ -177,6 +177,9 @@ impl Store {
             query::changed(&tx)?;
             db(tx.commit())?;
         }
+        if version < 8 {
+            db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR IGNORE INTO metadata(key,value) VALUES('repair_v020_after',''),('repair_codex','1'),('repair_claude','1'); PRAGMA user_version=8; COMMIT;"))?;
+        }
         for suffix in ["-wal", "-shm"] {
             let file = dir.join(format!("usage.sqlite{suffix}"));
             if file.exists() {
@@ -210,6 +213,65 @@ impl Store {
         let result = f(self);
         let end = db(self.connection.execute_batch("ROLLBACK;"));
         result.and_then(|value| end.map(|()| value))
+    }
+    /// Bounded, restartable metadata repair. Old rate snapshots remain unchanged.
+    pub fn repair_metadata_batch(&mut self) -> Result<bool> {
+        let after: Option<String> = db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='repair_v020_after'",
+                [],
+                |r| r.get(0),
+            )
+            .optional())?;
+        let Some(after) = after else {
+            return Ok(false);
+        };
+        let tx = db(self.connection.transaction())?;
+        let rows = {
+            let mut statement =
+                db(tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 64"))?;
+            let rows = db(statement.query_map([&after], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+        };
+        if rows.is_empty() {
+            db(tx.execute("DELETE FROM metadata WHERE key='repair_v020_after'", []))?;
+        } else {
+            for (id, body) in &rows {
+                let mut record: Record = serde_json::from_str(body)
+                    .map_err(|_| failure("历史用量元数据无法修复，已保留原记录"))?;
+                for attempt in &mut record.attempts {
+                    attempt.annotate_availability(&record.source);
+                }
+                if let Some(attempt) = &mut record.gateway_reported {
+                    attempt.annotate_availability("proxy");
+                }
+                db(tx.execute(
+                    "UPDATE records SET body=?2 WHERE id=?1",
+                    params![
+                        id,
+                        serde_json::to_string(&record).map_err(|_| failure("用量元数据无效"))?
+                    ],
+                ))?;
+                if record.source == "proxy" {
+                    dedup::supplement(&tx, id)?;
+                }
+                let body: String =
+                    db(tx.query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
+                let repaired: Record =
+                    serde_json::from_str(&body).map_err(|_| failure("用量元数据无效"))?;
+                query::project(&tx, 0, id, &repaired, 1, None)?;
+            }
+            db(tx.execute(
+                "UPDATE metadata SET value=?1 WHERE key='repair_v020_after'",
+                [&rows.last().unwrap().0],
+            ))?;
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok(!rows.is_empty())
     }
     pub fn needs_repair(&self, source: &str) -> Result<bool> {
         db(self.connection.query_row(
@@ -392,6 +454,9 @@ impl Store {
                 a.started_at = day;
                 a.duration_ms = 0;
                 a.first_token_ms = None;
+                // Per-request availability is not a billing dimension. Its
+                // first-token marker must not split otherwise identical days.
+                a.availability.clear();
             }
             // Exact token/tier/price dimensions are retained for safe future backfill.
             let key =
@@ -634,23 +699,31 @@ fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Resul
             for (a, b) in r.attempts.iter_mut().zip(&old.attempts) {
                 a.cost_multiplier = b.cost_multiplier.clone();
                 if let Some(price) = &b.price {
-                    if a.tokens == b.tokens {
-                        a.price = Some(price.clone());
+                    a.price = if a.tokens == b.tokens {
+                        Some(price.clone())
                     } else if price.basis.is_some() {
-                        a.price = Quote {
+                        // Late session fragments keep the original unit prices,
+                        // version and multiplier, even after automatic updates.
+                        Quote {
                             model: price.model.clone(),
                             data: price.basis.clone(),
                             version: price.version.clone(),
                             source: price.source.clone(),
                             multiplier: price.multiplier.clone(),
                         }
-                        .calculate(&a.tokens, a.service_tier.as_deref());
+                        .calculate(&a.tokens, a.service_tier.as_deref())
                     } else {
-                        a.price = None;
-                    }
+                        Some(price.clone())
+                    };
+                    a.pricing_model = b.pricing_model.clone();
+                    a.pricing_basis = b.pricing_basis.clone();
+                    a.mapping_revision = b.mapping_revision.clone();
                 }
             }
         }
+    }
+    for attempt in &mut r.attempts {
+        attempt.annotate_availability(&r.source);
     }
     Ok(r)
 }

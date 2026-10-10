@@ -279,20 +279,19 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .get(header::ACCEPT)
             .is_some_and(|h| h.as_bytes().windows(17).any(|w| w == b"text/event-stream"));
     let mut model = hints.as_ref().ok().and_then(|h| h.model.clone());
-    let compacted_window = hints.as_ref().ok().and_then(|h| h.compacted_window.clone());
     let compaction_trigger = hints.as_ref().is_ok_and(|h| h.compaction_trigger);
     let mut pinned = (mode == "manual").then(|| ids.first().cloned()).flatten();
     let mut unknown_affinity = false;
-    let continuation = match hints {
+    let continuation = match &hints {
         Ok(hints) if hints.previous_response_id.is_some() => {
-            let previous = hints.previous_response_id.unwrap();
+            let previous = hints.previous_response_id.as_ref().unwrap();
             let owner = gateway
                 .0
                 .inner
                 .lock()
                 .unwrap()
                 .affinity
-                .get(&previous)
+                .get(previous)
                 .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
                 .cloned();
             if let Some((owner, previous_model, _)) = owner {
@@ -333,7 +332,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     );
     let ownership = if gateway.client_id() == super::ClientId::Codex
         && mode == "auto"
-        && settings.handoff_after_compaction
         && responses
         && !unknown_affinity
     {
@@ -344,14 +342,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     .get(*id)
                     .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
             })
-            .cloned()
+            .filter_map(|id| routes.get(id).map(|r| r.provider.clone()))
             .collect();
         if let Some(session) =
             super::compaction::session(&parts.headers).filter(|_| !eligible.is_empty())
         {
-            let lease = gateway.0.compaction.prepare(
+            let lease = gateway.0.compaction.prepare_policy(
                 session,
-                compacted_window.as_deref(),
+                hints.as_ref().ok(),
                 !continuation && operation == crate::usage::model::Operation::Model,
                 &eligible,
             );
@@ -377,6 +375,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         gateway.usage_operation(model.as_deref(), operation)
     };
     let mut last = None;
+    let mut last_error: Option<crate::events::Record> = None;
     let mut attempted = 0usize;
     let mut ordinary_attempts = 0usize;
     let mut capacity_protected = false;
@@ -391,6 +390,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     let mut rpm_retry_after: Option<Duration> = None;
     let mut capacity_sources = Vec::new();
     let mut capacity_waited = Duration::ZERO;
+    let mut transient_retries = 0;
+    let mut retry_owner: Option<String> = None;
     while ordinary_attempts <= settings.max_retries {
         // An unknown previous_response_id has no safe owner to replay against;
         // preserve the existing one-attempt rule instead of silently
@@ -437,22 +438,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
-        if let Some(owner) = ownership
-            .as_ref()
-            .filter(|lease| !lease.handoff)
-            .and_then(|lease| lease.owner.as_deref())
-        {
-            if let Some(route) = candidates
-                .iter()
-                .find(|route| {
-                    route.provider.id == owner && route.provider_circuit.health().available
-                })
-                .cloned()
-            {
-                // Capacity and RPM keep the current conversation in place. A
-                // real upstream failure can still use the existing failover loop.
-                candidates = vec![route];
-            }
+        if let Some(owner) = retry_owner.take() {
+            candidates.retain(|route| route.provider.id == owner);
+        } else if let Some(lease) = &ownership {
+            candidates = lease.candidates(candidates);
         }
         let admission_started = Instant::now();
         let mut admission = match gateway
@@ -557,6 +546,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             capacity_waited += admission_started.elapsed();
         }
         let route = admission.route.clone();
+        if ownership
+            .as_ref()
+            .is_some_and(|lease| !lease.admitted(&route.provider.id))
+        {
+            admission.permits.neutral(&settings);
+            if gateway.0.compaction.error().is_some() {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONVERSATION_OWNERSHIP",
+                    "线程归属记录暂不可用",
+                );
+            }
+            continue;
+        }
         if unknown_affinity {
             pinned = Some(route.provider.id.clone());
         }
@@ -626,7 +629,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Some(connector::ConnectError::Tls) => "TLS",
                     _ => "NETWORK",
                 };
-                admission.permits.report(
+                last_error = Some(admission.permits.report(
                     &gateway,
                     &route,
                     model.as_deref(),
@@ -636,18 +639,18 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     attempted,
                     crate::events::Details {
                         phase: Some(crate::events::Phase::Connect),
-                        upstream_code: Some(last_category.into()),
+                        local_code: Some(connector::diagnostic_code(&e).into()),
                         counted_failure: Some(true),
                         ..Default::default()
                     },
-                );
+                ));
                 admission.permits.failure(&settings, None);
                 protocol.finish(None, last_category);
                 continue;
             }
             Err(_) => {
                 last_category = "FIRST_BYTE_TIMEOUT";
-                admission.permits.report(
+                last_error = Some(admission.permits.report(
                     &gateway,
                     &route,
                     model.as_deref(),
@@ -657,11 +660,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     attempted,
                     crate::events::Details {
                         phase: Some(crate::events::Phase::Headers),
-                        upstream_code: Some("FIRST_BYTE_TIMEOUT".into()),
+                        local_code: Some("FIRST_BYTE_TIMEOUT".into()),
                         counted_failure: Some(true),
                         ..Default::default()
                     },
-                );
+                ));
                 admission.permits.failure(&settings, None);
                 protocol.finish(None, last_category);
                 continue;
@@ -784,11 +787,28 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 wait_budget.protect_capacity();
                 capacity_waited += started.elapsed();
             }
+            let hard_rejection = super::upstream_error::permanent_rejection(&decoded);
             let retryable = compact_error
                 || model_error
-                || (circuit::retryable(status.as_u16())
-                    && (route.client_id != super::ClientId::Codex
-                        || !super::upstream_error::permanent_rejection(&decoded)));
+                || hard_rejection
+                || circuit::retryable(status.as_u16());
+            let retry_delay = if route.client_id == super::ClientId::Codex
+                && circuit::is_server_error(status.as_u16())
+                && !compact_error
+                && !model_error
+                && !capacity
+                && !hard_rejection
+                && !unknown_affinity
+                && ordinary_attempts <= settings.max_retries
+                && (pinned.as_deref() == Some(&route.provider.id)
+                    || ownership
+                        .as_ref()
+                        .is_some_and(|lease| lease.owns(&route.provider.id)))
+            {
+                routing::transient_delay(&mut transient_retries, cooldown)
+            } else {
+                None
+            };
             let will_retry = retryable
                 && !ids.is_empty()
                 && ordinary_attempts <= settings.max_retries
@@ -812,14 +832,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             details.phase = Some(crate::events::Phase::Response);
             details.counted_failure = Some(
-                !compact_error && !model_error && !capacity && status.as_u16() != 429 && retryable,
+                !compact_error
+                    && !model_error
+                    && !capacity
+                    && !hard_rejection
+                    && status.as_u16() != 429
+                    && retryable,
             );
-            admission.permits.report(
+            details.wait_seconds = retry_delay.map(|delay| delay.as_secs());
+            last_error = Some(admission.permits.report(
                 &gateway,
                 &route,
                 model.as_deref(),
                 reason,
-                if will_retry {
+                if retry_delay.is_some() {
+                    Action::RetryingSame
+                } else if will_retry {
                     Action::TryingNext
                 } else if capacity {
                     Action::Waiting
@@ -829,8 +857,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Some(status.as_u16()),
                 attempted,
                 details,
-            );
-            if model_error || compact_error {
+            ));
+            if model_error || compact_error || hard_rejection {
                 admission.permits.neutral(&settings);
             } else if capacity {
                 admission.permits.capacity_limited(&settings, cooldown);
@@ -856,6 +884,39 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         "上游错误响应读取失败",
                     )
                 });
+            }
+            if let Some(delay) = retry_delay {
+                // Release the failed attempt before registering a bounded wait.
+                // Keep the original spool, model, and response cursor untouched.
+                drop(admission);
+                let waiting_since = Instant::now();
+                match gateway
+                    .0
+                    .admission
+                    .wait_transient(
+                        CapacitySource {
+                            provider_id: route.provider.id.clone(),
+                            reset_generation,
+                        },
+                        delay,
+                        settings.max_waiting,
+                    )
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(Rejected::Stopped) => {
+                        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止")
+                    }
+                    Err(_) => break,
+                }
+                capacity_waited += waiting_since.elapsed();
+                if gateway
+                    .routing_ids(pinned.as_deref())
+                    .contains(&route.provider.id)
+                {
+                    ids.insert(0, route.provider.id.clone());
+                    retry_owner = Some(route.provider.id.clone());
+                }
             }
             if capacity {
                 capacity_pending = true;
@@ -930,7 +991,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.finish(Some(status.as_u16()), failure_kind);
         }
         if failed && protocol.transport_failure() {
-            admission.permits.report(
+            last_error = Some(admission.permits.report(
                 &gateway,
                 &route,
                 model.as_deref(),
@@ -940,11 +1001,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 attempted,
                 crate::events::Details {
                     phase: Some(crate::events::Phase::Response),
-                    upstream_code: Some(failure_kind.into()),
+                    local_code: Some(failure_kind.into()),
                     counted_failure: Some(true),
                     ..Default::default()
                 },
-            );
+            ));
             admission.permits.failure(&settings, None);
             last_category = failure_kind;
             continue;
@@ -1009,7 +1070,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let mut details = protocol.observation.error.clone();
             details.phase = Some(crate::events::Phase::Response);
             details.counted_failure = Some(false);
-            admission.permits.report(
+            last_error = Some(admission.permits.report(
                 &gateway,
                 &route,
                 model.as_deref(),
@@ -1030,7 +1091,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Some(status.as_u16()),
                 attempted,
                 details,
-            );
+            ));
             // Preserve a bounded error prefix. Dropping its unread tail cancels the
             // rejected attempt; if no alternative succeeds, return the original stream.
             let error_idle_seconds = settings.idle_seconds;
@@ -1225,13 +1286,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let output = async_stream::stream! { while let Some(frame) = receiver.recv().await { yield frame; } };
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }
-    gateway.record(
+    gateway.record_final(
+        last_error.as_ref(),
         previous_provider.as_deref(),
         model.as_deref(),
-        Reason::FailoverExhausted,
-        Action::Returned,
         last.as_ref().map(|r| r.status().as_u16()),
-        Some(attempted.min(u32::MAX as usize) as u32),
+        attempted,
     );
     last.unwrap_or_else(|| {
         if last_category == "RPM_LIMIT" {
@@ -1364,8 +1424,13 @@ impl Permits {
         action: Action,
         status: Option<u16>,
         attempt: usize,
-        details: crate::events::Details,
-    ) {
+        mut details: crate::events::Details,
+    ) -> crate::events::Record {
+        if details.upstream_code.is_none() && details.local_code.is_none() {
+            details.local_code = serde_json::to_value(reason.code())
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned));
+        }
         let mut event = crate::events::Record::new(
             Some(g.0.client),
             Some(&route.provider.id),
@@ -1380,8 +1445,9 @@ impl Permits {
             p.set_failure_event(event.clone());
         }
         if let Some(service) = g.0.diagnostics.lock().unwrap().as_ref() {
-            service.emit(event);
+            service.emit(event.clone());
         }
+        event
     }
 
     pub(super) fn capacity_limited(&mut self, cfg: &Settings, retry: Option<Duration>) {

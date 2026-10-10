@@ -95,6 +95,7 @@ export default function App() {
   const gatewayDirty = useRef(false);
   const usageDirty = useRef(false);
   const usageDraftChanged = useCallback((value: boolean) => { usageDirty.current = value; }, []);
+  const [focusEvent, setFocusEvent] = useState<{ id: string; clientId: ClientId; providerId: string | null; sequence: number } | null>(null);
   const [focusProvider, setFocusProvider] = useState<{
     id: string;
     clientId?: ClientId;
@@ -190,7 +191,7 @@ export default function App() {
                 setThemePreview(null);
                 setDialog("settings");
               })()
-            : navigate(p === "config" || p === "gateway" ? p : "accounts"),
+            : navigate(p === "config" || p === "gateway" || p === "logs" ? p : "accounts"),
       ],
       [
         "provider-settings",
@@ -210,6 +211,11 @@ export default function App() {
           });
         },
       ],
+      ["event-log", async (p) => {
+        if ((gatewayDirty.current || usageDirty.current || dirtyRef.current) && !(await confirmAction("查看日志会丢弃未保存的草稿。"))) return;
+        setPage("logs"); setDirty(false);
+        setFocusEvent({ ...(p as { id: string; clientId: ClientId; providerId: string | null }), sequence: Date.now() });
+      }],
       ["login-state", (p) => setLogin(p as LoginState)],
     ];
     for (const [event, fn] of events)
@@ -353,7 +359,7 @@ export default function App() {
             </button>
           </div>
         )}
-        {page === "usage" ? (<Suspense fallback={null}><Usage onDirtyChange={usageDraftChanged} /></Suspense>) : page === "logs" ? (<Suspense fallback={null}><EventLog /></Suspense>) : page === "accounts" ? (
+        {page === "usage" ? (<Suspense fallback={null}><Usage onDirtyChange={usageDraftChanged} /></Suspense>) : page === "logs" ? (<Suspense fallback={null}><EventLog focus={focusEvent} consumed={() => setFocusEvent(null)} /></Suspense>) : page === "accounts" ? (
           <section className="accounts-page">
             <div className="page-heading">
               <div>

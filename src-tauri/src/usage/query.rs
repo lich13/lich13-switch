@@ -281,6 +281,7 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
         status_known: row.get(i + 3)?,
         sessions: row.get(i + 4)?,
         tokens: Tokens {
+            inclusive_input: None,
             input: row.get(i + 5)?,
             output: row.get(i + 6)?,
             cache_read: row.get(i + 7)?,

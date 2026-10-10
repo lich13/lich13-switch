@@ -51,6 +51,7 @@ async fn incident_rate_limited_p1_waits_then_recovers_while_p2_is_open() {
     .await;
     let mut cfg = g.view().settings;
     cfg.failure_threshold = 1;
+    cfg.transient_failure_threshold = 1;
     cfg.capacity_retry_seconds = 1;
     cfg.queue_seconds = 3;
     update(&g, &t, Edit::Settings { settings: cfg });
@@ -211,6 +212,7 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
     .await;
     let mut settings = g.view().settings;
     settings.failure_threshold = 1;
+    settings.transient_failure_threshold = 1;
     update(&g, &t, Edit::Settings { settings });
     update(
         &g,

@@ -131,7 +131,14 @@ async fn compressed_sse_usage_and_repeated_terminals_record_one_request() {
                 .unwrap();
             assert_eq!((totals.requests, totals.unpriced), (1, 0));
             assert_eq!(totals.cost, "5.4");
-            assert_eq!(totals.tokens, attempt.tokens);
+            assert_eq!(attempt.tokens.inclusive_input, Some(1000));
+            let mut total_tokens = totals.tokens.clone();
+            let mut attempt_tokens = attempt.tokens.clone();
+            total_tokens.inclusive_input = None;
+            attempt_tokens.inclusive_input = None;
+            assert_eq!(total_tokens, attempt_tokens);
+            assert_eq!(totals.cache_input_eligible, 1000);
+            assert_eq!(totals.cache_read_eligible, 600);
         }
     }
 }

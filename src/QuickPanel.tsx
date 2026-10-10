@@ -18,7 +18,7 @@ import {
 import { command, preview, subscribe } from "./bridge";
 import { errorOf, type GatewayState, type ViewState } from "./types";
 import { QuotaInfo, useProviderQuota } from "./Quota";
-import { providerStatus } from "./provider-status";
+import { providerRuntimeStatus } from "./provider-status";
 import QuickControls from "./QuickControls";
 import AuthSyncNotice from "./AuthSyncNotice";
 import ProviderControls from "./ProviderControls";
@@ -388,17 +388,10 @@ function QuickContent({
                           <Settings2 size={14} />
                         </button>
                       </div>
-                      {(gateway.websocketRetries?.some(
-                        (w) => w.providerId === p.id,
-                      ) ||
-                        providerStatus(p) || gateway.compactionPending?.includes(p.id)) && (
-                        <span className="quick-provider-alert">
-                          {gateway.websocketRetries?.find(
-                            (w) => w.providerId === p.id,
-                          )
-                            ? `重连等待 ${gateway.websocketRetries.find((w) => w.providerId === p.id)!.retryIn}s`
-                            : providerStatus(p) || "等待压缩后接管"}
-                        </span>
+                      {providerRuntimeStatus(p, gateway) && (
+                        <button type="button" className="quick-provider-alert" onClick={() => void command("open_main", { page: "logs", eventId: p.health.cause?.eventId ?? null, providerId: p.health.cause ? p.id : null, clientId })}>
+                          {providerRuntimeStatus(p, gateway)}
+                        </button>
                       )}
                       <div className="quick-provider-secondary">
                         <QuotaInfo

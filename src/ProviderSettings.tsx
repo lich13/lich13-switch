@@ -8,10 +8,12 @@ import { errorOf } from "./types";
 import type { ClientId, ModelCatalog, Provider } from "./types";
 export default function ProviderSettings({ provider, runtime, clientId, revision, disabled = false, save, close, onDirtyChange }: {
   provider: Provider; runtime: Provider; clientId: ClientId; revision: string; disabled?: boolean;
-  save: (edit: { op: "policyProvider"; id: string; supportsWebsocket: boolean; allowedModels: string[] | null }, revision: EditRevision) => Promise<void>;
+  save: (edit: { op: "policyProvider"; id: string; supportsWebsocket: boolean; handoffAfterCompaction: boolean; takeNewThreads: boolean; allowedModels: string[] | null }, revision: EditRevision) => Promise<void>;
   close: () => void; onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [supportsWebsocket, setWebsocket] = useState(provider.supportsWebsocket);
+  const [handoffAfterCompaction, setHandoff] = useState(provider.handoffAfterCompaction ?? true);
+  const [takeNewThreads, setNewThreads] = useState(provider.takeNewThreads ?? false);
   const [limited, setLimited] = useState(provider.allowedModels != null);
   const [selected, setSelected] = useState(provider.allowedModels ?? []);
   const [custom, setCustom] = useState("");
@@ -22,16 +24,16 @@ export default function ProviderSettings({ provider, runtime, clientId, revision
   const [error, setError] = useState("");
   const [catalogError, setCatalogError] = useState("");
   const baseline = useRef<EditRevision>(revision);
-  const snapshot = (websocket: boolean, models: string[] | null) => JSON.stringify([websocket, models]);
+  const snapshot = (websocket: boolean, models: string[] | null, handoff = handoffAfterCompaction, newThreads = takeNewThreads) => JSON.stringify([websocket, models, handoff, newThreads]);
   const [saved, setSaved] = useState(snapshot(provider.supportsWebsocket, provider.allowedModels));
   const dirty = !!custom || saved !== snapshot(supportsWebsocket, limited ? selected : null);
   const generation = useRef(0);
   useEffect(() => {
     if (!dirty && !saving && !error) {
-      setWebsocket(runtime.supportsWebsocket); setLimited(runtime.allowedModels != null); setSelected(runtime.allowedModels ?? []);
-      setSaved(snapshot(runtime.supportsWebsocket, runtime.allowedModels)); baseline.current = revision;
+      setWebsocket(runtime.supportsWebsocket); setHandoff(runtime.handoffAfterCompaction ?? true); setNewThreads(runtime.takeNewThreads ?? false); setLimited(runtime.allowedModels != null); setSelected(runtime.allowedModels ?? []);
+      setSaved(snapshot(runtime.supportsWebsocket, runtime.allowedModels, runtime.handoffAfterCompaction ?? true, runtime.takeNewThreads ?? false)); baseline.current = revision;
     }
-  }, [runtime.supportsWebsocket, JSON.stringify(runtime.allowedModels), revision, dirty, saving, error]);
+  }, [runtime.supportsWebsocket, runtime.handoffAfterCompaction, runtime.takeNewThreads, JSON.stringify(runtime.allowedModels), revision, dirty, saving, error]);
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const load = async (force: boolean) => {
@@ -60,12 +62,16 @@ export default function ProviderSettings({ provider, runtime, clientId, revision
       if (custom.trim()) { setError("请先添加手填模型，或清空输入"); return; }
       if (limited && !selected.length) { setError("白名单至少选择一个模型"); return; }
       setSaving(true); setError("");
-      void save({ op: "policyProvider", id: provider.id, supportsWebsocket, allowedModels: limited ? selected : null }, baseline.current)
+      void save({ op: "policyProvider", id: provider.id, supportsWebsocket, handoffAfterCompaction, takeNewThreads, allowedModels: limited ? selected : null }, baseline.current)
         .then(() => { setSaved(snapshot(supportsWebsocket, limited ? selected : null)); close(); })
         .catch((e) => { baseline.current = null; setError(errorOf(e).message); }).finally(() => setSaving(false));
     }}>
       {clientId === "codex" && <label className="settings-toggle"><input type="checkbox" checked={supportsWebsocket} disabled={disabled || saving}
         onChange={(e) => setWebsocket(e.target.checked)} /><span>原生 WebSocket</span></label>}
+      {clientId === "codex" && <>
+        <label className="settings-toggle"><input type="checkbox" checked={handoffAfterCompaction} disabled={disabled || saving} onChange={(e) => setHandoff(e.target.checked)} /><span>压缩后接管</span></label>
+        <label className="settings-toggle"><input type="checkbox" checked={takeNewThreads} disabled={disabled || saving} onChange={(e) => setNewThreads(e.target.checked)} /><span>新线程接管</span></label>
+      </>}
       <div className="segmented" role="group" aria-label="模型规则">
         <button type="button" aria-pressed={!limited} className={!limited ? "active" : ""} disabled={saving} onClick={() => setLimited(false)}>不限模型</button>
         <button type="button" aria-pressed={limited} className={limited ? "active" : ""} disabled={saving} onClick={() => setLimited(true)}>白名单</button>

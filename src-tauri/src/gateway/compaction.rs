@@ -122,6 +122,8 @@ struct Entry {
     epoch: u64,
     boundary: Option<String>,
     boundary_sequence: u64,
+    #[serde(default)]
+    establishing: bool,
     #[serde(skip)]
     claim: Option<u64>,
 }
@@ -144,6 +146,10 @@ pub struct Lease {
     pub owner: Option<String>,
     pub handoff: bool,
     completed_epoch: Mutex<Option<u64>>,
+    pub fresh: bool,
+    preferred: Vec<String>,
+    receivers: Vec<String>,
+    initial_bound: std::sync::atomic::AtomicBool,
 }
 impl Registry {
     pub fn new(path: PathBuf) -> Arc<Self> {
@@ -233,6 +239,7 @@ impl Registry {
             .or_insert_with(|| Entry {
                 provider: first.clone(),
                 updated: now(),
+                establishing: true,
                 ..Default::default()
             });
         let owner = eligible
@@ -248,6 +255,7 @@ impl Registry {
         }
         entry.updated = now();
         let epoch = entry.epoch;
+        let entry_establishing = entry.establishing;
         let retry_write = state.error.is_some();
         self.save(&mut state, fresh || retry_write);
         if state.error.is_some() {
@@ -266,16 +274,62 @@ impl Registry {
             owner,
             handoff,
             completed_epoch: Mutex::new(None),
+            fresh: fresh || entry_establishing,
+            preferred: vec![],
+            receivers: eligible.to_vec(),
+            initial_bound: std::sync::atomic::AtomicBool::new(false),
         }))
     }
-    pub fn pending(&self, queued: &[String]) -> Vec<String> {
+    pub fn prepare_policy(
+        self: &Arc<Self>,
+        session: String,
+        hints: Option<&super::replay::RequestHints>,
+        can_handoff: bool,
+        eligible: &[super::model::Provider],
+    ) -> Option<Arc<Lease>> {
+        let ids: Vec<_> = eligible.iter().map(|p| p.id.clone()).collect();
+        let mut ordered = eligible.to_vec();
+        if can_handoff && hints.is_some_and(|h| h.first_turn) {
+            ordered.sort_by_key(|p| !p.take_new_threads);
+        }
+        let mut lease = self.prepare(
+            session,
+            hints.and_then(|h| h.compacted_window.as_deref()),
+            can_handoff,
+            &ordered.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+        )?;
+        let inner = Arc::get_mut(&mut lease)?;
+        inner.preferred = ordered.iter().map(|p| p.id.clone()).collect();
+        let owner_position = inner
+            .owner
+            .as_ref()
+            .and_then(|id| ids.iter().position(|p| p == id))
+            .unwrap_or(ids.len());
+        inner.receivers = eligible
+            .iter()
+            .take(owner_position)
+            .filter(|p| p.handoff_after_compaction)
+            .map(|p| p.id.clone())
+            .collect();
+        if let Some(owner) = &inner.owner {
+            inner.receivers.push(owner.clone());
+        }
+        Some(lease)
+    }
+    pub fn pending_policy(&self, queued: &[super::model::Provider]) -> Vec<String> {
         let state = self.state.lock().unwrap();
         let mut ids: Vec<_> = state
             .entries
             .values()
             .filter(|e| {
-                queued.first().is_some_and(|first| first != &e.provider)
-                    && queued.contains(&e.provider)
+                queued
+                    .iter()
+                    .position(|p| p.id == e.provider)
+                    .is_some_and(|position| {
+                        queued[..position]
+                            .iter()
+                            .any(|p| p.handoff_after_compaction)
+                    })
             })
             .map(|e| e.provider.clone())
             .collect();
@@ -298,6 +352,94 @@ impl Registry {
     }
 }
 impl Lease {
+    pub fn owns(&self, provider: &str) -> bool {
+        !self.handoff
+            && self
+                .registry
+                .state
+                .lock()
+                .unwrap()
+                .entries
+                .get(&self.session)
+                .is_some_and(|entry| !entry.establishing && entry.provider == provider)
+    }
+    /// The first actual admission, not the first successful response, establishes
+    /// ownership. Competing first requests release their slot and recheck it.
+    pub fn admitted(&self, provider: &str) -> bool {
+        use std::sync::atomic::Ordering;
+        if !self.fresh || self.initial_bound.load(Ordering::Acquire) {
+            return true;
+        }
+        let mut state = self.registry.state.lock().unwrap();
+        let Some(entry) = state.entries.get_mut(&self.session) else {
+            return false;
+        };
+        if !entry.establishing && entry.provider != provider {
+            return false;
+        }
+        let changed = entry.establishing;
+        entry.provider = provider.into();
+        entry.establishing = false;
+        self.initial_bound.store(true, Ordering::Release);
+        if changed {
+            self.registry.save(&mut state, true);
+        }
+        state.error.is_none()
+    }
+    pub fn candidates(&self, mut routes: Vec<super::Route>) -> Vec<super::Route> {
+        if self.handoff {
+            routes.retain(|r| self.receivers.contains(&r.provider.id));
+            return routes;
+        }
+        let bound = self
+            .registry
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .get(&self.session)
+            .filter(|e| !e.establishing)
+            .map(|e| e.provider.clone());
+        if self.fresh && bound.is_none() {
+            routes.sort_by_key(|r| {
+                self.preferred
+                    .iter()
+                    .position(|id| id == &r.provider.id)
+                    .unwrap_or(usize::MAX)
+            });
+            return routes;
+        }
+        if bound.is_some() {
+            self.initial_bound
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        let current = bound;
+        if let Some(owner) = current
+            .as_deref()
+            .and_then(|id| {
+                routes.iter().find(|r| {
+                    if r.provider.id != id {
+                        return false;
+                    }
+                    let health = r.provider_circuit.health();
+                    // A short upstream Retry-After is not evidence that this
+                    // conversation's owner has failed. New concurrent turns must wait
+                    // for that owner too, instead of slipping through to another route.
+                    health.available
+                        || (health.state == super::circuit::CircuitState::Closed
+                            && health.cooldown_reason.as_deref() == Some("retry_after")
+                            && health.cause.as_ref().is_some_and(|cause| {
+                                cause.reason == crate::events::Reason::UpstreamService
+                                    && cause.status.is_some_and(super::circuit::is_server_error)
+                            }))
+                })
+            })
+            .cloned()
+        {
+            return vec![owner];
+        }
+        routes
+    }
     pub fn complete(&self, provider: &str, boundary: Option<&str>) {
         let mut completed = self.completed_epoch.lock().unwrap();
         let first = completed.is_none();
@@ -314,7 +456,11 @@ impl Lease {
         if first && self.handoff && entry.claim != Some(self.sequence) {
             return;
         }
-        let changed = (first && (entry.provider != provider || self.handoff)) || boundary.is_some();
+        let changed = (first && (entry.provider != provider || self.handoff || entry.establishing))
+            || boundary.is_some();
+        if first {
+            entry.establishing = false;
+        }
         if first && (entry.provider != provider || self.handoff) {
             entry.provider = provider.into();
             entry.epoch = entry.epoch.saturating_add(1);

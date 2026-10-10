@@ -46,6 +46,7 @@ const actions = {
   routed: "已切换供应商",
   recovered: "已恢复可用",
   reconnecting: "等待后重新连接",
+  retrying_same: "原供应商等待重试",
   not_retried: "已输出，未重试",
 } as const;
 
@@ -65,6 +66,7 @@ export type EventRecord = {
   attempt: number | null;
   details?: {
     upstreamCode?: string | null;
+    localCode?: string | null;
     upstreamType?: string | null;
     parameter?: string | null;
     message?: string | null;
@@ -148,12 +150,12 @@ const phases: Record<string, string> = {
   ws_wait: "等待重连",
 };
 function summary(r: EventRecord) {
-  return [r.details?.upstreamCode, r.details?.message || reasons[r.reason]]
+  return [r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r), r.details?.message || reasons[r.reason]]
     .filter(Boolean)
     .join(" · ");
 }
 function actionText(r: EventRecord) {
-  return `${r.details?.countedFailure === false ? "未计入熔断，" : ""}${r.details?.waitSeconds ? `等待 ${r.details.waitSeconds} 秒${r.action === "reconnecting" ? "重连" : "重试"}` : actions[r.action]}`;
+  return `${r.details?.countedFailure === false ? "未计入熔断，" : ""}${r.details?.waitSeconds ? `${r.action === "retrying_same" ? "原供应商" : ""}等待 ${r.details.waitSeconds} 秒${r.action === "reconnecting" ? "重连" : "重试"}` : actions[r.action]}`;
 }
 function wireStatus(r: EventRecord) {
   return (
@@ -166,7 +168,7 @@ function wireStatus(r: EventRecord) {
   );
 }
 
-export default function EventLog() {
+export default function EventLog({ focus, consumed }: { focus?: { id: string; clientId: ClientId; providerId: string | null; sequence: number } | null; consumed?: () => void } = {}) {
   const [data, setData] = useState<EventPage>({
     items: [],
     total: 0,
@@ -195,6 +197,20 @@ export default function EventLog() {
   const [nativeVisible, setNativeVisible] = useState(true);
   const visible = documentVisible && nativeVisible;
   const sequence = useRef(0);
+  const detailSequence = useRef(0);
+  useEffect(() => () => { detailSequence.current++; }, []);
+
+  useEffect(() => {
+    if (!focus) return;
+    const current = focus;
+    const request = ++detailSequence.current;
+    consumed?.();
+    setFilters((old) => ({ ...old, clientId: current.clientId, providerId: current.providerId ?? "" }));
+    setPage(1);
+    void command<EventRecord | null>("get_app_event", { id: current.id })
+      .then((record) => { if (record && request === detailSequence.current) setSelected(record); })
+      .catch((e) => { if (request === detailSequence.current) setError(errorOf(e).message); });
+  }, [focus?.sequence]);
 
   const load = useCallback(async () => {
     const request = ++sequence.current;
@@ -325,6 +341,7 @@ export default function EventLog() {
     setBusy(true);
     try {
       await command("clear_app_events");
+      detailSequence.current++;
       setSelected(null);
       setPage(1);
       await load();
@@ -484,11 +501,12 @@ export default function EventLog() {
                       aria-label={reasons[r.reason]}
                       onClick={(e) => {
                         e.currentTarget.focus({ preventScroll: true });
+                        const request = ++detailSequence.current;
                         void command<EventRecord | null>("get_app_event", {
                           id: r.id,
                         })
-                          .then((value) => setSelected(value || r))
-                          .catch((e) => setError(errorOf(e).message));
+                          .then((value) => { if (request === detailSequence.current) setSelected(value || r); })
+                          .catch((e) => { if (request === detailSequence.current) setError(errorOf(e).message); });
                       }}
                     >
                       {summary(r)}
@@ -532,7 +550,7 @@ export default function EventLog() {
         <EventDetail
           event={selected}
           provider={name(selected)}
-          onClose={() => setSelected(null)}
+          onClose={() => { detailSequence.current++; setSelected(null); }}
         />
       )}
     </section>
@@ -593,7 +611,8 @@ function EventDetail({
         <dl>
           {[
             ["状态码", wireStatus(r)],
-            ["上游错误码", r.details?.upstreamCode ?? "未提供"],
+            ["上游错误码", r.details?.upstreamCode ?? "—"],
+            ["本地分类", r.details?.localCode ?? "—"],
             ["上游错误类型", r.details?.upstreamType ?? "未提供"],
             ["错误摘要", r.details?.message ?? reasons[r.reason]],
             ["参数", r.details?.parameter ?? "未提供"],
@@ -625,6 +644,7 @@ function EventDetail({
                     (
                       {
                         consecutive_failures: "连续失败达到阈值",
+                        transient_failures: "5xx 连续失败达到阈值",
                         error_rate: "错误率达到阈值",
                         probe_failed: "恢复探测失败",
                       } as Record<string, string>

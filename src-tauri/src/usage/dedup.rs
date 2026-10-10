@@ -239,26 +239,38 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
             current.deduplication = "strict_match".into();
         }
     }
-    if current.final_attempt().is_some_and(|a| {
-        a.tokens.input.is_none()
-            || a.tokens.output.is_none()
-            || a.tokens.cache_read.is_none()
-            || a.tokens.cache_write.is_none()
-    }) {
-        let donor = peers
+    if current.final_attempt().is_some() {
+        let donors: Vec<_> = peers
             .iter()
             .filter(|p| exact(&current, p))
-            .filter_map(|p| p.final_attempt().map(|a| (p.completed, a)))
-            .filter(|(_, a)| a.tokens.total().is_some())
-            .max_by_key(|(complete, a)| (*complete, a.tokens.output, a.tokens.total()));
-        if let Some((_, donor)) = donor {
+            .filter_map(|p| p.final_attempt())
+            .collect();
+        if !donors.is_empty() {
             let original = current
                 .final_attempt()
                 .cloned()
                 .expect("checked final attempt");
             let last = current.attempts.last_mut().expect("checked final attempt");
-            let mut fields = last.tokens.fill_missing(&donor.tokens);
-            if let Some(inclusive) = last.inclusive_input_tokens {
+            let mut consensus = Tokens::default();
+            macro_rules! agree { ($($f:ident),*) => {$(
+                let values: std::collections::BTreeSet<_> = donors.iter().filter_map(|a| a.tokens.$f).collect();
+                if values.len() == 1 { consensus.$f = values.first().copied(); }
+            )*}; }
+            agree!(
+                inclusive_input,
+                input,
+                output,
+                cache_read,
+                cache_write,
+                cache_write_5m,
+                cache_write_1h,
+                image_input,
+                image_output,
+                audio_input,
+                audio_output
+            );
+            let mut fields = last.tokens.fill_missing(&consensus);
+            if let Some(inclusive) = last.inclusive_input_tokens.or(last.tokens.inclusive_input) {
                 let cache = last
                     .tokens
                     .cache_read
@@ -266,7 +278,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
                     .saturating_add(last.tokens.cache_write.unwrap_or(0));
                 if cache <= inclusive {
                     let input = Some(inclusive - cache);
-                    if last.tokens.input != input {
+                    if last.tokens.input != input && original.tokens.input != Some(0) {
                         last.tokens.input = input;
                         fields.push("input".into());
                     }
@@ -291,18 +303,32 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
             if !fields.is_empty() {
                 last.usage_status = "session_supplemented".into();
             }
-            if last.response_model.is_none() {
-                last.response_model = donor.response_model.clone();
+            let models: std::collections::BTreeSet<_> = donors
+                .iter()
+                .filter_map(|a| a.response_model.as_deref())
+                .collect();
+            if last.response_model.is_none() && models.len() == 1 {
+                last.response_model = models.first().map(|v| (*v).to_owned());
             }
-            if last.pricing_model.is_none() {
-                last.pricing_model = donor.pricing_model.clone();
+            let priced: std::collections::BTreeSet<_> = donors
+                .iter()
+                .filter_map(|a| a.pricing_model.as_deref())
+                .collect();
+            if last.pricing_model.is_none() && priced.len() == 1 {
+                last.pricing_model = priced.first().map(|v| (*v).to_owned());
             }
+            last.annotate_availability("proxy");
             // Existing billed snapshots are immutable. A previously unpriced
             // record uses a matching known rate snapshot with its own multiplier.
             if last.price.is_none() && last.operation != super::model::Operation::WebSearch {
                 last.price = previous_price
                     .as_ref()
-                    .or(donor.price.as_ref())
+                    .or_else(|| {
+                        donors
+                            .iter()
+                            .filter_map(|a| a.price.as_ref())
+                            .find(|p| Some(p.model.as_str()) == last.pricing_model.as_deref())
+                    })
                     .filter(|p| Some(p.model.as_str()) == last.pricing_model.as_deref())
                     .and_then(|p| {
                         Quote {

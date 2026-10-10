@@ -20,7 +20,7 @@ export type ViewState = {
   accounts: Account[];
   authRevision: string;
   configRevision: string;
-  currentState: "saved" | "unsaved" | "missing" | "invalid";
+  currentState: "saved" | "unsaved" | "missing" | "invalid" | "gateway";
   preferences: Preferences;
   authSync?: {
     state: string;
@@ -88,12 +88,12 @@ export type GatewaySettings = {
   port: number;
   maxRetries: number;
   failureThreshold: number;
+  transientFailureThreshold?: number;
   successThreshold: number;
   cooldownSeconds: number;
   rateLimitSeconds: number;
   capacityRetrySeconds: number;
   websocketRetrySeconds: number;
-  handoffAfterCompaction?: boolean;
   errorRate: number;
   minRequests: number;
   firstByteSeconds: number;
@@ -112,6 +112,7 @@ export type Health = {
   protectedSingleProvider?: boolean;
   probeInFlight?: boolean;
   available?: boolean;
+  cause?: { eventId: string; code: string; reason: string; status: number | null; wsCloseCode: number | null } | null;
 };
 export type Provider = {
   id: string;
@@ -130,6 +131,8 @@ export type Provider = {
   rpmLedgerError?: boolean;
   allowedModels: string[] | null;
   supportsWebsocket: boolean;
+  handoffAfterCompaction?: boolean;
+  takeNewThreads?: boolean;
 };
 export type GatewayState = {
   clientId: ClientId;
@@ -144,6 +147,7 @@ export type GatewayState = {
   configState: string;
   configError: string | null;
   configWarning?: string | null;
+  connectionMode?: "bearer" | "apiKey";
   providers: Provider[];
   settings: GatewaySettings;
   activeConnections: number;
@@ -151,6 +155,7 @@ export type GatewayState = {
   capacityRetries: { providerId: string; retryIn: number }[];
   compactionPending?: string[];
   websocketRetries?: { providerId: string; retryIn: number }[];
+  transientRetries?: { providerId: string; retryIn: number }[];
   error: string | null;
   recoveryPending: boolean;
 };
