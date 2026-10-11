@@ -63,6 +63,8 @@ pub struct RequestHints {
     pub compacted_window: Option<String>,
     #[serde(skip)]
     pub first_turn: bool,
+    #[serde(skip)]
+    pub auxiliary: bool,
 }
 impl RequestHints {
     pub fn from_value(value: serde_json::Value, projected: bool) -> Result<Self, BoxError> {
@@ -92,6 +94,7 @@ impl RequestHints {
                 .get("stream")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            auxiliary: value.get("generate").and_then(serde_json::Value::as_bool) == Some(false),
             ..Default::default()
         };
         if let Some(input) = value.get("input").and_then(serde_json::Value::as_array) {
@@ -103,7 +106,8 @@ impl RequestHints {
                 .rev()
                 .find_map(|v| super::compaction::fingerprint(v, projected));
         }
-        hints.first_turn = hints.previous_response_id.is_none()
+        hints.first_turn = !hints.auxiliary
+            && hints.previous_response_id.is_none()
             && !hints.compaction_trigger
             && hints.compacted_window.is_none()
             && first_turn_input(value.get("input"));
@@ -131,7 +135,7 @@ fn first_turn_input(input: Option<&serde_json::Value>) -> bool {
                     _ => return false,
                 }
             }
-            users == 1
+            users > 0
         }
         _ => false,
     }

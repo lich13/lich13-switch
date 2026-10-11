@@ -45,13 +45,74 @@ fn digest_valid(value: &str) -> bool {
 }
 
 pub fn session(headers: &hyper::HeaderMap) -> Option<String> {
-    let values: Vec<_> = ["session_id", "conversation_id"]
-        .into_iter()
-        .filter_map(|key| headers.get(key).and_then(|v| v.to_str().ok()))
-        .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))
-        .collect();
-    // Codex's session_id is stable across HTTP and WebSocket transports.
-    values.first().map(|v| storage::digest(v.as_bytes()))
+    let mut identity = None;
+    for key in ["thread-id", "thread_id", "conversation_id"] {
+        for value in headers.get_all(key) {
+            let value = value.to_str().ok()?;
+            if value.trim().is_empty()
+                || value.len() > 256
+                || value.chars().any(char::is_control)
+                || identity.is_some_and(|previous| previous != value)
+            {
+                return None;
+            }
+            identity = Some(value);
+        }
+    }
+    if identity.is_none() {
+        // Underscore spelling is the legacy conversation identifier. Modern
+        // session-id may be shared prompt-cache affinity, never a thread ID.
+        for value in headers.get_all("session_id") {
+            let value = value.to_str().ok()?;
+            if value.trim().is_empty()
+                || value.len() > 256
+                || value.chars().any(char::is_control)
+                || identity.is_some_and(|previous| previous != value)
+            {
+                return None;
+            }
+            identity = Some(value);
+        }
+    }
+    identity.map(|v| storage::digest(v.as_bytes()))
+}
+
+pub fn decision(
+    thread: Option<&str>,
+    hints: Option<&super::replay::RequestHints>,
+    pinned: bool,
+    lease: Option<&Lease>,
+    provider: &str,
+) -> crate::usage::model::RoutingDecision {
+    use crate::usage::model::RoutingDecision as D;
+    if pinned {
+        D::CursorPinned
+    } else if hints.is_some_and(|h| h.auxiliary) {
+        D::Auxiliary
+    } else if thread.is_none() {
+        D::ThreadUnidentified
+    } else if let Some(lease) = lease {
+        lease.decision(hints, provider)
+    } else {
+        D::OrdinaryQueue
+    }
+}
+
+pub fn rejection_reason(
+    thread: Option<&str>,
+    hints: Option<&super::replay::RequestHints>,
+) -> &'static str {
+    if thread.is_none() {
+        "缺少可靠线程标识，没有符合接管策略的供应商"
+    } else if hints.is_some_and(|h| h.previous_response_id.is_some()) {
+        "响应游标固定，不能跨供应商接管"
+    } else if hints.is_some_and(|h| h.compacted_window.is_some()) {
+        "压缩边界未匹配或没有符合接管条件的供应商"
+    } else if hints.is_some_and(|h| h.first_turn) {
+        "没有可接收新线程的供应商"
+    } else {
+        "接管策略不接受此进行中的线程"
+    }
 }
 
 pub fn fingerprint(value: &Value, projected: bool) -> Option<String> {
@@ -150,6 +211,8 @@ struct Entry {
     boundary_sequence: u64,
     #[serde(default)]
     establishing: bool,
+    #[serde(default)]
+    first_turn: bool,
     #[serde(skip)]
     claim: Option<u64>,
 }
@@ -229,12 +292,23 @@ impl Registry {
             state.last_saved = now();
         }
     }
+    #[cfg(test)]
     pub fn prepare(
         self: &Arc<Self>,
         session: String,
         input: Option<&str>,
         can_handoff: bool,
         eligible: &[String],
+    ) -> Option<Arc<Lease>> {
+        self.prepare_inner(session, input, can_handoff, eligible, false)
+    }
+    fn prepare_inner(
+        self: &Arc<Self>,
+        session: String,
+        input: Option<&str>,
+        can_handoff: bool,
+        eligible: &[String],
+        first_turn: bool,
     ) -> Option<Arc<Lease>> {
         let first = eligible.first()?;
         let mut state = self.state.lock().unwrap();
@@ -268,6 +342,7 @@ impl Registry {
                 provider: first.clone(),
                 updated: now(),
                 establishing: true,
+                first_turn,
                 ..Default::default()
             });
         let owner = eligible
@@ -284,6 +359,7 @@ impl Registry {
         entry.updated = now();
         let epoch = entry.epoch;
         let entry_establishing = entry.establishing;
+        let first_turn = first_turn && entry.first_turn;
         let retry_write = state.error.is_some();
         self.save(&mut state, fresh || retry_write);
         if state.error.is_some() {
@@ -307,7 +383,11 @@ impl Registry {
             receivers: eligible.to_vec(),
             initial_bound: std::sync::atomic::AtomicBool::new(false),
             strict: false,
-            intake: Intake::Ordinary,
+            intake: if entry_establishing && first_turn {
+                Intake::NewThread
+            } else {
+                Intake::Ordinary
+            },
         }))
     }
     pub fn prepare_policy(
@@ -317,25 +397,27 @@ impl Registry {
         can_handoff: bool,
         eligible: &[super::model::Provider],
     ) -> Option<Arc<Lease>> {
+        if hints.is_some_and(|h| h.auxiliary) {
+            return None;
+        }
         let ids: Vec<_> = eligible.iter().map(|p| p.id.clone()).collect();
         let mut ordered = eligible.to_vec();
         if can_handoff && hints.is_some_and(|h| h.first_turn) {
             ordered.sort_by_key(|p| !p.take_new_threads);
         }
-        let mut lease = self.prepare(
+        let mut lease = self.prepare_inner(
             session,
             hints.and_then(|h| h.compacted_window.as_deref()),
             can_handoff,
             &ordered.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+            can_handoff && hints.is_some_and(|h| h.first_turn),
         )?;
         let inner = Arc::get_mut(&mut lease)?;
         inner.strict = true;
         inner.intake = if inner.handoff {
             Intake::Compacted
-        } else if inner.fresh && can_handoff && hints.is_some_and(|h| h.first_turn) {
-            Intake::NewThread
         } else {
-            Intake::Ordinary
+            inner.intake
         };
         inner.preferred = ordered.iter().map(|p| p.id.clone()).collect();
         let owner_position = inner
@@ -385,11 +467,53 @@ impl Registry {
                 .get(session)
                 .is_some_and(|entry| entry.claim.is_none() && entry.boundary.as_deref() == input)
     }
+    pub fn owner(&self, session: &str) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .entries
+            .get(session)
+            .filter(|e| !e.establishing && now().saturating_sub(e.updated) < RETENTION_MS)
+            .map(|e| e.provider.clone())
+    }
     pub fn error(&self) -> Option<String> {
         self.state.lock().unwrap().error.clone()
     }
 }
 impl Lease {
+    pub fn establishing(&self) -> bool {
+        self.registry
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .get(&self.session)
+            .is_some_and(|e| e.establishing)
+    }
+    pub fn decision(
+        &self,
+        hints: Option<&super::replay::RequestHints>,
+        provider: &str,
+    ) -> crate::usage::model::RoutingDecision {
+        use crate::usage::model::RoutingDecision as D;
+        if self.handoff {
+            return if self.owner.as_deref() == Some(provider) {
+                D::NoEligibleReceiver
+            } else {
+                D::CompactionHandoff
+            };
+        }
+        if self.intake == Intake::NewThread {
+            return D::NewThread;
+        }
+        if self.fresh {
+            return D::OrdinaryQueue;
+        }
+        if hints.is_some_and(|h| h.compacted_window.is_some()) {
+            return D::CompactionWindowMismatch;
+        }
+        D::ExistingThread
+    }
     pub(super) fn admission_policy(&self) -> (Intake, Option<String>) {
         let owner = self
             .registry

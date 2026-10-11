@@ -121,7 +121,6 @@ fn account_subscription(raw: &str) -> Option<AccountSubscription> {
 /// when it started. This guard never crosses IPC or contains credentials.
 pub struct LoginTarget {
     id: String,
-    identity: String,
     credential_revision: String,
     home: PathBuf,
     auth_revision: String,
@@ -253,6 +252,63 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
         kind: "chatgpt".into(),
         email,
     })
+}
+// A login refresh follows the person, not the workspace selected by OAuth.
+// Keep the vault's existing account identity format for normal import/switching.
+struct LoginPrincipal {
+    user: Option<String>,
+    subject: Option<String>,
+}
+fn login_principal(raw: &str) -> Result<LoginPrincipal> {
+    let value: Value =
+        serde_json::from_str(raw).map_err(|_| AppError::new("AUTH", "凭据不是有效的 JSON"))?;
+    let claims: Vec<_> = ["id_token", "access_token"]
+        .iter()
+        .filter_map(|field| value["tokens"][field].as_str().and_then(claims))
+        .collect();
+    let text = |value: &Value| {
+        value
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control))
+            .map(|s| storage::digest(s.as_bytes()))
+    };
+    let mut users: Vec<_> = claims
+        .iter()
+        .filter_map(|c| {
+            let auth = &c["https://api.openai.com/auth"];
+            text(&auth["chatgpt_user_id"]).or_else(|| text(&auth["user_id"]))
+        })
+        .collect();
+    let mut subjects: Vec<_> = claims.iter().filter_map(|c| text(&c["sub"])).collect();
+    users.sort();
+    users.dedup();
+    subjects.sort();
+    subjects.dedup();
+    if users.len() > 1 || (users.is_empty() && subjects.len() > 1) {
+        return Err(AppError::new(
+            "LOGIN_IDENTITY",
+            "登录凭据身份不一致，请重新登录",
+        ));
+    }
+    let principal = LoginPrincipal {
+        user: users.into_iter().next(),
+        subject: (subjects.len() == 1).then(|| subjects.remove(0)),
+    };
+    if principal.user.is_none() && principal.subject.is_none() {
+        return Err(AppError::new(
+            "LOGIN_IDENTITY_UNKNOWN",
+            "无法确认登录账号，请重新登录",
+        ));
+    }
+    Ok(principal)
+}
+impl LoginPrincipal {
+    fn matches(&self, other: &Self) -> bool {
+        match (&self.user, &other.user) {
+            (Some(left), Some(right)) => left == right,
+            _ => self.subject.is_some() && self.subject == other.subject,
+        }
+    }
 }
 fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
@@ -562,7 +618,6 @@ impl Core {
             .is_some_and(|info| info.identity == profile.identity);
         Ok(LoginTarget {
             id: id.into(),
-            identity: profile.identity.clone(),
             credential_revision: revision,
             home: self.home(),
             auth_revision: storage::revision(disk.as_deref()),
@@ -571,10 +626,10 @@ impl Core {
     }
     pub fn complete_target_login(&mut self, raw: &str, target: &LoginTarget) -> Result<bool> {
         let info = auth_info(raw)?;
-        if info.kind != "chatgpt" || info.identity != target.identity {
+        if info.kind != "chatgpt" {
             return Err(AppError::new(
                 "LOGIN_IDENTITY",
-                "登录账号或工作区不一致，未更新指定账号",
+                "请使用指定 ChatGPT 账号登录",
             ));
         }
         let index = self
@@ -589,6 +644,35 @@ impl Core {
             return Err(AppError::new(
                 "CONFLICT",
                 "登录期间账号凭据或配置目录已变化，未覆盖",
+            ));
+        }
+        let principal = login_principal(raw)?;
+        if !principal.matches(&login_principal(&self.store.profiles[index].auth)?) {
+            return Err(AppError::new(
+                "LOGIN_IDENTITY",
+                "登录的不是指定账号，未替换凭据",
+            ));
+        }
+        let account_id = |auth: &str| {
+            serde_json::from_str::<Value>(auth).ok().and_then(|v| {
+                v["tokens"]["account_id"]
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+            })
+        };
+        let incoming_account = account_id(raw);
+        if self.store.profiles.iter().any(|p| {
+            p.id != target.id
+                && p.kind == "chatgpt"
+                && (p.identity == info.identity
+                    || (incoming_account.is_some()
+                        && account_id(&p.auth) == incoming_account
+                        && login_principal(&p.auth).is_ok_and(|other| principal.matches(&other))))
+        }) {
+            return Err(AppError::new(
+                "LOGIN_DUPLICATE",
+                "新凭据已属于另一个已保存账号，未覆盖",
             ));
         }
         let path = target.home.join("auth.json");
@@ -613,6 +697,18 @@ impl Core {
         }
         let mut value: Value = serde_json::from_str(&self.store.profiles[index].auth)
             .map_err(|_| AppError::new("AUTH", "已保存凭据格式无效"))?;
+        // Replace the complete authentication unit, including absent fields.
+        // In particular never pair new tokens with an old account_id/API key.
+        if let Some(root) = value.as_object_mut() {
+            for field in ["auth_mode", "OPENAI_API_KEY", "last_refresh"] {
+                root.remove(field);
+            }
+            if let Some(tokens) = root.get_mut("tokens").and_then(Value::as_object_mut) {
+                for field in ["id_token", "access_token", "refresh_token", "account_id"] {
+                    tokens.remove(field);
+                }
+            }
+        }
         merge(
             &mut value,
             serde_json::from_str(raw).map_err(|_| AppError::new("AUTH", "新凭据格式无效"))?,
@@ -629,6 +725,7 @@ impl Core {
         }
         let profile = &mut self.store.profiles[index];
         profile.auth = merged.clone();
+        profile.identity = info.identity;
         profile.email = info.email;
         profile.updated_at = now();
         if let Err(error) = self.persist() {

@@ -330,11 +330,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         parts.uri.path().trim_end_matches('/'),
         "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
     );
+    let thread = super::compaction::session(&parts.headers);
+    let auxiliary = hints.as_ref().is_ok_and(|h| h.auxiliary);
+    if auxiliary && gateway.client_id() == super::ClientId::Codex && mode == "auto" {
+        if let Some(owner) = thread
+            .as_deref()
+            .and_then(|s| gateway.0.compaction.owner(s))
+            .filter(|id| ids.contains(id))
+        {
+            ids = vec![owner];
+        }
+    }
     let ownership = if gateway.client_id() == super::ClientId::Codex
         && mode == "auto"
         && responses
-        && pinned.is_none()
         && !unknown_affinity
+        && !auxiliary
     {
         let eligible: Vec<_> = ids
             .iter()
@@ -345,9 +356,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             })
             .filter_map(|id| routes.get(id).map(|r| r.provider.clone()))
             .collect();
-        if let Some(session) =
-            super::compaction::session(&parts.headers).filter(|_| !eligible.is_empty())
-        {
+        if let Some(session) = thread.clone().filter(|_| !eligible.is_empty()) {
             let lease = gateway.0.compaction.prepare_policy(
                 session,
                 hints.as_ref().ok(),
@@ -447,11 +456,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
-        } else if let Some(lease) = &ownership {
+        } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
             candidates = lease.candidates(candidates);
         } else if gateway.client_id() == super::ClientId::Codex
             && mode == "auto"
             && pinned.is_none()
+            && !auxiliary
         {
             candidates = super::compaction::unidentified_candidates(candidates);
         }
@@ -467,14 +477,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 break;
             }
-            gateway.record_policy_rejection(model.as_deref(), false);
+            gateway.record_policy_rejection(
+                model.as_deref(),
+                false,
+                super::compaction::rejection_reason(thread.as_deref(), hints.as_ref().ok()),
+            );
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "NO_ELIGIBLE_PROVIDER",
                 "没有符合线程接管策略的供应商",
             );
         }
-        if gateway.client_id() == super::ClientId::Codex && mode == "auto" && pinned.is_none() {
+        if gateway.client_id() == super::ClientId::Codex
+            && mode == "auto"
+            && pinned.is_none()
+            && !auxiliary
+        {
             let (intake, owner) = ownership
                 .as_ref()
                 .map_or((super::compaction::Intake::Ordinary, None), |lease| {
@@ -581,7 +599,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                     break;
                 }
-                gateway.record_policy_rejection(model.as_deref(), false);
+                gateway.record_policy_rejection(
+                    model.as_deref(),
+                    false,
+                    super::compaction::rejection_reason(thread.as_deref(), hints.as_ref().ok()),
+                );
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "NO_ELIGIBLE_PROVIDER",
@@ -669,6 +691,31 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 if websocket { "websocket" } else { "http" },
             ));
         }
+        protocol.context(
+            thread.clone(),
+            (gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses).then(
+                || {
+                    super::compaction::decision(
+                        thread.as_deref(),
+                        hints.as_ref().ok(),
+                        continuation,
+                        ownership.as_deref(),
+                        &route.provider.id,
+                    )
+                },
+            ),
+        );
+        protocol.watch_lifecycle(
+            gateway
+                .0
+                .inner
+                .lock()
+                .unwrap()
+                .shutdown
+                .as_ref()
+                .map(watch::Sender::subscribe),
+            None,
+        );
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(if stream_hint {
                 settings.first_byte_seconds
@@ -730,13 +777,18 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|h| h.to_str().ok())
-            .is_some_and(|h| h.starts_with("text/event-stream"));
+            .is_some_and(|h| {
+                h.split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+            });
         let encoding = response
             .headers()
             .get(header::CONTENT_ENCODING)
             .and_then(|h| h.to_str().ok())
             .unwrap_or("");
         protocol.response(status.as_u16(), response_stream, encoding);
+        protocol.response_headers(response.headers());
         if status == StatusCode::SWITCHING_PROTOCOLS && websocket {
             admission.permits.success(&settings);
             let Admission { permits, slot, .. } = admission;
@@ -1221,11 +1273,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             for frame in prefix {
                 tokio::select! {
                     biased;
-                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "CANCELLED"); permits.neutral(&cfg); return; }
+                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); return; }
                     result = sender.send(Ok(frame)) => { if result.is_err() { disconnected = true; break; } }
                 }
             }
             if ended {
+                if disconnected {
+                    protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
+                }
                 if protocol.succeeded() {
                     g.successful_response(&route.provider);
                 }
@@ -1248,7 +1303,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 if disconnected || sender.is_closed() {
                     active.take();
                     if protocol.terminal().is_none() {
-                        protocol.finish(Some(status.as_u16()), "CANCELLED");
+                        protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
                         permits.neutral(&cfg);
                         break;
                     }
@@ -1263,7 +1318,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 });
                 let next = tokio::select! {
                     biased;
-                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "CANCELLED"); permits.neutral(&cfg); break; }
+                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
                     _ = sender.closed(), if !disconnected => { disconnected = true; continue; }
                     frame = tokio::time::timeout_at(limit, body.frame()) => frame,
                 };
@@ -1294,7 +1349,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         if !disconnected {
                             tokio::select! {
                                 biased;
-                                _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "CANCELLED"); permits.neutral(&cfg); break; }
+                                _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
                                 result = sender.send(Ok(frame)) => { disconnected = result.is_err(); }
                             }
                         }
@@ -1322,6 +1377,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         break;
                     }
                 }
+            }
+            if disconnected {
+                protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
             }
             remember(&protocol, &g, &route, model.as_deref());
             observe_protocol(

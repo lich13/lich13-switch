@@ -106,6 +106,7 @@ fn retained(key: &str) -> bool {
             | "encrypted_content"
             | "previous_response_id"
             | "stream"
+            | "generate"
             | "stream_id"
             | "payload"
             | "info"

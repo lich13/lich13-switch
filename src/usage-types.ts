@@ -26,6 +26,14 @@ export type PriceSnapshot = {
   };
 };
 export type Attempt = {
+  end?: {
+    cause: string;
+    terminalReceived: boolean;
+    responseStarted: boolean;
+  } | null;
+  threadHash?: string | null;
+  upstreamRequestHash?: string | null;
+  routingDecision?: string | null;
   pricingBasis?: string | null;
   mappingRevision?: string | null;
   repeatCount?: number;

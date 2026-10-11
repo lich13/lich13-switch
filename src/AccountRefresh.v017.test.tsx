@@ -404,11 +404,11 @@ describe("targeted account credential refresh", () => {
       phase: "error",
       url: null,
       code: null,
-      message: "登录账号或工作区不一致，未更新指定账号",
+      message: "登录的不是指定账号，未替换凭据",
     });
 
     expect(
-      within(dialog).getByText("登录账号或工作区不一致，未更新指定账号"),
+      within(dialog).getByText("登录的不是指定账号，未替换凭据"),
     ).toBeInTheDocument();
     expect(
       within(dialog).getByRole("heading", { name: account.name }),

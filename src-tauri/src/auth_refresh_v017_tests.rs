@@ -13,28 +13,85 @@ fn setup() -> (tempfile::TempDir, Core) {
     (temp, core)
 }
 
-fn token(subject: &str, marker: &str, issued: i64) -> String {
-    let claims = json!({
+fn token_with_identity(
+    subject: &str,
+    email: &str,
+    marker: &str,
+    issued: i64,
+    identity: Option<(&str, &str)>,
+) -> String {
+    let mut claims = json!({
         "sub": subject,
-        "email": "fixture@example.invalid",
+        "email": email,
         "iat": issued,
         "jti": marker
     });
+    if let Some((field, value)) = identity {
+        claims["https://api.openai.com/auth"][field] = json!(value);
+    }
     format!("e30.{}.fixture", URL_SAFE_NO_PAD.encode(claims.to_string()))
 }
 
-fn oauth(subject: &str, workspace: &str, marker: &str, issued: i64) -> String {
+fn token(subject: &str, marker: &str, issued: i64) -> String {
+    token_with_identity(subject, "fixture@example.invalid", marker, issued, None)
+}
+
+fn oauth_with_tokens(
+    id_token: String,
+    access_token: String,
+    workspace: Option<&str>,
+    marker: &str,
+    issued: i64,
+) -> String {
+    let mut tokens = json!({
+        "access_token": access_token,
+        "id_token": id_token,
+        "refresh_token": format!("fixture-refresh-{marker}")
+    });
+    if let Some(workspace) = workspace {
+        tokens["account_id"] = json!(workspace);
+    }
     json!({
         "auth_mode": "chatgpt",
-        "tokens": {
-            "account_id": workspace,
-            "access_token": token(subject, &format!("access-{marker}"), issued),
-            "id_token": token(subject, &format!("id-{marker}"), issued),
-            "refresh_token": format!("fixture-refresh-{marker}")
-        },
+        "tokens": tokens,
         "last_refresh": issued
     })
     .to_string()
+}
+
+fn oauth(subject: &str, workspace: &str, marker: &str, issued: i64) -> String {
+    oauth_with_tokens(
+        token(subject, &format!("id-{marker}"), issued),
+        token(subject, &format!("access-{marker}"), issued),
+        Some(workspace),
+        marker,
+        issued,
+    )
+}
+
+fn oauth_user(
+    subject: &str,
+    user_field: &str,
+    user: &str,
+    email: &str,
+    workspace: Option<&str>,
+    marker: &str,
+    issued: i64,
+) -> String {
+    let identity = Some((user_field, user));
+    oauth_with_tokens(
+        token_with_identity(subject, email, &format!("id-{marker}"), issued, identity),
+        token_with_identity(
+            subject,
+            email,
+            &format!("access-{marker}"),
+            issued,
+            identity,
+        ),
+        workspace,
+        marker,
+        issued,
+    )
 }
 
 fn profile<'a>(core: &'a Core, id: &str) -> &'a Profile {
@@ -257,7 +314,7 @@ fn starting_targeted_login_rejects_api_keys_deleted_ids_and_stale_account_revisi
 }
 
 #[test]
-fn different_subject_workspace_or_auth_kind_does_not_replace_or_add_an_account() {
+fn different_subject_does_not_replace_or_add_an_account() {
     let (_temp, mut core) = setup();
     let at = now() as i64 - 60;
     let original = oauth("fixture-target", WORKSPACE, "saved", at);
@@ -266,20 +323,448 @@ fn different_subject_workspace_or_auth_kind_does_not_replace_or_add_an_account()
     let target = target_for(&mut core, &id);
     let before = snapshot(&core);
 
-    for incoming in [
-        oauth("fixture-other", WORKSPACE, "other-subject", at),
-        oauth(
-            "fixture-target",
-            "fixture-other-workspace",
-            "other-workspace",
+    let error = core
+        .complete_target_login(
+            &oauth("fixture-other", WORKSPACE, "other-subject", at),
+            &target,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "LOGIN_IDENTITY");
+    assert_eq!(snapshot(&core), before);
+}
+
+#[test]
+fn api_key_login_does_not_replace_a_chatgpt_target() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let id = core
+        .import_raw(
+            &oauth("fixture-target", WORKSPACE, "saved", at),
+            Some("Target".into()),
+        )
+        .unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let before = snapshot(&core);
+
+    let error = core
+        .complete_target_login(
+            &json!({"auth_mode": "apikey", "OPENAI_API_KEY": "fixture-api-value"}).to_string(),
+            &target,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, "LOGIN_IDENTITY");
+    assert_eq!(snapshot(&core), before);
+}
+
+#[test]
+fn same_chatgpt_user_can_refresh_into_a_different_workspace() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let before_id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-before-subject",
+                "chatgpt_user_id",
+                "fixture-before-user",
+                "fixture@example.invalid",
+                Some("fixture-workspace-before"),
+                "before",
+                at,
+            ),
+            Some("Before".into()),
+        )
+        .unwrap();
+    let mut original: Value = serde_json::from_str(&oauth_user(
+        "fixture-target-subject",
+        "chatgpt_user_id",
+        "fixture-user",
+        "fixture@example.invalid",
+        Some("fixture-workspace-old"),
+        "saved",
+        at,
+    ))
+    .unwrap();
+    original["future"] = json!({"keep": ["fixture", 7, true], "nested": {"keep": "old"}});
+    original["tokens"]["future_token_field"] = json!({"keep": true});
+    let original = original.to_string();
+    let id = core
+        .import_raw(&original, Some("Target name".into()))
+        .unwrap();
+    let after_id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-after-subject",
+                "chatgpt_user_id",
+                "fixture-after-user",
+                "fixture@example.invalid",
+                Some("fixture-workspace-after"),
+                "after",
+                at,
+            ),
+            Some("After".into()),
+        )
+        .unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let mut incoming: Value = serde_json::from_str(&oauth_user(
+        "fixture-target-subject",
+        "chatgpt_user_id",
+        "fixture-user",
+        "fixture@example.invalid",
+        Some("fixture-workspace-new"),
+        "different-workspace",
+        at - 3600,
+    ))
+    .unwrap();
+    incoming["future"] = json!({"nested": {"added": "new"}});
+    let incoming = incoming.to_string();
+
+    assert!(core.complete_target_login(&incoming, &target).unwrap());
+
+    let view = core.state().unwrap();
+    let profile = profile(&core, &id);
+    let saved: Value = serde_json::from_str(&profile.auth).unwrap();
+    assert_eq!(
+        view.accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect::<Vec<_>>(),
+        vec![before_id, id.clone(), after_id]
+    );
+    assert_eq!(profile.name, "Target name");
+    assert_eq!(saved["tokens"]["account_id"], "fixture-workspace-new");
+    assert_eq!(
+        profile.identity,
+        storage::digest(b"chatgpt:fixture-target-subject:fixture-workspace-new")
+    );
+    assert_eq!(saved["future"]["keep"], json!(["fixture", 7, true]));
+    assert_eq!(
+        saved["future"]["nested"],
+        json!({"keep": "old", "added": "new"})
+    );
+    assert_eq!(saved["tokens"]["future_token_field"], json!({"keep": true}));
+}
+
+#[test]
+fn matching_subject_fallback_allows_a_workspace_change_without_user_id_claims() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let id = core
+        .import_raw(
+            &oauth(
+                "fixture-subject-fallback",
+                "fixture-workspace-old",
+                "saved",
+                at,
+            ),
+            Some("Target".into()),
+        )
+        .unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let incoming = oauth(
+        "fixture-subject-fallback",
+        "fixture-workspace-new",
+        "workspace-change",
+        at - 3600,
+    );
+
+    assert!(core.complete_target_login(&incoming, &target).unwrap());
+
+    let saved: Value = serde_json::from_str(&profile(&core, &id).auth).unwrap();
+    assert_eq!(saved["tokens"]["account_id"], "fixture-workspace-new");
+    assert_eq!(
+        profile(&core, &id).identity,
+        storage::digest(b"chatgpt:fixture-subject-fallback:fixture-workspace-new")
+    );
+}
+
+#[test]
+fn same_user_id_allows_a_subject_change_and_user_id_is_the_fallback_identity_field() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-old-subject",
+                "user_id",
+                "fixture-user",
+                "fixture@example.invalid",
+                Some("fixture-workspace-old"),
+                "saved",
+                at,
+            ),
+            Some("Keep this name".into()),
+        )
+        .unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let incoming = oauth_user(
+        "fixture-new-subject",
+        "user_id",
+        "fixture-user",
+        "fixture@example.invalid",
+        Some("fixture-workspace-new"),
+        "subject-rotated",
+        at - 3600,
+    );
+
+    assert!(core.complete_target_login(&incoming, &target).unwrap());
+
+    let profile = profile(&core, &id);
+    assert_eq!(profile.name, "Keep this name");
+    assert_eq!(
+        profile.identity,
+        storage::digest(b"chatgpt:fixture-new-subject:fixture-workspace-new")
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&profile.auth).unwrap()["tokens"]["account_id"],
+        "fixture-workspace-new"
+    );
+}
+
+#[test]
+fn same_email_with_a_different_user_id_does_not_replace_the_target() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-target-subject",
+                "chatgpt_user_id",
+                "fixture-user-a",
+                "fixture@example.invalid",
+                Some(WORKSPACE),
+                "saved",
+                at,
+            ),
+            Some("Target".into()),
+        )
+        .unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let before = snapshot(&core);
+    let incoming = oauth_user(
+        "fixture-other-subject",
+        "chatgpt_user_id",
+        "fixture-user-b",
+        "fixture@example.invalid",
+        Some(WORKSPACE),
+        "other-user",
+        at,
+    );
+
+    let error = core.complete_target_login(&incoming, &target).unwrap_err();
+
+    assert_eq!(error.code, "LOGIN_IDENTITY");
+    assert_eq!(snapshot(&core), before);
+}
+
+#[test]
+fn conflicting_id_and_access_token_identities_are_rejected() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-target-subject",
+                "chatgpt_user_id",
+                "fixture-user",
+                "fixture@example.invalid",
+                Some(WORKSPACE),
+                "saved",
+                at,
+            ),
+            Some("Target".into()),
+        )
+        .unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let before = snapshot(&core);
+    let incoming = oauth_with_tokens(
+        token_with_identity(
+            "fixture-target-subject",
+            "fixture@example.invalid",
+            "id-conflict",
             at,
+            Some(("chatgpt_user_id", "fixture-user")),
         ),
-        json!({"auth_mode": "apikey", "OPENAI_API_KEY": "fixture-api-value"}).to_string(),
+        token_with_identity(
+            "fixture-target-subject",
+            "fixture@example.invalid",
+            "access-conflict",
+            at,
+            Some(("chatgpt_user_id", "fixture-other-user")),
+        ),
+        Some(WORKSPACE),
+        "identity-conflict",
+        at,
+    );
+
+    let error = core.complete_target_login(&incoming, &target).unwrap_err();
+
+    assert_eq!(error.code, "LOGIN_IDENTITY");
+    assert_eq!(snapshot(&core), before);
+}
+
+#[test]
+fn targeted_refresh_replaces_managed_workspace_credentials_without_reusing_missing_fields() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let mut original: Value = serde_json::from_str(&oauth_user(
+        "fixture-target-subject",
+        "chatgpt_user_id",
+        "fixture-user",
+        "fixture@example.invalid",
+        Some("fixture-workspace-old"),
+        "saved",
+        at,
+    ))
+    .unwrap();
+    original["OPENAI_API_KEY"] = json!("fixture-old-api-key");
+    original["tokens"]["legacy_workspace"] = json!("fixture-old-extension");
+    original["tokens"]["account_id"] = json!("fixture-workspace-old");
+    let original_tokens = original["tokens"].clone();
+    let original = original.to_string();
+    let id = core.import_raw(&original, Some("Target".into())).unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let mut incoming: Value = serde_json::from_str(&oauth_user(
+        "fixture-target-subject",
+        "chatgpt_user_id",
+        "fixture-user",
+        "fixture@example.invalid",
+        Some("fixture-workspace-new"),
+        "replacement",
+        at - 3600,
+    ))
+    .unwrap();
+    incoming["tokens"]
+        .as_object_mut()
+        .unwrap()
+        .remove("account_id");
+    incoming.as_object_mut().unwrap().remove("last_refresh");
+    let incoming = incoming.to_string();
+
+    assert!(core.complete_target_login(&incoming, &target).unwrap());
+
+    let saved: Value = serde_json::from_str(&profile(&core, &id).auth).unwrap();
+    assert!(saved.get("OPENAI_API_KEY").is_none());
+    assert!(saved.get("last_refresh").is_none());
+    assert!(saved["tokens"].get("account_id").is_none());
+    assert_eq!(saved["tokens"]["legacy_workspace"], "fixture-old-extension");
+    assert_eq!(
+        saved["tokens"]["refresh_token"],
+        "fixture-refresh-replacement"
+    );
+    assert_ne!(saved["tokens"]["id_token"], original_tokens["id_token"]);
+    assert_ne!(
+        saved["tokens"]["access_token"],
+        original_tokens["access_token"]
+    );
+}
+
+#[test]
+fn refresh_rejects_an_identity_already_saved_under_another_profile() {
+    let (_temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let target_id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-target-subject",
+                "chatgpt_user_id",
+                "fixture-user",
+                "fixture@example.invalid",
+                Some("fixture-workspace-target"),
+                "target",
+                at,
+            ),
+            Some("Target".into()),
+        )
+        .unwrap();
+    let other_id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-other-subject",
+                "chatgpt_user_id",
+                "fixture-user",
+                "fixture@example.invalid",
+                Some("fixture-workspace-other"),
+                "other",
+                at,
+            ),
+            Some("Other".into()),
+        )
+        .unwrap();
+    assert_ne!(target_id, other_id);
+    core.switch_account(&target_id, "missing").unwrap();
+    let target = target_for(&mut core, &target_id);
+    let before = snapshot(&core);
+    for (subject, marker) in [
+        ("fixture-other-subject", "duplicate-exact"),
+        ("fixture-new-subject", "duplicate-user-workspace"),
     ] {
+        let incoming = oauth_user(
+            subject,
+            "chatgpt_user_id",
+            "fixture-user",
+            "fixture@example.invalid",
+            Some("fixture-workspace-other"),
+            marker,
+            at,
+        );
         let error = core.complete_target_login(&incoming, &target).unwrap_err();
-        assert_eq!(error.code, "LOGIN_IDENTITY");
+
+        assert_eq!(error.code, "LOGIN_DUPLICATE");
         assert_eq!(snapshot(&core), before);
     }
+    assert_eq!(profile(&core, &target_id).name, "Target");
+    assert_eq!(profile(&core, &other_id).name, "Other");
+}
+
+#[test]
+fn cross_workspace_refresh_survives_restart_without_adding_a_duplicate_account() {
+    let (temp, mut core) = setup();
+    let at = now() as i64 - 60;
+    let id = core
+        .import_raw(
+            &oauth_user(
+                "fixture-target-subject",
+                "chatgpt_user_id",
+                "fixture-user",
+                "fixture@example.invalid",
+                Some("fixture-workspace-before"),
+                "saved",
+                at,
+            ),
+            Some("Keep target".into()),
+        )
+        .unwrap();
+    core.switch_account(&id, "missing").unwrap();
+    let target = target_for(&mut core, &id);
+    let incoming = oauth_user(
+        "fixture-target-subject",
+        "chatgpt_user_id",
+        "fixture-user",
+        "fixture@example.invalid",
+        Some("fixture-workspace-after"),
+        "after-workspace",
+        at - 3600,
+    );
+
+    assert!(core.complete_target_login(&incoming, &target).unwrap());
+    assert_eq!(core.store.profiles.len(), 1);
+
+    let mut reopened = Core::new(temp.path().join("app"), core.home()).unwrap();
+    let view = reopened.state().unwrap();
+    assert_eq!(view.accounts.len(), 1);
+    assert_eq!(view.accounts[0].id, id);
+    assert_eq!(view.accounts[0].name, "Keep target");
+    assert!(view.accounts[0].current);
+    assert_eq!(profile(&reopened, &id).auth, profile(&core, &id).auth);
+    assert_eq!(reopened.state().unwrap().accounts.len(), 1);
 }
 
 #[test]

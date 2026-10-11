@@ -48,6 +48,14 @@ mod websocket_tests;
 #[path = "v021_tests.rs"]
 mod v021_tests;
 
+#[cfg(test)]
+#[path = "v0211_handoff_tests.rs"]
+mod v0211_handoff_tests;
+
+#[cfg(test)]
+#[path = "v0211_lifecycle_tests.rs"]
+mod v0211_lifecycle_tests;
+
 fn hints(value: Value) -> RequestHints {
     RequestHints::from_value(value, false).expect("fixture request metadata")
 }
@@ -185,16 +193,30 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
 }
 
 #[test]
-fn first_turn_hints_require_one_user_message_and_no_cursor_or_compaction() {
+fn first_turn_hints_allow_initial_system_developer_user_messages_only() {
     assert!(
         hints(json!({"model":"fixture-model","input":[{"role":"user","content":"hi"}]})).first_turn
     );
+
+    assert!(
+        hints(json!({
+            "input":[
+                {"role":"system","content":"fixture policy"},
+                {"role":"developer","content":"fixture instructions"},
+                {"role":"user","content":"first"},
+                {"role":"user","content":"second"}
+            ]
+        }))
+        .first_turn
+    );
+
     for value in [
         json!({"input":[{"role":"assistant","content":"hi"}]}),
         json!({"input":[{"type":"function_call","id":"fixture"}]}),
         json!({"input":[{"type":"compaction_trigger"}]}),
         json!({"previous_response_id":"fixture-response","input":"hi"}),
-        json!({"input":[{"role":"user"},{"role":"user"}]}),
+        json!({"generate":false,"input":[{"role":"user","content":"warmup"}]}),
+        json!({"input":[{"role":"user","content":"first"},{"role":"assistant","content":"answer"}]}),
     ] {
         assert!(!hints(value).first_turn);
     }

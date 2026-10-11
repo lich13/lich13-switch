@@ -547,6 +547,21 @@ impl Trace {
     }
 }
 impl AttemptTrace {
+    pub fn end(&mut self, end: EndMetadata) {
+        self.attempt.end = Some(end);
+    }
+    pub fn context(&mut self, thread: Option<String>, decision: Option<RoutingDecision>) {
+        self.attempt.thread_hash =
+            thread.filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        self.attempt.routing_decision = decision;
+    }
+    pub fn upstream_request(&mut self, headers: &hyper::HeaderMap) {
+        self.attempt.upstream_request_hash = ["x-request-id", "request-id", "openai-request-id"]
+            .iter()
+            .find_map(|key| headers.get(*key).and_then(|v| v.to_str().ok()))
+            .filter(|v| !v.is_empty() && v.len() <= 512)
+            .map(|v| storage::digest(v.as_bytes()));
+    }
     pub fn is_claude(&self) -> bool {
         self.trace.0.client == "claude"
     }
@@ -645,7 +660,12 @@ impl AttemptTrace {
 impl Drop for AttemptTrace {
     fn drop(&mut self) {
         if !self.done {
-            self.attempt.outcome = "cancelled".into();
+            self.attempt.outcome = "unknown".into();
+            self.attempt.end.get_or_insert(EndMetadata {
+                cause: EndCause::Unsettled,
+                terminal_received: false,
+                response_started: self.attempt.status.is_some(),
+            });
             if self.attempt.tokens.total().is_none()
                 && self.attempt.usage_status != "parse_incomplete"
             {

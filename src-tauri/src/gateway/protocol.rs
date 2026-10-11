@@ -326,10 +326,14 @@ pub struct Protocol {
     status: Option<u16>,
     finished: bool,
     transport_failure: bool,
+    terminal_received: bool,
+    ended_early: bool,
     usage: Option<crate::usage::AttemptTrace>,
     started: std::time::Instant,
     first_usage_ms: Option<u64>,
     ownership: Option<(std::sync::Arc<super::compaction::Lease>, String)>,
+    stop: Option<tokio::sync::watch::Receiver<bool>>,
+    downstream: Option<tokio::sync::watch::Receiver<bool>>,
 }
 impl Protocol {
     pub fn new(stream: bool) -> Self {
@@ -340,15 +344,41 @@ impl Protocol {
             status: None,
             finished: false,
             transport_failure: false,
+            terminal_received: false,
+            ended_early: false,
             usage: None,
             started: std::time::Instant::now(),
             first_usage_ms: None,
             ownership: None,
+            stop: None,
+            downstream: None,
         }
     }
     pub fn attach_usage(&mut self, usage: crate::usage::AttemptTrace) {
         self.observation.meter.anthropic = Some(usage.is_claude());
         self.usage = Some(usage);
+    }
+    pub fn context(
+        &mut self,
+        thread: Option<String>,
+        decision: Option<crate::usage::model::RoutingDecision>,
+    ) {
+        if let Some(usage) = &mut self.usage {
+            usage.context(thread, decision);
+        }
+    }
+    pub fn response_headers(&mut self, headers: &hyper::HeaderMap) {
+        if let Some(usage) = &mut self.usage {
+            usage.upstream_request(headers);
+        }
+    }
+    pub fn watch_lifecycle(
+        &mut self,
+        stop: Option<tokio::sync::watch::Receiver<bool>>,
+        downstream: Option<tokio::sync::watch::Receiver<bool>>,
+    ) {
+        self.stop = stop;
+        self.downstream = downstream;
     }
     pub fn attach_ownership(
         &mut self,
@@ -368,7 +398,9 @@ impl Protocol {
         }
         let mut meter = self.observation.meter.clone();
         meter.parse_incomplete |= self.observation.incomplete;
-        meter.ended_early = self.transport_failure || self.terminal() == Some(Terminal::Cancelled);
+        meter.ended_early = self.ended_early
+            || self.transport_failure
+            || self.terminal() == Some(Terminal::Cancelled);
         meter.first_token_ms = self.first_usage_ms;
         let outcome = self.terminal().map(|t| match t {
             Terminal::Success => "success",
@@ -398,10 +430,12 @@ impl Protocol {
             o.feed(bytes);
             self.observation = o.snapshot(false);
         }
+        self.terminal_received |= self.observation.terminal.is_some();
         self.record_usage();
     }
     pub fn value(&mut self, value: &Value) {
         self.observation.value(value);
+        self.terminal_received |= self.observation.terminal.is_some();
         self.record_usage();
     }
     pub fn terminal(&self) -> Option<Terminal> {
@@ -421,6 +455,12 @@ impl Protocol {
     }
     pub fn finish(&mut self, status: Option<u16>, reason: &str) {
         if self.finished {
+            if matches!(
+                reason,
+                "CLIENT_DISCONNECTED" | "GATEWAY_STOPPED" | "CANCELLED"
+            ) {
+                self.record_end(reason);
+            }
             return;
         }
         self.finished = true;
@@ -428,6 +468,12 @@ impl Protocol {
         if let Some(o) = &mut self.observer {
             self.observation = o.snapshot(true);
         }
+        self.terminal_received |= self.observation.terminal.is_some();
+        self.ended_early = !self.terminal_received
+            && matches!(
+                reason,
+                "CLIENT_DISCONNECTED" | "GATEWAY_STOPPED" | "CANCELLED" | "UNSETTLED"
+            );
         self.transport_failure = self.observation.terminal.is_none()
             && matches!(
                 reason,
@@ -464,11 +510,57 @@ impl Protocol {
                 }
                 "OK" => Terminal::Success,
                 "HTTP" | "CLIENT_ERROR" => Terminal::Rejected,
-                "CANCELLED" => Terminal::Cancelled,
+                "CANCELLED" | "GATEWAY_STOPPED" => Terminal::Cancelled,
+                "CLIENT_DISCONNECTED" | "UNSETTLED" => Terminal::Unknown,
                 _ => Terminal::Failure,
             });
         }
         self.record_usage();
+        self.record_end(reason);
+    }
+    fn record_end(&mut self, reason: &str) {
+        use crate::usage::model::{EndCause, EndMetadata};
+        let cause = match reason {
+            "CLIENT_DISCONNECTED" => EndCause::ClientDisconnected,
+            "GATEWAY_STOPPED" => EndCause::GatewayStopped,
+            "CANCELLED" => EndCause::ClientCancelled,
+            _ if self.terminal_received => match self.observation.terminal {
+                Some(Terminal::Success | Terminal::Limited) => EndCause::Completed,
+                Some(Terminal::Cancelled) => EndCause::ClientCancelled,
+                _ => EndCause::ApplicationError,
+            },
+            _ if self.status.is_some_and(|s| s >= 400) => EndCause::UpstreamRejected,
+            "FIRST_BYTE_TIMEOUT" => EndCause::FirstByteTimeout,
+            "STREAM_TIMEOUT" => EndCause::StreamTimeout,
+            "STREAM_INTERRUPTED" => EndCause::UpstreamDisconnected,
+            "NETWORK" | "TLS" => EndCause::ConnectFailed,
+            "UNSETTLED" => EndCause::Unsettled,
+            _ if self.observation.incomplete => EndCause::ParseIncomplete,
+            "OK" if self.succeeded() => EndCause::Completed,
+            "OK" => EndCause::UpstreamDisconnected,
+            _ => EndCause::Unsettled,
+        };
+        if let Some(usage) = &mut self.usage {
+            usage.end(EndMetadata {
+                cause,
+                terminal_received: self.terminal_received,
+                response_started: self.status.is_some(),
+            });
+        }
+    }
+}
+impl Drop for Protocol {
+    fn drop(&mut self) {
+        // A dropped handler is not evidence of an explicit client cancellation.
+        // Flush only the bytes already observed; never continue the generation.
+        let reason = if self.stop.as_ref().is_some_and(|s| *s.borrow()) {
+            "GATEWAY_STOPPED"
+        } else if self.downstream.as_ref().is_some_and(|s| *s.borrow()) {
+            "CLIENT_DISCONNECTED"
+        } else {
+            "UNSETTLED"
+        };
+        self.finish(None, reason);
     }
 }
 impl Observer {

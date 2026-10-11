@@ -424,9 +424,54 @@ impl Operation {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EndCause {
+    Completed,
+    ApplicationError,
+    UpstreamRejected,
+    ClientCancelled,
+    ClientDisconnected,
+    GatewayStopped,
+    UpstreamDisconnected,
+    ConnectFailed,
+    FirstByteTimeout,
+    StreamTimeout,
+    ParseIncomplete,
+    Unsettled,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndMetadata {
+    pub cause: EndCause,
+    pub terminal_received: bool,
+    pub response_started: bool,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingDecision {
+    ThreadUnidentified,
+    NewThread,
+    ExistingThread,
+    AwaitingCompaction,
+    CompactionWindowMismatch,
+    CursorPinned,
+    NoEligibleReceiver,
+    CompactionHandoff,
+    Auxiliary,
+    OrdinaryQueue,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<EndMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_request_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_decision: Option<RoutingDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inclusive_input_tokens: Option<u64>,
     #[serde(default)]
@@ -562,6 +607,9 @@ impl Attempt {
             self.response_model = None;
         }
         self.response_id = None;
+        // A compressed history entry has no single transport ending or request ID.
+        self.end = None;
+        self.upstream_request_hash = None;
         if same {
             if let Some(price) = &mut self.price {
                 price.cost = cost.to_string();
@@ -590,6 +638,10 @@ impl Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            end: None,
+            thread_hash: None,
+            upstream_request_hash: None,
+            routing_decision: None,
             compaction_kind: None,
             usage_status: String::new(),
             availability: Default::default(),

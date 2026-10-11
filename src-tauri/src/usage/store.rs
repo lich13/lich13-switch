@@ -451,6 +451,10 @@ impl Store {
             for a in &mut r.attempts {
                 a.id.clear();
                 a.response_id = None;
+                a.end = None;
+                a.thread_hash = None;
+                a.upstream_request_hash = None;
+                a.routing_decision = None;
                 a.started_at = day;
                 a.duration_ms = 0;
                 a.first_token_ms = None;

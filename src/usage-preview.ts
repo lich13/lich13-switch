@@ -108,6 +108,33 @@ search.attempts[0] = {
     },
   },
 };
+if (densePreview) {
+  const completed = rows[2].attempts[0];
+  completed.end = {
+    cause: "client_disconnected",
+    terminalReceived: true,
+    responseStarted: true,
+  };
+  completed.routingDecision = "compaction_handoff";
+  const interrupted = rows[4];
+  interrupted.completed = false;
+  interrupted.attempts[0].outcome = "unknown";
+  interrupted.attempts[0].end = {
+    cause: "client_disconnected",
+    terminalReceived: false,
+    responseStarted: true,
+  };
+  interrupted.attempts[0].routingDecision = "existing_thread";
+  const stopped = rows[5];
+  stopped.completed = false;
+  stopped.attempts[0].status = 200;
+  stopped.attempts[0].outcome = "cancelled";
+  stopped.attempts[0].end = {
+    cause: "gateway_stopped",
+    terminalReceived: false,
+    responseStarted: true,
+  };
+}
 let settings: UsageSettings = {
   recording: true,
   autoSync: true,
@@ -149,7 +176,10 @@ function total(items: UsageRecord[]): Totals {
     .filter((r) => r.source === "proxy")
     .map((r) => r.attempts.at(-1)!)
     .filter(
-      (a) => a.stream && (a.operation ?? "model") === "model" && a.firstTokenMs != null,
+      (a) =>
+        a.stream &&
+        (a.operation ?? "model") === "model" &&
+        a.firstTokenMs != null,
     )
     .map((a) => a.firstTokenMs!);
 
@@ -162,8 +192,28 @@ function total(items: UsageRecord[]): Totals {
   return {
     firstTokenSumMs: first.reduce((sum, v) => sum + v, 0),
     firstTokenSamples: first.length,
-    cacheReadEligible: items.flatMap(r => r.attempts).filter(a => a.tokens.input != null && a.tokens.cacheRead != null && a.tokens.cacheWrite != null).reduce((n, a) => n + a.tokens.cacheRead!, 0),
-    cacheInputEligible: items.flatMap(r => r.attempts).filter(a => a.tokens.input != null && a.tokens.cacheRead != null && a.tokens.cacheWrite != null).reduce((n, a) => n + a.tokens.input! + a.tokens.cacheRead! + a.tokens.cacheWrite!, 0),
+    cacheReadEligible: items
+      .flatMap((r) => r.attempts)
+      .filter(
+        (a) =>
+          a.tokens.input != null &&
+          a.tokens.cacheRead != null &&
+          a.tokens.cacheWrite != null,
+      )
+      .reduce((n, a) => n + a.tokens.cacheRead!, 0),
+    cacheInputEligible: items
+      .flatMap((r) => r.attempts)
+      .filter(
+        (a) =>
+          a.tokens.input != null &&
+          a.tokens.cacheRead != null &&
+          a.tokens.cacheWrite != null,
+      )
+      .reduce(
+        (n, a) =>
+          n + a.tokens.input! + a.tokens.cacheRead! + a.tokens.cacheWrite!,
+        0,
+      ),
     requests: items.length,
     success: items.filter((r) => r.attempts.at(-1)!.status === 200).length,
     statusKnown: items.filter((r) => r.attempts.at(-1)!.status != null).length,
@@ -256,7 +306,8 @@ export function usagePreview(
       (!f.client || r.client === f.client) &&
       (!f.provider || r.attempts.at(-1)!.provider === f.provider) &&
       (!f.model || r.attempts.at(-1)!.pricingModel === f.model) &&
-      (!f.operation || (r.attempts.at(-1)!.operation ?? "model") === f.operation),
+      (!f.operation ||
+        (r.attempts.at(-1)!.operation ?? "model") === f.operation),
   );
   if (name === "get_usage_logs") {
     const filtered = selected.filter(

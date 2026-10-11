@@ -256,7 +256,7 @@ impl Gateway {
             service.emit(event);
         }
     }
-    fn record_policy_rejection(&self, model: Option<&str>, websocket: bool) {
+    fn record_policy_rejection(&self, model: Option<&str>, websocket: bool, message: &'static str) {
         use crate::events::{Action, Details, Phase, Reason, Record};
         let mut event = Record::new(
             Some(self.0.client),
@@ -269,7 +269,7 @@ impl Gateway {
         );
         event.details = Details {
             local_code: Some("NO_ELIGIBLE_PROVIDER".into()),
-            message: Some("没有符合线程接管策略的供应商".into()),
+            message: Some(message.into()),
             phase: Some(Phase::Admission),
             counted_failure: Some(false),
             ..Default::default()

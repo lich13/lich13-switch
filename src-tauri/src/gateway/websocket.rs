@@ -363,7 +363,7 @@ async fn take_slot(
             (1008, requirement.code())
         } else {
             if matches!(reason, Rejected::Policy) {
-                g.record_policy_rejection(None, true);
+                g.record_policy_rejection(None, true, "没有符合线程接管策略的供应商");
             }
             rejected(reason)
         }
@@ -897,39 +897,46 @@ async fn session_once(
     let first_hints =
         value(&first).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
     let conversation = super::compaction::session(&headers);
-    let mut ownership = if g.client_id() == super::ClientId::Codex
-        && !manual
-        && pinned.is_none()
-        && !unknown_affinity
-    {
-        let eligible: Vec<_> = ids
-            .iter()
-            .filter(|id| {
-                routes
-                    .get(*id)
-                    .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
-            })
-            .filter_map(|id| routes.get(id).map(|r| r.provider.clone()))
-            .collect();
-        if let Some(session) = conversation.clone().filter(|_| !eligible.is_empty()) {
-            Some(
-                g.0.compaction
-                    .prepare_policy(
-                        session,
-                        first_hints.as_ref(),
-                        first_hints.as_ref().is_some_and(|h| {
-                            h.previous_response_id.is_none() && !h.compaction_trigger
-                        }),
-                        &eligible,
-                    )
-                    .ok_or((1013, "CONVERSATION_OWNERSHIP"))?,
-            )
+    let auxiliary = first_hints.as_ref().is_some_and(|h| h.auxiliary);
+    if auxiliary && g.client_id() == super::ClientId::Codex && !manual {
+        if let Some(owner) = conversation
+            .as_deref()
+            .and_then(|s| g.0.compaction.owner(s))
+            .filter(|id| ids.contains(id))
+        {
+            ids = vec![owner];
+        }
+    }
+    let mut ownership =
+        if g.client_id() == super::ClientId::Codex && !manual && !unknown_affinity && !auxiliary {
+            let eligible: Vec<_> = ids
+                .iter()
+                .filter(|id| {
+                    routes
+                        .get(*id)
+                        .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
+                })
+                .filter_map(|id| routes.get(id).map(|r| r.provider.clone()))
+                .collect();
+            if let Some(session) = conversation.clone().filter(|_| !eligible.is_empty()) {
+                Some(
+                    g.0.compaction
+                        .prepare_policy(
+                            session,
+                            first_hints.as_ref(),
+                            first_hints.as_ref().is_some_and(|h| {
+                                h.previous_response_id.is_none() && !h.compaction_trigger
+                            }),
+                            &eligible,
+                        )
+                        .ok_or((1013, "CONVERSATION_OWNERSHIP"))?,
+                )
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
     let mut budget = Budget::new(cfg.queue_seconds);
     if pinned.is_some() || unknown_affinity {
         budget.pin_provider();
@@ -1034,9 +1041,13 @@ async fn session_once(
         }
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
-        } else if let Some(lease) = &ownership {
+        } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
             candidates = lease.candidates(candidates);
-        } else if g.client_id() == super::ClientId::Codex && !manual && pinned.is_none() {
+        } else if g.client_id() == super::ClientId::Codex
+            && !manual
+            && pinned.is_none()
+            && !auxiliary
+        {
             candidates = super::compaction::unidentified_candidates(candidates);
         }
         if matches_model
@@ -1048,10 +1059,14 @@ async fn session_once(
                 ids.clear();
                 continue;
             }
-            g.record_policy_rejection(current_model.as_deref(), true);
+            g.record_policy_rejection(
+                current_model.as_deref(),
+                true,
+                super::compaction::rejection_reason(conversation.as_deref(), first_hints.as_ref()),
+            );
             return Err((1008, "NO_ELIGIBLE_PROVIDER"));
         }
-        if g.client_id() == super::ClientId::Codex && !manual && pinned.is_none() {
+        if g.client_id() == super::ClientId::Codex && !manual && pinned.is_none() && !auxiliary {
             let (intake, owner) = ownership
                 .as_ref()
                 .map_or((super::compaction::Intake::Ordinary, None), |lease| {
@@ -1121,6 +1136,27 @@ async fn session_once(
                 "websocket",
             ));
         }
+        attempt_protocol.context(
+            conversation.clone(),
+            (!manual).then(|| {
+                super::compaction::decision(
+                    conversation.as_deref(),
+                    first_hints.as_ref(),
+                    pinned.is_some() || unknown_affinity,
+                    ownership.as_deref(),
+                    &admission.route.provider.id,
+                )
+            }),
+        );
+        attempt_protocol.watch_lifecycle(
+            g.0.inner
+                .lock()
+                .unwrap()
+                .shutdown
+                .as_ref()
+                .map(|s| s.subscribe()),
+            Some(client.closed.clone()),
+        );
         let result = while_connecting(client, async {
             upstream_native(&admission.route, &uri, &headers, cfg)
                 .await
@@ -1396,6 +1432,29 @@ async fn session_once(
             if let Some(trace) = &usage_trace {
                 next.attach_usage(trace.attempt(&route.provider.id, true, "websocket"));
             }
+            let hints = value(&replay_frame)
+                .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+            next.context(
+                conversation.clone(),
+                (!manual).then(|| {
+                    super::compaction::decision(
+                        conversation.as_deref(),
+                        hints.as_ref(),
+                        pinned.is_some() || unknown_affinity,
+                        ownership.as_deref(),
+                        &route.provider.id,
+                    )
+                }),
+            );
+            next.watch_lifecycle(
+                g.0.inner
+                    .lock()
+                    .unwrap()
+                    .shutdown
+                    .as_ref()
+                    .map(|s| s.subscribe()),
+                Some(client.closed.clone()),
+            );
             protocol = Some(next);
             turn = Some(admission);
             let opened = while_connecting(client, async {
@@ -1407,6 +1466,9 @@ async fn session_once(
             match opened {
                 Err(TURN_CANCELLED) => {
                     turn = None;
+                    if let Some(u) = &mut protocol {
+                        u.finish(None, "CANCELLED");
+                    }
                     protocol = None;
                     usage_trace = None;
                     retry_pending = false;
@@ -1529,7 +1591,11 @@ async fn session_once(
                     let state = g.0.inner.lock().unwrap();
                     state.store.mode == "auto"
                 };
-                if g.client_id() == super::ClientId::Codex && !manual && enabled {
+                if g.client_id() == super::ClientId::Codex
+                    && !manual
+                    && enabled
+                    && !hints.as_ref().is_some_and(|h| h.auxiliary)
+                {
                     let latest: Vec<_> = g
                         .routing_ids(None)
                         .into_iter()
@@ -1569,11 +1635,27 @@ async fn session_once(
                     } else {
                         None
                     };
+                    // An initial generate:false warmup never owns a thread. The
+                    // first real generation must still pass the shared policy.
+                    if ownership.as_ref().is_some_and(|lease| {
+                        lease.establishing()
+                            && lease
+                                .candidates(latest.clone())
+                                .first()
+                                .is_some_and(|r| r.provider.id != route.provider.id)
+                    }) {
+                        *next_turn = Some(frame);
+                        return Err((1999, "compaction handoff"));
+                    }
                 } else {
                     ownership = None;
                 }
                 tail_deadline = None;
                 let mut budget = Budget::new(cfg.queue_seconds);
+                if let Some(lease) = &ownership {
+                    let (intake, owner) = lease.admission_policy();
+                    budget.set_intake(intake, owner);
+                }
                 let acquired = take_slot(
                     g,
                     client,
@@ -1587,6 +1669,14 @@ async fn session_once(
                 .await;
                 match acquired {
                     Ok(mut admission) => {
+                        if ownership
+                            .as_ref()
+                            .is_some_and(|lease| !lease.admitted(&admission.route.provider.id))
+                        {
+                            admission.permits.neutral(cfg);
+                            *next_turn = Some(frame);
+                            return Err((1999, "compaction handoff"));
+                        }
                         if let Err(reason) = admission.commit_rpm() {
                             return Err(rejected(reason));
                         }
@@ -1622,6 +1712,29 @@ async fn session_once(
                         "websocket",
                     ));
                 }
+                next_protocol.context(
+                    conversation.clone(),
+                    (!manual).then(|| {
+                        super::compaction::decision(
+                            conversation.as_deref(),
+                            hints.as_ref(),
+                            hints
+                                .as_ref()
+                                .is_some_and(|h| h.previous_response_id.is_some()),
+                            ownership.as_deref(),
+                            &route.provider.id,
+                        )
+                    }),
+                );
+                next_protocol.watch_lifecycle(
+                    g.0.inner
+                        .lock()
+                        .unwrap()
+                        .shutdown
+                        .as_ref()
+                        .map(|s| s.subscribe()),
+                    Some(client.closed.clone()),
+                );
                 next_protocol.websocket_status(101);
                 protocol = Some(next_protocol);
                 received = false;
@@ -1822,23 +1935,33 @@ async fn session_once(
                     }
                 }
                 if let Err(error) = client.send(frame).await {
+                    if let Some(u) = &mut protocol { u.finish(None, "CLIENT_DISCONNECTED"); }
                     if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; }
                     return Err(error);
                 }
             },
             frame = client.incoming.recv() => {
-                let Some(frame) = frame else { if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; } return Ok(()); };
+                let Some(frame) = frame else {
+                    if let Some(u) = &mut protocol {
+                        u.finish(None, "CLIENT_DISCONNECTED");
+                    }
+                    if turn.is_none() {
+                        drain_completed(&mut upstream, &mut protocol).await;
+                    }
+                    return Ok(());
+                };
                 let closing = frame.opcode() == OpCode::Close;
                 if frame.opcode() == OpCode::Ping && !matches!(upstream, Upstream::Native(_)) {
                     client.send(Frame::pong(frame.payload().to_vec())).await?;
                 } else if frame.opcode() == OpCode::Pong && !matches!(upstream, Upstream::Native(_)) {
                     continue;
                 } else if closing {
+                    if let Some(u) = &mut protocol { u.finish(None, "CLIENT_DISCONNECTED"); }
                     if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; return Ok(()); }
                     if let Upstream::Native(peer) = &upstream { peer.send(frame.clone()).await?; }
                     if let Some(mut admission) = turn.take() {
                         if let Some(mut u) = protocol.take() {
-                            u.finish(None, "CANCELLED");
+                            u.finish(None, "CLIENT_DISCONNECTED");
                             admission.permits.neutral(cfg);
                         }
                     }
@@ -1860,7 +1983,15 @@ async fn session_once(
                     return Err(e);
                 }
             },
-            _ = client.closed.changed() => { if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; } return Ok(()); },
+            _ = client.closed.changed() => {
+                if let Some(u) = &mut protocol {
+                    u.finish(None, "CLIENT_DISCONNECTED");
+                }
+                if turn.is_none() {
+                    drain_completed(&mut upstream, &mut protocol).await;
+                }
+                return Ok(());
+            },
             _ = tokio::time::sleep_until(deadline), if turn.is_some() => {
                 let native = matches!(upstream, Upstream::Native(_));
                 retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if received { "STREAM_TIMEOUT" } else { "FIRST_BYTE_TIMEOUT" });

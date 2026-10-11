@@ -295,7 +295,9 @@ export default function Usage({
   const name = (id: string | null) =>
     id ? providers[id] || `供应商 ${id.slice(0, 8)}` : "本机会话";
   const t = data?.totals;
-  const cacheRate = t?.cacheInputEligible ? (100 * (t.cacheReadEligible ?? 0)) / t.cacheInputEligible : null;
+  const cacheRate = t?.cacheInputEligible
+    ? (100 * (t.cacheReadEligible ?? 0)) / t.cacheInputEligible
+    : null;
   const open = async (r: UsageRecord) => {
     try {
       setSelected(
@@ -364,9 +366,25 @@ export default function Usage({
       </header>
       <div className="usage-metrics">
         <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
-        <Metric label="已报告 Token" value={t ? compact(tokenTotal(t.tokens)) : "—"} title={t ? numeric(tokenTotal(t.tokens)) : undefined} />
-        <Metric label="缓存命中率" value={cacheRate == null ? "—" : `${cacheRate.toFixed(1)}%`} title={cacheRate == null ? "无有效缓存样本" : `${numeric(t?.cacheReadEligible)} / ${numeric(t?.cacheInputEligible)}`} />
-        <Metric label="平均首字" value={firstTokenLabel(averageFirstToken(t))} title={firstTokenTitle(t)} />
+        <Metric
+          label="已报告 Token"
+          value={t ? compact(tokenTotal(t.tokens)) : "—"}
+          title={t ? numeric(tokenTotal(t.tokens)) : undefined}
+        />
+        <Metric
+          label="缓存命中率"
+          value={cacheRate == null ? "—" : `${cacheRate.toFixed(1)}%`}
+          title={
+            cacheRate == null
+              ? "无有效缓存样本"
+              : `${numeric(t?.cacheReadEligible)} / ${numeric(t?.cacheInputEligible)}`
+          }
+        />
+        <Metric
+          label="平均首字"
+          value={firstTokenLabel(averageFirstToken(t))}
+          title={firstTokenTitle(t)}
+        />
       </div>
       <div className="usage-filters">
         <select
@@ -416,7 +434,11 @@ export default function Usage({
           <option value="proxy">本网关</option>
           <option value="sessions">本机会话</option>
         </select>
-        <select aria-label="请求类型" value={operation} onChange={(e) => choose(setOperation, e.target.value)}>
+        <select
+          aria-label="请求类型"
+          value={operation}
+          onChange={(e) => choose(setOperation, e.target.value)}
+        >
           <option value="">全部类型</option>
           <option value="model">生成</option>
           <option value="compaction">压缩</option>
@@ -533,9 +555,16 @@ export default function Usage({
                         )}
                         <time>{date(r.startedAt)}</time>
                       </td>
-                      <td className="usage-name" title={`${clientName(r.client)} · ${name(a.provider)}`}>
-                        <span className="usage-provider-name">{name(a.provider)}</span>
-                        <span className="usage-client-tag">{clientName(r.client)}</span>
+                      <td
+                        className="usage-name"
+                        title={`${clientName(r.client)} · ${name(a.provider)}`}
+                      >
+                        <span className="usage-provider-name">
+                          {name(a.provider)}
+                        </span>
+                        <span className="usage-client-tag">
+                          {clientName(r.client)}
+                        </span>
                       </td>
                       <td
                         className="usage-model"
@@ -550,13 +579,22 @@ export default function Usage({
                         <Model a={a} />
                       </td>
                       <td>
-                        <NumberValue value={a.tokens.input} missing={missingReason(a, "input", r.source)} />
+                        <NumberValue
+                          value={a.tokens.input}
+                          missing={missingReason(a, "input", r.source)}
+                        />
                       </td>
                       <td>
-                        <NumberValue value={a.tokens.output} missing={missingReason(a, "output", r.source)} />
+                        <NumberValue
+                          value={a.tokens.output}
+                          missing={missingReason(a, "output", r.source)}
+                        />
                       </td>
                       <td>
-                        <NumberValue value={a.tokens.cacheRead} missing={missingReason(a, "cache_read", r.source)} />
+                        <NumberValue
+                          value={a.tokens.cacheRead}
+                          missing={missingReason(a, "cache_read", r.source)}
+                        />
                       </td>
                       <td title={a.price?.cost}>
                         {money(a.price?.cost)}
@@ -656,7 +694,13 @@ function Metric({
     </div>
   );
 }
-function NumberValue({ value, missing = "历史缺失" }: { value: number | null | undefined; missing?: string }) {
+function NumberValue({
+  value,
+  missing = "历史缺失",
+}: {
+  value: number | null | undefined;
+  missing?: string;
+}) {
   const [focused, setFocused] = useState(false);
   return (
     <span
@@ -674,11 +718,19 @@ function NumberValue({ value, missing = "历史缺失" }: { value: number | null
 function Model({ a }: { a: Attempt }) {
   return (
     <>
-      <span className="usage-model-name">{a.operation === "web_search" ? "网络搜索" : (a.responseModel ?? a.requestedModel ?? "—")}</span>
+      <span className="usage-model-name">
+        {a.operation === "web_search"
+          ? "网络搜索"
+          : (a.responseModel ?? a.requestedModel ?? "—")}
+      </span>
       <span className="usage-badges">
         {a.stream && <span className="usage-badge stream">流式</span>}
-        {(a.operation === "compaction" || a.compactionKind) && <span className="usage-badge compaction">压缩</span>}
-        {a.operation === "web_search" && <span className="usage-badge search">搜索</span>}
+        {(a.operation === "compaction" || a.compactionKind) && (
+          <span className="usage-badge compaction">压缩</span>
+        )}
+        {a.operation === "web_search" && (
+          <span className="usage-badge search">搜索</span>
+        )}
       </span>
     </>
   );
@@ -1182,13 +1234,55 @@ function rateLabel(key: string) {
     .join(" · ");
 }
 function missingReason(a: Attempt, field: string, source: string): string {
-  if (field === "first_token" && (source !== "proxy" || !a.stream || (a.operation ?? "model") !== "model")) return "不适用";
+  if (
+    field === "first_token" &&
+    (source !== "proxy" || !a.stream || (a.operation ?? "model") !== "model")
+  )
+    return "不适用";
   const kind = a.availability?.[field] ?? a.usageStatus ?? "historical_missing";
-  return ({ upstream_unreported: "上游未报告", partial: "上游未报告", reported: "上游未报告", ended_early: "提前结束", parse_incomplete: "解析不完整", historical_missing: "历史缺失", not_applicable: "不适用", session_supplemented: "会话补齐" } as Record<string, string>)[kind] ?? "历史缺失";
+  return (
+    (
+      {
+        upstream_unreported: "上游未报告",
+        partial: "上游未报告",
+        reported: "上游未报告",
+        ended_early: "提前结束",
+        parse_incomplete: "解析不完整",
+        historical_missing: "历史缺失",
+        not_applicable: "不适用",
+        session_supplemented: "会话补齐",
+      } as Record<string, string>
+    )[kind] ?? "历史缺失"
+  );
 }
-function TokenField({ a, field, value, source }: { a: Attempt; field: string; value: number | null; source: string }) {
-  const reason = value == null ? missingReason(a, field, source) : a.usageSources?.[field] ? "会话补齐" : source === "proxy" ? "上游已报告" : "会话已报告";
-  return <span tabIndex={0} title={reason} aria-label={`${numeric(value)} · ${reason}`}>{numeric(value)}</span>;
+function TokenField({
+  a,
+  field,
+  value,
+  source,
+}: {
+  a: Attempt;
+  field: string;
+  value: number | null;
+  source: string;
+}) {
+  const reason =
+    value == null
+      ? missingReason(a, field, source)
+      : a.usageSources?.[field]
+        ? "会话补齐"
+        : source === "proxy"
+          ? "上游已报告"
+          : "会话已报告";
+  return (
+    <span
+      tabIndex={0}
+      title={reason}
+      aria-label={`${numeric(value)} · ${reason}`}
+    >
+      {numeric(value)}
+    </span>
+  );
 }
 function DetailFields({ items }: { items: [string, React.ReactNode][] }) {
   return (
@@ -1224,8 +1318,50 @@ function AttemptDetails({
         items={[
           ["供应商", name(a.provider)],
           ["时间", new Date(a.startedAt).toLocaleString()],
-          ["请求类型", a.operation === "web_search" ? "网络搜索" : a.operation === "compaction" || a.compactionKind ? "压缩" : "生成"],
-          ["用量采集", ({ reported: "上游已报告", partial: "部分字段未报告", upstream_unreported: "上游未报告", ended_early: "提前结束", parse_incomplete: "解析不完整", session_supplemented: "会话补齐" } as Record<string, string>)[a.usageStatus ?? ""] ?? "历史记录"],
+          [
+            "请求类型",
+            a.operation === "web_search"
+              ? "网络搜索"
+              : a.operation === "compaction" || a.compactionKind
+                ? "压缩"
+                : "生成",
+          ],
+          [
+            "用量采集",
+            (
+              {
+                reported: "上游已报告",
+                partial: "部分字段未报告",
+                upstream_unreported: "上游未报告",
+                ended_early: "提前结束",
+                parse_incomplete: "解析不完整",
+                session_supplemented: "会话补齐",
+              } as Record<string, string>
+            )[a.usageStatus ?? ""] ?? "历史记录",
+          ],
+          ...(source === "proxy"
+            ? [["结束原因", endReason(a)] as [string, string]]
+            : []),
+          ...(a.end
+            ? [
+                [
+                  "结束阶段",
+                  a.end.terminalReceived
+                    ? "已收到协议终态"
+                    : a.end.responseStarted
+                      ? "读取上游响应"
+                      : "等待上游响应",
+                ] as [string, string],
+              ]
+            : []),
+          ...(a.routingDecision
+            ? [
+                ["线程调度", routingReason(a.routingDecision)] as [
+                  string,
+                  string,
+                ],
+              ]
+            : []),
           ["请求模型", a.requestedModel],
           ["收到的响应模型", a.responseModel],
           ...metadata,
@@ -1234,11 +1370,69 @@ function AttemptDetails({
       <h3>Token</h3>
       <DetailFields
         items={[
-          ["输入", <TokenField a={a} field="input" value={a.tokens.input} source={source} />],
-          ["输出", <TokenField a={a} field="output" value={a.tokens.output} source={source} />],
-          ["缓存读取", <TokenField a={a} field="cache_read" value={a.tokens.cacheRead} source={source} />],
-          ["缓存写入", <TokenField a={a} field="cache_write" value={a.tokens.cacheWrite} source={source} />],
-          ...(a.usageSources && Object.keys(a.usageSources).length ? [["补齐字段", Object.keys(a.usageSources).map((key) => ({ inclusive_input: "完整输入", input: "输入", output: "输出", cache_read: "缓存读取", cache_write: "缓存写入", cache_write_5m: "短时缓存写入", cache_write_1h: "长时缓存写入", image_input: "图片输入", image_output: "图片输出", audio_input: "音频输入", audio_output: "音频输出" } as Record<string, string>)[key] ?? key).join("、")] as [string, string]] : []),
+          [
+            "输入",
+            <TokenField
+              a={a}
+              field="input"
+              value={a.tokens.input}
+              source={source}
+            />,
+          ],
+          [
+            "输出",
+            <TokenField
+              a={a}
+              field="output"
+              value={a.tokens.output}
+              source={source}
+            />,
+          ],
+          [
+            "缓存读取",
+            <TokenField
+              a={a}
+              field="cache_read"
+              value={a.tokens.cacheRead}
+              source={source}
+            />,
+          ],
+          [
+            "缓存写入",
+            <TokenField
+              a={a}
+              field="cache_write"
+              value={a.tokens.cacheWrite}
+              source={source}
+            />,
+          ],
+          ...(a.usageSources && Object.keys(a.usageSources).length
+            ? [
+                [
+                  "补齐字段",
+                  Object.keys(a.usageSources)
+                    .map(
+                      (key) =>
+                        (
+                          ({
+                            inclusive_input: "完整输入",
+                            input: "输入",
+                            output: "输出",
+                            cache_read: "缓存读取",
+                            cache_write: "缓存写入",
+                            cache_write_5m: "短时缓存写入",
+                            cache_write_1h: "长时缓存写入",
+                            image_input: "图片输入",
+                            image_output: "图片输出",
+                            audio_input: "音频输入",
+                            audio_output: "音频输出",
+                          }) as Record<string, string>
+                        )[key] ?? key,
+                    )
+                    .join("、"),
+                ] as [string, string],
+              ]
+            : []),
         ]}
       />
       <h3>费用</h3>
@@ -1288,14 +1482,79 @@ function AttemptDetails({
         items={[
           [
             "总耗时",
-            a.durationMs != null ? `${(a.durationMs / 1000).toFixed(3)}s` : <span tabIndex={0} title="历史缺失">—</span>,
+            a.durationMs != null ? (
+              `${(a.durationMs / 1000).toFixed(3)}s`
+            ) : (
+              <span tabIndex={0} title="历史缺失">
+                —
+              </span>
+            ),
           ],
-          ["首字", first != null ? `${(first / 1000).toFixed(3)}s` : <span tabIndex={0} title={missingReason(a, "first_token", source)}>—</span>],
+          [
+            "首字",
+            first != null ? (
+              `${(first / 1000).toFixed(3)}s`
+            ) : (
+              <span
+                tabIndex={0}
+                title={missingReason(a, "first_token", source)}
+              >
+                —
+              </span>
+            ),
+          ],
           ["传输", a.transport],
           ["流式", a.stream ? "是" : "否"],
         ]}
       />
     </>
+  );
+}
+
+function endReason(a: Attempt): string {
+  if (!a.end) return "历史结束原因未记录";
+  if (a.end.cause === "client_disconnected") {
+    return a.end.terminalReceived && ["success", "limited"].includes(a.outcome)
+      ? "上游已完成，客户端随后断开"
+      : a.end.terminalReceived
+        ? "上游已结束，客户端随后断开"
+        : "客户端断开，完成状态未知";
+  }
+  return (
+    (
+      {
+        completed: "上游已完成",
+        application_error: "上游返回应用错误",
+        upstream_rejected: "上游拒绝请求",
+        client_cancelled: "生成已取消",
+        gateway_stopped: "网关停止",
+        upstream_disconnected: "上游提前断开",
+        connect_failed: "上游连接失败",
+        first_byte_timeout: "等待上游响应超时",
+        stream_timeout: "读取上游流超时",
+        parse_incomplete: "响应解析不完整",
+        unsettled: "结束原因未确认",
+      } as Record<string, string>
+    )[a.end.cause] ?? "结束原因未确认"
+  );
+}
+
+function routingReason(reason: string): string {
+  return (
+    (
+      {
+        thread_unidentified: "缺少可靠线程标识，按普通队列",
+        new_thread: "识别为新线程",
+        existing_thread: "维持原供应商",
+        awaiting_compaction: "压缩尚未完成",
+        compaction_window_mismatch: "压缩窗口未匹配，维持原供应商",
+        cursor_pinned: "响应游标固定原供应商",
+        no_eligible_receiver: "接收方暂不可用，维持原供应商",
+        compaction_handoff: "压缩后接管",
+        auxiliary: "辅助请求，不建立线程归属",
+        ordinary_queue: "按普通队列建立归属",
+      } as Record<string, string>
+    )[reason] ?? "调度原因未记录"
   );
 }
 function Sources({
