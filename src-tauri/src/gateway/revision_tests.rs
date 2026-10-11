@@ -108,10 +108,6 @@ async fn actual_edits_still_conflict_and_external_checkpoint_writes_are_not_igno
             id: id.clone(),
             allowed_models: Some(vec!["m".into()]),
         },
-        Edit::WebsocketProvider {
-            id: id.clone(),
-            supports_websocket: false,
-        },
         Edit::Reorder {
             ids: g
                 .view()

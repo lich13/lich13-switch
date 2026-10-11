@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClientId, Provider, ProviderQuota } from "./types";
 const mock = vi.hoisted(() => ({
@@ -182,6 +182,95 @@ describe("quota display and refresh", () => {
     });
     fireEvent.click(screen.getByText("额度详情"));
     expect(screen.getByText("已用 1.5 USD / 10 USD")).toBeInTheDocument();
+  });
+  it("shows a unique active subscription beside compact quota without relabeling existing plans", () => {
+    const q = {
+      ...result(),
+      subscriptions: [
+        {
+          name: "Pro",
+          status: "active",
+          expiresAt: null,
+          active: true,
+          plans: [{ ...result().plans[0], name: "订阅窗口" }],
+        },
+      ],
+    };
+    render(
+      <QuotaInfo
+        provider={provider}
+        quota={q}
+        compact
+        details={() => {}}
+        refresh={() => {}}
+      />,
+    );
+    const area = screen.getByLabelText(`${provider.name} 额度`);
+    expect(within(area).getByText("Pro")).toHaveClass("quota-subscription");
+    expect(within(area).queryByText("订阅窗口")).not.toBeInTheDocument();
+    expect(within(area).queryByText("Key 配额")).not.toBeInTheDocument();
+  });
+  it("summarizes multiple subscriptions and keeps their plans in on-demand details", () => {
+    const q = {
+      ...result(),
+      subscriptions: [
+        {
+          name: "Pro",
+          status: "active",
+          expiresAt: null,
+          active: true,
+          plans: [{ ...result().plans[0], name: "Pro 周期" }],
+        },
+        {
+          name: null,
+          status: null,
+          expiresAt: null,
+          active: null,
+          plans: [{ ...result().plans[0], name: "未知周期" }],
+        },
+      ],
+    };
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+    const details = screen.getByText("额度详情").closest("details");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("额度详情"));
+    expect(screen.getByText("Pro")).toBeInTheDocument();
+    expect(screen.getByText("未识别套餐")).toBeInTheDocument();
+    expect(screen.getByText("Pro 周期")).toBeInTheDocument();
+    expect(screen.getByText("未知周期")).toBeInTheDocument();
+    expect(screen.getByText("Key 配额")).toBeInTheDocument();
+  });
+  it("uses a count for ambiguous compact subscription summaries", () => {
+    const q = {
+      ...result(),
+      subscriptions: [
+        {
+          name: "Pro",
+          status: "active",
+          expiresAt: null,
+          active: true,
+          plans: [],
+        },
+        {
+          name: "Team",
+          status: "active",
+          expiresAt: null,
+          active: true,
+          plans: [],
+        },
+      ],
+    };
+    render(
+      <QuotaInfo
+        provider={provider}
+        quota={q}
+        compact
+        details={() => {}}
+        refresh={() => {}}
+      />,
+    );
+    expect(screen.getByText("2 个套餐")).toHaveClass("quota-subscription");
   });
   it("keeps previous successful values visible with a stale error, without inventing zero", async () => {
     render(<Harness />);

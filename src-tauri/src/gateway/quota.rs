@@ -21,7 +21,7 @@ pub fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
-#[derive(Clone, Serialize, Default)]
+#[derive(Clone, Serialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub name: String,
@@ -31,6 +31,15 @@ pub struct Plan {
     pub unit: String,
     pub unlimited: bool,
     pub reset_at: Option<String>,
+}
+#[derive(Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Subscription {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub expires_at: Option<String>,
+    pub active: Option<bool>,
+    pub plans: Vec<Plan>,
 }
 #[derive(Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +63,7 @@ pub struct QuotaView {
     pub error: Option<String>,
     pub key_status: Option<String>,
     pub plans: Vec<Plan>,
+    pub subscriptions: Vec<Subscription>,
     pub expires_at: Option<String>,
     pub expires_at_unix: Option<i64>,
     pub today: Option<Usage>,
@@ -74,6 +84,7 @@ impl QuotaView {
             error: None,
             key_status: None,
             plans: vec![],
+            subscriptions: vec![],
             expires_at: None,
             expires_at_unix: None,
             today: None,
@@ -201,6 +212,7 @@ impl Service {
                         Ok(Some(data)) => {
                             view.source = Some(data.source.into());
                             view.plans = data.plans;
+                            view.subscriptions = data.subscriptions;
                             view.key_status = data.key_status;
                             view.expires_at = data.expires_at;
                             view.expires_at_unix = data.expires_at_unix;
@@ -358,6 +370,7 @@ fn urls(base: &str) -> std::result::Result<(String, String, String), Failure> {
 struct Data {
     source: &'static str,
     plans: Vec<Plan>,
+    subscriptions: Vec<Subscription>,
     key_status: Option<String>,
     expires_at: Option<String>,
     expires_at_unix: Option<i64>,
@@ -376,6 +389,113 @@ fn string(v: &Value, k: &str) -> Option<String> {
     v[k].as_str()
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().filter(|c| !c.is_control()).take(120).collect())
+}
+fn metadata_text(v: &Value, key: &str) -> Option<String> {
+    let text = v[key].as_str()?.trim();
+    if text.chars().count() > 80 || text.chars().any(char::is_control) {
+        return None;
+    }
+    crate::events::safe_message(text).filter(|s| !s.contains("[已隐去]"))
+}
+fn subscription_expiry(value: &Value) -> Option<String> {
+    if let Some(seconds) = value.as_i64().filter(|s| *s > 0) {
+        return chrono::DateTime::from_timestamp(seconds, 0).map(|d| d.to_rfc3339());
+    }
+    chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|d| d.to_rfc3339())
+}
+// Explicit subscription metadata only. A token's name, balance or expiration
+// never proves which subscription it belongs to.
+fn subscriptions(value: &Value, unit: &str) -> Vec<Subscription> {
+    let nodes: Vec<&Value> = if let Some(items) = value["subscriptions"].as_array() {
+        items.iter().filter(|v| v.is_object()).take(32).collect()
+    } else if value["subscription"].is_object() {
+        vec![&value["subscription"]]
+    } else if metadata_text(value, "planName")
+        .or_else(|| metadata_text(value, "plan_name"))
+        .is_some()
+    {
+        vec![value]
+    } else {
+        vec![]
+    };
+    let single = nodes.len() == 1;
+    nodes
+        .into_iter()
+        .map(|node| {
+            let sub = node
+                .get("subscription")
+                .filter(|v| v.is_object())
+                .unwrap_or(node);
+            let root = std::ptr::eq(node, value);
+            let name = metadata_text(node, "planName")
+                .or_else(|| metadata_text(node, "plan_name"))
+                .or_else(|| metadata_text(&node["plan"], "name"))
+                .or_else(|| metadata_text(&node["plan"], "title"))
+                .or_else(|| (!root).then(|| metadata_text(sub, "name")).flatten())
+                .or_else(|| {
+                    single
+                        .then(|| {
+                            metadata_text(value, "planName")
+                                .or_else(|| metadata_text(value, "plan_name"))
+                        })
+                        .flatten()
+                });
+            let status = (!root).then(|| metadata_text(sub, "status")).flatten();
+            let active = (!root)
+                .then(|| sub["active"].as_bool())
+                .flatten()
+                .or(match status.as_deref() {
+                    Some("active") => Some(true),
+                    Some("expired" | "disabled" | "cancelled" | "canceled") => Some(false),
+                    _ => None,
+                });
+            let expires_at = (!root)
+                .then(|| {
+                    ["expires_at", "expiresAt", "end_time"]
+                        .iter()
+                        .find_map(|key| subscription_expiry(&sub[*key]))
+                })
+                .flatten();
+            let mut plans = Vec::new();
+            for (label, used, total) in [
+                ("每日", "daily_usage_usd", "daily_limit_usd"),
+                ("每周", "weekly_usage_usd", "weekly_limit_usd"),
+                ("每月", "monthly_usage_usd", "monthly_limit_usd"),
+            ] {
+                if let Some(total) = n(sub, total).filter(|v| *v >= 0.) {
+                    let used = n(sub, used);
+                    plans.push(plan(
+                        label,
+                        used.map(|u| (total - u).max(0.)),
+                        used,
+                        Some(total),
+                        "USD",
+                        false,
+                    ));
+                }
+            }
+            if let Some(total) = n(sub, "amount_total") {
+                let used = n(sub, "amount_used");
+                plans.push(plan(
+                    "套餐额度",
+                    used.map(|u| (total - u).max(0.)),
+                    used,
+                    Some(total),
+                    &metadata_text(sub, "unit").unwrap_or_else(|| unit.into()),
+                    false,
+                ));
+            }
+            Subscription {
+                name,
+                status,
+                expires_at,
+                active,
+                plans,
+            }
+        })
+        .collect()
 }
 fn plan(
     name: &str,
@@ -416,6 +536,7 @@ fn sub2(v: &Value) -> Option<Data> {
         "active" | "disabled" | "expired" | "quota_exhausted"
     );
     if !(v["subscription"].is_object()
+        || v["subscriptions"].is_array()
         || v["quota"].is_object()
         || v["rate_limits"].is_array()
         || n(v, "remaining").is_some()
@@ -427,6 +548,7 @@ fn sub2(v: &Value) -> Option<Data> {
     let unit = string(v, "unit").unwrap_or_else(|| "USD".into());
     let mut d = Data {
         source: "sub2api",
+        subscriptions: subscriptions(v, &unit),
         expires_at: string(v, "expires_at"),
         today: usage(&v["usage"]["today"]),
         total_usage: usage(&v["usage"]["total"]),
@@ -468,7 +590,10 @@ fn sub2(v: &Value) -> Option<Data> {
         let remaining = n(v, "remaining")
             .or_else(|| windows.iter().filter_map(|p| p.remaining).reduce(f64::min));
         d.plans.push(plan(
-            &string(v, "planName").unwrap_or_else(|| "订阅".into()),
+            &d.subscriptions
+                .first()
+                .and_then(|s| s.name.clone())
+                .unwrap_or_else(|| "订阅".into()),
             remaining,
             worst.and_then(|p| p.used),
             worst.and_then(|p| p.total),
@@ -548,6 +673,7 @@ fn newapi(v: &Value) -> Option<Data> {
     let expires = body["expires_at"].as_i64().filter(|t| *t > 0);
     Some(Data {
         source: "newapi",
+        subscriptions: subscriptions(body, "额度单位"),
         plans: vec![plan(
             "Key 额度",
             remaining,
@@ -588,6 +714,18 @@ fn convert(d: &mut Data, status: &Value) {
         p.remaining = p.remaining.map(|n| n / per * rate);
         p.used = p.used.map(|n| n / per * rate);
         p.total = p.total.map(|n| n / per * rate);
+    }
+    for subscription in &mut d.subscriptions {
+        for p in subscription
+            .plans
+            .iter_mut()
+            .filter(|p| p.unit == "额度单位")
+        {
+            p.unit = unit.clone();
+            p.remaining = p.remaining.map(|n| n / per * rate);
+            p.used = p.used.map(|n| n / per * rate);
+            p.total = p.total.map(|n| n / per * rate);
+        }
     }
 }
 async fn fetch(input: &Query) -> std::result::Result<Option<Data>, Failure> {
@@ -632,6 +770,10 @@ async fn fetch(input: &Query) -> std::result::Result<Option<Data>, Failure> {
     }
     Ok(None)
 }
+
+#[cfg(test)]
+#[path = "quota_subscription_v021_tests.rs"]
+mod quota_subscription_v021_tests;
 
 #[cfg(test)]
 mod tests {

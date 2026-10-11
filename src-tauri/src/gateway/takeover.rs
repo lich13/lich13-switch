@@ -156,27 +156,6 @@ pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
         .map_err(|_| AppError::new("CONFIG", "配置不是 UTF-8"))?;
     Ok((storage::revision(raw.as_deref()), pair_for(client, text)?))
 }
-/// Read the optional Codex transport capability without changing the owned
-/// credential pair. This is only an initial import hint; the gateway store is
-/// the source of truth after a provider has been imported.
-pub fn websocket_support_for(client: ClientId, home: &Path) -> Result<Option<bool>> {
-    if client != ClientId::Codex {
-        return Ok(None);
-    }
-    let raw = storage::read_optional(&client.config(home))?;
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let text = std::str::from_utf8(&raw).map_err(|_| AppError::new("CONFIG", "配置不是 UTF-8"))?;
-    let doc = parse(text)?;
-    let provider = custom(&doc)?;
-    let Some(item) = provider.get("supports_websockets") else {
-        return Ok(None);
-    };
-    item.as_bool()
-        .map(Some)
-        .ok_or_else(|| AppError::new("CUSTOM", "custom 的 supports_websockets 必须是布尔值"))
-}
 pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
     match client {
         ClientId::Codex => pair(&parse(text)?),
@@ -595,26 +574,6 @@ mod tests {
             assert_eq!(masked(text),masked(&out));
             assert_eq!(pair(&parse(&out).unwrap()).unwrap().token.as_deref(),Some("a\\b\"c\n"));
         }
-    }
-    #[test]
-    fn initial_import_reads_websocket_capability_without_writing_it() {
-        let t = tempfile::tempdir().unwrap();
-        let path = t.path().join("config.toml");
-        fs::write(
-            &path,
-            "model_provider='custom'\n[model_providers.custom]\nbase_url='https://x.test'\nexperimental_bearer_token='k'\nsupports_websockets=false\n",
-        )
-        .unwrap();
-        let before = fs::read(&path).unwrap();
-        assert_eq!(
-            websocket_support_for(ClientId::Codex, t.path()).unwrap(),
-            Some(false)
-        );
-        assert_eq!(fs::read(path).unwrap(), before);
-        assert_eq!(
-            websocket_support_for(ClientId::Claude, t.path()).unwrap(),
-            None
-        );
     }
     #[test]
     fn missing_fields_insert_into_existing_normal_inline_and_dotted_tables() {

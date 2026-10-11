@@ -207,6 +207,52 @@ describe("settings presentation", () => {
   });
 });
 describe("user workflows", () => {
+  it("shows subscription labels only for ChatGPT accounts and marks stale plans by title", async () => {
+    state.accounts = [
+      {
+        ...state.accounts[0],
+        subscription: { planType: "pro", label: "Pro", stale: false },
+      },
+      {
+        ...state.accounts[1],
+        subscription: {
+          planType: "api-secret",
+          label: "API Secret Plan",
+          stale: false,
+        },
+      },
+      {
+        id: "unknown",
+        name: "未知账号",
+        email: null,
+        kind: "chatgpt",
+        current: false,
+        updatedAt: 1,
+        subscription: { planType: null, label: "未识别", stale: true },
+      },
+    ];
+    render(<App />);
+    await screen.findByRole("heading", { name: "账号", level: 1 });
+
+    const knownRow = screen.getByText("个人账号").closest(".account-row");
+    expect(knownRow).not.toBeNull();
+    expect(within(knownRow as HTMLElement).getByText("Pro")).toHaveClass(
+      "account-plan",
+    );
+
+    const unknownRow = screen.getByText("未知账号").closest(".account-row");
+    expect(unknownRow).not.toBeNull();
+    const unknownPlan = within(unknownRow as HTMLElement).getByText("未识别");
+    expect(unknownPlan).toHaveClass("account-plan");
+    expect(unknownPlan).toHaveAttribute("title", expect.stringContaining("凭据需刷新"));
+
+    const apiRow = screen.getByText("工作账号").closest(".account-row");
+    expect(apiRow).not.toBeNull();
+    expect(
+      within(apiRow as HTMLElement).queryByText("API Secret Plan"),
+    ).not.toBeInTheDocument();
+  });
+
   it("copies active device login values and keeps API-key accounts without a manual add option", async () => {
     const user = userEvent.setup();
     render(<App />);

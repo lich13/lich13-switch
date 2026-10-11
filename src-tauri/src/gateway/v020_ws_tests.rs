@@ -134,32 +134,6 @@ async fn native_upstream() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<Atom
     (port, http_hits, handshakes, frames)
 }
 
-async fn bridge_upstream() -> (u16, Arc<AtomicUsize>) {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let seen = hits.clone();
-    let port = server(move |request| {
-        let seen = seen.clone();
-        async move {
-            let attempt = seen.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = request.into_body().collect().await;
-            match attempt {
-                1 => Response::new(replay::full(r#"{"provider":"owner"}"#)),
-                2 => json_response(500, r#"{"error":{"message":"fixture 500"}}"#, None),
-                3 => json_response(507, r#"{"error":{"message":"fixture 507"}}"#, None),
-                _ => Response::builder()
-                    .status(200)
-                    .header("content-type", "text/event-stream")
-                    .body(replay::full(format!(
-                        "data: {CREATED}\n\ndata: {COMPLETED}\n\n"
-                    )))
-                    .unwrap(),
-            }
-        }
-    })
-    .await;
-    (port, hits)
-}
-
 #[tokio::test]
 async fn established_owner_native_websocket_retries_500_507_without_failover() {
     let (port, http_hits, handshakes, frames) = native_upstream().await;
@@ -175,14 +149,6 @@ async fn established_owner_native_websocket_retries_500_507_without_failover() {
         format!("http://127.0.0.1:{backup}/v1"),
     ])
     .await;
-    update(
-        &gateway,
-        &dir,
-        Edit::WebsocketProvider {
-            id: gateway.view().providers[0].id.clone(),
-            supports_websocket: true,
-        },
-    );
     retry_settings(&gateway, &dir);
     start(&gateway, &dir).await;
 
@@ -206,62 +172,6 @@ async fn established_owner_native_websocket_retries_500_507_without_failover() {
     assert_eq!(http_hits.load(Ordering::SeqCst), 1);
     assert_eq!(handshakes.load(Ordering::SeqCst), 3);
     assert_eq!(frames.load(Ordering::SeqCst), 1);
-    assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
-    assert_eq!(gateway.view().providers[0].rpm_used, 4);
-    assert_eq!(gateway.view().providers[1].rpm_used, 0);
-
-    client
-        .send(yawc::Frame::close(1000.into(), "fixture done"))
-        .await
-        .unwrap();
-    drop(client);
-    gateway.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn established_owner_http_bridge_retries_500_507_before_first_event() {
-    let (port, hits) = bridge_upstream().await;
-    let backup_hits = Arc::new(AtomicUsize::new(0));
-    let backup_seen = backup_hits.clone();
-    let backup = server(move |_| {
-        backup_seen.fetch_add(1, Ordering::SeqCst);
-        async { json_response(200, r#"{"provider":"backup"}"#, None) }
-    })
-    .await;
-    let (dir, gateway) = fixture(vec![
-        format!("http://127.0.0.1:{port}/v1"),
-        format!("http://127.0.0.1:{backup}/v1"),
-    ])
-    .await;
-    update(
-        &gateway,
-        &dir,
-        Edit::WebsocketProvider {
-            id: gateway.view().providers[0].id.clone(),
-            supports_websocket: false,
-        },
-    );
-    retry_settings(&gateway, &dir);
-    start(&gateway, &dir).await;
-
-    let first = request(
-        &gateway,
-        "fixture-sticky-bridge",
-        br#"{"model":"fixture-model","input":[{"role":"user","content":"first"}]}"#.to_vec(),
-    )
-    .await;
-    assert_eq!(first.status(), 200);
-    first.into_body().collect().await.unwrap();
-
-    let mut client = responses_client(&gateway, "fixture-sticky-bridge").await;
-    client
-        .send(yawc::Frame::text(CREATE.to_owned()))
-        .await
-        .unwrap();
-    assert_eq!(next_frame(&mut client).await.as_str(), CREATED);
-    assert_eq!(next_frame(&mut client).await.as_str(), COMPLETED);
-    settled(&gateway).await;
-    assert_eq!(hits.load(Ordering::SeqCst), 4);
     assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
     assert_eq!(gateway.view().providers[0].rpm_used, 4);
     assert_eq!(gateway.view().providers[1].rpm_used, 0);

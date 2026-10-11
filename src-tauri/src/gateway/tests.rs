@@ -1166,11 +1166,9 @@ mod v080;
 mod capacity;
 #[path = "claude_tests.rs"]
 mod claude_v080;
-#[path = "websocket_bridge_tests.rs"]
-mod websocket_bridge;
 
-#[path = "v013_tests.rs"]
-mod v013;
+#[path = "model_error_tests.rs"]
+mod model_errors;
 
 #[path = "quota_tests.rs"]
 mod quota_v013;

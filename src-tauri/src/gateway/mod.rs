@@ -68,7 +68,6 @@ pub struct ProviderView {
     pub rpm_limited: bool,
     pub rpm_ledger_error: bool,
     pub allowed_models: Option<Vec<String>>,
-    pub supports_websocket: bool,
     pub handoff_after_compaction: bool,
     pub take_new_threads: bool,
 }
@@ -257,6 +256,28 @@ impl Gateway {
             service.emit(event);
         }
     }
+    fn record_policy_rejection(&self, model: Option<&str>, websocket: bool) {
+        use crate::events::{Action, Details, Phase, Reason, Record};
+        let mut event = Record::new(
+            Some(self.0.client),
+            None,
+            model,
+            Reason::ProtocolError,
+            Action::Returned,
+            (!websocket).then_some(503),
+            Some(0),
+        );
+        event.details = Details {
+            local_code: Some("NO_ELIGIBLE_PROVIDER".into()),
+            message: Some("没有符合线程接管策略的供应商".into()),
+            phase: Some(Phase::Admission),
+            counted_failure: Some(false),
+            ..Default::default()
+        };
+        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
+            service.emit(event);
+        }
+    }
     pub fn set_quota_interval(&self, seconds: u64) {
         self.0.quota.set_interval(seconds);
     }
@@ -371,18 +392,6 @@ impl Gateway {
                 },
                 false,
             )?;
-            if self.0.client == ClientId::Codex {
-                let websocket = match &next.connection {
-                    codex_api::Connection::ApiKey { provider } => {
-                        codex_api::websocket(home, provider)?
-                    }
-                    _ => takeover::websocket_support_for(self.0.client, home)?,
-                }
-                .unwrap_or(true);
-                if let Some(provider) = next.providers.last_mut() {
-                    provider.supports_websocket = websocket;
-                }
-            }
         }
         next.initialized = true;
         s.revision = next.persist(&self.0.data.join("gateway.json"), &s.revision)?;
@@ -514,7 +523,6 @@ impl Gateway {
                         max_concurrency: p.max_concurrency,
                         max_rpm: p.max_rpm,
                         allowed_models: p.allowed_models.clone(),
-                        supports_websocket: p.supports_websocket,
                         handoff_after_compaction: p.handoff_after_compaction,
                         take_new_threads: p.take_new_threads,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
@@ -648,6 +656,9 @@ impl Gateway {
                 "网关设置已变化，请使用最新状态重试",
             ));
         }
+        if self.0.client != ClientId::Codex && matches!(&edit, Edit::TakeoverProvider { .. }) {
+            return Err(AppError::new("SETTINGS", "接管策略仅适用于 Codex"));
+        }
         if let Edit::Reset { id } = &edit {
             if !s.store.providers.iter().any(|p| &p.id == id) {
                 return Err(AppError::new("PROVIDER", "供应商不存在"));
@@ -709,15 +720,6 @@ impl Gateway {
                 };
             }
             Edit::Import => {
-                let supports_websocket = match &next.connection {
-                    codex_api::Connection::ApiKey { provider }
-                        if self.0.client == ClientId::Codex =>
-                    {
-                        codex_api::websocket(home, provider)?
-                    }
-                    _ => takeover::websocket_support_for(self.0.client, home)?,
-                }
-                .unwrap_or(true);
                 let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
                 next.edit(
                     Edit::SaveProvider {
@@ -728,9 +730,6 @@ impl Gateway {
                     },
                     s.running,
                 )?;
-                if let Some(provider) = next.providers.last_mut() {
-                    provider.supports_websocket = supports_websocket;
-                }
             }
             edit => next.edit(edit, s.running)?,
         }

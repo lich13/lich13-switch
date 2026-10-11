@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
+import Modal from "./Modal";
 import { command, subscribe } from "./bridge";
 import {
   errorOf,
@@ -188,6 +189,7 @@ export function QuotaInfo({
   compact?: boolean;
   details?: () => void;
 }) {
+  const [showDetails, setShowDetails] = useState(false);
   const loading = quota?.state === "loading";
   const stale =
     quota?.stale ||
@@ -213,21 +215,23 @@ export function QuotaInfo({
     : quota?.expiresAt
       ? date(quota.expiresAt)
       : "";
+  const subscriptions = quota?.subscriptions ?? [];
+  const activeSubscriptions = subscriptions.filter((s) => s.active === true);
+  const currentSubscription = activeSubscriptions.length === 1 ? activeSubscriptions[0] : subscriptions.length === 1 ? subscriptions[0] : null;
+  const subscriptionLabel = currentSubscription?.name || (subscriptions.length > 1 ? `${subscriptions.length} 个套餐` : null);
   if (compact)
     return (
+      <>
       <div className="quota-compact" aria-label={`${provider.name} 额度`}>
-        {details ? (
-          <button className="quota-value" onClick={details}>
+        {subscriptionLabel && <span className="quota-subscription" title={subscriptionLabel}>{subscriptionLabel}</span>}
+          <button className="quota-value" title={headline} onClick={details ?? (() => setShowDetails(true))}>
             {headline}
           </button>
-        ) : (
-          <span className="quota-value">{headline}</span>
-        )}
         {stale && <span className="quota-warning">已过期</span>}
         {quota?.error &&
           quota.state !== "unsupported" &&
           quota.plans.length > 0 && (
-            <button className="quota-warning text-button" onClick={details}>
+            <button className="quota-warning text-button" onClick={details ?? (() => setShowDetails(true))}>
               查询失败
             </button>
           )}
@@ -243,6 +247,10 @@ export function QuotaInfo({
           <RefreshCw size={13} className={loading ? "quota-spin" : ""} />
         </button>
       </div>
+      {showDetails && <Modal title={`${provider.name} 额度`} close={() => setShowDetails(false)}>
+        <QuotaInfo provider={provider} quota={quota} refresh={refresh} />
+      </Modal>}
+      </>
     );
   return (
     <div className="quota-area" aria-label={`${provider.name} 额度`}>
@@ -281,12 +289,23 @@ export function QuotaInfo({
         </div>
       )}
       {quota &&
-        (quota.plans.length > 0 ||
+        (subscriptions.length > 0 || quota.plans.length > 0 ||
           expiry ||
           quota.today ||
           quota.totalUsage) && (
           <details className="quota-details">
             <summary>额度详情</summary>
+            {subscriptions.map((subscription, i) => <section className="quota-subscription-detail" key={i} aria-label={subscription.name ?? "未识别套餐"}>
+              <div className="quota-subscription-heading"><strong>{subscription.name ?? "未识别套餐"}</strong>
+                {subscription.status && <span>{({ active: "生效中", expired: "已到期", disabled: "已禁用", cancelled: "已取消", canceled: "已取消" } as Record<string, string>)[subscription.status] ?? subscription.status}</span>}
+              </div>
+              {subscription.expiresAt && <div>套餐到期 {date(subscription.expiresAt)}</div>}
+              {subscription.plans.map((p, n) => <div className="quota-plan" key={n}>
+                <span>{p.name}</span><strong>{amount(p)}</strong>
+                <span>{p.used != null ? `已用 ${number(p.used)} ${p.unit}` : ""}{p.total != null && !p.unlimited ? ` / ${number(p.total)} ${p.unit}` : ""}</span>
+                {p.resetAt && <span>重置 {date(p.resetAt) || p.resetAt}</span>}
+              </div>)}
+            </section>)}
             {quota.plans.map((p, i) => (
               <div key={i} className="quota-plan">
                 <span>{p.name}</span>

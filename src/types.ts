@@ -15,6 +15,7 @@ export type Account = {
   current: boolean;
   updatedAt: number;
   credentialRevision?: string;
+  subscription?: { planType: string | null; label: string; stale: boolean } | null;
 };
 export type ViewState = {
   accounts: Account[];
@@ -130,7 +131,6 @@ export type Provider = {
   rpmLimited: boolean;
   rpmLedgerError?: boolean;
   allowedModels: string[] | null;
-  supportsWebsocket: boolean;
   handoffAfterCompaction?: boolean;
   takeNewThreads?: boolean;
 };
@@ -192,6 +192,13 @@ export type ProviderQuota = {
   error: string | null;
   keyStatus: string | null;
   plans: QuotaPlan[];
+  subscriptions?: {
+    name: string | null;
+    status: string | null;
+    expiresAt: string | null;
+    active: boolean | null;
+    plans: QuotaPlan[];
+  }[];
   expiresAt: string | null;
   expiresAtUnix: number | null;
   today: QuotaUsage | null;

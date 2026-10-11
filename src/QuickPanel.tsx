@@ -21,6 +21,7 @@ import { QuotaInfo, useProviderQuota } from "./Quota";
 import { providerRuntimeStatus } from "./provider-status";
 import QuickControls from "./QuickControls";
 import AuthSyncNotice from "./AuthSyncNotice";
+import AccountPlan from "./AccountPlan";
 import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
@@ -333,6 +334,23 @@ function QuickContent({
                         {priority && (
                           <span className="quick-priority">P{priority}</span>
                         )}
+                        <ProviderNameEditor
+                          provider={p}
+                          revision={gateway.revision}
+                          disabled={rowBusy}
+                          commit={(payload, revision) =>
+                            edit(payload, revision)
+                          }
+                          report={setError}
+                          className="quick-name"
+                        />
+                        <QuotaInfo
+                          compact
+                          provider={p}
+                          quota={quota.quotaFor(p)}
+                          refresh={() => void quota.refresh(p.id)}
+                        />
+
                         <button
                           className="quick-select"
                           disabled={rowBusy}
@@ -350,19 +368,6 @@ function QuickContent({
                               : "选择"}
                           </span>
                         </button>
-                        <ProviderNameEditor
-                          provider={p}
-                          revision={gateway.revision}
-                          disabled={rowBusy}
-                          commit={(payload, revision) =>
-                            edit(payload, revision)
-                          }
-                          report={setError}
-                          className="quick-name"
-                        />
-                        {clientId === "codex" && !p.supportsWebsocket && (
-                          <span className="provider-transport">HTTP 桥接</span>
-                        )}
                         <button
                           type="button"
                           className="icon-button compact quick-provider-reset"
@@ -394,13 +399,8 @@ function QuickContent({
                         </button>
                       )}
                       <div className="quick-provider-secondary">
-                        <QuotaInfo
-                          compact
-                          provider={p}
-                          quota={quota.quotaFor(p)}
-                          refresh={() => void quota.refresh(p.id)}
-                        />
                         <ProviderControls
+                          clientId={clientId}
                           provider={p}
                           revision={gateway.revision}
                           disabled={rowBusy}
@@ -447,7 +447,7 @@ function QuickContent({
                     aria-label={`切换到 ${a.name}`}
                   >
                     <span className="quick-name">
-                      <strong title={a.name}>{a.name}</strong>
+                      <span className="account-title"><strong title={a.name}>{a.name}</strong><AccountPlan account={a} /></span>
                       <span>
                         {a.kind === "chatgpt" ? "ChatGPT" : "API Key"}
                         {a.current ? " · 当前文件" : ""}

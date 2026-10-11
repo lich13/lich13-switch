@@ -53,9 +53,8 @@ export const gatewayDemo: GatewayState = {
       rpmRetryIn: 0,
       rpmLimited: false,
       allowedModels: null,
-      supportsWebsocket: true,
-          handoffAfterCompaction: true,
-          takeNewThreads: false,
+      handoffAfterCompaction: false,
+      takeNewThreads: false,
     },
     {
       id: "backup",
@@ -72,9 +71,8 @@ export const gatewayDemo: GatewayState = {
       rpmRetryIn: 0,
       rpmLimited: false,
       allowedModels: null,
-      supportsWebsocket: true,
-          handoffAfterCompaction: true,
-          takeNewThreads: false,
+      handoffAfterCompaction: false,
+      takeNewThreads: false,
     },
   ],
   activeConnections: 0,
@@ -132,6 +130,25 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       stale: false,
       error: null,
       keyStatus: null,
+      subscriptions: provider.id.endsWith("primary") ? [{
+        name: "开发者套餐",
+        status: "active",
+        active: true,
+        expiresAt: "2027-12-31T00:00:00Z",
+        plans: [{ name: "每日", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null }],
+      }] : [{
+        name: "团队研发与长周期协作套餐",
+        status: "active",
+        active: true,
+        expiresAt: null,
+        plans: [{ name: "每月", remaining: 800, used: 200, total: 1000, unit: "额度单位", unlimited: false, resetAt: null }],
+      }, {
+        name: "开发者加量套餐",
+        status: "active",
+        active: true,
+        expiresAt: null,
+        plans: [{ name: "套餐额度", remaining: 5, used: 0, total: 5, unit: "USD", unlimited: false, resetAt: null }],
+      }],
       plans: [
         {
           name: "API Key 配额",
@@ -195,16 +212,13 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           rpmRetryIn: 0,
           rpmLimited: false,
           allowedModels: null,
-          supportsWebsocket: true,
-          handoffAfterCompaction: true,
+          handoffAfterCompaction: false,
           takeNewThreads: false,
         });
     }
     if (["modelsProvider", "policyProvider"].includes(e.op as string) && p)
       p.allowedModels = e.allowedModels as string[] | null;
-    if (["websocketProvider", "policyProvider"].includes(e.op as string) && p)
-      p.supportsWebsocket = Boolean(e.supportsWebsocket);
-    if (e.op === "policyProvider" && p) {
+    if (["policyProvider", "takeoverProvider"].includes(e.op as string) && p) {
       p.handoffAfterCompaction = e.handoffAfterCompaction == null ? p.handoffAfterCompaction : Boolean(e.handoffAfterCompaction);
       p.takeNewThreads = e.takeNewThreads == null ? p.takeNewThreads : Boolean(e.takeNewThreads);
     }

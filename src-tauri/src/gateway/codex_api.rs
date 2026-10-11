@@ -187,17 +187,6 @@ pub fn read(home: &Path, id: &str) -> Result<(String, Pair)> {
     );
     Ok((revision, pair))
 }
-pub fn websocket(home: &Path, id: &str) -> Result<Option<bool>> {
-    let config = text(home)?;
-    let doc = document(&config)?;
-    match provider(&doc, id)?.get("supports_websockets") {
-        None => Ok(None),
-        Some(v) => v
-            .as_bool()
-            .map(Some)
-            .ok_or_else(|| invalid("supports_websockets 必须是布尔值")),
-    }
-}
 fn patch_base(config: &str, id: &str, value: &str) -> Result<String> {
     let doc = document(config)?;
     compatible(&doc, id)?;

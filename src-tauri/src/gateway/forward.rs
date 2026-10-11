@@ -333,6 +333,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     let ownership = if gateway.client_id() == super::ClientId::Codex
         && mode == "auto"
         && responses
+        && pinned.is_none()
         && !unknown_affinity
     {
         let eligible: Vec<_> = ids
@@ -438,10 +439,48 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
+        let matches_model = candidates
+            .iter()
+            .any(|r| requirement.allows(r.provider.allowed_models.as_deref()));
+        if matches_model {
+            candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
+        }
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = &ownership {
             candidates = lease.candidates(candidates);
+        } else if gateway.client_id() == super::ClientId::Codex
+            && mode == "auto"
+            && pinned.is_none()
+        {
+            candidates = super::compaction::unidentified_candidates(candidates);
+        }
+        if matches_model
+            && !candidates
+                .iter()
+                .any(|r| requirement.allows(r.provider.allowed_models.as_deref()))
+        {
+            if attempted > 0 {
+                if capacity_pending {
+                    ids.clear();
+                    continue;
+                }
+                break;
+            }
+            gateway.record_policy_rejection(model.as_deref(), false);
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "NO_ELIGIBLE_PROVIDER",
+                "没有符合线程接管策略的供应商",
+            );
+        }
+        if gateway.client_id() == super::ClientId::Codex && mode == "auto" && pinned.is_none() {
+            let (intake, owner) = ownership
+                .as_ref()
+                .map_or((super::compaction::Intake::Ordinary, None), |lease| {
+                    lease.admission_policy()
+                });
+            wait_budget.set_intake(intake, owner);
         }
         let admission_started = Instant::now();
         let mut admission = match gateway
@@ -534,6 +573,21 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     requirement.message(),
                 );
             }
+            Err(Rejected::Policy) => {
+                if attempted > 0 {
+                    if capacity_pending {
+                        ids.clear();
+                        continue;
+                    }
+                    break;
+                }
+                gateway.record_policy_rejection(model.as_deref(), false);
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "NO_ELIGIBLE_PROVIDER",
+                    "没有符合线程接管策略的供应商",
+                );
+            }
             Err(Rejected::Unavailable) => {
                 if capacity_pending {
                     ids.clear();
@@ -562,6 +616,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
         if unknown_affinity {
             pinned = Some(route.provider.id.clone());
+            wait_budget.pin_provider();
         }
         let reset_generation = admission.reset_generation;
         ids.retain(|id| id != &route.provider.id);

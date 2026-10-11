@@ -27,6 +27,7 @@ struct State {
     queued: std::collections::HashSet<String>,
     rpm_limits: HashMap<String, u32>,
     models: HashMap<String, Option<Vec<String>>>,
+    intake: HashMap<String, (bool, bool)>,
     active: HashMap<String, usize>,
     rpm: HashMap<String, VecDeque<RateStamp>>,
     rpm_pending: HashMap<String, usize>,
@@ -47,6 +48,7 @@ impl State {
             queued: Default::default(),
             rpm_limits: HashMap::new(),
             models: HashMap::new(),
+            intake: HashMap::new(),
             active: HashMap::new(),
             rpm,
             rpm_pending: HashMap::new(),
@@ -160,6 +162,7 @@ pub enum Rejected {
     Timeout,
     Cooling(u64),
     Model,
+    Policy,
     RateLimited(u64),
     RateLedger,
 }
@@ -167,6 +170,7 @@ pub struct Budget {
     remaining: Duration,
     protected_capacity: bool,
     fixed_provider: bool,
+    intake: Option<(super::compaction::Intake, Option<String>)>,
 }
 impl Admission {
     pub fn commit_rpm(&mut self) -> Result<(), Rejected> {
@@ -247,17 +251,22 @@ fn persist_rpm(path: &Path, rpm: &HashMap<String, VecDeque<RateStamp>>) -> stora
     storage::atomic_write(path, &bytes, None)
 }
 impl Budget {
+    pub(super) fn set_intake(&mut self, intake: super::compaction::Intake, owner: Option<String>) {
+        self.intake = Some((intake, owner));
+    }
     pub fn protect_capacity(&mut self) {
         self.protected_capacity = true;
     }
     pub fn pin_provider(&mut self) {
         self.fixed_provider = true;
+        self.intake = None;
     }
     pub fn new(seconds: u64) -> Self {
         Self {
             remaining: Duration::from_secs(seconds),
             protected_capacity: false,
             fixed_provider: false,
+            intake: None,
         }
     }
 }
@@ -287,6 +296,15 @@ impl Scheduler {
         s.models = providers
             .iter()
             .map(|p| (p.id.clone(), p.allowed_models.clone()))
+            .collect();
+        s.intake = providers
+            .iter()
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    (p.handoff_after_compaction, p.take_new_threads),
+                )
+            })
             .collect();
         s.order = providers
             .iter()
@@ -597,7 +615,7 @@ impl Scheduler {
                 if !s.running || s.epoch != epoch {
                     break Err(Rejected::Stopped);
                 }
-                let mut matching: Vec<_> = routes
+                let matching: Vec<_> = routes
                     .iter()
                     .filter(|r| s.limits.contains_key(&r.provider.id))
                     .filter(|r| {
@@ -607,11 +625,6 @@ impl Scheduler {
                             || s.queued.contains(&r.provider.id)
                     })
                     .collect();
-                if budget.protected_capacity && !budget.fixed_provider && !manual {
-                    matching.sort_by_key(|r| {
-                        s.order.get(&r.provider.id).copied().unwrap_or(usize::MAX)
-                    });
-                }
                 if matching.is_empty() {
                     break Err(Rejected::Unavailable);
                 }
@@ -624,7 +637,30 @@ impl Scheduler {
                 if matching.is_empty() {
                     break Err(Rejected::Model);
                 }
-                let eligible = matching;
+                let mut eligible = matching;
+                if let Some((intake, owner)) = &budget.intake {
+                    eligible.retain(|r| {
+                        owner.as_deref() == Some(&r.provider.id)
+                            || s.intake.get(&r.provider.id).is_some_and(|(compact, new)| {
+                                super::compaction::accepts_flags(*compact, *new, *intake)
+                            })
+                    });
+                    if eligible.is_empty() {
+                        break Err(Rejected::Policy);
+                    }
+                }
+                if budget.protected_capacity && !budget.fixed_provider && !manual {
+                    eligible.sort_by_key(|r| {
+                        let preferred =
+                            budget.intake.as_ref().is_some_and(|(intake, _)| {
+                                *intake == super::compaction::Intake::NewThread
+                            }) && s.intake.get(&r.provider.id).is_some_and(|(_, new)| *new);
+                        (
+                            !preferred,
+                            s.order.get(&r.provider.id).copied().unwrap_or(usize::MAX),
+                        )
+                    });
+                }
                 let mut any_ready = false;
                 let mut retry_in = u64::MAX;
                 rate_retry = None;

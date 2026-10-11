@@ -17,15 +17,10 @@ pub struct Provider {
     pub max_rpm: u32,
     #[serde(default)]
     pub allowed_models: Option<Vec<String>>,
-    #[serde(default = "default_websocket_support")]
-    pub supports_websocket: bool,
-    #[serde(default = "default_websocket_support")]
+    #[serde(default)]
     pub handoff_after_compaction: bool,
     #[serde(default)]
     pub take_new_threads: bool,
-}
-fn default_websocket_support() -> bool {
-    true
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,16 +200,18 @@ pub enum Edit {
     },
     PolicyProvider {
         id: String,
-        supports_websocket: bool,
         allowed_models: Option<Vec<String>>,
         #[serde(default)]
         handoff_after_compaction: Option<bool>,
         #[serde(default)]
         take_new_threads: Option<bool>,
     },
-    WebsocketProvider {
+    TakeoverProvider {
         id: String,
-        supports_websocket: bool,
+        #[serde(default)]
+        handoff_after_compaction: Option<bool>,
+        #[serde(default)]
+        take_new_threads: Option<bool>,
     },
     Reorder {
         ids: Vec<String>,
@@ -276,20 +273,8 @@ impl Store {
         let store: Self = match &raw {
             Some(raw) => {
                 let invalid = || AppError::new("STORE", "网关存储无法读取，请保留原文件");
-                let mut value: serde_json::Value =
+                let value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
-                let legacy = value["settings"]["handoffAfterCompaction"]
-                    .as_bool()
-                    .unwrap_or(true);
-                if let Some(providers) = value["providers"].as_array_mut() {
-                    for provider in providers {
-                        if let Some(fields) = provider.as_object_mut() {
-                            fields
-                                .entry("handoffAfterCompaction")
-                                .or_insert(legacy.into());
-                        }
-                    }
-                }
                 serde_json::from_value(value).map_err(|_| invalid())?
             }
             None => Self::default(),
@@ -383,8 +368,7 @@ impl Store {
                         max_concurrency: 0,
                         max_rpm: 0,
                         allowed_models: None,
-                        supports_websocket: default_websocket_support(),
-                        handoff_after_compaction: true,
+                        handoff_after_compaction: false,
                         take_new_threads: false,
                     });
                     if self.selected.is_none() {
@@ -450,7 +434,6 @@ impl Store {
             }
             Edit::PolicyProvider {
                 id,
-                supports_websocket,
                 allowed_models,
                 handoff_after_compaction,
                 take_new_threads,
@@ -463,7 +446,6 @@ impl Store {
                     running,
                 )?;
                 let provider = self.provider_mut(&id)?;
-                provider.supports_websocket = supports_websocket;
                 if let Some(value) = handoff_after_compaction {
                     provider.handoff_after_compaction = value;
                 }
@@ -471,11 +453,21 @@ impl Store {
                     provider.take_new_threads = value;
                 }
             }
-            Edit::WebsocketProvider {
+            Edit::TakeoverProvider {
                 id,
-                supports_websocket,
+                handoff_after_compaction,
+                take_new_threads,
             } => {
-                self.provider_mut(&id)?.supports_websocket = supports_websocket;
+                if handoff_after_compaction.is_none() && take_new_threads.is_none() {
+                    return Err(AppError::new("SETTINGS", "请选择要修改的接管开关"));
+                }
+                let provider = self.provider_mut(&id)?;
+                if let Some(value) = handoff_after_compaction {
+                    provider.handoff_after_compaction = value;
+                }
+                if let Some(value) = take_new_threads {
+                    provider.take_new_threads = value;
+                }
             }
             Edit::Reorder { ids } => {
                 let mut sorted = ids.clone();

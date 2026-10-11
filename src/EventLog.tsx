@@ -140,6 +140,7 @@ function normalizedCode(record: EventRecord) {
 }
 
 const phases: Record<string, string> = {
+  admission: "准入",
   connect: "建立连接",
   headers: "等待响应头",
   response: "读取响应",

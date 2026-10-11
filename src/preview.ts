@@ -23,6 +23,7 @@ export const demo: ViewState = {
       email: "personal@example.invalid",
       current: true,
       updatedAt: 0,
+      subscription: { planType: "plus", label: "Plus", stale: false },
     },
     {
       id: "work",
@@ -31,6 +32,7 @@ export const demo: ViewState = {
       email: "work@example.invalid",
       current: false,
       updatedAt: 0,
+      subscription: { planType: "business", label: "Business", stale: true },
     },
     {
       id: "api",

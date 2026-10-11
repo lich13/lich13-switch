@@ -60,6 +60,62 @@ pub struct Account {
     pub current: bool,
     pub updated_at: u64,
     pub credential_revision: String,
+    pub subscription: Option<AccountSubscription>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSubscription {
+    pub plan_type: Option<String>,
+    pub label: String,
+    pub stale: bool,
+}
+// Display metadata only: never used to authenticate an account or select a route.
+fn account_subscription(raw: &str) -> Option<AccountSubscription> {
+    let doc: Value = serde_json::from_str(raw).ok()?;
+    if doc["auth_mode"] == "apikey"
+        || (doc.get("auth_mode").is_none()
+            && doc["OPENAI_API_KEY"]
+                .as_str()
+                .is_some_and(|k| !k.is_empty()))
+    {
+        return None;
+    }
+    let token = doc["tokens"]["id_token"].as_str().and_then(claims);
+    let auth = token
+        .as_ref()
+        .and_then(|v| v.get("https://api.openai.com/auth"));
+    let workspace = doc["tokens"]["account_id"]
+        .as_str()
+        .filter(|v| !v.is_empty());
+    let matches_workspace = workspace.is_none_or(|workspace| {
+        auth.and_then(|v| v["chatgpt_account_id"].as_str()) == Some(workspace)
+    });
+    let plan_type = auth
+        .filter(|_| matches_workspace)
+        .and_then(|v| v["chatgpt_plan_type"].as_str())
+        .and_then(crate::events::safe_model)
+        .filter(|v| v.len() <= 64);
+    let label = match plan_type.as_deref() {
+        Some("free") => "Free",
+        Some("plus") => "Plus",
+        Some("pro") => "Pro",
+        Some("team") => "Team",
+        Some("business") => "Business",
+        Some("enterprise") => "Enterprise",
+        Some("edu") => "Edu",
+        Some(value) => value,
+        None => "未识别",
+    }
+    .to_owned();
+    let stale = token
+        .as_ref()
+        .and_then(|v| v["exp"].as_u64())
+        .is_some_and(|exp| exp <= now());
+    Some(AccountSubscription {
+        plan_type,
+        label,
+        stale,
+    })
 }
 /// A login may only replace the account and disk version explicitly selected
 /// when it started. This guard never crosses IPC or contains credentials.
@@ -811,6 +867,9 @@ impl Core {
                 current: Some(p.identity.as_str()) == identity,
                 updated_at: p.updated_at,
                 credential_revision: storage::digest(p.auth.as_bytes()),
+                subscription: (p.kind == "chatgpt")
+                    .then(|| account_subscription(&p.auth))
+                    .flatten(),
             })
             .collect();
         let status = if managed {
@@ -1290,3 +1349,7 @@ mod auth_refresh_v017_tests;
 #[cfg(test)]
 #[path = "core_api_v020_tests.rs"]
 mod core_api_v020_tests;
+
+#[cfg(test)]
+#[path = "core_subscription_v021_tests.rs"]
+mod core_subscription_v021_tests;

@@ -35,7 +35,6 @@ fn provider(id: &str, handoff: bool, take: bool) -> Provider {
         max_concurrency: 0,
         max_rpm: 0,
         allowed_models: None,
-        supports_websocket: false,
         handoff_after_compaction: handoff,
         take_new_threads: take,
     }
@@ -44,6 +43,10 @@ fn provider(id: &str, handoff: bool, take: bool) -> Provider {
 #[cfg(test)]
 #[path = "v020_ws_tests.rs"]
 mod websocket_tests;
+
+#[cfg(test)]
+#[path = "v021_tests.rs"]
+mod v021_tests;
 
 fn hints(value: Value) -> RequestHints {
     RequestHints::from_value(value, false).expect("fixture request metadata")
@@ -81,7 +84,7 @@ fn protocol_json_without_object_or_type_uses_openai_inclusive_cache_rules() {
 }
 
 #[test]
-fn legacy_global_handoff_flag_migrates_to_each_provider_without_staying_global() {
+fn legacy_global_handoff_flag_does_not_override_provider_defaults_or_stay_global() {
     let dir = tempfile::tempdir().unwrap();
     let mut value = serde_json::to_value(Store::default()).unwrap();
     value["settings"]["handoffAfterCompaction"] = false.into();
@@ -95,22 +98,23 @@ fn legacy_global_handoff_flag_migrates_to_each_provider_without_staying_global()
         "maxConcurrency": 0,
         "maxRpm": 0,
         "allowedModels": null,
-        "supportsWebsocket": false
+        "supportsWebsocket": false,
+        "handoffAfterCompaction": true
     }]);
     let path = dir.path().join("gateway.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
     let (store, revision) = Store::load(&path).unwrap();
-    assert!(!store.providers[0].handoff_after_compaction);
+    assert!(store.providers[0].handoff_after_compaction);
     assert!(!store.providers[0].take_new_threads);
     assert_eq!(store.persist(&path, &revision).unwrap().len(), 64);
     let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert!(saved["settings"].get("handoffAfterCompaction").is_none());
-    assert_eq!(saved["providers"][0]["handoffAfterCompaction"], false);
+    assert_eq!(saved["providers"][0]["handoffAfterCompaction"], true);
 }
 
 #[test]
-fn missing_legacy_handoff_flag_defaults_each_provider_to_enabled() {
+fn missing_legacy_handoff_flag_defaults_each_provider_to_disabled() {
     let dir = tempfile::tempdir().unwrap();
     let mut value = serde_json::to_value(Store::default()).unwrap();
     value["providers"] = json!([{
@@ -125,7 +129,7 @@ fn missing_legacy_handoff_flag_defaults_each_provider_to_enabled() {
     let path = dir.path().join("gateway.json");
     std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     let (store, _) = Store::load(&path).unwrap();
-    assert!(store.providers[0].handoff_after_compaction);
+    assert!(!store.providers[0].handoff_after_compaction);
     assert!(!store.providers[0].take_new_threads);
 }
 
@@ -148,7 +152,6 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
         .edit(
             Edit::PolicyProvider {
                 id: id.clone(),
-                supports_websocket: false,
                 allowed_models: Some(vec!["fixture-model".into()]),
                 handoff_after_compaction: Some(false),
                 take_new_threads: Some(true),
@@ -157,7 +160,6 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
         )
         .unwrap();
     let p = &store.providers[0];
-    assert!(!p.supports_websocket);
     assert_eq!(
         p.allowed_models.as_deref(),
         Some(["fixture-model".into()].as_slice())
@@ -169,7 +171,6 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
         .edit(
             Edit::PolicyProvider {
                 id,
-                supports_websocket: true,
                 allowed_models: None,
                 handoff_after_compaction: None,
                 take_new_threads: None,
@@ -178,7 +179,6 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
         )
         .unwrap();
     let p = &store.providers[0];
-    assert!(p.supports_websocket);
     assert_eq!(p.allowed_models, None);
     assert!(!p.handoff_after_compaction);
     assert!(p.take_new_threads);
@@ -488,7 +488,6 @@ async fn http_first_turn_uses_take_provider_even_when_queue_order_is_older() {
         &dir,
         Edit::PolicyProvider {
             id: ids[1].clone(),
-            supports_websocket: false,
             allowed_models: None,
             handoff_after_compaction: Some(true),
             take_new_threads: Some(true),

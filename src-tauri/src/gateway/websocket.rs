@@ -1,6 +1,6 @@
 //! Responses uses per-generation slots, following Sub2API's BeforeTurn/AfterTurn
-//! behavior (a3eb7ef3). Native payloads stay unchanged; HTTP bridges adapt only
-//! the response.create envelope and never replay after downstream output.
+//! behavior (a3eb7ef3). Native message payloads stay unchanged; retries never
+//! replay a generation after downstream output.
 use super::{
     admission::{Admission, Budget, CapacitySource, Rejected},
     circuit, forward,
@@ -9,7 +9,6 @@ use super::{
     routing::Requirement,
     Active, Gateway, Route,
 };
-use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -17,17 +16,14 @@ use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use sha1::{Digest, Sha1};
-use std::{collections::HashMap, future::Future, io, time::Duration};
+use std::{collections::HashMap, future::Future, time::Duration};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader},
+    io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot, watch},
 };
-use tokio_util::io::StreamReader;
 use yawc::{Frame, OpCode, Options, WebSocket};
 type Failure = (u16, &'static str);
-type BoxReader = Box<dyn AsyncBufRead + Send + Unpin>;
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
-const MAX_SSE_EVENT: usize = MAX_MESSAGE;
 const KEEPALIVE: Duration = Duration::from_secs(20);
 // Internal control result, consumed before writing a close frame.
 const TURN_CANCELLED: Failure = (0, "turn cancelled before output");
@@ -137,22 +133,6 @@ impl Drop for Peer {
 enum Upstream {
     Native(Peer),
     Disconnected,
-    Bridge(Option<BridgeTurn>),
-}
-struct BridgeTurn {
-    first: Option<Result<Frame, Failure>>,
-    incoming: mpsc::Receiver<Result<Frame, Failure>>,
-    task: tokio::task::JoinHandle<()>,
-}
-impl BridgeTurn {
-    fn cancel(&self) {
-        self.task.abort();
-    }
-}
-impl Drop for BridgeTurn {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 async fn next_upstream(upstream: &mut Upstream) -> Option<Result<Frame, Failure>> {
     match upstream {
@@ -166,41 +146,17 @@ async fn next_upstream(upstream: &mut Upstream) -> Option<Result<Frame, Failure>
                 _ = peer.closed.changed() => None,
             }
         }
-        Upstream::Bridge(Some(turn)) => {
-            if let Some(first) = turn.first.take() {
-                Some(first)
-            } else {
-                turn.incoming.recv().await
-            }
-        }
-        Upstream::Bridge(None) | Upstream::Disconnected => None,
+        Upstream::Disconnected => None,
     }
 }
 async fn send_to_upstream(upstream: &mut Upstream, frame: Frame) -> Result<(), Failure> {
     match upstream {
         Upstream::Native(peer) => peer.send(frame).await,
-        Upstream::Bridge(Some(turn)) => {
-            let Some(value) = value(&frame) else {
-                return Err((1008, "bridge only accepts JSON response events"));
-            };
-            let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if kind == "response.cancel" {
-                turn.cancel();
-                return Ok(());
-            }
-            if kind == "response.create" {
-                return Err((1013, "too many pending turns"));
-            }
-            Err((1008, "event is not supported by HTTP bridge"))
-        }
-        Upstream::Bridge(None) | Upstream::Disconnected => Err((1011, "bridge turn is not active")),
+        Upstream::Disconnected => Err((1011, "upstream is disconnected")),
     }
 }
 fn unsupported_status(status: u16) -> bool {
     matches!(status, 400 | 404 | 405 | 406 | 426 | 501)
-}
-fn uses_native_websocket(client: super::ClientId, supports_websocket: bool) -> bool {
-    client != super::ClientId::Codex || supports_websocket
 }
 #[derive(Clone, Debug)]
 struct AttemptFailure {
@@ -314,6 +270,7 @@ fn creates(frame: &Frame) -> bool {
 }
 fn rejected(reason: Rejected) -> Failure {
     match reason {
+        Rejected::Policy => (1008, "NO_ELIGIBLE_PROVIDER"),
         Rejected::Model => (1008, "MODEL_NOT_ALLOWED or MODEL_UNDETERMINED"),
         Rejected::Stopped => (1012, "gateway stopped"),
         Rejected::Unavailable => (1013, "no available provider"),
@@ -405,6 +362,9 @@ async fn take_slot(
         if matches!(reason, Rejected::Model) {
             (1008, requirement.code())
         } else {
+            if matches!(reason, Rejected::Policy) {
+                g.record_policy_rejection(None, true);
+            }
             rejected(reason)
         }
     })
@@ -618,20 +578,6 @@ async fn upstream_native(
         (route.client_id == super::ClientId::Codex).then_some(KEEPALIVE),
     ))
 }
-fn bridge_payload(frame: &Frame) -> Result<Bytes, Failure> {
-    let mut value = value(frame).ok_or((1008, "invalid response.create"))?;
-    let object = value
-        .as_object_mut()
-        .ok_or((1008, "response.create must be a JSON object"))?;
-    if object.get("type").and_then(|v| v.as_str()) != Some("response.create") {
-        return Err((1008, "expected response.create"));
-    }
-    object.remove("type");
-    object.insert("stream".into(), serde_json::Value::Bool(true));
-    serde_json::to_vec(&value)
-        .map(Bytes::from)
-        .map_err(|_| (1011, "cannot encode bridge request"))
-}
 async fn response_prefix(mut body: Incoming, limit: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(limit.min(4096));
     while bytes.len() < limit {
@@ -645,147 +591,6 @@ async fn response_prefix(mut body: Incoming, limit: usize) -> Vec<u8> {
     }
     bytes
 }
-fn decoded_reader(body: Incoming, encoding: &str) -> Result<BoxReader, AttemptFailure> {
-    let stream = body
-        .into_data_stream()
-        .map(|result| result.map_err(io::Error::other));
-    decode_reader(
-        Box::new(BufReader::new(StreamReader::new(stream))),
-        encoding,
-    )
-}
-fn decode_reader(reader: BoxReader, encoding: &str) -> Result<BoxReader, AttemptFailure> {
-    let reader: BoxReader = match encoding.trim().to_ascii_lowercase().as_str() {
-        "" | "identity" => Box::new(reader),
-        "br" => Box::new(BufReader::new(BrotliDecoder::new(reader))),
-        "gzip" => Box::new(BufReader::new(GzipDecoder::new(reader))),
-        "deflate" => Box::new(BufReader::new(ZlibDecoder::new(reader))),
-        "zstd" => Box::new(BufReader::new(ZstdDecoder::new(reader))),
-        _ => {
-            return Err(AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: true,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
-                details: Default::default(),
-            })
-        }
-    };
-    Ok(reader)
-}
-async fn send_bridge_event(
-    data: &[u8],
-    event: &str,
-    sender: &mpsc::Sender<Result<Frame, Failure>>,
-) -> Result<bool, Failure> {
-    if data == b"[DONE]" {
-        // A transport sentinel is not a Responses completion event.
-        return Ok(true);
-    }
-    let mut value: serde_json::Value =
-        serde_json::from_slice(data).map_err(|_| (1011, "bridge returned invalid SSE JSON"))?;
-    let object = value
-        .as_object_mut()
-        .ok_or((1011, "bridge returned invalid SSE JSON"))?;
-    let payload = if !object.contains_key("type") && !event.is_empty() {
-        object.insert("type".into(), serde_json::Value::String(event.into()));
-        serde_json::to_string(&value).map_err(|_| (1011, "bridge event encoding failed"))?
-    } else {
-        std::str::from_utf8(data)
-            .map(str::to_owned)
-            .map_err(|_| (1011, "bridge returned non-UTF8 SSE JSON"))?
-    };
-    sender
-        .send(Ok(Frame::text(payload)))
-        .await
-        .map(|_| false)
-        .map_err(|_| (1000, "bridge client closed"))
-}
-async fn bridge_events(mut reader: BoxReader, sender: mpsc::Sender<Result<Frame, Failure>>) {
-    let mut line = Vec::with_capacity(256);
-    let mut data = Vec::new();
-    let mut event = String::new();
-    loop {
-        line.clear();
-        let read = bounded_line(&mut reader, &mut line).await;
-        let Ok(size) = read else {
-            let _ = sender.send(Err(read.unwrap_err())).await;
-            return;
-        };
-        if size == 0 {
-            if !data.is_empty() {
-                if let Err(error) = send_bridge_event(&data, &event, &sender).await {
-                    let _ = sender.send(Err(error)).await;
-                }
-            }
-            return;
-        }
-        if data.len() + line.len() > MAX_SSE_EVENT {
-            let _ = sender.send(Err((1009, "bridge event too large"))).await;
-            return;
-        }
-        let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
-        let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
-        if trimmed.is_empty() {
-            if !data.is_empty() {
-                match send_bridge_event(&data, &event, &sender).await {
-                    Ok(done) => {
-                        data.clear();
-                        event.clear();
-                        if done {
-                            return;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = sender.send(Err(error)).await;
-                        return;
-                    }
-                }
-            }
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix(b"event:") {
-            if value.len() <= 256 {
-                event = String::from_utf8_lossy(value).trim().to_owned();
-            }
-        }
-        if let Some(value) = trimmed.strip_prefix(b"data:") {
-            let value = value.strip_prefix(b" ").unwrap_or(value);
-            if !data.is_empty() {
-                data.push(b'\n');
-            }
-            data.extend_from_slice(value);
-        }
-    }
-}
-async fn bounded_line(reader: &mut BoxReader, line: &mut Vec<u8>) -> Result<usize, Failure> {
-    loop {
-        let bytes = reader
-            .fill_buf()
-            .await
-            .map_err(|_| (1013, "bridge response read failed"))?;
-        if bytes.is_empty() {
-            return Ok(line.len());
-        }
-        let count = bytes
-            .iter()
-            .position(|b| *b == b'\n')
-            .map_or(bytes.len(), |n| n + 1);
-        if line.len() + count > MAX_SSE_EVENT {
-            return Err((1009, "bridge event too large"));
-        }
-        let end = bytes[count - 1] == b'\n';
-        line.extend_from_slice(&bytes[..count]);
-        reader.consume(count);
-        if end {
-            return Ok(line.len());
-        }
-    }
-}
-
 fn policy_rejection(frame: &Frame) -> bool {
     value(frame).is_some_and(|v| {
         v.pointer("/response/error/code")
@@ -849,213 +654,6 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
         .then(|| frame.payload().to_vec()),
         details: Box::new(super::upstream_error::details_value(&v, false)),
     })
-}
-async fn upstream_bridge(
-    route: &Route,
-    uri: &Uri,
-    original: &HeaderMap,
-    settings: &Settings,
-    first: &Frame,
-) -> Result<BridgeTurn, AttemptFailure> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds);
-    let payload = bridge_payload(first).map_err(|_| AttemptFailure {
-        status: None,
-        retry: None,
-        capacity: false,
-        unsupported: false,
-        model_unavailable: false,
-        context_incompatible: false,
-        model_payload: None,
-        details: Default::default(),
-    })?;
-    let mut request = Request::new(replay::full(payload.clone()));
-    *request.method_mut() = hyper::Method::POST;
-    *request.uri_mut() = forward::target_for(route.client_id, &route.provider.base_url, uri)
-        .map_err(|_| AttemptFailure {
-            status: None,
-            retry: None,
-            capacity: false,
-            unsupported: false,
-            model_unavailable: false,
-            context_incompatible: false,
-            model_payload: None,
-            details: Default::default(),
-        })?;
-    *request.headers_mut() = original.clone();
-    let headers = request.headers_mut();
-    forward::clean_headers(headers, false);
-    headers.remove(header::HOST);
-    headers.remove(header::CONTENT_LENGTH);
-    headers.remove(header::CONTENT_ENCODING);
-    headers.remove(header::UPGRADE);
-    headers.remove("x-api-key");
-    for name in [
-        "sec-websocket-key",
-        "sec-websocket-version",
-        "sec-websocket-extensions",
-        "sec-websocket-protocol",
-    ] {
-        headers.remove(name);
-    }
-    headers.insert(
-        header::AUTHORIZATION,
-        format!("Bearer {}", route.provider.token)
-            .parse()
-            .map_err(|_| AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
-                details: Default::default(),
-            })?,
-    );
-    headers.insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("application/json"),
-    );
-    headers.insert(
-        header::ACCEPT,
-        header::HeaderValue::from_static("text/event-stream"),
-    );
-    headers.insert(
-        header::ACCEPT_ENCODING,
-        header::HeaderValue::from_static("gzip, deflate, zstd, br"),
-    );
-    headers.insert(
-        header::CONTENT_LENGTH,
-        header::HeaderValue::from(payload.len() as u64),
-    );
-    let response = match tokio::time::timeout_at(deadline, route.client.request(request)).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            return Err(AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
-                details: local_failure(super::connector::diagnostic_code(&error)),
-            });
-        }
-        Err(_) => {
-            return Err(AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
-                details: local_failure("FIRST_BYTE_TIMEOUT"),
-            })
-        }
-    };
-    let status = response.status();
-    let retry = response
-        .headers()
-        .get(header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(circuit::retry_after);
-    if !status.is_success() {
-        let encoding = response
-            .headers()
-            .get(header::CONTENT_ENCODING)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("identity")
-            .to_owned();
-        let prefix =
-            tokio::time::timeout_at(deadline, response_prefix(response.into_body(), 128 * 1024))
-                .await
-                .unwrap_or_default();
-        let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
-        return Err(AttemptFailure {
-            status: Some(status.as_u16()),
-            retry,
-            capacity: route.client_id == super::ClientId::Codex
-                && forward::capacity_message(status, &decoded),
-            details: Box::new(super::upstream_error::details_http(&decoded)),
-            model_payload: super::upstream_error::model_http(status.as_u16(), &decoded)
-                .then(|| decoded.clone()),
-            model_unavailable: super::upstream_error::model_http(status.as_u16(), &decoded),
-            context_incompatible: serde_json::from_slice(&decoded)
-                .ok()
-                .is_some_and(|v| super::compaction::incompatible(&v)),
-            unsupported: matches!(status.as_u16(), 404 | 405)
-                && !super::upstream_error::permanent_rejection(&decoded)
-                && !super::upstream_error::model_http(status.as_u16(), &decoded),
-        });
-    }
-    let content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    if !content_type
-        .split(';')
-        .next()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
-    {
-        return Err(AttemptFailure {
-            status: Some(status.as_u16()),
-            retry,
-            capacity: false,
-            unsupported: true,
-            model_unavailable: false,
-            context_incompatible: false,
-            model_payload: None,
-            details: Default::default(),
-        });
-    }
-    let encoding = response
-        .headers()
-        .get(header::CONTENT_ENCODING)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("identity")
-        .to_owned();
-    let reader = decoded_reader(response.into_body(), &encoding)?;
-    let (sender, incoming) = mpsc::channel(2);
-    let task = tokio::spawn(bridge_events(reader, sender));
-    // Own the worker before awaiting: cancelling this future also drops the
-    // HTTP body, including while the worker is blocked by downstream pressure.
-    let mut turn = BridgeTurn {
-        first: None,
-        incoming,
-        task,
-    };
-    let first = match tokio::time::timeout_at(deadline, turn.incoming.recv()).await {
-        Ok(Some(Ok(frame))) => frame,
-        outcome => {
-            let code = match outcome {
-                Ok(Some(Err((1009, _)))) => "PROTOCOL_BUFFER_LIMIT",
-                Err(_) => "FIRST_BYTE_TIMEOUT",
-                _ => "STREAM_INTERRUPTED",
-            };
-            let mut details = local_failure(code);
-            details.phase = Some(crate::events::Phase::Stream);
-            return Err(AttemptFailure {
-                status: Some(status.as_u16()),
-                retry,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
-                details,
-            });
-        }
-    };
-    if let Some(mut failure) = first_event_failure(&first) {
-        failure.retry = retry;
-        failure.status = Some(status.as_u16());
-        return Err(failure);
-    }
-    turn.first = Some(Ok(first));
-    Ok(turn)
 }
 fn turn_model(
     g: &Gateway,
@@ -1299,7 +897,11 @@ async fn session_once(
     let first_hints =
         value(&first).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
     let conversation = super::compaction::session(&headers);
-    let mut ownership = if g.client_id() == super::ClientId::Codex && !manual && !unknown_affinity {
+    let mut ownership = if g.client_id() == super::ClientId::Codex
+        && !manual
+        && pinned.is_none()
+        && !unknown_affinity
+    {
         let eligible: Vec<_> = ids
             .iter()
             .filter(|id| {
@@ -1424,10 +1026,38 @@ async fn session_once(
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
+        let matches_model = candidates
+            .iter()
+            .any(|r| requirement.allows(r.provider.allowed_models.as_deref()));
+        if matches_model {
+            candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
+        }
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = &ownership {
             candidates = lease.candidates(candidates);
+        } else if g.client_id() == super::ClientId::Codex && !manual && pinned.is_none() {
+            candidates = super::compaction::unidentified_candidates(candidates);
+        }
+        if matches_model
+            && !candidates
+                .iter()
+                .any(|r| requirement.allows(r.provider.allowed_models.as_deref()))
+        {
+            if attempts > 0 {
+                ids.clear();
+                continue;
+            }
+            g.record_policy_rejection(current_model.as_deref(), true);
+            return Err((1008, "NO_ELIGIBLE_PROVIDER"));
+        }
+        if g.client_id() == super::ClientId::Codex && !manual && pinned.is_none() {
+            let (intake, owner) = ownership
+                .as_ref()
+                .map_or((super::compaction::Intake::Ordinary, None), |lease| {
+                    lease.admission_policy()
+                });
+            budget.set_intake(intake, owner);
         }
         let mut admission = match take_slot(
             g,
@@ -1443,7 +1073,9 @@ async fn session_once(
         {
             Ok(admission) => admission,
             Err((code, reason))
-                if capacity_pending && code == 1013 && reason != "RPM ledger unavailable" =>
+                if capacity_pending
+                    && ((code == 1013 && reason != "RPM ledger unavailable")
+                        || (code == 1008 && reason == "NO_ELIGIBLE_PROVIDER")) =>
             {
                 ids.clear();
                 continue;
@@ -1474,6 +1106,7 @@ async fn session_once(
         ordinary_attempts = ordinary_attempts.saturating_add(1);
         if unknown_affinity {
             pinned = Some(admission.route.provider.id.clone());
+            budget.pin_provider();
         }
         let rerouted = previous_provider
             .as_deref()
@@ -1481,30 +1114,17 @@ async fn session_once(
         previous_provider = Some(admission.route.provider.id.clone());
         let mut attempt_protocol = super::protocol::Protocol::new(true);
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
-        let native_mode = uses_native_websocket(
-            admission.route.client_id,
-            admission.route.provider.supports_websocket,
-        );
         if let Some(trace) = &usage_trace {
             attempt_protocol.attach_usage(trace.attempt(
                 &admission.route.provider.id,
                 true,
-                if native_mode { "websocket" } else { "bridge" },
+                "websocket",
             ));
         }
         let result = while_connecting(client, async {
-            if uses_native_websocket(
-                admission.route.client_id,
-                admission.route.provider.supports_websocket,
-            ) {
-                upstream_native(&admission.route, &uri, &headers, cfg)
-                    .await
-                    .map(Upstream::Native)
-            } else {
-                upstream_bridge(&admission.route, &uri, &headers, cfg, &first)
-                    .await
-                    .map(|turn| Upstream::Bridge(Some(turn)))
-            }
+            upstream_native(&admission.route, &uri, &headers, cfg)
+                .await
+                .map(Upstream::Native)
         })
         .await?;
         match result {
@@ -1519,7 +1139,7 @@ async fn session_once(
                         Some(attempts.min(u32::MAX as usize) as u32),
                     );
                 }
-                attempt_protocol.websocket_status(if native_mode { 101 } else { 200 });
+                attempt_protocol.websocket_status(101);
                 break (upstream, admission, attempt_protocol);
             }
             Err(failure) => {
@@ -1774,28 +1394,14 @@ async fn session_once(
             let mut next = super::protocol::Protocol::new(true);
             next.attach_ownership(ownership.clone(), &route.provider.id);
             if let Some(trace) = &usage_trace {
-                next.attach_usage(trace.attempt(
-                    &route.provider.id,
-                    true,
-                    if uses_native_websocket(route.client_id, route.provider.supports_websocket) {
-                        "websocket"
-                    } else {
-                        "bridge"
-                    },
-                ));
+                next.attach_usage(trace.attempt(&route.provider.id, true, "websocket"));
             }
             protocol = Some(next);
             turn = Some(admission);
             let opened = while_connecting(client, async {
-                if uses_native_websocket(route.client_id, route.provider.supports_websocket) {
-                    upstream_native(&route, &uri, &headers, cfg)
-                        .await
-                        .map(Upstream::Native)
-                } else {
-                    upstream_bridge(&route, &uri, &headers, cfg, &replay_frame)
-                        .await
-                        .map(|turn| Upstream::Bridge(Some(turn)))
-                }
+                upstream_native(&route, &uri, &headers, cfg)
+                    .await
+                    .map(Upstream::Native)
             })
             .await;
             match opened {
@@ -1870,22 +1476,14 @@ async fn session_once(
                 }
                 Ok(Ok(opened)) => {
                     if let Some(u) = &mut protocol {
-                        u.websocket_status(if matches!(opened, Upstream::Native(_)) {
-                            101
-                        } else {
-                            200
-                        });
+                        u.websocket_status(101);
                     }
                     upstream = opened;
                 }
             }
             retry_pending = false;
             retry_capacity = false;
-            if let Err(error) = if matches!(upstream, Upstream::Native(_)) {
-                send_to_upstream(&mut upstream, replay_frame.clone()).await
-            } else {
-                Ok(())
-            } {
+            if let Err(error) = send_to_upstream(&mut upstream, replay_frame.clone()).await {
                 retry_pending = disconnect_turn(
                     g,
                     &route,
@@ -2021,101 +1619,15 @@ async fn session_once(
                     next_protocol.attach_usage(trace.attempt(
                         &route.provider.id,
                         true,
-                        if uses_native_websocket(route.client_id, route.provider.supports_websocket)
-                        {
-                            "websocket"
-                        } else {
-                            "bridge"
-                        },
+                        "websocket",
                     ));
                 }
-                next_protocol.websocket_status(
-                    if uses_native_websocket(route.client_id, route.provider.supports_websocket) {
-                        101
-                    } else {
-                        200
-                    },
-                );
+                next_protocol.websocket_status(101);
                 protocol = Some(next_protocol);
                 received = false;
                 deadline =
                     tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
-                if !uses_native_websocket(route.client_id, route.provider.supports_websocket)
-                    && route.client_id == super::ClientId::Codex
                 {
-                    let opened = while_connecting(
-                        client,
-                        upstream_bridge(&route, &uri, &headers, cfg, &frame),
-                    )
-                    .await;
-                    let opened = match opened {
-                        Ok(result) => result,
-                        Err(TURN_CANCELLED) => {
-                            if let Some(mut admission) = turn.take() {
-                                admission.permits.neutral(cfg);
-                            }
-                            protocol = None;
-                            cancellation(client).await?;
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    match opened {
-                        Ok(bridge) => upstream = Upstream::Bridge(Some(bridge)),
-                        Err(failure) => {
-                            if let Some(u) = &mut protocol {
-                                u.finish(failure.status, "HTTP");
-                            }
-                            if let Some(mut admission) = turn.take() {
-                                record_failure(
-                                    &mut admission.permits,
-                                    g,
-                                    &route,
-                                    current_model.as_deref(),
-                                    &failure,
-                                    if failure.capacity {
-                                        crate::events::Action::Waiting
-                                    } else {
-                                        crate::events::Action::Returned
-                                    },
-                                    attempts,
-                                );
-                                if failure.model_unavailable || failure.hard_rejection() {
-                                    admission.permits.neutral(cfg);
-                                } else if failure.capacity {
-                                    admission.permits.capacity_limited(cfg, failure.retry);
-                                } else if failure.status == Some(429) {
-                                    admission.permits.rate_limited(cfg, failure.retry);
-                                } else if failure.unsupported {
-                                    admission.permits.neutral(cfg);
-                                } else if failure.retryable() {
-                                    admission.permits.failure(cfg, failure.retry);
-                                } else {
-                                    admission.permits.neutral(cfg);
-                                }
-                            }
-                            if failure.capacity {
-                                ordinary_attempts = ordinary_attempts.saturating_sub(1);
-                                capacity_protected = true;
-                                retry_capacity = true;
-                                retry_pending = true;
-                                protocol = None;
-                                upstream = Upstream::Disconnected;
-                                continue;
-                            }
-                            if let Some(payload) = failure.model_payload {
-                                client.send(Frame::text(payload)).await?;
-                            }
-                            return Err(if failure.model_unavailable {
-                                (1008, "MODEL_UNAVAILABLE")
-                            } else if failure.unsupported {
-                                (1008, "WS_UNSUPPORTED")
-                            } else {
-                                (1013, "bridge request failed")
-                            });
-                        }
-                    }
-                } else {
                     if matches!(upstream, Upstream::Disconnected) {
                         match while_connecting(client, upstream_native(&route, &uri, &headers, cfg))
                             .await?
@@ -2216,7 +1728,6 @@ async fn session_once(
                 protocol = None;
                 usage_trace = None;
                 tail_deadline = None;
-                if let Upstream::Bridge(active) = &mut upstream { active.take(); }
             },
             event = next_upstream(&mut upstream), if turn.is_some() || protocol.is_some() || matches!(upstream, Upstream::Native(_)) => {
                 let disconnected = match &event { None => true, Some(Err(_)) => true, Some(Ok(frame)) => frame.opcode() == OpCode::Close };
@@ -2226,7 +1737,7 @@ async fn session_once(
                     // as an idle disconnect. An error already sent downstream
                     // must retain the upstream close without a second failure.
                     if turn.is_none() && !terminal_error && route.client_id == super::ClientId::Codex {
-                        upstream = if matches!(upstream, Upstream::Native(_)) { Upstream::Disconnected } else { Upstream::Bridge(None) };
+                        upstream = Upstream::Disconnected;
                         protocol = None;
                         usage_trace = None;
                         tail_deadline = None;
@@ -2276,7 +1787,7 @@ async fn session_once(
                 if route.client_id == super::ClientId::Codex && turn.is_some() && !received {
                     if let Some(failure) = first_event_failure(&frame).filter(|f| f.capacity) {
                         if let Some(mut admission) = turn.take() { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Waiting, attempts); admission.permits.capacity_limited(cfg, failure.retry); }
-                        if let Some(mut u) = protocol.take() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(if matches!(upstream, Upstream::Native(_)) {101} else {200}), "UPSTREAM_ERROR"); }
+                        if let Some(mut u) = protocol.take() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), "UPSTREAM_ERROR"); }
                         ordinary_attempts = ordinary_attempts.saturating_sub(1);
                         capacity_protected = true; retry_capacity = true; retry_pending = true;
                         upstream = Upstream::Disconnected;
@@ -2295,13 +1806,13 @@ async fn session_once(
                     if protocol.as_ref().is_some_and(|u| u.terminal().is_some()) || matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error") {
                         if let Some(mut admission) = turn.take() {
                             if let Some(u)=protocol.as_mut() {
-                                u.finish(Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), "UPSTREAM_ERROR");
+                                u.finish(Some(101), "UPSTREAM_ERROR");
                                 terminal_error = !matches!(u.terminal(), Some(super::protocol::Terminal::Success | super::protocol::Terminal::Limited | super::protocol::Terminal::Cancelled));
                                 if route.client_id == super::ClientId::Codex && first_event_failure(&frame).is_some_and(|failure| failure.capacity) {
                                     if let Some(failure) = first_event_failure(&frame) { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts); }
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
-                                    forward::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(if uses_native_websocket(route.client_id, route.provider.supports_websocket) { 101 } else { 200 }), attempts);
+                                    forward::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
                                 }
                                 if u.succeeded() { g.successful_response(&route.provider); }
                             }
@@ -2325,9 +1836,6 @@ async fn session_once(
                 } else if closing {
                     if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; return Ok(()); }
                     if let Upstream::Native(peer) = &upstream { peer.send(frame.clone()).await?; }
-                    if let Upstream::Bridge(Some(bridge)) = &upstream {
-                        bridge.cancel();
-                    }
                     if let Some(mut admission) = turn.take() {
                         if let Some(mut u) = protocol.take() {
                             u.finish(None, "CANCELLED");
@@ -2338,23 +1846,6 @@ async fn session_once(
                 } else if creates(&frame) {
                     if pending.is_some() { return Err((1013, "too many pending turns")); }
                     pending = Some(frame);
-                } else if value(&frame).is_some_and(|v| v["type"] == "response.cancel")
-                    && matches!(&upstream, Upstream::Bridge(_))
-                {
-                    if let Upstream::Bridge(Some(bridge)) = &upstream {
-                        bridge.cancel();
-                    }
-                    cancellation(client).await?;
-                    if let Some(mut admission) = turn.take() {
-                        if let Some(mut u) = protocol.take() {
-                            u.finish(Some(101), "CANCELLED");
-                            admission.permits.neutral(cfg);
-                        }
-                    }
-                    if let Upstream::Bridge(active) = &mut upstream {
-                        active.take();
-                    }
-                    usage_trace = None;
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                     if e.0 == 1008 {
                         if let Some(mut admission) = turn.take() {
@@ -2385,93 +1876,6 @@ async fn session_once(
 mod tests {
     use super::*;
 
-    #[test]
-    fn bridge_payload_only_changes_websocket_envelope() {
-        let frame = Frame::text(
-            r#"{"type":"response.create","model":"gpt-test","stream":false,"future":{"x":1}}"#,
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(&bridge_payload(&frame).unwrap()).unwrap();
-        assert_eq!(value["model"], "gpt-test");
-        assert_eq!(value["future"]["x"], 1);
-        assert_eq!(value["stream"], true);
-        assert!(value.get("type").is_none());
-    }
-
-    #[tokio::test]
-    async fn bridge_events_preserve_json_and_support_multiline_crlf() {
-        let input = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\r\ndata: \"delta\"}\r\n\r\ndata: [DONE]\r\n\r\n";
-        let reader: BoxReader = Box::new(BufReader::new(std::io::Cursor::new(input.to_vec())));
-        let (sender, mut receiver) = mpsc::channel(4);
-        bridge_events(reader, sender).await;
-        let first = receiver.recv().await.unwrap().unwrap();
-        assert_eq!(
-            first.payload().as_ref(),
-            b"{\"type\":\"response.output_text.delta\",\"delta\":\n\"delta\"}"
-        );
-        assert!(receiver.recv().await.is_none());
-    }
-
-    #[test]
-    fn claude_routes_are_always_native() {
-        assert!(uses_native_websocket(super::super::ClientId::Claude, false));
-        assert!(uses_native_websocket(super::super::ClientId::Codex, true));
-        assert!(!uses_native_websocket(super::super::ClientId::Codex, false));
-    }
-
-    #[tokio::test]
-    async fn bridge_event_limit_applies_before_newline_and_after_decompression() {
-        use std::io::Write;
-        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        gzip.write_all(&vec![b'x'; MAX_SSE_EVENT + 100]).unwrap();
-        let reader: BoxReader =
-            Box::new(BufReader::new(std::io::Cursor::new(gzip.finish().unwrap())));
-        let (sender, mut incoming) = mpsc::channel(2);
-        bridge_events(decode_reader(reader, "gzip").unwrap(), sender).await;
-        assert!(matches!(incoming.recv().await, Some(Err((1009, _)))));
-        assert!(incoming.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn bridge_backpressure_is_bounded_and_dropping_turn_aborts_reader() {
-        struct ReadGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for ReadGuard {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let worker_ended = ended.clone();
-        let input =
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n".repeat(100);
-        let reader: BoxReader = Box::new(BufReader::new(std::io::Cursor::new(input.into_bytes())));
-        let (sender, incoming) = mpsc::channel(2);
-        let task = tokio::spawn(async move {
-            let _guard = ReadGuard(worker_ended);
-            bridge_events(reader, sender).await;
-        });
-        let turn = BridgeTurn {
-            first: None,
-            incoming,
-            task,
-        };
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while turn.incoming.len() < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(!turn.task.is_finished());
-        drop(turn);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !ended.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-    }
     #[tokio::test]
     async fn keepalive_preserves_control_frames_and_does_not_leak_its_own_pong() {
         let (a, b) = tokio::io::duplex(4096);

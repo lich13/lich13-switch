@@ -1631,6 +1631,50 @@ select:focus-visible {
   gap: 10px;
   min-height: 30px;
 }
+.provider-main .provider-title {
+  flex: 0 1 auto;
+  max-width: 26%;
+}
+.provider-main .quota-compact {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 36%;
+  margin-right: auto;
+}
+.quota-compact .quota-value,
+.quota-subscription {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.account-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-plan,
+.quota-subscription {
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+.account-plan { flex-shrink: 0; }
+.quota-subscription { max-width: 90px; }
+.quota-subscription-detail { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.quota-subscription-heading { display: flex; align-items: center; gap: 10px; }
+.quota-subscription-heading strong { overflow-wrap: anywhere; }
 .provider-title {
   display: inline-flex;
   align-items: center;
@@ -1800,11 +1844,6 @@ select:focus-visible {
 }
 .settings-toggle input {
   accent-color: var(--accent);
-}
-.provider-transport {
-  color: var(--accent);
-  font-size: 11px;
-  white-space: nowrap;
 }
 .provider-settings > label:not(.check-label) {
   display: grid;
@@ -2013,11 +2052,14 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 7px;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .provider-concurrency,
 .provider-rpm,
-.provider-queue {
+.provider-queue,
+.provider-takeover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2034,10 +2076,13 @@ select:focus-visible {
 }
 .provider-concurrency[aria-expanded="true"],
 .provider-rpm[aria-expanded="true"],
+.provider-takeover[aria-pressed="true"],
 .provider-queue[aria-pressed="true"] {
   color: var(--ink);
   background: var(--elevated);
 }
+.policy-dot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid currentColor; }
+.provider-takeover[aria-pressed="true"] .policy-dot { background: var(--accent); border-color: var(--accent); }
 .provider-queue[aria-pressed="true"] svg {
   color: var(--accent);
 }
@@ -2078,6 +2123,7 @@ select:focus-visible {
 }
 .provider-secondary {
   gap: 12px;
+  flex-wrap: wrap;
 }
 .provider-secondary .quota-compact {
   flex-shrink: 0;
@@ -2085,12 +2131,18 @@ select:focus-visible {
 .quick-provider-main {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex-wrap: wrap;
 }
+.quick-provider-main .quick-name { flex: 0 1 auto; max-width: 88px; min-width: 30px; }
+.quick-provider-main .quota-compact { flex: 1 1 72px; min-width: 54px; padding: 0; gap: 3px; font-size: 11px; }
+.quick-provider-main .quota-compact .icon-button { flex: 0 0 20px; width: 20px; height: 24px; }
+.quick-provider-main .quota-subscription { max-width: 50px; }
+.quick-name > .account-title { display: flex; }
 .quick-provider-main .quick-select {
   flex: 0 0 auto;
   width: auto;
-  min-width: 48px;
+  min-width: 36px;
   padding: 3px 6px;
   gap: 4px;
 }
@@ -2128,6 +2180,8 @@ select:focus-visible {
   padding: 0 5px;
   font-size: 12px;
 }
+.quick-provider-secondary .provider-takeover { padding: 0 5px; font-size: 12px; }
+.quick-provider-secondary .provider-controls { width: 100%; justify-content: flex-start; }
 .quick-scroll .sortable-providers {
   gap: 4px;
 }

@@ -16,6 +16,7 @@ vi.mock("./bridge", () => ({
 import QuickPanel from "./QuickPanel";
 import { demo } from "./preview";
 import { claudeGatewayDemo, gatewayDemo } from "./gateway-preview";
+import type { ProviderQuota } from "./types";
 beforeEach(() => {
   localStorage.clear();
   mock.command.mockReset();
@@ -43,6 +44,59 @@ beforeEach(() => {
   );
 });
 afterEach(() => localStorage.clear());
+it("shows ChatGPT subscription labels in the quick account list and hides API-key plans", async () => {
+  const user = userEvent.setup();
+  const accounts = structuredClone(demo);
+  accounts.accounts = [
+    {
+      ...accounts.accounts[0],
+      subscription: { planType: "pro", label: "Pro", stale: false },
+    },
+    {
+      ...accounts.accounts[2],
+      subscription: {
+        planType: "api-secret",
+        label: "API Secret Plan",
+        stale: false,
+      },
+    },
+    {
+      id: "unknown",
+      name: "未知账号",
+      kind: "chatgpt" as const,
+      email: null,
+      current: false,
+      updatedAt: 0,
+      subscription: { planType: null, label: "未识别", stale: true },
+    },
+  ];
+  mock.command.mockImplementation(
+    async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === "get_state" || name === "switch_account")
+        return structuredClone(accounts);
+      if (name === "get_gateway" || name === "update_gateway")
+        return structuredClone(
+          args?.clientId === "claude" ? claudeGatewayDemo : gatewayDemo,
+        );
+      if (name === "get_quick")
+        return { pinned: false, tab: "providers", visible: true };
+      if (name === "set_quick")
+        return { pinned: false, tab: "providers", ...args };
+    },
+  );
+  render(<QuickPanel />);
+  await user.click(await screen.findByRole("button", { name: "账号" }));
+
+  const known = await screen.findByRole("button", { name: "切换到 日常开发" });
+  expect(within(known).getByText("Pro")).toHaveClass("account-plan");
+  const unknown = screen.getByRole("button", { name: "切换到 未知账号" });
+  const unknownPlan = within(unknown).getByText("未识别");
+  expect(unknownPlan).toHaveClass("account-plan");
+  expect(unknownPlan).toHaveAttribute("title", expect.stringContaining("凭据需刷新"));
+  const api = screen.getByRole("button", { name: "切换到 API 开发账号" });
+  expect(within(api).queryByText("API Secret Plan")).not.toBeInTheDocument();
+});
+
 it("uses current revisions for quick actions without initializing the main window", async () => {
   const user = userEvent.setup();
   render(<QuickPanel />);
@@ -149,20 +203,11 @@ it("can restore a newer saved credential without auto-writing the auth file", as
     expectedRevision: demo.authRevision,
   });
 });
-it("syncs the bridge badge and opens the shared provider settings without selecting it", async () => {
+it("keeps provider settings HTTP/SSE-only and opens shared policy settings", async () => {
   const user = userEvent.setup();
   render(<QuickPanel />);
   await screen.findByText("api.example.com");
-  act(() =>
-    mock.listeners.get("gateway-state")!({
-      ...gatewayDemo,
-      providers: gatewayDemo.providers.map((p) => ({
-        ...p,
-        supportsWebsocket: false,
-      })),
-    }),
-  );
-  expect(screen.getAllByText("HTTP 桥接").length).toBeGreaterThan(0);
+  expect(screen.queryByText("HTTP 桥接")).not.toBeInTheDocument();
   await user.click(
     screen.getByRole("button", { name: "api.example.com 设置" }),
   );
@@ -175,6 +220,67 @@ it("syncs the bridge badge and opens the shared provider settings without select
     mock.command.mock.calls.some(([name]) => name === "update_gateway"),
   ).toBe(false);
 });
+
+it("keeps the provider quota beside the name in the quick panel", async () => {
+  const gateway = structuredClone(gatewayDemo);
+  const p = gateway.providers[0];
+  p.quota = {
+    providerId: p.id,
+    version: p.quotaVersion,
+    state: "ok",
+    source: "sub2api",
+    checkedAt: 1,
+    successAt: 1,
+    retryAt: null,
+    stale: false,
+    error: null,
+    keyStatus: null,
+    plans: [
+      {
+        name: "API Key 配额",
+        remaining: 8,
+        used: 2,
+        total: 10,
+        unit: "USD",
+        unlimited: false,
+        resetAt: null,
+      },
+    ],
+    subscriptions: [
+      {
+        name: "Pro",
+        status: "active",
+        expiresAt: null,
+        active: true,
+        plans: [],
+      },
+    ],
+    expiresAt: null,
+    expiresAtUnix: null,
+    today: null,
+    totalUsage: null,
+  } as ProviderQuota;
+  mock.command.mockImplementation(
+    async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === "get_state" || name === "switch_account")
+        return structuredClone(demo);
+      if (name === "get_gateway" || name === "update_gateway")
+        return structuredClone(gateway);
+      if (name === "get_quick")
+        return { pinned: false, tab: "providers", visible: true };
+      if (name === "set_quick")
+        return { pinned: false, tab: "providers", ...args };
+    },
+  );
+  render(<QuickPanel />);
+  const name = await screen.findByRole("button", { name: `${p.name} 名称` });
+  const row = name.closest("[data-provider-id]");
+  expect(row).not.toBeNull();
+  const quota = within(row as HTMLElement).getByLabelText(`${p.name} 额度`);
+  expect(name.compareDocumentPosition(quota) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(quota).getByText("Pro")).toHaveClass("quota-subscription");
+});
+
 it("quick concurrency editing keeps drafts during events and consumes Escape before the panel", async () => {
   const user = userEvent.setup();
   render(<QuickPanel />);

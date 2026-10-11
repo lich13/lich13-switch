@@ -19,7 +19,7 @@ beforeEach(() => {
   });
 });
 
-it("preserves a transport draft across events and retries a conflict with the refreshed revision", async () => {
+it("preserves a model policy draft across events and retries a conflict with the refreshed revision", async () => {
   const user = userEvent.setup();
   const provider = structuredClone(gatewayDemo.providers[0]);
   const save = vi
@@ -37,7 +37,7 @@ it("preserves a transport draft across events and retries a conflict with the re
     onDirtyChange: dirty,
   };
   const { rerender } = render(<ProviderSettings {...props} />);
-  const checkbox = screen.getByRole("checkbox", { name: "原生 WebSocket" });
+  const checkbox = await screen.findByRole("checkbox", { name: "fixture-model" });
   await user.click(checkbox);
   expect(save).not.toHaveBeenCalled();
   rerender(
@@ -47,7 +47,7 @@ it("preserves a transport draft across events and retries a conflict with the re
       revision="external"
     />,
   );
-  expect(checkbox).not.toBeChecked();
+  expect(checkbox).toBeChecked();
   expect(checkbox).toHaveFocus();
   await user.click(screen.getByRole("button", { name: "保存" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("网关设置已变化");
@@ -55,31 +55,25 @@ it("preserves a transport draft across events and retries a conflict with the re
     {
       op: "policyProvider",
       id: provider.id,
-      supportsWebsocket: false,
-      handoffAfterCompaction: true,
-      takeNewThreads: false,
-      allowedModels: null,
+      allowedModels: ["fixture-model"],
     },
     "before",
   );
-  expect(checkbox).not.toBeChecked();
+  expect(checkbox).toBeChecked();
   rerender(<ProviderSettings {...props} revision="refreshed" />);
   await user.click(screen.getByRole("button", { name: "重试" }));
   expect(save).toHaveBeenLastCalledWith(
     {
       op: "policyProvider",
       id: provider.id,
-      supportsWebsocket: false,
-      handoffAfterCompaction: true,
-      takeNewThreads: false,
-      allowedModels: null,
+      allowedModels: ["fixture-model"],
     },
     null,
   );
   rerender(
     <ProviderSettings
       {...props}
-      runtime={{ ...provider, supportsWebsocket: false }}
+      runtime={{ ...provider, activeRequests: 3 }}
       revision="saved"
     />,
   );
@@ -89,7 +83,7 @@ it("preserves a transport draft across events and retries a conflict with the re
   expect(dirty).toHaveBeenLastCalledWith(false);
 });
 
-it("blocks duplicate transport saves and keeps the draft until completion", async () => {
+it("blocks duplicate model policy saves and keeps the draft until completion", async () => {
   const user = userEvent.setup();
   const provider = structuredClone(gatewayDemo.providers[0]);
   let resolve!: () => void;
@@ -109,9 +103,8 @@ it("blocks duplicate transport saves and keeps the draft until completion", asyn
       close={() => {}}
     />,
   );
-  await user.click(screen.getByRole("checkbox", { name: "原生 WebSocket" }));
+  await user.click(await screen.findByRole("checkbox", { name: "fixture-model" }));
   await user.click(screen.getByRole("button", { name: "保存" }));
-  expect(screen.getByRole("checkbox", { name: "原生 WebSocket" })).toBeDisabled();
   expect(screen.getByRole("checkbox", { name: "fixture-model" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "保存中…" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "关闭" })).toBeDisabled();

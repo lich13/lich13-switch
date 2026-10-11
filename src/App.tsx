@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import { command, subscribe } from "./bridge";
 import AuthSyncNotice from "./AuthSyncNotice";
+import AccountPlan from "./AccountPlan";
 import StartupSettings from "./StartupSettings";
 import PowerSettings from "./PowerSettings";
 import LinkSettings from "./LinkSettings";
@@ -485,7 +486,7 @@ export default function App() {
                       )}
                     </div>
                     <div className="account-copy">
-                      <strong title={a.name}>{a.name}</strong>
+                      <div className="account-title"><strong title={a.name}>{a.name}</strong><AccountPlan account={a} /></div>
                       <div>
                         <span>
                           {a.kind === "chatgpt" ? "ChatGPT" : "API Key"}

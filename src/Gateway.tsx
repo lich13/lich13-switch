@@ -360,6 +360,13 @@ function GatewayContent({
                           : undefined
                       }
                     />
+                    <QuotaInfo
+                      compact
+                      provider={p}
+                      quota={quota.quotaFor(p)}
+                      refresh={() => void quota.refresh(p.id)}
+                      details={() => setDialog({ kind: "quota", item: p })}
+                    />
                     {status && (
                       <button
                         className="provider-alert"
@@ -374,9 +381,7 @@ function GatewayContent({
                     {state.mode === "auto" && state.lastSuccessful === p.id && (
                       <span className="provider-binding">最近使用</span>
                     )}
-                    {clientId === "codex" && !p.supportsWebsocket && (
-                      <span className="provider-transport">HTTP 桥接</span>
-                    )}
+
                     <button
                       className="secondary compact"
                       disabled={rowBusy}
@@ -464,14 +469,8 @@ function GatewayContent({
                     <span className="provider-domain" title={p.baseUrl}>
                       {new URL(p.baseUrl).host}
                     </span>
-                    <QuotaInfo
-                      compact
-                      provider={p}
-                      quota={quota.quotaFor(p)}
-                      refresh={() => void quota.refresh(p.id)}
-                      details={() => setDialog({ kind: "quota", item: p })}
-                    />
                     <ProviderControls
+                      clientId={clientId}
                       provider={p}
                       revision={state.revision}
                       disabled={rowBusy}

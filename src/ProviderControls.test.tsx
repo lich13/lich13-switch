@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import ProviderControls from "./ProviderControls";
@@ -89,6 +89,136 @@ it("keeps authoritative queue state on failure and prevents duplicate submission
   await waitFor(() => expect(report).toHaveBeenCalledWith("写入失败"));
   expect(toggle).toHaveAttribute("aria-pressed", "true");
   expect(toggle).toBeEnabled();
+});
+
+it("places takeover controls first and commits one actual field per click", async () => {
+  const user = userEvent.setup();
+  const commit = vi.fn().mockResolvedValue(undefined);
+  const report = vi.fn();
+  const { container, rerender } = render(
+    <ProviderControls
+      provider={{
+        ...provider,
+        handoffAfterCompaction: true,
+        takeNewThreads: false,
+      }}
+      clientId="codex"
+      revision="takeover-revision"
+      disabled={false}
+      commit={commit}
+      report={report}
+    />,
+  );
+
+  const handoff = screen.getByRole("button", {
+    name: `${provider.name} 压缩后接管`,
+  });
+  const newThreads = screen.getByRole("button", {
+    name: `${provider.name} 新线程接管`,
+  });
+  expect(handoff).toHaveAttribute("aria-pressed", "true");
+  expect(newThreads).toHaveAttribute("aria-pressed", "false");
+  expect(handoff).toHaveTextContent("压缩后");
+  expect(newThreads).toHaveTextContent("新线程");
+  const controls = container.querySelector(".provider-controls");
+  expect(controls).not.toBeNull();
+  expect(within(controls as HTMLElement).getAllByRole("button").slice(0, 2)).toEqual([
+    handoff,
+    newThreads,
+  ]);
+
+  await user.click(handoff);
+  expect(commit).toHaveBeenLastCalledWith(
+    {
+      op: "takeoverProvider",
+      id: provider.id,
+      handoffAfterCompaction: false,
+    },
+    "takeover-revision",
+  );
+  expect(commit.mock.calls.at(-1)?.[0]).not.toHaveProperty("takeNewThreads");
+  expect(commit.mock.calls.at(-1)?.[0]).not.toHaveProperty("allowedModels");
+  expect(commit.mock.calls.at(-1)?.[0]).not.toHaveProperty("supportsWebsocket");
+
+  rerender(
+    <ProviderControls
+      provider={{
+        ...provider,
+        handoffAfterCompaction: false,
+        takeNewThreads: false,
+      }}
+      clientId="codex"
+      revision="takeover-revision-2"
+      disabled={false}
+      commit={commit}
+      report={report}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: `${provider.name} 新线程接管` }));
+  expect(commit).toHaveBeenLastCalledWith(
+    { op: "takeoverProvider", id: provider.id, takeNewThreads: true },
+    "takeover-revision-2",
+  );
+  expect(commit.mock.calls.at(-1)?.[0]).not.toHaveProperty("handoffAfterCompaction");
+});
+
+it("keeps the authoritative takeover state on failure and blocks duplicate clicks", async () => {
+  let reject!: (error: Error) => void;
+  const commit = vi.fn(
+    () =>
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const report = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <ProviderControls
+      provider={{ ...provider, handoffAfterCompaction: true }}
+      clientId="codex"
+      revision="takeover-failure"
+      disabled={false}
+      commit={commit}
+      report={report}
+    />,
+  );
+  const handoff = screen.getByRole("button", {
+    name: `${provider.name} 压缩后接管`,
+  });
+  await user.dblClick(handoff);
+  expect(commit).toHaveBeenCalledTimes(1);
+  expect(commit).toHaveBeenCalledWith(
+    {
+      op: "takeoverProvider",
+      id: provider.id,
+      handoffAfterCompaction: false,
+    },
+    "takeover-failure",
+  );
+  expect(handoff).toBeDisabled();
+  reject(new Error("接管设置失败"));
+  await waitFor(() => expect(report).toHaveBeenCalledWith("接管设置失败"));
+  expect(handoff).toHaveAttribute("aria-pressed", "true");
+  expect(handoff).toBeEnabled();
+});
+
+it("hides takeover controls for Claude", () => {
+  render(
+    <ProviderControls
+      provider={provider}
+      clientId="claude"
+      revision="claude-revision"
+      disabled={false}
+      commit={vi.fn()}
+      report={vi.fn()}
+    />,
+  );
+  expect(
+    screen.queryByRole("button", { name: `${provider.name} 压缩后接管` }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: `${provider.name} 新线程接管` }),
+  ).not.toBeInTheDocument();
 });
 
 it("edits the provider RPM cap in the shared control", async () => {

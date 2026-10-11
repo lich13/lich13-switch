@@ -11,6 +11,32 @@ use std::{
 const MAX_THREADS: usize = 4096;
 const RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) enum Intake {
+    #[default]
+    Ordinary,
+    NewThread,
+    Compacted,
+}
+fn accepts(provider: &super::model::Provider, intake: Intake) -> bool {
+    accepts_flags(
+        provider.handoff_after_compaction,
+        provider.take_new_threads,
+        intake,
+    )
+}
+pub(super) fn accepts_flags(compacted: bool, new_thread: bool, intake: Intake) -> bool {
+    (!compacted && !new_thread)
+        || (intake == Intake::NewThread && new_thread)
+        || (intake == Intake::Compacted && compacted)
+}
+pub fn unidentified_candidates(routes: Vec<super::Route>) -> Vec<super::Route> {
+    routes
+        .into_iter()
+        .filter(|r| accepts(&r.provider, Intake::Ordinary))
+        .collect()
+}
+
 fn now() -> u64 {
     crate::usage::model::now().max(0) as u64
 }
@@ -150,6 +176,8 @@ pub struct Lease {
     preferred: Vec<String>,
     receivers: Vec<String>,
     initial_bound: std::sync::atomic::AtomicBool,
+    strict: bool,
+    intake: Intake,
 }
 impl Registry {
     pub fn new(path: PathBuf) -> Arc<Self> {
@@ -278,6 +306,8 @@ impl Registry {
             preferred: vec![],
             receivers: eligible.to_vec(),
             initial_bound: std::sync::atomic::AtomicBool::new(false),
+            strict: false,
+            intake: Intake::Ordinary,
         }))
     }
     pub fn prepare_policy(
@@ -299,6 +329,14 @@ impl Registry {
             &ordered.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
         )?;
         let inner = Arc::get_mut(&mut lease)?;
+        inner.strict = true;
+        inner.intake = if inner.handoff {
+            Intake::Compacted
+        } else if inner.fresh && can_handoff && hints.is_some_and(|h| h.first_turn) {
+            Intake::NewThread
+        } else {
+            Intake::Ordinary
+        };
         inner.preferred = ordered.iter().map(|p| p.id.clone()).collect();
         let owner_position = inner
             .owner
@@ -352,6 +390,18 @@ impl Registry {
     }
 }
 impl Lease {
+    pub(super) fn admission_policy(&self) -> (Intake, Option<String>) {
+        let owner = self
+            .registry
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .get(&self.session)
+            .filter(|entry| !entry.establishing)
+            .map(|entry| entry.provider.clone());
+        (self.intake, owner)
+    }
     pub fn owns(&self, provider: &str) -> bool {
         !self.handoff
             && self
@@ -388,7 +438,12 @@ impl Lease {
     }
     pub fn candidates(&self, mut routes: Vec<super::Route>) -> Vec<super::Route> {
         if self.handoff {
-            routes.retain(|r| self.receivers.contains(&r.provider.id));
+            routes.retain(|r| {
+                self.receivers.contains(&r.provider.id)
+                    && (!self.strict
+                        || self.owner.as_deref() == Some(&r.provider.id)
+                        || r.provider.handoff_after_compaction)
+            });
             return routes;
         }
         let bound = self
@@ -401,6 +456,9 @@ impl Lease {
             .filter(|e| !e.establishing)
             .map(|e| e.provider.clone());
         if self.fresh && bound.is_none() {
+            if self.strict {
+                routes.retain(|r| accepts(&r.provider, self.intake));
+            }
             routes.sort_by_key(|r| {
                 self.preferred
                     .iter()
@@ -437,6 +495,11 @@ impl Lease {
             .cloned()
         {
             return vec![owner];
+        }
+        if self.strict {
+            routes.retain(|r| {
+                current.as_deref() == Some(&r.provider.id) || accepts(&r.provider, self.intake)
+            });
         }
         routes
     }

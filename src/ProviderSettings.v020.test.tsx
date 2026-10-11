@@ -39,20 +39,16 @@ beforeEach(() => {
   mock.command.mockResolvedValue(catalog());
 });
 
-it("saves the two handoff controls with transport and model policy in one transaction", async () => {
+it("saves model policy without embedding transport or takeover controls", async () => {
   const user = userEvent.setup();
   const p = props();
   render(<ProviderSettings {...p} />);
 
-  const handoff = await screen.findByRole("checkbox", { name: "压缩后接管" });
-  const newThreads = screen.getByRole("checkbox", { name: "新线程接管" });
-  expect(handoff).toBeChecked();
-  expect(newThreads).not.toBeChecked();
+  expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole("checkbox", { name: "原生 WebSocket" }));
-  await user.click(handoff);
-  await user.click(newThreads);
-  await user.click(screen.getByRole("checkbox", { name: "fixture-listed" }));
+  await user.click(await screen.findByRole("checkbox", { name: "fixture-listed" }));
   await user.click(screen.getByRole("button", { name: "保存" }));
 
   await waitFor(() => expect(p.close).toHaveBeenCalledOnce());
@@ -60,42 +56,30 @@ it("saves the two handoff controls with transport and model policy in one transa
     {
       op: "policyProvider",
       id: p.provider.id,
-      supportsWebsocket: false,
-      handoffAfterCompaction: false,
-      takeNewThreads: true,
       allowedModels: ["fixture-listed"],
     },
     "fixture-v020-revision",
   );
 });
 
-it("keeps both handoff drafts through a conflict and retries with the refreshed revision", async () => {
+it("keeps transport and model drafts through a conflict and retries with the refreshed revision", async () => {
   const user = userEvent.setup();
   const p = props();
   p.save.mockRejectedValueOnce({ message: "网关设置已变化" });
   const { rerender } = render(<ProviderSettings {...p} />);
 
-  await user.click(await screen.findByRole("checkbox", { name: "原生 WebSocket" }));
-  await user.click(screen.getByRole("checkbox", { name: "压缩后接管" }));
-  await user.click(screen.getByRole("checkbox", { name: "新线程接管" }));
-  await user.click(screen.getByRole("checkbox", { name: "fixture-listed" }));
+  await user.click(await screen.findByRole("checkbox", { name: "fixture-listed" }));
 
   rerender(
     <ProviderSettings
       {...p}
       runtime={{
         ...p.provider,
-        supportsWebsocket: true,
-        handoffAfterCompaction: true,
-        takeNewThreads: false,
         allowedModels: ["fixture-other"],
       }}
       revision="fixture-external-revision"
     />,
   );
-  expect(screen.getByRole("checkbox", { name: "原生 WebSocket" })).not.toBeChecked();
-  expect(screen.getByRole("checkbox", { name: "压缩后接管" })).not.toBeChecked();
-  expect(screen.getByRole("checkbox", { name: "新线程接管" })).toBeChecked();
   expect(screen.getByRole("checkbox", { name: "fixture-listed" })).toBeChecked();
 
   await user.click(screen.getByRole("button", { name: "保存" }));
@@ -104,9 +88,6 @@ it("keeps both handoff drafts through a conflict and retries with the refreshed 
     {
       op: "policyProvider",
       id: p.provider.id,
-      supportsWebsocket: false,
-      handoffAfterCompaction: false,
-      takeNewThreads: true,
       allowedModels: ["fixture-listed"],
     },
     "fixture-v020-revision",
@@ -119,23 +100,20 @@ it("keeps both handoff drafts through a conflict and retries with the refreshed 
     {
       op: "policyProvider",
       id: p.provider.id,
-      supportsWebsocket: false,
-      handoffAfterCompaction: false,
-      takeNewThreads: true,
       allowedModels: ["fixture-listed"],
     },
     null,
   );
 });
 
-it("uses the migrated defaults when an older provider omits handoff fields", async () => {
+it("keeps older handoff fields compatible without exposing provider settings controls", async () => {
   const p = props();
   delete p.provider.handoffAfterCompaction;
   delete p.provider.takeNewThreads;
   render(<ProviderSettings {...p} runtime={p.provider} />);
 
-  expect(await screen.findByRole("checkbox", { name: "压缩后接管" })).toBeChecked();
-  expect(screen.getByRole("checkbox", { name: "新线程接管" })).not.toBeChecked();
+  expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
 });
 
 it("does not expose either handoff control for Claude", async () => {
@@ -144,5 +122,6 @@ it("does not expose either handoff control for Claude", async () => {
 
   expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
   expect(await screen.findByRole("checkbox", { name: "fixture-listed" })).toBeEnabled();
 });

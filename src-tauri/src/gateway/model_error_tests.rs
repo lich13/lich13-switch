@@ -67,24 +67,6 @@ fn encoded(encoding: &str, raw: &[u8]) -> Vec<u8> {
     }
 }
 
-async fn ws_next(ws: &mut yawc::TcpWebSocket) -> yawc::Frame {
-    tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
-        .await
-        .unwrap()
-        .unwrap()
-}
-
-fn bridge(g: &Gateway, t: &tempfile::TempDir, index: usize) {
-    update(
-        g,
-        t,
-        Edit::WebsocketProvider {
-            id: g.view().providers[index].id.clone(),
-            supports_websocket: false,
-        },
-    );
-}
-
 #[tokio::test]
 async fn http_200_application_failure_does_not_trip_provider_circuit() {
     let upstream = server(|_| async {
@@ -351,104 +333,6 @@ async fn later_sse_model_error_never_splices_backup_and_preserves_compressed_byt
         assert_eq!(backup_hits.load(Ordering::SeqCst), 0, "{encoding}");
         g.stop().await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn bridge_404_model_error_is_prioritized_before_unsupported_classification() {
-    let first =
-        server(|_| async { model_error(404, "no available channel for model exact-model") }).await;
-    let backup_hits = Arc::new(AtomicUsize::new(0));
-    let backup_count = backup_hits.clone();
-    let second = server(move |_| {
-        backup_count.fetch_add(1, Ordering::SeqCst);
-        async { sse(r#"{"type":"response.completed"}"#) }
-    })
-    .await;
-    let (t, g) = fixture(vec![
-        format!("http://127.0.0.1:{first}/v1"),
-        format!("http://127.0.0.1:{second}/v1"),
-    ])
-    .await;
-    bridge(&g, &t, 0);
-    bridge(&g, &t, 1);
-    auto(&g, &t, 1);
-    start(&g, &t).await;
-    let mut ws = concurrency::responses_client(&g).await;
-    ws.send(yawc::Frame::text(
-        r#"{"type":"response.create","model":"exact-model"}"#,
-    ))
-    .await
-    .unwrap();
-    assert_eq!(
-        ws_next(&mut ws).await.payload().as_ref(),
-        br#"{"type":"response.completed"}"#
-    );
-    assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
-    assert_eq!(g.view().providers[0].health.failures, 0);
-    drop(ws);
-    g.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn bridge_all_model_errors_returns_last_original_payload_without_poisoning_health() {
-    let first_body = serde_json::to_vec(&serde_json::json!({
-        "error": {"code": "model_not_found", "message": "p1 missing"}
-    }))
-    .unwrap();
-    let second_body = serde_json::to_vec(&serde_json::json!({
-        "error": {"code": "model_not_found", "message": "p2 missing"}
-    }))
-    .unwrap();
-    let first = server({
-        let body = first_body.clone();
-        move |_| {
-            let body = body.clone();
-            async move {
-                Response::builder()
-                    .status(404)
-                    .header("content-type", "application/json")
-                    .body(full(body))
-                    .unwrap()
-            }
-        }
-    })
-    .await;
-    let second = server({
-        let body = second_body.clone();
-        move |_| {
-            let body = body.clone();
-            async move {
-                Response::builder()
-                    .status(404)
-                    .header("content-type", "application/json")
-                    .body(full(body))
-                    .unwrap()
-            }
-        }
-    })
-    .await;
-    let (t, g) = fixture(vec![
-        format!("http://127.0.0.1:{first}/v1"),
-        format!("http://127.0.0.1:{second}/v1"),
-    ])
-    .await;
-    bridge(&g, &t, 0);
-    bridge(&g, &t, 1);
-    auto(&g, &t, 1);
-    start(&g, &t).await;
-    let mut ws = concurrency::responses_client(&g).await;
-    ws.send(yawc::Frame::text(
-        r#"{"type":"response.create","model":"exact-model"}"#,
-    ))
-    .await
-    .unwrap();
-    let payload = ws_next(&mut ws).await;
-    assert_eq!(payload.payload(), second_body.as_slice());
-    let close = ws_next(&mut ws).await;
-    assert_eq!(close.close_code().map(u16::from), Some(1008));
-    assert!(g.view().providers.iter().all(|p| p.health.failures == 0));
-    drop(ws);
-    g.stop().await.unwrap();
 }
 
 #[tokio::test]

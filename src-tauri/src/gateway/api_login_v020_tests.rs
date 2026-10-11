@@ -52,7 +52,6 @@ fn provider(id: &str, base: &str, token: &str) -> Provider {
         max_concurrency: 0,
         max_rpm: 0,
         allowed_models: None,
-        supports_websocket: false,
         handoff_after_compaction: true,
         take_new_threads: false,
     }

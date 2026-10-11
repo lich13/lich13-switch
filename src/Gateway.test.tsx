@@ -1,7 +1,7 @@
 import { render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import type { ClientId, GatewayState } from "./types";
+import type { ClientId, GatewayState, ProviderQuota } from "./types";
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
   listeners: new Map<string, (s: GatewayState) => void>(),
@@ -137,40 +137,53 @@ describe("gateway controls", () => {
     expect(screen.queryByText("测试连接")).not.toBeInTheDocument();
   });
 
-  it("edits the Codex websocket transport", async () => {
-    const user = userEvent.setup();
-    state.providers[0].supportsWebsocket = false;
-    render(<Gateway notify={() => {}} />);
-    expect(await screen.findByText("HTTP 桥接")).toBeInTheDocument();
-    const operations = screen.getByLabelText(`${state.providers[0].name} 操作`);
-    await user.click(operations);
-    const rename = within(operations.closest("details")!).getByRole("button", {
-      name: "重命名",
-    });
-    expect(rename.querySelector("svg")).not.toBeNull();
-    await user.click(
-      within(operations.closest("details")!).getByRole("button", {
-        name: "供应商设置",
-      }),
-    );
-    const checkbox = screen.getByRole("checkbox", { name: "原生 WebSocket" });
-    expect(checkbox).not.toBeChecked();
-    await user.click(checkbox);
-    await user.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() =>
-      expect(mock.command).toHaveBeenCalledWith("update_gateway", {
-        clientId: "codex",
-        edit: {
-          op: "policyProvider",
-          id: state.providers[0].id,
-          allowedModels: null,
-          supportsWebsocket: true,
-          handoffAfterCompaction: state.providers[0].handoffAfterCompaction ?? true,
-          takeNewThreads: state.providers[0].takeNewThreads ?? false,
+  it("keeps the provider quota beside the name in the main panel", async () => {
+    const p = state.providers[0];
+    p.quota = {
+      providerId: p.id,
+      version: p.quotaVersion,
+      state: "ok",
+      source: "sub2api",
+      checkedAt: 1,
+      successAt: 1,
+      retryAt: null,
+      stale: false,
+      error: null,
+      keyStatus: null,
+      plans: [
+        {
+          name: "API Key 配额",
+          remaining: 8,
+          used: 2,
+          total: 10,
+          unit: "USD",
+          unlimited: false,
+          resetAt: null,
         },
-        expectedRevision: state.revision,
-      }),
-    );
+      ],
+      subscriptions: [
+        {
+          name: "Pro",
+          status: "active",
+          expiresAt: null,
+          active: true,
+          plans: [],
+        },
+      ],
+      expiresAt: null,
+      expiresAtUnix: null,
+      today: null,
+      totalUsage: null,
+    } as ProviderQuota;
+    render(<Gateway notify={() => {}} />);
+    const name = await screen.findByRole("button", {
+      name: `${p.name} 名称`,
+    });
+    const row = name.closest("[data-provider-id]");
+    expect(row).not.toBeNull();
+    const quota = within(row as HTMLElement).getByLabelText(`${p.name} 额度`);
+    expect(name.compareDocumentPosition(quota) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(quota).getByText("Pro")).toHaveClass("quota-subscription");
   });
 
   it("consumes explicit provider focus after opening the requested editor", async () => {
@@ -183,21 +196,18 @@ describe("gateway controls", () => {
         onFocusHandled={handled}
       />,
     );
-    expect(
-      await screen.findByRole("checkbox", { name: "原生 WebSocket" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
     rerender(
       <Gateway notify={() => {}} focusProvider={null} onFocusHandled={handled} />,
     );
-    expect(
-      screen.getByRole("checkbox", { name: "原生 WebSocket" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
   });
 
-  it("starts a fresh transport draft after explicit navigation has confirmed discarding it", async () => {
-    const user = userEvent.setup();
+  it("starts a fresh provider policy editor after explicit navigation", async () => {
     const providerId = state.providers[0].id;
     const { rerender } = render(
       <Gateway
@@ -205,11 +215,8 @@ describe("gateway controls", () => {
         focusProvider={{ id: providerId, sequence: 1 }}
       />,
     );
-    const checkbox = await screen.findByRole("checkbox", {
-      name: "原生 WebSocket",
-    });
-    await user.click(checkbox);
-    expect(checkbox).not.toBeChecked();
+    expect(await screen.findByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     // App confirms discarding before emitting this new navigation sequence.
     rerender(
       <Gateway
@@ -217,9 +224,8 @@ describe("gateway controls", () => {
         focusProvider={{ id: providerId, sequence: 2 }}
       />,
     );
-    expect(
-      await screen.findByRole("checkbox", { name: "原生 WebSocket" }),
-    ).toBeChecked();
+    expect(await screen.findByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     expect(
       mock.command.mock.calls.some(([name]) => name === "update_gateway"),
     ).toBe(false);
@@ -350,9 +356,6 @@ it("keeps model choices and manual entries when discovery fails and events refre
       op: "policyProvider",
       id: "primary",
       allowedModels: ["gpt-A", "custom-model"],
-      supportsWebsocket: state.providers[0].supportsWebsocket,
-      handoffAfterCompaction: state.providers[0].handoffAfterCompaction ?? true,
-      takeNewThreads: state.providers[0].takeNewThreads ?? false,
     },
     expectedRevision: state.revision,
   });

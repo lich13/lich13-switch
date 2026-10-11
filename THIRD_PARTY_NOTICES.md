@@ -35,7 +35,7 @@ https://github.com/Wei-Shaw/sub2api/tree/a3eb7ef302961cba716dc78b39b93b60c467db0
 
 ## Codex Responses WebSocket compatibility
 
-The native Responses WebSocket scheduling boundary follows the lifecycle described by Wei-Shaw/sub2api at the reference above. The HTTP/SSE compatibility bridge is an independent Rust adapter: it keeps the client WebSocket and converts only the `response.create` envelope and SSE event transport. Event names and field semantics follow the public OpenAI Responses streaming event documentation.
+The native Responses WebSocket scheduling boundary follows the lifecycle described by Wei-Shaw/sub2api at the reference above. The HTTP/SSE compatibility adapter was removed in v0.21. Native WebSocket forwarding, per-turn admission, capacity waiting and safe pre-output reconnect remain; no request protocol conversion is performed.
 
 https://platform.openai.com/docs/api-reference/responses-streaming
 
@@ -126,3 +126,7 @@ https://developers.openai.com/api/docs/guides/websocket-mode
 The Codex ordinary API login compatibility review references CC Switch at `00db3eef0431f8e981f5063151e2ac10bd8da79e` (MIT), under the notice above. `OPENAI_API_KEY` and credential-store precedence inform detection; connection selection, byte-preserving base_url edits, and recovery transactions are independently implemented. This integration does not normalize provider IDs, change models, or manage keyring entries.
 
 https://github.com/farion1231/cc-switch/blob/00db3eef0431f8e981f5063151e2ac10bd8da79e/src-tauri/src/codex_config.rs
+
+## Subscription display reference
+
+Account and provider subscription metadata organization follows cc-switch at `df40d53c36b604e044b4d5b9091aeb961aa56990` (MIT), `src/types/subscription.ts`. Parsing and strict intake policy are independently implemented. Official ChatGPT plan metadata follows the `chatgpt_plan_type` claim used by openai/codex (`codex-rs/login/src/token_data.rs`); it is display metadata only.

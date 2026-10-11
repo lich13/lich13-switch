@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, Gauge, LoaderCircle, Plus } from "lucide-react";
-import { errorOf, type Provider } from "./types";
+import { errorOf, type Provider, type ClientId } from "./types";
 import type { ProviderCommit } from "./SortableProviders";
 
 export default function ProviderControls({
   provider,
+  clientId = "codex",
   revision,
   disabled,
   visible = true,
@@ -13,6 +14,7 @@ export default function ProviderControls({
   report,
 }: {
   provider: Provider;
+  clientId?: ClientId;
   revision: string;
   disabled: boolean;
   visible?: boolean;
@@ -134,8 +136,29 @@ export default function ProviderControls({
       setSaving(false);
     }
   };
+  const togglePolicy = async (field: "handoffAfterCompaction" | "takeNewThreads") => {
+    if (pending.current || disabled) return;
+    pending.current = true;
+    setSaving(true);
+    try {
+      await commit({ op: "takeoverProvider", id: provider.id, [field]: !provider[field] }, revision);
+    } catch (e) {
+      report(errorOf(e).message);
+    } finally {
+      pending.current = false;
+      setSaving(false);
+    }
+  };
   return (
     <div className="provider-controls">
+      {clientId === "codex" && <>
+        <button type="button" className="provider-takeover" aria-label={`${provider.name} 压缩后接管`}
+          title="压缩后接管" aria-pressed={Boolean(provider.handoffAfterCompaction)} disabled={disabled || saving}
+          onClick={() => void togglePolicy("handoffAfterCompaction")}><span className="policy-dot" />压缩后</button>
+        <button type="button" className="provider-takeover" aria-label={`${provider.name} 新线程接管`}
+          title="新线程接管" aria-pressed={Boolean(provider.takeNewThreads)} disabled={disabled || saving}
+          onClick={() => void togglePolicy("takeNewThreads")}><span className="policy-dot" />新线程</button>
+      </>}
       <button
         ref={anchor}
         type="button"

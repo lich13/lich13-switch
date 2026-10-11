@@ -12,6 +12,31 @@ fn automatic(g: &Gateway, t: &tempfile::TempDir) {
         },
     );
 }
+fn takeover_eligible(g: &Gateway, t: &tempfile::TempDir) {
+    for provider in g.view().providers {
+        update(
+            g,
+            t,
+            Edit::TakeoverProvider {
+                id: provider.id,
+                handoff_after_compaction: Some(true),
+                take_new_threads: Some(true),
+            },
+        );
+    }
+}
+fn handoff_only_second(g: &Gateway, t: &tempfile::TempDir) {
+    let id = g.view().providers.last().unwrap().id.clone();
+    update(
+        g,
+        t,
+        Edit::TakeoverProvider {
+            id,
+            handoff_after_compaction: Some(true),
+            take_new_threads: Some(false),
+        },
+    );
+}
 fn promote_second(g: &Gateway, t: &tempfile::TempDir) {
     let mut ids: Vec<_> = g.view().providers.iter().map(|p| p.id.clone()).collect();
     ids.reverse();
@@ -69,6 +94,7 @@ async fn old_thread_stays_until_completed_compaction_new_thread_uses_latest_prio
     .await;
     let auth = std::fs::read(t.path().join("auth.json")).unwrap();
     automatic(&g, &t);
+    takeover_eligible(&g, &t);
     start(&g, &t).await;
     let config = std::fs::read(t.path().join("config.toml")).unwrap();
     let ordinary = br#"{"model":"fixture-model","input":"fixture"}"#.to_vec();
@@ -117,6 +143,7 @@ async fn incompatible_compaction_context_falls_back_without_circuit_failure_or_b
     ])
     .await;
     automatic(&g, &t);
+    handoff_only_second(&g, &t);
     start(&g, &t).await;
     let ordinary = br#"{"model":"fixture-model","input":"fixture"}"#.to_vec();
     call(
@@ -152,6 +179,7 @@ async fn unobserved_compaction_never_authorizes_handoff() {
     ])
     .await;
     automatic(&g, &t);
+    handoff_only_second(&g, &t);
     start(&g, &t).await;
     call(
         &g,
@@ -188,6 +216,7 @@ async fn failed_compaction_with_an_output_item_does_not_authorize_handoff() {
     ])
     .await;
     automatic(&g, &t);
+    handoff_only_second(&g, &t);
     start(&g, &t).await;
     let ordinary = br#"{"model":"fixture-model"}"#.to_vec();
     call(&g, "fixture-failed-compact", "/responses", ordinary.clone()).await;
@@ -254,16 +283,7 @@ async fn websocket_handoff_changes_only_upstream_between_completed_turns() {
     ])
     .await;
     automatic(&g, &t);
-    for provider in g.view().providers {
-        update(
-            &g,
-            &t,
-            Edit::WebsocketProvider {
-                id: provider.id,
-                supports_websocket: true,
-            },
-        );
-    }
+    takeover_eligible(&g, &t);
     start(&g, &t).await;
     let token = g.0.inner.lock().unwrap().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(

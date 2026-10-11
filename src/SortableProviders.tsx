@@ -26,6 +26,7 @@ export type ProviderEdit =
   | { op: "reorder"; ids: string[] }
   | { op: "queueProvider"; id: string; queued: boolean }
   | { op: "concurrencyProvider"; id: string; maxConcurrency: number }
+  | { op: "takeoverProvider"; id: string; handoffAfterCompaction?: boolean; takeNewThreads?: boolean }
   | { op: "rpmProvider"; id: string; maxRpm: number };
 export type ProviderCommit = (
   edit: ProviderEdit,
