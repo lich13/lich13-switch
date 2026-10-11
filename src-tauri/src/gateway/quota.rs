@@ -443,14 +443,15 @@ fn subscriptions(value: &Value, unit: &str) -> Vec<Subscription> {
                         .flatten()
                 });
             let status = (!root).then(|| metadata_text(sub, "status")).flatten();
-            let active = (!root)
-                .then(|| sub["active"].as_bool())
-                .flatten()
-                .or(match status.as_deref() {
-                    Some("active") => Some(true),
-                    Some("expired" | "disabled" | "cancelled" | "canceled") => Some(false),
-                    _ => None,
-                });
+            let active =
+                (!root)
+                    .then(|| sub["active"].as_bool())
+                    .flatten()
+                    .or(match status.as_deref() {
+                        Some("active") => Some(true),
+                        Some("expired" | "disabled" | "cancelled" | "canceled") => Some(false),
+                        _ => None,
+                    });
             let expires_at = (!root)
                 .then(|| {
                     ["expires_at", "expiresAt", "end_time"]
