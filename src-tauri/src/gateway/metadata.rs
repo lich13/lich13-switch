@@ -8,6 +8,96 @@ const FIELD: usize = 2048;
 const ITEMS: usize = 64;
 const METADATA_BUDGET: usize = 1024 * 1024;
 
+// Hash decoded JSON string bytes incrementally; never retain an opaque window.
+#[derive(Default)]
+struct StringDigest {
+    hash: Sha256,
+    escape: Vec<u8>,
+    high: Option<u16>,
+    invalid: bool,
+}
+impl StringDigest {
+    fn push(&mut self, b: u8) {
+        if self.invalid {
+            return;
+        }
+        if self.escape.is_empty() {
+            if b == b'\\' {
+                self.escape.push(b);
+            } else if self.high.is_some() {
+                self.invalid = true;
+            } else {
+                self.hash.update([b]);
+            }
+            return;
+        }
+        self.escape.push(b);
+        if self.escape.len() == 2 && b != b'u' {
+            let decoded = match b {
+                b'"' => b'"',
+                b'\\' => b'\\',
+                b'/' => b'/',
+                b'b' => 8,
+                b'f' => 12,
+                b'n' => 10,
+                b'r' => 13,
+                b't' => 9,
+                _ => {
+                    self.invalid = true;
+                    return;
+                }
+            };
+            if self.high.is_some() {
+                self.invalid = true;
+            } else {
+                self.hash.update([decoded]);
+            }
+            self.escape.clear();
+        } else if self.escape.len() == 6 {
+            let unit = std::str::from_utf8(&self.escape[2..])
+                .ok()
+                .and_then(|v| u16::from_str_radix(v, 16).ok());
+            self.escape.clear();
+            let Some(unit) = unit else {
+                self.invalid = true;
+                return;
+            };
+            let code = if let Some(high) = self.high.take() {
+                if !(0xdc00..=0xdfff).contains(&unit) {
+                    self.invalid = true;
+                    return;
+                }
+                0x10000 + (((high as u32 - 0xd800) << 10) | (unit as u32 - 0xdc00))
+            } else if (0xd800..=0xdbff).contains(&unit) {
+                self.high = Some(unit);
+                return;
+            } else {
+                unit as u32
+            };
+            if let Some(ch) = char::from_u32(code) {
+                self.hash.update(ch.encode_utf8(&mut [0; 4]).as_bytes());
+            } else {
+                self.invalid = true;
+            }
+        }
+    }
+    fn finish(self) -> Option<String> {
+        (!self.invalid && self.escape.is_empty() && self.high.is_none())
+            .then(|| format!("{:x}", self.hash.finalize()))
+    }
+}
+fn metadata_size(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| 64 + k.len() + metadata_size(v))
+            .sum(),
+        Value::Array(items) => items.iter().map(|v| 64 + metadata_size(v)).sum(),
+        Value::String(s) => s.len(),
+        _ => 0,
+    }
+}
+
 enum Container {
     Object(Map<String, Value>),
     Array(Vec<Value>),
@@ -25,7 +115,7 @@ enum Lex {
         bytes: Vec<u8>,
         escaped: bool,
         large: bool,
-        digest: Option<Sha256>,
+        digest: Option<StringDigest>,
         nonempty: bool,
     },
     Atom(Vec<u8>),
@@ -150,7 +240,9 @@ impl Projector {
                     key.to_owned(),
                     f.keep
                         && match &f.value {
-                            Container::Array(items) => items.len() < ITEMS,
+                            Container::Array(items) => {
+                                matches!(f.role.as_str(), "input" | "output") || items.len() < ITEMS
+                            }
                             Container::Object(map) => map.len() < ITEMS && retained(key),
                         },
                 )
@@ -206,39 +298,90 @@ impl Projector {
                     return;
                 }
                 frame.state = 3;
-                // Request/response content is unnecessary except for compaction markers.
-                let compact_array = frame.role == "output";
+                // Scan every input item, retaining only distinct structural evidence.
+                // History length and ciphertext size must not hide a compaction boundary.
                 let compact = value.get("type").and_then(Value::as_str).is_some_and(|t| {
                     matches!(
                         t,
                         "compaction" | "context_compaction" | "compaction_trigger"
                     )
                 });
-                if frame.keep && frame.role == "input" && items.len() >= ITEMS {
-                    // Overflow is not a valid first-turn proof.
-                    if let Some(last) = items.last_mut() {
-                        *last = serde_json::json!({"type":"unknown"});
-                    }
-                }
+                let before = metadata_size(&value);
                 let value = if frame.role == "input" && !compact {
-                    serde_json::json!({"type":value.get("type").cloned().unwrap_or(Value::String("message".into())),"role":value.get("role")})
+                    let kind = match value.get("type").and_then(Value::as_str) {
+                        None | Some("message") => "message",
+                        Some("input_message") => "input_message",
+                        _ => "unknown",
+                    };
+                    let role = match value.get("role").and_then(Value::as_str) {
+                        Some("user") => "user",
+                        Some("system") => "system",
+                        Some("developer") => "developer",
+                        Some("assistant") => "assistant",
+                        _ => "unknown",
+                    };
+                    serde_json::json!({"type":kind,"role":role})
                 } else {
                     value
                 };
-                if frame.keep && items.len() < ITEMS && (!compact_array || compact) {
+                if matches!(frame.role.as_str(), "input" | "output") {
+                    self.retained_bytes = self.retained_bytes.saturating_sub(before);
+                    if !frame.keep
+                        || (frame.role == "output" && !compact && items.len() >= ITEMS - 1)
+                    {
+                        return;
+                    }
+                    if compact {
+                        // Only the latest window is eligible, but a trigger is separate evidence.
+                        let kind = value.get("type").cloned();
+                        items.retain(|item| {
+                            let keep = item.get("type") != kind.as_ref();
+                            if !keep {
+                                self.retained_bytes =
+                                    self.retained_bytes.saturating_sub(metadata_size(item));
+                            }
+                            keep
+                        });
+                    } else if frame.role == "input" && items.contains(&value) {
+                        return;
+                    }
+                    if items.len() >= ITEMS {
+                        // Unknown structures cannot establish a new thread. Keep the
+                        // reserved tail free for a later genuine compaction marker.
+                        let removed = items.remove(0);
+                        self.retained_bytes =
+                            self.retained_bytes.saturating_sub(metadata_size(&removed));
+                        if !items
+                            .iter()
+                            .any(|v| v.get("type").and_then(Value::as_str) == Some("unknown"))
+                        {
+                            items.insert(0, serde_json::json!({"type":"unknown"}));
+                        }
+                        if items.len() >= ITEMS {
+                            items.remove(1);
+                        }
+                    }
+                    self.retained_bytes = self.retained_bytes.saturating_add(metadata_size(&value));
+                    items.push(value);
+                } else if frame.keep && items.len() < ITEMS {
                     self.retained_bytes = self
                         .retained_bytes
                         .saturating_add(64 + value.as_str().map_or(0, str::len));
-                    if self.retained_bytes > METADATA_BUDGET {
-                        self.failed = true;
-                        return;
-                    }
                     items.push(value);
+                }
+                if self.retained_bytes > METADATA_BUDGET {
+                    self.failed = true;
                 }
             }
         }
     }
-    fn string(&mut self, bytes: Vec<u8>, large: bool, digest: Option<Sha256>, nonempty: bool) {
+    fn string(
+        &mut self,
+        bytes: Vec<u8>,
+        large: bool,
+        digest: Option<StringDigest>,
+        nonempty: bool,
+    ) {
         if self.stack.last().is_some_and(|f| {
             (f.state == 0 || f.state == 4) && matches!(f.value, Container::Object(_))
         }) {
@@ -270,7 +413,10 @@ impl Projector {
                     })
                     .unwrap_or(Value::Null)
             } else if let Some(digest) = digest {
-                Value::String(format!("sha256:{:x}", digest.finalize()))
+                digest
+                    .finish()
+                    .map(|hash| Value::String(format!("sha256:{hash}")))
+                    .unwrap_or(Value::Null)
             } else {
                 Value::Null
             }
@@ -308,11 +454,8 @@ impl Projector {
                         self.string(bytes, large, digest, nonempty);
                         continue;
                     }
-                    if b == b'\\' {
-                        digest = None;
-                    }
                     if let Some(digest) = &mut digest {
-                        digest.update([b]);
+                        digest.push(b);
                     }
                     nonempty = true;
                     if bytes.len() < FIELD {
@@ -390,7 +533,8 @@ impl Projector {
                         bytes: vec![b'"'],
                         escaped: false,
                         large: false,
-                        digest: (self.target().0 == "encrypted_content").then(Sha256::new),
+                        digest: (self.target().0 == "encrypted_content")
+                            .then(StringDigest::default),
                         nonempty: false,
                     }
                 }

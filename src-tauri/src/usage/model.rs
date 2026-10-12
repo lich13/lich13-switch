@@ -457,13 +457,39 @@ pub enum RoutingDecision {
     CompactionWindowMismatch,
     CursorPinned,
     NoEligibleReceiver,
+    ReceiverCapacityFull,
+    BoundaryInFlight,
+    CompactionWindowMissing,
     CompactionHandoff,
     Auxiliary,
     OrdinaryQueue,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TransferMetadata {
+    pub received_at: Option<i64>,
+    pub sent_at: i64,
+    pub first_byte_at: Option<i64>,
+    pub terminal_at: Option<i64>,
+    pub ended_at: i64,
+    pub upstream_bytes: u64,
+    pub downstream_bytes: u64,
+    pub terminal_handed_off: bool,
+    pub upstream_eof: bool,
+    pub upstream_end: Option<String>,
+    pub ws_close_code: Option<u16>,
+    pub downstream_error: Option<String>,
+    pub timeout_phase: Option<String>,
+    pub timeout_seconds: Option<u64>,
+    pub last_progress_ms: Option<u64>,
+    pub client_request_hash: Option<String>,
+    pub response_hash: Option<String>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<TransferMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<EndMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -638,6 +664,7 @@ impl Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            transfer: None,
             end: None,
             thread_hash: None,
             upstream_request_hash: None,

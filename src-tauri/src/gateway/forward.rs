@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
+#[derive(Clone, Copy)]
+struct ReceivedAt(i64);
 pub async fn serve(
     gateway: Gateway,
     listener: tokio::net::TcpListener,
@@ -29,15 +31,95 @@ pub async fn serve(
             result=listener.accept()=>{
                 let Ok((socket,_))=result else{break};let g=gateway.clone();let mut stop=shutdown.clone();
                 tokio::spawn(async move{
-                    let service=hyper::service::service_fn(move|request|{let g=g.clone();async move{Ok::<_,Infallible>(forward(g,request).await)}});
+                    let activity = std::sync::Arc::new(super::wire_progress::Activity::default());
+                    let socket = super::wire_progress::Tracked::new(socket, activity.clone());
+                    let deliveries = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::sync::Weak<super::protocol::Delivery>>::new()));
+                    let tracked = deliveries.clone();
+                    let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
+                        let g=g.clone();
+                        let delivery = std::sync::Arc::new(super::protocol::Delivery::default());
+                        { let mut items = tracked.lock().unwrap(); items.retain(|w| w.strong_count() != 0); items.push(std::sync::Arc::downgrade(&delivery)); }
+                        request.extensions_mut().insert(delivery);
+                        request.extensions_mut().insert(ReceivedAt(crate::usage::model::now()));
+                        request.extensions_mut().insert(activity.clone());
+                        async move{Ok::<_,Infallible>(forward(g,request).await)}
+                    });
                     let connection=hyper::server::conn::http1::Builder::new().preserve_header_case(true)
                         .serve_connection(TokioIo::new(socket),service).with_upgrades();
                     tokio::pin!(connection);
-                    tokio::select!{_= &mut connection=>(),_=stop.changed()=>{connection.as_mut().graceful_shutdown();let _=connection.await;}}
+                    let result = tokio::select!{result= &mut connection=>result,_=stop.changed()=>{connection.as_mut().graceful_shutdown();connection.await}};
+                    if result.is_err() {
+                        for delivery in deliveries.lock().unwrap().iter().filter_map(std::sync::Weak::upgrade) {
+                            delivery.error.store(2, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 });
             }
         }
     }
+}
+type ForwardFrame = (
+    Result<hyper::body::Frame<Bytes>, BoxError>,
+    bool,
+    tokio::sync::oneshot::Sender<()>,
+);
+struct DeliveryGuard {
+    delivery: std::sync::Arc<super::protocol::Delivery>,
+    complete: bool,
+}
+impl Drop for DeliveryGuard {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = self.delivery.error.compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum DownstreamEnd {
+    Closed,
+    Timeout,
+}
+impl DownstreamEnd {
+    fn record(
+        self,
+        delivery: &super::protocol::Delivery,
+        protocol: &mut super::protocol::Protocol,
+        seconds: u64,
+    ) {
+        if matches!(self, Self::Timeout) {
+            delivery
+                .error
+                .store(3, std::sync::atomic::Ordering::Relaxed);
+            protocol.timeout("downstream_write", seconds);
+        }
+    }
+}
+async fn send_frame(
+    sender: &tokio::sync::mpsc::Sender<ForwardFrame>,
+    frame: Result<hyper::body::Frame<Bytes>, BoxError>,
+    terminal: bool,
+    activity: &super::wire_progress::Activity,
+    seconds: u64,
+) -> Result<(), DownstreamEnd> {
+    super::wire_progress::writing(
+        async {
+            let (ack, received) = tokio::sync::oneshot::channel();
+            sender
+                .send((frame, terminal, ack))
+                .await
+                .map_err(|_| DownstreamEnd::Closed)?;
+            received.await.map_err(|_| DownstreamEnd::Closed)
+        },
+        activity,
+        seconds,
+    )
+    .await
+    .map_err(|_| DownstreamEnd::Timeout)?
 }
 pub(super) fn error(status: StatusCode, code: &str, message: &str) -> Response<WireBody> {
     Response::builder().status(status).header(header::CONTENT_TYPE,"application/json")
@@ -171,7 +253,6 @@ pub(super) fn capacity_delay(settings: &Settings, retry: Option<Duration>) -> Du
         .max(Duration::from_secs(settings.capacity_retry_seconds))
 }
 async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<WireBody> {
-    let began = Instant::now();
     let (settings, mode, mut ids, token, running) = {
         let s = gateway.0.inner.lock().unwrap();
         let ids = if s.store.mode == "auto" {
@@ -392,6 +473,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     let mut previous_provider: Option<String> = None;
     let mut last_category = "NO_PROVIDER";
     let mut wait_budget = Budget::new(settings.queue_seconds);
+    wait_budget.track(
+        &gateway.0.admission,
+        ownership.as_deref(),
+        settings.thread_idle_release_seconds,
+    );
     if pinned.is_some() || unknown_affinity {
         wait_budget.pin_provider();
     }
@@ -399,7 +485,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     let mut capacity_retry_after: Option<Duration> = None;
     let mut rpm_retry_after: Option<Duration> = None;
     let mut capacity_sources = Vec::new();
-    let mut capacity_waited = Duration::ZERO;
     let mut transient_retries = 0;
     let mut retry_owner: Option<String> = None;
     while ordinary_attempts <= settings.max_retries {
@@ -415,7 +500,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         if ids.is_empty() {
             if capacity_pending && ordinary_attempts <= settings.max_retries {
                 let delay = capacity_delay(&settings, capacity_retry_after);
-                let waiting_since = Instant::now();
+                let _waiting_since = Instant::now();
                 match gateway
                     .0
                     .admission
@@ -428,7 +513,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                     Err(_) => break,
                 }
-                capacity_waited += waiting_since.elapsed();
+
                 ids = gateway.routing_ids(pinned.as_deref());
                 routes = ids
                     .iter()
@@ -500,7 +585,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 });
             wait_budget.set_intake(intake, owner);
         }
-        let admission_started = Instant::now();
+        let _admission_started = Instant::now();
         let mut admission = match gateway
             .0
             .admission
@@ -618,10 +703,31 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 break;
             }
         };
-        if capacity_protected {
-            capacity_waited += admission_started.elapsed();
-        }
-        let route = admission.route.clone();
+        let route = match gateway
+            .endpoint_route(
+                admission.route.clone(),
+                thread.as_deref(),
+                hints
+                    .as_ref()
+                    .ok()
+                    .and_then(|h| h.previous_response_id.as_deref()),
+                ownership
+                    .as_ref()
+                    .is_some_and(|lease| lease.handoff || lease.establishing())
+                    || hints.as_ref().is_ok_and(|h| h.first_turn),
+            )
+            .await
+        {
+            Ok(route) => route,
+            Err(reason) => {
+                admission.permits.neutral(&settings);
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &reason.code,
+                    &reason.message,
+                );
+            }
+        };
         if ownership
             .as_ref()
             .is_some_and(|lease| !lease.admitted(&route.provider.id))
@@ -684,6 +790,17 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(stream_hint);
         protocol.attach_ownership(ownership.clone(), &route.provider.id);
+        protocol.attach_thread(wait_budget.thread.clone());
+        protocol.request_headers(&parts.headers);
+        if let Some(at) = parts.extensions.get::<ReceivedAt>() {
+            protocol.request_received(at.0);
+        }
+        if let Some(delivery) = parts
+            .extensions
+            .get::<std::sync::Arc<super::protocol::Delivery>>()
+        {
+            protocol.set_delivery(delivery.clone());
+        }
         if let Some(trace) = &usage_trace {
             protocol.attach_usage(trace.attempt(
                 &route.provider.id,
@@ -695,13 +812,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             thread.clone(),
             (gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses).then(
                 || {
-                    super::compaction::decision(
-                        thread.as_deref(),
-                        hints.as_ref().ok(),
-                        continuation,
-                        ownership.as_deref(),
-                        &route.provider.id,
-                    )
+                    admission.handoff_wait.unwrap_or_else(|| {
+                        super::compaction::decision(
+                            thread.as_deref(),
+                            hints.as_ref().ok(),
+                            continuation,
+                            ownership.as_deref(),
+                            &route.provider.id,
+                        )
+                    })
                 },
             ),
         );
@@ -716,12 +835,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .map(watch::Sender::subscribe),
             None,
         );
-        let deadline = tokio::time::Instant::now()
-            + Duration::from_secs(if stream_hint {
-                settings.first_byte_seconds
-            } else {
-                settings.total_seconds
-            });
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds);
         let response = tokio::time::timeout_at(deadline, route.client.request(upstream)).await;
         let mut response = match response {
             Ok(Ok(response)) => response,
@@ -752,6 +867,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             Err(_) => {
                 last_category = "FIRST_BYTE_TIMEOUT";
+                protocol.timeout("response_headers", settings.first_byte_seconds);
                 last_error = Some(admission.permits.report(
                     &gateway,
                     &route,
@@ -764,7 +880,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         phase: Some(crate::events::Phase::Headers),
                         local_code: Some("FIRST_BYTE_TIMEOUT".into()),
                         counted_failure: Some(true),
-                        ..Default::default()
+                        ..protocol.observation.error.clone()
                     },
                 ));
                 admission.permits.failure(&settings, None);
@@ -818,7 +934,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         },
                     );
                     if protocol.succeeded() {
-                        g.successful_response(&provider_for_tunnel);
+                        g.persist_success(&provider_for_tunnel).await;
                     }
                     permits.neutral(&cfg);
                 }
@@ -843,23 +959,24 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .and_then(circuit::retry_after);
             let (mut response_parts, body) = response.into_parts();
             clean_headers(&mut response_parts.headers, false);
-            let captured = tokio::time::timeout(
-                Duration::from_secs(settings.total_seconds),
-                Replay::capture(body, gateway.0.spool.path()),
+            let captured = Replay::capture_observed(
+                body,
+                gateway.0.spool.path(),
+                Some(Duration::from_secs(settings.idle_seconds)),
+                |bytes| protocol.feed(bytes),
             )
             .await;
+            if captured
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<std::io::Error>())
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::TimedOut)
+            {
+                protocol.timeout("error_body_idle", settings.idle_seconds);
+            }
             let decoded = match &captured {
-                Ok(Ok(body)) => {
+                Ok(body) => {
                     let encoded = body.prefix(2 * 1024 * 1024).await.unwrap_or_default();
-                    // Errors may include a large echoed body before usage. Walk
-                    // the captured spool with the bounded metadata observer;
-                    // the diagnostic prefix and the forwarded bytes stay separate.
-                    let mut observed = body.body();
-                    while let Some(Ok(frame)) = observed.frame().await {
-                        if let Some(bytes) = frame.data_ref() {
-                            protocol.feed(bytes);
-                        }
-                    }
                     protocol.finish(Some(status.as_u16()), "HTTP");
                     let encoding = response_parts
                         .headers
@@ -892,7 +1009,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 ordinary_attempts = ordinary_attempts.saturating_sub(1);
                 capacity_protected = true;
                 wait_budget.protect_capacity();
-                capacity_waited += started.elapsed();
             }
             let hard_rejection = super::upstream_error::permanent_rejection(&decoded);
             let retryable = compact_error
@@ -976,7 +1092,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 admission.permits.neutral(&settings);
             }
-            if let Ok(Ok(body)) = captured {
+            if let Ok(body) = captured {
                 protocol.finish(Some(status.as_u16()), "HTTP");
                 last = Some(Response::from_parts(response_parts, body.body()));
             } else {
@@ -996,7 +1112,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 // Release the failed attempt before registering a bounded wait.
                 // Keep the original spool, model, and response cursor untouched.
                 drop(admission);
-                let waiting_since = Instant::now();
+                let _waiting_since = Instant::now();
                 match gateway
                     .0
                     .admission
@@ -1016,7 +1132,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                     Err(_) => break,
                 }
-                capacity_waited += waiting_since.elapsed();
+
                 if gateway
                     .routing_ids(pinned.as_deref())
                     .contains(&route.provider.id)
@@ -1039,22 +1155,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.starts_with("text/event-stream"));
+            .is_some_and(|v| {
+                v.split(';')
+                    .next()
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+            });
         let (mut response_parts, mut body) = response.into_parts();
         clean_headers(&mut response_parts.headers, false);
-        let first_deadline = if stream {
-            tokio::time::Instant::now()
-                + Duration::from_secs(settings.first_byte_seconds).saturating_sub(started.elapsed())
-        } else {
-            deadline
-        };
+        let mut first_deadline = tokio::time::Instant::now()
+            + Duration::from_secs(settings.first_byte_seconds).saturating_sub(started.elapsed());
         // Buffer only the first complete SSE event (or bounded JSON); preserve
         // the original frames and encoding exactly, including comments/trailers.
         let json = response_parts
             .headers
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("json"));
+            .is_some_and(|v| v.to_ascii_lowercase().contains("json"));
         let mut prefix = Vec::new();
         let mut prefix_bytes = 0;
         let mut ended = false;
@@ -1066,8 +1182,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     if let Some(bytes) = frame.data_ref() {
                         prefix_bytes += bytes.len();
                         protocol.feed(bytes);
+                        if !bytes.is_empty() {
+                            first_deadline = tokio::time::Instant::now()
+                                + Duration::from_secs(settings.idle_seconds);
+                        }
                     }
-                    prefix.push(frame);
+                    prefix.push((frame, protocol.terminal().is_some()));
                     if body.is_end_stream() {
                         ended = true;
                     }
@@ -1085,7 +1205,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 result => {
                     failed = true;
-                    failure_kind = if result.is_err() {
+                    failure_kind = if result.is_err() && prefix_bytes != 0 {
+                        "STREAM_TIMEOUT"
+                    } else if result.is_err() {
                         "FIRST_BYTE_TIMEOUT"
                     } else {
                         "STREAM_INTERRUPTED"
@@ -1095,6 +1217,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
         }
         if failed {
+            if failure_kind.ends_with("TIMEOUT") {
+                protocol.timeout(
+                    if prefix_bytes == 0 {
+                        "first_byte"
+                    } else {
+                        "first_event_idle"
+                    },
+                    if prefix_bytes == 0 {
+                        settings.first_byte_seconds
+                    } else {
+                        settings.idle_seconds
+                    },
+                );
+            }
             protocol.finish(Some(status.as_u16()), failure_kind);
         }
         if failed && protocol.transport_failure() {
@@ -1110,7 +1246,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     phase: Some(crate::events::Phase::Response),
                     local_code: Some(failure_kind.into()),
                     counted_failure: Some(true),
-                    ..Default::default()
+                    ..protocol.observation.error.clone()
                 },
             ));
             admission.permits.failure(&settings, None);
@@ -1123,6 +1259,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Some(status.as_u16()),
                 if status.is_success() { "OK" } else { "HTTP" },
             );
+            if protocol.terminal().is_some() {
+                if let Some((_, terminal)) = prefix.last_mut() {
+                    *terminal = true;
+                }
+            }
         }
         let initial_model_error = if stream {
             protocol.observation.first_event_model_error == Some(true)
@@ -1160,7 +1301,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 ordinary_attempts = ordinary_attempts.saturating_sub(1);
                 capacity_protected = true;
                 wait_budget.protect_capacity();
-                capacity_waited += started.elapsed();
+
                 admission.permits.capacity_limited(&settings, cooldown);
                 capacity_pending = true;
                 capacity_sources.push(CapacitySource {
@@ -1203,7 +1344,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             // rejected attempt; if no alternative succeeds, return the original stream.
             let error_idle_seconds = settings.idle_seconds;
             let rejected = async_stream::try_stream! {
-                for frame in prefix {yield frame;}
+                for (frame, _) in prefix {yield frame;}
                 loop {
                     match tokio::time::timeout(Duration::from_secs(error_idle_seconds),body.frame()).await {
                         Ok(Some(frame))=>yield frame.map_err(|e|Box::new(e) as BoxError)?,
@@ -1223,9 +1364,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             };
             continue;
         }
-        let total_deadline = tokio::time::Instant::now()
-            + Duration::from_secs(settings.total_seconds)
-                .saturating_sub(began.elapsed().saturating_sub(capacity_waited));
         let Admission {
             mut permits, slot, ..
         } = admission;
@@ -1242,8 +1380,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Some(attempted.min(u32::MAX as usize) as u32),
             );
         }
-        let (sender, mut receiver) =
-            tokio::sync::mpsc::channel::<Result<hyper::body::Frame<Bytes>, BoxError>>(2);
+        let delivery = protocol.delivery();
+        let output_delivery = delivery.clone();
+        let activity = parts
+            .extensions
+            .get::<std::sync::Arc<super::wire_progress::Activity>>()
+            .cloned()
+            .unwrap_or_default();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<ForwardFrame>(2);
         let mut shutdown = gateway
             .0
             .inner
@@ -1266,56 +1410,39 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Some(status.as_u16()),
                 attempted,
             );
-            if protocol.terminal().is_some() {
-                slot.take();
-            }
             let mut disconnected = false;
-            for frame in prefix {
+            for (frame, terminal) in prefix {
                 tokio::select! {
                     biased;
                     _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); return; }
-                    result = sender.send(Ok(frame)) => { if result.is_err() { disconnected = true; break; } }
+                    result = send_frame(&sender, Ok(frame), terminal, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
                 }
+                protocol.commit_ownership();
             }
             if ended {
                 if disconnected {
                     protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
                 }
                 if protocol.succeeded() {
-                    g.successful_response(&route.provider);
+                    if protocol.delivered_success() {
+                        if let Some(slot) = &mut slot {
+                            slot.complete();
+                        }
+                    }
+                    g.persist_success(&route.provider).await;
                 }
                 return;
             }
-            let mut drain_deadline = None;
-            let mut drained = 0usize;
             loop {
-                if protocol.terminal().is_some() {
-                    // Completed generations release concurrency immediately; only
-                    // a small metadata tail may still be observed/forwarded.
-                    slot.take();
-                    drain_deadline.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + Duration::from_secs(2)
-                    });
-                    if drained >= 256 * 1024 {
-                        break;
-                    }
-                }
                 if disconnected || sender.is_closed() {
                     active.take();
-                    if protocol.terminal().is_none() {
-                        protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
-                        permits.neutral(&cfg);
-                        break;
-                    }
-                    disconnected = true;
+                    protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
+                    permits.neutral(&cfg);
+                    break;
                 }
-                let limit = drain_deadline.unwrap_or_else(|| {
-                    if stream {
-                        tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds)
-                    } else {
-                        total_deadline
-                    }
-                });
+                // Backpressure is awaited separately. Only time spent polling the
+                // upstream measures its silence; completed events do not cut off tails.
+                let limit = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
                 let next = tokio::select! {
                     biased;
                     _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
@@ -1325,9 +1452,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 match next {
                     Ok(Some(Ok(frame))) => {
                         if let Some(data) = frame.data_ref() {
-                            if drain_deadline.is_some() {
-                                drained = drained.saturating_add(data.len());
-                            }
                             protocol.feed(data);
                         }
                         let complete = body.is_end_stream();
@@ -1350,8 +1474,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             tokio::select! {
                                 biased;
                                 _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
-                                result = sender.send(Ok(frame)) => { disconnected = result.is_err(); }
+                                result = send_frame(&sender, Ok(frame), protocol.terminal().is_some(), &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
                             }
+                            protocol.commit_ownership();
                         }
                         if complete {
                             break;
@@ -1359,6 +1484,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                     Ok(None) => {
                         protocol.finish(Some(status.as_u16()), if neutral { "HTTP" } else { "OK" });
+                        // EOF may finish a JSON value or an SSE event without a
+                        // trailing newline. All preceding body frames were acknowledged.
+                        delivery.handed(0, protocol.terminal().is_some());
+                        protocol.commit_ownership();
                         break;
                     }
                     result => {
@@ -1367,11 +1496,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         } else {
                             "STREAM_INTERRUPTED"
                         };
+                        if result.is_err() {
+                            protocol.timeout("stream_idle", cfg.idle_seconds);
+                        }
                         protocol.finish(Some(status.as_u16()), category);
                         if !disconnected && protocol.transport_failure() {
                             tokio::select! {
                                 _ = stopping(&mut shutdown) => {}
-                                _ = sender.send(Err(std::io::Error::other("上游流中断").into())) => {}
+                                _ = send_frame(&sender, Err(std::io::Error::other("上游流中断").into()), false, &activity, cfg.idle_seconds) => {}
                             }
                         }
                         break;
@@ -1393,10 +1525,24 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 attempted,
             );
             if protocol.succeeded() {
-                g.successful_response(&route.provider);
+                if protocol.delivered_success() {
+                    if let Some(slot) = &mut slot {
+                        slot.complete();
+                    }
+                }
+                g.persist_success(&route.provider).await;
             }
         });
-        let output = async_stream::stream! { while let Some(frame) = receiver.recv().await { yield frame; } };
+        let output = async_stream::stream! {
+            let mut guard = DeliveryGuard { delivery: output_delivery.clone(), complete: false };
+            while let Some((frame, terminal, ack)) = receiver.recv().await {
+                let bytes = frame.as_ref().ok().and_then(|f| f.data_ref()).map_or(0, Bytes::len);
+                output_delivery.handed(bytes, terminal);
+                let _ = ack.send(());
+                yield frame;
+            }
+            guard.complete = true;
+        };
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }
     gateway.record_final(
@@ -1450,6 +1596,7 @@ async fn stopping(stop: &mut Option<watch::Receiver<bool>>) {
 }
 fn remember(protocol: &super::protocol::Protocol, g: &Gateway, route: &Route, model: Option<&str>) {
     if let Some(id) = &protocol.observation.response_id {
+        g.0.endpoints.remember(&route.provider, id);
         g.remember_model(
             id,
             &route.provider.id,

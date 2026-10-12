@@ -1195,27 +1195,43 @@ select:focus-visible {
   color: var(--muted);
 }
 .quota-area {
-  margin: 8px 0 10px 34px;
-  font-size: 12px;
+  min-width: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 .quota-summary {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding-bottom: 16px;
 }
-.quota-summary > span,
-.quota-summary time {
+.quota-freshness {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--muted);
+  font-size: 12px;
 }
-.quota-summary strong {
-  font-weight: 550;
+.quota-headline {
+  color: var(--ink);
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: -.4px;
+  overflow-wrap: anywhere;
 }
 .quota-summary .icon-button {
   width: 26px;
   height: 26px;
 }
-.quota-summary .quota-warning,
+.quota-notices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.quota-area .quota-warning,
 .quota-error {
   color: var(--warning);
 }
@@ -1223,25 +1239,98 @@ select:focus-visible {
   margin: 4px 0;
   overflow-wrap: anywhere;
 }
-.quota-details {
-  margin-top: 3px;
+.quota-subscription-detail {
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.quota-subscription-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 10px;
+}
+.quota-subscription-heading strong {
+  font-size: 14px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.quota-subscription-heading time {
+  margin-left: auto;
+  font-size: 12px;
   color: var(--muted);
 }
-.quota-details summary {
+.quota-plan-table,
+.quota-usage table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.quota-plan-table th,
+.quota-plan-table td,
+.quota-usage th,
+.quota-usage td {
+  padding: 6px 0 6px 10px;
+  text-align: right;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.quota-plan-table th:first-child,
+.quota-usage th:first-child {
+  padding-left: 0;
+  text-align: left;
+}
+.quota-plan-table thead,
+.quota-usage thead,
+.quota-plan-table tbody th,
+.quota-usage tbody th,
+.quota-separator,
+.quota-key-expiry {
+  color: var(--muted);
+}
+.quota-plan-table thead,
+.quota-usage thead,
+.quota-unit {
+  font-size: 12px;
+}
+.quota-unit {
+  margin-left: 6px;
+}
+.quota-plan-table td {
+  white-space: nowrap;
+}
+.quota-plan-table td:nth-child(2) {
+  color: var(--ink);
+  font-weight: 550;
+}
+.quota-plan-table tbody th {
+  max-width: 140px;
+  overflow-wrap: anywhere;
+}
+.quota-plan-table tbody time {
+  display: block;
+  font-size: 12px;
+}
+.quota-key-expiry {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 8px 0;
+}
+.quota-usage {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  color: var(--muted);
+}
+.quota-usage summary {
   cursor: pointer;
   width: max-content;
 }
-.quota-details > div {
-  margin-top: 7px;
-}
-.quota-plan {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-}
-.quota-plan strong {
+.quota-usage td {
   color: var(--ink);
-  font-weight: 500;
+}
+.quota-usage table {
+  margin-top: 8px;
 }
 .quota-spin {
   animation: quota-spin 1.2s linear infinite;
@@ -1672,9 +1761,6 @@ select:focus-visible {
 }
 .account-plan { flex-shrink: 0; }
 .quota-subscription { max-width: 90px; }
-.quota-subscription-detail { padding: 8px 0; border-bottom: 1px solid var(--line); }
-.quota-subscription-heading { display: flex; align-items: center; gap: 10px; }
-.quota-subscription-heading strong { overflow-wrap: anywhere; }
 .provider-title {
   display: inline-flex;
   align-items: center;
@@ -1770,6 +1856,10 @@ select:focus-visible {
   font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
+}
+.provider-handoff {
+  display: block;
+  margin-top: 4px;
 }
 .row-menu > summary {
   display: flex;
@@ -2003,7 +2093,7 @@ select:focus-visible {
   .provider-secondary {
     gap: 10px;
   }
-  .provider-binding {
+  .provider-binding:not(.provider-handoff) {
     display: none;
   }
 }
@@ -2116,6 +2206,15 @@ select:focus-visible {
   gap: 8px;
   margin-top: 12px;
 }
+.concurrency-breakdown {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 12px;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+.concurrency-breakdown dt { color: var(--muted); }
+.concurrency-breakdown dd { margin: 0; font-variant-numeric: tabular-nums; }
 .concurrency-actions button {
   min-height: 28px;
   padding: 4px 10px;
@@ -2518,3 +2617,29 @@ select:focus-visible {
 .claude-profile .form-error { margin: 0; }
 .claude-profile-warning { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .claude-profile-warning ul { padding-left: 20px; }
+/* Endpoint routing stays inside the existing compact provider dialog. */
+.endpoint-toolbar, .endpoint-primary, .endpoint-row-actions, .endpoint-preferred {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.endpoint-toolbar { justify-content: space-between; }
+.endpoint-toolbar strong { font-size: 13px; font-weight: 600; }
+.endpoint-primary { padding: 10px 0; }
+.endpoint-primary > span:first-child, .endpoint-preferred > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.endpoint-list { display: grid; gap: 12px; }
+.endpoint-row { display: grid; gap: 4px; min-width: 0; }
+.endpoint-row input { min-width: 0; width: 100%; }
+.endpoint-row-actions { justify-content: flex-end; }
+.endpoint-result { display: inline-flex; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 12px; }
+.endpoint-result > span { color: var(--muted); }
+.endpoint-row-actions > .endpoint-result { margin-right: auto; }
+.endpoint-preferred { margin-top: 12px; font-size: 12px; }
+.endpoint-form .text-button { display: inline-flex; align-items: center; gap: 5px; }

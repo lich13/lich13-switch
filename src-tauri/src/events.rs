@@ -40,11 +40,13 @@ pub enum Reason {
     StartupRecovery,
     AccountSync,
     ProtocolError,
+    ThreadHandoff,
 }
 impl Reason {
     pub fn notifiable(self, action: Action) -> bool {
         match self {
-            Self::ModelUnavailable
+            Self::ThreadHandoff
+            | Self::ModelUnavailable
             | Self::Authentication
             | Self::CircuitOpen
             | Self::FailoverExhausted
@@ -76,6 +78,7 @@ impl Reason {
             Self::StartupRecovery => "启动恢复失败",
             Self::AccountSync => "账号同步异常",
             Self::ProtocolError => "上游协议返回错误",
+            Self::ThreadHandoff => "线程已接管",
         }
     }
     pub fn code(self) -> ErrorCode {
@@ -94,6 +97,7 @@ impl Reason {
             Self::StartupRecovery => ErrorCode::StartupRecoveryFailed,
             Self::AccountSync => ErrorCode::AccountSyncError,
             Self::ProtocolError => ErrorCode::ProtocolError,
+            Self::ThreadHandoff => ErrorCode::ThreadHandoff,
         }
     }
 }
@@ -114,6 +118,7 @@ pub enum ErrorCode {
     StartupRecoveryFailed,
     AccountSyncError,
     ProtocolError,
+    ThreadHandoff,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -171,6 +176,8 @@ impl StatusGroup {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Record {
+    #[serde(skip)]
+    pub notification_message: Option<String>,
     pub id: String,
     pub first_at: u64,
     pub last_at: u64,
@@ -202,6 +209,7 @@ impl Record {
     ) -> Self {
         let t = now();
         Self {
+            notification_message: None,
             id: uuid::Uuid::new_v4().to_string(),
             first_at: t,
             last_at: t,
@@ -211,7 +219,10 @@ impl Record {
             model: model.and_then(safe_model),
             reason,
             action,
-            level: if matches!(reason, Reason::Recovered | Reason::Failover) {
+            level: if matches!(
+                reason,
+                Reason::Recovered | Reason::Failover | Reason::ThreadHandoff
+            ) {
                 Level::Info
             } else if matches!(
                 reason,
@@ -229,6 +240,9 @@ impl Record {
         }
     }
     pub fn notification(&self) -> String {
+        if let Some(message) = &self.notification_message {
+            return message.clone();
+        }
         format!(
             "{} · {}{}：{}；{}",
             self.client_id.map(ClientId::name).unwrap_or("应用"),
@@ -245,13 +259,17 @@ impl Record {
         )
     }
     fn same(&self, other: &Self) -> bool {
+        let mut details = self.details.clone();
+        let mut other_details = other.details.clone();
+        details.last_progress_ms = None;
+        other_details.last_progress_ms = None;
         self.client_id == other.client_id
             && self.provider_id == other.provider_id
             && self.model == other.model
             && self.reason == other.reason
             && self.status == other.status
             && self.action == other.action
-            && self.details == other.details
+            && details == other_details
     }
 }
 fn safe_id(s: &str) -> Option<String> {

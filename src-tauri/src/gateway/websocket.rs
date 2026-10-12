@@ -25,13 +25,15 @@ use yawc::{Frame, OpCode, Options, WebSocket};
 type Failure = (u16, &'static str);
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 const KEEPALIVE: Duration = Duration::from_secs(20);
+// Only bounds late usage observation after a settled turn. It never closes
+// the upstream connection or limits forwarding / generation progress.
+const USAGE_TAIL: Duration = Duration::from_secs(2);
 // Internal control result, consumed before writing a close frame.
 const TURN_CANCELLED: Failure = (0, "turn cancelled before output");
 fn options() -> Options {
     Options::default()
         .with_balanced_compression()
         .with_limits(MAX_MESSAGE, MAX_MESSAGE)
-        .with_fragment_timeout(Duration::from_secs(120))
         .with_utf8()
 }
 struct Outgoing {
@@ -43,12 +45,16 @@ struct Peer {
     outgoing: mpsc::Sender<Outgoing>,
     closed: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    activity: std::sync::Arc<super::wire_progress::Activity>,
 }
 impl Peer {
     fn new<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         socket: WebSocket<S>,
         keepalive: Option<Duration>,
+        activity: std::sync::Arc<super::wire_progress::Activity>,
+        idle_seconds: u64,
     ) -> Self {
+        activity.websocket();
         let (mut sink, mut stream) = socket.split();
         let (tx, incoming) = mpsc::channel(2);
         let (outgoing, mut rx) = mpsc::channel::<Outgoing>(1);
@@ -70,13 +76,14 @@ impl Peer {
             }
             let _ = closed_tx.send(true);
         });
+        let writer_activity = activity.clone();
         let writer = tokio::spawn(async move {
             loop {
                 let heartbeat = tokio::time::sleep(keepalive.unwrap_or(KEEPALIVE));
                 let outgoing = tokio::select! {
                     outgoing = rx.recv() => outgoing,
                     _ = heartbeat, if keepalive.is_some() => {
-                        if !matches!(tokio::time::timeout(Duration::from_secs(5), sink.send(Frame::ping(ping.clone()))).await, Ok(Ok(()))) {
+                        if !matches!(super::wire_progress::writing(sink.send(Frame::ping(ping.clone())), &writer_activity, idle_seconds).await, Ok(Ok(()))) {
                             break;
                         }
                         continue;
@@ -86,7 +93,8 @@ impl Peer {
                     break;
                 };
                 let ok = matches!(
-                    tokio::time::timeout(Duration::from_secs(120), sink.send(frame)).await,
+                    super::wire_progress::writing(sink.send(frame), &writer_activity, idle_seconds)
+                        .await,
                     Ok(Ok(()))
                 );
                 let _ = ack.send(ok);
@@ -101,18 +109,36 @@ impl Peer {
             outgoing,
             closed,
             tasks: vec![reader, writer],
+            activity,
         }
     }
     async fn send(&self, frame: Frame) -> Result<(), Failure> {
-        let (ack, rx) = oneshot::channel();
-        self.outgoing
-            .send(Outgoing { frame, ack })
-            .await
-            .map_err(|_| (1011, "connection closed"))?;
-        if rx.await.unwrap_or(false) {
-            Ok(())
-        } else {
-            Err((1011, "connection write failed"))
+        let closing = frame.opcode() == OpCode::Close;
+        let mut closed = self.closed.clone();
+        let sending = async {
+            let (ack, rx) = oneshot::channel();
+            self.outgoing
+                .send(Outgoing { frame, ack })
+                .await
+                .map_err(|_| (1011, "connection closed"))?;
+            if rx.await.unwrap_or(false) {
+                Ok(())
+            } else {
+                Err((1011, "connection write failed"))
+            }
+        };
+        // A close reply may still be written after the reader observes Close.
+        // Other backpressured writes must stop as soon as the peer disconnects.
+        if closing {
+            return sending.await;
+        }
+        if *closed.borrow() {
+            return Err((1011, "connection closed"));
+        }
+        tokio::select! {
+            biased;
+            result = sending => result,
+            _ = closed.changed() => Err((1011, "connection closed")),
         }
     }
     async fn close(&self, code: u16, reason: &str) {
@@ -186,6 +212,7 @@ impl AttemptFailure {
                 self.details.local_code.as_deref(),
                 Some(
                     "CONNECT_TIMEOUT"
+                        | "WS_HANDSHAKE_TIMEOUT"
                         | "TLS_HANDSHAKE_FAILED"
                         | "CONNECTION_FAILED"
                         | "FIRST_BYTE_TIMEOUT"
@@ -296,6 +323,11 @@ pub(super) fn accept(
             "WebSocket 握手必须使用 GET",
         );
     }
+    let activity = request
+        .extensions()
+        .get::<std::sync::Arc<super::wire_progress::Activity>>()
+        .cloned()
+        .unwrap_or_default();
     let headers = request.headers().clone();
     let uri = request.uri().clone();
     let upgraded = WebSocket::upgrade_with_options(&mut request, options());
@@ -318,6 +350,8 @@ pub(super) fn accept(
         let mut client = Peer::new(
             socket,
             (gateway.0.client == super::ClientId::Codex).then_some(KEEPALIVE),
+            activity,
+            settings.idle_seconds,
         );
         let Some(mut stop) = stop else {
             return;
@@ -448,8 +482,10 @@ async fn upstream_native(
             .parse()
             .unwrap(),
     );
+    // Establishing the WebSocket is a connection operation, before a generation
+    // frame has been sent. Its deadline must not consume the response budget.
     let mut response = match tokio::time::timeout(
-        Duration::from_secs(settings.first_byte_seconds),
+        Duration::from_secs(settings.connect_seconds),
         route.client.request(request),
     )
     .await
@@ -476,7 +512,12 @@ async fn upstream_native(
                 model_unavailable: false,
                 context_incompatible: false,
                 model_payload: None,
-                details: local_failure("FIRST_BYTE_TIMEOUT"),
+                details: Box::new(crate::events::Details {
+                    local_code: Some("WS_HANDSHAKE_TIMEOUT".into()),
+                    timeout_phase: Some("ws_handshake".into()),
+                    timeout_seconds: Some(settings.connect_seconds),
+                    ..Default::default()
+                }),
             })
         }
     };
@@ -493,12 +534,7 @@ async fn upstream_native(
             .and_then(|h| h.to_str().ok())
             .unwrap_or("identity")
             .to_owned();
-        let prefix = tokio::time::timeout(
-            Duration::from_secs(settings.first_byte_seconds),
-            response_prefix(response.into_body(), 128 * 1024),
-        )
-        .await
-        .unwrap_or_default();
+        let prefix = response_prefix(response.into_body(), 128 * 1024, settings).await;
         let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
         let model_unavailable = super::upstream_error::model_http(status.as_u16(), &decoded);
         let capacity = !model_unavailable
@@ -557,8 +593,10 @@ async fn upstream_native(
             model_payload: None,
             details: local_failure("WS_UPGRADE_FAILED"),
         })?;
+    let activity = std::sync::Arc::new(super::wire_progress::Activity::default());
+    activity.websocket();
     let socket = WebSocket::from_stream_with_extensions(
-        TokioIo::new(io),
+        super::wire_progress::Tracked::new(TokioIo::new(io), activity.clone()),
         yawc::Role::Client,
         extensions.as_deref(),
         options(),
@@ -576,17 +614,24 @@ async fn upstream_native(
     Ok(Peer::new(
         socket,
         (route.client_id == super::ClientId::Codex).then_some(KEEPALIVE),
+        activity,
+        settings.idle_seconds,
     ))
 }
-async fn response_prefix(mut body: Incoming, limit: usize) -> Vec<u8> {
+async fn response_prefix(mut body: Incoming, limit: usize, settings: &Settings) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(limit.min(4096));
+    let mut deadline =
+        tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds);
     while bytes.len() < limit {
-        let Some(Ok(frame)) = body.frame().await else {
+        let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, body.frame()).await else {
             break;
         };
         if let Ok(data) = frame.into_data() {
             let count = data.len().min(limit - bytes.len());
             bytes.extend_from_slice(&data[..count]);
+            if count != 0 {
+                deadline = tokio::time::Instant::now() + Duration::from_secs(settings.idle_seconds);
+            }
         }
     }
     bytes
@@ -729,29 +774,6 @@ async fn session(
         }
     }
 }
-async fn drain_completed(
-    upstream: &mut Upstream,
-    protocol: &mut Option<super::protocol::Protocol>,
-) {
-    let Some(protocol) = protocol.as_mut().filter(|p| p.succeeded()) else {
-        return;
-    };
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let mut bytes = 0usize;
-    while bytes < 256 * 1024 {
-        let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, next_upstream(upstream)).await
-        else {
-            break;
-        };
-        if frame.opcode() == OpCode::Close {
-            break;
-        }
-        bytes = bytes.saturating_add(frame.payload().len());
-        if let Some(value) = value(&frame) {
-            protocol.value(&value);
-        }
-    }
-}
 // The terminal is settled once before reconnecting. A received application
 // error remains neutral even when the peer closes immediately afterwards.
 #[allow(clippy::too_many_arguments)]
@@ -775,6 +797,7 @@ fn disconnect_turn(
     };
     let mut observed = protocol.take();
     if let Some(u) = &mut observed {
+        u.websocket_close(close.and_then(close_code));
         u.finish(Some(101), category);
     }
     let terminal = observed.as_ref().and_then(|u| u.terminal());
@@ -847,15 +870,26 @@ async fn session_once(
     uri: Uri,
     next_turn: &mut Option<Frame>,
 ) -> Result<(), Failure> {
-    let first_deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
+    let first_started = tokio::time::Instant::now();
+    let mut first_deadline = first_started + Duration::from_secs(cfg.first_byte_seconds);
     let first = if let Some(frame) = next_turn.take() {
         frame
     } else {
         loop {
-            let frame = tokio::time::timeout_at(first_deadline, client.incoming.recv())
-                .await
-                .map_err(|_| (1008, "missing first response.create"))?
-                .ok_or((1000, "client closed"))?;
+            let frame = match tokio::time::timeout_at(first_deadline, client.incoming.recv()).await
+            {
+                Ok(frame) => frame.ok_or((1000, "client closed"))?,
+                Err(_) => {
+                    if let Some(at) = client.activity.read_at().filter(|at| *at >= first_started) {
+                        let next = at + Duration::from_secs(cfg.idle_seconds);
+                        if next > tokio::time::Instant::now() {
+                            first_deadline = next;
+                            continue;
+                        }
+                    }
+                    return Err((1008, "missing first response.create"));
+                }
+            };
             if frame.opcode() == OpCode::Close {
                 return Ok(());
             }
@@ -872,6 +906,7 @@ async fn session_once(
             break frame;
         }
     };
+    let mut turn_received_at = crate::usage::model::now();
     let mut pinned = manual.then(|| ids.first().cloned()).flatten();
     let mut unknown_affinity = false;
     if let Some(previous) = value(&first).and_then(|v| {
@@ -938,6 +973,11 @@ async fn session_once(
             None
         };
     let mut budget = Budget::new(cfg.queue_seconds);
+    budget.track(
+        &g.0.admission,
+        ownership.as_deref(),
+        cfg.thread_idle_release_seconds,
+    );
     if pinned.is_some() || unknown_affinity {
         budget.pin_provider();
     }
@@ -1113,6 +1153,20 @@ async fn session_once(
             }
             continue;
         }
+        admission.route = g
+            .endpoint_route(
+                admission.route.clone(),
+                conversation.as_deref(),
+                first_hints
+                    .as_ref()
+                    .and_then(|h| h.previous_response_id.as_deref()),
+                ownership
+                    .as_ref()
+                    .is_some_and(|lease| lease.handoff || lease.establishing())
+                    || first_hints.as_ref().is_some_and(|h| h.first_turn),
+            )
+            .await
+            .map_err(|_| (1013, "ENDPOINT_AFFINITY"))?;
         if let Err(reason) = admission.commit_rpm() {
             return Err(rejected(reason));
         }
@@ -1129,6 +1183,9 @@ async fn session_once(
         previous_provider = Some(admission.route.provider.id.clone());
         let mut attempt_protocol = super::protocol::Protocol::new(true);
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
+        attempt_protocol.attach_thread(budget.thread.clone());
+        attempt_protocol.request_headers(&headers);
+        attempt_protocol.request_received(turn_received_at);
         if let Some(trace) = &usage_trace {
             attempt_protocol.attach_usage(trace.attempt(
                 &admission.route.provider.id,
@@ -1139,13 +1196,15 @@ async fn session_once(
         attempt_protocol.context(
             conversation.clone(),
             (!manual).then(|| {
-                super::compaction::decision(
-                    conversation.as_deref(),
-                    first_hints.as_ref(),
-                    pinned.is_some() || unknown_affinity,
-                    ownership.as_deref(),
-                    &admission.route.provider.id,
-                )
+                admission.handoff_wait.unwrap_or_else(|| {
+                    super::compaction::decision(
+                        conversation.as_deref(),
+                        first_hints.as_ref(),
+                        pinned.is_some() || unknown_affinity,
+                        ownership.as_deref(),
+                        &admission.route.provider.id,
+                    )
+                })
             }),
         );
         attempt_protocol.watch_lifecycle(
@@ -1327,6 +1386,7 @@ async fn session_once(
         }
     };
     let mut route = admission.route.clone();
+    let mut thread_request = budget.thread.take();
     let mut turn = Some(admission);
     let mut replay_frame = first.clone();
     let mut retry_pending = false;
@@ -1335,10 +1395,11 @@ async fn session_once(
     let mut previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)> = None;
     let mut protocol = Some(initial_protocol);
     let mut pending: Option<Frame> = None;
+    let mut pending_received_at = turn_received_at;
     let mut confirmed_model: Option<String> = None;
     let mut received = false;
     let mut terminal_error = false;
-    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
+    let mut receive_started = tokio::time::Instant::now();
     if let Upstream::Native(peer) = &mut upstream {
         if let Err(e) = peer.send(first).await {
             retry_pending = disconnect_turn(
@@ -1362,6 +1423,9 @@ async fn session_once(
             upstream = Upstream::Disconnected;
         }
     }
+    // Upload progress has its own deadline. Start response waiting only after
+    // the first frame has been handed to the upstream socket.
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
     loop {
         if retry_pending {
             let delay = if retry_immediately {
@@ -1385,6 +1449,7 @@ async fn session_once(
             match waited {
                 Err(TURN_CANCELLED) => {
                     retry_pending = false;
+                    thread_request = None;
                     protocol = None;
                     usage_trace = None;
                     cancellation(client).await?;
@@ -1400,6 +1465,11 @@ async fn session_once(
                 Some(&route.provider.id),
             )?;
             let mut budget = Budget::new(cfg.queue_seconds);
+            budget.thread = thread_request.clone();
+            budget.handoff_owner = ownership
+                .as_ref()
+                .filter(|lease| lease.handoff)
+                .and_then(|lease| lease.owner.clone());
             budget.pin_provider();
             if capacity_protected {
                 budget.protect_capacity();
@@ -1418,6 +1488,8 @@ async fn session_once(
             let mut admission = match acquired {
                 Err(TURN_CANCELLED) => {
                     retry_pending = false;
+                    thread_request = None;
+                    protocol = None;
                     usage_trace = None;
                     cancellation(client).await?;
                     continue;
@@ -1429,6 +1501,9 @@ async fn session_once(
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
             next.attach_ownership(ownership.clone(), &route.provider.id);
+            next.attach_thread(thread_request.clone());
+            next.request_headers(&headers);
+            next.request_received(turn_received_at);
             if let Some(trace) = &usage_trace {
                 next.attach_usage(trace.attempt(&route.provider.id, true, "websocket"));
             }
@@ -1545,6 +1620,7 @@ async fn session_once(
             }
             retry_pending = false;
             retry_capacity = false;
+            receive_started = tokio::time::Instant::now();
             if let Err(error) = send_to_upstream(&mut upstream, replay_frame.clone()).await {
                 retry_pending = disconnect_turn(
                     g,
@@ -1572,11 +1648,9 @@ async fn session_once(
         }
         if turn.is_none() {
             if let Some(frame) = pending.take() {
+                turn_received_at = pending_received_at;
                 if let Some(previous) = protocol.take().filter(|p| p.succeeded()) {
-                    previous_usage = Some((
-                        previous,
-                        tokio::time::Instant::now() + Duration::from_secs(2),
-                    ));
+                    previous_usage = Some((previous, tokio::time::Instant::now() + USAGE_TAIL));
                 }
                 let model = turn_model(
                     g,
@@ -1652,6 +1726,12 @@ async fn session_once(
                 }
                 tail_deadline = None;
                 let mut budget = Budget::new(cfg.queue_seconds);
+                budget.track(
+                    &g.0.admission,
+                    ownership.as_deref(),
+                    cfg.thread_idle_release_seconds,
+                );
+                thread_request = budget.thread.clone();
                 if let Some(lease) = &ownership {
                     let (intake, owner) = lease.admission_policy();
                     budget.set_intake(intake, owner);
@@ -1705,6 +1785,9 @@ async fn session_once(
                 );
                 let mut next_protocol = super::protocol::Protocol::new(true);
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
+                next_protocol.attach_thread(thread_request.clone());
+                next_protocol.request_headers(&headers);
+                next_protocol.request_received(turn_received_at);
                 if let Some(trace) = &usage_trace {
                     next_protocol.attach_usage(trace.attempt(
                         &route.provider.id,
@@ -1738,8 +1821,7 @@ async fn session_once(
                 next_protocol.websocket_status(101);
                 protocol = Some(next_protocol);
                 received = false;
-                deadline =
-                    tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
+                receive_started = tokio::time::Instant::now();
                 {
                     if matches!(upstream, Upstream::Disconnected) {
                         match while_connecting(client, upstream_native(&route, &uri, &headers, cfg))
@@ -1832,6 +1914,8 @@ async fn session_once(
                         continue;
                     }
                 }
+                deadline =
+                    tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
             }
         }
         tokio::select! {
@@ -1866,6 +1950,10 @@ async fn session_once(
                     return Err((1013, "upstream disconnected before completion"));
                 }
                 let frame = event.unwrap()?;
+                if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
+                    if let Some(u) = &mut protocol { u.websocket_progress(frame.payload().len()); }
+                }
+                let mut settled_turn = None;
                 if let Some(v) = value(&frame) {
                     let mut observed = super::protocol::Observation::default();
                     observed.value(&v);
@@ -1873,12 +1961,15 @@ async fn session_once(
                     let belongs_to_previous = protocol.as_ref().and_then(|u| u.observation.response_id.as_ref()).map_or(usage_only, |id| Some(id) != observed.response_id.as_ref());
                     if let Some((previous, _)) = previous_usage.as_mut().filter(|(previous, _)| belongs_to_previous && observed.response_id.is_some() && previous.observation.response_id == observed.response_id) {
                         previous.value(&v);
+                        let sending = tokio::time::Instant::now();
                         client.send(frame).await?;
+                        deadline += sending.elapsed();
                         continue;
                     }
                 }
                 if turn.is_some() && !received && ownership.as_ref().is_some_and(|lease| lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)) && value(&frame).is_some_and(|v| super::compaction::incompatible(&v)) {
                     if let Some(old) = ownership.as_ref().and_then(|lease| lease.owner.as_ref()).and_then(|id| g.route(id)).filter(|old| old.provider.queued && Requirement::model(current_model.as_deref()).allows(old.provider.allowed_models.as_deref())) {
+                        let old = g.endpoint_route(old, conversation.as_deref(), None, false).await.map_err(|_| (1013, "ENDPOINT_AFFINITY"))?;
                         if ordinary_attempts <= cfg.max_retries {
                             if let Some(mut admission) = turn.take() {
                                 let details = value(&frame).map(|v| super::upstream_error::details_value(&v, false)).unwrap_or_default();
@@ -1912,8 +2003,8 @@ async fn session_once(
                     deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
                 }
                 if let Some(v) = value(&frame) {
-                    if let Some(u)=&mut protocol {u.value(&v);}
-                    if let Some(id) = v.pointer("/response/id").or_else(|| v.get("response_id")).and_then(|v| v.as_str()) { g.remember_model(id, &route.provider.id, current_model.as_deref()); }
+                    if let Some(u)=&mut protocol { u.value(&v); }
+                    if let Some(id) = v.pointer("/response/id").or_else(|| v.get("response_id")).and_then(|v| v.as_str()) { g.0.endpoints.remember(&route.provider, id); g.remember_model(id, &route.provider.id, current_model.as_deref()); }
                     let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
                     if protocol.as_ref().is_some_and(|u| u.terminal().is_some()) || matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error") {
@@ -1927,26 +2018,39 @@ async fn session_once(
                                 } else {
                                     forward::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
                                 }
-                                if u.succeeded() { g.successful_response(&route.provider); }
-                            }
 
+                            }
+                            settled_turn = Some(admission);
                         }
-                        if tail_deadline.is_none() { tail_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(2)); }
+                        if tail_deadline.is_none() { tail_deadline = Some(tokio::time::Instant::now() + USAGE_TAIL); }
                     }
                 }
+                let frame_bytes = frame.payload().len();
+                let sending = tokio::time::Instant::now();
                 if let Err(error) = client.send(frame).await {
                     if let Some(u) = &mut protocol { u.finish(None, "CLIENT_DISCONNECTED"); }
-                    if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; }
+
                     return Err(error);
+                }
+                // Do not charge time blocked by the downstream reader to the
+                // upstream silence timer. Peer::send has its own progress limit.
+                deadline += sending.elapsed();
+                if let Some(u) = &mut protocol {
+                    u.delivery().handed(frame_bytes, u.terminal().is_some());
+                    u.commit_ownership();
+                    if u.delivered_success() {
+                        if let Some(admission) = &mut settled_turn {
+                            admission.slot.complete();
+                            g.persist_success(&route.provider).await;
+                        }
+                    }
+                    if turn.is_none() { u.attach_thread(None); thread_request = None; }
                 }
             },
             frame = client.incoming.recv() => {
                 let Some(frame) = frame else {
                     if let Some(u) = &mut protocol {
                         u.finish(None, "CLIENT_DISCONNECTED");
-                    }
-                    if turn.is_none() {
-                        drain_completed(&mut upstream, &mut protocol).await;
                     }
                     return Ok(());
                 };
@@ -1957,7 +2061,7 @@ async fn session_once(
                     continue;
                 } else if closing {
                     if let Some(u) = &mut protocol { u.finish(None, "CLIENT_DISCONNECTED"); }
-                    if turn.is_none() { drain_completed(&mut upstream, &mut protocol).await; return Ok(()); }
+                    if turn.is_none() { return Ok(()); }
                     if let Upstream::Native(peer) = &upstream { peer.send(frame.clone()).await?; }
                     if let Some(mut admission) = turn.take() {
                         if let Some(mut u) = protocol.take() {
@@ -1968,6 +2072,7 @@ async fn session_once(
                     return Ok(());
                 } else if creates(&frame) {
                     if pending.is_some() { return Err((1013, "too many pending turns")); }
+                    pending_received_at = crate::usage::model::now();
                     pending = Some(frame);
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                     if e.0 == 1008 {
@@ -1987,14 +2092,30 @@ async fn session_once(
                 if let Some(u) = &mut protocol {
                     u.finish(None, "CLIENT_DISCONNECTED");
                 }
-                if turn.is_none() {
-                    drain_completed(&mut upstream, &mut protocol).await;
-                }
                 return Ok(());
             },
             _ = tokio::time::sleep_until(deadline), if turn.is_some() => {
+                let mut partial_progress = None;
+                if let Upstream::Native(peer) = &upstream {
+                    if let Some(at) = peer.activity.read_at().filter(|at| *at >= receive_started) {
+                        partial_progress = Some(at);
+                        let next = at + Duration::from_secs(cfg.idle_seconds);
+                        if next > tokio::time::Instant::now() { deadline = next; continue; }
+                    }
+                }
+                let body_started = received || partial_progress.is_some();
+                if let Some(u) = &mut protocol {
+                    let phase = if body_started { "ws_idle" } else { "ws_first_byte" };
+                    let seconds = if body_started { cfg.idle_seconds } else { cfg.first_byte_seconds };
+                    if let Some(at) = partial_progress {
+                        u.timeout_after(phase, seconds, at.elapsed());
+                    } else {
+                        u.timeout(phase, seconds);
+                    }
+                }
+
                 let native = matches!(upstream, Upstream::Native(_));
-                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if received { "STREAM_TIMEOUT" } else { "FIRST_BYTE_TIMEOUT" });
+                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if body_started { "STREAM_TIMEOUT" } else { "FIRST_BYTE_TIMEOUT" });
                 upstream = Upstream::Disconnected;
                 if retry_pending { continue; }
                 return Err((1013, "upstream timeout"));
@@ -2011,7 +2132,12 @@ mod tests {
     async fn keepalive_preserves_control_frames_and_does_not_leak_its_own_pong() {
         let (a, b) = tokio::io::duplex(4096);
         let peer = WebSocket::from_stream(a, yawc::Role::Server, Options::default()).unwrap();
-        let mut peer = Peer::new(peer, Some(Duration::from_millis(20)));
+        let mut peer = Peer::new(
+            peer,
+            Some(Duration::from_millis(20)),
+            Default::default(),
+            600,
+        );
         let mut client = WebSocket::from_stream(b, yawc::Role::Client, Options::default()).unwrap();
         let ping = tokio::time::timeout(Duration::from_secs(1), client.next())
             .await

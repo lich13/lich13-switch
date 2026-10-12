@@ -61,7 +61,11 @@ fn record(id: &str, source: &str, response_id: &str, price: Option<PriceSnapshot
 }
 
 fn capacity_record(index: u64, codex_count: u64, shared_basis: &Value) -> Record {
-    let source = if index < codex_count { "codex" } else { "proxy" };
+    let source = if index < codex_count {
+        "codex"
+    } else {
+        "proxy"
+    };
     let operation = match index % 10 {
         8 => Operation::WebSearch,
         9 => Operation::Compaction,
@@ -185,7 +189,9 @@ fn source_storage_profiles(database: &Connection) -> BTreeMap<String, SourceStor
         .prepare("SELECT source,body FROM records ORDER BY source,id")
         .unwrap();
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .unwrap();
     let mut profiles: BTreeMap<String, SourceStorageProfile> = BTreeMap::new();
     for row in rows {
@@ -232,7 +238,9 @@ fn dbstat_storage_profile(database: &Connection) -> Option<PageStorageProfile> {
         .prepare("SELECT name,sum(pgsize) FROM dbstat GROUP BY name")
         .ok()?;
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
         .ok()?;
     let mut profile = PageStorageProfile::default();
     for row in rows {
@@ -377,13 +385,21 @@ fn dictionary_compression_profile() -> (u64, u64, u64) {
         let compressed = dictionary_encoder.finish().unwrap();
         dictionary_compressed_bytes += compressed.len() as u64;
 
-        let mut decoder =
-            zstd::stream::read::Decoder::with_dictionary(compressed.as_slice(), dictionary).unwrap();
+        let decoder =
+            zstd::stream::read::Decoder::with_dictionary(compressed.as_slice(), dictionary)
+                .unwrap();
         let mut restored = Vec::new();
-        decoder.take((raw.len() + 1) as u64).read_to_end(&mut restored).unwrap();
+        decoder
+            .take((raw.len() + 1) as u64)
+            .read_to_end(&mut restored)
+            .unwrap();
         assert_eq!(restored, raw);
     }
-    (raw_bytes, plain_compressed_bytes, dictionary_compressed_bytes)
+    (
+        raw_bytes,
+        plain_compressed_bytes,
+        dictionary_compressed_bytes,
+    )
 }
 
 fn legacy_zstd_wrapper(body: &str) -> String {
@@ -449,7 +465,9 @@ fn downgrade_to_v8(dir: &Path, inline_bases: bool, mode_none: bool) {
         let rows = {
             let mut statement = database.prepare("SELECT id,body FROM records").unwrap();
             let rows = statement
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
                 .unwrap()
                 .map(Result::unwrap)
                 .collect::<Vec<_>>();
@@ -520,7 +538,7 @@ fn compressed_body_round_trip_restores_lossless_record() {
     let encoded: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(encoded["_usageCodec"], "zstd-dict-v1");
     let unpacked = super::bodies::unpack(&body).unwrap();
-    assert_eq!(unpacked["attempts"][0]["price"]["basisRef"].is_string(), true);
+    assert!(unpacked["attempts"][0]["price"]["basisRef"].is_string());
     assert!(unpacked["attempts"][0]["price"].get("basis").is_none());
     drop(database);
 
@@ -559,18 +577,25 @@ fn compressed_body_checksum_corruption_is_rejected_and_retained() {
 
     let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
     let body: String = database
-        .query_row("SELECT body FROM records WHERE id=?1", [&row.id], |r| r.get(0))
+        .query_row("SELECT body FROM records WHERE id=?1", [&row.id], |r| {
+            r.get(0)
+        })
         .unwrap();
     let mut wrapper: Value = serde_json::from_str(&body).unwrap();
     let encoded = wrapper["_usageBody"].as_str().unwrap();
     let mut packed = STANDARD.decode(encoded).unwrap();
-    let last = packed.last_mut().expect("compressed fixture has a checksum");
+    let last = packed
+        .last_mut()
+        .expect("compressed fixture has a checksum");
     *last ^= 0x01;
     wrapper["_usageBody"] = Value::String(STANDARD.encode(packed));
     let damaged = serde_json::to_string(&wrapper).unwrap();
     assert!(super::bodies::unpack(&damaged).is_err());
     database
-        .execute("UPDATE records SET body=?2 WHERE id=?1", params![&row.id, damaged])
+        .execute(
+            "UPDATE records SET body=?2 WHERE id=?1",
+            params![&row.id, damaged],
+        )
         .unwrap();
     drop(database);
 
@@ -604,7 +629,9 @@ fn old_and_compressed_bodies_are_read_together() {
         )),
     );
     new.attempts[0].transport = "fixture-mixed-compressible-payload".repeat(400);
-    store.write_batch(&[old.clone(), new.clone()], None).unwrap();
+    store
+        .write_batch(&[old.clone(), new.clone()], None)
+        .unwrap();
     let old_detail = store.detail(&old.id).unwrap();
     let new_detail = store.detail(&new.id).unwrap();
 
@@ -617,10 +644,14 @@ fn old_and_compressed_bodies_are_read_together() {
         )
         .unwrap();
     let stored_old: String = database
-        .query_row("SELECT body FROM records WHERE id=?1", [&old.id], |r| r.get(0))
+        .query_row("SELECT body FROM records WHERE id=?1", [&old.id], |r| {
+            r.get(0)
+        })
         .unwrap();
     let stored_new: String = database
-        .query_row("SELECT body FROM records WHERE id=?1", [&new.id], |r| r.get(0))
+        .query_row("SELECT body FROM records WHERE id=?1", [&new.id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert!(serde_json::from_str::<Value>(&stored_old)
         .unwrap()
@@ -632,8 +663,14 @@ fn old_and_compressed_bodies_are_read_together() {
     );
     drop(database);
 
-    assert_eq!(serde_json::to_value(store.detail(&old.id).unwrap()).unwrap(), serde_json::to_value(old_detail).unwrap());
-    assert_eq!(serde_json::to_value(store.detail(&new.id).unwrap()).unwrap(), serde_json::to_value(new_detail).unwrap());
+    assert_eq!(
+        serde_json::to_value(store.detail(&old.id).unwrap()).unwrap(),
+        serde_json::to_value(old_detail).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(store.detail(&new.id).unwrap()).unwrap(),
+        serde_json::to_value(new_detail).unwrap()
+    );
 }
 
 #[test]
@@ -748,13 +785,14 @@ fn mixed_legacy_dictionary_and_plain_bodies_migrate_to_dictionary_codec() {
         )
         .unwrap();
     let stored_plain: String = database
-        .query_row(
-            "SELECT body FROM records WHERE id=?1",
-            [&plain.id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT body FROM records WHERE id=?1", [&plain.id], |row| {
+            row.get(0)
+        })
         .unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&stored_legacy).unwrap()["_usageCodec"], "zstd-v1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored_legacy).unwrap()["_usageCodec"],
+        "zstd-v1"
+    );
     assert_eq!(
         serde_json::from_str::<Value>(&stored_dictionary).unwrap()["_usageCodec"],
         "zstd-dict-v1"
@@ -875,7 +913,9 @@ fn compressed_projection_keeps_operation_source_status_and_unpriced_filters_cons
     compaction.attempts[0].status = None;
     compaction.attempts[0].transport = "fixture-projection-payload".repeat(300);
     let mut store = Store::open(dir.path()).unwrap();
-    store.write_batch(&[model, search, compaction], None).unwrap();
+    store
+        .write_batch(&[model, search, compaction], None)
+        .unwrap();
 
     let all = store.dashboard(&Filter::default()).unwrap();
     assert_eq!(all.totals.requests, 3);
@@ -920,7 +960,11 @@ fn compressed_projection_keeps_operation_source_status_and_unpriced_filters_cons
         assert_eq!(dashboard.totals.requests, requests, "{operation}");
         assert_eq!(dashboard.totals.tokens.input, Some(input), "{operation}");
         assert_eq!(dashboard.totals.unpriced, unpriced, "{operation}");
-        assert_eq!(decimal(&dashboard.totals.cost), decimal(cost), "{operation}");
+        assert_eq!(
+            decimal(&dashboard.totals.cost),
+            decimal(cost),
+            "{operation}"
+        );
     }
 
     assert_eq!(
@@ -952,12 +996,12 @@ fn compressed_projection_keeps_operation_source_status_and_unpriced_filters_cons
         })
         .unwrap();
     assert_eq!(search_page.total, 1);
-    assert_eq!(search_page.rows[0].attempts[0].operation, Operation::WebSearch);
     assert_eq!(
-        store
-            .detail("fixture-projection-search")
-            .unwrap()
-            .attempts[0]
+        search_page.rows[0].attempts[0].operation,
+        Operation::WebSearch
+    );
+    assert_eq!(
+        store.detail("fixture-projection-search").unwrap().attempts[0]
             .price
             .as_ref()
             .unwrap()
@@ -1033,13 +1077,19 @@ fn repeated_price_bases_are_interned_without_merging_distinct_old_bases() {
         ("fixture-basis-b", basis_b),
     ] {
         let detail = store.detail(id).unwrap();
-        assert_eq!(detail.attempts[0].price.as_ref().unwrap().basis, Some(expected));
+        assert_eq!(
+            detail.attempts[0].price.as_ref().unwrap().basis,
+            Some(expected)
+        );
     }
     drop(store);
     let reopened = Store::open(dir.path()).unwrap();
     assert_eq!(
         reopened.detail("fixture-basis-a-1").unwrap().attempts[0]
-            .price.as_ref().unwrap().basis,
+            .price
+            .as_ref()
+            .unwrap()
+            .basis,
         Some(json!({"input_cost_per_token":"0.01","fixture":"basis-a"}))
     );
 }
@@ -1081,7 +1131,10 @@ fn v8_price_basis_migration_resumes_after_restart_and_preserves_records_prices_a
     let mut store = Store::open(dir.path()).unwrap();
     store.write_batch(&rows, None).unwrap();
     let before_summary = summary(&store);
-    assert_eq!(before_summary.0, 259, "the exact response pair is deduplicated");
+    assert_eq!(
+        before_summary.0, 259,
+        "the exact response pair is deduplicated"
+    );
     let before_gateway = serde_json::to_value(store.detail(&rows[0].id).unwrap()).unwrap();
     let before_session = serde_json::to_value(store.detail(&rows[1].id).unwrap()).unwrap();
     assert_eq!(
@@ -1131,7 +1184,10 @@ fn v8_price_basis_migration_resumes_after_restart_and_preserves_records_prices_a
         .query_row("SELECT count(*) FROM price_bases", [], |row| row.get(0))
         .unwrap();
     assert_eq!(mode, 2, "the old mode-0 database is atomically converted");
-    assert_eq!(bases, 2, "identical old bases share storage; distinct bases remain separate");
+    assert_eq!(
+        bases, 2,
+        "identical old bases share storage; distinct bases remain separate"
+    );
     drop(database);
     drop(resumed);
 
@@ -1180,10 +1236,11 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
             |row| row.get(0),
         )
         .unwrap();
-    let first_ref = super::bodies::unpack(&first_before).unwrap()["attempts"][0]["price"]["basisRef"]
-    .as_str()
-    .unwrap()
-    .to_owned();
+    let first_ref = super::bodies::unpack(&first_before).unwrap()["attempts"][0]["price"]
+        ["basisRef"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let first_basis_body: String = database
         .query_row(
             "SELECT body FROM price_bases WHERE hash=?1",
@@ -1217,9 +1274,7 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
         .unwrap()
         .to_owned();
     assert_ne!(first_ref, second_ref);
-    database
-        .execute("DELETE FROM price_bases", [])
-        .unwrap();
+    database.execute("DELETE FROM price_bases", []).unwrap();
     database
         .execute(
             "DELETE FROM metadata WHERE key IN ('storage_records_after','storage_daily_after','storage_repack')",
@@ -1267,9 +1322,18 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(first_after, first_before_batch, "prior row update rolled back");
-    assert_eq!(bases, 0, "the first basis insertion rolled back with the damaged row");
-    assert_eq!(cursor_after, cursor_before, "migration cursor did not advance");
+    assert_eq!(
+        first_after, first_before_batch,
+        "prior row update rolled back"
+    );
+    assert_eq!(
+        bases, 0,
+        "the first basis insertion rolled back with the damaged row"
+    );
+    assert_eq!(
+        cursor_after, cursor_before,
+        "migration cursor did not advance"
+    );
     assert!(!first_before.is_empty());
 }
 
@@ -1316,7 +1380,10 @@ fn reclaim_releases_pages_after_deleting_large_isolated_fixture_batch() {
     let after_pages: u64 = after
         .query_row("PRAGMA page_count", [], |row| row.get(0))
         .unwrap();
-    assert!(after_pages < before_reclaim, "incremental vacuum releases fixture pages");
+    assert!(
+        after_pages < before_reclaim,
+        "incremental vacuum releases fixture pages"
+    );
     assert_eq!(store.logs(&Filter::default()).unwrap().total, 0);
 }
 
@@ -1364,12 +1431,18 @@ fn live_reader_snapshot_does_not_block_reclaim_and_wal_truncates_after_reader_cl
     let store = Store::open(dir.path()).unwrap();
     let started = Instant::now();
     store.reclaim_space().unwrap();
-    assert!(started.elapsed() < Duration::from_secs(2), "active reader must not block reclaim");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "active reader must not block reclaim"
+    );
     let stable_snapshot: u64 = reader
         .query_row("SELECT count(*) FROM fixture_wal", [], |row| row.get(0))
         .unwrap();
     assert_eq!(stable_snapshot, 0, "the reader keeps its original snapshot");
-    assert!(wal_len(dir.path()) >= WAL_LIMIT, "a pinned WAL is left intact");
+    assert!(
+        wal_len(dir.path()) >= WAL_LIMIT,
+        "a pinned WAL is left intact"
+    );
 
     reader.execute_batch("ROLLBACK;").unwrap();
     drop(reader);
@@ -1380,7 +1453,10 @@ fn live_reader_snapshot_does_not_block_reclaim_and_wal_truncates_after_reader_cl
         .unwrap();
     assert_eq!(after_count, 640);
     drop(verify);
-    assert!(wal_len(dir.path()) < WAL_LIMIT, "checkpoint can truncate after the reader closes");
+    assert!(
+        wal_len(dir.path()) < WAL_LIMIT,
+        "checkpoint can truncate after the reader closes"
+    );
     drop(writer);
 }
 
@@ -1417,7 +1493,10 @@ fn unchanged_cursor_is_a_noop_for_data_version_and_wal() {
     let after_version = store.logs(&Filter::default()).unwrap().data_version;
     let after_wal = wal_len(dir.path());
     assert_eq!(after_version, before_version);
-    assert_eq!(after_wal, before_wal, "an unchanged cursor appends no WAL frames");
+    assert_eq!(
+        after_wal, before_wal,
+        "an unchanged cursor appends no WAL frames"
+    );
 }
 
 #[test]
@@ -1539,7 +1618,10 @@ fn v0212_hundred_thousand_records_fit_storage_target() {
     );
     assert_eq!(overview.totals.unpriced, 0);
     assert_eq!(
-        (overview.totals.first_token_sum_ms, overview.totals.first_token_samples),
+        (
+            overview.totals.first_token_sum_ms,
+            overview.totals.first_token_samples
+        ),
         (expected_first_token_sum, expected_first_token_samples)
     );
     assert_eq!(overview.sources.get("codex"), Some(&CODEX));
@@ -1548,13 +1630,24 @@ fn v0212_hundred_thousand_records_fit_storage_target() {
     for (source, (requests, input, output)) in expected_sources {
         let dashboard = store
             .dashboard(&Filter {
-                source: Some(if source == "codex" { "sessions" } else { source }.into()),
+                source: Some(
+                    if source == "codex" {
+                        "sessions"
+                    } else {
+                        source
+                    }
+                    .into(),
+                ),
                 ..Filter::default()
             })
             .unwrap();
         assert_eq!(dashboard.totals.requests, requests, "{source} requests");
         assert_eq!(dashboard.totals.tokens.input, Some(input), "{source} input");
-        assert_eq!(dashboard.totals.tokens.output, Some(output), "{source} output");
+        assert_eq!(
+            dashboard.totals.tokens.output,
+            Some(output),
+            "{source} output"
+        );
         assert_eq!(
             decimal(&dashboard.totals.cost).expect("source cost should parse"),
             decimal(if source == "codex" { "201.6" } else { "134.4" })
@@ -1570,8 +1663,16 @@ fn v0212_hundred_thousand_records_fit_storage_target() {
             })
             .unwrap();
         assert_eq!(dashboard.totals.requests, requests, "{operation} requests");
-        assert_eq!(dashboard.totals.tokens.input, Some(input), "{operation} input");
-        assert_eq!(dashboard.totals.tokens.output, Some(output), "{operation} output");
+        assert_eq!(
+            dashboard.totals.tokens.input,
+            Some(input),
+            "{operation} input"
+        );
+        assert_eq!(
+            dashboard.totals.tokens.output,
+            Some(output),
+            "{operation} output"
+        );
         assert_eq!(dashboard.totals.unpriced, 0, "{operation} unpriced");
     }
 
@@ -1594,7 +1695,10 @@ fn v0212_hundred_thousand_records_fit_storage_target() {
         let detail = store.detail(id).unwrap();
         detail_elapsed += started.elapsed();
         assert_eq!(detail.attempts.len(), 1);
-        assert_eq!(detail.attempts[0].price.as_ref().unwrap().basis, Some(shared_basis.clone()));
+        assert_eq!(
+            detail.attempts[0].price.as_ref().unwrap().basis,
+            Some(shared_basis.clone())
+        );
     }
     let database_bytes = file_len(&dir.path().join("usage.sqlite"));
     let wal_bytes = wal_len(dir.path());

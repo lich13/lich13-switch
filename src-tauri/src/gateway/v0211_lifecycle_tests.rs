@@ -14,15 +14,27 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, HeaderMap, Response};
 use std::{
     io::Write,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 const COMPLETED: &[u8] =
     br#"data: {"type":"response.completed","response":{"id":"fixture-completed","status":"completed"}}
 
 "#;
+
+struct CancelGuard(Arc<Notify>);
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
 
 fn wait_for_record(service: &Service) -> crate::usage::model::Record {
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -244,7 +256,7 @@ fn context_and_upstream_request_id_are_hashed_and_routing_decision_is_preserved(
 }
 
 #[tokio::test]
-async fn http_client_disconnect_preserves_forwarded_bytes_and_bounded_usage_tail() {
+async fn http_client_disconnect_preserves_forwarded_bytes_without_usage_tail() {
     let completed = Bytes::from_static(
         b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-http-tail\"}}\n\n",
     );
@@ -252,13 +264,25 @@ async fn http_client_disconnect_preserves_forwarded_bytes_and_bounded_usage_tail
         b"data: {\"response_id\":\"fixture-http-tail\",\"usage\":{\"input_tokens\":25,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":20}}}\n\n",
     );
     let expected_completed = completed.clone();
+    let cancelled = Arc::new(Notify::new());
+    let tail_generated = Arc::new(AtomicBool::new(false));
+    let tail_release = Arc::new(Notify::new());
+    let cancelled_copy = cancelled.clone();
+    let generated_copy = tail_generated.clone();
+    let release_copy = tail_release.clone();
     let port = super::server(move |_| {
         let completed = completed.clone();
         let usage = usage.clone();
+        let cancelled = cancelled_copy.clone();
+        let generated = generated_copy.clone();
+        let release = release_copy.clone();
         async move {
+            let guard = CancelGuard(cancelled);
             let chunks = async_stream::try_stream! {
+                let _guard = guard;
                 yield Frame::data(completed);
-                tokio::time::sleep(Duration::from_millis(80)).await;
+                release.notified().await;
+                generated.store(true, Ordering::SeqCst);
                 yield Frame::data(usage);
             };
             Response::builder()
@@ -292,6 +316,9 @@ async fn http_client_disconnect_preserves_forwarded_bytes_and_bounded_usage_tail
         Some(expected_completed.as_ref())
     );
     drop(body);
+    tokio::time::timeout(Duration::from_secs(3), cancelled.notified())
+        .await
+        .expect("upstream stream was not cancelled after client disconnect");
 
     let record = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
@@ -305,14 +332,16 @@ async fn http_client_disconnect_preserves_forwarded_bytes_and_bounded_usage_tail
     })
     .await
     .expect("HTTP disconnect usage record did not settle");
+    assert!(record.completed);
     let attempt = record.final_attempt().unwrap();
     assert_eq!(attempt.outcome, "success");
-    assert_eq!(attempt.tokens.input, Some(5));
-    assert_eq!(attempt.tokens.cache_read, Some(20));
-    assert_eq!(attempt.tokens.output, Some(3));
+    assert_eq!(attempt.tokens.input, None);
+    assert_eq!(attempt.tokens.cache_read, None);
+    assert_eq!(attempt.tokens.output, None);
     assert_eq!(
         attempt.end.as_ref().map(|end| end.cause),
         Some(EndCause::ClientDisconnected)
     );
+    assert!(!tail_generated.load(Ordering::SeqCst));
     gateway.stop().await.unwrap();
 }

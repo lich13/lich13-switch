@@ -208,6 +208,8 @@ struct Entry {
     updated: u64,
     epoch: u64,
     boundary: Option<String>,
+    #[serde(default)]
+    consumed_boundary: Option<String>,
     boundary_sequence: u64,
     #[serde(default)]
     establishing: bool,
@@ -222,10 +224,22 @@ struct State {
     sequence: u64,
     error: Option<String>,
     last_saved: u64,
+    save_version: u64,
+    persisted_version: u64,
+    notifications: Vec<(u64, String, String, String)>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffWaiting {
+    pub provider_id: String,
+    pub state: String,
 }
 pub struct Registry {
     path: PathBuf,
     state: Mutex<State>,
+    persist: std::sync::mpsc::SyncSender<()>,
+    notifications: Mutex<Option<(super::ClientId, crate::events::Service)>>,
+    names: Mutex<HashMap<String, String>>,
 }
 pub struct Lease {
     registry: Arc<Registry>,
@@ -256,6 +270,7 @@ impl Registry {
                                     && e.provider.len() <= 256
                                     && !e.provider.chars().any(char::is_control)
                                     && e.boundary.as_deref().is_none_or(digest_valid)
+                                    && e.consumed_boundary.as_deref().is_none_or(digest_valid)
                             }) =>
                     {
                         state.entries = entries
@@ -275,21 +290,106 @@ impl Registry {
             Ok(None) => {}
             _ => state.error = Some("线程归属记录无法读取".into()),
         }
-        Arc::new(Self {
+        let (persist, changes) = std::sync::mpsc::sync_channel(1);
+        let registry = Arc::new(Self {
             path,
             state: Mutex::new(state),
-        })
+            persist,
+            notifications: Mutex::new(None),
+            names: Mutex::new(HashMap::new()),
+        });
+        let weak = Arc::downgrade(&registry);
+        std::thread::spawn(move || {
+            while changes.recv().is_ok() {
+                let Some(registry) = weak.upgrade() else {
+                    break;
+                };
+                let (entries, version) = {
+                    let state = registry.state.lock().unwrap();
+                    (state.entries.clone(), state.save_version)
+                };
+                let saved = serde_json::to_vec(&entries)
+                    .ok()
+                    .and_then(|raw| storage::atomic_write(&registry.path, &raw, None).ok())
+                    .is_some();
+                let notifications = {
+                    let mut state = registry.state.lock().unwrap();
+                    state.error = (!saved).then(|| "线程归属记录保存失败".into());
+                    if saved {
+                        state.persisted_version = version;
+                        state.last_saved = now();
+                        let ready: Vec<_> = state
+                            .notifications
+                            .iter()
+                            .filter(|(n, ..)| *n <= version)
+                            .cloned()
+                            .collect();
+                        state.notifications.retain(|(n, ..)| *n > version);
+                        ready
+                    } else {
+                        vec![]
+                    }
+                };
+                for (_, scope, from, to) in notifications {
+                    if let Some((client, events)) = registry.notifications.lock().unwrap().as_ref()
+                    {
+                        let names = registry.names.lock().unwrap();
+                        let label = |id: &String| {
+                            names
+                                .get(id)
+                                .and_then(|n| crate::events::safe_message(n))
+                                .unwrap_or_else(|| "供应商".into())
+                        };
+                        let mut record = crate::events::Record::new(
+                            Some(*client),
+                            Some(&to),
+                            None,
+                            crate::events::Reason::ThreadHandoff,
+                            crate::events::Action::Routed,
+                            None,
+                            None,
+                        );
+                        record.details.handoff_scope = Some(scope);
+                        record.notification_message =
+                            Some(format!("线程已接管：{} → {}", label(&from), label(&to)));
+                        events.emit(record);
+                    }
+                }
+            }
+        });
+        registry
+    }
+    pub fn notifications(&self, client: super::ClientId, events: crate::events::Service) {
+        *self.notifications.lock().unwrap() = Some((client, events));
+    }
+    pub fn provider_names(&self, providers: &[super::model::Provider]) {
+        *self.names.lock().unwrap() = providers
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
     }
     fn save(&self, state: &mut State, force: bool) {
         if !force && now().saturating_sub(state.last_saved) < 60_000 {
             return;
         }
-        let result = serde_json::to_vec(&state.entries)
-            .ok()
-            .and_then(|raw| storage::atomic_write(&self.path, &raw, None).ok());
-        state.error = result.is_none().then(|| "线程归属记录保存失败".into());
-        if result.is_some() {
-            state.last_saved = now();
+        state.save_version = state.save_version.saturating_add(1);
+        let _ = self.persist.try_send(());
+    }
+    #[cfg(test)]
+    pub fn flush(&self) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let state = self.state.lock().unwrap();
+                if state.persisted_version == state.save_version || state.error.is_some() {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "ownership write did not settle"
+            );
+            std::thread::yield_now();
         }
     }
     #[cfg(test)]
@@ -436,26 +536,56 @@ impl Registry {
         }
         Some(lease)
     }
-    pub fn pending_policy(&self, queued: &[super::model::Provider]) -> Vec<String> {
+    pub fn waiting_policy(
+        &self,
+        queued: &[super::model::Provider],
+        capacity: &super::admission::Scheduler,
+    ) -> Vec<HandoffWaiting> {
         let state = self.state.lock().unwrap();
-        let mut ids: Vec<_> = state
+        let (active, _) = capacity.counts();
+        let mut result = std::collections::BTreeMap::new();
+        for entry in state
             .entries
             .values()
-            .filter(|e| {
-                queued
-                    .iter()
-                    .position(|p| p.id == e.provider)
-                    .is_some_and(|position| {
-                        queued[..position]
-                            .iter()
-                            .any(|p| p.handoff_after_compaction)
+            .filter(|e| !e.establishing && now().saturating_sub(e.updated) < RETENTION_MS)
+        {
+            let Some(position) = queued.iter().position(|p| p.id == entry.provider) else {
+                continue;
+            };
+            for provider in queued[..position]
+                .iter()
+                .filter(|p| p.handoff_after_compaction)
+            {
+                let full = provider.max_concurrency != 0
+                    && active.get(&provider.id).copied().unwrap_or(0)
+                        + capacity.reserved(&provider.id)
+                        >= provider.max_concurrency as usize;
+                let phase = if full {
+                    "capacity_full"
+                } else if entry.boundary.is_some() {
+                    "awaiting_request"
+                } else {
+                    "awaiting_compaction"
+                };
+                result
+                    .entry(provider.id.clone())
+                    .and_modify(|current| {
+                        if phase == "capacity_full"
+                            || (*current == "awaiting_compaction" && phase == "awaiting_request")
+                        {
+                            *current = phase;
+                        }
                     })
+                    .or_insert(phase);
+            }
+        }
+        result
+            .into_iter()
+            .map(|(provider_id, state)| HandoffWaiting {
+                provider_id,
+                state: state.into(),
             })
-            .map(|e| e.provider.clone())
-            .collect();
-        ids.sort();
-        ids.dedup();
-        ids
+            .collect()
     }
     pub fn boundary_matches(&self, session: &str, input: Option<&str>) -> bool {
         input.is_some()
@@ -481,6 +611,9 @@ impl Registry {
     }
 }
 impl Lease {
+    pub fn session_digest(&self) -> &str {
+        &self.session
+    }
     pub fn establishing(&self) -> bool {
         self.registry
             .state
@@ -509,8 +642,29 @@ impl Lease {
         if self.fresh {
             return D::OrdinaryQueue;
         }
-        if hints.is_some_and(|h| h.compacted_window.is_some()) {
-            return D::CompactionWindowMismatch;
+        if let Some(window) = hints.and_then(|h| h.compacted_window.as_deref()) {
+            let state = self.registry.state.lock().unwrap();
+            if state.entries.get(&self.session).is_some_and(|entry| {
+                entry.claim.is_some() && entry.boundary.as_deref() == Some(window)
+            }) {
+                return D::BoundaryInFlight;
+            }
+            if state.entries.get(&self.session).is_some_and(|entry| {
+                entry.boundary.as_deref() != Some(window)
+                    && entry.consumed_boundary.as_deref() != Some(window)
+            }) {
+                return D::CompactionWindowMismatch;
+            }
+        } else if self
+            .registry
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .get(&self.session)
+            .is_some_and(|entry| entry.boundary.is_some())
+        {
+            return D::CompactionWindowMissing;
         }
         D::ExistingThread
     }
@@ -637,24 +791,27 @@ impl Lease {
         let Some(entry) = state.entries.get_mut(&self.session) else {
             return;
         };
+        if !first && boundary == entry.boundary.as_deref() {
+            return;
+        }
         if entry.epoch != completed.unwrap_or(self.epoch) {
             return;
         }
         if first && self.handoff && entry.claim != Some(self.sequence) {
             return;
         }
-        let changed = (first && (entry.provider != provider || self.handoff || entry.establishing))
-            || boundary.is_some();
+        let moved = first && entry.provider != provider;
+        let previous = entry.provider.clone();
+        let changed = (first && (moved || entry.establishing)) || boundary.is_some();
         if first {
             entry.establishing = false;
         }
-        if first && (entry.provider != provider || self.handoff) {
+        if moved {
             entry.provider = provider.into();
             entry.epoch = entry.epoch.saturating_add(1);
-            entry.boundary = None;
+            entry.consumed_boundary = entry.boundary.take();
         }
         if first && self.handoff {
-            entry.boundary = None;
             entry.claim = None;
         }
         if let Some(boundary) = boundary.filter(|_| self.sequence >= entry.boundary_sequence) {
@@ -663,6 +820,13 @@ impl Lease {
         }
         *completed = Some(entry.epoch);
         entry.updated = now();
+        if moved && self.handoff {
+            let scope = storage::digest(format!("{}:{}", self.session, self.sequence).as_bytes());
+            let version = state.save_version.saturating_add(1);
+            state
+                .notifications
+                .push((version, scope, previous, provider.into()));
+        }
         self.registry.save(&mut state, changed);
     }
 }
@@ -788,6 +952,7 @@ mod tests {
             .prepare(key(), None, true, &ids(&["old"]))
             .unwrap()
             .complete("old", Some(&boundary));
+        registry.flush();
         drop(registry);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("fixture-session"));

@@ -17,6 +17,7 @@ struct Shared {
     state: Mutex<State>,
     wake: Notify,
     events: broadcast::Sender<()>,
+    persist: std::sync::mpsc::SyncSender<()>,
 }
 struct State {
     running: bool,
@@ -29,6 +30,7 @@ struct State {
     models: HashMap<String, Option<Vec<String>>>,
     intake: HashMap<String, (bool, bool)>,
     active: HashMap<String, usize>,
+    retention: super::thread_capacity::Retention,
     rpm: HashMap<String, VecDeque<RateStamp>>,
     rpm_pending: HashMap<String, usize>,
     rpm_path: PathBuf,
@@ -40,6 +42,9 @@ struct State {
 impl State {
     fn new(rpm_path: PathBuf, rpm: HashMap<String, VecDeque<RateStamp>>, rpm_error: bool) -> Self {
         Self {
+            retention: super::thread_capacity::Retention::load(
+                &rpm_path.with_file_name("thread-reservations.json"),
+            ),
             running: false,
             epoch: 0,
             next: 0,
@@ -71,7 +76,7 @@ struct PersistedRpm {
     providers: HashMap<String, Vec<i64>>,
 }
 const RPM_WINDOW: Duration = Duration::from_secs(60);
-fn now_wall_ms() -> i64 {
+pub(super) fn now_wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -133,7 +138,31 @@ pub struct CapacityRetry {
 pub struct Slot {
     scheduler: Scheduler,
     id: String,
+    thread: Option<Arc<ThreadRequest>>,
+    success: bool,
 }
+pub struct ThreadRequest {
+    scheduler: Scheduler,
+    ticket: u64,
+}
+impl Drop for ThreadRequest {
+    fn drop(&mut self) {
+        self.scheduler
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .retention
+            .finish(self.ticket);
+        self.scheduler.signal();
+    }
+}
+impl Slot {
+    pub fn complete(&mut self) {
+        self.success = true;
+    }
+}
+
 struct RpmReservation {
     scheduler: Scheduler,
     id: String,
@@ -148,6 +177,7 @@ struct CapacityWait {
     ticket: u64,
 }
 pub struct Admission {
+    pub handoff_wait: Option<crate::usage::model::RoutingDecision>,
     pub route: Route,
     pub permits: Permits,
     pub slot: Slot,
@@ -167,6 +197,8 @@ pub enum Rejected {
     RateLedger,
 }
 pub struct Budget {
+    pub thread: Option<Arc<ThreadRequest>>,
+    pub handoff_owner: Option<String>,
     remaining: Duration,
     protected_capacity: bool,
     fixed_provider: bool,
@@ -251,6 +283,30 @@ fn persist_rpm(path: &Path, rpm: &HashMap<String, VecDeque<RateStamp>>) -> stora
     storage::atomic_write(path, &bytes, None)
 }
 impl Budget {
+    pub fn track(
+        &mut self,
+        scheduler: &Scheduler,
+        lease: Option<&super::compaction::Lease>,
+        seconds: u64,
+    ) {
+        if self.thread.is_some() {
+            return;
+        }
+        if let Some(lease) = lease {
+            self.handoff_owner = lease.handoff.then(|| lease.owner.clone()).flatten();
+            let mut state = scheduler.0.state.lock().unwrap();
+            state.retention.seconds = seconds;
+            let ticket = state
+                .retention
+                .begin(lease.session_digest(), lease.owner.as_deref());
+            drop(state);
+            self.thread = Some(Arc::new(ThreadRequest {
+                scheduler: scheduler.clone(),
+                ticket,
+            }));
+        }
+    }
+
     pub(super) fn set_intake(&mut self, intake: super::compaction::Intake, owner: Option<String>) {
         self.intake = Some((intake, owner));
     }
@@ -263,6 +319,8 @@ impl Budget {
     }
     pub fn new(seconds: u64) -> Self {
         Self {
+            thread: None,
+            handoff_owner: None,
             remaining: Duration::from_secs(seconds),
             protected_capacity: false,
             fixed_provider: false,
@@ -273,12 +331,60 @@ impl Budget {
 impl Scheduler {
     pub fn new(events: broadcast::Sender<()>, rpm_path: PathBuf) -> Self {
         let (rpm, rpm_error) = load_rpm(&rpm_path);
-        Self(Arc::new(Shared {
+        let (persist, updates) = std::sync::mpsc::sync_channel(1);
+        let path = rpm_path.with_file_name("thread-reservations.json");
+        let shared = Arc::new(Shared {
             state: Mutex::new(State::new(rpm_path, rpm, rpm_error)),
             wake: Notify::new(),
             events,
-        }))
+            persist,
+        });
+        let weak = Arc::downgrade(&shared);
+        std::thread::spawn(move || {
+            let mut previous = Vec::new();
+            while updates.recv().is_ok() {
+                let Some(shared) = weak.upgrade() else {
+                    break;
+                };
+                let snapshot = {
+                    let mut state = shared.state.lock().unwrap();
+                    if state.retention.error {
+                        continue;
+                    }
+                    state.retention.prune();
+                    state.retention.snapshot()
+                };
+                if snapshot == previous {
+                    continue;
+                }
+                if storage::atomic_write(&path, &snapshot, None).is_err() {
+                    shared.state.lock().unwrap().retention.error = true;
+                    let _ = shared.events.send(());
+                } else {
+                    previous = snapshot;
+                }
+            }
+        });
+        Self(shared)
     }
+    pub fn configure_retention(&self, seconds: u64) {
+        let mut s = self.0.state.lock().unwrap();
+        let providers = s.limits.keys().cloned().collect();
+        s.retention.configure(&providers, seconds);
+    }
+    pub fn reserved(&self, id: &str) -> usize {
+        self.0.state.lock().unwrap().retention.reserved(id)
+    }
+    pub fn retention_error(&self) -> bool {
+        self.0.state.lock().unwrap().retention.error
+    }
+    fn available(s: &State, id: &str, request: Option<u64>, manual: bool) -> bool {
+        let limit = s.limits[id];
+        let occupied = s.active.get(id).copied().unwrap_or(0)
+            + if manual { 0 } else { s.retention.reserved(id) };
+        limit == 0 || (!manual && s.retention.reusable(request, id)) || occupied < limit as usize
+    }
+
     pub fn configure(&self, providers: &[Provider], running: bool) {
         let mut s = self.0.state.lock().unwrap();
         if s.running != running {
@@ -411,8 +517,14 @@ impl Scheduler {
         })
     }
     pub fn counts(&self) -> (HashMap<String, usize>, usize) {
-        let s = self.0.state.lock().unwrap();
-        (s.active.clone(), s.waiting.len() + s.capacity_waits.len())
+        let mut s = self.0.state.lock().unwrap();
+        let changed = s.retention.prune();
+        let result = (s.active.clone(), s.waiting.len() + s.capacity_waits.len());
+        drop(s);
+        if changed {
+            self.signal();
+        }
+        result
     }
     pub fn capacity_retries(&self) -> Vec<CapacityRetry> {
         self.retries(WaitKind::Capacity)
@@ -564,6 +676,7 @@ impl Scheduler {
         self.signal();
     }
     pub fn signal(&self) {
+        let _ = self.0.persist.try_send(());
         self.0.wake.notify_waiters();
         let _ = self.0.events.send(());
     }
@@ -600,7 +713,18 @@ impl Scheduler {
         immediate: bool,
     ) -> Result<Admission, Rejected> {
         let started = Instant::now();
-        let epoch = self.0.state.lock().unwrap().epoch;
+        let epoch = {
+            let mut state = self.0.state.lock().unwrap();
+            state.retention.prune();
+            if budget.fixed_provider && routes.len() == 1 {
+                if let Some(thread) = &budget.thread {
+                    // A previous_response_id may still belong to the old provider
+                    // after a handoff. Its queued turn protects that provider too.
+                    state.retention.hold(thread.ticket, &routes[0].provider.id);
+                }
+            }
+            state.epoch
+        };
         let mut waiting: Option<Waiting> = None;
         let deadline = tokio::time::Instant::now() + budget.remaining;
         let mut cooling;
@@ -615,14 +739,16 @@ impl Scheduler {
                 if !s.running || s.epoch != epoch {
                     break Err(Rejected::Stopped);
                 }
+                s.retention.prune();
+                let request = budget.thread.as_ref().map(|t| t.ticket);
+                if request.is_some() && s.retention.error {
+                    break Err(Rejected::Unavailable);
+                }
                 let matching: Vec<_> = routes
                     .iter()
                     .filter(|r| s.limits.contains_key(&r.provider.id))
                     .filter(|r| {
-                        !budget.protected_capacity
-                            || budget.fixed_provider
-                            || manual
-                            || s.queued.contains(&r.provider.id)
+                        budget.fixed_provider || manual || s.queued.contains(&r.provider.id)
                     })
                     .collect();
                 if matching.is_empty() {
@@ -649,7 +775,26 @@ impl Scheduler {
                         break Err(Rejected::Policy);
                     }
                 }
-                if budget.protected_capacity && !budget.fixed_provider && !manual {
+                if let Some(owner) = budget
+                    .handoff_owner
+                    .as_ref()
+                    .filter(|_| !budget.fixed_provider)
+                {
+                    eligible.retain(|r| {
+                        r.provider.id == *owner
+                            || (s.order.get(&r.provider.id) < s.order.get(owner)
+                                && s.intake
+                                    .get(&r.provider.id)
+                                    .is_some_and(|(compact, _)| *compact))
+                    });
+                    if eligible.is_empty() {
+                        break Err(Rejected::Policy);
+                    }
+                }
+                if (budget.protected_capacity || budget.handoff_owner.is_some())
+                    && !budget.fixed_provider
+                    && !manual
+                {
                     eligible.sort_by_key(|r| {
                         let preferred =
                             budget.intake.as_ref().is_some_and(|(intake, _)| {
@@ -671,19 +816,23 @@ impl Scheduler {
                     }
                 }
                 let mut accepted = None;
+                let mut capacity_blocked = false;
                 let mut retry_selection = true;
                 'selection: loop {
                     for (position, route) in eligible.iter().enumerate() {
                         let id = &route.provider.id;
-                        let limit = s.limits[id];
-                        let active = s.active.get(id).copied().unwrap_or(0);
+
                         let health = route.provider_circuit.health();
                         if !health.available {
                             retry_in = retry_in.min(health.retry_in.max(1));
                             continue;
                         }
                         any_ready = true;
-                        if limit != 0 && active >= limit as usize {
+                        if !Self::available(&s, id, request, manual) {
+                            capacity_blocked |= budget
+                                .handoff_owner
+                                .as_ref()
+                                .is_some_and(|owner| owner != id);
                             continue;
                         }
                         // A waiter pinned to another provider never blocks this provider.
@@ -699,9 +848,7 @@ impl Scheduler {
                         if retry_selection
                             && eligible[..position].iter().any(|earlier| {
                                 let id = &earlier.provider.id;
-                                let limit = s.limits[id];
-                                (limit == 0
-                                    || s.active.get(id).copied().unwrap_or(0) < limit as usize)
+                                Self::available(&s, id, request, manual)
                                     && earlier.provider_circuit.health().available
                                     && !s
                                         .waiting
@@ -729,8 +876,22 @@ impl Scheduler {
                         if let Some(permits) = Permits::acquire(route, manual) {
                             match self.reserve_rpm(&mut s, id, rpm_limit) {
                                 Ok(rpm) => {
+                                    let retain = budget
+                                        .handoff_owner
+                                        .as_ref()
+                                        .is_none_or(|owner| owner == id);
+                                    if let Some(request) = request {
+                                        if !s.retention.admit(request, id, retain) {
+                                            // RpmReservation locks on drop; release it outside the lock.
+                                            drop(s);
+                                            drop(rpm);
+                                            drop(permits);
+                                            return Err(Rejected::Full);
+                                        }
+                                    }
                                     *s.active.entry(id.clone()).or_default() += 1;
                                     accepted = Some(Admission {
+                                        handoff_wait: (capacity_blocked && budget.handoff_owner.as_deref() == Some(id)).then_some(crate::usage::model::RoutingDecision::ReceiverCapacityFull),
                                         route: (**route).clone(),
                                         permits,
                                         rpm: Some(rpm),
@@ -738,6 +899,8 @@ impl Scheduler {
                                         slot: Slot {
                                             scheduler: self.clone(),
                                             id: id.clone(),
+                                            thread: budget.thread.clone(),
+                                            success: false,
                                         },
                                     });
                                     break;
@@ -848,6 +1011,9 @@ impl Scheduler {
 impl Drop for Slot {
     fn drop(&mut self) {
         let mut s = self.scheduler.0.state.lock().unwrap();
+        if let Some(thread) = &self.thread {
+            s.retention.release(thread.ticket, &self.id, self.success);
+        }
         if let Some(n) = s.active.get_mut(&self.id) {
             *n = n.saturating_sub(1);
         }

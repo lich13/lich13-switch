@@ -1,8 +1,22 @@
 //! Isolated protocol fixtures for compaction boundaries; never use production clients.
 use super::*;
 use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::sync::Notify;
 
 const WINDOW: &str = "fixture-opaque-window";
+
+struct CancelGuard(Arc<Notify>);
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
 fn automatic(g: &Gateway, t: &tempfile::TempDir) {
     update(
         g,
@@ -325,15 +339,35 @@ async fn websocket_handoff_changes_only_upstream_between_completed_turns() {
 }
 
 #[tokio::test]
-async fn terminal_then_client_disconnect_collects_bounded_usage_tail_without_cancel_reclassification(
-) {
-    let port = server(|_| async {
-        let chunks = async_stream::try_stream! {
-            yield Frame::data(Bytes::from_static(b"event: response.completed\ndata: {\"response\":{\"id\":\"fixture-tail\",\"status\":\"completed\"}}\n\n"));
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            yield Frame::data(Bytes::from_static(b"event: response.usage\ndata: {\"response_id\":\"fixture-tail\",\"usage\":{\"input_tokens\":25,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":20}}}\n\n"));
-        };
-        Response::builder().header("content-type","text/event-stream").body(StreamBody::new(chunks).map_err(|e: std::io::Error|->connector::BoxError{e.into()}).boxed_unsync()).unwrap()
+async fn terminal_then_client_disconnect_keeps_completed_without_usage_tail() {
+    let cancelled = Arc::new(Notify::new());
+    let tail_generated = Arc::new(AtomicBool::new(false));
+    let tail_release = Arc::new(Notify::new());
+    let cancelled_copy = cancelled.clone();
+    let generated_copy = tail_generated.clone();
+    let release_copy = tail_release.clone();
+    let port = server(move |_| {
+        let cancelled = cancelled_copy.clone();
+        let generated = generated_copy.clone();
+        let release = release_copy.clone();
+        async move {
+            let guard = CancelGuard(cancelled);
+            let chunks = async_stream::try_stream! {
+                let _guard = guard;
+                yield Frame::data(Bytes::from_static(b"event: response.completed\ndata: {\"response\":{\"id\":\"fixture-tail\",\"status\":\"completed\"}}\n\n"));
+                release.notified().await;
+                generated.store(true, Ordering::SeqCst);
+                yield Frame::data(Bytes::from_static(b"event: response.usage\ndata: {\"response_id\":\"fixture-tail\",\"usage\":{\"input_tokens\":25,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":20}}}\n\n"));
+            };
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(
+                    StreamBody::new(chunks)
+                        .map_err(|e: std::io::Error| -> connector::BoxError { e.into() })
+                        .boxed_unsync(),
+                )
+                .unwrap()
+        }
     }).await;
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
     let usage = crate::usage::Service::new(t.path());
@@ -357,6 +391,9 @@ async fn terminal_then_client_disconnect_collects_bounded_usage_tail_without_can
         .windows(18)
         .any(|w| w == b"response.completed"));
     drop(body);
+    tokio::time::timeout(Duration::from_secs(3), cancelled.notified())
+        .await
+        .expect("upstream stream was not cancelled after client disconnect");
     let row = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let rows = usage
@@ -373,9 +410,10 @@ async fn terminal_then_client_disconnect_collects_bounded_usage_tail_without_can
     let attempt = row.final_attempt().unwrap();
     assert!(row.completed);
     assert_eq!(attempt.outcome, "success");
-    assert_eq!(attempt.tokens.input, Some(5));
-    assert_eq!(attempt.tokens.cache_read, Some(20));
-    assert_eq!(attempt.tokens.output, Some(3));
+    assert_eq!(attempt.tokens.input, None);
+    assert_eq!(attempt.tokens.cache_read, None);
+    assert_eq!(attempt.tokens.output, None);
+    assert!(!tail_generated.load(Ordering::SeqCst));
     assert_eq!(g.view().providers[0].active_requests, 0);
     g.stop().await.unwrap();
 }

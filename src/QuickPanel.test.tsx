@@ -209,7 +209,7 @@ it("keeps provider settings HTTP/SSE-only and opens shared policy settings", asy
   await screen.findByText("api.example.com");
   expect(screen.queryByText("HTTP 桥接")).not.toBeInTheDocument();
   await user.click(
-    screen.getByRole("button", { name: "api.example.com 设置" }),
+    screen.getByRole("button", { name: "api.example.com 白名单" }),
   );
   expect(mock.command).toHaveBeenCalledWith("open_main", {
     page: "gateway",

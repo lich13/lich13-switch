@@ -1,5 +1,15 @@
 use super::*;
 
+async fn settle(g: &Gateway) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while g.view().providers.iter().any(|p| p.active_requests != 0) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fixture request did not settle");
+}
+
 fn import_link(base_url: &str, token: &str, display_name: &str) -> Edit {
     Edit::ImportLink {
         base_url: base_url.into(),
@@ -85,6 +95,7 @@ async fn running_gateway_import_keeps_config_auth_and_the_selected_upstream() {
         response.into_body().collect().await.unwrap().to_bytes(),
         "original-upstream"
     );
+    settle(&g).await;
     assert_eq!(imported_hits.load(Ordering::SeqCst), 0);
     let view = g.view();
     assert_eq!(view.last_successful, before.selected);

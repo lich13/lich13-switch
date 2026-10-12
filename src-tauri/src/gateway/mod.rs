@@ -12,6 +12,7 @@ pub mod catalog;
 mod circuit;
 mod compaction;
 mod connector;
+mod endpoints;
 mod forward;
 pub(crate) mod metadata;
 mod model;
@@ -21,12 +22,14 @@ mod protocol_tests;
 mod quota;
 mod replay;
 mod routing;
+mod thread_capacity;
 mod upstream_error;
 #[cfg(test)]
 mod v019_usage_tests;
 #[cfg(test)]
 mod v020_tests;
 mod websocket;
+mod wire_progress;
 pub use quota::QuotaView;
 mod takeover;
 #[cfg(test)]
@@ -56,6 +59,9 @@ pub struct ProviderView {
     pub id: String,
     pub name: String,
     base_url: String,
+    extra_base_urls: Vec<String>,
+    endpoint_measurements: Vec<endpoints::Measurement>,
+    preferred_base_url: String,
     queued: bool,
     health: Health,
     quota_version: String,
@@ -63,6 +69,7 @@ pub struct ProviderView {
     pub max_concurrency: u32,
     pub max_rpm: u32,
     pub active_requests: usize,
+    pub reserved_threads: usize,
     pub rpm_used: usize,
     pub rpm_retry_in: u64,
     pub rpm_limited: bool,
@@ -94,7 +101,7 @@ pub struct View {
     pub capacity_retries: Vec<admission::CapacityRetry>,
     pub websocket_retries: Vec<admission::CapacityRetry>,
     pub transient_retries: Vec<admission::CapacityRetry>,
-    pub compaction_pending: Vec<String>,
+    pub handoff_waiting: Vec<compaction::HandoffWaiting>,
     pub error: Option<String>,
     pub recovery_pending: bool,
 }
@@ -126,6 +133,7 @@ struct Shared {
     events: broadcast::Sender<()>,
     quota: quota::Service,
     catalog: catalog::Service,
+    endpoints: endpoints::Service,
     admission: admission::Scheduler,
     compaction: Arc<compaction::Registry>,
 }
@@ -206,6 +214,12 @@ impl Gateway {
         }
     }
     pub fn set_diagnostics(&self, events: crate::events::Service) {
+        self.0
+            .compaction
+            .notifications(self.0.client, events.clone());
+        self.0
+            .compaction
+            .provider_names(&self.0.inner.lock().unwrap().store.providers);
         *self.0.diagnostics.lock().unwrap() = Some(events);
     }
     fn record(
@@ -314,6 +328,7 @@ impl Gateway {
         let (events, _) = broadcast::channel(32);
         let admission = admission::Scheduler::new(events.clone(), data.join("rpm-window.json"));
         admission.configure(&store.providers, false);
+        admission.configure_retention(store.settings.thread_idle_release_seconds);
         let gateway = Self(Arc::new(Shared {
             client,
             diagnostics: Mutex::new(None),
@@ -336,6 +351,7 @@ impl Gateway {
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
+            endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             data,
             spool,
             active: AtomicUsize::new(0),
@@ -397,6 +413,10 @@ impl Gateway {
         s.revision = next.persist(&self.0.data.join("gateway.json"), &s.revision)?;
         s.store = next;
         self.0.admission.configure(&s.store.providers, false);
+        self.0
+            .admission
+            .configure_retention(s.store.settings.thread_idle_release_seconds);
+        self.0.compaction.provider_names(&s.store.providers);
         Ok(())
     }
     fn import_pair(
@@ -433,6 +453,7 @@ impl Gateway {
         let editable = (
             self.0.client,
             &s.store.providers,
+            &s.store.provider_endpoints,
             &s.store.connection,
             &s.store.settings,
             &s.store.mode,
@@ -517,6 +538,20 @@ impl Gateway {
                         id: p.id.clone(),
                         name: p.name.clone(),
                         base_url: p.base_url.clone(),
+                        extra_base_urls: s
+                            .store
+                            .provider_endpoints
+                            .get(&p.id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        endpoint_measurements: self
+                            .0
+                            .endpoints
+                            .measurements(p, &Self::endpoint_urls(&s.store, p)),
+                        preferred_base_url: self
+                            .0
+                            .endpoints
+                            .preferred(p, &Self::endpoint_urls(&s.store, p)),
                         queued: p.queued,
                         health: health(pkey(p)),
                         quota_version: Self::quota_version(&s.store, p),
@@ -526,6 +561,11 @@ impl Gateway {
                         handoff_after_compaction: p.handoff_after_compaction,
                         take_new_threads: p.take_new_threads,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
+                        reserved_threads: if s.store.mode == "auto" {
+                            self.0.admission.reserved(&p.id)
+                        } else {
+                            0
+                        },
                         rpm_used,
                         rpm_retry_in,
                         rpm_limited,
@@ -542,19 +582,29 @@ impl Gateway {
             capacity_retries: self.0.admission.capacity_retries(),
             websocket_retries: self.0.admission.websocket_retries(),
             transient_retries: self.0.admission.transient_retries(),
-            compaction_pending: if self.0.client == ClientId::Codex && s.store.mode == "auto" {
-                self.0.compaction.pending_policy(
+            handoff_waiting: if self.0.client == ClientId::Codex && s.store.mode == "auto" {
+                self.0.compaction.waiting_policy(
                     &s.store
                         .providers
                         .iter()
                         .filter(|p| p.queued)
                         .cloned()
                         .collect::<Vec<_>>(),
+                    &self.0.admission,
                 )
             } else {
                 vec![]
             },
-            error: s.error.clone().or_else(|| self.0.compaction.error()),
+            error: s
+                .error
+                .clone()
+                .or_else(|| self.0.compaction.error())
+                .or_else(|| {
+                    self.0
+                        .admission
+                        .retention_error()
+                        .then(|| "线程名额记录不可用，请检查私有数据目录".into())
+                }),
             recovery_pending: s.upgrade_pending
                 || self.0.data.join("gateway-recovery.json").exists(),
         }
@@ -737,7 +787,9 @@ impl Gateway {
         ports.push(next.settings.port);
         for provider in &next.providers {
             for port in &ports {
-                model::base_url(&provider.base_url, *port)?;
+                for url in Self::endpoint_urls(&next, provider) {
+                    model::base_url(&url, *port)?;
+                }
             }
         }
         // A port change must not turn another client's existing upstream into a loop.
@@ -752,8 +804,11 @@ impl Gateway {
                 .filter_map(std::sync::Weak::upgrade)
             {
                 if !Arc::ptr_eq(&peer, &self.0) {
-                    for p in &peer.inner.lock().unwrap().store.providers {
-                        model::base_url(&p.base_url, next.settings.port)?;
+                    let peer = peer.inner.lock().unwrap();
+                    for p in &peer.store.providers {
+                        for url in Self::endpoint_urls(&peer.store, p) {
+                            model::base_url(&url, next.settings.port)?;
+                        }
                     }
                 }
             }
@@ -798,6 +853,11 @@ impl Gateway {
         s.home = Some(home.to_owned());
         self.sync_single_protection(&s);
         self.0.admission.configure(&s.store.providers, s.running);
+        self.0
+            .admission
+            .configure_retention(s.store.settings.thread_idle_release_seconds);
+        self.0.compaction.provider_names(&s.store.providers);
+        self.0.endpoints.retain(&s.store.providers);
         self.0.quota.retain(
             &s.store
                 .providers
@@ -898,6 +958,10 @@ impl Gateway {
             s.shutdown = Some(tx);
             s.error = None;
             self.0.admission.configure(&s.store.providers, true);
+            self.0
+                .admission
+                .configure_retention(s.store.settings.thread_idle_release_seconds);
+            self.0.compaction.provider_names(&s.store.providers);
         }
         let gateway = self.clone();
         let task = tokio::spawn(async move {
@@ -1056,6 +1120,10 @@ impl Gateway {
             s.running = false;
             s.upgrade_pending = false;
             self.0.admission.configure(&s.store.providers, false);
+            self.0
+                .admission
+                .configure_retention(s.store.settings.thread_idle_release_seconds);
+            self.0.compaction.provider_names(&s.store.providers);
             s.error = None;
             s.listener_task.take()
         };
@@ -1065,6 +1133,13 @@ impl Gateway {
         self.0.clients.lock().unwrap().clear();
         self.changed();
         Ok(self.view())
+    }
+    async fn persist_success(&self, provider: &Provider) {
+        let gateway = self.clone();
+        let provider = provider.clone();
+        // Recovery writes happen after response delivery, outside async socket
+        // polling. Await this bounded per-request job so shutdown keeps its order.
+        let _ = tokio::task::spawn_blocking(move || gateway.successful_response(&provider)).await;
     }
     fn successful_response(&self, provider: &Provider) {
         let mut s = self.0.inner.lock().unwrap();
@@ -1078,7 +1153,15 @@ impl Gateway {
             return;
         }
         if s.store.mode == "auto" {
-            let target = takeover::Pair::new(&provider.base_url, &provider.token);
+            // Routes may use an auxiliary URL. Client configuration and recovery
+            // always restore the canonical primary URL saved by the user.
+            let canonical = s
+                .store
+                .providers
+                .iter()
+                .find(|p| p.id == provider.id)
+                .unwrap();
+            let target = takeover::Pair::new(&canonical.base_url, &canonical.token);
             let update = (|| -> Result<()> {
                 if s.store
                     .resume

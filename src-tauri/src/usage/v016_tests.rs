@@ -1,5 +1,5 @@
 use super::{
-    model::{Meter, Operation, Record, Settings, Tokens, Totals},
+    model::{Attempt, Meter, Operation, Record, Settings, Tokens, Totals},
     pricing::Config,
     Service,
 };
@@ -54,6 +54,20 @@ fn fixed_prices(service: &Service) {
     pricing.configure(config, &view.revision).unwrap();
 }
 
+fn finish_attempt(trace: &super::Trace, attempt: super::AttemptTrace) -> Attempt {
+    let id = attempt.attempt.id.clone();
+    drop(attempt);
+    trace
+        .0
+        .attempts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|attempt| attempt.id == id)
+        .cloned()
+        .expect("dropped attempt was not retained on its trace")
+}
+
 fn priced_attempt(service: &Service, selection: &str) -> (String, String, String, String) {
     let mut settings: Settings = service.settings();
     settings.pricing_model = selection.into();
@@ -72,10 +86,12 @@ fn priced_attempt(service: &Service, selection: &str) -> (String, String, String
         ..Meter::default()
     };
     attempt.update(&meter, Some(200), Some("success"));
+    assert!(attempt.attempt.price.is_none());
+    let saved = finish_attempt(&trace, attempt);
 
-    let response_model = attempt.attempt.response_model.clone().unwrap();
-    let pricing_model = attempt.attempt.pricing_model.clone().unwrap();
-    let price = attempt.attempt.price.as_ref().unwrap();
+    let response_model = saved.response_model.clone().unwrap();
+    let pricing_model = saved.pricing_model.clone().unwrap();
+    let price = saved.price.as_ref().unwrap();
     (
         response_model,
         pricing_model,
@@ -132,7 +148,7 @@ fn sparse_final_meter_preserves_response_model_and_prices_cumulative_usage() {
         ..Meter::default()
     };
     attempt.update(&first, Some(200), None);
-    assert_eq!(attempt.attempt.price.as_ref().unwrap().cost, "8");
+    assert!(attempt.attempt.price.is_none());
 
     let final_meter = Meter {
         tokens: Tokens {
@@ -142,19 +158,21 @@ fn sparse_final_meter_preserves_response_model_and_prices_cumulative_usage() {
         ..Meter::default()
     };
     attempt.update(&final_meter, None, Some("success"));
+    assert!(attempt.attempt.price.is_none());
+    let saved = finish_attempt(&trace, attempt);
 
     assert_eq!(
-        attempt.attempt.response_model.as_deref(),
+        saved.response_model.as_deref(),
         Some("fixture-response-model")
     );
     assert_eq!(
-        attempt.attempt.pricing_model.as_deref(),
+        saved.pricing_model.as_deref(),
         Some("fixture-response-model")
     );
-    assert_eq!(attempt.attempt.tokens.input, Some(2));
-    assert_eq!(attempt.attempt.tokens.output, Some(3));
-    assert_eq!(attempt.attempt.status, Some(200));
-    assert_eq!(attempt.attempt.price.as_ref().unwrap().cost, "16");
+    assert_eq!(saved.tokens.input, Some(2));
+    assert_eq!(saved.tokens.output, Some(3));
+    assert_eq!(saved.status, Some(200));
+    assert_eq!(saved.price.as_ref().unwrap().cost, "16");
 }
 
 #[test]
@@ -185,16 +203,18 @@ fn missing_response_price_or_usage_remains_unpriced_with_known_metadata() {
             ..Meter::default()
         };
         attempt.update(&meter, Some(200), Some("success"));
-
-        assert_eq!(attempt.attempt.response_model.as_deref(), Some(model));
-        assert_eq!(attempt.attempt.pricing_model.as_deref(), Some(model));
-        assert_eq!(attempt.attempt.tokens, tokens);
         assert!(attempt.attempt.price.is_none());
+        let saved = finish_attempt(&trace, attempt);
+
+        assert_eq!(saved.response_model.as_deref(), Some(model));
+        assert_eq!(saved.pricing_model.as_deref(), Some(model));
+        assert_eq!(saved.tokens, tokens);
+        assert!(saved.price.is_none());
 
         let row = Record {
             source: "proxy".into(),
             completed: true,
-            attempts: vec![attempt.attempt.clone()],
+            attempts: vec![saved.clone()],
             ..Record::default()
         };
         assert!(row.cost().is_none());
@@ -223,8 +243,10 @@ fn successful_search_is_priced_once_per_request_without_token_usage() {
 
         attempt.update(&Meter::default(), None, Some("success"));
         attempt.update(&Meter::default(), None, None);
+        assert!(attempt.attempt.price.is_none());
+        let saved = finish_attempt(&trace, attempt);
 
-        let price = attempt.attempt.price.as_ref().unwrap();
+        let price = saved.price.as_ref().unwrap();
         assert_eq!(price.model, "web_search");
         assert_eq!(price.multiplier, "2.5");
         assert_eq!(price.cost, "0.025");
@@ -234,13 +256,13 @@ fn successful_search_is_priced_once_per_request_without_token_usage() {
         );
         assert_eq!(price.basis.as_ref().unwrap()["unit"], "request");
         assert_eq!(price.basis.as_ref().unwrap()["quantity"], 1);
-        assert_eq!(attempt.attempt.grouping_model(), Some("web_search"));
-        assert_eq!(attempt.attempt.tokens.total(), None);
+        assert_eq!(saved.grouping_model(), Some("web_search"));
+        assert_eq!(saved.tokens.total(), None);
 
         let row = Record {
             source: "proxy".into(),
             completed: true,
-            attempts: vec![attempt.attempt.clone()],
+            attempts: vec![saved],
             ..Record::default()
         };
         assert_eq!(row.cost().unwrap().to_string(), "0.025");
@@ -272,7 +294,9 @@ fn unsuccessful_search_and_model_requests_without_usage_do_not_get_search_fees()
         let mut attempt = trace.attempt("fixture-provider", false, "http");
         attempt.update(&Meter::default(), status, Some(outcome));
         assert!(attempt.attempt.price.is_none(), "{status:?} {outcome}");
-        assert_eq!(attempt.attempt.tokens.total(), None);
+        let saved = finish_attempt(&trace, attempt);
+        assert!(saved.price.is_none(), "{status:?} {outcome}");
+        assert_eq!(saved.tokens.total(), None);
     }
 
     let trace = service.begin_operation(
@@ -283,8 +307,7 @@ fn unsuccessful_search_and_model_requests_without_usage_do_not_get_search_fees()
     let mut attempt = trace.attempt("fixture-provider", false, "http");
     attempt.update(&Meter::default(), Some(200), Some("success"));
     assert!(attempt.attempt.price.is_none());
-    assert_eq!(
-        attempt.attempt.grouping_model(),
-        Some("fixture-request-model")
-    );
+    let saved = finish_attempt(&trace, attempt);
+    assert!(saved.price.is_none());
+    assert_eq!(saved.grouping_model(), Some("fixture-request-model"));
 }

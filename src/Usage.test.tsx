@@ -500,7 +500,7 @@ describe("usage records", () => {
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent),
     ).toEqual([
-      "时间",
+      "开始时间",
       "供应商",
       "模型",
       "输入",
@@ -696,7 +696,7 @@ describe("usage records", () => {
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent),
     ).toEqual([
-      "时间",
+      "开始时间",
       "供应商",
       "模型",
       "输入",
@@ -1336,7 +1336,7 @@ describe("usage navigation", () => {
       }),
     );
     expect(mock.confirm).toHaveBeenLastCalledWith(
-      "打开供应商设置会丢弃未保存的草稿。",
+      "打开白名单会丢弃未保存的草稿。",
     );
     await act(async () => mock.listeners.get("navigate")?.("accounts"));
     expect(mock.confirm).toHaveBeenLastCalledWith(

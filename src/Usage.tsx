@@ -517,7 +517,7 @@ export default function Usage({
               <thead>
                 <tr>
                   {[
-                    "时间",
+                    "开始时间",
                     "供应商",
                     "模型",
                     "输入",
@@ -1362,6 +1362,22 @@ function AttemptDetails({
                 ],
               ]
             : []),
+          ...(a.transfer ? [
+            ["请求进入", a.transfer.receivedAt == null ? "—" : new Date(a.transfer.receivedAt).toLocaleString()],
+            ["上游发送", new Date(a.transfer.sentAt).toLocaleString()],
+            ["收到首字节", a.transfer.firstByteAt == null ? "—" : new Date(a.transfer.firstByteAt).toLocaleString()],
+            ["协议终态", a.transfer.terminalAt == null ? "—" : new Date(a.transfer.terminalAt).toLocaleString()],
+            ["本地结束", new Date(a.transfer.endedAt).toLocaleString()],
+            ["上游读取", `${numeric(a.transfer.upstreamBytes)} B`],
+            ["交给下游网络层", `${numeric(a.transfer.downstreamBytes)} B`],
+            ["终态已交出", a.transfer.terminalHandedOff ? "是" : "未确认"],
+            ["上游结束", ({ EOF: "正常 EOF", DISCONNECTED: "连接中断", TIMEOUT: "无进展超时", CONNECT_FAILED: "连接失败" } as Record<string, string>)[a.transfer.upstreamEnd ?? ""] ?? "—"],
+            ["WS 关闭码", a.transfer.wsCloseCode == null ? "—" : String(a.transfer.wsCloseCode)],
+            ["下游错误", a.transfer.downstreamError ?? "—"],
+            ["超时阶段", a.transfer.timeoutPhase ?? "—"],
+            ["超时阈值", a.transfer.timeoutSeconds == null ? "—" : `${a.transfer.timeoutSeconds} 秒`],
+            ["距最后进展", a.transfer.lastProgressMs == null ? "—" : `${a.transfer.lastProgressMs} ms`],
+          ] as [string, string][] : []),
           ["请求模型", a.requestedModel],
           ["收到的响应模型", a.responseModel],
           ...metadata,
@@ -1550,6 +1566,9 @@ function routingReason(reason: string): string {
         compaction_window_mismatch: "压缩窗口未匹配，维持原供应商",
         cursor_pinned: "响应游标固定原供应商",
         no_eligible_receiver: "接收方暂不可用，维持原供应商",
+        receiver_capacity_full: "接管名额已满，原供应商继续",
+        boundary_in_flight: "其他请求正在接管",
+        compaction_window_missing: "未携带压缩窗口，维持原供应商",
         compaction_handoff: "压缩后接管",
         auxiliary: "辅助请求，不建立线程归属",
         ordinary_queue: "按普通队列建立归属",

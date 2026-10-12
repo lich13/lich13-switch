@@ -3,6 +3,8 @@
 //! These fixtures use loopback upstreams and synthetic tokens only.  The module
 //! is intentionally self-contained so it does not couple the v0.20 checks to
 //! the older versioned test helpers.
+#[path = "v0212_capacity_tests.rs"]
+mod v0212_capacity_tests;
 use super::{
     compaction::Registry,
     model::{Provider, Store},
@@ -55,6 +57,14 @@ mod v0211_handoff_tests;
 #[cfg(test)]
 #[path = "v0211_lifecycle_tests.rs"]
 mod v0211_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "v0212_tests.rs"]
+mod v0212_tests;
+
+#[cfg(test)]
+#[path = "v0212_delivery_tests.rs"]
+mod v0212_delivery_tests;
 
 fn hints(value: Value) -> RequestHints {
     RequestHints::from_value(value, false).expect("fixture request metadata")
@@ -309,7 +319,8 @@ fn ownership_survives_registry_restart_and_keeps_boundary_hash() {
     let boundary = digest("window-hash");
     let old = provider("old", true, false);
     let new = provider("new", true, false);
-    let first = Registry::new(path.clone())
+    let registry = Registry::new(path.clone());
+    let first = registry
         .prepare_policy(
             session.clone(),
             Some(&hints(json!({"input":"x"}))),
@@ -319,6 +330,7 @@ fn ownership_survives_registry_restart_and_keeps_boundary_hash() {
         .unwrap();
     assert!(first.admitted("old"));
     first.complete("old", Some(&boundary));
+    registry.flush();
 
     let restored = Registry::new(path);
     let lease = restored
@@ -665,6 +677,18 @@ async fn established_owner_retries_two_transient_failures_without_touching_backu
     assert_eq!(owner_hits.load(Ordering::SeqCst), 4);
     assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
     assert_eq!(gateway.view().providers[0].rpm_used, 4);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while gateway
+            .view()
+            .providers
+            .iter()
+            .any(|p| p.active_requests != 0)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fixture request did not settle");
     assert_eq!(gateway.view().providers[0].active_requests, 0);
     gateway.stop().await.unwrap();
 }

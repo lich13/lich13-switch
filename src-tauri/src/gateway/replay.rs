@@ -146,7 +146,30 @@ pub struct Replay {
     pub length: u64,
 }
 impl Replay {
-    pub async fn capture<B>(mut body: B, dir: &Path) -> Result<Self, BoxError>
+    pub async fn capture<B>(body: B, dir: &Path) -> Result<Self, BoxError>
+    where
+        B: Body<Data = Bytes> + Unpin,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
+        Self::capture_progress(body, dir, None).await
+    }
+    pub async fn capture_progress<B>(
+        mut body: B,
+        dir: &Path,
+        idle: Option<std::time::Duration>,
+    ) -> Result<Self, BoxError>
+    where
+        B: Body<Data = Bytes> + Unpin,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
+        Self::capture_observed(&mut body, dir, idle, |_| {}).await
+    }
+    pub async fn capture_observed<B>(
+        mut body: B,
+        dir: &Path,
+        idle: Option<std::time::Duration>,
+        mut observed: impl FnMut(&[u8]),
+    ) -> Result<Self, BoxError>
     where
         B: Body<Data = Bytes> + Unpin,
         B::Error: std::error::Error + Send + Sync + 'static,
@@ -156,10 +179,21 @@ impl Replay {
         let mut writer = None;
         let mut length = 0;
         let mut trailers = None;
-        while let Some(frame) = body.frame().await {
+        loop {
+            let frame = if let Some(idle) = idle {
+                tokio::time::timeout(idle, body.frame())
+                    .await
+                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "upstream body idle"))?
+            } else {
+                body.frame().await
+            };
+            let Some(frame) = frame else {
+                break;
+            };
             let frame = frame?;
             match frame.into_data() {
                 Ok(chunk) => {
+                    observed(&chunk);
                     length += chunk.len() as u64;
                     if length > MAX_BODY {
                         return Err(io::Error::other("请求超过 1 GiB").into());

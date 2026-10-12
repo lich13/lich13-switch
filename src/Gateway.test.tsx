@@ -196,13 +196,13 @@ describe("gateway controls", () => {
         onFocusHandled={handled}
       />,
     );
-    expect(await screen.findByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
     rerender(
       <Gateway notify={() => {}} focusProvider={null} onFocusHandled={handled} />,
     );
-    expect(screen.getByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
   });
@@ -215,7 +215,7 @@ describe("gateway controls", () => {
         focusProvider={{ id: providerId, sequence: 1 }}
       />,
     );
-    expect(await screen.findByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     // App confirms discarding before emitting this new navigation sequence.
     rerender(
@@ -224,7 +224,7 @@ describe("gateway controls", () => {
         focusProvider={{ id: providerId, sequence: 2 }}
       />,
     );
-    expect(await screen.findByRole("dialog", { name: state.providers[0].name })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
     expect(
       mock.command.mock.calls.some(([name]) => name === "update_gateway"),
@@ -321,7 +321,7 @@ it("keeps model choices and manual entries when discovery fails and events refre
   await user.click(operations);
   await user.click(
     within(operations.closest("details")!).getByRole("button", {
-      name: "供应商设置",
+      name: "白名单",
     }),
   );
   await user.click(await screen.findByRole("checkbox", { name: "gpt-A" }));
@@ -341,7 +341,7 @@ it("keeps model choices and manual entries when discovery fails and events refre
   expect(screen.getByRole("checkbox", { name: "custom-model" })).toBeChecked();
   discoveryFailed = true;
   await user.click(screen.getByRole("button", { name: "刷新模型列表" }));
-  const dialog = screen.getByRole("dialog", { name: state.providers[0].name });
+  const dialog = screen.getByRole("dialog", { name: `${state.providers[0].name} · 白名单` });
   expect(await within(dialog).findByRole("status")).toHaveTextContent(
     "模型列表读取失败",
   );

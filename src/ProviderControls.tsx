@@ -176,7 +176,7 @@ export default function ProviderControls({
           );
         }}
       >
-        并发 {provider.activeRequests}/{provider.maxConcurrency || "∞"}
+        并发 {provider.activeRequests + (provider.reservedThreads ?? 0)}/{provider.maxConcurrency || "∞"}
       </button>
       <button
         type="button"
@@ -253,6 +253,7 @@ export default function ProviderControls({
                 void update(false);
               }}
             >
+              {draft.kind === "concurrency" && <dl className="concurrency-breakdown"><dt>正在请求</dt><dd>{provider.activeRequests}</dd><dt>线程预留</dt><dd>{provider.reservedThreads ?? 0}</dd></dl>}
               <label>
                 上限（0 不限）
                 <input

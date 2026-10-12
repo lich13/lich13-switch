@@ -84,6 +84,8 @@ https://github.com/microsoft/node-jsonc-parser
 
 The statistics interface, Codex cumulative-counter and replay-prefix behavior, Claude message-ID merging, and token cache normalization are adapted from CC Switch at `7d8004c40867ec295395840e2c5a0fe42065c086` (MIT, Copyright (c) 2025 Jason Young). The complete MIT notice above applies. Storage, bounded gateway observation, hashed session identities, and cross-source reconciliation are adapted for this application.
 
+SQLite incremental space reclamation references CC Switch's `src-tauri/src/database/mod.rs` (MIT), including draining all rows returned by `incremental_vacuum`. WAL maintenance and content-addressed pricing snapshots are independently implemented; stored usage and historical prices are preserved.
+
 https://github.com/farion1231/cc-switch/tree/7d8004c40867ec295395840e2c5a0fe42065c086/src/components/usage
 
 The v0.15 session parsing and cross-source matching review uses CC Switch at `5ae6ad3888ba4543f6fad343c87656a97bd69da4` (MIT). The same notice applies. Codex single-request counters, source snapshot de-duplication, replay-prefix alignment, and Claude message completion are adapted with additional safeguards for counter resets, late cache-only completion, ambiguous one-to-one matches, and missing HTTP status. The reference was statically compared with synthetic fixtures; the upstream importer was not executed against user data.
@@ -130,3 +132,9 @@ https://github.com/farion1231/cc-switch/blob/00db3eef0431f8e981f5063151e2ac10bd8
 ## Subscription display reference
 
 Account and provider subscription metadata organization follows cc-switch at `df40d53c36b604e044b4d5b9091aeb961aa56990` (MIT), `src/types/subscription.ts`. Parsing and strict intake policy are independently implemented. Official ChatGPT plan metadata follows the `chatgpt_plan_type` claim used by openai/codex (`codex-rs/login/src/token_data.rs`); it is display metadata only.
+
+## Endpoint probe reference
+
+The endpoint probe design references the MIT-licensed CC Switch `src-tauri/src/services/speedtest.rs`: one warmup GET followed by response-header latency measurement. The provider-scoped scheduler, atomic primary/auxiliary swap, loop protection and hash-only endpoint affinity are independently implemented. Probe traffic contains no provider credentials and performs no model generation.
+
+https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/speedtest.rs

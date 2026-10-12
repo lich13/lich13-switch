@@ -21,6 +21,12 @@ pub struct Gate {
     failed: HashMap<String, Instant>,
 }
 pub fn key(r: &Record) -> String {
+    if r.reason == crate::events::Reason::ThreadHandoff {
+        return format!(
+            "handoff:{}",
+            r.details.handoff_scope.as_deref().unwrap_or(&r.id)
+        );
+    }
     // All components already pass the event whitelist; no free-form response.
     format!(
         "{:?}:{}:{}:{:?}",

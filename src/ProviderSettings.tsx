@@ -53,7 +53,7 @@ export default function ProviderSettings({ provider, runtime, clientId, revision
     setSelected((old) => [...new Set([...old, ...values])]); setLimited(true); setCustom(""); setError("");
   };
   const models = [...new Set([...selected, ...(catalog?.models ?? [])])].filter((v) => v.toLowerCase().includes(query.toLowerCase()));
-  return <Modal title={provider.name} close={() => void leave()} busy={saving}>
+  return <Modal title={`${provider.name} · 白名单`} close={() => void leave()} busy={saving}>
     <form className="gateway-form provider-settings" onSubmit={(e) => {
       e.preventDefault();
       if (custom.trim()) { setError("请先添加手填模型，或清空输入"); return; }

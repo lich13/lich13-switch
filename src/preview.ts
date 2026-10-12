@@ -274,6 +274,7 @@ export async function run(
       "stop_gateway",
       "update_gateway",
       "query_provider_quota",
+      "probe_provider_endpoints",
     ].includes(name)
   ) {
     const result = gatewayPreview(name, args);

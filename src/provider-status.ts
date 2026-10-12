@@ -4,12 +4,16 @@ export function providerRuntimeStatus(p: Provider, state: GatewayState): string 
   if (reconnect) return `WS 断开 · 重连${reconnect.retryIn}秒`;
   const retry = state.transientRetries?.find((w) => w.providerId === p.id);
   if (retry) return `${causeText(p) || "上游波动"} · 原线路重试${retry.retryIn}秒`;
-  return providerStatus(p) || (state.compactionPending?.includes(p.id) ? "等待压缩后接管" : "");
+  return providerStatus(p);
+}
+export function providerHandoffStatus(p: Provider, state: GatewayState): string {
+  const waiting = state.handoffWaiting?.find(w => w.providerId === p.id);
+  return waiting ? { awaiting_compaction: "待压缩后接管", awaiting_request: "待下一请求接管", capacity_full: "接管名额已满" }[waiting.state] : "";
 }
 function causeText(p: Provider): string {
   const c = p.health.cause;
   if (!c) return "";
-  const codes: Record<string, string> = { FIRST_BYTE_TIMEOUT: "首字超时", CONNECT_TIMEOUT: "连接超时", TLS_HANDSHAKE_FAILED: "TLS 失败", TLS: "TLS 失败", STREAM_TIMEOUT: "流超时", STREAM_INTERRUPTED: "连接中断", CONNECTION_FAILED: "连接失败", NETWORK: "连接失败" };
+  const codes: Record<string, string> = { FIRST_BYTE_TIMEOUT: "首字超时", CONNECT_TIMEOUT: "连接超时", WS_HANDSHAKE_TIMEOUT: "WS 握手超时", TLS_HANDSHAKE_FAILED: "TLS 失败", TLS: "TLS 失败", STREAM_TIMEOUT: "流超时", STREAM_INTERRUPTED: "连接中断", CONNECTION_FAILED: "连接失败", NETWORK: "连接失败" };
   if (codes[c.code]) return codes[c.code];
   if (c.reason === "authentication") return "认证失败";
   if (c.status != null && c.status >= 400) return `上游 ${c.status}`;
@@ -29,7 +33,8 @@ export function providerStatus(p: Provider): string {
   if (h.state === "half_open") return "恢复探测";
   if (p.rpmLedgerError) return "RPM 记录不可用";
   if (p.rpmLimited) return `RPM 已满 · 等待${Math.max(1, p.rpmRetryIn)}秒`;
-  if (p.maxConcurrency > 0 && p.activeRequests >= p.maxConcurrency)
-    return `并发已满 · ${p.activeRequests}/${p.maxConcurrency}`;
+  const occupied = p.activeRequests + (p.reservedThreads ?? 0);
+  if (p.maxConcurrency > 0 && occupied >= p.maxConcurrency)
+    return `并发已满 · ${occupied}/${p.maxConcurrency}`;
   return "";
 }

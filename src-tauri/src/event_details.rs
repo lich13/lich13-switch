@@ -17,6 +17,8 @@ pub enum Phase {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Details {
+    #[serde(default)]
+    pub handoff_scope: Option<String>,
     pub upstream_code: Option<String>,
     #[serde(default)]
     pub local_code: Option<String>,
@@ -29,6 +31,9 @@ pub struct Details {
     pub wait_seconds: Option<u64>,
     pub cause_id: Option<String>,
     pub circuit: Option<CircuitEvidence>,
+    pub timeout_phase: Option<String>,
+    pub timeout_seconds: Option<u64>,
+    pub last_progress_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -172,6 +177,25 @@ pub fn safe_message(value: &str) -> Option<String> {
 }
 impl Details {
     pub fn sanitized(mut self) -> Self {
+        self.handoff_scope = self
+            .handoff_scope
+            .filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()));
+        self.timeout_phase = self.timeout_phase.filter(|v| {
+            matches!(
+                v.as_str(),
+                "response_headers"
+                    | "first_byte"
+                    | "first_event_idle"
+                    | "error_body_idle"
+                    | "stream_idle"
+                    | "downstream_write"
+                    | "ws_idle"
+                    | "ws_first_byte"
+                    | "ws_handshake"
+            )
+        });
+        self.timeout_seconds = self.timeout_seconds.filter(|v| (1..=86400).contains(v));
+        self.last_progress_ms = self.last_progress_ms.map(|v| v.min(86_400_000));
         self.upstream_code = code(self.upstream_code);
         self.local_code = code(self.local_code);
         self.upstream_type = code(self.upstream_type);

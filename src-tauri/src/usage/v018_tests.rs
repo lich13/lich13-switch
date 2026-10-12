@@ -1,6 +1,6 @@
 use super::{model::*, store::Store, Service};
 use rusqlite::{params, Connection};
-use serde_json::{json, Value};
+use serde_json::json;
 
 const DAY: i64 = 86_400_000;
 const BASE: i64 = 20_000 * DAY;
@@ -421,7 +421,7 @@ fn daily_rollup_stores_sum_and_count_and_keeps_unknown_samples_out_of_the_diviso
         )
         .unwrap();
     assert_eq!(count, 1);
-    let daily: Value = serde_json::from_str(&body).unwrap();
+    let daily = super::bodies::unpack(&body).unwrap();
     assert_eq!(daily["totals"]["requests"], 3);
     assert_eq!(daily["totals"]["firstTokenSumMs"], 30);
     assert_eq!(daily["totals"]["firstTokenSamples"], 2);
@@ -549,7 +549,7 @@ fn v5_migration_backfills_details_but_never_invents_first_token_samples_for_old_
     let version: i64 = database
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     drop(database);
     let totals = Store::open(dir.path())
         .unwrap()

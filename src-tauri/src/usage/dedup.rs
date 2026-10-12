@@ -1,6 +1,6 @@
 //! One-to-one cross-source matching, based on CC Switch 5ae6ad38's ten-minute
 //! fingerprint window. Ambiguous sessions remain inspectable and never double bill.
-use super::{model::*, pricing::Quote, query};
+use super::{bodies, model::*, pricing::Quote, query};
 use crate::storage::Result;
 use rusqlite::{params, Connection};
 const WINDOW: i64 = 600_000;
@@ -55,8 +55,7 @@ fn rows(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
         ],
         |r| r.get::<_, String>(0),
     ))?;
-    rows.map(|v| serde_json::from_str(&db(v)?).map_err(|_| failure("用量关联记录无效")))
-        .collect()
+    rows.map(|v| bodies::decode(c, &db(v)?)).collect()
 }
 fn state(
     c: &Connection,
@@ -72,12 +71,7 @@ fn state(
     r.merged_sources = sources;
     db(c.execute(
         "UPDATE records SET effective=?2,duplicate_of=?3,body=?4 WHERE id=?1",
-        params![
-            r.id,
-            effective,
-            target,
-            serde_json::to_string(&r).map_err(|_| failure("用量关联无效"))?
-        ],
+        params![r.id, effective, target, bodies::encode(c, &r)?],
     ))?;
     Ok(())
 }
@@ -202,7 +196,7 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
 }
 
 fn save_projection(c: &Connection, r: &Record) -> Result<()> {
-    let body = serde_json::to_string(r).map_err(|_| failure("用量关联无效"))?;
+    let body = bodies::encode(c, r)?;
     db(c.execute(
         "UPDATE records SET body=?2,signature=?3,model=?4 WHERE id=?1",
         params![
@@ -216,7 +210,7 @@ fn save_projection(c: &Connection, r: &Record) -> Result<()> {
 }
 pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
     let body: String = db(c.query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
-    let mut current: Record = serde_json::from_str(&body).map_err(|_| failure("用量关联无效"))?;
+    let mut current: Record = bodies::decode(c, &body)?;
     let previous_price = current.final_attempt().and_then(|a| a.price.clone());
     if let Some(original) = current.gateway_reported.take() {
         if let Some(last) = current.attempts.last_mut() {
@@ -228,7 +222,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
     ))?;
     let peers = db(stmt.query_map([id], |r| r.get::<_, String>(0)))?;
     let peers = peers
-        .map(|r| serde_json::from_str::<Record>(&db(r)?).map_err(|_| failure("用量关联无效")))
+        .map(|r| bodies::decode::<Record>(c, &db(r)?))
         .collect::<Result<Vec<_>>>()?;
     current.merged_sources = peers.iter().map(|r| r.source.clone()).collect();
     if !peers.is_empty() {
@@ -344,7 +338,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
             current.gateway_reported = Some(original);
         }
     }
-    if serde_json::to_string(&current).map_err(|_| failure("用量关联无效"))? != body {
+    if bodies::encode(c, &current)? != body {
         save_projection(c, &current)?;
     }
     Ok(())
@@ -357,7 +351,7 @@ pub fn reset_source_supplements(c: &Connection, source: &str) -> Result<()> {
     let rows = db(stmt.query_map([source], |r| r.get::<_, String>(0)))?;
     let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
     for body in rows {
-        let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("用量关联无效"))?;
+        let mut r: Record = bodies::decode(c, &body)?;
         if let Some(original) = r.gateway_reported.take() {
             if let Some(last) = r.attempts.last_mut() {
                 *last = original;

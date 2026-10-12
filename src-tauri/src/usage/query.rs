@@ -91,17 +91,64 @@ pub fn schema(c: &Connection) -> Result<()> {
       input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,
       cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
       cost TEXT NOT NULL,unpriced INTEGER NOT NULL,duration_ms INTEGER NOT NULL,measured_outputs INTEGER NOT NULL,generation_ms INTEGER NOT NULL,
-      PRIMARY KEY(kind,owner,ordinal));
-      CREATE INDEX IF NOT EXISTS usage_filter_client ON records(client,time DESC,id DESC);
-      CREATE INDEX IF NOT EXISTS usage_filter_provider ON records(provider,time DESC,id DESC);
-      CREATE INDEX IF NOT EXISTS usage_filter_model ON records(model,time DESC,id DESC);
-      CREATE INDEX IF NOT EXISTS usage_page ON records(effective,time DESC,id DESC);
+      first_token_sum_ms INTEGER NOT NULL DEFAULT 0,first_token_samples INTEGER NOT NULL DEFAULT 0,
+      cache_read_eligible INTEGER NOT NULL DEFAULT 0,cache_input_eligible INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS usage_filter_client ON records(client,time DESC);
+      CREATE INDEX IF NOT EXISTS usage_filter_provider ON records(provider,time DESC);
+      CREATE INDEX IF NOT EXISTS usage_filter_model ON records(model,time DESC);
+      CREATE INDEX IF NOT EXISTS usage_page ON records(effective,time DESC);
       CREATE INDEX IF NOT EXISTS usage_filter_operation ON records(
         CASE WHEN json_extract(body,'$.attempts[#-1].operation')='web_search' THEN 'web_search'
         WHEN json_extract(body,'$.attempts[#-1].operation')='compaction' OR json_extract(body,'$.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END,
-        time DESC,id DESC);
+        time DESC);
       CREATE INDEX IF NOT EXISTS usage_duplicate ON records(duplicate_of,source);
       CREATE INDEX IF NOT EXISTS daily_time ON daily(day);"))
+}
+
+/// The old secondary indexes repeated each 64-character record ID five times.
+/// Time remains indexed; SQLite sorts only equal-time ties by the stable ID.
+pub(super) fn compact_indexes(c: &Connection) -> rusqlite::Result<()> {
+    let tx = c.unchecked_transaction()?;
+    // VACUUM can defer while a reader is active. Do not rebuild these indexes
+    // again on each retry once their redundant ID column has been removed.
+    for (name, columns) in [
+        ("usage_filter_client", "client,time DESC"),
+        ("usage_filter_provider", "provider,time DESC"),
+        ("usage_filter_model", "model,time DESC"),
+        ("usage_page", "effective,time DESC"),
+        ("usage_filter_operation", "CASE WHEN json_extract(body,'$.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract(body,'$.attempts[#-1].operation')='compaction' OR json_extract(body,'$.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END,time DESC"),
+    ] {
+        let redundant: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_index_xinfo(?1) WHERE name='id' AND key=1)",
+            [name], |row| row.get(0),
+        )?;
+        if redundant { tx.execute_batch(&format!("DROP INDEX {name};"))?; }
+        tx.execute_batch(&format!("CREATE INDEX IF NOT EXISTS {name} ON records({columns});"))?;
+    }
+    let without_rowid: bool = tx.query_row(
+        "SELECT wr FROM pragma_table_list WHERE schema='main' AND name='usage_metrics'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !without_rowid {
+        tx.execute_batch("CREATE TABLE usage_metrics_repacked(
+          kind INTEGER NOT NULL,owner TEXT NOT NULL,ordinal INTEGER NOT NULL,
+          provider TEXT,model TEXT,requests INTEGER NOT NULL,attempts INTEGER NOT NULL,
+          success INTEGER NOT NULL,status_known INTEGER NOT NULL,sessions INTEGER NOT NULL,
+          input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,
+          cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
+          cost TEXT NOT NULL,unpriced INTEGER NOT NULL,duration_ms INTEGER NOT NULL,measured_outputs INTEGER NOT NULL,generation_ms INTEGER NOT NULL,
+          first_token_sum_ms INTEGER NOT NULL DEFAULT 0,first_token_samples INTEGER NOT NULL DEFAULT 0,
+          cache_read_eligible INTEGER NOT NULL DEFAULT 0,cache_input_eligible INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;
+          INSERT INTO usage_metrics_repacked SELECT kind,owner,ordinal,provider,model,requests,attempts,success,status_known,sessions,
+          input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,
+          cost,unpriced,duration_ms,measured_outputs,generation_ms,first_token_sum_ms,first_token_samples,cache_read_eligible,cache_input_eligible FROM usage_metrics;
+          DROP TABLE usage_metrics;
+          ALTER TABLE usage_metrics_repacked RENAME TO usage_metrics;")?;
+    }
+    tx.commit()
 }
 pub fn project(
     c: &Connection,

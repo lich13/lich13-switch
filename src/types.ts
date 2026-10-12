@@ -95,6 +95,8 @@ export type GatewaySettings = {
   rateLimitSeconds: number;
   capacityRetrySeconds: number;
   websocketRetrySeconds: number;
+  threadIdleReleaseSeconds?: number;
+  endpointProbeSeconds?: number;
   errorRate: number;
   minRequests: number;
   firstByteSeconds: number;
@@ -119,6 +121,15 @@ export type Provider = {
   id: string;
   name: string;
   baseUrl: string;
+  extraBaseUrls?: string[];
+  preferredBaseUrl?: string;
+  endpointMeasurements?: {
+    baseUrl: string;
+    latencyMs: number | null;
+    status: number | null;
+    error: string | null;
+    checkedAt: number;
+  }[];
   queued: boolean;
   health: Health;
   quotaVersion: string;
@@ -126,6 +137,7 @@ export type Provider = {
   maxConcurrency: number;
   maxRpm: number;
   activeRequests: number;
+  reservedThreads?: number;
   rpmUsed: number;
   rpmRetryIn: number;
   rpmLimited: boolean;
@@ -153,7 +165,7 @@ export type GatewayState = {
   activeConnections: number;
   waitingRequests: number;
   capacityRetries: { providerId: string; retryIn: number }[];
-  compactionPending?: string[];
+  handoffWaiting?: { providerId: string; state: "awaiting_compaction" | "awaiting_request" | "capacity_full" }[];
   websocketRetries?: { providerId: string; retryIn: number }[];
   transientRetries?: { providerId: string; retryIn: number }[];
   error: string | null;

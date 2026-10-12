@@ -265,7 +265,7 @@ async fn reset_provider_wakes_capacity_wait_and_retries_without_extra_attempt() 
     );
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert!(g.view().capacity_retries.is_empty());
-    assert_eq!(g.view().providers[0].active_requests, 0);
+    until(|| g.view().providers[0].active_requests == 0).await;
     g.stop().await.unwrap();
 }
 

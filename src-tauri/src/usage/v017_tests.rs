@@ -56,6 +56,20 @@ fn meter(model: &str, input: u64, output: u64) -> Meter {
     }
 }
 
+fn finish_attempt(trace: &super::Trace, attempt: super::AttemptTrace) -> Attempt {
+    let id = attempt.attempt.id.clone();
+    drop(attempt);
+    trace
+        .0
+        .attempts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|attempt| attempt.id == id)
+        .cloned()
+        .expect("dropped attempt was not retained on its trace")
+}
+
 #[test]
 fn provider_mappings_are_exact_and_isolated_by_client_provider_and_model_field() {
     let dir = tempfile::tempdir().unwrap();
@@ -229,8 +243,24 @@ fn mapping_and_price_snapshots_remain_frozen_for_an_inflight_attempt() {
     let trace = service.begin("codex", Some("fixture-shared"));
     let mut attempt = trace.attempt("provider-a", true, "http");
     attempt.update(&meter("fixture-visible", 2, 1), Some(200), None);
-    let first_revision = attempt.attempt.mapping_revision.clone().unwrap();
-    let first_price_version = attempt.attempt.price.as_ref().unwrap().version.clone();
+    assert!(attempt.attempt.price.is_none());
+    let first_revision = service
+        .prices()
+        .unwrap()
+        .resolve(
+            "codex",
+            Some("provider-a"),
+            Some("fixture-shared"),
+            Some("fixture-visible"),
+            "response",
+        )
+        .2
+        .unwrap();
+    let first_price_version = service
+        .prices()
+        .unwrap()
+        .quote(Some("fixture-price-a"), "1")
+        .version;
 
     configure(
         service.prices().unwrap(),
@@ -243,7 +273,8 @@ fn mapping_and_price_snapshots_remain_frozen_for_an_inflight_attempt() {
         )],
     );
     attempt.update(&meter("fixture-visible", 2, 3), None, Some("success"));
-    let saved = &attempt.attempt;
+    assert!(attempt.attempt.price.is_none());
+    let saved = finish_attempt(&trace, attempt);
     assert_eq!(saved.requested_model.as_deref(), Some("fixture-shared"));
     assert_eq!(saved.response_model.as_deref(), Some("fixture-visible"));
     assert_eq!(saved.pricing_model.as_deref(), Some("fixture-price-a"));
@@ -258,13 +289,12 @@ fn mapping_and_price_snapshots_remain_frozen_for_an_inflight_attempt() {
     let next_trace = service.begin("codex", Some("fixture-shared"));
     let mut next = next_trace.attempt("provider-a", false, "http");
     next.update(&meter("fixture-visible", 2, 3), Some(200), Some("success"));
+    assert!(next.attempt.price.is_none());
+    let next_saved = finish_attempt(&next_trace, next);
+    assert_eq!(next_saved.pricing_model.as_deref(), Some("fixture-price-b"));
+    assert_ne!(next_saved.mapping_revision, saved.mapping_revision);
     assert_eq!(
-        next.attempt.pricing_model.as_deref(),
-        Some("fixture-price-b")
-    );
-    assert_ne!(next.attempt.mapping_revision, saved.mapping_revision);
-    assert_eq!(
-        decimal(&next.attempt.price.as_ref().unwrap().cost),
+        decimal(&next_saved.price.as_ref().unwrap().cost),
         decimal("8")
     );
 
@@ -294,7 +324,7 @@ fn mapping_and_price_snapshots_remain_frozen_for_an_inflight_attempt() {
                 "response"
             )
             .2,
-        next.attempt.mapping_revision
+        next_saved.mapping_revision
     );
 }
 
@@ -310,13 +340,15 @@ fn missing_prices_do_not_guess_hidden_models_but_explicit_mappings_can_price_the
         Some(200),
         Some("success"),
     );
+    assert!(missing.attempt.price.is_none());
+    let missing = finish_attempt(&trace, missing);
     assert_eq!(
-        missing.attempt.pricing_model.as_deref(),
+        missing.pricing_model.as_deref(),
         Some("fixture-unlisted-response")
     );
-    assert_eq!(missing.attempt.pricing_basis.as_deref(), Some("response"));
-    assert!(missing.attempt.price.is_none());
-    assert!(missing.attempt.mapping_revision.is_none());
+    assert_eq!(missing.pricing_basis.as_deref(), Some("response"));
+    assert!(missing.price.is_none());
+    assert!(missing.mapping_revision.is_none());
 
     configure(
         service.prices().unwrap(),
@@ -335,34 +367,29 @@ fn missing_prices_do_not_guess_hidden_models_but_explicit_mappings_can_price_the
         Some(200),
         Some("success"),
     );
+    assert!(mapped.attempt.price.is_none());
+    let mapped = finish_attempt(&mapped_trace, mapped);
     assert_eq!(
-        mapped.attempt.response_model.as_deref(),
+        mapped.response_model.as_deref(),
         Some("fixture-unlisted-response")
     );
+    assert_eq!(mapped.pricing_model.as_deref(), Some("fixture-price-a"));
+    assert_eq!(mapped.pricing_basis.as_deref(), Some("provider_mapping"));
     assert_eq!(
-        mapped.attempt.pricing_model.as_deref(),
-        Some("fixture-price-a")
-    );
-    assert_eq!(
-        mapped.attempt.pricing_basis.as_deref(),
-        Some("provider_mapping")
-    );
-    assert_eq!(
-        decimal(&mapped.attempt.price.as_ref().unwrap().cost),
+        decimal(&mapped.price.as_ref().unwrap().cost),
         decimal("0.8")
     );
 
     let visible_trace = service.begin("codex", Some("fixture-visible"));
     let mut visible = visible_trace.attempt("provider-a", false, "http");
     visible.update(&meter("fixture-visible", 2, 3), Some(200), Some("success"));
+    assert!(visible.attempt.price.is_none());
+    let visible = finish_attempt(&visible_trace, visible);
+    assert_eq!(visible.pricing_model.as_deref(), Some("fixture-visible"));
+    assert_eq!(visible.pricing_basis.as_deref(), Some("response"));
+    assert!(visible.mapping_revision.is_none());
     assert_eq!(
-        visible.attempt.pricing_model.as_deref(),
-        Some("fixture-visible")
-    );
-    assert_eq!(visible.attempt.pricing_basis.as_deref(), Some("response"));
-    assert!(visible.attempt.mapping_revision.is_none());
-    assert_eq!(
-        decimal(&visible.attempt.price.as_ref().unwrap().cost),
+        decimal(&visible.price.as_ref().unwrap().cost),
         decimal("0.8")
     );
 }
@@ -417,9 +444,11 @@ fn mapped_pricing_preserves_cache_dimensions_and_search_per_request_fees() {
     let trace = service.begin("codex", Some("fixture-shared"));
     let mut attempt = trace.attempt("provider-a", false, "http");
     attempt.update(&usage, Some(200), Some("success"));
-    assert_eq!(attempt.attempt.tokens, usage.tokens);
+    assert!(attempt.attempt.price.is_none());
+    let attempt = finish_attempt(&trace, attempt);
+    assert_eq!(attempt.tokens, usage.tokens);
     assert_eq!(
-        decimal(&attempt.attempt.price.as_ref().unwrap().cost),
+        decimal(&attempt.price.as_ref().unwrap().cost),
         decimal("4.06")
     );
 
@@ -427,8 +456,10 @@ fn mapped_pricing_preserves_cache_dimensions_and_search_per_request_fees() {
     let mut attempt = search.attempt("provider-a", false, "http");
     attempt.update(&usage, Some(200), Some("success"));
     attempt.update(&usage, None, None);
-    let price = attempt.attempt.price.as_ref().unwrap();
-    assert_eq!(attempt.attempt.grouping_model(), Some("web_search"));
+    assert!(attempt.attempt.price.is_none());
+    let attempt = finish_attempt(&search, attempt);
+    let price = attempt.price.as_ref().unwrap();
+    assert_eq!(attempt.grouping_model(), Some("web_search"));
     assert_eq!(decimal(&price.cost), decimal("0.02"));
     assert_eq!(price.basis.as_ref().unwrap()["quantity"], 1);
     assert_eq!(price.rates.len(), 1);
@@ -908,7 +939,7 @@ fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempt
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
 }
 
 #[test]

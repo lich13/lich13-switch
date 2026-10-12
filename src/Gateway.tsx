@@ -8,11 +8,12 @@ import type { ClientId } from "./types";
 import { saveGatewayEdit, type EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
 import ProviderSettings from "./ProviderSettings";
+import ProviderEndpoints from "./ProviderEndpoints";
 import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import Modal from "./Modal";
-import { providerRuntimeStatus } from "./provider-status";
+import { providerRuntimeStatus, providerHandoffStatus } from "./provider-status";
 import { QuotaInfo, useProviderQuota } from "./Quota";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -40,6 +41,7 @@ type Edit = Record<string, unknown>;
 type Dialog =
   | { kind: "provider"; item?: Provider }
   | { kind: "settings"; item: Provider }
+  | { kind: "endpoints"; item: Provider }
   | { kind: "quota"; item: Provider }
   | null;
 type GatewayProps = {
@@ -423,7 +425,10 @@ function GatewayContent({
                           }
                         >
                           <Settings2 size={14} />
-                          供应商设置
+                          白名单
+                        </button>
+                        <button onClick={() => setDialog({ kind: "endpoints", item: p })}>
+                          <Network size={14} />端点
                         </button>
                         <button
                           onClick={() =>
@@ -465,6 +470,7 @@ function GatewayContent({
                       </div>
                     </details>
                   </div>
+                  {providerHandoffStatus(p, state) && <span className="provider-binding provider-handoff">{providerHandoffStatus(p, state)}</span>}
                   <div className="provider-secondary">
                     <span className="provider-domain" title={p.baseUrl}>
                       {new URL(p.baseUrl).host}
@@ -549,12 +555,12 @@ function GatewayContent({
           close={() => setDialog(null)}
           save={async (payload, revision) => {
             await edit(payload, revision);
-            notify("供应商设置已保存");
+            notify("白名单已保存");
           }}
         />
       )}
       {dialog?.kind === "quota" && (
-        <Modal title={`${dialog.item.name} 额度`} close={() => setDialog(null)}>
+        <Modal compact title={`${dialog.item.name} 额度`} close={() => setDialog(null)}>
           <QuotaInfo
             provider={dialog.item}
             quota={quota.quotaFor(
@@ -565,6 +571,12 @@ function GatewayContent({
           />
         </Modal>
       )}
+      {dialog?.kind === "endpoints" && <ProviderEndpoints
+        provider={dialog.item}
+        runtime={state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item}
+        clientId={clientId} revision={state.revision} onDirtyChange={markDialog}
+        update={setState} save={edit} close={() => setDialog(null)}
+      />}
       {dialog?.kind === "provider" && (
         <GatewayDialog
           clientId={clientId}
@@ -622,6 +634,7 @@ function Advanced({
             keyof GatewaySettings,
             string,
           ],
+          ["threadIdleReleaseSeconds", "线程空闲释放 / 秒"] as [keyof GatewaySettings, string],
           ["capacityRetrySeconds", "容量错误等待 / 秒"] as [
             keyof GatewaySettings,
             string,
@@ -632,8 +645,9 @@ function Advanced({
     ["minRequests", "最小请求数"],
     ["firstByteSeconds", "首字节 / 秒"],
     ["idleSeconds", "流静默 / 秒"],
-    ["totalSeconds", "非流式总时限 / 秒"],
+    ["totalSeconds", "请求上传 / 秒"],
     ["connectSeconds", "连接超时 / 秒"],
+    ["endpointProbeSeconds", "端点测速间隔 / 秒"],
     ["queueSeconds", "排队等待 / 秒"],
     ["maxWaiting", "最多等待请求"],
   ];
@@ -660,16 +674,16 @@ function Advanced({
             <input
               type="number"
               required
-              min={key === "maxRetries" ? 0 : key === "errorRate" ? 0.01 : 1}
+              min={key === "maxRetries" ? 0 : key === "errorRate" ? 0.01 : key === "endpointProbeSeconds" ? 10 : 1}
               max={
                 key === "capacityRetrySeconds" ||
-                key === "websocketRetrySeconds"
+                key === "websocketRetrySeconds" || key === "threadIdleReleaseSeconds" || key === "endpointProbeSeconds"
                   ? 86400
                   : key === "transientFailureThreshold" ? 1000
                   : undefined
               }
               step={key === "errorRate" ? 0.01 : 1}
-              value={draft[key] ?? (key === "transientFailureThreshold" ? 6 : "")}
+              value={draft[key] ?? (key === "transientFailureThreshold" ? 6 : key === "threadIdleReleaseSeconds" || key === "endpointProbeSeconds" ? 300 : "")}
               onChange={(e) => {
                 if (!editing) baseRevision.current = revision;
                 setEditing(true);

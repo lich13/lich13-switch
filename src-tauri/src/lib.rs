@@ -841,6 +841,16 @@ fn get_gateway(client_id: gateway::ClientId, r: tauri::State<'_, Arc<Runtime>>) 
     r.gateway(client_id).view()
 }
 #[tauri::command]
+async fn probe_provider_endpoints(
+    client_id: gateway::ClientId,
+    provider_id: String,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::View> {
+    r.gateway(client_id)
+        .probe_endpoints(&provider_id, true)
+        .await
+}
+#[tauri::command]
 async fn update_gateway(
     client_id: gateway::ClientId,
     app: tauri::AppHandle,
@@ -1315,6 +1325,15 @@ pub fn run() {
                 });
             }
             for g in [runtime.gateway.clone(), runtime.claude.clone()] {
+                let probes = g.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        interval.tick().await;
+                        probes.probe_due_endpoints().await;
+                    }
+                });
                 let mut quota_events = g.quota_events();
                 let quota_app = app.handle().clone();
                 let client_id = g.client_id();
@@ -1570,6 +1589,7 @@ pub fn run() {
             quick::hide_quick,
             quick::resize_quick,
             get_gateway,
+            probe_provider_endpoints,
             update_gateway,
             start_gateway,
             stop_gateway,

@@ -1,6 +1,9 @@
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +41,10 @@ pub struct Settings {
     pub capacity_retry_seconds: u64,
     #[serde(default = "default_capacity_retry_seconds")]
     pub websocket_retry_seconds: u64,
+    #[serde(default = "default_thread_idle_seconds")]
+    pub thread_idle_release_seconds: u64,
+    #[serde(default = "default_endpoint_probe_seconds")]
+    pub endpoint_probe_seconds: u64,
     pub error_rate: f64,
     pub min_requests: u32,
     pub first_byte_seconds: u64,
@@ -48,6 +55,12 @@ pub struct Settings {
     pub queue_seconds: u64,
     #[serde(default = "default_max_waiting")]
     pub max_waiting: usize,
+}
+fn default_thread_idle_seconds() -> u64 {
+    300
+}
+fn default_endpoint_probe_seconds() -> u64 {
+    300
 }
 fn default_wait_seconds() -> u64 {
     30
@@ -76,10 +89,12 @@ impl Default for Settings {
             rate_limit_seconds: default_rate_limit_seconds(),
             capacity_retry_seconds: default_capacity_retry_seconds(),
             websocket_retry_seconds: default_capacity_retry_seconds(),
+            thread_idle_release_seconds: default_thread_idle_seconds(),
+            endpoint_probe_seconds: default_endpoint_probe_seconds(),
             error_rate: 0.6,
             min_requests: 10,
-            first_byte_seconds: 60,
-            idle_seconds: 120,
+            first_byte_seconds: 600,
+            idle_seconds: 600,
             total_seconds: 600,
             connect_seconds: 15,
             queue_seconds: default_wait_seconds(),
@@ -97,12 +112,14 @@ impl Settings {
             || self.min_requests == 0
             || self.max_waiting == 0
             || self.max_waiting > 10000
+            || !(10..=86400).contains(&self.endpoint_probe_seconds)
             || !(0.01..=1.0).contains(&self.error_rate)
             || [
                 self.cooldown_seconds,
                 self.rate_limit_seconds,
                 self.capacity_retry_seconds,
                 self.websocket_retry_seconds,
+                self.thread_idle_release_seconds,
                 self.first_byte_seconds,
                 self.idle_seconds,
                 self.total_seconds,
@@ -122,10 +139,14 @@ impl Settings {
 pub struct Store {
     pub schema: u32,
     #[serde(default)]
+    pub phase_timeouts: bool,
+    #[serde(default)]
     pub initialized: bool,
     #[serde(default)]
     pub connection: super::codex_api::Connection,
     pub providers: Vec<Provider>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_endpoints: BTreeMap<String, Vec<String>>,
     pub settings: Settings,
     pub mode: String,
     pub selected: Option<String>,
@@ -144,9 +165,11 @@ impl Default for Store {
     fn default() -> Self {
         Self {
             schema: 2,
+            phase_timeouts: true,
             initialized: false,
             connection: Default::default(),
             providers: vec![],
+            provider_endpoints: BTreeMap::new(),
             settings: Settings::default(),
             mode: "manual".into(),
             selected: None,
@@ -178,6 +201,14 @@ pub enum Edit {
     RenameProvider {
         id: String,
         name: String,
+    },
+    EndpointsProvider {
+        id: String,
+        base_urls: Vec<String>,
+    },
+    SwapEndpoint {
+        id: String,
+        base_url: String,
     },
     DeleteProvider {
         id: String,
@@ -270,7 +301,7 @@ pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
 impl Store {
     pub fn load(path: &Path) -> Result<(Self, String)> {
         let raw = storage::read_optional(path)?;
-        let store: Self = match &raw {
+        let mut store: Self = match &raw {
             Some(raw) => {
                 let invalid = || AppError::new("STORE", "网关存储无法读取，请保留原文件");
                 let value: serde_json::Value =
@@ -282,7 +313,24 @@ impl Store {
         if !matches!(store.schema, 1 | 2) {
             return Err(AppError::new("STORE", "网关存储版本不受支持"));
         }
+        if !store.phase_timeouts {
+            if store.settings.first_byte_seconds == 60 {
+                store.settings.first_byte_seconds = 600;
+            }
+            if store.settings.idle_seconds == 120 {
+                store.settings.idle_seconds = 600;
+            }
+            store.phase_timeouts = true;
+        }
         store.settings.validate()?;
+        store
+            .provider_endpoints
+            .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
+        for p in &store.providers {
+            if let Some(values) = store.provider_endpoints.get_mut(&p.id) {
+                *values = endpoint_urls(&p.base_url, values, store.settings.port)?;
+            }
+        }
         Ok((store, storage::revision(raw.as_deref())))
     }
     pub fn persist(&self, path: &Path, expected: &str) -> Result<String> {
@@ -379,8 +427,38 @@ impl Store {
             Edit::RenameProvider { id, name: value } => {
                 self.provider_mut(&id)?.name = name(&value)?
             }
+            Edit::EndpointsProvider { id, base_urls } => {
+                let primary = self.provider_mut(&id)?.base_url.clone();
+                let values = endpoint_urls(&primary, &base_urls, self.settings.port)?;
+                if values.is_empty() {
+                    self.provider_endpoints.remove(&id);
+                } else {
+                    self.provider_endpoints.insert(id, values);
+                }
+            }
+            Edit::SwapEndpoint {
+                id,
+                base_url: selected,
+            } => {
+                let primary = self.provider_mut(&id)?.base_url.clone();
+                let mut values = self
+                    .provider_endpoints
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
+                let index = values
+                    .iter()
+                    .position(|url| url == &selected)
+                    .ok_or_else(|| AppError::new("ENDPOINT", "辅助端点已变化，请刷新后重试"))?;
+                values[index] = primary;
+                // Swapping roles does not change credentials or the endpoint set.
+                // Keep the provider version so existing conversations retain affinity.
+                self.provider_mut(&id)?.base_url = selected;
+                self.provider_endpoints.insert(id, values);
+            }
             Edit::DeleteProvider { id } => {
                 self.providers.retain(|p| p.id != id);
+                self.provider_endpoints.remove(&id);
                 if self.selected.as_deref() == Some(&id) {
                     self.selected = self.providers.first().map(|p| p.id.clone());
                 }
@@ -509,6 +587,35 @@ impl Store {
                 unreachable!("handled by gateway")
             }
         }
+        for provider in &self.providers {
+            if let Some(urls) = self.provider_endpoints.get_mut(&provider.id) {
+                *urls = endpoint_urls(&provider.base_url, urls, self.settings.port)?;
+            }
+        }
         Ok(())
     }
+}
+
+pub fn endpoint_urls(primary: &str, values: &[String], port: u16) -> Result<Vec<String>> {
+    if values.len() > 8 {
+        return Err(AppError::new("ENDPOINT", "最多添加 8 个辅助端点"));
+    }
+    let canonical = |raw: &str| -> Result<String> {
+        if raw.len() > 2048 || raw.chars().any(char::is_control) {
+            return Err(AppError::new("ENDPOINT", "端点地址过长或含有无效字符"));
+        }
+        Ok(base_url(raw, port)?
+            .as_str()
+            .trim_end_matches('/')
+            .to_owned())
+    };
+    let main = canonical(primary)?;
+    let mut result = Vec::new();
+    for value in values {
+        let url = canonical(value)?;
+        if url != main && !result.contains(&url) {
+            result.push(url);
+        }
+    }
+    Ok(result)
 }

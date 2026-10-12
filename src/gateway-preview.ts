@@ -30,9 +30,11 @@ export const gatewayDemo: GatewayState = {
     websocketRetrySeconds: 60,
     errorRate: 0.6,
     minRequests: 10,
-    firstByteSeconds: 60,
-    idleSeconds: 120,
+    firstByteSeconds: 600,
+    idleSeconds: 600,
     totalSeconds: 600,
+    threadIdleReleaseSeconds: 300,
+    endpointProbeSeconds: 300,
     connectSeconds: 15,
     queueSeconds: 30,
     maxWaiting: 100,
@@ -105,8 +107,40 @@ export const claudeGatewayDemo: GatewayState = {
     allowedModels: null,
   })),
 };
+if (densePreview) {
+  gatewayDemo.mode = "auto";
+  gatewayDemo.running = true;
+  gatewayDemo.configState = "gateway";
+  gatewayDemo.configProvider = null;
+  const [primary, backup, receiver] = gatewayDemo.providers;
+  Object.assign(primary, {
+    handoffAfterCompaction: true,
+    activeRequests: 1,
+    reservedThreads: 2,
+  });
+  Object.assign(backup, {
+    handoffAfterCompaction: true,
+    activeRequests: 1,
+    reservedThreads: 1,
+    maxConcurrency: 2,
+  });
+  receiver.handoffAfterCompaction = true;
+  gatewayDemo.activeConnections = 2;
+  gatewayDemo.handoffWaiting = [
+    { providerId: primary.id, state: "awaiting_compaction" },
+    { providerId: backup.id, state: "capacity_full" },
+    { providerId: receiver.id, state: "awaiting_request" },
+  ];
+}
 export function gatewayPreview(name: string, args: Record<string, unknown>) {
   const s = args.clientId === "claude" ? claudeGatewayDemo : gatewayDemo;
+  if (name === "probe_provider_endpoints") {
+    const p = s.providers.find((p) => p.id === args.providerId);
+    if (!p) throw new Error("供应商不存在");
+    p.endpointMeasurements = [p.baseUrl, ...(p.extraBaseUrls ?? [])].map((baseUrl, i) => ({ baseUrl, latencyMs: i ? 48 : 96, status: 401, error: null, checkedAt: Date.now() }));
+    p.preferredBaseUrl = p.extraBaseUrls?.[0] ?? p.baseUrl;
+    return structuredClone(s);
+  }
   if (name === "start_gateway") {
     s.running = true;
     s.configState = "gateway";
@@ -123,7 +157,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       providerId: provider.id,
       version: provider.quotaVersion,
       state: "ok",
-      source: provider.id === "primary" ? "sub2api" : "newapi",
+      source: provider.id.endsWith("primary") ? "sub2api" : "newapi",
       checkedAt: Math.floor(Date.now() / 1000),
       successAt: Math.floor(Date.now() / 1000),
       retryAt: null,
@@ -135,7 +169,10 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         status: "active",
         active: true,
         expiresAt: "2027-12-31T00:00:00Z",
-        plans: [{ name: "每日", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null }],
+        plans: [
+          { name: "每日", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null },
+          { name: "每周", remaining: 42, used: 8, total: 50, unit: "USD", unlimited: false, resetAt: null },
+        ],
       }] : [{
         name: "团队研发与长周期协作套餐",
         status: "active",
@@ -149,7 +186,11 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         expiresAt: null,
         plans: [{ name: "套餐额度", remaining: 5, used: 0, total: 5, unit: "USD", unlimited: false, resetAt: null }],
       }],
-      plans: [
+      plans: provider.id.endsWith("primary") ? [
+        { name: "开发者套餐", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null },
+        { name: "每日", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null },
+        { name: "每周", remaining: 42, used: 8, total: 50, unit: "USD", unlimited: false, resetAt: null },
+      ] : [
         {
           name: "API Key 配额",
           remaining: 42.35,
@@ -163,7 +204,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       expiresAt: null,
       expiresAtUnix: null,
       today: { requests: 18, tokens: 56200, cost: 1.25 },
-      totalUsage: null,
+      totalUsage: { requests: 2400, tokens: 9600000, cost: 28.5 },
     };
     provider.quota = result;
     return result;
@@ -186,6 +227,17 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       p.maxConcurrency = Number(e.maxConcurrency);
     if (e.op === "rpmProvider" && p) p.maxRpm = Number(e.maxRpm);
     if (e.op === "renameProvider" && p) p.name = String(e.name);
+    if (e.op === "endpointsProvider" && p) {
+      p.extraBaseUrls = [...new Set((e.baseUrls as string[]).map((url) => new URL(url).href.replace(/\/$/, "")))].filter((url) => url !== p.baseUrl.replace(/\/$/, ""));
+      p.endpointMeasurements = []; p.preferredBaseUrl = p.baseUrl;
+    }
+    if (e.op === "swapEndpoint" && p) {
+      const index = p.extraBaseUrls?.indexOf(String(e.baseUrl)) ?? -1;
+      if (index < 0) throw new Error("辅助端点已变化，请刷新后重试");
+      const previous = p.baseUrl;
+      p.baseUrl = p.extraBaseUrls![index]; p.extraBaseUrls![index] = previous;
+      p.endpointMeasurements = []; p.preferredBaseUrl = p.baseUrl;
+    }
     if (e.op === "reset" && p) p.health = { ...healthy };
     if (e.op === "deleteProvider")
       s.providers = s.providers.filter((p) => p.id !== id);

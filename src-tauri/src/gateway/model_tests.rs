@@ -1,5 +1,16 @@
 use super::*;
 use crate::gateway::routing::Requirement;
+
+async fn settle(g: &Gateway) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while g.view().providers.iter().any(|p| p.active_requests != 0) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fixture request did not settle");
+}
+
 fn allow(g: &Gateway, t: &tempfile::TempDir, n: usize, models: Option<Vec<&str>>) {
     update(
         g,
@@ -101,6 +112,7 @@ async fn exact_rules_filter_before_attempts_and_preserve_original_json_and_resou
         .as_ref(),
         payload
     );
+    settle(&g).await;
     assert_eq!(seen.lock().unwrap()[0].0, 4);
     assert_eq!(g.view().providers[4].active_requests, 0);
     assert!(g.view().providers[..4]

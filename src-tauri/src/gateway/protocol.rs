@@ -319,8 +319,29 @@ pub struct Observer {
 }
 
 /// Health observation and bounded usage metadata share decoding, never terminal policy.
+#[derive(Default)]
+pub struct Delivery {
+    pub bytes: std::sync::atomic::AtomicU64,
+    pub terminal: std::sync::atomic::AtomicBool,
+    // 1: body dropped; 2: HTTP connection error; 3: downstream stall.
+    pub error: std::sync::atomic::AtomicU8,
+}
+impl Delivery {
+    pub fn handed(&self, bytes: usize, terminal: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.bytes.fetch_add(bytes as u64, Relaxed);
+        if terminal {
+            self.terminal.store(true, Relaxed);
+        }
+    }
+}
 pub struct Protocol {
     observer: Option<Observer>,
+    thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
+    transfer: crate::usage::model::TransferMetadata,
+    delivery: std::sync::Arc<Delivery>,
+    last_progress: std::time::Instant,
+
     pub observation: Observation,
     stream: bool,
     status: Option<u16>,
@@ -339,6 +360,13 @@ impl Protocol {
     pub fn new(stream: bool) -> Self {
         Self {
             observer: None,
+            thread: None,
+            transfer: crate::usage::model::TransferMetadata {
+                sent_at: crate::usage::model::now(),
+                ..Default::default()
+            },
+            delivery: Default::default(),
+            last_progress: std::time::Instant::now(),
             observation: Observation::default(),
             stream,
             status: None,
@@ -353,6 +381,55 @@ impl Protocol {
             stop: None,
             downstream: None,
         }
+    }
+    pub fn attach_thread(
+        &mut self,
+        thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
+    ) {
+        self.thread = thread;
+    }
+    pub fn request_received(&mut self, at: i64) {
+        self.transfer.received_at = Some(at);
+    }
+    pub fn websocket_close(&mut self, code: Option<u16>) {
+        self.transfer.ws_close_code = code;
+    }
+    pub fn delivery(&self) -> std::sync::Arc<Delivery> {
+        self.delivery.clone()
+    }
+    pub fn set_delivery(&mut self, delivery: std::sync::Arc<Delivery>) {
+        self.delivery = delivery;
+    }
+    pub fn request_headers(&mut self, headers: &hyper::HeaderMap) {
+        self.transfer.client_request_hash = ["x-request-id", "request-id", "x-client-request-id"]
+            .iter()
+            .find_map(|key| headers.get(*key))
+            .filter(|v| !v.is_empty() && v.len() <= 512)
+            .map(|v| crate::storage::digest(v.as_bytes()));
+    }
+    pub fn timeout(&mut self, phase: &str, seconds: u64) {
+        self.timeout_after(phase, seconds, self.last_progress.elapsed());
+    }
+    pub fn timeout_after(&mut self, phase: &str, seconds: u64, silent: std::time::Duration) {
+        self.transfer.timeout_phase = Some(phase.into());
+        self.transfer.timeout_seconds = Some(seconds);
+        self.transfer.last_progress_ms = Some(silent.as_millis().min(u64::MAX as u128) as u64);
+        self.observation.error.timeout_phase = self.transfer.timeout_phase.clone();
+        self.observation.error.timeout_seconds = self.transfer.timeout_seconds;
+        self.observation.error.last_progress_ms = self.transfer.last_progress_ms;
+    }
+    fn progress(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.transfer
+            .first_byte_at
+            .get_or_insert_with(crate::usage::model::now);
+        self.transfer.upstream_bytes = self.transfer.upstream_bytes.saturating_add(bytes as u64);
+        self.last_progress = std::time::Instant::now();
+    }
+    pub fn websocket_progress(&mut self, bytes: usize) {
+        self.progress(bytes);
     }
     pub fn attach_usage(&mut self, usage: crate::usage::AttemptTrace) {
         self.observation.meter.anthropic = Some(usage.is_claude());
@@ -387,12 +464,35 @@ impl Protocol {
     ) {
         self.ownership = lease.map(|lease| (lease, provider.into()));
     }
-    fn record_usage(&mut self) {
+    pub fn commit_ownership(&self) {
         if self.terminal() == Some(Terminal::Success) {
             if let Some((lease, provider)) = &self.ownership {
-                lease.complete(provider, self.observation.compaction_fingerprint.as_deref());
+                let receiver = lease.handoff && lease.owner.as_deref() != Some(provider);
+                if !receiver
+                    || self
+                        .delivery
+                        .terminal
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    lease.complete(provider, self.observation.compaction_fingerprint.as_deref());
+                }
             }
         }
+    }
+    pub fn delivered_success(&self) -> bool {
+        self.terminal() == Some(Terminal::Success)
+            && self
+                .delivery
+                .terminal
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn record_usage(&mut self) {
+        if self.terminal_received {
+            self.transfer
+                .terminal_at
+                .get_or_insert_with(crate::usage::model::now);
+        }
+        self.commit_ownership();
         if self.observation.meter.first_token_ms.is_some() && self.first_usage_ms.is_none() {
             self.first_usage_ms = Some(self.started.elapsed().as_millis() as u64);
         }
@@ -426,6 +526,7 @@ impl Protocol {
         self.observer = Some(observer);
     }
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.progress(bytes.len());
         if let Some(o) = &mut self.observer {
             o.feed(bytes);
             self.observation = o.snapshot(false);
@@ -464,10 +565,21 @@ impl Protocol {
             return;
         }
         self.finished = true;
+        self.transfer.upstream_eof = reason == "OK";
+        self.transfer.upstream_end = match reason {
+            "OK" => Some("EOF".into()),
+            "STREAM_INTERRUPTED" => Some("DISCONNECTED".into()),
+            "STREAM_TIMEOUT" | "FIRST_BYTE_TIMEOUT" => Some("TIMEOUT".into()),
+            "NETWORK" | "TLS" => Some("CONNECT_FAILED".into()),
+            _ => None,
+        };
         self.status = self.status.or(status);
         if let Some(o) = &mut self.observer {
             self.observation = o.snapshot(true);
         }
+        self.observation.error.timeout_phase = self.transfer.timeout_phase.clone();
+        self.observation.error.timeout_seconds = self.transfer.timeout_seconds;
+        self.observation.error.last_progress_ms = self.transfer.last_progress_ms;
         self.terminal_received |= self.observation.terminal.is_some();
         self.ended_early = !self.terminal_received
             && matches!(
@@ -540,13 +652,35 @@ impl Protocol {
             "OK" => EndCause::UpstreamDisconnected,
             _ => EndCause::Unsettled,
         };
+        if reason == "CLIENT_DISCONNECTED" {
+            self.transfer.downstream_error = Some("CLIENT_DISCONNECTED".into());
+        }
+        self.snapshot_delivery();
         if let Some(usage) = &mut self.usage {
+            usage.transfer(self.transfer.clone());
             usage.end(EndMetadata {
                 cause,
                 terminal_received: self.terminal_received,
                 response_started: self.status.is_some(),
             });
         }
+    }
+    fn snapshot_delivery(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.transfer.ended_at = crate::usage::model::now();
+        self.transfer.downstream_bytes = self.delivery.bytes.load(Relaxed);
+        self.transfer.terminal_handed_off = self.delivery.terminal.load(Relaxed);
+        self.transfer.response_hash = self
+            .observation
+            .response_id
+            .as_ref()
+            .map(|v| crate::storage::digest(v.as_bytes()));
+        self.transfer.downstream_error = match self.delivery.error.load(Relaxed) {
+            2 => Some("DOWNSTREAM_CONNECTION_ERROR".into()),
+            3 => Some("DOWNSTREAM_WRITE_TIMEOUT".into()),
+            1 => Some("RESPONSE_BODY_DROPPED".into()),
+            _ => self.transfer.downstream_error.clone(),
+        };
     }
 }
 impl Drop for Protocol {
@@ -561,6 +695,10 @@ impl Drop for Protocol {
             "UNSETTLED"
         };
         self.finish(None, reason);
+        self.snapshot_delivery();
+        if let Some(usage) = &mut self.usage {
+            usage.transfer(self.transfer.clone());
+        }
     }
 }
 impl Observer {

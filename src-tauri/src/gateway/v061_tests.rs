@@ -282,10 +282,10 @@ async fn sse_completed_then_client_disconnect_is_success_and_in_band_error_is_ne
         let event = frame.data_ref().unwrap().strip_prefix(b"data: ").unwrap();
         let event: serde_json::Value = serde_json::from_slice(event).unwrap();
         assert_eq!(event["type"], terminal);
-        assert_eq!(g.view().providers[0].active_requests, 0);
         drop(r);
         settle(&g).await;
         let view = g.view();
+        assert_eq!(view.providers[0].active_requests, 0);
         assert_eq!(view.providers[0].health.requests, requests);
         assert_eq!(view.providers[0].health.failures, failures);
         assert!(!view.providers[0].health.probe_in_flight);

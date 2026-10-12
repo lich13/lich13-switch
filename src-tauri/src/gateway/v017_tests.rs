@@ -236,6 +236,7 @@ async fn http_capacity_retries_beyond_five_rounds_even_with_zero_retry_budget() 
     assert!(requests
         .iter()
         .all(|body| body.as_ref() == original.as_slice()));
+    until(|| g.view().providers[0].active_requests == 0).await;
     let view = g.view();
     assert_eq!(view.providers[0].rpm_used, 6);
     assert_eq!(view.providers[0].health.failures, 0);

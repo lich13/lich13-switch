@@ -15,6 +15,7 @@ export const reasons = {
   failover: "自动换商",
   circuit_open: "供应商熔断",
   recovered: "供应商恢复",
+  thread_handoff: "线程已接管",
   config_conflict: "配置冲突",
   startup_recovery: "启动恢复失败",
   account_sync: "账号同步异常",
@@ -32,6 +33,7 @@ export const errorCodes: Record<keyof typeof reasons, string> = {
   failover: "FAILOVER",
   circuit_open: "CIRCUIT_OPEN",
   recovered: "RECOVERED",
+  thread_handoff: "THREAD_HANDOFF",
   config_conflict: "CONFIG_CONFLICT",
   startup_recovery: "STARTUP_RECOVERY_FAILED",
   account_sync: "ACCOUNT_SYNC_ERROR",
@@ -75,6 +77,9 @@ export type EventRecord = {
     countedFailure?: boolean | null;
     waitSeconds?: number | null;
     causeId?: string | null;
+    timeoutPhase?: string | null;
+    timeoutSeconds?: number | null;
+    lastProgressMs?: number | null;
     circuit?: {
       failures: number;
       failureThreshold: number;
@@ -149,6 +154,17 @@ const phases: Record<string, string> = {
   ws_send: "WebSocket 发送",
   ws_receive: "WebSocket 接收",
   ws_wait: "等待重连",
+};
+const timeoutPhases: Record<string, string> = {
+  response_headers: "等待响应头",
+  first_byte: "等待首字节",
+  first_event_idle: "首事件接收静默",
+  error_body_idle: "错误响应接收静默",
+  stream_idle: "上游流静默",
+  downstream_write: "下游发送无进展",
+  ws_idle: "WebSocket 接收静默",
+  ws_first_byte: "WebSocket 等待首字节",
+  ws_handshake: "WebSocket 握手",
 };
 function summary(r: EventRecord) {
   return [r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r), r.details?.message || reasons[r.reason]]
@@ -630,6 +646,15 @@ function EventDetail({
             ["客户端", client(r.clientId)],
             ["供应商", provider],
             ["处理结果", actionText(r)],
+            ...(r.details?.timeoutPhase
+              ? [["超时阶段", timeoutPhases[r.details.timeoutPhase] ?? r.details.timeoutPhase]]
+              : []),
+            ...(r.details?.timeoutSeconds != null
+              ? [["配置阈值", `${r.details.timeoutSeconds} 秒`]]
+              : []),
+            ...(r.details?.lastProgressMs != null
+              ? [["最后进展距超时", `${r.details.lastProgressMs} 毫秒`]]
+              : []),
             ...(r.details?.circuit
               ? [
                   [

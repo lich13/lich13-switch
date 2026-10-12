@@ -1,5 +1,5 @@
 use super::{
-    dedup,
+    bodies, dedup,
     model::*,
     pricing::{Pricing, Quote},
     query,
@@ -72,9 +72,10 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 8 {
+        if version > 9 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
+        super::maintenance::configure(&connection)?;
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
         db(connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
           CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,model TEXT,status INTEGER,response TEXT,signature TEXT,effective INTEGER NOT NULL DEFAULT 1,duplicate_of TEXT,body TEXT NOT NULL);
@@ -84,6 +85,7 @@ impl Store {
           CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL);
           CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
           CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
@@ -129,8 +131,7 @@ impl Store {
                     break;
                 }
                 for (id, body) in rows {
-                    let record: Record = serde_json::from_str(&body)
-                        .map_err(|_| failure("旧用量记录无效，已保留原数据库"))?;
+                    let record: Record = bodies::decode(&tx, &body)?;
                     query::project(&tx, 0, &id, &record, 1, None)?;
                     if version < 7
                         && record.source == "proxy"
@@ -159,8 +160,7 @@ impl Store {
                 db(rows.collect::<rusqlite::Result<Vec<_>>>())?
             };
             for (id, body) in rows {
-                let daily: Daily = serde_json::from_str(&body)
-                    .map_err(|_| failure("旧汇总无效，已保留原数据库"))?;
+                let daily: Daily = bodies::decode(&tx, &body)?;
                 query::project(
                     &tx,
                     1,
@@ -179,6 +179,9 @@ impl Store {
         }
         if version < 8 {
             db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR IGNORE INTO metadata(key,value) VALUES('repair_v020_after',''),('repair_codex','1'),('repair_claude','1'); PRAGMA user_version=8; COMMIT;"))?;
+        }
+        if version < 9 {
+            db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR IGNORE INTO metadata(key,value) VALUES('storage_records_after',''),('storage_daily_after',''),('storage_repack','1'); PRAGMA user_version=9; COMMIT;"))?;
         }
         for suffix in ["-wal", "-shm"] {
             let file = dir.join(format!("usage.sqlite{suffix}"));
@@ -202,6 +205,75 @@ impl Store {
             connection,
             overview_cache: Default::default(),
         })
+    }
+    pub fn reclaim_space(&self) -> Result<()> {
+        let pending: bool = db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key IN ('storage_records_after','storage_daily_after'))",
+            [], |row| row.get(0),
+        ))?;
+        let repack: bool = db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
+            [],
+            |row| row.get(0),
+        ))?;
+        if super::maintenance::reclaim(&self.connection, !pending, repack)? && repack {
+            db(self
+                .connection
+                .execute("DELETE FROM metadata WHERE key='storage_repack'", []))?;
+        }
+        Ok(())
+    }
+    /// Restartable conversion of repeated pricing bases. No record, projection,
+    /// association, timestamp or price is recomputed during this storage change.
+    pub fn compact_storage_batch(&mut self) -> Result<bool> {
+        for (table, key) in [
+            ("records", "storage_records_after"),
+            ("daily", "storage_daily_after"),
+        ] {
+            let after: Option<String> = db(self
+                .connection
+                .query_row("SELECT value FROM metadata WHERE key=?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional())?;
+            let Some(after) = after else {
+                continue;
+            };
+            let tx = db(self.connection.transaction())?;
+            let rows = {
+                let mut statement = db(tx.prepare(&format!(
+                    "SELECT id,body FROM {table} WHERE id>?1 ORDER BY id LIMIT 256"
+                )))?;
+                let rows = db(statement.query_map([after], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                }))?;
+                db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+            };
+            if rows.is_empty() {
+                db(tx.execute("DELETE FROM metadata WHERE key=?1", [key]))?;
+            } else {
+                for (id, body) in &rows {
+                    let compact = if table == "records" {
+                        bodies::encode(&tx, &bodies::decode::<Record>(&tx, body)?)?
+                    } else {
+                        bodies::encode(&tx, &bodies::decode::<Daily>(&tx, body)?)?
+                    };
+                    if &compact != body {
+                        db(tx.execute(
+                            &format!("UPDATE {table} SET body=?2 WHERE id=?1"),
+                            params![id, compact],
+                        ))?;
+                    }
+                }
+                db(tx.execute(
+                    "UPDATE metadata SET value=?2 WHERE key=?1",
+                    params![key, rows.last().unwrap().0],
+                ))?;
+            }
+            db(tx.commit())?;
+            return Ok(true);
+        }
+        Ok(false)
     }
     pub fn reader_with_cache(dir: &Path, cache: OverviewCache) -> Result<Self> {
         let mut reader = Self::reader(dir)?;
@@ -240,8 +312,7 @@ impl Store {
             db(tx.execute("DELETE FROM metadata WHERE key='repair_v020_after'", []))?;
         } else {
             for (id, body) in &rows {
-                let mut record: Record = serde_json::from_str(body)
-                    .map_err(|_| failure("历史用量元数据无法修复，已保留原记录"))?;
+                let mut record: Record = bodies::decode(&tx, body)?;
                 for attempt in &mut record.attempts {
                     attempt.annotate_availability(&record.source);
                 }
@@ -250,18 +321,14 @@ impl Store {
                 }
                 db(tx.execute(
                     "UPDATE records SET body=?2 WHERE id=?1",
-                    params![
-                        id,
-                        serde_json::to_string(&record).map_err(|_| failure("用量元数据无效"))?
-                    ],
+                    params![id, bodies::encode(&tx, &record)?],
                 ))?;
                 if record.source == "proxy" {
                     dedup::supplement(&tx, id)?;
                 }
                 let body: String =
                     db(tx.query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
-                let repaired: Record =
-                    serde_json::from_str(&body).map_err(|_| failure("用量元数据无效"))?;
+                let repaired: Record = bodies::decode(&tx, &body)?;
                 query::project(&tx, 0, id, &repaired, 1, None)?;
             }
             db(tx.execute(
@@ -310,7 +377,7 @@ impl Store {
             insert(&tx, r)?;
         }
         if let Some((id, body)) = cursor {
-            db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![id,body]))?;
+            db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
         }
         if !records.is_empty() {
             query::changed(&tx)?;
@@ -322,7 +389,7 @@ impl Store {
             db(self
                 .connection
                 .query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
-        serde_json::from_str(&body).map_err(|_| failure("记录无效"))
+        bodies::decode(&self.connection, &body)
     }
     fn records(&self, f: &Filter, with_status: bool) -> Result<Vec<Record>> {
         let (condition, args) = query::conditions(f, "r", with_status);
@@ -336,7 +403,7 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             let (body, duplicate) = db(row)?;
-            let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("记录无效"))?;
+            let mut r: Record = bodies::decode(&self.connection, &body)?;
             r.duplicate_of = duplicate;
             if f.source.as_deref() == Some("proxy") {
                 r.gateway_only();
@@ -372,7 +439,7 @@ impl Store {
         let mut records = Vec::new();
         for row in rows {
             let (body, duplicate) = db(row)?;
-            let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("用量记录无效"))?;
+            let mut r: Record = bodies::decode(&self.connection, &body)?;
             r.duplicate_of = duplicate;
             if f.source.as_deref() == Some("proxy") {
                 r.gateway_only();
@@ -452,6 +519,7 @@ impl Store {
                 a.id.clear();
                 a.response_id = None;
                 a.end = None;
+                a.transfer = None;
                 a.thread_hash = None;
                 a.upstream_request_hash = None;
                 a.routing_decision = None;
@@ -471,7 +539,7 @@ impl Store {
                 })
                 .optional())?;
             let mut d = if let Some(body) = old {
-                serde_json::from_str::<Daily>(&body).map_err(|_| failure("汇总无效"))?
+                bodies::decode::<Daily>(&tx, &body)?
             } else {
                 Daily {
                     scope: Some(scope.unwrap_or_else(|| "all".into())),
@@ -485,7 +553,7 @@ impl Store {
                 }
             };
             d.totals.add(&t);
-            db(tx.execute("INSERT INTO daily(id,day,body) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![key,day,serde_json::to_string(&d).map_err(|_|failure("汇总失败"))?]))?;
+            db(tx.execute("INSERT INTO daily(id,day,body) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![key,day,bodies::encode(&tx, &d)?]))?;
             query::project(&tx, 1, &key, &d.example, d.totals.requests, Some(&d.totals))?;
         }
         // Keep only irreversible correlation keys after detail expiry. They prevent
@@ -506,7 +574,7 @@ impl Store {
         let tx = db(self.connection.transaction())?;
         let mut any_changed = false;
         for body in all {
-            let mut r: Record = serde_json::from_str(&body).map_err(|_| failure("记录无效"))?;
+            let mut r: Record = bodies::decode(&tx, &body)?;
             let mut changed = false;
             for a in &mut r.attempts {
                 if a.price.is_none() && a.compacted_unpriced.is_none() {
@@ -519,10 +587,7 @@ impl Store {
                 query::project(&tx, 0, &r.id, &r, 1, None)?;
                 db(tx.execute(
                     "UPDATE records SET body=?2 WHERE id=?1",
-                    params![
-                        r.id,
-                        serde_json::to_string(&r).map_err(|_| failure("记录无效"))?
-                    ],
+                    params![r.id, bodies::encode(&tx, &r)?],
                 ))?;
             }
         }
@@ -535,7 +600,7 @@ impl Store {
         let daily = db(daily)?;
         drop(stmt);
         for (id, body) in daily {
-            let mut d: Daily = serde_json::from_str(&body).map_err(|_| failure("汇总无效"))?;
+            let mut d: Daily = bodies::decode(&tx, &body)?;
             if d.totals.unpriced == 0 {
                 continue;
             }
@@ -562,10 +627,7 @@ impl Store {
             query::project(&tx, 1, &id, &d.example, d.totals.requests, Some(&d.totals))?;
             db(tx.execute(
                 "UPDATE daily SET body=?2 WHERE id=?1",
-                params![
-                    id,
-                    serde_json::to_string(&d).map_err(|_| failure("汇总无效"))?
-                ],
+                params![id, bodies::encode(&tx, &d)?],
             ))?;
         }
         if any_changed {
@@ -613,7 +675,7 @@ impl Store {
             }
             db(tx.execute(
                 "INSERT INTO rebuilding(body) VALUES(?1)",
-                [serde_json::to_string(r).map_err(|_| failure("重建记录无效"))?],
+                [bodies::encode(&tx, r)?],
             ))?;
         }
         dedup::reset_source_supplements(&tx, source)?;
@@ -668,11 +730,11 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
     let provider = a.and_then(|v| v.provider.as_deref());
     let model = a.and_then(|v| v.grouping_model());
     let status = a.and_then(|v| v.status);
-    let body = serde_json::to_string(r).map_err(|_| failure("用量元数据无效"))?;
+    let body = bodies::encode(tx, r)?;
     db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.started_at,provider,model,status,response,signature,body]))?;
     query::project(tx, 0, &r.id, r, 1, None)?;
     if let Some(previous) = previous {
-        let old: Record = serde_json::from_str(&previous).map_err(|_| failure("旧用量记录无效"))?;
+        let old: Record = bodies::decode(tx, &previous)?;
         if old.signature() != r.signature() {
             dedup::reconcile(tx, &old)?;
         }
@@ -691,7 +753,7 @@ fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Resul
         .optional())?;
     let mut r = incoming.clone();
     if let Some(body) = existing {
-        let old: Record = serde_json::from_str(&body).map_err(|_| failure("原用量记录无效"))?;
+        let old: Record = bodies::decode(tx, &body)?;
         if r.source != "proxy" {
             if (old.completed && !r.completed)
                 || old.final_attempt().and_then(|a| a.tokens.output)

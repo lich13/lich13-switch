@@ -199,7 +199,7 @@ export default function App() {
         async (p) => {
           if (
             (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
-            !(await confirmAction("打开供应商设置会丢弃未保存的草稿。"))
+            !(await confirmAction("打开白名单会丢弃未保存的草稿。"))
           )
             return;
           setPage("gateway");

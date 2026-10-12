@@ -26,6 +26,14 @@ export type PriceSnapshot = {
   };
 };
 export type Attempt = {
+  transfer?: {
+    receivedAt?: number | null;
+    sentAt: number; firstByteAt: number | null; terminalAt: number | null; endedAt: number;
+    upstreamBytes: number; downstreamBytes: number; terminalHandedOff: boolean; upstreamEof: boolean;
+    upstreamEnd?: string | null; wsCloseCode?: number | null;
+    downstreamError: string | null; timeoutPhase: string | null; timeoutSeconds: number | null;
+    lastProgressMs: number | null; clientRequestHash: string | null; responseHash: string | null;
+  } | null;
   end?: {
     cause: string;
     terminalReceived: boolean;

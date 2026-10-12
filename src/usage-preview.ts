@@ -116,6 +116,24 @@ if (densePreview) {
     responseStarted: true,
   };
   completed.routingDecision = "compaction_handoff";
+  completed.transfer = {
+    receivedAt: completed.startedAt,
+    sentAt: completed.startedAt + 100,
+    firstByteAt: completed.startedAt + 300,
+    terminalAt: completed.startedAt + 5100,
+    endedAt: completed.startedAt + 5200,
+    upstreamBytes: 1048576,
+    downstreamBytes: 1048576,
+    terminalHandedOff: true,
+    upstreamEof: true,
+    upstreamEnd: "EOF",
+    downstreamError: null,
+    timeoutPhase: null,
+    timeoutSeconds: null,
+    lastProgressMs: 0,
+    clientRequestHash: null,
+    responseHash: null,
+  };
   const interrupted = rows[4];
   interrupted.completed = false;
   interrupted.attempts[0].outcome = "unknown";
@@ -125,6 +143,24 @@ if (densePreview) {
     responseStarted: true,
   };
   interrupted.attempts[0].routingDecision = "existing_thread";
+  interrupted.attempts[0].transfer = {
+    receivedAt: interrupted.startedAt,
+    sentAt: interrupted.startedAt + 100,
+    firstByteAt: interrupted.startedAt + 300,
+    terminalAt: null,
+    endedAt: interrupted.startedAt + 5200,
+    upstreamBytes: 16384,
+    downstreamBytes: 8192,
+    terminalHandedOff: false,
+    upstreamEof: false,
+    upstreamEnd: null,
+    downstreamError: "DOWNSTREAM_CONNECTION_ERROR",
+    timeoutPhase: null,
+    timeoutSeconds: null,
+    lastProgressMs: 10,
+    clientRequestHash: null,
+    responseHash: null,
+  };
   const stopped = rows[5];
   stopped.completed = false;
   stopped.attempts[0].status = 200;

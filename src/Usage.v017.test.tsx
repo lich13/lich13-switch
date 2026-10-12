@@ -212,7 +212,7 @@ it("renders compact token cells, exposes their full values on focus, and has no 
   expect(
     screen.getAllByRole("columnheader").map((header) => header.textContent),
   ).toEqual([
-    "时间",
+    "开始时间",
     "供应商",
     "模型",
     "输入",

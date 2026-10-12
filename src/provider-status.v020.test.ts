@@ -1,6 +1,10 @@
 import { beforeEach, expect, it } from "vitest";
 import { gatewayDemo } from "./gateway-preview";
-import { providerRuntimeStatus, providerStatus } from "./provider-status";
+import {
+  providerHandoffStatus,
+  providerRuntimeStatus,
+  providerStatus,
+} from "./provider-status";
 import type { GatewayState } from "./types";
 
 function provider() {
@@ -129,10 +133,12 @@ it("prioritizes a WebSocket reconnect over other runtime states", () => {
   ).toBe("WS 断开 · 重连4秒");
 });
 
-it("indicates a provider waiting for compaction handoff", () => {
+it("keeps handoff waiting separate from clickable runtime status", () => {
   const p = provider();
 
-  expect(providerRuntimeStatus(p, state({ compactionPending: [p.id] }))).toBe(
-    "等待压缩后接管",
-  );
+  const current = state({
+    handoffWaiting: [{ providerId: p.id, state: "awaiting_compaction" }],
+  });
+  expect(providerRuntimeStatus(p, current)).toBe("");
+  expect(providerHandoffStatus(p, current)).toBe("待压缩后接管");
 });

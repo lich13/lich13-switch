@@ -440,7 +440,8 @@ fn v0211_restart_restores_owner_and_compaction_boundary_from_thread_identity() {
     let old = provider_with_policy("old", true, false);
     let new = provider_with_policy("new", true, false);
     let boundary = digest(WINDOW);
-    let first = Registry::new(path.clone())
+    let registry = Registry::new(path.clone());
+    let first = registry
         .prepare_policy(
             session.clone(),
             Some(&hints(json!({"input":"ordinary"}))),
@@ -450,6 +451,7 @@ fn v0211_restart_restores_owner_and_compaction_boundary_from_thread_identity() {
         .unwrap();
     assert!(first.admitted("old"));
     first.complete("old", Some(&boundary));
+    registry.flush();
     drop(first);
 
     let restored = Registry::new(path);

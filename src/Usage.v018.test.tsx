@@ -574,7 +574,7 @@ describe("v0.18 rankings", () => {
     expect(
       screen.getAllByRole("columnheader").map((header) => header.textContent),
     ).toEqual([
-      "时间",
+      "开始时间",
       "供应商",
       "模型",
       "输入",

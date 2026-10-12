@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClientId, Provider, ProviderQuota } from "./types";
+import { quotaFixture, quotaPlan } from "./quota-fixtures.v0212";
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
   listeners: new Map<string, (s: unknown) => void>(),
@@ -180,8 +181,12 @@ describe("quota display and refresh", () => {
       providerId: provider.id,
       force: true,
     });
-    fireEvent.click(screen.getByText("额度详情"));
-    expect(screen.getByText("已用 1.5 USD / 10 USD")).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: /额度.*USD/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /Key 配额/ })).toHaveTextContent(
+      "1.5 / 10",
+    );
   });
   it("shows a unique active subscription beside compact quota without relabeling existing plans", () => {
     const q = {
@@ -231,15 +236,15 @@ describe("quota display and refresh", () => {
       ],
     };
     render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
-    const details = screen.getByText("额度详情").closest("details");
-    expect(details).not.toBeNull();
-    expect(details).not.toHaveAttribute("open");
-    fireEvent.click(screen.getByText("额度详情"));
-    expect(screen.getByText("Pro")).toBeInTheDocument();
-    expect(screen.getByText("未识别套餐")).toBeInTheDocument();
-    expect(screen.getByText("Pro 周期")).toBeInTheDocument();
-    expect(screen.getByText("未知周期")).toBeInTheDocument();
-    expect(screen.getByText("Key 配额")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Pro" })).toHaveTextContent(
+      "Pro 周期",
+    );
+    expect(
+      screen.getByRole("region", { name: "未识别套餐" }),
+    ).toHaveTextContent("未知周期");
+    expect(screen.getByRole("region", { name: "额度窗口" })).toHaveTextContent(
+      "Key 配额",
+    );
   });
   it("uses a count for ambiguous compact subscription summaries", () => {
     const q = {
@@ -271,6 +276,149 @@ describe("quota display and refresh", () => {
       />,
     );
     expect(screen.getByText("2 个套餐")).toHaveClass("quota-subscription");
+  });
+  it("shows each Sub2API window once while keeping its summary and standalone key quota separate", () => {
+    const daily = quotaPlan({ name: "每日", remaining: 8, used: 2, total: 10 });
+    const weekly = quotaPlan({ name: "每周", remaining: 42, used: 8, total: 50 });
+    const q = quotaFixture(provider, {
+      source: "sub2api",
+      plans: [
+        quotaPlan({ name: "开发者套餐", remaining: 8, used: 2, total: 10 }),
+        daily,
+        weekly,
+        quotaPlan({ name: "Key 配额", remaining: 3.5, used: 1.5, total: 5 }),
+      ],
+      subscriptions: [
+        {
+          name: "开发者套餐",
+          status: "active",
+          active: true,
+          expiresAt: "2027-12-31T00:00:00Z",
+          plans: [daily, weekly],
+        },
+      ],
+    });
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+
+    expect(screen.getAllByText("开发者套餐", { exact: true })).toHaveLength(1);
+    expect(screen.getAllByText("每日", { exact: true })).toHaveLength(1);
+    expect(screen.getAllByText("每周", { exact: true })).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "额度窗口" })).toHaveTextContent(
+      "Key 配额",
+    );
+  });
+  it("keeps matching top-level plans when a Sub2API payload contains multiple subscriptions", () => {
+    const pro = quotaPlan({ name: "Pro", remaining: 8, used: 2, total: 10 });
+    const team = quotaPlan({ name: "Team", remaining: 5, used: 1, total: 6 });
+    const q = quotaFixture(provider, {
+      source: "sub2api",
+      plans: [pro],
+      subscriptions: [
+        {
+          name: "Pro",
+          status: "active",
+          active: true,
+          expiresAt: null,
+          plans: [pro],
+        },
+        {
+          name: "Team",
+          status: "active",
+          active: true,
+          expiresAt: null,
+          plans: [team],
+        },
+      ],
+    });
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+
+    expect(screen.getAllByText("Pro", { exact: true })).toHaveLength(3);
+    expect(screen.getByRole("region", { name: "额度窗口" })).toHaveTextContent(
+      "Pro",
+    );
+  });
+  it("keeps zero balances and distinct values or currencies instead of deduplicating them", () => {
+    const zero = quotaPlan({ name: "每日", remaining: 0, used: 0, total: 10 });
+    const changed = quotaPlan({ name: "每日", remaining: 7, used: 3, total: 10 });
+    const credits = quotaPlan({
+      name: "每日",
+      remaining: 0,
+      used: 0,
+      total: 10,
+      unit: "积分",
+    });
+    const q = quotaFixture(provider, {
+      source: "newapi",
+      plans: [zero, changed, credits],
+      subscriptions: [
+        {
+          name: "基础套餐",
+          status: "active",
+          active: true,
+          expiresAt: null,
+          plans: [zero],
+        },
+      ],
+    });
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+
+    expect(screen.getByText("剩余 0 USD")).toBeInTheDocument();
+    expect(screen.queryByText("未返回剩余额度")).not.toBeInTheDocument();
+    expect(screen.getAllByText("每日", { exact: true })).toHaveLength(4);
+    expect(screen.getByRole("region", { name: "额度窗口" })).toHaveTextContent(
+      "7 USD",
+    );
+    expect(screen.getByRole("region", { name: "额度窗口" })).toHaveTextContent(
+      "0 积分",
+    );
+  });
+  it("keeps long expired plans readable and expands usage statistics with compact token values", () => {
+    const longName = "企业协作套餐 · 跨区域研发与长周期用量管理";
+    const q = quotaFixture(provider, {
+      plans: [quotaPlan({ name: "Key 配额", remaining: 0, used: 0, total: 10 })],
+      subscriptions: [
+        {
+          name: longName,
+          status: "expired",
+          active: false,
+          expiresAt: "2025-12-31T00:00:00Z",
+          plans: [quotaPlan({ name: "每月", remaining: 1, used: 9, total: 10 })],
+        },
+      ],
+      expiresAtUnix: 1_800_000_000,
+      today: { requests: 18, tokens: 1_234, cost: 0 },
+      totalUsage: { requests: 2_400, tokens: 9_600_000, cost: null },
+    });
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+
+    const subscription = screen.getByRole("region", { name: longName });
+    expect(subscription).toHaveTextContent("已到期");
+    const expiry = within(subscription).getByText(/^到期 /);
+    expect(expiry).toHaveAttribute("title", expect.stringContaining("套餐到期"));
+    expect(subscription).toHaveTextContent("每月");
+    const usage = screen.getByText("用量统计").closest("details");
+    expect(usage).not.toBeNull();
+    expect(usage).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("用量统计"));
+    expect(usage).toHaveAttribute("open", "");
+    expect(within(usage as HTMLDetailsElement).getByText("1.23K")).toBeInTheDocument();
+    expect(within(usage as HTMLDetailsElement).getByText("9.6M")).toBeInTheDocument();
+  });
+  it("disables manual refresh while an upstream retry backoff is active", () => {
+    const refresh = vi.fn();
+    const q = quotaFixture(provider, {
+      state: "error",
+      error: "请求太频繁",
+      retryAt: Date.now() / 1000 + 120,
+      stale: true,
+    });
+    render(<QuotaInfo provider={provider} quota={q} refresh={refresh} />);
+    const button = screen.getByRole("button", {
+      name: `刷新 ${provider.name} 额度`,
+    });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(refresh).not.toHaveBeenCalled();
   });
   it("keeps previous successful values visible with a stale error, without inventing zero", async () => {
     render(<Harness />);

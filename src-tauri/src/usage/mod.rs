@@ -1,5 +1,7 @@
+mod bodies;
 pub mod commands;
 mod dedup;
+mod maintenance;
 pub mod model;
 pub mod pricing;
 mod query;
@@ -17,6 +19,8 @@ mod v018_tests;
 mod v019_tests;
 #[cfg(test)]
 mod v020_tests;
+#[cfg(test)]
+mod v0212_storage_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -38,6 +42,8 @@ struct Inner {
     path: PathBuf,
     directory: PathBuf,
     writer: mpsc::SyncSender<Record>,
+    overflow: mpsc::SyncSender<Record>,
+    dropped_records: std::sync::atomic::AtomicU64,
     spool_lock: Mutex<()>,
     price_hint: tokio::sync::Notify,
     backfilling: std::sync::atomic::AtomicBool,
@@ -163,6 +169,7 @@ impl Service {
             .filter(|v| v.validate().is_ok())
             .unwrap_or_default();
         let (writer, receiver) = mpsc::sync_channel::<Record>(256);
+        let (overflow, pending) = mpsc::sync_channel::<Record>(64);
         let (events, _) = broadcast::channel(32);
         let inner = Arc::new(Inner {
             store: Mutex::new(opened.ok()),
@@ -172,6 +179,8 @@ impl Service {
             path,
             directory: dir,
             writer,
+            overflow,
+            dropped_records: std::sync::atomic::AtomicU64::new(0),
             spool_lock: Mutex::new(()),
             price_hint: tokio::sync::Notify::new(),
             backfilling: std::sync::atomic::AtomicBool::new(false),
@@ -182,6 +191,33 @@ impl Service {
             syncing: Mutex::new(false),
             report: Mutex::new(Default::default()),
             events,
+        });
+        let spool = Arc::downgrade(&inner);
+        std::thread::spawn(move || {
+            while let Ok(record) = pending.recv() {
+                let Some(inner) = spool.upgrade() else {
+                    break;
+                };
+                let mut saved = false;
+                for retry in 0..3 {
+                    match inner.persist_pending(&record) {
+                        Ok(()) => {
+                            saved = true;
+                            break;
+                        }
+                        Err(error) => {
+                            *inner.pending_error.lock().unwrap() = Some(error.message);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1 << retry));
+                }
+                if !saved {
+                    inner
+                        .dropped_records
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let _ = inner.events.send(());
+            }
         });
         let weak = Arc::downgrade(&inner);
         std::thread::spawn(move || {
@@ -201,12 +237,10 @@ impl Service {
                 }
                 batch.extend(pending.iter().map(|(_, r)| r.clone()));
                 // One bounded metadata batch per writer iteration, including idle periods.
-                let repair = inner
-                    .store
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                    .map(store::Store::repair_metadata_batch);
+                let repair = inner.store.lock().unwrap().as_mut().map(|store| {
+                    let changed = store.repair_metadata_batch()?;
+                    store.compact_storage_batch().map(|_| changed)
+                });
                 let repair_failed = repair
                     .as_ref()
                     .and_then(|v| v.as_ref().err())
@@ -278,16 +312,21 @@ impl Service {
         self.0.settings.read().unwrap().clone()
     }
     pub fn state(&self) -> State {
+        let dropped = self
+            .0
+            .dropped_records
+            .load(std::sync::atomic::Ordering::Relaxed);
         State {
             settings: self.settings(),
             syncing: *self.0.syncing.lock().unwrap(),
             reports: self.0.report.lock().unwrap().clone(),
-            error: self
+            error: (dropped != 0).then(|| format!("{dropped} 条用量因写入拥塞未保存；请检查磁盘与数据库，并同步本机会话补齐可恢复记录"))
+                .or_else(|| self
                 .0
                 .write_error
                 .lock()
                 .unwrap()
-                .clone()
+                .clone())
                 .or_else(|| self.0.pending_error.lock().unwrap().clone())
                 .or_else(|| self.0.repair_error.lock().unwrap().clone())
                 .or_else(|| self.0.error.lock().unwrap().clone()),
@@ -322,7 +361,10 @@ impl Service {
         reader.snapshot(|db| f(db))
     }
     pub fn maintain(&self) -> Result<()> {
-        let result = self.query(|store| store.compact(now()));
+        let result = self.query(|store| {
+            store.compact(now())?;
+            store.reclaim_space()
+        });
         if let Err(error) = &result {
             *self.0.error.lock().unwrap() = Some(error.message.clone());
             let _ = self.0.events.send(());
@@ -500,8 +542,11 @@ impl Drop for TraceInner {
             let record = match error {
                 mpsc::TrySendError::Full(r) | mpsc::TrySendError::Disconnected(r) => r,
             };
-            if let Err(error) = self.service.0.persist_pending(&record) {
-                *self.service.0.write_error.lock().unwrap() = Some(error.message);
+            if self.service.0.overflow.try_send(record).is_err() {
+                self.service
+                    .0
+                    .dropped_records
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let _ = self.service.0.events.send(());
         }
@@ -547,6 +592,9 @@ impl Trace {
     }
 }
 impl AttemptTrace {
+    pub fn transfer(&mut self, value: model::TransferMetadata) {
+        self.attempt.transfer = Some(value);
+    }
     pub fn end(&mut self, end: EndMetadata) {
         self.attempt.end = Some(end);
     }
@@ -608,6 +656,8 @@ impl AttemptTrace {
                 self.done = true;
             }
         }
+    }
+    fn price(&mut self) {
         let (model, basis, mapping) = self
             .prices
             .as_ref()
@@ -673,6 +723,8 @@ impl Drop for AttemptTrace {
             }
             self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
         }
+        self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
+        self.price();
         self.attempt.annotate_availability("proxy");
         let mut attempts = self.trace.0.attempts.lock().unwrap();
         if attempts.len() >= 128 {
