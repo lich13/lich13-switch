@@ -465,6 +465,7 @@ fn base(
         client: client.into(),
         source: client.into(),
         started_at: start.unwrap_or(at),
+        finished_at: Some(at),
         session_id: session,
         completed: complete,
         estimated_speed: duration > 0,

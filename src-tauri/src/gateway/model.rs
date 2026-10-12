@@ -186,6 +186,10 @@ impl Default for Store {
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Edit {
     #[serde(skip)]
+    ImportProviders {
+        providers: Vec<Provider>,
+    },
+    #[serde(skip)]
     ImportLink {
         base_url: String,
         token: String,
@@ -273,7 +277,7 @@ pub fn name(value: &str) -> Result<String> {
     }
 }
 pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
-    let u = url::Url::parse(value.trim())
+    let mut u = url::Url::parse(value.trim())
         .map_err(|_| AppError::new("URL", "请输入完整的 HTTP 或 HTTPS base_url"))?;
     if !["http", "https"].contains(&u.scheme())
         || u.host_str().is_none()
@@ -296,7 +300,35 @@ pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
     {
         return Err(AppError::new("LOOP", "上游不能指向本网关"));
     }
+    normalize_api_path(&mut u);
     Ok(u)
+}
+pub(super) fn normalize_api_path(url: &mut url::Url) {
+    let mut path = url.path().trim_end_matches('/').to_owned();
+    for endpoint in [
+        "/responses/compact",
+        "/chat/completions",
+        "/alpha/search",
+        "/responses",
+        "/messages",
+        "/completions",
+        "/embeddings",
+        "/models",
+    ] {
+        if let Some(base) = path.strip_suffix(endpoint) {
+            path = base.to_owned();
+            break;
+        }
+    }
+    let versioned = path.split('/').any(|segment| {
+        segment
+            .strip_prefix('v')
+            .is_some_and(|version| version.as_bytes().first().is_some_and(u8::is_ascii_digit))
+    });
+    if !versioned {
+        path.push_str("/v1");
+    }
+    url.set_path(&path);
 }
 impl Store {
     pub fn load(path: &Path) -> Result<(Self, String)> {
@@ -347,6 +379,30 @@ impl Store {
     }
     pub fn edit(&mut self, edit: Edit, running: bool) -> Result<()> {
         match edit {
+            Edit::ImportProviders { providers } => {
+                if providers.is_empty() || providers.len() > 1000 {
+                    return Err(AppError::new("IMPORT", "请选择 1–1000 项"));
+                }
+                let mut pairs = std::collections::HashSet::new();
+                for p in &self.providers {
+                    pairs.insert((
+                        base_url(&p.base_url, self.settings.port)?.to_string(),
+                        p.token.clone(),
+                    ));
+                }
+                for mut p in providers {
+                    p.name = name(&p.name)?;
+                    let u = base_url(&p.base_url, self.settings.port)?;
+                    if !pairs.insert((u.to_string(), p.token.clone())) {
+                        return Err(AppError::new("DUPLICATE", "相同地址和 Key 已存在"));
+                    }
+                    p.base_url = u.as_str().trim_end_matches('/').into();
+                    p.queued = false;
+                    p.handoff_after_compaction = false;
+                    p.take_new_threads = false;
+                    self.providers.push(p);
+                }
+            }
             Edit::ImportLink {
                 base_url: raw,
                 token,
@@ -393,7 +449,7 @@ impl Store {
                 };
                 if let Some(id) = id {
                     let p = self.provider_mut(&id)?;
-                    p.base_url = raw.trim().to_owned();
+                    p.base_url = u.as_str().trim_end_matches('/').to_owned();
                     if !token.is_empty() {
                         p.token = token;
                     }
@@ -409,7 +465,7 @@ impl Store {
                     self.providers.push(Provider {
                         id: id.clone(),
                         name: label,
-                        base_url: raw.trim().into(),
+                        base_url: u.as_str().trim_end_matches('/').into(),
                         token,
                         queued: true,
                         version: uuid::Uuid::new_v4().to_string(),

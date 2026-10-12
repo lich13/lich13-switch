@@ -212,7 +212,7 @@ it("renders compact token cells, exposes their full values on focus, and has no 
   expect(
     screen.getAllByRole("columnheader").map((header) => header.textContent),
   ).toEqual([
-    "开始时间",
+    "结束时间",
     "供应商",
     "模型",
     "输入",
@@ -397,7 +397,7 @@ it("marks provider mappings as estimates and reports compacted attempts with unk
   ).toBeGreaterThan(0);
   expect(within(drawer).getByText("含未定价项 · $3.2345")).toBeInTheDocument();
   expect(
-    within(drawer).getByRole("heading", { name: "尝试记录" }),
+    within(drawer).getByRole("heading", { name: "此前尝试" }),
   ).toBeInTheDocument();
   expect(
     within(drawer).getByText("实际尝试").nextElementSibling,

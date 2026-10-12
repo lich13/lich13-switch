@@ -323,6 +323,7 @@ pub struct Observer {
 pub struct Delivery {
     pub bytes: std::sync::atomic::AtomicU64,
     pub terminal: std::sync::atomic::AtomicBool,
+    pub finished: std::sync::atomic::AtomicBool,
     // 1: body dropped; 2: HTTP connection error; 3: downstream stall.
     pub error: std::sync::atomic::AtomicU8,
 }
@@ -464,15 +465,27 @@ impl Protocol {
     ) {
         self.ownership = lease.map(|lease| (lease, provider.into()));
     }
+    pub fn business_observed(&self) -> bool {
+        !self.stream
+            || self.observation.first_event_model_error.is_some()
+            || self.terminal_received
+            || self.observation.incomplete
+    }
+    pub fn output_handed(&self, business: bool) {
+        if business {
+            if let Some((lease, provider)) = &self.ownership {
+                lease.output_started(provider);
+            }
+        }
+        self.commit_ownership();
+    }
     pub fn commit_ownership(&self) {
         if self.terminal() == Some(Terminal::Success) {
             if let Some((lease, provider)) = &self.ownership {
-                let receiver = lease.handoff && lease.owner.as_deref() != Some(provider);
-                if !receiver
-                    || self
-                        .delivery
-                        .terminal
-                        .load(std::sync::atomic::Ordering::Relaxed)
+                if self
+                    .delivery
+                    .terminal
+                    .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     lease.complete(provider, self.observation.compaction_fingerprint.as_deref());
                 }
@@ -492,7 +505,6 @@ impl Protocol {
                 .terminal_at
                 .get_or_insert_with(crate::usage::model::now);
         }
-        self.commit_ownership();
         if self.observation.meter.first_token_ms.is_some() && self.first_usage_ms.is_none() {
             self.first_usage_ms = Some(self.started.elapsed().as_millis() as u64);
         }
@@ -633,14 +645,14 @@ impl Protocol {
     fn record_end(&mut self, reason: &str) {
         use crate::usage::model::{EndCause, EndMetadata};
         let cause = match reason {
-            "CLIENT_DISCONNECTED" => EndCause::ClientDisconnected,
-            "GATEWAY_STOPPED" => EndCause::GatewayStopped,
-            "CANCELLED" => EndCause::ClientCancelled,
             _ if self.terminal_received => match self.observation.terminal {
                 Some(Terminal::Success | Terminal::Limited) => EndCause::Completed,
                 Some(Terminal::Cancelled) => EndCause::ClientCancelled,
                 _ => EndCause::ApplicationError,
             },
+            "CLIENT_DISCONNECTED" => EndCause::ClientDisconnected,
+            "GATEWAY_STOPPED" => EndCause::GatewayStopped,
+            "CANCELLED" => EndCause::ClientCancelled,
             _ if self.status.is_some_and(|s| s >= 400) => EndCause::UpstreamRejected,
             "FIRST_BYTE_TIMEOUT" => EndCause::FirstByteTimeout,
             "STREAM_TIMEOUT" => EndCause::StreamTimeout,
@@ -677,6 +689,11 @@ impl Protocol {
             .map(|v| crate::storage::digest(v.as_bytes()));
         self.transfer.downstream_error = match self.delivery.error.load(Relaxed) {
             2 => Some("DOWNSTREAM_CONNECTION_ERROR".into()),
+            4 => Some("DOWNSTREAM_CANCELLED".into()),
+            5 => Some("DOWNSTREAM_CLOSED".into()),
+            6 => Some("DOWNSTREAM_PEER_RESET".into()),
+            7 => Some("DOWNSTREAM_WRITE_FAILED".into()),
+            8 => Some("DOWNSTREAM_PROTOCOL_ERROR".into()),
             3 => Some("DOWNSTREAM_WRITE_TIMEOUT".into()),
             1 => Some("RESPONSE_BODY_DROPPED".into()),
             _ => self.transfer.downstream_error.clone(),

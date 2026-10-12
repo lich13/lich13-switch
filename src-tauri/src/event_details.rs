@@ -14,9 +14,19 @@ pub enum Phase {
     WsWait,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthScope {
+    Provider,
+    Model,
+    Request,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Details {
+    #[serde(default)]
+    pub health_scope: Option<HealthScope>,
     #[serde(default)]
     pub handoff_scope: Option<String>,
     pub upstream_code: Option<String>,

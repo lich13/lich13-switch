@@ -130,6 +130,58 @@ fn json_and_sse_eof_without_trailing_blank_line_settle_after_downstream_delivery
 }
 
 #[test]
+fn websocket_response_created_delivery_consumes_old_compaction_boundary_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::new(dir.path().join("owners.json"));
+    let session = crate::storage::digest(b"fixture-ws-response-created-session");
+    let boundary = crate::storage::digest(b"fixture-ws-response-created-boundary");
+    let handoff = seed_handoff(&registry, &session, &boundary);
+
+    let mut protocol = Protocol::new(true);
+    protocol.attach_ownership(Some(handoff), NEW);
+    protocol.websocket_status(101);
+    protocol.value(&json!({
+        "type": "response.created",
+        "response": {"id": "fixture-response", "model": "fixture-model"}
+    }));
+
+    // The websocket text frame is business output only after the downstream
+    // send succeeds. A control/non-business handoff must leave the boundary
+    // reusable until the actual response.created frame is acknowledged.
+    protocol.output_handed(false);
+    drop(protocol);
+    assert!(registry.boundary_matches(&session, Some(&boundary)));
+
+    let handoff = registry
+        .prepare(
+            session.clone(),
+            Some(&boundary),
+            true,
+            &[NEW.into(), OLD.into()],
+        )
+        .expect("fixture second handoff lease");
+    assert!(handoff.handoff);
+    let mut protocol = Protocol::new(true);
+    protocol.attach_ownership(Some(handoff), NEW);
+    protocol.websocket_status(101);
+    protocol.value(&json!({
+        "type": "response.created",
+        "response": {"id": "fixture-response", "model": "fixture-model"}
+    }));
+    protocol.output_handed(true);
+    drop(protocol);
+
+    let retry = registry
+        .prepare(session, Some(&boundary), true, &[NEW.into(), OLD.into()])
+        .expect("fixture retry lease");
+    assert!(
+        !retry.handoff,
+        "an acknowledged response.created must consume the old boundary"
+    );
+    assert_eq!(retry.owner.as_deref(), Some(OLD));
+}
+
+#[test]
 fn limited_and_failed_terminals_never_count_as_delivered_success() {
     for (value, expected) in [
         (

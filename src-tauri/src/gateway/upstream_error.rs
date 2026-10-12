@@ -114,9 +114,16 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
         || v.get("status").is_some_and(|s| s == "failed");
     if (http_error || explicit)
         && (v.is_string()
-            || ["code", "type", "message", "detail"]
-                .iter()
-                .any(|k| v.get(k).is_some()))
+            || [
+                "code",
+                "type",
+                "message",
+                "detail",
+                "errorKey",
+                "errorMessage",
+            ]
+            .iter()
+            .any(|k| v.get(k).is_some()))
     {
         Some(v)
     } else {
@@ -125,9 +132,16 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
 }
 fn strings(error: &Value) -> impl Iterator<Item = &str> {
     error.as_str().into_iter().chain(
-        ["code", "type", "message", "detail"]
-            .into_iter()
-            .filter_map(move |k| error.get(k).and_then(Value::as_str)),
+        [
+            "code",
+            "type",
+            "message",
+            "detail",
+            "errorKey",
+            "errorMessage",
+        ]
+        .into_iter()
+        .filter_map(move |k| error.get(k).and_then(Value::as_str)),
     )
 }
 fn is_model(error: &Value) -> bool {
@@ -152,8 +166,7 @@ pub fn model_error(value: &Value) -> bool {
 }
 pub fn temporary_capacity_event(value: &Value) -> bool {
     envelope(value, false, 0).is_some_and(|error| {
-        !strings(error).any(|s| permanent_rejection(s.as_bytes()))
-            && strings(error).any(capacity_message)
+        !strings(error).any(global_fault) && strings(error).any(capacity_message)
     })
 }
 pub fn model_http(status: u16, bytes: &[u8]) -> bool {
@@ -170,11 +183,17 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
         return Details::default();
     };
     Details {
-        upstream_code: error.get("code").and_then(|v| match v {
-            Value::String(s) => Some(s.clone()),
-            Value::Number(n) if n.is_i64() || n.is_u64() => Some(n.to_string()),
-            _ => None,
-        }),
+        health_scope: strings(error)
+            .any(global_fault)
+            .then_some(crate::events::HealthScope::Provider),
+        upstream_code: error
+            .get("code")
+            .or_else(|| error.get("errorKey"))
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) if n.is_i64() || n.is_u64() => Some(n.to_string()),
+                _ => None,
+            }),
         upstream_type: error.get("type").and_then(Value::as_str).map(str::to_owned),
         parameter: error
             .get("param")
@@ -184,6 +203,7 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
             .as_str()
             .or_else(|| error.get("message").and_then(Value::as_str))
             .or_else(|| error.get("detail").and_then(Value::as_str))
+            .or_else(|| error.get("errorMessage").and_then(Value::as_str))
             .map(str::to_owned),
         ..Details::default()
     }
@@ -196,6 +216,10 @@ pub fn details_http(bytes: &[u8]) -> Details {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(v) => details_value(&v, true),
         Err(_) => Details {
+            health_scope: std::str::from_utf8(bytes)
+                .ok()
+                .filter(|s| global_fault(s))
+                .map(|_| crate::events::HealthScope::Provider),
             message: std::str::from_utf8(bytes)
                 .ok()
                 .and_then(crate::events::safe_message),
@@ -210,6 +234,24 @@ pub(super) fn permanent_rejection(body: &[u8]) -> bool {
     [
         "insufficient_quota",
         "insufficient_balance",
+        "insufficient_account_balance",
+        "account_balance_insufficient",
+        "api_key_quota_exhausted",
+        "usage_limit_exceeded",
+        "insufficient_user_quota",
+        "balance_exhausted",
+        "balance_not_enough",
+        "credits_exhausted",
+        "credit_limit_exceeded",
+        "insufficient account balance",
+        "insufficient credit balance",
+        "account balance is insufficient",
+        "credit balance exhausted",
+        "balance has been exhausted",
+        "run out of credits",
+        "out of credit",
+        "api key quota exhausted",
+        "api key quota exceeded",
         "credit_balance_too_low",
         "billing_hard_limit_reached",
         "account_disabled",
@@ -220,9 +262,46 @@ pub(super) fn permanent_rejection(body: &[u8]) -> bool {
         "account has been disabled",
         "余额不足",
         "余额已耗尽",
+        "余额耗尽",
+        "余额用尽",
+        "余额已用完",
+        "账户欠费",
+        "账号欠费",
+        "账户额度已耗尽",
+        "账户额度已用完",
+        "api key 额度已用完",
+        "api key额度已用完",
+        "令牌额度已用完",
+        "令牌额度不足",
         "账号已禁用",
         "账户已禁用",
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+// Only explicit account/key-wide evidence broadens health scope.
+fn global_fault(text: &str) -> bool {
+    if model_message(text) {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    permanent_rejection(text.as_bytes())
+        || [
+            "invalid_api_key",
+            "invalid api key",
+            "incorrect api key",
+            "api_key_expired",
+            "api_key_revoked",
+            "api_key_disabled",
+            "authentication_error",
+            "account_suspended",
+            "api key is invalid",
+            "api key has expired",
+            "密钥无效",
+            "密钥已过期",
+            "密钥已撤销",
+        ]
+        .iter()
+        .any(|s| lower.contains(s))
 }

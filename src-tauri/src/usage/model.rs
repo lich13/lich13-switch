@@ -463,6 +463,12 @@ pub enum RoutingDecision {
     CompactionHandoff,
     Auxiliary,
     OrdinaryQueue,
+    FirstTurnUnconfirmed,
+    NewThreadCapacityFull,
+    NewThreadModelDenied,
+    NewThreadModelCooling,
+    NewThreadProviderUnavailable,
+    NewThreadQueueWaiting,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -744,6 +750,8 @@ pub struct Record {
     pub client: String,
     pub source: String,
     pub started_at: i64,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
     pub session_id: Option<String>,
     pub attempts: Vec<Attempt>,
     pub completed: bool,
@@ -761,6 +769,23 @@ pub struct Record {
     pub gateway_reported: Option<Attempt>,
 }
 impl Record {
+    /// Protocol completion and local finish are real observations; old records
+    /// without either retain their original event time, never a guessed duration.
+    pub fn event_time(&self) -> i64 {
+        if self.source != "proxy" {
+            return self.finished_at.unwrap_or(self.started_at);
+        }
+        self.final_attempt()
+            .and_then(|a| a.transfer.as_ref())
+            .and_then(|t| {
+                t.terminal_at.filter(|v| *v >= self.started_at).or_else(|| {
+                    (t.ended_at >= self.started_at && t.ended_at > 0).then_some(t.ended_at)
+                })
+            })
+            .or(self.finished_at)
+            .unwrap_or(self.started_at)
+    }
+
     /// Only real gateway generations supply latency samples, including merged records.
     pub fn measured_first_token_ms(&self) -> Option<u64> {
         let a = self.final_attempt()?;

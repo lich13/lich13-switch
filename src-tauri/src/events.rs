@@ -5,7 +5,7 @@ use crate::{
     gateway::ClientId,
     storage::{self, AppError, Result},
 };
-pub use details::{safe_message, CircuitEvidence, Details, Phase};
+pub use details::{safe_message, CircuitEvidence, Details, HealthScope, Phase};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -254,7 +254,13 @@ impl Record {
                 .as_ref()
                 .map(|s| format!(" · {s}"))
                 .unwrap_or_default(),
-            self.reason.text(),
+            if self.reason == Reason::CircuitOpen
+                && self.details.health_scope == Some(HealthScope::Model)
+            {
+                "当前模型暂不可用"
+            } else {
+                self.reason.text()
+            },
             self.action.text()
         )
     }

@@ -812,23 +812,44 @@ impl Scheduler {
                 let ticket = waiting.as_ref().map(|w| w.ticket);
                 if let Some(ticket) = ticket {
                     if let Some(entry) = s.waiting.iter_mut().find(|(id, _)| *id == ticket) {
-                        entry.1 = eligible.iter().map(|r| r.provider.id.clone()).collect();
+                        entry.1 = eligible
+                            .iter()
+                            .filter(|r| r.health_for(requirement).available)
+                            .map(|r| r.provider.id.clone())
+                            .collect();
                     }
                 }
                 let mut accepted = None;
                 let mut capacity_blocked = false;
+                let mut intake_skip = None;
+                let first_turn = budget
+                    .intake
+                    .as_ref()
+                    .is_some_and(|(intake, _)| *intake == super::compaction::Intake::NewThread);
                 let mut retry_selection = true;
                 'selection: loop {
                     for (position, route) in eligible.iter().enumerate() {
                         let id = &route.provider.id;
 
-                        let health = route.provider_circuit.health();
+                        let health = route.health_for(requirement);
                         if !health.available {
+                            if first_turn && route.provider.take_new_threads {
+                                intake_skip = Some(if route.provider_circuit.health().available {
+                                    crate::usage::model::RoutingDecision::NewThreadModelCooling
+                                } else {
+                                    crate::usage::model::RoutingDecision::NewThreadProviderUnavailable
+                                });
+                            }
                             retry_in = retry_in.min(health.retry_in.max(1));
                             continue;
                         }
                         any_ready = true;
                         if !Self::available(&s, id, request, manual) {
+                            if first_turn && route.provider.take_new_threads {
+                                intake_skip = Some(
+                                    crate::usage::model::RoutingDecision::NewThreadCapacityFull,
+                                );
+                            }
                             capacity_blocked |= budget
                                 .handoff_owner
                                 .as_ref()
@@ -841,6 +862,11 @@ impl Scheduler {
                             .take_while(|(id, _)| Some(*id) != ticket)
                             .any(|(_, ids)| ids.contains(id))
                         {
+                            if first_turn && route.provider.take_new_threads {
+                                intake_skip = Some(
+                                    crate::usage::model::RoutingDecision::NewThreadQueueWaiting,
+                                );
+                            }
                             continue;
                         }
                         // Capacity cannot change under this lock, but a higher-priority
@@ -849,7 +875,7 @@ impl Scheduler {
                             && eligible[..position].iter().any(|earlier| {
                                 let id = &earlier.provider.id;
                                 Self::available(&s, id, request, manual)
-                                    && earlier.provider_circuit.health().available
+                                    && earlier.health_for(requirement).available
                                     && !s
                                         .waiting
                                         .iter()
@@ -873,7 +899,7 @@ impl Scheduler {
                                 break 'selection;
                             }
                         }
-                        if let Some(permits) = Permits::acquire(route, manual) {
+                        if let Some(permits) = Permits::acquire_for(route, manual, requirement) {
                             match self.reserve_rpm(&mut s, id, rpm_limit) {
                                 Ok(rpm) => {
                                     let retain = budget
@@ -891,7 +917,7 @@ impl Scheduler {
                                     }
                                     *s.active.entry(id.clone()).or_default() += 1;
                                     accepted = Some(Admission {
-                                        handoff_wait: (capacity_blocked && budget.handoff_owner.as_deref() == Some(id)).then_some(crate::usage::model::RoutingDecision::ReceiverCapacityFull),
+                                        handoff_wait: (capacity_blocked && budget.handoff_owner.as_deref() == Some(id)).then_some(crate::usage::model::RoutingDecision::ReceiverCapacityFull).or(intake_skip),
                                         route: (**route).clone(),
                                         permits,
                                         rpm: Some(rpm),
@@ -943,7 +969,11 @@ impl Scheduler {
                         let ticket = s.next;
                         s.waiting.push_back((
                             ticket,
-                            eligible.iter().map(|r| r.provider.id.clone()).collect(),
+                            eligible
+                                .iter()
+                                .filter(|r| r.health_for(requirement).available)
+                                .map(|r| r.provider.id.clone())
+                                .collect(),
                         ));
                         waiting = Some(Waiting {
                             scheduler: self.clone(),
@@ -963,7 +993,11 @@ impl Scheduler {
                         let ticket = s.next;
                         s.waiting.push_back((
                             ticket,
-                            eligible.iter().map(|r| r.provider.id.clone()).collect(),
+                            eligible
+                                .iter()
+                                .filter(|r| r.health_for(requirement).available)
+                                .map(|r| r.provider.id.clone())
+                                .collect(),
                         ));
                         waiting = Some(Waiting {
                             scheduler: self.clone(),
@@ -984,7 +1018,11 @@ impl Scheduler {
                     let ticket = s.next;
                     s.waiting.push_back((
                         ticket,
-                        eligible.iter().map(|r| r.provider.id.clone()).collect(),
+                        eligible
+                            .iter()
+                            .filter(|r| r.health_for(requirement).available)
+                            .map(|r| r.provider.id.clone())
+                            .collect(),
                     ));
                     waiting = Some(Waiting {
                         scheduler: self.clone(),

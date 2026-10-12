@@ -743,7 +743,10 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
     // Restore the v2 schema before exercising migration to the current version.
     let database = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
     database
-        .execute_batch("ALTER TABLE receipts DROP COLUMN operation;")
+        .execute_batch(
+            "ALTER TABLE receipts DROP COLUMN operation;
+             ALTER TABLE records DROP COLUMN local_sequence;",
+        )
         .unwrap();
     database.pragma_update(None, "user_version", 2).unwrap();
     drop(database);
@@ -753,7 +756,7 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     assert_eq!(
         migrated.detail(&gateway.id).unwrap().attempts[0]
             .price

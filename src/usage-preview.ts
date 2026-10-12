@@ -56,6 +56,7 @@ const rows: UsageRecord[] = Array.from({ length: 47 }, (_, i) => {
     source: i % 3 ? "proxy" : i % 2 ? "claude" : "codex",
     startedAt: at,
     sessionId: null,
+    finishedAt: at + 5200,
     attempts: [{ ...attempt, status: i % 3 ? attempt.status : null }],
     completed: i % 5 !== 0,
     estimatedSpeed: i % 3 === 0,
@@ -170,6 +171,30 @@ if (densePreview) {
     terminalReceived: false,
     responseStarted: true,
   };
+  const retried = rows[8];
+  retried.attempts.unshift({
+    ...structuredClone(retried.attempts[0]),
+    id: "fixture-prior-attempt",
+    provider: "primary",
+    status: 503,
+    outcome: "failure",
+    startedAt: retried.startedAt - 1000,
+    durationMs: 500,
+    firstTokenMs: null,
+    tokens: { input: null, output: null, cacheRead: null, cacheWrite: null },
+    price: null,
+    end: {
+      cause: "upstream_rejected",
+      terminalReceived: false,
+      responseStarted: false,
+    },
+  });
+}
+for (const row of rows) {
+  row.finishedAt =
+    row.attempts.at(-1)?.transfer?.terminalAt ??
+    row.attempts.at(-1)?.transfer?.endedAt ??
+    row.finishedAt;
 }
 let settings: UsageSettings = {
   recording: true,
@@ -333,18 +358,24 @@ export function usagePreview(
       ? undefined
       : structuredClone(price);
   const f = (args.filter ?? {}) as UsageFilter;
-  const selected = rows.filter(
-    (r) =>
-      (!f.source ||
-        (f.source === "proxy" ? r.source === "proxy" : r.source !== "proxy")) &&
-      r.startedAt >= (f.start ?? 0) &&
-      r.startedAt <= (f.end ?? Infinity) &&
-      (!f.client || r.client === f.client) &&
-      (!f.provider || r.attempts.at(-1)!.provider === f.provider) &&
-      (!f.model || r.attempts.at(-1)!.pricingModel === f.model) &&
-      (!f.operation ||
-        (r.attempts.at(-1)!.operation ?? "model") === f.operation),
-  );
+  const selected = rows
+    .filter(
+      (r) =>
+        (!f.source ||
+          (f.source === "proxy"
+            ? r.source === "proxy"
+            : r.source !== "proxy")) &&
+        (r.finishedAt ?? r.startedAt) >= (f.start ?? 0) &&
+        (r.finishedAt ?? r.startedAt) <= (f.end ?? Infinity) &&
+        (!f.client || r.client === f.client) &&
+        (!f.provider || r.attempts.at(-1)!.provider === f.provider) &&
+        (!f.model || r.attempts.at(-1)!.pricingModel === f.model) &&
+        (!f.operation ||
+          (r.attempts.at(-1)!.operation ?? "model") === f.operation),
+    )
+    .sort(
+      (a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt),
+    );
   if (name === "get_usage_logs") {
     const filtered = selected.filter(
       (r) =>

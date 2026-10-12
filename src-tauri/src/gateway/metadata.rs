@@ -311,6 +311,10 @@ impl Projector {
                     let kind = match value.get("type").and_then(Value::as_str) {
                         None | Some("message") => "message",
                         Some("input_message") => "input_message",
+                        Some("function_call") => "function_call",
+                        Some("function_call_output") => "function_call_output",
+                        Some("reasoning") => "reasoning",
+                        Some("tool_result") => "tool_result",
                         _ => "unknown",
                     };
                     let role = match value.get("role").and_then(Value::as_str) {

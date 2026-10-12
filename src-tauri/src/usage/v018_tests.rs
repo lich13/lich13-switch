@@ -448,6 +448,7 @@ fn downgrade_fixture_metrics_to_v5(database: &Connection) {
     database
         .execute_batch(&format!(
             "ALTER TABLE usage_metrics RENAME TO fixture_v018_metrics;
+             ALTER TABLE records DROP COLUMN local_sequence;
              CREATE TABLE usage_metrics(
                kind INTEGER NOT NULL,owner TEXT NOT NULL,ordinal INTEGER NOT NULL,
                provider TEXT,model TEXT,requests INTEGER NOT NULL,attempts INTEGER NOT NULL,
@@ -549,7 +550,7 @@ fn v5_migration_backfills_details_but_never_invents_first_token_samples_for_old_
     let version: i64 = database
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     drop(database);
     let totals = Store::open(dir.path())
         .unwrap()

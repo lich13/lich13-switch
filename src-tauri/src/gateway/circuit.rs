@@ -200,6 +200,16 @@ pub struct Permit {
     failure_event: Option<crate::events::Record>,
 }
 impl Circuit {
+    pub(super) fn protection(&self) -> Option<Duration> {
+        self.0.lock().unwrap().protection
+    }
+    pub(super) fn discardable(&self) -> bool {
+        if Arc::strong_count(&self.0) != 1 {
+            return false;
+        }
+        let h = self.health();
+        h.available && h.failures == 0 && h.cause.is_none()
+    }
     pub fn take_open_event(&self) -> Option<crate::events::Record> {
         self.0.lock().unwrap().open_event.take()
     }

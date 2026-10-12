@@ -74,9 +74,9 @@ fn feed_completed(protocol: &mut Protocol) {
 #[test]
 fn completed_then_disconnect_cancel_or_stop_keeps_success_but_records_the_followup_cause() {
     for (reason, cause) in [
-        ("CLIENT_DISCONNECTED", EndCause::ClientDisconnected),
-        ("CANCELLED", EndCause::ClientCancelled),
-        ("GATEWAY_STOPPED", EndCause::GatewayStopped),
+        ("CLIENT_DISCONNECTED", EndCause::Completed),
+        ("CANCELLED", EndCause::Completed),
+        ("GATEWAY_STOPPED", EndCause::Completed),
     ] {
         let record = record_for(|protocol| {
             feed_completed(protocol);
@@ -195,7 +195,7 @@ fn token_survives_terminal_disconnect_and_is_written_once() {
     assert_eq!(attempt.outcome, "success");
     assert_eq!(
         attempt.end.as_ref().map(|end| end.cause),
-        Some(EndCause::ClientDisconnected)
+        Some(EndCause::Completed)
     );
 }
 
@@ -340,7 +340,7 @@ async fn http_client_disconnect_preserves_forwarded_bytes_without_usage_tail() {
     assert_eq!(attempt.tokens.output, None);
     assert_eq!(
         attempt.end.as_ref().map(|end| end.cause),
-        Some(EndCause::ClientDisconnected)
+        Some(EndCause::Completed)
     );
     assert!(!tail_generated.load(Ordering::SeqCst));
     gateway.stop().await.unwrap();

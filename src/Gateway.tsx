@@ -8,18 +8,24 @@ import type { ClientId } from "./types";
 import { saveGatewayEdit, type EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
 import ProviderSettings from "./ProviderSettings";
+import ProviderExchange from "./ProviderExchange";
 import ProviderEndpoints from "./ProviderEndpoints";
 import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import Modal from "./Modal";
-import { providerRuntimeStatus, providerHandoffStatus } from "./provider-status";
+import {
+  providerRuntimeStatus,
+  providerHandoffStatus,
+  providerFault,
+} from "./provider-status";
 import { QuotaInfo, useProviderQuota } from "./Quota";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Plus,
   Power,
   Download,
+  Upload,
   Pencil,
   Trash2,
   Network,
@@ -39,6 +45,7 @@ import {
 
 type Edit = Record<string, unknown>;
 type Dialog =
+  | { kind: "exchange"; mode: "import" | "export" }
   | { kind: "provider"; item?: Provider }
   | { kind: "settings"; item: Provider }
   | { kind: "endpoints"; item: Provider }
@@ -283,6 +290,20 @@ function GatewayContent({
             <Plus size={15} />
             添加
           </button>
+          <button
+            disabled={busy}
+            onClick={() => setDialog({ kind: "exchange", mode: "import" })}
+          >
+            <Download size={15} />
+            导入
+          </button>
+          <button
+            disabled={busy || !state.providers.length}
+            onClick={() => setDialog({ kind: "exchange", mode: "export" })}
+          >
+            <Upload size={15} />
+            导出
+          </button>
           <details className="row-menu">
             <summary aria-label="网关操作">
               <MoreHorizontal size={17} />
@@ -293,18 +314,6 @@ function GatewayContent({
                 disabled={!state.providers.length}
               >
                 刷新全部额度
-              </button>
-              <button
-                disabled={busy}
-                onClick={() =>
-                  run(async () => {
-                    await edit({ op: "import" });
-                    notify("已导入当前供应商");
-                  })
-                }
-              >
-                <Download size={14} />
-                从配置导入
               </button>
             </div>
           </details>
@@ -372,7 +381,14 @@ function GatewayContent({
                     {status && (
                       <button
                         className="provider-alert"
-                        onClick={() => void command("open_main", { page: "logs", eventId: p.health.cause?.eventId ?? null, providerId: p.health.cause ? p.id : null, clientId })}
+                        onClick={() =>
+                          void command("open_main", {
+                            page: "logs",
+                            eventId: providerFault(p)?.eventId ?? null,
+                            providerId: providerFault(p) ? p.id : null,
+                            clientId,
+                          })
+                        }
                       >
                         {status}
                       </button>
@@ -427,8 +443,13 @@ function GatewayContent({
                           <Settings2 size={14} />
                           白名单
                         </button>
-                        <button onClick={() => setDialog({ kind: "endpoints", item: p })}>
-                          <Network size={14} />端点
+                        <button
+                          onClick={() =>
+                            setDialog({ kind: "endpoints", item: p })
+                          }
+                        >
+                          <Network size={14} />
+                          端点
                         </button>
                         <button
                           onClick={() =>
@@ -470,7 +491,11 @@ function GatewayContent({
                       </div>
                     </details>
                   </div>
-                  {providerHandoffStatus(p, state) && <span className="provider-binding provider-handoff">{providerHandoffStatus(p, state)}</span>}
+                  {providerHandoffStatus(p, state) && (
+                    <span className="provider-binding provider-handoff">
+                      {providerHandoffStatus(p, state)}
+                    </span>
+                  )}
                   <div className="provider-secondary">
                     <span className="provider-domain" title={p.baseUrl}>
                       {new URL(p.baseUrl).host}
@@ -541,6 +566,17 @@ function GatewayContent({
           />
         </details>
       </>
+      {dialog?.kind === "exchange" && (
+        <ProviderExchange
+          mode={dialog.mode}
+          state={state}
+          clientId={clientId}
+          close={() => setDialog(null)}
+          update={setState}
+          notify={notify}
+          onDirtyChange={markDialog}
+        />
+      )}
       {dialog?.kind === "settings" && (
         <ProviderSettings
           key={`${dialog.item.id}:${dialogVersion}`}
@@ -560,7 +596,11 @@ function GatewayContent({
         />
       )}
       {dialog?.kind === "quota" && (
-        <Modal compact title={`${dialog.item.name} 额度`} close={() => setDialog(null)}>
+        <Modal
+          compact
+          title={`${dialog.item.name} 额度`}
+          close={() => setDialog(null)}
+        >
           <QuotaInfo
             provider={dialog.item}
             quota={quota.quotaFor(
@@ -571,12 +611,20 @@ function GatewayContent({
           />
         </Modal>
       )}
-      {dialog?.kind === "endpoints" && <ProviderEndpoints
-        provider={dialog.item}
-        runtime={state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item}
-        clientId={clientId} revision={state.revision} onDirtyChange={markDialog}
-        update={setState} save={edit} close={() => setDialog(null)}
-      />}
+      {dialog?.kind === "endpoints" && (
+        <ProviderEndpoints
+          provider={dialog.item}
+          runtime={
+            state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item
+          }
+          clientId={clientId}
+          revision={state.revision}
+          onDirtyChange={markDialog}
+          update={setState}
+          save={edit}
+          close={() => setDialog(null)}
+        />
+      )}
       {dialog?.kind === "provider" && (
         <GatewayDialog
           clientId={clientId}
@@ -634,7 +682,10 @@ function Advanced({
             keyof GatewaySettings,
             string,
           ],
-          ["threadIdleReleaseSeconds", "线程空闲释放 / 秒"] as [keyof GatewaySettings, string],
+          ["threadIdleReleaseSeconds", "线程空闲释放 / 秒"] as [
+            keyof GatewaySettings,
+            string,
+          ],
           ["capacityRetrySeconds", "容量错误等待 / 秒"] as [
             keyof GatewaySettings,
             string,
@@ -674,16 +725,35 @@ function Advanced({
             <input
               type="number"
               required
-              min={key === "maxRetries" ? 0 : key === "errorRate" ? 0.01 : key === "endpointProbeSeconds" ? 10 : 1}
+              min={
+                key === "maxRetries"
+                  ? 0
+                  : key === "errorRate"
+                    ? 0.01
+                    : key === "endpointProbeSeconds"
+                      ? 10
+                      : 1
+              }
               max={
                 key === "capacityRetrySeconds" ||
-                key === "websocketRetrySeconds" || key === "threadIdleReleaseSeconds" || key === "endpointProbeSeconds"
+                key === "websocketRetrySeconds" ||
+                key === "threadIdleReleaseSeconds" ||
+                key === "endpointProbeSeconds"
                   ? 86400
-                  : key === "transientFailureThreshold" ? 1000
-                  : undefined
+                  : key === "transientFailureThreshold"
+                    ? 1000
+                    : undefined
               }
               step={key === "errorRate" ? 0.01 : 1}
-              value={draft[key] ?? (key === "transientFailureThreshold" ? 6 : key === "threadIdleReleaseSeconds" || key === "endpointProbeSeconds" ? 300 : "")}
+              value={
+                draft[key] ??
+                (key === "transientFailureThreshold"
+                  ? 6
+                  : key === "threadIdleReleaseSeconds" ||
+                      key === "endpointProbeSeconds"
+                    ? 300
+                    : "")
+              }
               onChange={(e) => {
                 if (!editing) baseRevision.current = revision;
                 setEditing(true);
@@ -790,7 +860,9 @@ function GatewayDialog({
           <label>
             {clientId === "claude"
               ? "ANTHROPIC_AUTH_TOKEN"
-              : connectionMode === "apiKey" ? "OPENAI_API_KEY" : "experimental_bearer_token"}
+              : connectionMode === "apiKey"
+                ? "OPENAI_API_KEY"
+                : "experimental_bearer_token"}
             <input
               required={!dialog.item}
               type="password"

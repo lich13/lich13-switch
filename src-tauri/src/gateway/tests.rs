@@ -195,10 +195,17 @@ async fn codex_capacity_429_fails_over_to_next_provider_before_returning() {
         "backup-ok"
     );
     assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    let provider = &g.view().providers[0];
+    let model = provider
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "gpt-test")
+        .expect("known model must have isolated health");
     assert_eq!(
-        g.view().providers[0].health.cooldown_reason.as_deref(),
+        model.health.cooldown_reason.as_deref(),
         Some("capacity_retry")
     );
+    assert_eq!(provider.health.cooldown_reason, None);
     g.stop().await.unwrap();
 }
 
@@ -390,7 +397,7 @@ async fn queue_four_attempt_limit_terminal_errors_and_original_last_error() {
     assert_eq!(response.status(), 422);
     response.into_body().collect().await.unwrap();
     assert_eq!(*hits.lock().unwrap(), vec![0]);
-    assert_eq!(g.view().providers[0].health.failures, 1);
+    assert_eq!(g.view().providers[0].health.failures, 0);
     g.stop().await.unwrap();
 }
 #[tokio::test]
@@ -501,23 +508,49 @@ async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
         },
     );
     start(&g, &t).await;
-    let first_status =
-        tokio::time::timeout(Duration::from_secs(5), request(&g, "/v1/a", vec![], vec![]))
-            .await
-            .expect("upstream failure response timed out")
-            .status();
+    let body = br#"{"model":"fixture-model"}"#.to_vec();
+    let first_status = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(
+            &g,
+            "/v1/a",
+            body.clone(),
+            vec![("content-type", "application/json")],
+        ),
+    )
+    .await
+    .expect("upstream failure response timed out")
+    .status();
     assert_eq!(first_status, 502);
-    let cooldown_status =
-        tokio::time::timeout(Duration::from_secs(5), request(&g, "/v1/a", vec![], vec![]))
-            .await
-            .expect("cooldown response timed out")
-            .status();
+    let cooldown_status = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(
+            &g,
+            "/v1/a",
+            body,
+            vec![("content-type", "application/json")],
+        ),
+    )
+    .await
+    .expect("cooldown response timed out")
+    .status();
     assert_eq!(cooldown_status, 503);
     let view = g.view();
-    let health = &view.providers[0].health;
+    assert_eq!(view.providers[0].health.failures, 0);
+    let health = view.providers[0]
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "fixture-model")
+        .expect("known model must have isolated health")
+        .health
+        .clone();
     assert!(health.retry_in >= 118);
     assert_eq!(health.failures, 1);
     assert_eq!(health.state, super::circuit::CircuitState::Closed);
+    assert_eq!(
+        health.cooldown_reason.as_deref(),
+        Some("single_provider_protected")
+    );
     assert!(health.protected_single_provider);
     g.stop().await.unwrap();
     let (_, pair) = takeover::read(t.path()).unwrap();
@@ -829,7 +862,7 @@ async fn custom_only_switch_while_stopped_running_and_auto_stop() {
     let direct = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
         direct,
-        initial.replace("https://a.test/v1", &format!("http://127.0.0.1:{ok}"))
+        initial.replace("https://a.test/v1", &format!("http://127.0.0.1:{ok}/v1"))
     );
     start(&g, &t).await;
     let live = std::fs::read(&path).unwrap();

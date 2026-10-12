@@ -15,7 +15,11 @@ export type Account = {
   current: boolean;
   updatedAt: number;
   credentialRevision?: string;
-  subscription?: { planType: string | null; label: string; stale: boolean } | null;
+  subscription?: {
+    planType: string | null;
+    label: string;
+    stale: boolean;
+  } | null;
 };
 export type ViewState = {
   accounts: Account[];
@@ -115,7 +119,13 @@ export type Health = {
   protectedSingleProvider?: boolean;
   probeInFlight?: boolean;
   available?: boolean;
-  cause?: { eventId: string; code: string; reason: string; status: number | null; wsCloseCode: number | null } | null;
+  cause?: {
+    eventId: string;
+    code: string;
+    reason: string;
+    status: number | null;
+    wsCloseCode: number | null;
+  } | null;
 };
 export type Provider = {
   id: string;
@@ -132,6 +142,7 @@ export type Provider = {
   }[];
   queued: boolean;
   health: Health;
+  modelHealth?: { model: string; health: Health }[];
   quotaVersion: string;
   quota: ProviderQuota | null;
   maxConcurrency: number;
@@ -165,7 +176,10 @@ export type GatewayState = {
   activeConnections: number;
   waitingRequests: number;
   capacityRetries: { providerId: string; retryIn: number }[];
-  handoffWaiting?: { providerId: string; state: "awaiting_compaction" | "awaiting_request" | "capacity_full" }[];
+  handoffWaiting?: {
+    providerId: string;
+    state: "awaiting_compaction" | "awaiting_request" | "capacity_full";
+  }[];
   websocketRetries?: { providerId: string; retryIn: number }[];
   transientRetries?: { providerId: string; retryIn: number }[];
   error: string | null;

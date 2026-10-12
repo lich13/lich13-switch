@@ -574,7 +574,7 @@ describe("v0.18 rankings", () => {
     expect(
       screen.getAllByRole("columnheader").map((header) => header.textContent),
     ).toEqual([
-      "开始时间",
+      "结束时间",
       "供应商",
       "模型",
       "输入",
@@ -756,7 +756,7 @@ describe("v0.18 request details and sources", () => {
         [...detail.querySelectorAll(".usage-drawer-body > h3")].map(
           (heading) => heading.textContent,
         ),
-      ).toEqual(["基本信息", "Token", "费用", "性能", "尝试记录"]);
+      ).toEqual(["基本信息", "Token", "费用", "性能"]);
       const firstToken = within(detail).getAllByText("首字", {
         selector: "dt",
       })[0];

@@ -491,7 +491,12 @@ fn downgrade_to_v8(dir: &Path, inline_bases: bool, mode_none: bool) {
             [],
         )
         .unwrap();
-    database.pragma_update(None, "user_version", 8).unwrap();
+    database
+        .execute_batch(
+            "ALTER TABLE records DROP COLUMN local_sequence;
+             PRAGMA user_version=8;",
+        )
+        .unwrap();
     if mode_none {
         database
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA auto_vacuum=NONE; VACUUM;")
@@ -1281,7 +1286,13 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
             [],
         )
         .unwrap();
-    database.pragma_update(None, "user_version", 8).unwrap();
+    database
+        .execute_batch(
+            "ALTER TABLE records DROP COLUMN local_sequence;
+             DELETE FROM metadata WHERE key IN ('record_sequence','finish_time_after');
+             PRAGMA user_version=8;",
+        )
+        .unwrap();
     drop(database);
 
     let mut migrated = Store::open(dir.path()).unwrap();

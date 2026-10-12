@@ -138,3 +138,5 @@ Account and provider subscription metadata organization follows cc-switch at `df
 The endpoint probe design references the MIT-licensed CC Switch `src-tauri/src/services/speedtest.rs`: one warmup GET followed by response-header latency measurement. The provider-scoped scheduler, atomic primary/auxiliary swap, loop protection and hash-only endpoint affinity are independently implemented. Probe traffic contains no provider credentials and performs no model generation.
 
 https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/speedtest.rs
+
+The v0.22 diagnostics and request-detail organization reference CC Switch at `90fb37ffb76bf06f2d021cd020b7f677216e916c`. The Sub2API JSON exchange adapter follows the public account-data format at `ab80abc6d1f929a6864c8804fd077b509d21fda2`; no Sub2API implementation is copied. Model-scoped health, bounded import previews and conservative compaction-opportunity consumption are independently implemented.

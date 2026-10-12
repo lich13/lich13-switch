@@ -177,7 +177,13 @@ async fn capacity_wait_is_bounded_cancelable_and_stopped_without_holding_slots()
     assert!(view.capacity_retries[0].retry_in > 55);
     assert_eq!(view.capacity_retries[0].provider_id, view.providers[0].id);
     assert_eq!(view.providers[0].active_requests, 0);
-    let response = request(&g, "/v1/responses", vec![], vec![]).await;
+    let response = request(
+        &g,
+        "/v1/responses",
+        br#"{"model":"test"}"#.to_vec(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
     assert_eq!(response.status(), 429);
     assert_eq!(response.headers()["retry-after"], "5");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -478,12 +484,9 @@ async fn service_and_network_errors_do_not_open_sole_automatic_provider() {
             r.into_body().collect().await.unwrap();
             let health = &g.view().providers[0].health;
             assert_eq!(health.state, circuit::CircuitState::Closed);
-            assert_eq!(
-                health.cooldown_reason.as_deref(),
-                Some("single_provider_protected")
-            );
+            assert_eq!(health.cooldown_reason, None);
         }
-        assert_eq!(g.view().providers[0].health.failures, 3);
+        assert_eq!(g.view().providers[0].health.failures, 0);
         g.stop().await.unwrap();
     }
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -511,6 +514,7 @@ async fn service_and_network_errors_do_not_open_sole_automatic_provider() {
         circuit::CircuitState::Closed
     );
     assert!(g.view().providers[0].health.protected_single_provider);
+    assert_eq!(g.view().providers[0].health.failures, 1);
     g.stop().await.unwrap();
 }
 
@@ -649,10 +653,16 @@ async fn claude_rate_limit_keeps_original_cooldown_and_no_capacity_retry() {
     .await;
     assert_eq!(r.status(), 429);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    let h = &g.view().providers[0].health;
-    assert_eq!(h.cooldown_reason.as_deref(), Some("rate_limit"));
-    assert!(h.retry_in <= 2);
-    assert!(!h.protected_single_provider);
+    let provider = &g.view().providers[0];
+    let model = provider
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "claude-test")
+        .expect("known model must have isolated health");
+    assert_eq!(model.health.cooldown_reason.as_deref(), Some("rate_limit"));
+    assert!(model.health.retry_in <= 2);
+    assert_eq!(provider.health.cooldown_reason, None);
+    assert!(!provider.health.protected_single_provider);
     assert!(g.view().capacity_retries.is_empty());
     g.stop().await.unwrap();
 }
@@ -778,10 +788,17 @@ async fn capacity_errors_preserve_compressed_spooled_multipart_and_stream_payloa
         assert!(received
             .iter()
             .all(|value| value.as_ref() == body.as_slice()));
+        let provider = &g.view().providers[0];
+        let model = provider
+            .model_health
+            .iter()
+            .find(|entry| entry.model == "fixture")
+            .expect("payload model must have isolated health");
         assert_eq!(
-            g.view().providers[0].health.cooldown_reason.as_deref(),
+            model.health.cooldown_reason.as_deref(),
             Some("capacity_retry")
         );
+        assert_eq!(provider.health.cooldown_reason, None);
         until(|| g.view().active_connections == 0).await;
         assert_eq!(std::fs::read_dir(g.0.spool.path()).unwrap().count(), 0);
         g.stop().await.unwrap();

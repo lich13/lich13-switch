@@ -13,9 +13,13 @@ mod circuit;
 mod compaction;
 mod connector;
 mod endpoints;
+pub(crate) mod exchange;
+#[cfg(test)]
+mod exchange_tests;
 mod forward;
 pub(crate) mod metadata;
 mod model;
+mod model_health;
 mod protocol;
 #[cfg(test)]
 mod protocol_tests;
@@ -28,6 +32,8 @@ mod upstream_error;
 mod v019_usage_tests;
 #[cfg(test)]
 mod v020_tests;
+#[cfg(test)]
+mod v022_tests;
 mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
@@ -64,6 +70,7 @@ pub struct ProviderView {
     preferred_base_url: String,
     queued: bool,
     health: Health,
+    model_health: Vec<model_health::ModelHealth>,
     quota_version: String,
     quota: Option<QuotaView>,
     pub max_concurrency: u32,
@@ -114,6 +121,7 @@ struct Inner {
     listener_task: Option<tokio::task::JoinHandle<()>>,
     error: Option<String>,
     circuits: HashMap<String, Circuit>,
+    model_circuits: HashMap<String, model_health::Models>,
     affinity: HashMap<String, (String, Option<String>, Instant)>,
     last_successful: Option<String>,
     home: Option<PathBuf>,
@@ -134,6 +142,7 @@ struct Shared {
     quota: quota::Service,
     catalog: catalog::Service,
     endpoints: endpoints::Service,
+    exchange: exchange::Service,
     admission: admission::Scheduler,
     compaction: Arc<compaction::Registry>,
 }
@@ -145,6 +154,26 @@ struct Route {
     provider: Provider,
     client: HttpClient,
     provider_circuit: Circuit,
+    model_circuits: model_health::Models,
+}
+impl Route {
+    fn model_circuit(&self, requirement: &routing::Requirement) -> Option<Circuit> {
+        let routing::Requirement::Model(model) = requirement else {
+            return None;
+        };
+        let circuit = self.model_circuits.circuit(model);
+        circuit.set_single_provider_protection(self.provider_circuit.protection());
+        Some(circuit)
+    }
+    fn health_for(&self, requirement: &routing::Requirement) -> Health {
+        let provider = self.provider_circuit.health();
+        if !provider.available {
+            return provider;
+        }
+        self.model_circuit(requirement)
+            .map(|c| c.health())
+            .unwrap_or(provider)
+    }
 }
 fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
@@ -181,17 +210,23 @@ impl Gateway {
     }
 
     pub fn report_diagnostics(&self) {
+        self.0.exchange.prune();
         use crate::events::{Action, Reason};
         let view = self.view();
-        let circuits: Vec<_> = self
-            .0
-            .inner
-            .lock()
-            .unwrap()
-            .circuits
-            .values()
-            .cloned()
-            .collect();
+        let circuits: Vec<_> = {
+            let state = self.0.inner.lock().unwrap();
+            state
+                .circuits
+                .values()
+                .cloned()
+                .chain(
+                    state
+                        .model_circuits
+                        .values()
+                        .flat_map(model_health::Models::circuits),
+                )
+                .collect()
+        };
         for circuit in circuits {
             if let Some(event) = circuit.take_open_event() {
                 if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
@@ -344,6 +379,7 @@ impl Gateway {
                 listener_task: None,
                 error,
                 circuits: HashMap::new(),
+                model_circuits: HashMap::new(),
                 affinity: HashMap::new(),
                 last_successful: None,
                 home: None,
@@ -351,6 +387,7 @@ impl Gateway {
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
+            exchange: exchange::Service::default(),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             data,
             spool,
@@ -554,6 +591,11 @@ impl Gateway {
                             .preferred(p, &Self::endpoint_urls(&s.store, p)),
                         queued: p.queued,
                         health: health(pkey(p)),
+                        model_health: s
+                            .model_circuits
+                            .get(&pkey(p))
+                            .map(|m| m.states())
+                            .unwrap_or_default(),
                         quota_version: Self::quota_version(&s.store, p),
                         max_concurrency: p.max_concurrency,
                         max_rpm: p.max_rpm,
@@ -719,6 +761,12 @@ impl Gateway {
                 .iter()
                 .filter(|(key, _)| key.starts_with(&prefix))
                 .map(|(_, circuit)| circuit.clone())
+                .chain(
+                    s.model_circuits
+                        .iter()
+                        .filter(|(key, _)| key.starts_with(&prefix))
+                        .flat_map(|(_, models)| models.circuits()),
+                )
                 .collect();
             self.0.admission.reset_provider(id, &circuits);
             drop(s);
@@ -849,6 +897,9 @@ impl Gateway {
             s.last_successful = None;
         }
         s.store = next;
+        let keys: std::collections::HashSet<_> = s.store.providers.iter().map(pkey).collect();
+        s.circuits.retain(|key, _| keys.contains(key));
+        s.model_circuits.retain(|key, _| keys.contains(key));
         s.revision = revision;
         s.home = Some(home.to_owned());
         self.sync_single_protection(&s);
@@ -1290,6 +1341,15 @@ impl Gateway {
                     .map(|_| Duration::from_secs(state.store.settings.capacity_retry_seconds)),
             );
         }
+        for (key, models) in &state.model_circuits {
+            let protection = single
+                .as_ref()
+                .filter(|prefix| key.starts_with(prefix.as_str()))
+                .map(|_| Duration::from_secs(state.store.settings.capacity_retry_seconds));
+            for circuit in models.circuits() {
+                circuit.set_single_provider_protection(protection);
+            }
+        }
     }
     fn routing_ids(&self, pinned: Option<&str>) -> Vec<String> {
         let s = self.0.inner.lock().unwrap();
@@ -1315,6 +1375,7 @@ impl Gateway {
         let mut s = self.0.inner.lock().unwrap();
         let provider = s.store.providers.iter().find(|p| p.id == id)?.clone();
         let provider_circuit = s.circuits.entry(pkey(&provider)).or_default().clone();
+        let model_circuits = s.model_circuits.entry(pkey(&provider)).or_default().clone();
         self.sync_single_protection(&s);
         let key = format!("{}:{}", pkey(&provider), s.store.settings.connect_seconds);
         let mut clients = self.0.clients.lock().unwrap();
@@ -1339,6 +1400,7 @@ impl Gateway {
             provider,
             client,
             provider_circuit,
+            model_circuits,
         })
     }
     #[cfg(test)]

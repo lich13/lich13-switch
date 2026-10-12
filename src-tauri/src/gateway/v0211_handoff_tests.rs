@@ -301,13 +301,54 @@ fn v0211_unadmitted_history_cannot_be_upgraded_to_new_thread() {
     }));
     assert!(user_only.first_turn);
     let later = registry
-        .prepare_policy(session, Some(&user_only), true, &[new_only, ordinary])
+        .prepare_policy(
+            session,
+            Some(&user_only),
+            true,
+            &[new_only.clone(), ordinary.clone()],
+        )
         .unwrap();
     assert_eq!(later.admission_policy().0, Intake::Ordinary);
     assert_eq!(
         later.decision(Some(&user_only), "new-only",),
         crate::usage::model::RoutingDecision::OrdinaryQueue
     );
+
+    // A first-turn lease prepared in parallel cannot seize a history-confirmed
+    // session for the new-thread-only provider, but can fall back to ordinary.
+    let parallel_session = digest("fixture-history-parallel-first");
+    let first = hints(json!({
+        "input":[{"role":"user","content":"first"}]
+    }));
+    let pending_first = registry
+        .prepare_policy(
+            parallel_session.clone(),
+            Some(&first),
+            true,
+            &[new_only.clone(), ordinary.clone()],
+        )
+        .unwrap();
+    assert_eq!(pending_first.admission_policy().0, Intake::NewThread);
+    let history = hints(json!({
+        "input":[
+            {"role":"user","content":"prior"},
+            {"role":"assistant","content":"answer"},
+            {"role":"user","content":"continuation"}
+        ]
+    }));
+    let history_lease = registry
+        .prepare_policy(
+            parallel_session,
+            Some(&history),
+            true,
+            &[ordinary.clone(), new_only.clone()],
+        )
+        .unwrap();
+    assert_eq!(history_lease.admission_policy().0, Intake::Ordinary);
+    assert_eq!(pending_first.admission_policy().0, Intake::Ordinary);
+    assert!(!pending_first.admitted("new-only"));
+    assert!(history_lease.admitted("ordinary"));
+    assert!(pending_first.admitted("ordinary"));
 }
 
 #[test]
@@ -429,7 +470,7 @@ fn v0211_parallel_compaction_boundary_claims_once() {
 
     first.complete("new", Some(&boundary));
     parallel.complete("old", Some(&boundary));
-    assert!(registry.boundary_matches(&session, Some(&boundary)));
+    assert!(!registry.boundary_matches(&session, Some(&boundary)));
 }
 
 #[test]

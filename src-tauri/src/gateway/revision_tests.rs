@@ -76,7 +76,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         g.stop().await.unwrap();
         assert_ne!(g.view().revision, running);
         let (_, pair) = takeover::read_for(g.0.client, &home).unwrap();
-        assert_eq!(pair.base_url.as_deref(), Some("https://b.invalid"));
+        assert_eq!(pair.base_url.as_deref(), Some("https://b.invalid/v1"));
         assert_eq!(pair.token.as_deref(), Some("b"));
         assert_eq!(
             std::fs::read(home.join("auth.json")).unwrap(),

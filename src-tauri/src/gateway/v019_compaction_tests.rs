@@ -8,6 +8,7 @@ use std::sync::{
 use tokio::sync::Notify;
 
 const WINDOW: &str = "fixture-opaque-window";
+const NEXT_WINDOW: &str = "fixture-next-opaque-window";
 
 struct CancelGuard(Arc<Notify>);
 
@@ -57,7 +58,19 @@ fn promote_second(g: &Gateway, t: &tempfile::TempDir) {
     update(g, t, Edit::Reorder { ids });
 }
 fn input() -> Vec<u8> {
-    br#"{ "model":"fixture-model", "input":[{"type":"compaction","encrypted_content":"fixture-opaque-window"},{"role":"user","content":"fixture"}],"future":{"unchanged":true} }"#.to_vec()
+    input_for(WINDOW)
+}
+fn input_for(window: &str) -> Vec<u8> {
+    json!({
+        "model":"fixture-model",
+        "input":[
+            {"type":"compaction","encrypted_content":window},
+            {"role":"user","content":"fixture"}
+        ],
+        "future":{"unchanged":true}
+    })
+    .to_string()
+    .into_bytes()
 }
 async fn call(g: &Gateway, session: &str, path: &str, body: Vec<u8>) -> Value {
     let response = request(
@@ -87,9 +100,13 @@ async fn endpoint(name: &'static str, reject_window: bool) -> (u16, Arc<Mutex<Ve
                 return Response::builder().status(400).header("content-type", "application/json")
                     .body(full(r#"{"error":{"code":"invalid_encrypted_content","message":"compaction context unsupported"}}"#)).unwrap();
             }
+            let window = value
+                .get("fixture_next_window")
+                .and_then(Value::as_str)
+                .unwrap_or(WINDOW);
             Response::builder().header("content-type", "application/json").body(full(json!({
                 "id":format!("fixture-response-{name}"),"object":"response","model":"fixture-model","status":"completed","provider":name,
-                "output":if compact { json!([{"type":"compaction","encrypted_content":WINDOW}]) } else { json!([]) },
+                "output":if compact { json!([{"type":"compaction","encrypted_content":window}]) } else { json!([]) },
                 "usage":{"input_tokens":25,"output_tokens":3,"input_tokens_details":{"cached_tokens":20}}
             }).to_string())).unwrap()
         }
@@ -98,7 +115,7 @@ async fn endpoint(name: &'static str, reject_window: bool) -> (u16, Arc<Mutex<Ve
 }
 
 #[tokio::test]
-async fn old_thread_stays_until_completed_compaction_new_thread_uses_latest_priority() {
+async fn old_thread_does_not_revive_consumed_compaction_boundary() {
     let (a, old) = endpoint("old", false).await;
     let (b, new) = endpoint("new", false).await;
     let (t, g) = fixture(vec![
@@ -137,10 +154,32 @@ async fn old_thread_stays_until_completed_compaction_new_thread_uses_latest_prio
     let bytes = input();
     assert_eq!(
         call(&g, "fixture-existing", "/v1/responses", bytes.clone()).await["provider"],
+        "old"
+    );
+    assert_eq!(old.lock().unwrap().last().unwrap(), &bytes);
+    assert_eq!(old.lock().unwrap().len(), 5);
+    assert_eq!(new.lock().unwrap().len(), 1);
+
+    // A subsequent compaction response with a different encrypted window is
+    // new evidence; only that fresh boundary permits the next handoff.
+    let refresh = json!({
+        "model":"fixture-model",
+        "fixture_next_window":NEXT_WINDOW,
+        "input":"fixture"
+    })
+    .to_string()
+    .into_bytes();
+    assert_eq!(
+        call(&g, "fixture-existing", "/v1/responses/compact", refresh).await["provider"],
+        "old"
+    );
+    let next = input_for(NEXT_WINDOW);
+    assert_eq!(
+        call(&g, "fixture-existing", "/v1/responses", next.clone()).await["provider"],
         "new"
     );
-    assert_eq!(new.lock().unwrap().last().unwrap(), &bytes);
-    assert_eq!(old.lock().unwrap().len(), 4);
+    assert_eq!(new.lock().unwrap().last().unwrap(), &next);
+    assert_eq!(old.lock().unwrap().len(), 6);
     assert_eq!(new.lock().unwrap().len(), 2);
     assert_eq!(std::fs::read(t.path().join("config.toml")).unwrap(), config);
     assert_eq!(std::fs::read(t.path().join("auth.json")).unwrap(), auth);

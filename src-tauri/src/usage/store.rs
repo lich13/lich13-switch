@@ -72,7 +72,7 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 9 {
+        if version > 10 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         super::maintenance::configure(&connection)?;
@@ -189,6 +189,9 @@ impl Store {
                 storage::protect(&file, false)?;
             }
         }
+        if version < 10 {
+            db(connection.execute_batch("BEGIN IMMEDIATE; ALTER TABLE records ADD COLUMN local_sequence INTEGER NOT NULL DEFAULT 0; UPDATE records SET local_sequence=rowid; INSERT OR REPLACE INTO metadata(key,value) SELECT 'record_sequence',coalesce(max(local_sequence),0) FROM records; INSERT OR IGNORE INTO metadata(key,value) VALUES('finish_time_after',''); PRAGMA user_version=10; COMMIT;"))?;
+        }
         Ok(Self {
             connection,
             overview_cache: Default::default(),
@@ -274,6 +277,49 @@ impl Store {
             return Ok(true);
         }
         Ok(false)
+    }
+    pub fn repair_finish_times(&mut self) -> Result<bool> {
+        let after: Option<String> = db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='finish_time_after'",
+                [],
+                |r| r.get(0),
+            )
+            .optional())?;
+        let Some(after) = after else {
+            return Ok(false);
+        };
+        let tx = db(self.connection.transaction())?;
+        let rows = {
+            let mut stmt =
+                db(tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 128"))?;
+            let values = db(stmt.query_map([after], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            db(values.collect::<rusqlite::Result<Vec<_>>>())?
+        };
+        for (id, body) in &rows {
+            let mut r: Record = bodies::decode(&tx, body)?;
+            r.finished_at = Some(r.event_time());
+            db(tx.execute(
+                "UPDATE records SET time=?2,body=?3 WHERE id=?1",
+                params![id, r.event_time(), bodies::encode(&tx, &r)?],
+            ))?;
+        }
+        if let Some((last, _)) = rows.last() {
+            db(tx.execute(
+                "UPDATE metadata SET value=?1 WHERE key='finish_time_after'",
+                [last],
+            ))?;
+        } else {
+            db(tx.execute("DELETE FROM metadata WHERE key='finish_time_after'", []))?;
+        }
+        if !rows.is_empty() {
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok(!rows.is_empty())
     }
     pub fn reader_with_cache(dir: &Path, cache: OverviewCache) -> Result<Self> {
         let mut reader = Self::reader(dir)?;
@@ -394,7 +440,7 @@ impl Store {
     fn records(&self, f: &Filter, with_status: bool) -> Result<Vec<Record>> {
         let (condition, args) = query::conditions(f, "r", with_status);
         let eligible = query::eligible(f, "r", false);
-        let mut statement = db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {eligible} AND {condition} ORDER BY time DESC,id DESC")))?;
+        let mut statement = db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {eligible} AND {condition} ORDER BY time DESC,local_sequence DESC,id DESC")))?;
         let rows = db(
             statement.query_map(rusqlite::params_from_iter(args.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
@@ -430,7 +476,7 @@ impl Store {
             |r| r.get(0),
         ))?;
         let page = f.page.max(1).min((total.div_ceil(20) as u32).max(1));
-        let mut stmt=db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {where_sql} ORDER BY time DESC,id DESC LIMIT 20 OFFSET {}",(page-1)*20)))?;
+        let mut stmt=db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {where_sql} ORDER BY time DESC,local_sequence DESC,id DESC LIMIT 20 OFFSET {}",(page-1)*20)))?;
         let rows = db(
             stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
@@ -501,7 +547,7 @@ impl Store {
         }
         let tx = db(self.connection.transaction())?;
         for (scope, mut r) in records {
-            let day = query::bucket(r.started_at, DAY);
+            let day = query::bucket(r.event_time(), DAY);
             let Some(a) = r.final_attempt() else {
                 continue;
             };
@@ -513,6 +559,8 @@ impl Store {
             r.id.clear();
             r.session_id = None;
             r.started_at = day;
+            // A per-request finish must not split otherwise identical daily buckets.
+            r.finished_at = None;
             r.duplicate_of = None;
             r.gateway_reported = None;
             for a in &mut r.attempts {
@@ -558,7 +606,7 @@ impl Store {
         }
         // Keep only irreversible correlation keys after detail expiry. They prevent
         // archived files, late imports and source rebuilds from duplicating daily totals.
-        db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time+coalesce(json_extract(body,'$.attempts[#-1].durationMs'),0),effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
+        db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
         db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
         db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
         query::changed(&tx)?;
@@ -723,6 +771,8 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
         )
         .optional())?;
     let r = preserve_existing(tx, incoming)?;
+    let mut r = r;
+    r.finished_at = Some(r.event_time());
     let r = &r;
     let a = r.final_attempt();
     let response = a.and_then(|v| v.response_id.as_deref());
@@ -731,7 +781,8 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
     let model = a.and_then(|v| v.grouping_model());
     let status = a.and_then(|v| v.status);
     let body = bodies::encode(tx, r)?;
-    db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.started_at,provider,model,status,response,signature,body]))?;
+    db(tx.execute("INSERT INTO metadata(key,value) VALUES('record_sequence','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1", []))?;
+    db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body,local_sequence) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT cast(value as integer) FROM metadata WHERE key='record_sequence')) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.event_time(),provider,model,status,response,signature,body]))?;
     query::project(tx, 0, &r.id, r, 1, None)?;
     if let Some(previous) = previous {
         let old: Record = bodies::decode(tx, &previous)?;

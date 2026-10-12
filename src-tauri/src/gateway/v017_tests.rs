@@ -361,7 +361,14 @@ async fn capacity_rounds_do_not_reset_the_ordinary_failure_budget() {
     assert_eq!(limited.load(Ordering::SeqCst), 2);
     assert_eq!(failed.load(Ordering::SeqCst), 2);
     assert_eq!(g.view().providers[0].health.failures, 0);
-    assert_eq!(g.view().providers[1].health.failures, 2);
+    let provider = &g.view().providers[1];
+    assert_eq!(provider.health.failures, 0);
+    let model = provider
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "fixture-model")
+        .expect("known model must have isolated health");
+    assert_eq!(model.health.failures, 2);
     g.stop().await.unwrap();
 }
 

@@ -1773,9 +1773,11 @@ fn maintenance_compacts_history_when_session_auto_sync_is_disabled() {
         }
         for row in &rows[2..] {
             let kept = service.query(|store| store.detail(&row.id)).unwrap();
+            let mut expected = row.clone();
+            expected.finished_at = kept.finished_at;
             assert_eq!(
                 serde_json::to_value(&kept).unwrap(),
-                serde_json::to_value(row).unwrap()
+                serde_json::to_value(expected).unwrap()
             );
             assert!(row.started_at >= page.detail_since);
         }

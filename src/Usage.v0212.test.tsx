@@ -173,10 +173,10 @@ function detailValue(dialog: HTMLElement, label: string): HTMLElement {
   return dt.nextElementSibling as HTMLElement;
 }
 
-it("labels the request table time column as start time", async () => {
+it("labels the request table time column as end time", async () => {
   render(<Usage />);
   const table = await screen.findByRole("table");
-  expect(within(table).getByRole("columnheader", { name: "开始时间" })).toBeInTheDocument();
+  expect(within(table).getByRole("columnheader", { name: "结束时间" })).toBeInTheDocument();
   expect(within(table).queryByRole("columnheader", { name: "时间" })).not.toBeInTheDocument();
 });
 

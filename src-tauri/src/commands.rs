@@ -103,3 +103,112 @@ pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::Record> {
 pub async fn clear_app_events(r: R<'_>) -> Result<()> {
     r.diagnostics.clear().await
 }
+
+#[tauri::command]
+pub async fn preview_sub2api_import(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    client_id: crate::gateway::ClientId,
+) -> Result<Option<crate::gateway::exchange::Preview>> {
+    use tauri_plugin_dialog::DialogExt;
+    let gateway = r.gateway(client_id).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter("Sub2API JSON", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))?;
+        gateway.exchange_preview(&path).map(Some)
+    })
+    .await
+    .map_err(|_| AppError::new("IMPORT", "导入文件读取失败"))?
+}
+#[tauri::command]
+pub async fn commit_sub2api_import(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    client_id: crate::gateway::ClientId,
+    token: String,
+    ids: Vec<usize>,
+    expected_revision: String,
+) -> Result<crate::gateway::View> {
+    let _guard = r.official_tx.lock().await;
+    let view = r.gateway(client_id).exchange_commit(
+        &token,
+        &ids,
+        &expected_revision,
+        &r.home(client_id)?,
+    )?;
+    let _ = crate::refresh(&app, &r);
+    Ok(view)
+}
+#[tauri::command]
+pub fn cancel_sub2api_import(r: R<'_>, client_id: crate::gateway::ClientId, token: String) {
+    r.gateway(client_id).exchange_cancel(&token);
+}
+#[tauri::command]
+pub async fn prepare_sub2api_export(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    client_id: crate::gateway::ClientId,
+    replace_template: Option<bool>,
+) -> Result<bool> {
+    use tauri_plugin_dialog::DialogExt;
+    let gateway = r.gateway(client_id).clone();
+    if gateway.exchange_has_template() && !replace_template.unwrap_or(false) {
+        return Ok(true);
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .set_title("选择 Sub2API 导出文件作为模板")
+            .add_filter("Sub2API JSON", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(false);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))?;
+        gateway.exchange_template(&path)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| AppError::new("EXPORT", "模板读取失败"))?
+}
+#[tauri::command]
+pub async fn export_sub2api_providers(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    client_id: crate::gateway::ClientId,
+    ids: Vec<String>,
+    expected_revision: String,
+) -> Result<bool> {
+    use tauri_plugin_dialog::DialogExt;
+    let gateway = r.gateway(client_id).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .set_file_name("sub2api-accounts.json")
+            .add_filter("JSON", &["json"])
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| AppError::new("PATH", "请选择本地文件"))?;
+        gateway.exchange_export(&ids, &expected_revision, &path)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| AppError::new("EXPORT", "导出保存失败"))?
+}

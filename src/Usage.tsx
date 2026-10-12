@@ -39,6 +39,18 @@ const date = (n: number) =>
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+const preciseDate = (n: number) =>
+  new Date(n).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
     hour12: false,
   });
 const local = (n: number) => {
@@ -517,7 +529,7 @@ export default function Usage({
               <thead>
                 <tr>
                   {[
-                    "开始时间",
+                    "结束时间",
                     "供应商",
                     "模型",
                     "输入",
@@ -544,16 +556,16 @@ export default function Usage({
                       onKeyDown={(e) => {
                         if (e.key === "Enter") void open(r);
                       }}
-                      aria-label={`${date(r.startedAt)} ${name(a.provider)} 请求详情`}
+                      aria-label={`${date(r.finishedAt ?? r.startedAt)} ${name(a.provider)} 请求详情`}
                     >
-                      <td title={new Date(r.startedAt).toLocaleString()}>
+                      <td title={preciseDate(r.finishedAt ?? r.startedAt)}>
                         {a.status != null && a.status >= 400 && (
                           <span
                             className="usage-error-dot"
                             title={`HTTP ${a.status}`}
                           />
                         )}
-                        <time>{date(r.startedAt)}</time>
+                        <time>{date(r.finishedAt ?? r.startedAt)}</time>
                       </td>
                       <td
                         className="usage-name"
@@ -1158,6 +1170,16 @@ function Detail({
           ],
           ["请求 ID", r.id],
           [
+            "列表时间依据",
+            r.source !== "proxy"
+              ? "会话事件时间"
+              : a.transfer?.terminalAt != null
+                ? "协议终态"
+                : a.transfer?.endedAt
+                  ? "本地结束"
+                  : "历史开始时间（缺少结束记录）",
+          ],
+          [
             "数据归属",
             r.deduplication === "ambiguous"
               ? "关联未确认，未计入合计"
@@ -1171,33 +1193,37 @@ function Detail({
           ],
         ]}
       />
-      <h3>尝试记录</h3>
-      <dl className="usage-detail-grid">
-        <dt>全部尝试费用</dt>
-        <dd>
-          {r.attempts.some((a) => !a.price || a.compactedUnpriced)
-            ? "含未定价项 · "
-            : ""}
-          {money(String(total))}
-        </dd>
-        <dt>实际尝试</dt>
-        <dd>
-          {numeric(
-            r.attempts.reduce((sum, a) => sum + (a.repeatCount ?? 1), 0),
-          )}
-        </dd>
-      </dl>
-      {r.attempts.map((attempt, i) => (
-        <details key={attempt.id}>
-          <summary>
-            {i + 1} · {name(attempt.provider)} · {attempt.status ?? "—"}
-            {(attempt.repeatCount ?? 1) > 1
-              ? ` · 合并 ${compact(attempt.repeatCount)} 次`
-              : ""}
-          </summary>
-          <AttemptDetails a={attempt} name={name} source={r.source} />
-        </details>
-      ))}
+      {r.attempts.length > 1 && (
+        <>
+          <h3>此前尝试</h3>
+          <dl className="usage-detail-grid">
+            <dt>全部尝试费用</dt>
+            <dd>
+              {r.attempts.some((a) => !a.price || a.compactedUnpriced)
+                ? "含未定价项 · "
+                : ""}
+              {money(String(total))}
+            </dd>
+            <dt>实际尝试</dt>
+            <dd>
+              {numeric(
+                r.attempts.reduce((sum, a) => sum + (a.repeatCount ?? 1), 0),
+              )}
+            </dd>
+          </dl>
+          {r.attempts.slice(0, -1).map((attempt, i) => (
+            <details key={attempt.id}>
+              <summary>
+                {i + 1} · {name(attempt.provider)} · {attempt.status ?? "—"}
+                {(attempt.repeatCount ?? 1) > 1
+                  ? ` · 合并 ${compact(attempt.repeatCount)} 次`
+                  : ""}
+              </summary>
+              <AttemptDetails a={attempt} name={name} source={r.source} />
+            </details>
+          ))}
+        </>
+      )}
     </Drawer>
   );
 }
@@ -1317,7 +1343,7 @@ function AttemptDetails({
       <DetailFields
         items={[
           ["供应商", name(a.provider)],
-          ["时间", new Date(a.startedAt).toLocaleString()],
+          ["开始时间", preciseDate(a.startedAt)],
           [
             "请求类型",
             a.operation === "web_search"
@@ -1362,22 +1388,64 @@ function AttemptDetails({
                 ],
               ]
             : []),
-          ...(a.transfer ? [
-            ["请求进入", a.transfer.receivedAt == null ? "—" : new Date(a.transfer.receivedAt).toLocaleString()],
-            ["上游发送", new Date(a.transfer.sentAt).toLocaleString()],
-            ["收到首字节", a.transfer.firstByteAt == null ? "—" : new Date(a.transfer.firstByteAt).toLocaleString()],
-            ["协议终态", a.transfer.terminalAt == null ? "—" : new Date(a.transfer.terminalAt).toLocaleString()],
-            ["本地结束", new Date(a.transfer.endedAt).toLocaleString()],
-            ["上游读取", `${numeric(a.transfer.upstreamBytes)} B`],
-            ["交给下游网络层", `${numeric(a.transfer.downstreamBytes)} B`],
-            ["终态已交出", a.transfer.terminalHandedOff ? "是" : "未确认"],
-            ["上游结束", ({ EOF: "正常 EOF", DISCONNECTED: "连接中断", TIMEOUT: "无进展超时", CONNECT_FAILED: "连接失败" } as Record<string, string>)[a.transfer.upstreamEnd ?? ""] ?? "—"],
-            ["WS 关闭码", a.transfer.wsCloseCode == null ? "—" : String(a.transfer.wsCloseCode)],
-            ["下游错误", a.transfer.downstreamError ?? "—"],
-            ["超时阶段", a.transfer.timeoutPhase ?? "—"],
-            ["超时阈值", a.transfer.timeoutSeconds == null ? "—" : `${a.transfer.timeoutSeconds} 秒`],
-            ["距最后进展", a.transfer.lastProgressMs == null ? "—" : `${a.transfer.lastProgressMs} ms`],
-          ] as [string, string][] : []),
+          ...(a.transfer
+            ? ([
+                [
+                  "请求进入",
+                  a.transfer.receivedAt == null
+                    ? "—"
+                    : preciseDate(a.transfer.receivedAt),
+                ],
+                ["上游发送", preciseDate(a.transfer.sentAt)],
+                [
+                  "收到首字节",
+                  a.transfer.firstByteAt == null
+                    ? "—"
+                    : preciseDate(a.transfer.firstByteAt),
+                ],
+                [
+                  "协议终态",
+                  a.transfer.terminalAt == null
+                    ? "—"
+                    : preciseDate(a.transfer.terminalAt),
+                ],
+                ["本地结束", preciseDate(a.transfer.endedAt)],
+                ["上游读取", `${numeric(a.transfer.upstreamBytes)} B`],
+                ["交给下游网络层", `${numeric(a.transfer.downstreamBytes)} B`],
+                ["终态已交出", a.transfer.terminalHandedOff ? "是" : "未确认"],
+                [
+                  "上游结束",
+                  (
+                    {
+                      EOF: "正常 EOF",
+                      DISCONNECTED: "连接中断",
+                      TIMEOUT: "无进展超时",
+                      CONNECT_FAILED: "连接失败",
+                    } as Record<string, string>
+                  )[a.transfer.upstreamEnd ?? ""] ?? "—",
+                ],
+                [
+                  "WS 关闭码",
+                  a.transfer.wsCloseCode == null
+                    ? "—"
+                    : String(a.transfer.wsCloseCode),
+                ],
+                ["下游错误", a.transfer.downstreamError ?? "—"],
+                ["超时阶段", a.transfer.timeoutPhase ?? "—"],
+                [
+                  "超时阈值",
+                  a.transfer.timeoutSeconds == null
+                    ? "—"
+                    : `${a.transfer.timeoutSeconds} 秒`,
+                ],
+                [
+                  "距最后进展",
+                  a.transfer.lastProgressMs == null
+                    ? "—"
+                    : `${a.transfer.lastProgressMs} ms`,
+                ],
+              ] as [string, string][])
+            : []),
           ["请求模型", a.requestedModel],
           ["收到的响应模型", a.responseModel],
           ...metadata,
@@ -1572,6 +1640,12 @@ function routingReason(reason: string): string {
         compaction_handoff: "压缩后接管",
         auxiliary: "辅助请求，不建立线程归属",
         ordinary_queue: "按普通队列建立归属",
+        first_turn_unconfirmed: "首轮证据不足，按普通队列",
+        new_thread_capacity_full: "新线程接收方并发预留已满",
+        new_thread_model_denied: "新线程接收方的白名单不匹配",
+        new_thread_model_cooling: "新线程接收方的当前模型正在冷却",
+        new_thread_provider_unavailable: "新线程接收方当前不可用",
+        new_thread_queue_waiting: "新线程接收方已有等待请求",
       } as Record<string, string>
     )[reason] ?? "调度原因未记录"
   );

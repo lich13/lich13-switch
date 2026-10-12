@@ -51,6 +51,13 @@ enum Payload {
     Memory(Bytes),
     Disk(Arc<tempfile::NamedTempFile>),
 }
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum TurnEvidence {
+    First,
+    History,
+    #[default]
+    Unknown,
+}
 #[derive(serde::Deserialize, Default)]
 pub struct RequestHints {
     pub previous_response_id: Option<String>,
@@ -63,6 +70,8 @@ pub struct RequestHints {
     pub compacted_window: Option<String>,
     #[serde(skip)]
     pub first_turn: bool,
+    #[serde(skip)]
+    pub turn: TurnEvidence,
     #[serde(skip)]
     pub auxiliary: bool,
 }
@@ -106,11 +115,47 @@ impl RequestHints {
                 .rev()
                 .find_map(|v| super::compaction::fingerprint(v, projected));
         }
+        hints.auxiliary |= value.get("input").is_some_and(|input| match input {
+            serde_json::Value::String(s) => s.is_empty(),
+            serde_json::Value::Array(a) => a.is_empty(),
+            _ => false,
+        });
         hints.first_turn = !hints.auxiliary
             && hints.previous_response_id.is_none()
             && !hints.compaction_trigger
             && hints.compacted_window.is_none()
             && first_turn_input(value.get("input"));
+        hints.turn = if hints.first_turn {
+            TurnEvidence::First
+        } else if hints.previous_response_id.is_some()
+            || hints.compacted_window.is_some()
+            || value
+                .get("input")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                            || item
+                                .get("type")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|kind| {
+                                    matches!(
+                                        kind,
+                                        "function_call"
+                                            | "function_call_output"
+                                            | "reasoning"
+                                            | "compaction"
+                                            | "context_compaction"
+                                            | "tool_result"
+                                    )
+                                })
+                    })
+                })
+        {
+            TurnEvidence::History
+        } else {
+            TurnEvidence::Unknown
+        };
         Ok(hints)
     }
 }
@@ -146,13 +191,6 @@ pub struct Replay {
     pub length: u64,
 }
 impl Replay {
-    pub async fn capture<B>(body: B, dir: &Path) -> Result<Self, BoxError>
-    where
-        B: Body<Data = Bytes> + Unpin,
-        B::Error: std::error::Error + Send + Sync + 'static,
-    {
-        Self::capture_progress(body, dir, None).await
-    }
     pub async fn capture_progress<B>(
         mut body: B,
         dir: &Path,

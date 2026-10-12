@@ -80,8 +80,13 @@ async fn incident_rate_limited_p1_waits_then_recovers_while_p2_is_open() {
     let view = g.view();
     assert_eq!(view.providers[0].health.failures, 0);
     assert_eq!(view.providers[0].health.cooldown_reason, None);
+    let p2_model = view.providers[1]
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "gpt-test")
+        .expect("known model must have isolated health");
     assert_eq!(
-        view.providers[1].health.state,
+        p2_model.health.state,
         super::super::circuit::CircuitState::Open
     );
     let response = request(
@@ -105,11 +110,16 @@ async fn incident_rate_limited_p1_waits_then_recovers_while_p2_is_open() {
     assert!(recovered.health.available);
     assert!(!recovered.health.probe_in_flight);
     assert_eq!(view.last_successful.as_deref(), Some(recovered.id.as_str()));
+    let p2_model = view.providers[1]
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "gpt-test")
+        .expect("known model must have isolated health");
     assert_eq!(
-        view.providers[1].health.state,
+        p2_model.health.state,
         super::super::circuit::CircuitState::Open
     );
-    assert_eq!(view.providers[1].health.failures, 1);
+    assert_eq!(p2_model.health.failures, 1);
     assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
     assert_eq!(hits.load(Ordering::SeqCst), 3);
     assert_eq!(
@@ -139,9 +149,15 @@ async fn cooldown_timeout_returns_503_without_another_upstream_attempt() {
     settings.queue_seconds = 1;
     update(&g, &t, Edit::Settings { settings });
     start(&g, &t).await;
+    let body = br#"{"model":"fixture-model"}"#.to_vec();
     let first = tokio::time::timeout(
         Duration::from_secs(5),
-        request(&g, "/v1/responses", vec![], vec![]),
+        request(
+            &g,
+            "/v1/responses",
+            body.clone(),
+            vec![("content-type", "application/json")],
+        ),
     )
     .await
     .expect("upstream failure response timed out");
@@ -153,7 +169,12 @@ async fn cooldown_timeout_returns_503_without_another_upstream_attempt() {
     );
     let response = tokio::time::timeout(
         Duration::from_secs(5),
-        request(&g, "/v1/responses", vec![], vec![]),
+        request(
+            &g,
+            "/v1/responses",
+            body,
+            vec![("content-type", "application/json")],
+        ),
     )
     .await
     .expect("cooldown response timed out");
@@ -163,7 +184,14 @@ async fn cooldown_timeout_returns_503_without_another_upstream_attempt() {
     assert!(String::from_utf8_lossy(&body).contains("PROVIDERS_COOLING_DOWN"));
     settle(&g).await;
     let view = g.view();
-    let health = &view.providers[0].health;
+    assert_eq!(view.providers[0].health.failures, 0);
+    let health = view.providers[0]
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "fixture-model")
+        .expect("known model must have isolated health")
+        .health
+        .clone();
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     assert_eq!(health.failures, 1);
     assert_eq!(health.requests, 1);
@@ -242,12 +270,23 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
         &[(0, Bytes::from(req.clone())), (1, Bytes::from(req))]
     );
     let view = g.view();
-    assert_eq!(view.providers[0].health.requests, 1);
-    assert_eq!(view.providers[0].health.failures, 1);
+    assert_eq!(view.providers[0].health.requests, 0);
+    assert_eq!(view.providers[0].health.failures, 0);
     assert_eq!(
         view.providers[0].health.state,
+        super::super::circuit::CircuitState::Closed
+    );
+    let p1_model = view.providers[0]
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "gpt-4o")
+        .expect("known model must have isolated health");
+    assert_eq!(
+        p1_model.health.state,
         super::super::circuit::CircuitState::Open
     );
+    assert_eq!(p1_model.health.requests, 1);
+    assert_eq!(p1_model.health.failures, 1);
     assert_eq!(view.providers[1].health.requests, 1);
     assert_eq!(view.providers[1].health.failures, 0);
     assert_eq!(

@@ -500,7 +500,7 @@ describe("usage records", () => {
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent),
     ).toEqual([
-      "开始时间",
+      "结束时间",
       "供应商",
       "模型",
       "输入",
@@ -530,7 +530,7 @@ describe("usage records", () => {
     expect(within(dialog).getByText("HTTP 200")).toBeInTheDocument();
     expect(within(dialog).getByText("已完成")).toBeInTheDocument();
     expect(
-      within(dialog).getByRole("heading", { name: "尝试记录" }),
+      within(dialog).getByRole("heading", { name: "此前尝试" }),
     ).toBeInTheDocument();
     expect(
       within(dialog).getByText("实际尝试").nextElementSibling,
@@ -547,8 +547,8 @@ describe("usage records", () => {
       within(firstSummary.parentElement!).getByText("9,999"),
     ).toBeVisible();
     expect(
-      within(dialog).getByText("2 · Fixture Provider · 200"),
-    ).toBeInTheDocument();
+      within(dialog).queryByText("2 · Fixture Provider · 200"),
+    ).not.toBeInTheDocument();
   });
 
   it("labels web search operations instead of showing their model", async () => {
@@ -696,7 +696,7 @@ describe("usage records", () => {
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent),
     ).toEqual([
-      "开始时间",
+      "结束时间",
       "供应商",
       "模型",
       "输入",
@@ -719,7 +719,7 @@ describe("usage records", () => {
     const firstTokenLabels = within(dialog).getAllByText("首字", {
       selector: "dt",
     });
-    expect(firstTokenLabels).toHaveLength(2);
+    expect(firstTokenLabels).toHaveLength(1);
     for (const label of firstTokenLabels) {
       expect(label.nextElementSibling).toHaveTextContent("—");
     }

@@ -64,6 +64,7 @@ pub struct Activity {
     read: Mutex<ReadProgress>,
     write: Mutex<Instant>,
     websocket: std::sync::atomic::AtomicBool,
+    io_error: std::sync::atomic::AtomicU8,
 }
 impl Default for Activity {
     fn default() -> Self {
@@ -71,10 +72,29 @@ impl Default for Activity {
             read: Mutex::new(ReadProgress::default()),
             write: Mutex::new(Instant::now()),
             websocket: Default::default(),
+            io_error: Default::default(),
         }
     }
 }
 impl Activity {
+    pub fn error_code(&self) -> u8 {
+        self.io_error.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn failed(&self, error: &std::io::Error, write: bool) {
+        let code = if matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+        ) {
+            6
+        } else if write {
+            7
+        } else {
+            2
+        };
+        self.io_error
+            .store(code, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn websocket(&self) {
         self.websocket
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -103,6 +123,9 @@ impl<S: AsyncRead + Unpin> AsyncRead for Tracked<S> {
     ) -> Poll<std::io::Result<()>> {
         let before = buf.filled().len();
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Err(error)) = &result {
+            self.activity.failed(error, false);
+        }
         if matches!(result, Poll::Ready(Ok(())))
             && self
                 .activity
@@ -125,6 +148,9 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Tracked<S> {
         bytes: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(cx, bytes);
+        if let Poll::Ready(Err(error)) = &result {
+            self.activity.failed(error, true);
+        }
         if let Poll::Ready(Ok(n)) = &result {
             if *n > 0 {
                 *self.activity.write.lock().unwrap() = Instant::now();
@@ -133,7 +159,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Tracked<S> {
         result
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        let result = Pin::new(&mut self.inner).poll_flush(cx);
+        if let Poll::Ready(Err(error)) = &result {
+            self.activity.failed(error, true);
+        }
+        result
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)

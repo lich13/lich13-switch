@@ -21,6 +21,8 @@ mod v019_tests;
 mod v020_tests;
 #[cfg(test)]
 mod v0212_storage_tests;
+#[cfg(test)]
+mod v022_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -238,7 +240,7 @@ impl Service {
                 batch.extend(pending.iter().map(|(_, r)| r.clone()));
                 // One bounded metadata batch per writer iteration, including idle periods.
                 let repair = inner.store.lock().unwrap().as_mut().map(|store| {
-                    let changed = store.repair_metadata_batch()?;
+                    let changed = store.repair_metadata_batch()? | store.repair_finish_times()?;
                     store.compact_storage_batch().map(|_| changed)
                 });
                 let repair_failed = repair

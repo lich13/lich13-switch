@@ -67,6 +67,7 @@ export type EventRecord = {
   status: number | null;
   attempt: number | null;
   details?: {
+    healthScope?: "provider" | "model" | "request" | null;
     upstreamCode?: string | null;
     localCode?: string | null;
     upstreamType?: string | null;
@@ -166,8 +167,16 @@ const timeoutPhases: Record<string, string> = {
   ws_first_byte: "WebSocket 等待首字节",
   ws_handshake: "WebSocket 握手",
 };
+function reasonText(r: EventRecord) {
+  return r.reason === "circuit_open" && r.details?.healthScope === "model"
+    ? "模型暂不可用"
+    : reasons[r.reason];
+}
 function summary(r: EventRecord) {
-  return [r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r), r.details?.message || reasons[r.reason]]
+  return [
+    r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r),
+    r.details?.message || reasonText(r),
+  ]
     .filter(Boolean)
     .join(" · ");
 }
@@ -185,7 +194,18 @@ function wireStatus(r: EventRecord) {
   );
 }
 
-export default function EventLog({ focus, consumed }: { focus?: { id: string; clientId: ClientId; providerId: string | null; sequence: number } | null; consumed?: () => void } = {}) {
+export default function EventLog({
+  focus,
+  consumed,
+}: {
+  focus?: {
+    id: string;
+    clientId: ClientId;
+    providerId: string | null;
+    sequence: number;
+  } | null;
+  consumed?: () => void;
+} = {}) {
   const [data, setData] = useState<EventPage>({
     items: [],
     total: 0,
@@ -215,18 +235,31 @@ export default function EventLog({ focus, consumed }: { focus?: { id: string; cl
   const visible = documentVisible && nativeVisible;
   const sequence = useRef(0);
   const detailSequence = useRef(0);
-  useEffect(() => () => { detailSequence.current++; }, []);
+  useEffect(
+    () => () => {
+      detailSequence.current++;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!focus) return;
     const current = focus;
     const request = ++detailSequence.current;
     consumed?.();
-    setFilters((old) => ({ ...old, clientId: current.clientId, providerId: current.providerId ?? "" }));
+    setFilters((old) => ({
+      ...old,
+      clientId: current.clientId,
+      providerId: current.providerId ?? "",
+    }));
     setPage(1);
     void command<EventRecord | null>("get_app_event", { id: current.id })
-      .then((record) => { if (record && request === detailSequence.current) setSelected(record); })
-      .catch((e) => { if (request === detailSequence.current) setError(errorOf(e).message); });
+      .then((record) => {
+        if (record && request === detailSequence.current) setSelected(record);
+      })
+      .catch((e) => {
+        if (request === detailSequence.current) setError(errorOf(e).message);
+      });
   }, [focus?.sequence]);
 
   const load = useCallback(async () => {
@@ -508,22 +541,32 @@ export default function EventLog({ focus, consumed }: { focus?: { id: string; cl
                       title={wireStatus(r)}
                     >
                       {r.status != null && <span>{statusText(r.status)}</span>}
-                      {r.details?.wsCloseCode != null && <span>WS {r.details.wsCloseCode}</span>}
-                      {r.status == null && r.details?.wsCloseCode == null && "—"}
+                      {r.details?.wsCloseCode != null && (
+                        <span>WS {r.details.wsCloseCode}</span>
+                      )}
+                      {r.status == null &&
+                        r.details?.wsCloseCode == null &&
+                        "—"}
                     </span>
                   </td>
                   <td>
                     <button
                       className={"event-code " + r.level}
-                      aria-label={reasons[r.reason]}
+                      aria-label={reasonText(r)}
                       onClick={(e) => {
                         e.currentTarget.focus({ preventScroll: true });
                         const request = ++detailSequence.current;
                         void command<EventRecord | null>("get_app_event", {
                           id: r.id,
                         })
-                          .then((value) => { if (request === detailSequence.current) setSelected(value || r); })
-                          .catch((e) => { if (request === detailSequence.current) setError(errorOf(e).message); });
+                          .then((value) => {
+                            if (request === detailSequence.current)
+                              setSelected(value || r);
+                          })
+                          .catch((e) => {
+                            if (request === detailSequence.current)
+                              setError(errorOf(e).message);
+                          });
                       }}
                     >
                       {summary(r)}
@@ -567,7 +610,10 @@ export default function EventLog({ focus, consumed }: { focus?: { id: string; cl
         <EventDetail
           event={selected}
           provider={name(selected)}
-          onClose={() => { detailSequence.current++; setSelected(null); }}
+          onClose={() => {
+            detailSequence.current++;
+            setSelected(null);
+          }}
         />
       )}
     </section>
@@ -615,7 +661,7 @@ function EventDetail({
       <div className="event-drawer-inner">
         <header>
           <h2 ref={heading} id="event-title" tabIndex={-1}>
-            {reasons[r.reason]}
+            {reasonText(r)}
           </h2>
           <button
             className="icon-button"
@@ -628,10 +674,20 @@ function EventDetail({
         <dl>
           {[
             ["状态码", wireStatus(r)],
+            [
+              "影响范围",
+              r.details?.healthScope === "model"
+                ? `当前模型 · ${r.model ?? "—"}`
+                : r.details?.healthScope === "provider"
+                  ? "整个供应商"
+                  : r.details?.healthScope === "request"
+                    ? "仅此请求"
+                    : "历史未记录",
+            ],
             ["上游错误码", r.details?.upstreamCode ?? "—"],
             ["本地分类", r.details?.localCode ?? "—"],
             ["上游错误类型", r.details?.upstreamType ?? "未提供"],
-            ["错误摘要", r.details?.message ?? reasons[r.reason]],
+            ["错误摘要", r.details?.message ?? reasonText(r)],
             ["参数", r.details?.parameter ?? "未提供"],
             ["阶段", phases[r.details?.phase ?? ""] ?? "未提供"],
             [
@@ -647,7 +703,13 @@ function EventDetail({
             ["供应商", provider],
             ["处理结果", actionText(r)],
             ...(r.details?.timeoutPhase
-              ? [["超时阶段", timeoutPhases[r.details.timeoutPhase] ?? r.details.timeoutPhase]]
+              ? [
+                  [
+                    "超时阶段",
+                    timeoutPhases[r.details.timeoutPhase] ??
+                      r.details.timeoutPhase,
+                  ],
+                ]
               : []),
             ...(r.details?.timeoutSeconds != null
               ? [["配置阈值", `${r.details.timeoutSeconds} 秒`]]

@@ -84,12 +84,32 @@ export const gatewayDemo: GatewayState = {
   recoveryPending: false,
 };
 if (densePreview) {
-  gatewayDemo.providers.push(...Array.from({ length: 12 }, (_, index) => ({
-    ...structuredClone(gatewayDemo.providers[index % 2]),
-    id: `fixture-provider-${index + 1}`,
-    name: `团队供应商 ${index + 1} · 跨区域研发与长名称显示`,
-    baseUrl: "https://provider.example.invalid/v1",
-  })));
+  gatewayDemo.providers[0].modelHealth = [
+    {
+      model: "gpt-6-luna",
+      health: {
+        ...healthy,
+        available: false,
+        retryIn: 60,
+        cooldownReason: "capacity_retry",
+        cause: {
+          eventId: "fixture-model-capacity",
+          code: "rate_limit_exceeded",
+          reason: "rate_limit",
+          status: 429,
+          wsCloseCode: null,
+        },
+      },
+    },
+  ];
+  gatewayDemo.providers.push(
+    ...Array.from({ length: 12 }, (_, index) => ({
+      ...structuredClone(gatewayDemo.providers[index % 2]),
+      id: `fixture-provider-${index + 1}`,
+      name: `团队供应商 ${index + 1} · 跨区域研发与长名称显示`,
+      baseUrl: "https://provider.example.invalid/v1",
+    })),
+  );
 }
 export const claudeGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo),
@@ -134,10 +154,58 @@ if (densePreview) {
 }
 export function gatewayPreview(name: string, args: Record<string, unknown>) {
   const s = args.clientId === "claude" ? claudeGatewayDemo : gatewayDemo;
+  if (name === "preview_sub2api_import")
+    return {
+      token: "preview-sub2api",
+      revision: s.revision,
+      unsupportedProxies: 1,
+      rows: [
+        {
+          id: 0,
+          name: "导入供应商",
+          baseUrl: "https://import.example.invalid/v1",
+          concurrency: 3,
+          error: null,
+        },
+        {
+          id: 1,
+          name: "OAuth 账号",
+          baseUrl: null,
+          concurrency: null,
+          error: "仅支持 API Key，OAuth 账号不支持",
+        },
+      ],
+    };
+  if (name === "prepare_sub2api_export" || name === "export_sub2api_providers")
+    return true;
+  if (name === "cancel_sub2api_import") return null;
+  if (name === "commit_sub2api_import") {
+    if (args.expectedRevision !== s.revision)
+      throw { code: "CONFLICT", message: "网关设置已变化，请使用最新状态重试" };
+    s.providers.push({
+      ...s.providers[0],
+      id: crypto.randomUUID(),
+      name: "导入供应商",
+      baseUrl: "https://import.example.invalid/v1",
+      queued: false,
+      handoffAfterCompaction: false,
+      takeNewThreads: false,
+    });
+    s.revision = crypto.randomUUID();
+    return structuredClone(s);
+  }
   if (name === "probe_provider_endpoints") {
     const p = s.providers.find((p) => p.id === args.providerId);
     if (!p) throw new Error("供应商不存在");
-    p.endpointMeasurements = [p.baseUrl, ...(p.extraBaseUrls ?? [])].map((baseUrl, i) => ({ baseUrl, latencyMs: i ? 48 : 96, status: 401, error: null, checkedAt: Date.now() }));
+    p.endpointMeasurements = [p.baseUrl, ...(p.extraBaseUrls ?? [])].map(
+      (baseUrl, i) => ({
+        baseUrl,
+        latencyMs: i ? 48 : 96,
+        status: 401,
+        error: null,
+        checkedAt: Date.now(),
+      }),
+    );
     p.preferredBaseUrl = p.extraBaseUrls?.[0] ?? p.baseUrl;
     return structuredClone(s);
   }
@@ -164,43 +232,112 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       stale: false,
       error: null,
       keyStatus: null,
-      subscriptions: provider.id.endsWith("primary") ? [{
-        name: "开发者套餐",
-        status: "active",
-        active: true,
-        expiresAt: "2027-12-31T00:00:00Z",
-        plans: [
-          { name: "每日", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null },
-          { name: "每周", remaining: 42, used: 8, total: 50, unit: "USD", unlimited: false, resetAt: null },
-        ],
-      }] : [{
-        name: "团队研发与长周期协作套餐",
-        status: "active",
-        active: true,
-        expiresAt: null,
-        plans: [{ name: "每月", remaining: 800, used: 200, total: 1000, unit: "额度单位", unlimited: false, resetAt: null }],
-      }, {
-        name: "开发者加量套餐",
-        status: "active",
-        active: true,
-        expiresAt: null,
-        plans: [{ name: "套餐额度", remaining: 5, used: 0, total: 5, unit: "USD", unlimited: false, resetAt: null }],
-      }],
-      plans: provider.id.endsWith("primary") ? [
-        { name: "开发者套餐", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null },
-        { name: "每日", remaining: 8, used: 2, total: 10, unit: "USD", unlimited: false, resetAt: null },
-        { name: "每周", remaining: 42, used: 8, total: 50, unit: "USD", unlimited: false, resetAt: null },
-      ] : [
-        {
-          name: "API Key 配额",
-          remaining: 42.35,
-          used: 7.65,
-          total: 50,
-          unit: "USD",
-          unlimited: false,
-          resetAt: null,
-        },
-      ],
+      subscriptions: provider.id.endsWith("primary")
+        ? [
+            {
+              name: "开发者套餐",
+              status: "active",
+              active: true,
+              expiresAt: "2027-12-31T00:00:00Z",
+              plans: [
+                {
+                  name: "每日",
+                  remaining: 8,
+                  used: 2,
+                  total: 10,
+                  unit: "USD",
+                  unlimited: false,
+                  resetAt: null,
+                },
+                {
+                  name: "每周",
+                  remaining: 42,
+                  used: 8,
+                  total: 50,
+                  unit: "USD",
+                  unlimited: false,
+                  resetAt: null,
+                },
+              ],
+            },
+          ]
+        : [
+            {
+              name: "团队研发与长周期协作套餐",
+              status: "active",
+              active: true,
+              expiresAt: null,
+              plans: [
+                {
+                  name: "每月",
+                  remaining: 800,
+                  used: 200,
+                  total: 1000,
+                  unit: "额度单位",
+                  unlimited: false,
+                  resetAt: null,
+                },
+              ],
+            },
+            {
+              name: "开发者加量套餐",
+              status: "active",
+              active: true,
+              expiresAt: null,
+              plans: [
+                {
+                  name: "套餐额度",
+                  remaining: 5,
+                  used: 0,
+                  total: 5,
+                  unit: "USD",
+                  unlimited: false,
+                  resetAt: null,
+                },
+              ],
+            },
+          ],
+      plans: provider.id.endsWith("primary")
+        ? [
+            {
+              name: "开发者套餐",
+              remaining: 8,
+              used: 2,
+              total: 10,
+              unit: "USD",
+              unlimited: false,
+              resetAt: null,
+            },
+            {
+              name: "每日",
+              remaining: 8,
+              used: 2,
+              total: 10,
+              unit: "USD",
+              unlimited: false,
+              resetAt: null,
+            },
+            {
+              name: "每周",
+              remaining: 42,
+              used: 8,
+              total: 50,
+              unit: "USD",
+              unlimited: false,
+              resetAt: null,
+            },
+          ]
+        : [
+            {
+              name: "API Key 配额",
+              remaining: 42.35,
+              used: 7.65,
+              total: 50,
+              unit: "USD",
+              unlimited: false,
+              resetAt: null,
+            },
+          ],
       expiresAt: null,
       expiresAtUnix: null,
       today: { requests: 18, tokens: 56200, cost: 1.25 },
@@ -228,15 +365,24 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     if (e.op === "rpmProvider" && p) p.maxRpm = Number(e.maxRpm);
     if (e.op === "renameProvider" && p) p.name = String(e.name);
     if (e.op === "endpointsProvider" && p) {
-      p.extraBaseUrls = [...new Set((e.baseUrls as string[]).map((url) => new URL(url).href.replace(/\/$/, "")))].filter((url) => url !== p.baseUrl.replace(/\/$/, ""));
-      p.endpointMeasurements = []; p.preferredBaseUrl = p.baseUrl;
+      p.extraBaseUrls = [
+        ...new Set(
+          (e.baseUrls as string[]).map((url) =>
+            new URL(url).href.replace(/\/$/, ""),
+          ),
+        ),
+      ].filter((url) => url !== p.baseUrl.replace(/\/$/, ""));
+      p.endpointMeasurements = [];
+      p.preferredBaseUrl = p.baseUrl;
     }
     if (e.op === "swapEndpoint" && p) {
       const index = p.extraBaseUrls?.indexOf(String(e.baseUrl)) ?? -1;
       if (index < 0) throw new Error("辅助端点已变化，请刷新后重试");
       const previous = p.baseUrl;
-      p.baseUrl = p.extraBaseUrls![index]; p.extraBaseUrls![index] = previous;
-      p.endpointMeasurements = []; p.preferredBaseUrl = p.baseUrl;
+      p.baseUrl = p.extraBaseUrls![index];
+      p.extraBaseUrls![index] = previous;
+      p.endpointMeasurements = [];
+      p.preferredBaseUrl = p.baseUrl;
     }
     if (e.op === "reset" && p) p.health = { ...healthy };
     if (e.op === "deleteProvider")
@@ -271,16 +417,21 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     if (["modelsProvider", "policyProvider"].includes(e.op as string) && p)
       p.allowedModels = e.allowedModels as string[] | null;
     if (["policyProvider", "takeoverProvider"].includes(e.op as string) && p) {
-      p.handoffAfterCompaction = e.handoffAfterCompaction == null ? p.handoffAfterCompaction : Boolean(e.handoffAfterCompaction);
-      p.takeNewThreads = e.takeNewThreads == null ? p.takeNewThreads : Boolean(e.takeNewThreads);
+      p.handoffAfterCompaction =
+        e.handoffAfterCompaction == null
+          ? p.handoffAfterCompaction
+          : Boolean(e.handoffAfterCompaction);
+      p.takeNewThreads =
+        e.takeNewThreads == null ? p.takeNewThreads : Boolean(e.takeNewThreads);
     }
     if (e.op === "connection") {
-      if (s.clientId !== "codex" || s.running) throw new Error("请先关闭 Codex 网关再修改连接方式");
-      if (e.mode !== "auto" && e.mode !== "apiKey" && e.mode !== "bearer") throw new Error("连接方式无效");
+      if (s.clientId !== "codex" || s.running)
+        throw new Error("请先关闭 Codex 网关再修改连接方式");
+      if (e.mode !== "auto" && e.mode !== "apiKey" && e.mode !== "bearer")
+        throw new Error("连接方式无效");
       if (e.mode !== "auto") s.connectionMode = e.mode;
     }
     if (e.op === "settings") s.settings = e.settings as GatewaySettings;
-    if (e.op === "import") throw new Error("预览模式无法读取真实客户端配置");
     s.revision = crypto.randomUUID();
   }
   return structuredClone(s);

@@ -925,8 +925,12 @@ fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempt
     .unwrap();
     drop(store);
     let db = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    db.execute_batch("DELETE FROM usage_metrics WHERE kind=2; PRAGMA user_version=4;")
-        .unwrap();
+    db.execute_batch(
+        "DELETE FROM usage_metrics WHERE kind=2;
+         ALTER TABLE records DROP COLUMN local_sequence;
+         PRAGMA user_version=4;",
+    )
+    .unwrap();
     drop(db);
     let migrated = Store::open(dir.path()).unwrap();
     check_source_totals(&migrated);
@@ -939,7 +943,7 @@ fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempt
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 }
 
 #[test]

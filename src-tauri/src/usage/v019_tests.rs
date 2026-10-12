@@ -51,6 +51,14 @@ fn append_bytes(path: &Path, bytes: &[u8]) {
 fn session_filter() -> super::model::Filter {
     super::model::Filter {
         start: Some(BASE - 1),
+        end: Some(BASE + 4),
+        ..super::model::Filter::default()
+    }
+}
+
+fn session_filter_before_finished_at() -> super::model::Filter {
+    super::model::Filter {
+        start: Some(BASE - 1),
         end: Some(BASE + 1),
         ..super::model::Filter::default()
     }
@@ -731,6 +739,14 @@ fn codex_unterminated_tail_is_replayed_after_the_missing_half_arrives() {
     let totals = store.dashboard(&session_filter()).unwrap().totals;
     assert_eq!(totals.requests, 1);
     assert_eq!(totals.tokens.output, Some(5));
+    assert_eq!(
+        store
+            .dashboard(&session_filter_before_finished_at())
+            .unwrap()
+            .totals
+            .requests,
+        0
+    );
 }
 
 #[test]

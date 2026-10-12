@@ -72,14 +72,16 @@ export const demo: ViewState = {
   },
 };
 if (densePreview) {
-  demo.accounts.push(...Array.from({ length: 12 }, (_, index) => ({
-    id: `fixture-account-${index + 1}`,
-    name: `团队工作空间 ${index + 1} · 长名称账号`,
-    kind: "chatgpt" as const,
-    email: null,
-    current: false,
-    updatedAt: 0,
-  })));
+  demo.accounts.push(
+    ...Array.from({ length: 12 }, (_, index) => ({
+      id: `fixture-account-${index + 1}`,
+      name: `团队工作空间 ${index + 1} · 长名称账号`,
+      kind: "chatgpt" as const,
+      email: null,
+      current: false,
+      updatedAt: 0,
+    })),
+  );
 }
 let doc: ConfigDocument = {
   clientId: "codex",
@@ -269,6 +271,19 @@ export async function run(
   }
   if (
     [
+      "preview_sub2api_import",
+      "prepare_sub2api_export",
+      "export_sub2api_providers",
+      "cancel_sub2api_import",
+      "commit_sub2api_import",
+    ].includes(name)
+  ) {
+    const result = gatewayPreview(name, args);
+    if (name === "commit_sub2api_import") emit("gateway-state", result);
+    return result;
+  }
+  if (
+    [
       "get_gateway",
       "start_gateway",
       "stop_gateway",
@@ -305,12 +320,20 @@ export async function run(
               (key === "statusGroup"
                 ? v === "no_status"
                   ? r.status == null
-                  : r.status != null && Math.floor(r.status / 100) === ({ success: 2, client_error: 4, server_error: 5 } as Record<string, number>)[String(v)]
+                  : r.status != null &&
+                    Math.floor(r.status / 100) ===
+                      (
+                        {
+                          success: 2,
+                          client_error: 4,
+                          server_error: 5,
+                        } as Record<string, number>
+                      )[String(v)]
                 : key === "from"
-                ? r.lastAt >= Number(v)
-                : key === "to"
-                  ? r.firstAt <= Number(v)
-                  : r[key as keyof typeof r] === v),
+                  ? r.lastAt >= Number(v)
+                  : key === "to"
+                    ? r.firstAt <= Number(v)
+                    : r[key as keyof typeof r] === v),
           ),
       );
       const page = Math.max(

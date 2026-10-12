@@ -206,10 +206,10 @@ it("shows reasoned missing token fields and preserves a real zero duration", asy
 
   await user.click((await screen.findByText("fixture-response")).closest("tr")!);
   const drawer = await screen.findByRole("dialog", { name: "请求详情" });
-  expect(within(drawer).getAllByLabelText("— · 上游未报告")).toHaveLength(2);
-  expect(within(drawer).getAllByLabelText("— · 提前结束")).toHaveLength(2);
-  expect(within(drawer).getAllByLabelText("— · 解析不完整")).toHaveLength(2);
-  expect(within(drawer).getAllByLabelText("— · 历史缺失")).toHaveLength(2);
+  expect(within(drawer).getAllByLabelText("— · 上游未报告")).toHaveLength(1);
+  expect(within(drawer).getAllByLabelText("— · 提前结束")).toHaveLength(1);
+  expect(within(drawer).getAllByLabelText("— · 解析不完整")).toHaveLength(1);
+  expect(within(drawer).getAllByLabelText("— · 历史缺失")).toHaveLength(1);
   for (const label of within(drawer).getAllByText("总耗时", { selector: "dt" })) {
     expect(label.nextElementSibling).toHaveTextContent("0.000s");
   }

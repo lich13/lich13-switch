@@ -353,15 +353,26 @@ async fn rate_limit_authentication_and_network_keep_distinct_health_policies() {
     .await;
     auto(&g, &t, 1);
     start(&g, &t).await;
-    let response = request(&g, "/v1/test", vec![], vec![]).await;
+    let response = request(
+        &g,
+        "/v1/test",
+        br#"{"model":"fixture-model"}"#.to_vec(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
         "rate-backup"
     );
-    let rate_health = &g.view().providers[0].health;
-    assert_eq!(rate_health.failures, 0);
+    let provider = &g.view().providers[0];
+    assert_eq!(provider.health.failures, 0);
+    let rate_health = provider
+        .model_health
+        .iter()
+        .find(|entry| entry.model == "fixture-model")
+        .expect("known model must have isolated health");
     assert_eq!(
-        rate_health.cooldown_reason.as_deref(),
+        rate_health.health.cooldown_reason.as_deref(),
         Some("capacity_retry")
     );
     g.stop().await.unwrap();
@@ -369,8 +380,10 @@ async fn rate_limit_authentication_and_network_keep_distinct_health_policies() {
     let auth = server(|_| async {
         Response::builder()
             .status(401)
-            .header("content-type", "text/plain")
-            .body(full("bad key"))
+            .header("content-type", "application/json")
+            .body(full(
+                r#"{"error":{"code":"invalid_api_key","message":"fixture invalid key"}}"#,
+            ))
             .unwrap()
     })
     .await;

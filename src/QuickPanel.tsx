@@ -19,7 +19,11 @@ import {
 import { command, preview, subscribe } from "./bridge";
 import { errorOf, type GatewayState, type ViewState } from "./types";
 import { QuotaInfo, useProviderQuota } from "./Quota";
-import { providerRuntimeStatus, providerHandoffStatus } from "./provider-status";
+import {
+  providerRuntimeStatus,
+  providerHandoffStatus,
+  providerFault,
+} from "./provider-status";
 import QuickControls from "./QuickControls";
 import AuthSyncNotice from "./AuthSyncNotice";
 import AccountPlan from "./AccountPlan";
@@ -56,7 +60,9 @@ function QuickContent({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [endpointProvider, setEndpointProvider] = useState<GatewayState["providers"][number] | null>(null);
+  const [endpointProvider, setEndpointProvider] = useState<
+    GatewayState["providers"][number] | null
+  >(null);
   const [systemDark, setSystemDark] = useState(
     matchMedia("(prefers-color-scheme: dark)").matches,
   );
@@ -384,7 +390,8 @@ function QuickContent({
                         <button
                           className="icon-button quick-provider-settings"
                           disabled={rowBusy}
-                          aria-label={`${p.name} 白名单`} title="白名单"
+                          aria-label={`${p.name} 白名单`}
+                          title="白名单"
                           onClick={() =>
                             void command("open_main", {
                               page: "gateway",
@@ -395,11 +402,35 @@ function QuickContent({
                         >
                           <Settings2 size={14} />
                         </button>
-                        <button type="button" className="icon-button compact" aria-label={`${p.name} 端点`} title="端点" disabled={rowBusy} onClick={() => setEndpointProvider(p)}><Network size={14} /></button>
+                        <button
+                          type="button"
+                          className="icon-button compact"
+                          aria-label={`${p.name} 端点`}
+                          title="端点"
+                          disabled={rowBusy}
+                          onClick={() => setEndpointProvider(p)}
+                        >
+                          <Network size={14} />
+                        </button>
                       </div>
-                      {providerHandoffStatus(p, gateway) && <span className="provider-binding provider-handoff">{providerHandoffStatus(p, gateway)}</span>}
+                      {providerHandoffStatus(p, gateway) && (
+                        <span className="provider-binding provider-handoff">
+                          {providerHandoffStatus(p, gateway)}
+                        </span>
+                      )}
                       {providerRuntimeStatus(p, gateway) && (
-                        <button type="button" className="quick-provider-alert" onClick={() => void command("open_main", { page: "logs", eventId: p.health.cause?.eventId ?? null, providerId: p.health.cause ? p.id : null, clientId })}>
+                        <button
+                          type="button"
+                          className="quick-provider-alert"
+                          onClick={() =>
+                            void command("open_main", {
+                              page: "logs",
+                              eventId: providerFault(p)?.eventId ?? null,
+                              providerId: providerFault(p) ? p.id : null,
+                              clientId,
+                            })
+                          }
+                        >
                           {providerRuntimeStatus(p, gateway)}
                         </button>
                       )}
@@ -452,7 +483,10 @@ function QuickContent({
                     aria-label={`切换到 ${a.name}`}
                   >
                     <span className="quick-name">
-                      <span className="account-title"><strong title={a.name}>{a.name}</strong><AccountPlan account={a} /></span>
+                      <span className="account-title">
+                        <strong title={a.name}>{a.name}</strong>
+                        <AccountPlan account={a} />
+                      </span>
                       <span>
                         {a.kind === "chatgpt" ? "ChatGPT" : "API Key"}
                         {a.current ? " · 当前文件" : ""}
@@ -489,12 +523,20 @@ function QuickContent({
           {prefs.tab === "providers" ? "管理供应商" : "管理账号"}
         </button>
       </footer>
-      {endpointProvider && gateway && <ProviderEndpoints
-        provider={endpointProvider}
-        runtime={gateway.providers.find((p) => p.id === endpointProvider.id) ?? endpointProvider}
-        clientId={clientId} revision={gateway.revision}
-        save={edit} update={setGateway} close={() => setEndpointProvider(null)}
-      />}
+      {endpointProvider && gateway && (
+        <ProviderEndpoints
+          provider={endpointProvider}
+          runtime={
+            gateway.providers.find((p) => p.id === endpointProvider.id) ??
+            endpointProvider
+          }
+          clientId={clientId}
+          revision={gateway.revision}
+          save={edit}
+          update={setGateway}
+          close={() => setEndpointProvider(null)}
+        />
+      )}
     </div>
   );
 }

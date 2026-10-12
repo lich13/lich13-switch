@@ -160,10 +160,19 @@ async fn visual_config_save_keeps_gateway_fields_and_conflicts_do_not_lose_draft
     let stopped = claude.read_config(&home).unwrap();
     assert!(!stopped.guarded);
     assert!(stopped.text.contains("English"));
-    assert!(
-        takeover::pair_for(ClientId::Claude, &stopped.text).unwrap()
-            == takeover::pair_for(ClientId::Claude, &original.text).unwrap()
+    let original_pair = takeover::pair_for(ClientId::Claude, &original.text).unwrap();
+    let stopped_pair = takeover::pair_for(ClientId::Claude, &stopped.text).unwrap();
+    let expected_base = super::model::base_url(
+        original_pair.base_url.as_deref().unwrap(),
+        claude.view().settings.port,
+    )
+    .unwrap()
+    .to_string();
+    assert_eq!(
+        stopped_pair.base_url.as_deref(),
+        Some(expected_base.as_str())
     );
+    assert_eq!(stopped_pair.token, original_pair.token);
     assert!(!codex.view().running);
     assert!(!home.join("auth.json").exists());
 }

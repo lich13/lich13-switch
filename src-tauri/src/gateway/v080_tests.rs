@@ -177,7 +177,7 @@ async fn dual_hot_switch_preserves_live_config_hashes_and_stops_to_each_selected
         ],
         vec![
             "https://claude-a.fixture.invalid/deployment".into(),
-            "https://claude-b.fixture.invalid/deployment".into(),
+            "https://claude-b.fixture.invalid/deployment/v1".into(),
         ],
     )
     .await;
@@ -229,7 +229,10 @@ async fn dual_hot_switch_preserves_live_config_hashes_and_stops_to_each_selected
         std::fs::read_to_string(f.claude_home.join("settings.json")).unwrap(),
         claude_config::patch(
             &original_claude,
-            &takeover::Pair::new("https://claude-b.fixture.invalid/deployment", CLAUDE_TOKEN)
+            &takeover::Pair::new(
+                "https://claude-b.fixture.invalid/deployment/v1",
+                CLAUDE_TOKEN,
+            )
         )
         .unwrap()
     );
@@ -512,21 +515,67 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     }).await;
     let f = dual_fixture(vec![], vec![format!("http://127.0.0.1:{upstream}/claude")]).await;
     start_client(&f.claude, &f.claude_home).await;
-    let complete = response_bytes(&f.claude, "/v1/messages?case=complete").await;
+    let fixture_body = || br#"{"model":"claude-fixture"}"#.to_vec();
+    let complete_response = request(
+        &f.claude,
+        "/v1/messages?case=complete",
+        fixture_body(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(complete_response.status(), 200);
+    let complete = complete_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     assert_eq!(complete.as_ref(), [START, STOP].concat());
     wait_until(|| f.claude.view().providers[0].active_requests == 0).await;
     assert_eq!(f.claude.view().providers[0].health.requests, 1);
     assert_eq!(f.claude.view().providers[0].health.failures, 0);
+    let model_health = |gateway: &Gateway| {
+        gateway
+            .route(&gateway.view().providers[0].id)
+            .unwrap()
+            .model_circuit(&super::super::routing::Requirement::Model(
+                "claude-fixture".into(),
+            ))
+            .unwrap()
+            .health()
+    };
+    assert_eq!(model_health(&f.claude).requests, 1);
+    assert_eq!(model_health(&f.claude).failures, 0);
+    let eof_response = request(
+        &f.claude,
+        "/v1/messages?case=eof",
+        fixture_body(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(eof_response.status(), 200);
     assert_eq!(
-        response_bytes(&f.claude, "/v1/messages?case=eof")
+        eof_response
+            .into_body()
+            .collect()
             .await
+            .unwrap()
+            .to_bytes()
             .as_ref(),
         START
     );
     wait_until(|| f.claude.view().providers[0].active_requests == 0).await;
-    assert_eq!(f.claude.view().providers[0].health.requests, 2);
-    assert_eq!(f.claude.view().providers[0].health.failures, 1);
-    let mut interrupted = request(&f.claude, "/v1/messages?case=abrupt", vec![], vec![]).await;
+    assert_eq!(f.claude.view().providers[0].health.requests, 1);
+    assert_eq!(f.claude.view().providers[0].health.failures, 0);
+    assert_eq!(model_health(&f.claude).requests, 2);
+    assert_eq!(model_health(&f.claude).failures, 1);
+    let mut interrupted = request(
+        &f.claude,
+        "/v1/messages?case=abrupt",
+        fixture_body(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
     assert_eq!(interrupted.status(), 200);
     let first = interrupted.body_mut().frame().await.unwrap().unwrap();
     assert_eq!(first.data_ref().unwrap().as_ref(), START);
@@ -534,8 +583,10 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     release.add_permits(1);
     assert!(interrupted.into_body().collect().await.is_err());
     wait_until(|| f.claude.view().providers[0].active_requests == 0).await;
-    assert_eq!(f.claude.view().providers[0].health.requests, 3);
-    assert_eq!(f.claude.view().providers[0].health.failures, 2);
+    assert_eq!(f.claude.view().providers[0].health.requests, 1);
+    assert_eq!(f.claude.view().providers[0].health.failures, 0);
+    assert_eq!(model_health(&f.claude).requests, 3);
+    assert_eq!(model_health(&f.claude).failures, 2);
     f.claude.stop().await.unwrap();
 }
 
@@ -610,7 +661,7 @@ async fn initial_claude_import_is_read_only_and_deleted_providers_stay_deleted_a
     assert_eq!(imported.providers.len(), 1);
     assert_eq!(
         imported.providers[0].base_url,
-        "https://claude.fixture.invalid/deployment"
+        "https://claude.fixture.invalid/deployment/v1"
     );
     assert_eq!(
         imported.selected.as_deref(),

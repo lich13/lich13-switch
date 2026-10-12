@@ -35,6 +35,7 @@ pub async fn serve(
                     let socket = super::wire_progress::Tracked::new(socket, activity.clone());
                     let deliveries = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::sync::Weak<super::protocol::Delivery>>::new()));
                     let tracked = deliveries.clone();
+                    let connection_activity = activity.clone();
                     let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
                         let g=g.clone();
                         let delivery = std::sync::Arc::new(super::protocol::Delivery::default());
@@ -48,9 +49,11 @@ pub async fn serve(
                         .serve_connection(TokioIo::new(socket),service).with_upgrades();
                     tokio::pin!(connection);
                     let result = tokio::select!{result= &mut connection=>result,_=stop.changed()=>{connection.as_mut().graceful_shutdown();connection.await}};
-                    if result.is_err() {
+                    if let Err(error) = result {
                         for delivery in deliveries.lock().unwrap().iter().filter_map(std::sync::Weak::upgrade) {
-                            delivery.error.store(2, std::sync::atomic::Ordering::Relaxed);
+                            if !delivery.finished.load(std::sync::atomic::Ordering::Acquire) {
+                                delivery.error.store(if connection_activity.error_code() != 0 { connection_activity.error_code() } else if error.is_canceled() { 4 } else if error.is_closed() || error.is_incomplete_message() { 5 } else if error.is_parse() { 8 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
                 });
@@ -130,39 +133,26 @@ pub(super) fn target_for(
     base: &str,
     incoming: &Uri,
 ) -> Result<Uri, BoxError> {
-    if client == super::ClientId::Codex {
-        return target(base, incoming);
-    }
-    format!(
-        "{}{}",
-        base.trim_end_matches('/'),
-        incoming.path_and_query().map(|p| p.as_str()).unwrap_or("/")
-    )
-    .parse()
-    .map_err(Into::into)
+    let _ = client;
+    target(base, incoming)
 }
 pub(super) fn target(base: &str, incoming: &Uri) -> Result<Uri, BoxError> {
+    let mut base = url::Url::parse(base)?;
+    super::model::normalize_api_path(&mut base);
     let path = incoming.path();
-    let suffix = if path == "/v1" {
-        ""
-    } else if let Some(s) = path.strip_prefix("/v1/") {
-        return format!(
-            "{}/{}{}",
-            base.trim_end_matches('/'),
-            s,
-            incoming
-                .query()
-                .map(|q| format!("?{q}"))
-                .unwrap_or_default()
-        )
-        .parse()
-        .map_err(Into::into);
-    } else {
-        path
-    };
+    let suffix = path
+        .strip_prefix("/v1/")
+        .map(|s| format!("/{s}"))
+        .unwrap_or_else(|| {
+            if path == "/v1" {
+                String::new()
+            } else {
+                path.into()
+            }
+        });
     format!(
         "{}{}{}",
-        base.trim_end_matches('/'),
+        base.as_str().trim_end_matches('/'),
         suffix,
         incoming
             .query()
@@ -318,19 +308,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     }
     let downstream_upgrade = websocket.then(|| hyper::upgrade::on(&mut request));
     let (parts, body) = request.into_parts();
-    let replay = match tokio::time::timeout(
-        Duration::from_secs(settings.total_seconds),
-        Replay::capture(body, gateway.0.spool.path()),
+    let replay = match Replay::capture_progress(
+        body,
+        gateway.0.spool.path(),
+        Some(Duration::from_secs(settings.idle_seconds)),
     )
     .await
     {
-        Ok(Ok(body)) => body,
+        Ok(body) => body,
         _ => {
             return error(
                 StatusCode::BAD_REQUEST,
                 "BODY",
                 "请求未完整接收、超过 1 GiB 或已取消",
-            )
+            );
         }
     };
     let content_type = parts
@@ -413,13 +404,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     );
     let thread = super::compaction::session(&parts.headers);
     let auxiliary = hints.as_ref().is_ok_and(|h| h.auxiliary);
-    if auxiliary && gateway.client_id() == super::ClientId::Codex && mode == "auto" {
+    if (auxiliary || hints.is_err())
+        && gateway.client_id() == super::ClientId::Codex
+        && mode == "auto"
+    {
         if let Some(owner) = thread
             .as_deref()
             .and_then(|s| gateway.0.compaction.owner(s))
             .filter(|id| ids.contains(id))
         {
-            ids = vec![owner];
+            ids = vec![owner.clone()];
+            if hints.is_err() {
+                // Metadata failure cannot move a conversation we already know.
+                pinned = Some(owner);
+            }
         }
     }
     let ownership = if gateway.client_id() == super::ClientId::Codex
@@ -482,6 +480,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         wait_budget.pin_provider();
     }
     let mut capacity_pending = false;
+    let mut hard_denied = std::collections::HashSet::new();
     let mut capacity_retry_after: Option<Duration> = None;
     let mut rpm_retry_after: Option<Duration> = None;
     let mut capacity_sources = Vec::new();
@@ -509,12 +508,17 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 {
                     Ok(()) => {}
                     Err(Rejected::Stopped) => {
-                        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止")
+                        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
                     }
                     Err(_) => break,
                 }
 
                 ids = gateway.routing_ids(pinned.as_deref());
+                ids.retain(|id| {
+                    gateway.route(id).is_some_and(|route| {
+                        !hard_denied.contains(&(id.clone(), route.provider.version))
+                    })
+                });
                 routes = ids
                     .iter()
                     .filter_map(|id| gateway.route(id).map(|r| (id.clone(), r)))
@@ -536,13 +540,18 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let matches_model = candidates
             .iter()
             .any(|r| requirement.allows(r.provider.allowed_models.as_deref()));
+        let new_thread_model_denied = ownership.as_ref().is_some_and(|lease| {
+            lease.admission_policy().0 == super::compaction::Intake::NewThread
+        }) && candidates.iter().any(|r| {
+            r.provider.take_new_threads && !requirement.allows(r.provider.allowed_models.as_deref())
+        });
         if matches_model {
             candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
         }
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
-            candidates = lease.candidates(candidates);
+            candidates = lease.candidates_for(candidates, &requirement);
         } else if gateway.client_id() == super::ClientId::Codex
             && mode == "auto"
             && pinned.is_none()
@@ -657,10 +666,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     StatusCode::SERVICE_UNAVAILABLE,
                     "RPM_LEDGER",
                     "RPM 状态暂不可用，请稍后重试",
-                )
+                );
             }
             Err(Rejected::Stopped) => {
-                return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止")
+                return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
             }
             Err(Rejected::Model) => {
                 if attempted > 0 {
@@ -812,15 +821,23 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             thread.clone(),
             (gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses).then(
                 || {
-                    admission.handoff_wait.unwrap_or_else(|| {
-                        super::compaction::decision(
-                            thread.as_deref(),
-                            hints.as_ref().ok(),
-                            continuation,
-                            ownership.as_deref(),
-                            &route.provider.id,
+                    admission
+                        .handoff_wait
+                        .or(
+                            (new_thread_model_denied && !route.provider.take_new_threads)
+                                .then_some(
+                                    crate::usage::model::RoutingDecision::NewThreadModelDenied,
+                                ),
                         )
-                    })
+                        .unwrap_or_else(|| {
+                            super::compaction::decision(
+                                thread.as_deref(),
+                                hints.as_ref().ok(),
+                                continuation,
+                                ownership.as_deref(),
+                                &route.provider.id,
+                            )
+                        })
                 },
             ),
         );
@@ -1002,7 +1019,16 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let model_error = protocol.observation.terminal
                 == Some(super::protocol::Terminal::ModelUnavailable)
                 || super::upstream_error::model_http(status.as_u16(), &decoded);
+            let mut details = super::upstream_error::details_http(&decoded);
+            if details == crate::events::Details::default() {
+                details = protocol.observation.error.clone();
+            }
+            let hard_rejection = details.health_scope == Some(crate::events::HealthScope::Provider);
+            if hard_rejection {
+                hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
+            }
             let capacity = !model_error
+                && !hard_rejection
                 && route.client_id == super::ClientId::Codex
                 && (protocol.observation.capacity_error || capacity_message(status, &decoded));
             if capacity && !websocket {
@@ -1010,7 +1036,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 capacity_protected = true;
                 wait_budget.protect_capacity();
             }
-            let hard_rejection = super::upstream_error::permanent_rejection(&decoded);
             let retryable = compact_error
                 || model_error
                 || hard_rejection
@@ -1040,6 +1065,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Reason::ProtocolError
             } else if model_error {
                 Reason::ModelUnavailable
+            } else if hard_rejection && status == StatusCode::TOO_MANY_REQUESTS {
+                Reason::UpstreamService
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 Reason::RateLimit
             } else if capacity {
@@ -1049,18 +1076,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 Reason::UpstreamService
             };
-            let mut details = super::upstream_error::details_http(&decoded);
-            if details == crate::events::Details::default() {
-                details = protocol.observation.error.clone();
-            }
             details.phase = Some(crate::events::Phase::Response);
             details.counted_failure = Some(
                 !compact_error
                     && !model_error
                     && !capacity
-                    && !hard_rejection
-                    && status.as_u16() != 429
-                    && retryable,
+                    && (status.as_u16() != 429 || hard_rejection)
+                    && (retryable || hard_rejection),
             );
             details.wait_seconds = retry_delay.map(|delay| delay.as_secs());
             last_error = Some(admission.permits.report(
@@ -1081,13 +1103,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 attempted,
                 details,
             ));
-            if model_error || compact_error || hard_rejection {
+            if model_error || compact_error {
                 admission.permits.neutral(&settings);
             } else if capacity {
                 admission.permits.capacity_limited(&settings, cooldown);
+            } else if hard_rejection {
+                admission.permits.failure(&settings, cooldown);
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 admission.permits.rate_limited(&settings, cooldown);
-            } else if retryable {
+            } else if retryable || hard_rejection {
                 admission.permits.failure(&settings, cooldown);
             } else {
                 admission.permits.neutral(&settings);
@@ -1128,7 +1152,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 {
                     Ok(()) => {}
                     Err(Rejected::Stopped) => {
-                        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止")
+                        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
                     }
                     Err(_) => break,
                 }
@@ -1187,7 +1211,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                                 + Duration::from_secs(settings.idle_seconds);
                         }
                     }
-                    prefix.push((frame, protocol.terminal().is_some()));
+                    prefix.push((
+                        frame,
+                        protocol.terminal().is_some(),
+                        protocol.business_observed(),
+                    ));
                     if body.is_end_stream() {
                         ended = true;
                     }
@@ -1260,8 +1288,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 if status.is_success() { "OK" } else { "HTTP" },
             );
             if protocol.terminal().is_some() {
-                if let Some((_, terminal)) = prefix.last_mut() {
+                if let Some((_, terminal, business)) = prefix.last_mut() {
                     *terminal = true;
+                    *business = true;
                 }
             }
         }
@@ -1283,7 +1312,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 ids = vec![owner.clone()];
             }
         }
-        let initial_capacity = route.client_id == super::ClientId::Codex
+        let initial_hard_rejection = protocol.terminal().is_some()
+            && protocol.observation.error.health_scope
+                == Some(crate::events::HealthScope::Provider);
+        if initial_hard_rejection {
+            hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
+        }
+        let initial_capacity = !initial_hard_rejection
+            && route.client_id == super::ClientId::Codex
             && !websocket
             && !initial_model_error
             && if stream {
@@ -1291,7 +1327,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 ended && protocol.observation.capacity_error
             };
-        if initial_model_error || initial_capacity || initial_compact_error {
+        if initial_model_error
+            || initial_capacity
+            || initial_compact_error
+            || initial_hard_rejection
+        {
             let cooldown = response_parts
                 .headers
                 .get(header::RETRY_AFTER)
@@ -1302,15 +1342,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 capacity_protected = true;
                 wait_budget.protect_capacity();
 
-                admission.permits.capacity_limited(&settings, cooldown);
                 capacity_pending = true;
                 capacity_sources.push(CapacitySource {
                     provider_id: route.provider.id.clone(),
                     reset_generation,
                 });
                 capacity_retry_after = capacity_retry_after.max(cooldown);
-            } else {
-                admission.permits.neutral(&settings);
             }
             protocol.finish(Some(status.as_u16()), "HTTP");
             let will_retry =
@@ -1324,6 +1361,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 model.as_deref(),
                 if initial_compact_error {
                     Reason::ProtocolError
+                } else if initial_hard_rejection {
+                    Reason::UpstreamService
                 } else if initial_capacity {
                     Reason::Capacity
                 } else {
@@ -1340,11 +1379,16 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 attempted,
                 details,
             ));
+            if initial_capacity {
+                admission.permits.capacity_limited(&settings, cooldown);
+            } else {
+                admission.permits.neutral(&settings);
+            }
             // Preserve a bounded error prefix. Dropping its unread tail cancels the
             // rejected attempt; if no alternative succeeds, return the original stream.
             let error_idle_seconds = settings.idle_seconds;
             let rejected = async_stream::try_stream! {
-                for (frame, _) in prefix {yield frame;}
+                for (frame, _, _) in prefix {yield frame;}
                 loop {
                     match tokio::time::timeout(Duration::from_secs(error_idle_seconds),body.frame()).await {
                         Ok(Some(frame))=>yield frame.map_err(|e|Box::new(e) as BoxError)?,
@@ -1357,7 +1401,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 response_parts,
                 StreamBody::new(rejected).boxed_unsync(),
             ));
-            last_category = if initial_capacity {
+            last_category = if initial_hard_rejection {
+                "UPSTREAM_REJECTED"
+            } else if initial_capacity {
                 "CAPACITY"
             } else {
                 "MODEL_UNAVAILABLE"
@@ -1411,13 +1457,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 attempted,
             );
             let mut disconnected = false;
-            for (frame, terminal) in prefix {
+            for (frame, terminal, business) in prefix {
                 tokio::select! {
                     biased;
                     _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); return; }
                     result = send_frame(&sender, Ok(frame), terminal, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
                 }
-                protocol.commit_ownership();
+                protocol.output_handed(business);
             }
             if ended {
                 if disconnected {
@@ -1476,7 +1522,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                                 _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
                                 result = send_frame(&sender, Ok(frame), protocol.terminal().is_some(), &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
                             }
-                            protocol.commit_ownership();
+                            if !disconnected {
+                                protocol.output_handed(protocol.business_observed());
+                            }
                         }
                         if complete {
                             break;
@@ -1487,7 +1535,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         // EOF may finish a JSON value or an SSE event without a
                         // trailing newline. All preceding body frames were acknowledged.
                         delivery.handed(0, protocol.terminal().is_some());
-                        protocol.commit_ownership();
+                        protocol.output_handed(protocol.business_observed());
                         break;
                     }
                     result => {
@@ -1542,6 +1590,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 yield frame;
             }
             guard.complete = true;
+            output_delivery.finished.store(true, std::sync::atomic::Ordering::Release);
         };
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }
@@ -1600,7 +1649,7 @@ fn remember(protocol: &super::protocol::Protocol, g: &Gateway, route: &Route, mo
         g.remember_model(
             id,
             &route.provider.id,
-            protocol.observation.model.as_deref().or(model),
+            model.or(protocol.observation.model.as_deref()),
         );
     }
 }
@@ -1672,6 +1721,8 @@ pub(super) fn settle_protocol(
 }
 pub(super) struct Permits {
     provider: Option<Permit>,
+    model: Option<Permit>,
+    scope: crate::events::HealthScope,
 }
 impl Permits {
     #[allow(clippy::too_many_arguments)]
@@ -1686,6 +1737,23 @@ impl Permits {
         attempt: usize,
         mut details: crate::events::Details,
     ) -> crate::events::Record {
+        use crate::events::{HealthScope, Phase};
+        self.scope = details.health_scope.unwrap_or_else(|| {
+            if reason == Reason::Network
+                && status.is_none()
+                && matches!(details.phase, Some(Phase::Connect | Phase::WsHandshake))
+            {
+                HealthScope::Provider
+            } else if self.model.is_some() {
+                HealthScope::Model
+            } else {
+                HealthScope::Request
+            }
+        });
+        details.health_scope = Some(self.scope);
+        if self.scope == HealthScope::Request {
+            details.counted_failure = Some(false);
+        }
         if details.upstream_code.is_none() && details.local_code.is_none() {
             details.local_code = serde_json::to_value(reason.code())
                 .ok()
@@ -1701,7 +1769,11 @@ impl Permits {
             Some(attempt.min(u32::MAX as usize) as u32),
         );
         event.details = details.sanitized();
-        if let Some(p) = &mut self.provider {
+        let target = match self.scope {
+            HealthScope::Provider => &mut self.provider,
+            _ => &mut self.model,
+        };
+        if let Some(p) = target {
             p.set_failure_event(event.clone());
         }
         if let Some(service) = g.0.diagnostics.lock().unwrap().as_ref() {
@@ -1710,23 +1782,60 @@ impl Permits {
         event
     }
 
-    pub(super) fn capacity_limited(&mut self, cfg: &Settings, retry: Option<Duration>) {
-        if let Some(p) = self.provider.take() {
-            p.finish(Outcome::CapacityLimited(retry), cfg);
+    fn settle(&mut self, cfg: &Settings, outcome: Outcome) {
+        use crate::events::HealthScope;
+        match self.scope {
+            HealthScope::Provider => {
+                if let Some(p) = self.provider.take() {
+                    p.finish(outcome, cfg);
+                }
+                if let Some(p) = self.model.take() {
+                    p.finish(Outcome::Neutral, cfg);
+                }
+            }
+            HealthScope::Model => {
+                if let Some(p) = self.model.take() {
+                    p.finish(outcome, cfg);
+                }
+                if let Some(p) = self.provider.take() {
+                    p.finish(Outcome::Neutral, cfg);
+                }
+            }
+            HealthScope::Request => self.neutral(cfg),
         }
+    }
+    pub(super) fn capacity_limited(&mut self, cfg: &Settings, retry: Option<Duration>) {
+        self.settle(cfg, Outcome::CapacityLimited(retry));
     }
     pub(super) fn rate_limited(&mut self, cfg: &Settings, retry: Option<Duration>) {
-        if let Some(p) = self.provider.take() {
-            p.finish(Outcome::RateLimited(retry), cfg);
-        }
+        self.settle(cfg, Outcome::RateLimited(retry));
     }
-    pub(super) fn acquire(route: &Route, manual: bool) -> Option<Self> {
+    pub(super) fn acquire_for(
+        route: &Route,
+        manual: bool,
+        requirement: &super::routing::Requirement,
+    ) -> Option<Self> {
+        let provider = route.provider_circuit.acquire(manual)?;
+        let model = match route.model_circuit(requirement) {
+            Some(circuit) => Some(circuit.acquire(manual)?),
+            None => None,
+        };
+        let scope = if model.is_some() {
+            crate::events::HealthScope::Model
+        } else {
+            crate::events::HealthScope::Request
+        };
         Some(Self {
-            provider: Some(route.provider_circuit.acquire(manual)?),
+            provider: Some(provider),
+            model,
+            scope,
         })
     }
     pub(super) fn success(&mut self, cfg: &Settings) {
         if let Some(p) = self.provider.take() {
+            p.finish(Outcome::Success, cfg);
+        }
+        if let Some(p) = self.model.take() {
             p.finish(Outcome::Success, cfg);
         }
     }
@@ -1734,10 +1843,11 @@ impl Permits {
         if let Some(p) = self.provider.take() {
             p.finish(Outcome::Neutral, cfg);
         }
+        if let Some(p) = self.model.take() {
+            p.finish(Outcome::Neutral, cfg);
+        }
     }
     pub(super) fn failure(&mut self, cfg: &Settings, retry: Option<Duration>) {
-        if let Some(p) = self.provider.take() {
-            p.finish(Outcome::Failure(retry), cfg);
-        }
+        self.settle(cfg, Outcome::Failure(retry));
     }
 }

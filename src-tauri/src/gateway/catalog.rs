@@ -107,12 +107,13 @@ type Failure = (String, Option<u64>);
 async fn fetch(input: &Query) -> std::result::Result<Vec<String>, Failure> {
     let fail = |message: &str| (message.to_owned(), None);
     let claude = input.client_id == super::ClientId::Claude;
-    let base = format!(
-        "{}{}",
-        input.base.trim_end_matches('/'),
-        if claude { "/v1/models" } else { "/models" }
-    );
-    let mut url = url::Url::parse(&base).map_err(|_| fail("模型接口地址无效"))?;
+    let target = super::forward::target_for(
+        input.client_id,
+        &input.base,
+        &"/v1/models".parse().expect("static model path"),
+    )
+    .map_err(|_| fail("模型接口地址无效"))?;
+    let mut url = url::Url::parse(&target.to_string()).map_err(|_| fail("模型接口地址无效"))?;
     let mut models = Vec::new();
     let mut total = 0usize;
     let mut cursors = std::collections::HashSet::new();

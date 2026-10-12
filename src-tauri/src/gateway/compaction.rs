@@ -212,10 +212,14 @@ struct Entry {
     consumed_boundary: Option<String>,
     boundary_sequence: u64,
     #[serde(default)]
+    boundary_fresh: bool,
+    #[serde(default)]
     establishing: bool,
     #[serde(default)]
     first_turn: bool,
-    #[serde(skip)]
+    #[serde(default)]
+    history_seen: bool,
+    #[serde(default)]
     claim: Option<u64>,
 }
 #[derive(Default)]
@@ -252,8 +256,10 @@ pub struct Lease {
     pub fresh: bool,
     preferred: Vec<String>,
     receivers: Vec<String>,
+    ordinary_receivers: Vec<String>,
     initial_bound: std::sync::atomic::AtomicBool,
     strict: bool,
+    confirmed: bool,
     intake: Intake,
 }
 impl Registry {
@@ -276,6 +282,15 @@ impl Registry {
                         state.entries = entries
                             .into_iter()
                             .filter(|(_, e)| now().saturating_sub(e.updated) < RETENTION_MS)
+                            .map(|(key, mut e)| {
+                                // Older records cannot prove that a window is still fresh.
+                                // An interrupted claim cannot be replayed after restart.
+                                if !e.boundary_fresh || e.claim.take().is_some() {
+                                    e.consumed_boundary = e.boundary.take().or(e.consumed_boundary);
+                                    e.boundary_fresh = false;
+                                }
+                                (key, e)
+                            })
                             .collect();
                         state.sequence = state
                             .entries
@@ -400,7 +415,13 @@ impl Registry {
         can_handoff: bool,
         eligible: &[String],
     ) -> Option<Arc<Lease>> {
-        self.prepare_inner(session, input, can_handoff, eligible, false)
+        self.prepare_inner(
+            session,
+            input,
+            can_handoff,
+            eligible,
+            super::replay::TurnEvidence::Unknown,
+        )
     }
     fn prepare_inner(
         self: &Arc<Self>,
@@ -408,8 +429,10 @@ impl Registry {
         input: Option<&str>,
         can_handoff: bool,
         eligible: &[String],
-        first_turn: bool,
+        turn: super::replay::TurnEvidence,
     ) -> Option<Arc<Lease>> {
+        use super::replay::TurnEvidence;
+        let first_turn = can_handoff && turn == TurnEvidence::First;
         let first = eligible.first()?;
         let mut state = self.state.lock().unwrap();
         // A corrupt ledger must not silently guess a persisted conversation owner.
@@ -445,12 +468,21 @@ impl Registry {
                 first_turn,
                 ..Default::default()
             });
+        let history_changed = !entry.history_seen && turn == TurnEvidence::History;
+        entry.history_seen |= turn == TurnEvidence::History;
+        if entry.history_seen {
+            entry.first_turn = false;
+        } else if entry.establishing && first_turn {
+            entry.first_turn = true;
+            entry.provider = first.clone();
+        }
         let owner = eligible
             .contains(&entry.provider)
             .then(|| entry.provider.clone());
         let handoff = can_handoff
             && owner.is_some()
             && entry.claim.is_none()
+            && entry.boundary_fresh
             && input.is_some()
             && entry.boundary.as_deref() == input;
         if handoff {
@@ -461,7 +493,10 @@ impl Registry {
         let entry_establishing = entry.establishing;
         let first_turn = first_turn && entry.first_turn;
         let retry_write = state.error.is_some();
-        self.save(&mut state, fresh || retry_write);
+        self.save(
+            &mut state,
+            fresh || retry_write || handoff || history_changed,
+        );
         if state.error.is_some() {
             if let Some(entry) = state.entries.get_mut(&session) {
                 if entry.claim == Some(sequence) {
@@ -481,8 +516,10 @@ impl Registry {
             fresh: fresh || entry_establishing,
             preferred: vec![],
             receivers: eligible.to_vec(),
+            ordinary_receivers: eligible.to_vec(),
             initial_bound: std::sync::atomic::AtomicBool::new(false),
             strict: false,
+            confirmed: true,
             intake: if entry_establishing && first_turn {
                 Intake::NewThread
             } else {
@@ -510,16 +547,22 @@ impl Registry {
             hints.and_then(|h| h.compacted_window.as_deref()),
             can_handoff,
             &ordered.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
-            can_handoff && hints.is_some_and(|h| h.first_turn),
+            hints.map_or(super::replay::TurnEvidence::Unknown, |h| h.turn),
         )?;
         let inner = Arc::get_mut(&mut lease)?;
         inner.strict = true;
+        inner.confirmed = hints.is_some_and(|h| h.turn != super::replay::TurnEvidence::Unknown);
         inner.intake = if inner.handoff {
             Intake::Compacted
         } else {
             inner.intake
         };
         inner.preferred = ordered.iter().map(|p| p.id.clone()).collect();
+        inner.ordinary_receivers = eligible
+            .iter()
+            .filter(|p| accepts(p, Intake::Ordinary))
+            .map(|p| p.id.clone())
+            .collect();
         let owner_position = inner
             .owner
             .as_ref()
@@ -595,7 +638,11 @@ impl Registry {
                 .unwrap()
                 .entries
                 .get(session)
-                .is_some_and(|entry| entry.claim.is_none() && entry.boundary.as_deref() == input)
+                .is_some_and(|entry| {
+                    entry.claim.is_none()
+                        && entry.boundary_fresh
+                        && entry.boundary.as_deref() == input
+                })
     }
     pub fn owner(&self, session: &str) -> Option<String> {
         self.state
@@ -636,11 +683,15 @@ impl Lease {
                 D::CompactionHandoff
             };
         }
-        if self.intake == Intake::NewThread {
+        if self.admission_policy().0 == Intake::NewThread {
             return D::NewThread;
         }
         if self.fresh {
-            return D::OrdinaryQueue;
+            return if self.confirmed {
+                D::OrdinaryQueue
+            } else {
+                D::FirstTurnUnconfirmed
+            };
         }
         if let Some(window) = hints.and_then(|h| h.compacted_window.as_deref()) {
             let state = self.registry.state.lock().unwrap();
@@ -669,16 +720,17 @@ impl Lease {
         D::ExistingThread
     }
     pub(super) fn admission_policy(&self) -> (Intake, Option<String>) {
-        let owner = self
-            .registry
-            .state
-            .lock()
-            .unwrap()
-            .entries
-            .get(&self.session)
+        let state = self.registry.state.lock().unwrap();
+        let entry = state.entries.get(&self.session);
+        let intake = if self.intake == Intake::NewThread && entry.is_some_and(|e| e.history_seen) {
+            Intake::Ordinary
+        } else {
+            self.intake
+        };
+        let owner = entry
             .filter(|entry| !entry.establishing)
             .map(|entry| entry.provider.clone());
-        (self.intake, owner)
+        (intake, owner)
     }
     pub fn owns(&self, provider: &str) -> bool {
         !self.handoff
@@ -705,16 +757,32 @@ impl Lease {
         if !entry.establishing && entry.provider != provider {
             return false;
         }
+        if entry.establishing
+            && entry.history_seen
+            && self.strict
+            && self.intake == Intake::NewThread
+            && !self.ordinary_receivers.iter().any(|id| id == provider)
+        {
+            return false;
+        }
         let changed = entry.establishing;
         entry.provider = provider.into();
-        entry.establishing = false;
+        entry.establishing = !self.confirmed;
         self.initial_bound.store(true, Ordering::Release);
         if changed {
             self.registry.save(&mut state, true);
         }
         state.error.is_none()
     }
-    pub fn candidates(&self, mut routes: Vec<super::Route>) -> Vec<super::Route> {
+    #[cfg(test)]
+    pub fn candidates(&self, routes: Vec<super::Route>) -> Vec<super::Route> {
+        self.candidates_for(routes, &super::routing::Requirement::Unknown)
+    }
+    pub fn candidates_for(
+        &self,
+        mut routes: Vec<super::Route>,
+        requirement: &super::routing::Requirement,
+    ) -> Vec<super::Route> {
         if self.handoff {
             routes.retain(|r| {
                 self.receivers.contains(&r.provider.id)
@@ -724,18 +792,10 @@ impl Lease {
             });
             return routes;
         }
-        let bound = self
-            .registry
-            .state
-            .lock()
-            .unwrap()
-            .entries
-            .get(&self.session)
-            .filter(|e| !e.establishing)
-            .map(|e| e.provider.clone());
+        let (intake, bound) = self.admission_policy();
         if self.fresh && bound.is_none() {
             if self.strict {
-                routes.retain(|r| accepts(&r.provider, self.intake));
+                routes.retain(|r| accepts(&r.provider, intake));
             }
             routes.sort_by_key(|r| {
                 self.preferred
@@ -757,7 +817,7 @@ impl Lease {
                     if r.provider.id != id {
                         return false;
                     }
-                    let health = r.provider_circuit.health();
+                    let health = r.health_for(requirement);
                     // A short upstream Retry-After is not evidence that this
                     // conversation's owner has failed. New concurrent turns must wait
                     // for that owner too, instead of slipping through to another route.
@@ -776,10 +836,38 @@ impl Lease {
         }
         if self.strict {
             routes.retain(|r| {
-                current.as_deref() == Some(&r.provider.id) || accepts(&r.provider, self.intake)
+                current.as_deref() == Some(&r.provider.id) || accepts(&r.provider, intake)
             });
         }
         routes
+    }
+    /// Close this one opportunity at the first output, including response.created.
+    /// The in-flight winning claim remains valid solely to commit that same turn.
+    pub fn output_started(&self, provider: &str) {
+        let mut state = self.registry.state.lock().unwrap();
+        let Some(entry) = state.entries.get_mut(&self.session) else {
+            return;
+        };
+        if entry.epoch != self.epoch {
+            return;
+        }
+        let mut changed = false;
+        if entry.establishing {
+            entry.establishing = false;
+            entry.provider = provider.into();
+            changed = true;
+        }
+        if entry.boundary_fresh
+            && self.sequence > entry.boundary_sequence
+            && entry.claim.is_none_or(|claim| claim == self.sequence)
+        {
+            entry.consumed_boundary = entry.boundary.take();
+            entry.boundary_fresh = false;
+            changed = true;
+        }
+        if changed {
+            self.registry.save(&mut state, true);
+        }
     }
     pub fn complete(&self, provider: &str, boundary: Option<&str>) {
         let mut completed = self.completed_epoch.lock().unwrap();
@@ -809,14 +897,18 @@ impl Lease {
         if moved {
             entry.provider = provider.into();
             entry.epoch = entry.epoch.saturating_add(1);
-            entry.consumed_boundary = entry.boundary.take();
+            entry.consumed_boundary = entry.boundary.take().or(entry.consumed_boundary.take());
+            entry.boundary_fresh = false;
         }
         if first && self.handoff {
             entry.claim = None;
         }
         if let Some(boundary) = boundary.filter(|_| self.sequence >= entry.boundary_sequence) {
-            entry.boundary = Some(boundary.into());
-            entry.boundary_sequence = self.sequence;
+            if entry.consumed_boundary.as_deref() != Some(boundary) {
+                entry.boundary = Some(boundary.into());
+                entry.boundary_sequence = self.sequence;
+                entry.boundary_fresh = true;
+            }
         }
         *completed = Some(entry.epoch);
         entry.updated = now();
