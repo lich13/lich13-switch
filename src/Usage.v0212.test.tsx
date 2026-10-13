@@ -190,7 +190,7 @@ it("shows transfer timestamps, byte counts, and timeout metadata in request deta
     expect(detailValue(dialog, label)).not.toHaveTextContent("—");
   }
   expect(detailValue(dialog, "上游读取").textContent).toMatch(/1,?024 B/);
-  expect(detailValue(dialog, "交给下游网络层").textContent).toMatch(/2,?048 B/);
+  expect(detailValue(dialog, "交给 HTTP 层").textContent).toMatch(/2,?048 B/);
   expect(detailValue(dialog, "终态已交出")).toHaveTextContent("是");
   expect(detailValue(dialog, "上游结束")).toHaveTextContent("正常 EOF");
   expect(detailValue(dialog, "WS 关闭码")).toHaveTextContent("1000");
