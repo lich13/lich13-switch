@@ -405,6 +405,80 @@ fn decode_http_body(wire: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn observed_tcp_peeks_without_consuming_and_returns_a_silent_peer_reset() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(address).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    let activity = Arc::new(super::wire_progress::Activity::default());
+    let (mut observed, failed) = super::wire_progress::observed_tcp(server, activity);
+    let monitor = tokio::spawn(failed);
+
+    let request_bytes = b"fixture request bytes";
+    client.write_all(request_bytes).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let mut received = vec![0; request_bytes.len()];
+    tokio::time::timeout(WAIT, observed.read_exact(&mut received))
+        .await
+        .expect("socket observer consumed request bytes before the HTTP reader")
+        .unwrap();
+    assert_eq!(received, request_bytes);
+
+    super::tests::set_reset_on_drop(&client);
+    drop(client);
+    let error = tokio::time::timeout(Duration::from_secs(2), monitor)
+        .await
+        .expect("RST did not wake the observer on an otherwise silent connection")
+        .expect("socket observer task panicked");
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+    ));
+}
+
+#[tokio::test]
+async fn observed_tcp_keeps_peer_write_half_close_neutral_and_records_eof_once() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(address).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    let activity = Arc::new(super::wire_progress::Activity::default());
+    let (_observed, failed) = super::wire_progress::observed_tcp(server, activity.clone());
+    let monitor = tokio::spawn(failed);
+
+    client.shutdown().await.unwrap();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if activity
+                .snapshot(0)
+                .events
+                .iter()
+                .any(|event| event.kind == "peer_read_eof")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer FIN was not recorded");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let eof_events = activity
+        .snapshot(0)
+        .events
+        .into_iter()
+        .filter(|event| event.kind == "peer_read_eof")
+        .count();
+    assert_eq!(eof_events, 1);
+    assert!(
+        !monitor.is_finished(),
+        "a legal FIN cancelled the connection"
+    );
+    monitor.abort();
+    let _ = monitor.await;
+}
+
+#[tokio::test]
 async fn http_write_half_close_still_delivers_the_complete_response() {
     let received = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());

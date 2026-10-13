@@ -412,7 +412,7 @@ async fn terminal_then_client_disconnect_keeps_completed_without_usage_tail() {
     let usage = crate::usage::Service::new(t.path());
     g.set_usage(usage.clone());
     start(&g, &t).await;
-    let response = request(
+    let (response, sender, task) = super::tests::request_with_reset(
         &g,
         "/responses",
         br#"{"model":"fixture-model","stream":true}"#.to_vec(),
@@ -429,7 +429,7 @@ async fn terminal_then_client_disconnect_keeps_completed_without_usage_tail() {
         .unwrap()
         .windows(18)
         .any(|w| w == b"response.completed"));
-    drop(body);
+    super::tests::reset_and_drop(task, sender, body).await;
     tokio::time::timeout(Duration::from_secs(3), cancelled.notified())
         .await
         .expect("upstream stream was not cancelled after client disconnect");

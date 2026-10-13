@@ -286,6 +286,63 @@ async fn request(
     }
     client.request(req.body(full(body)).unwrap()).await.unwrap()
 }
+pub(super) type ResetSender = hyper::client::conn::http1::SendRequest<WireBody>;
+
+// Dropping a response by itself closes with FIN. To model a full cancellation,
+// abort and await the socket-owning connection task before dropping the response.
+#[allow(deprecated)]
+pub(super) async fn request_with_reset(
+    g: &Gateway,
+    path: &str,
+    body: Vec<u8>,
+    headers: Vec<(&str, &str)>,
+) -> (Response<Incoming>, ResetSender, tokio::task::JoinHandle<()>) {
+    let (token, port) = {
+        let state = g.0.inner.lock().unwrap();
+        (state.store.local_token.clone(), state.store.settings.port)
+    };
+    let socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    socket.set_linger(Some(Duration::ZERO)).unwrap();
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(socket))
+        .await
+        .unwrap();
+    let task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    sender.ready().await.unwrap();
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("host", format!("127.0.0.1:{port}"))
+        .header("authorization", format!("Bearer {token}"));
+    for (key, value) in headers {
+        req = req.header(key, value);
+    }
+    let response = sender
+        .send_request(req.body(full(body)).unwrap())
+        .await
+        .unwrap();
+    (response, sender, task)
+}
+
+pub(super) async fn reset_and_drop<T>(
+    task: tokio::task::JoinHandle<()>,
+    sender: ResetSender,
+    value: T,
+) {
+    task.abort();
+    let _ = task.await;
+    drop(sender);
+    drop(value);
+}
+
+#[allow(deprecated)]
+pub(super) fn set_reset_on_drop(stream: &tokio::net::TcpStream) {
+    stream.set_linger(Some(Duration::ZERO)).unwrap();
+}
+
 #[tokio::test]
 async fn unknown_paths_query_duplicate_headers_and_original_payloads() {
     let seen = Arc::new(Mutex::new(vec![]));
@@ -464,9 +521,10 @@ async fn streaming_first_byte_retry_no_splicing_and_cancel_releases_activity() {
             name: None,
         },
     );
-    let mut response = request(&g, "/v1/responses", vec![], vec![]).await;
+    let (mut response, sender, task) =
+        request_with_reset(&g, "/v1/responses", vec![], vec![]).await;
     response.body_mut().frame().await.unwrap().unwrap();
-    drop(response);
+    reset_and_drop(task, sender, response).await;
     for _ in 0..20 {
         if g.view().active_connections == 0 {
             break;

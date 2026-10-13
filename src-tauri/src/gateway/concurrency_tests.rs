@@ -566,11 +566,12 @@ async fn http_capacity_429_and_client_disconnect_release_the_slot() {
         },
     );
     start(&g, &t).await;
-    let r = request(&g, "/v1/responses", vec![], vec![]).await;
+    let (r, sender, task) =
+        super::tests::request_with_reset(&g, "/v1/responses", vec![], vec![]).await;
     let second = request(&g, "/v1/responses", vec![], vec![]).await;
     assert_eq!(second.status(), 429);
     assert_eq!(second.headers()["retry-after"], "5");
-    drop(r);
+    super::tests::reset_and_drop(task, sender, r).await;
     until(|| g.view().providers[0].active_requests == 0).await;
     g.stop().await.unwrap();
 }

@@ -187,6 +187,7 @@ async fn capacity_wait_is_bounded_cancelable_and_stopped_without_holding_slots()
     assert_eq!(response.status(), 429);
     assert_eq!(response.headers()["retry-after"], "5");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+    super::tests::set_reset_on_drop(&stream);
     drop(stream);
     until(|| g.view().waiting_requests == 0 && g.view().active_connections == 0).await;
     update(

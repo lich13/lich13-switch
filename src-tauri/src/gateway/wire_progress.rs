@@ -10,31 +10,38 @@ use tokio::{
 };
 
 // Hyper stops polling reads during a response when half-close is allowed.
-// Share the existing read half so an error-only waiter can still see a reset;
-// it never consumes bytes or treats a read FIN as a cancelled response.
+// Share the existing read half so a non-consuming waiter can still see a reset.
+// Error-only readiness excludes established-connection resets on Windows.
+// Read readiness plus MSG_PEEK preserves both request bytes and valid read FINs.
 pub struct Tcp {
     read: Arc<tokio::net::tcp::OwnedReadHalf>,
     write: tokio::net::tcp::OwnedWriteHalf,
 }
 pub fn observed_tcp(
     socket: tokio::net::TcpStream,
+    activity: Arc<Activity>,
 ) -> (Tcp, impl std::future::Future<Output = std::io::Error>) {
     let (read, write) = socket.into_split();
     let read = Arc::new(read);
     let monitor = read.clone();
     let failed = async move {
-        if let Err(error) = monitor.ready(tokio::io::Interest::ERROR).await {
-            return error;
-        }
+        let socket = monitor.as_ref().as_ref();
+        let mut byte = [0];
         loop {
-            match monitor.as_ref().as_ref().take_error() {
-                Ok(Some(error)) | Err(error) => return error,
-                Ok(None) => {
-                    // Readiness may be spurious or another I/O poll may have
-                    // consumed the error. Do not cancel without socket evidence.
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
+            // The async readiness waiter is independent of Hyper's poll_read
+            // waker. Peeking never removes data that Hyper still needs to read.
+            match socket.peek(&mut byte).await {
+                Err(error) => return error,
+                Ok(0) => activity.read_eof(),
+                Ok(_) => {}
             }
+            match socket.take_error() {
+                Ok(Some(error)) | Err(error) => return error,
+                Ok(None) => {}
+            }
+            // Buffered data and FIN remain readable until Hyper consumes them
+            // or the connection ends. Neither establishes response cancellation.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     };
     (Tcp { read, write }, failed)
@@ -157,6 +164,11 @@ impl Default for Activity {
     }
 }
 impl Activity {
+    fn read_eof(&self) {
+        if !self.eof.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            self.event("peer_read_eof");
+        }
+    }
     pub fn track(&self, delivery: &Arc<super::protocol::Delivery>) {
         let mut deliveries = self.deliveries.lock().unwrap();
         deliveries.retain(|d| d.upgrade().is_some_and(|d| !d.is_settled()));
@@ -274,14 +286,8 @@ impl<S: AsyncRead + Unpin> AsyncRead for Tracked<S> {
         if matches!(result, Poll::Ready(Ok(()))) {
             let size = buf.filled().len() - before;
             self.activity.evidence.lock().unwrap().read_bytes += size as u64;
-            if size == 0
-                && buf.remaining() > 0
-                && !self
-                    .activity
-                    .eof
-                    .swap(true, std::sync::atomic::Ordering::AcqRel)
-            {
-                self.activity.event("peer_read_eof");
+            if size == 0 && buf.remaining() > 0 {
+                self.activity.read_eof();
             }
         }
         if matches!(result, Poll::Ready(Ok(())))

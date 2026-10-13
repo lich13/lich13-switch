@@ -315,13 +315,14 @@ async fn sse_completed_then_client_disconnect_is_success_and_in_band_error_is_ne
         ("/v1/responses", "response.completed", 0, 1),
         ("/v1/failed", "response.failed", 0, 1),
     ] {
-        let mut r = request(&g, path, vec![], vec![]).await;
+        let (mut r, sender, task) =
+            super::tests::request_with_reset(&g, path, vec![], vec![]).await;
         assert_eq!(r.status(), 200);
         let frame = r.body_mut().frame().await.unwrap().unwrap();
         let event = frame.data_ref().unwrap().strip_prefix(b"data: ").unwrap();
         let event: serde_json::Value = serde_json::from_slice(event).unwrap();
         assert_eq!(event["type"], terminal);
-        drop(r);
+        super::tests::reset_and_drop(task, sender, r).await;
         settle(&g).await;
         let view = g.view();
         assert_eq!(view.providers[0].active_requests, 0);

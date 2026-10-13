@@ -464,6 +464,8 @@ async fn unbounded_http_capacity_wait_releases_slots_and_obeys_cancel_and_gatewa
                 .unwrap()
                 .unwrap();
             assert!(String::from_utf8_lossy(&response).contains("STOPPED"));
+        } else {
+            super::tests::set_reset_on_drop(&stream);
         }
         drop(stream);
         until(|| g.view().waiting_requests == 0 && g.view().active_connections == 0).await;
@@ -506,6 +508,7 @@ async fn capacity_retries_wait_at_the_rpm_limit_without_an_extra_upstream_attemp
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     assert_eq!(g.view().providers[0].active_requests, 0);
     assert_eq!(g.view().providers[0].health.failures, 0);
+    super::tests::set_reset_on_drop(&stream);
     drop(stream);
     until(|| g.view().waiting_requests == 0 && g.view().active_connections == 0).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);

@@ -32,7 +32,7 @@ pub async fn serve(
                 let Ok((socket,_))=result else{break};let g=gateway.clone();let mut stop=shutdown.clone();
                 tokio::spawn(async move{
                     let activity = std::sync::Arc::new(super::wire_progress::Activity::default());
-                    let (socket, socket_error) = super::wire_progress::observed_tcp(socket);
+                    let (socket, socket_error) = super::wire_progress::observed_tcp(socket, activity.clone());
                     let socket = super::wire_progress::Tracked::new(socket, activity.clone());
                     let connection_activity = activity.clone();
                     let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
