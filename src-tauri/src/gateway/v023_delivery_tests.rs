@@ -1,4 +1,6 @@
 //! v0.23 delivery regressions using synthetic protocol data and isolated TCP listeners.
+#[path = "v0231_terminal_tests.rs"]
+mod v0231_terminal_tests;
 use super::{
     connector::BoxError,
     protocol::{Protocol, Terminal},

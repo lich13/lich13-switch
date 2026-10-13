@@ -31,6 +31,10 @@ export type Attempt = {
     sentAt: number;
     firstByteAt: number | null;
     terminalAt: number | null;
+    terminalEvent?: string | null;
+    terminalStatus?: string | null;
+    incompleteReason?: string | null;
+    upstreamClientRequestHash?: string | null;
     endedAt: number;
     upstreamBytes: number;
     downstreamBytes: number;

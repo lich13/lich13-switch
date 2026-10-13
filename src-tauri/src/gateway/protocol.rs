@@ -11,12 +11,17 @@ pub struct Observation {
     pub model: Option<String>,
     pub incomplete: bool,
     pub terminal: Option<Terminal>,
+    pub terminal_event: Option<String>,
+    pub terminal_status: Option<String>,
+    pub incomplete_reason: Option<String>,
     pub expects_terminal: bool,
     pub first_event_model_error: Option<bool>,
     pub first_event_capacity_error: Option<bool>,
     pub capacity_error: bool,
     pub compaction_fingerprint: Option<String>,
     pub compaction_incompatible: bool,
+    responses_seen: bool,
+    pending_error_response: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terminal {
@@ -38,6 +43,36 @@ impl Observation {
         self.value_projected(outer, false);
     }
     fn value_projected(&mut self, outer: &Value, projected: bool) {
+        let value = outer
+            .get("response")
+            .filter(|v| v.is_object())
+            .or_else(|| outer.get("message").filter(|v| v.is_object()))
+            .unwrap_or(outer);
+        let event = outer.get("type").and_then(Value::as_str).unwrap_or("");
+        let status = value.get("status").and_then(Value::as_str).unwrap_or("");
+        let response_id = crate::usage::model::response_id(outer);
+        let explicit_terminal =
+            matches!(
+                event,
+                "response.completed"
+                    | "response.done"
+                    | "response.failed"
+                    | "response.incomplete"
+                    | "response.cancelled"
+                    | "response.canceled"
+            ) || matches!(status, "completed" | "failed" | "incomplete" | "cancelled");
+        if let Some(pending) = &self.pending_error_response {
+            // Only the same response can resolve a provisional Responses error.
+            // These checks affect observation, never the bytes sent downstream.
+            if response_id.is_some_and(|id| id != pending)
+                || (explicit_terminal && response_id != Some(pending.as_str()))
+            {
+                return;
+            }
+        }
+        self.responses_seen |= event.starts_with("response.")
+            || outer.get("response_id").is_some()
+            || outer.get("response").is_some_and(Value::is_object);
         self.compaction_incompatible |= super::compaction::incompatible(outer);
         if let Some(fingerprint) = super::compaction::output(outer, projected) {
             self.compaction_fingerprint = Some(fingerprint);
@@ -47,21 +82,16 @@ impl Observation {
             self.model = self.meter.model.clone();
         }
         let details = super::upstream_error::details_value(outer, false);
-        if details != crate::events::Details::default() {
+        let has_error = details != crate::events::Details::default();
+        if has_error {
             self.error = details;
         }
-        let value = outer
-            .get("response")
-            .filter(|v| v.is_object())
-            .or_else(|| outer.get("message").filter(|v| v.is_object()))
-            .unwrap_or(outer);
-        if let Some(id) = crate::usage::model::response_id(outer) {
+        if let Some(id) = response_id {
             self.response_id = Some(id.into());
         }
         if let Some(model) = identifier(value.get("model")) {
             self.model = Some(model);
         }
-        let event = outer.get("type").and_then(Value::as_str).unwrap_or("");
         self.expects_terminal |= event.starts_with("response.")
             || matches!(
                 event,
@@ -74,7 +104,6 @@ impl Observation {
             || outer.get("choices").is_some();
         if self.terminal.is_none() {
             self.capacity_error = super::upstream_error::temporary_capacity_event(outer);
-            let status = value.get("status").and_then(Value::as_str).unwrap_or("");
             let terminal = if super::upstream_error::model_error(outer) {
                 Some(Terminal::ModelUnavailable)
             } else {
@@ -83,7 +112,7 @@ impl Observation {
                         Some(Terminal::Success)
                     }
                     "response.cancelled" | "response.canceled" => Some(Terminal::Cancelled),
-                    "response.failed" | "error" => Some(error_terminal(value)),
+                    "response.failed" => Some(error_terminal(value)),
                     "response.incomplete" => Some(incomplete_terminal(value)),
                     "message" if value.get("stop_reason").is_some_and(|v| !v.is_null()) => {
                         Some(Terminal::Success)
@@ -93,19 +122,18 @@ impl Observation {
                         "failed" => Some(error_terminal(value)),
                         "incomplete" => Some(incomplete_terminal(value)),
                         "cancelled" => Some(Terminal::Cancelled),
+                        _ if event == "error" => Some(error_terminal(value)),
                         _ if value.get("error").is_some_and(|e| !e.is_null()) => {
                             Some(error_terminal(value))
                         }
-                        _ if self.error != crate::events::Details::default() => {
-                            Some(error_terminal(outer))
-                        }
+                        _ if has_error => Some(error_terminal(outer)),
                         _ => None,
                     },
                 }
             };
             // A chat completion finishes only once all reported choices finish.
             let choices = outer.get("choices").and_then(Value::as_array);
-            self.terminal = terminal.or_else(|| {
+            let terminal = terminal.or_else(|| {
                 choices
                     .filter(|c| {
                         !c.is_empty()
@@ -122,8 +150,93 @@ impl Observation {
                         }
                     })
             });
+            if self.pending_error_response.is_some()
+                && matches!(terminal, Some(Terminal::Success | Terminal::Limited))
+                && !explicit_terminal
+            {
+                // A stop marker from another protocol is not a Responses
+                // terminal, even if it appears in the same transport stream.
+                return;
+            }
+            if event == "error"
+                && terminal == Some(Terminal::Failure)
+                && !explicit_terminal
+                && self.responses_seen
+                && self.response_id.is_some()
+                && !self.capacity_error
+                && self.error.health_scope != Some(crate::events::HealthScope::Provider)
+            {
+                // Some Responses streams report an error before a final response
+                // envelope. Do not settle usage, health or the WS turn yet.
+                self.pending_error_response = self.response_id.clone();
+            } else if let Some(terminal) = terminal {
+                if self.pending_error_response.take().is_some() && terminal == Terminal::Success {
+                    self.error = crate::events::Details::default();
+                }
+                self.terminal = Some(terminal);
+                self.terminal_event = safe_terminal_event(event);
+                self.terminal_status = safe_terminal_status(status);
+                if event == "response.incomplete" || status == "incomplete" {
+                    self.incomplete_reason = safe_incomplete_reason(value);
+                }
+            }
         }
     }
+    fn finish_pending(&mut self) {
+        if self.pending_error_response.take().is_some() && self.terminal.is_none() {
+            self.terminal = Some(Terminal::Failure);
+            self.terminal_event = Some("error".into());
+        }
+    }
+    fn done(&mut self) {
+        self.finish_pending();
+        if self.terminal.is_none() {
+            self.terminal = Some(Terminal::Success);
+            self.terminal_event = Some("[DONE]".into());
+        }
+    }
+}
+
+fn safe_terminal_event(event: &str) -> Option<String> {
+    matches!(
+        event,
+        "response.completed"
+            | "response.done"
+            | "response.failed"
+            | "response.incomplete"
+            | "response.cancelled"
+            | "response.canceled"
+            | "message_stop"
+            | "message"
+            | "error"
+    )
+    .then(|| event.to_owned())
+}
+fn safe_terminal_status(status: &str) -> Option<String> {
+    (!status.is_empty()).then(|| {
+        match status {
+            "completed" | "failed" | "incomplete" | "cancelled" => status,
+            _ => "unrecognized",
+        }
+        .into()
+    })
+}
+fn safe_incomplete_reason(value: &Value) -> Option<String> {
+    value
+        .pointer("/incomplete_details/reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| {
+            match reason {
+                "max_output_tokens"
+                | "max_tokens"
+                | "content_filter"
+                | "server_error"
+                | "rate_limit_exceeded" => reason,
+                _ => "unrecognized",
+            }
+            .into()
+        })
 }
 
 fn error_terminal(value: &Value) -> Terminal {
@@ -211,7 +324,7 @@ impl Sink {
             self.observation.first_event_capacity_error = Some(false);
         }
         if self.data_len <= 16 && self.data_prefix.trim_ascii() == b"[DONE]" {
-            self.observation.terminal.get_or_insert(Terminal::Success);
+            self.observation.done();
         } else if let Some(mut v) = json.finish() {
             if v.get("type").is_none() && !self.event.is_empty() {
                 if let Some(map) = v.as_object_mut() {
@@ -258,6 +371,7 @@ impl Sink {
         } else {
             self.observation.incomplete = true;
         }
+        self.observation.finish_pending();
     }
 }
 impl Write for Sink {
@@ -528,6 +642,10 @@ impl Protocol {
         }
     }
     pub fn response_headers(&mut self, headers: &hyper::HeaderMap) {
+        self.transfer.upstream_client_request_hash = headers
+            .get("x-client-request-id")
+            .filter(|v| !v.is_empty() && v.len() <= 512)
+            .map(|v| crate::storage::digest(v.as_bytes()));
         if let Some(usage) = &mut self.usage {
             usage.upstream_request(headers);
         }
@@ -683,6 +801,7 @@ impl Protocol {
         if let Some(o) = &mut self.observer {
             self.observation = o.snapshot(true);
         }
+        self.observation.finish_pending();
         self.observation.error.timeout_phase = self.transfer.timeout_phase.clone();
         self.observation.error.timeout_seconds = self.transfer.timeout_seconds;
         self.observation.error.last_progress_ms = self.transfer.last_progress_ms;
@@ -742,6 +861,7 @@ impl Protocol {
             _ if self.terminal_received => match self.observation.terminal {
                 Some(Terminal::Success | Terminal::Limited) => EndCause::Completed,
                 Some(Terminal::Cancelled) => EndCause::ClientCancelled,
+                Some(Terminal::Unknown) => EndCause::UpstreamIncomplete,
                 _ => EndCause::ApplicationError,
             },
             "CLIENT_DISCONNECTED" => match self
@@ -785,6 +905,9 @@ impl Protocol {
         self.transfer.ended_at = crate::usage::model::now();
         self.transfer.downstream_bytes = self.delivery.bytes.load(Relaxed);
         self.transfer.terminal_handed_off = self.delivery.terminal.load(Relaxed);
+        self.transfer.terminal_event = self.observation.terminal_event.clone();
+        self.transfer.terminal_status = self.observation.terminal_status.clone();
+        self.transfer.incomplete_reason = self.observation.incomplete_reason.clone();
         self.transfer.connection = self
             .delivery
             .activity

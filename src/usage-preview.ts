@@ -123,6 +123,8 @@ if (densePreview) {
     sentAt: completed.startedAt + 100,
     firstByteAt: completed.startedAt + 300,
     terminalAt: completed.startedAt + 5100,
+    terminalEvent: "response.completed",
+    terminalStatus: "completed",
     endedAt: completed.startedAt + 5200,
     upstreamBytes: 1048576,
     downstreamBytes: 1048576,
@@ -181,6 +183,27 @@ if (densePreview) {
     cause: "gateway_stopped",
     terminalReceived: false,
     responseStarted: true,
+  };
+  const incomplete = rows[7];
+  incomplete.client = "codex";
+  incomplete.completed = false;
+  incomplete.attempts[0].outcome = "unknown";
+  incomplete.attempts[0].end = {
+    cause: "upstream_incomplete",
+    terminalReceived: true,
+    responseStarted: true,
+  };
+  incomplete.attempts[0].transfer = {
+    ...completed.transfer,
+    receivedAt: incomplete.startedAt,
+    sentAt: incomplete.startedAt + 100,
+    firstByteAt: incomplete.startedAt + 300,
+    terminalAt: incomplete.startedAt + 5100,
+    endedAt: incomplete.startedAt + 5200,
+    terminalEvent: "response.incomplete",
+    terminalStatus: "incomplete",
+    incompleteReason: "unrecognized",
+    upstreamClientRequestHash: "0123456789abcdef".repeat(4),
   };
   const retried = rows[8];
   retried.attempts.unshift({

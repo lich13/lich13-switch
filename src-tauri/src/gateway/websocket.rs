@@ -46,6 +46,9 @@ struct Peer {
     closed: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     activity: std::sync::Arc<super::wire_progress::Activity>,
+    // Only bounded request identifiers from the upstream handshake, not its
+    // authentication or other response headers. Reused turns share these IDs.
+    response_identifiers: HeaderMap,
 }
 impl Peer {
     fn new<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
@@ -110,6 +113,7 @@ impl Peer {
             closed,
             tasks: vec![reader, writer],
             activity,
+            response_identifiers: HeaderMap::new(),
         }
     }
     async fn send(&self, frame: Frame) -> Result<(), Failure> {
@@ -588,6 +592,21 @@ async fn upstream_native(
         .get(header::SEC_WEBSOCKET_EXTENSIONS)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let response_identifiers = [
+        "x-request-id",
+        "request-id",
+        "openai-request-id",
+        "x-client-request-id",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        response
+            .headers()
+            .get(name)
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .map(|value| (header::HeaderName::from_static(name), value.clone()))
+    })
+    .collect();
     let io = hyper::upgrade::on(&mut response)
         .await
         .map_err(|_| AttemptFailure {
@@ -618,12 +637,14 @@ async fn upstream_native(
         model_payload: None,
         details: local_failure("WS_EXTENSION_UNSUPPORTED"),
     })?;
-    Ok(Peer::new(
+    let mut peer = Peer::new(
         socket,
         (route.client_id == super::ClientId::Codex).then_some(KEEPALIVE),
         activity,
         settings.idle_seconds,
-    ))
+    );
+    peer.response_identifiers = response_identifiers;
+    Ok(peer)
 }
 async fn response_prefix(mut body: Incoming, limit: usize, settings: &Settings) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(limit.min(4096));
@@ -1260,6 +1281,9 @@ async fn session_once(
                     );
                 }
                 attempt_protocol.websocket_status(101);
+                if let Upstream::Native(peer) = &upstream {
+                    attempt_protocol.response_headers(&peer.response_identifiers);
+                }
                 break (upstream, admission, attempt_protocol);
             }
             Err(failure) => {
@@ -1653,6 +1677,9 @@ async fn session_once(
                 Ok(Ok(opened)) => {
                     if let Some(u) = &mut protocol {
                         u.websocket_status(101);
+                        if let Upstream::Native(peer) = &opened {
+                            u.response_headers(&peer.response_identifiers);
+                        }
                     }
                     upstream = opened;
                 }
@@ -1934,6 +1961,9 @@ async fn session_once(
                             }
                         }
                     }
+                    if let (Some(u), Upstream::Native(peer)) = (&mut protocol, &upstream) {
+                        u.response_headers(&peer.response_identifiers);
+                    }
                     if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                         retry_pending = disconnect_turn(
                             g,
@@ -2050,7 +2080,7 @@ async fn session_once(
                     if let Some(id) = v.pointer("/response/id").or_else(|| v.get("response_id")).and_then(|v| v.as_str()) { g.0.endpoints.remember(&route.provider, id); g.remember_model(id, &route.provider.id, current_model.as_deref()); }
                     let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
-                    if protocol.as_ref().is_some_and(|u| u.terminal().is_some()) || matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error") {
+                    if protocol.as_ref().map_or_else(|| matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error"), |u| u.terminal().is_some()) {
                         if let Some(mut admission) = turn.take() {
                             if let Some(u)=protocol.as_mut() {
                                 u.finish(Some(101), "UPSTREAM_ERROR");

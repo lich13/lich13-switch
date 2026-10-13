@@ -1410,6 +1410,10 @@ function AttemptDetails({
                     : preciseDate(a.transfer.terminalAt),
                 ],
                 ["本地结束", preciseDate(a.transfer.endedAt)],
+                ...(a.transfer.terminalEvent ? [["终态事件", a.transfer.terminalEvent]] : []),
+                ...(a.transfer.terminalStatus ? [["终态状态", a.transfer.terminalStatus]] : []),
+                ...(a.transfer.incompleteReason ? [["未完成原因", a.transfer.incompleteReason === "unrecognized" ? "未识别" : a.transfer.incompleteReason]] : []),
+                ...(a.transfer.upstreamClientRequestHash ? [["上游关联摘要", a.transfer.upstreamClientRequestHash.slice(0, 12)]] : []),
                 ["上游读取", `${numeric(a.transfer.upstreamBytes)} B`],
                 [a.transport === "websocket" ? "交给 WebSocket 层" : "交给 HTTP 层", `${numeric(a.transfer.downstreamBytes)} B`],
                 ...(a.transfer.connection ? [
@@ -1614,6 +1618,7 @@ function endReason(a: Attempt): string {
       {
         completed: "上游已完成",
         application_error: "上游返回应用错误",
+        upstream_incomplete: "上游未完成，原因未确认",
         upstream_rejected: "上游拒绝请求",
         client_cancelled: "生成已取消",
         downstream_write_timeout: "写入下游超时，完成状态未知",

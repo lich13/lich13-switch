@@ -429,6 +429,7 @@ impl Operation {
 pub enum EndCause {
     Completed,
     ApplicationError,
+    UpstreamIncomplete,
     UpstreamRejected,
     ClientCancelled,
     ClientDisconnected,
@@ -481,6 +482,14 @@ pub struct TransferMetadata {
     pub sent_at: i64,
     pub first_byte_at: Option<i64>,
     pub terminal_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_client_request_hash: Option<String>,
     pub ended_at: i64,
     pub upstream_bytes: u64,
     pub downstream_bytes: u64,
