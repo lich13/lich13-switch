@@ -24,6 +24,7 @@ import {
   MoreHorizontal,
   X,
   Upload,
+  Download,
   ScrollText,
   ExternalLink,
   ChevronRight,
@@ -42,6 +43,7 @@ import {
 import { command, subscribe } from "./bridge";
 import AuthSyncNotice from "./AuthSyncNotice";
 import AccountPlan from "./AccountPlan";
+import AccountExchange from "./AccountExchange";
 import StartupSettings from "./StartupSettings";
 import PowerSettings from "./PowerSettings";
 import LinkSettings from "./LinkSettings";
@@ -76,6 +78,7 @@ const emptyLogin: LoginState = {
   callbackReady: false,
 };
 export default function App() {
+  const [exchangeMode, setExchangeMode] = useState<"import" | "export" | null>(null);
   const [state, setState] = useState<ViewState | null>(null),
     [page, setPage] = useState<"accounts" | "config" | "gateway" | "logs" | "usage">("accounts"),
     [search, setSearch] = useState(""),
@@ -366,6 +369,9 @@ export default function App() {
               <div>
                 <h1>账号</h1>
               </div>
+              <div className="account-actions">
+              <button disabled={!state} onClick={() => setExchangeMode("import")}><Upload size={16} />导入</button>
+              <button disabled={!state?.accounts.length} onClick={() => setExchangeMode("export")}><Download size={16} />导出</button>
               <button
                 className="primary"
                 onClick={() => setDialog("add")}
@@ -374,6 +380,7 @@ export default function App() {
                 <Plus size={16} />
                 添加账号
               </button>
+              </div>
             </div>
             {(state?.currentState === "unsaved" ||
               state?.currentState === "missing" ||
@@ -630,6 +637,7 @@ export default function App() {
         >
           {dialog === "add" || (typeof dialog === "object" && dialog.action === "refresh") ? (
             <AddAccount
+              onImport={() => { setDialog(null); setExchangeMode("import"); }}
               target={typeof dialog === "object" ? dialog.account : undefined}
               login={login}
               setLogin={setLogin}
@@ -659,6 +667,7 @@ export default function App() {
           )}
         </Modal>
       )}
+      {exchangeMode && <AccountExchange mode={exchangeMode} close={() => setExchangeMode(null)} update={setState} notify={notify} />}
     </div>
   );
 }
@@ -703,11 +712,13 @@ function Modal({
   );
 }
 function AddAccount({
+  onImport,
   target,
   login,
   setLogin,
   onDone,
 }: {
+  onImport: () => void;
   target?: Account;
   login: LoginState;
   setLogin: React.Dispatch<React.SetStateAction<LoginState>>;
@@ -907,17 +918,12 @@ function AddAccount({
         <>
           <div className="import-area">
             <Upload size={26} />
-            <h3>导入已有 auth.json</h3>
+            <h3>导入 Codex、Sub2API 或 CLIProxyAPI</h3>
 
             <button
               className="primary"
               disabled={busy}
-              onClick={() =>
-                void perform(async () => {
-                  const s = await command<ViewState | null>("import_auth_file");
-                  if (s) onDone(s);
-                })
-              }
+              onClick={onImport}
             >
               <FolderOpen size={16} />
               选择凭据文件

@@ -159,6 +159,9 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       token: "preview-sub2api",
       revision: s.revision,
       unsupportedProxies: 1,
+      template: { ready: false, token: "preview-import-template", rows: [
+        { id: 0, name: "标准并发模板" }, { id: 1, name: "自定义模型映射模板" },
+      ] },
       rows: [
         {
           id: 0,
@@ -176,7 +179,11 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         },
       ],
     };
-  if (name === "prepare_sub2api_export" || name === "export_sub2api_providers")
+  if (name === "prepare_sub2api_export")
+    return { ready: !args.replaceTemplate, token: args.replaceTemplate ? "preview-template" : null, rows: [
+      { id: 0, name: "标准并发模板" }, { id: 1, name: "自定义模型映射模板" },
+    ] };
+  if (name === "export_sub2api_providers" || name === "select_sub2api_template")
     return true;
   if (name === "cancel_sub2api_import") return null;
   if (name === "commit_sub2api_import") {

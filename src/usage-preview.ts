@@ -111,6 +111,7 @@ search.attempts[0] = {
 };
 if (densePreview) {
   const completed = rows[2].attempts[0];
+  completed.transport = "websocket";
   completed.end = {
     cause: "client_disconnected",
     terminalReceived: true,
@@ -156,6 +157,16 @@ if (densePreview) {
     upstreamEof: false,
     upstreamEnd: null,
     downstreamError: "DOWNSTREAM_CONNECTION_ERROR",
+    connection: {
+      id: "fixture-connection-id",
+      requestSequence: 2,
+      readBytes: 4096,
+      socketWrittenBytes: 8448,
+      events: [
+        { sequence: 1, at: interrupted.startedAt + 5100, kind: "peer_reset" },
+        { sequence: 2, at: interrupted.startedAt + 5200, kind: "response_body_cancelled" },
+      ],
+    },
     timeoutPhase: null,
     timeoutSeconds: null,
     lastProgressMs: 10,

@@ -171,6 +171,7 @@ struct Sink {
     data_prefix: Vec<u8>,
     data_len: usize,
     skip_space: bool,
+    after_cr: bool,
 }
 impl Sink {
     fn new(stream: bool) -> Self {
@@ -184,6 +185,7 @@ impl Sink {
             data_prefix: vec![],
             data_len: 0,
             skip_space: false,
+            after_cr: false,
         }
     }
     fn data(&mut self, bytes: &[u8]) {
@@ -265,7 +267,15 @@ impl Write for Sink {
             return Ok(bytes.len());
         }
         for &b in bytes {
+            if self.after_cr {
+                self.after_cr = false;
+                if b == b'\n' {
+                    continue;
+                }
+            }
             if b == b'\r' {
+                self.line_end();
+                self.after_cr = true;
                 continue;
             }
             if b == b'\n' {
@@ -326,13 +336,85 @@ pub struct Delivery {
     pub finished: std::sync::atomic::AtomicBool,
     // 1: body dropped; 2: HTTP connection error; 3: downstream stall.
     pub error: std::sync::atomic::AtomicU8,
+    activity: std::sync::Mutex<Option<std::sync::Arc<super::wire_progress::Activity>>>,
+    request_sequence: std::sync::atomic::AtomicU64,
+    settled: std::sync::atomic::AtomicBool,
+    settled_notify: tokio::sync::Notify,
 }
 impl Delivery {
+    pub fn track(
+        self: &std::sync::Arc<Self>,
+        activity: std::sync::Arc<super::wire_progress::Activity>,
+    ) {
+        self.request_sequence.store(
+            activity.begin_request(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *self.activity.lock().unwrap() = Some(activity.clone());
+        activity.track(self);
+    }
+    pub fn is_settled(&self) -> bool {
+        self.settled.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn settle(&self) {
+        self.settled
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.settled_notify.notify_one();
+    }
+    pub fn failed(&self, code: u8) {
+        if !self.is_settled() {
+            let _ = self.error.compare_exchange(
+                0,
+                code,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.settle();
+        }
+    }
+    pub async fn wait(&self) {
+        if self.activity.lock().unwrap().is_none() {
+            return;
+        }
+        while !self.is_settled() {
+            self.settled_notify.notified().await;
+        }
+    }
+    pub fn body_complete(&self) {
+        if !self
+            .finished
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.event("response_body_complete");
+        }
+    }
+    pub fn event(&self, kind: &str) {
+        if let Some(activity) = self.activity.lock().unwrap().as_ref() {
+            activity.event(kind);
+        }
+    }
+    pub fn dropped(&self) {
+        if self.finished.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let activity = self.activity.lock().unwrap();
+        let code = activity.as_ref().map_or(0, |a| a.error_code());
+        if let Some(activity) = activity.as_ref() {
+            activity.event("response_body_cancelled");
+        }
+        let _ = self.error.compare_exchange(
+            0,
+            if code == 0 { 1 } else { code },
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.settle();
+    }
     pub fn handed(&self, bytes: usize, terminal: bool) {
         use std::sync::atomic::Ordering::Relaxed;
         self.bytes.fetch_add(bytes as u64, Relaxed);
-        if terminal {
-            self.terminal.store(true, Relaxed);
+        if terminal && !self.terminal.swap(true, Relaxed) {
+            self.event("terminal_handed_to_transport");
         }
     }
 }
@@ -501,6 +583,9 @@ impl Protocol {
     }
     fn record_usage(&mut self) {
         if self.terminal_received {
+            if self.transfer.terminal_at.is_none() {
+                self.delivery.event("upstream_terminal_observed");
+            }
             self.transfer
                 .terminal_at
                 .get_or_insert_with(crate::usage::model::now);
@@ -577,6 +662,15 @@ impl Protocol {
             return;
         }
         self.finished = true;
+        self.delivery.event(match reason {
+            "OK" => "upstream_eof",
+            "STREAM_INTERRUPTED" => "upstream_read_failed",
+            "STREAM_TIMEOUT" | "FIRST_BYTE_TIMEOUT" => "upstream_timeout",
+            "GATEWAY_STOPPED" => "gateway_stopping",
+            "CANCELLED" => "request_cancelled",
+            "CLIENT_DISCONNECTED" => "response_consumer_closed",
+            _ => "upstream_observation_ended",
+        });
         self.transfer.upstream_eof = reason == "OK";
         self.transfer.upstream_end = match reason {
             "OK" => Some("EOF".into()),
@@ -650,7 +744,16 @@ impl Protocol {
                 Some(Terminal::Cancelled) => EndCause::ClientCancelled,
                 _ => EndCause::ApplicationError,
             },
-            "CLIENT_DISCONNECTED" => EndCause::ClientDisconnected,
+            "CLIENT_DISCONNECTED" => match self
+                .delivery
+                .error
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                1 => EndCause::Unsettled,
+                3 => EndCause::DownstreamWriteTimeout,
+                2 | 4 | 7 | 8 => EndCause::DownstreamTransportError,
+                _ => EndCause::ClientDisconnected,
+            },
             "GATEWAY_STOPPED" => EndCause::GatewayStopped,
             "CANCELLED" => EndCause::ClientCancelled,
             _ if self.status.is_some_and(|s| s >= 400) => EndCause::UpstreamRejected,
@@ -682,6 +785,13 @@ impl Protocol {
         self.transfer.ended_at = crate::usage::model::now();
         self.transfer.downstream_bytes = self.delivery.bytes.load(Relaxed);
         self.transfer.terminal_handed_off = self.delivery.terminal.load(Relaxed);
+        self.transfer.connection = self
+            .delivery
+            .activity
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|activity| activity.snapshot(self.delivery.request_sequence.load(Relaxed)));
         self.transfer.response_hash = self
             .observation
             .response_id

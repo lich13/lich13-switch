@@ -303,19 +303,46 @@ async fn http_client_disconnect_preserves_forwarded_bytes_without_usage_tail() {
     gateway.set_usage(service.clone());
     super::start(&gateway, &dir).await;
 
-    let response = super::request(
-        &gateway,
-        "fixture-http-disconnect",
-        br#"{"model":"fixture-model","stream":true}"#.to_vec(),
-    )
-    .await;
+    let (token, gateway_port) = {
+        let state = gateway.0.inner.lock().unwrap();
+        (state.store.local_token.clone(), state.store.settings.port)
+    };
+    let socket = tokio::net::TcpStream::connect(("127.0.0.1", gateway_port))
+        .await
+        .unwrap();
+    // An explicit reset closes both directions; FIN alone remains a valid
+    // request-side half-close while this response is still pending.
+    #[allow(deprecated)]
+    socket.set_linger(Some(Duration::ZERO)).unwrap();
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(socket))
+            .await
+            .unwrap();
+    let connection_task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("host", "fixture.invalid")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("session_id", "fixture-http-disconnect")
+        .body(super::replay::full(
+            br#"{"model":"fixture-model","stream":true}"#.to_vec(),
+        ))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
     let mut body = response.into_body();
     let first = body.frame().await.unwrap().unwrap();
     assert_eq!(
         first.data_ref().map(|bytes| bytes.as_ref()),
         Some(expected_completed.as_ref())
     );
+    connection_task.abort();
+    let _ = connection_task.await;
     drop(body);
+    drop(sender);
     tokio::time::timeout(Duration::from_secs(3), cancelled.notified())
         .await
         .expect("upstream stream was not cancelled after client disconnect");

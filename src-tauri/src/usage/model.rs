@@ -432,6 +432,8 @@ pub enum EndCause {
     UpstreamRejected,
     ClientCancelled,
     ClientDisconnected,
+    DownstreamWriteTimeout,
+    DownstreamTransportError,
     GatewayStopped,
     UpstreamDisconnected,
     ConnectFailed,
@@ -473,6 +475,8 @@ pub enum RoutingDecision {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TransferMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionEvidence>,
     pub received_at: Option<i64>,
     pub sent_at: i64,
     pub first_byte_at: Option<i64>,
@@ -490,6 +494,24 @@ pub struct TransferMetadata {
     pub last_progress_ms: Option<u64>,
     pub client_request_hash: Option<String>,
     pub response_hash: Option<String>,
+}
+/// Cumulative connection-level counters include HTTP framing and other requests.
+/// A successful socket write is not proof that the peer application consumed bytes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionEvidence {
+    pub id: String,
+    pub request_sequence: u64,
+    pub read_bytes: u64,
+    pub socket_written_bytes: u64,
+    pub events: Vec<TransportEvent>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportEvent {
+    pub sequence: u64,
+    pub at: i64,
+    pub kind: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

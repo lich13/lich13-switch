@@ -208,6 +208,8 @@ static NSDictionary *handle(NSDictionary *request) {
         if(![before[@"supported"] boolValue])return failure(@"UNSUPPORTED",@"此设备不支持电池合盖控制");
         if(!same(before,@{@"enabled":request[@"beforeEnabled"],@"batterySleep":request[@"beforeSleep"]}))
             return failure(@"CONFLICT",@"电源状态已变化，请重新操作");
+        if(request[@"beforeOwnership"] && ![request[@"beforeOwnership"] isEqual:stateView(before,record)[@"state"][@"ownership"]])
+            return failure(@"CONFLICT",@"电源归属已变化，请重新操作");
     }
     NSMutableDictionary *desired=[before mutableCopy];
     NSDictionary *nextRecord=nil;
@@ -458,6 +460,34 @@ int main(void) {
         CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==0);CHECK(!readJSON(Restore));
         CHECK([handle(@{@"op":@"run",@"command":@"true"})[@"error"][@"code"] isEqual:@"POWER_PROTOCOL"]);
         CHECK([handle(@{@"op":@"set",@"enabled":@2,@"beforeEnabled":@NO,@"beforeSleep":@7})[@"error"][@"code"] isEqual:@"POWER_PROTOCOL"]);
+
+        // Ownership CAS rejects unchanged physical values when authority changed.
+        testReset(YES,0);
+        CHECK([handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
+                        @"beforeOwnership":@"application"})[@"error"][@"code"] isEqual:@"CONFLICT"]);
+        CHECK(same(TestState,testState(YES,0)));CHECK(TestFieldWrites==0);CHECK(!readJSON(Restore));
+        CHECK(!handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
+                        @"beforeOwnership":@"external"})[@"error"]);
+        CHECK(same(TestState,testState(NO,0)));CHECK(TestFieldWrites==1);
+
+        testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
+        NSDictionary *ownedRecord=[readJSON(Restore) copy];
+        NSUInteger ownedWrites=TestFieldWrites;
+        CHECK([handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
+                        @"beforeOwnership":@"external"})[@"error"][@"code"] isEqual:@"CONFLICT"]);
+        CHECK(same(TestState,testState(YES,0)));CHECK(TestFieldWrites==ownedWrites);
+        CHECK([readJSON(Restore) isEqual:ownedRecord]);
+        CHECK(!handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
+                        @"beforeOwnership":@"application"})[@"error"]);
+        CHECK(same(TestState,testState(NO,7)));CHECK(!readJSON(Restore));
+
+        testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
+        ownedWrites=TestFieldWrites;
+        [TestFiles removeObjectForKey:Restore];
+        CHECK(testView(@"external",NO));
+        CHECK([handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
+                        @"beforeOwnership":@"application"})[@"error"][@"code"] isEqual:@"CONFLICT"]);
+        CHECK(same(TestState,testState(YES,0)));CHECK(TestFieldWrites==ownedWrites);CHECK(!readJSON(Restore));
 
         // A second-field failure rolls back only the first write.
         testReset(NO,7);TestFailFieldWrite=2;

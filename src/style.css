@@ -3005,7 +3005,26 @@ select:focus-visible {
   color: var(--muted);
   font-size: 12px;
 }
+.exchange-row > span > .exchange-error {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .exchange-row > .mono {
   flex-shrink: 0;
   font-size: 12px;
+}
+.exchange-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.account-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.template-choice { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
+.template-choice legend { font-weight: 600; margin-bottom: 12px; }
+.template-choice > button { margin-top: 12px; }
+@media (max-width: 560px) {
+  .accounts-page .page-heading { align-items: flex-start; gap: 12px; }
+  .account-actions { gap: 6px; }
 }

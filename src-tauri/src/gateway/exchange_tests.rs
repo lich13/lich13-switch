@@ -89,6 +89,11 @@ fn sub2api_preview_commit_export_round_trip_supports_partial_and_all_selection()
     let (data_all, gateway_all) = fixture_gateway();
     let source_all = write_fixture(data_all.path(), fixture_accounts());
     let preview_all = gateway_all.exchange_preview(&source_all).unwrap();
+    let template = preview_all.template.as_ref().unwrap();
+    assert!(!template.ready);
+    gateway_all
+        .exchange_select_template(template.token.as_deref().unwrap(), 1)
+        .unwrap();
     let all = gateway_all
         .exchange_commit(
             &preview_all.token,
@@ -191,6 +196,12 @@ fn sub2api_exchange_rejects_revision_conflicts_and_export_selection_errors() {
     let source = write_fixture(data.path(), fixture_accounts());
     let preview = gateway.exchange_preview(&source).unwrap();
     gateway
+        .exchange_select_template(
+            preview.template.as_ref().unwrap().token.as_deref().unwrap(),
+            0,
+        )
+        .unwrap();
+    gateway
         .edit(
             Edit::SaveProvider {
                 id: None,
@@ -228,23 +239,32 @@ fn sub2api_exchange_rejects_revision_conflicts_and_export_selection_errors() {
 }
 
 #[test]
-fn sub2api_template_persists_only_non_secret_defaults() {
+fn sub2api_template_preserves_selected_prototype_and_masks_only_connection_fields() {
     let (data, gateway) = fixture_gateway();
     let source = write_fixture(data.path(), fixture_accounts());
-    gateway.exchange_template(&source).unwrap();
+    let prepared = gateway.exchange_template(&source).unwrap();
+    assert!(!prepared.ready);
+    gateway
+        .exchange_select_template(prepared.token.as_deref().unwrap(), 0)
+        .unwrap();
     let stored = data.path().join("sub2api-template.json");
     let template: Value = serde_json::from_slice(&std::fs::read(stored).unwrap()).unwrap();
-    assert_eq!(template["version"], 1);
-    assert_eq!(template["priority"], 17);
-    assert_eq!(template["rate_multiplier"], 1.25);
-    assert_eq!(template["auto_pause_on_expired"], false);
+    assert_eq!(template["version"], 2);
+    let saved = &template["document"]["accounts"][0];
+    let mut expected = fixture_accounts()[0].clone();
+    expected["name"] = json!("");
+    expected["credentials"]["base_url"] = json!("");
+    expected["credentials"]["api_key"] = json!("");
+    assert_eq!(saved, &expected);
+    assert_eq!(
+        template["document"]["accounts"].as_array().unwrap().len(),
+        1
+    );
     let text = serde_json::to_string(&template).unwrap();
     for secret in [
         "Fixture Alpha",
         "alpha.example.invalid",
         "fixture-key-alpha",
-        "proxy_key",
-        "credentials",
     ] {
         assert!(!text.contains(secret), "template leaked {secret}");
     }
@@ -261,7 +281,7 @@ fn sub2api_template_persists_only_non_secret_defaults() {
         )],
     );
     let result = gateway.exchange_template(&invalid);
-    assert_eq!(result.unwrap_err().code, "SUB2API_FILE");
+    assert_eq!(result.unwrap_err().code, "EXCHANGE_TEMPLATE");
 }
 
 #[test]

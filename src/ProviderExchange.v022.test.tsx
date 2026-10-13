@@ -1,8 +1,9 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GatewayState } from "./types";
 import { gatewayDemo } from "./gateway-preview";
+import type { PreparedTemplate } from "./TemplateChoice";
 
 const mock = vi.hoisted(() => ({ command: vi.fn() }));
 vi.mock("./bridge", () => ({ command: mock.command }));
@@ -48,7 +49,8 @@ beforeEach(() => {
     if (name === "preview_sub2api_import") return structuredClone(preview);
     if (name === "commit_sub2api_import") return structuredClone(gatewayDemo);
     if (name === "cancel_sub2api_import") return null;
-    if (name === "prepare_sub2api_export") return true;
+    if (name === "prepare_sub2api_export")
+      return { ready: true, token: null, rows: [] };
     if (name === "export_sub2api_providers") return true;
     throw new Error(`Unexpected fixture command: ${name}`);
   });
@@ -177,4 +179,181 @@ it("exports only the checked provider with the authoritative revision", async ()
     expectedRevision: current.revision,
   });
   expect(notify).toHaveBeenCalledWith("已导出 1 个供应商");
+});
+
+const pendingTemplate: PreparedTemplate = {
+  ready: false,
+  token: "fixture-provider-template-token",
+  rows: [
+    { id: 0, name: "Fixture provider prototype A" },
+    { id: 4, name: "Fixture provider prototype B" },
+  ],
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+it.each(["import", "export"] as const)(
+  "requires a single explicit prototype before %s and keeps provider multi-selection",
+  async (mode) => {
+    const user = userEvent.setup();
+    const fallback = mock.command.getMockImplementation()!;
+    mock.command.mockImplementation(
+      async (name: string, args?: Record<string, unknown>) => {
+        if (name === "preview_sub2api_import")
+          return structuredClone({ ...preview, template: pendingTemplate });
+        if (name === "prepare_sub2api_export")
+          return structuredClone(pendingTemplate);
+        if (name === "select_sub2api_template") return null;
+        return fallback(name, args);
+      },
+    );
+    const close = vi.fn();
+    const current = state();
+    render(
+      <ProviderExchange
+        mode={mode}
+        state={current}
+        clientId="codex"
+        close={close}
+        update={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+    const choice = await screen.findByRole("group", {
+      name: "选择一个账号作为导出原型",
+    });
+    const submitName = mode === "import" ? "导入所选" : "导出所选";
+    expect(screen.getByRole("button", { name: submitName })).toBeDisabled();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    await user.click(
+      within(choice).getByRole("radio", {
+        name: "Fixture provider prototype B",
+      }),
+    );
+    await user.click(
+      within(choice).getByRole("button", { name: "使用此原型" }),
+    );
+    const all = await screen.findByRole("checkbox", { name: /全选/ });
+    expect(all).toBeChecked();
+    expect(mock.command).toHaveBeenCalledWith("select_sub2api_template", {
+      clientId: "codex",
+      token: pendingTemplate.token,
+      id: 4,
+    });
+    const checkboxes = screen.getAllByRole("checkbox");
+    expect(
+      checkboxes.filter((checkbox) => (checkbox as HTMLInputElement).checked),
+    ).toHaveLength(3);
+    await user.click(checkboxes[mode === "import" ? 3 : 2]);
+    await user.click(screen.getByRole("button", { name: submitName }));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(mock.command).toHaveBeenCalledWith(
+      mode === "import" ? "commit_sub2api_import" : "export_sub2api_providers",
+      mode === "import"
+        ? {
+            clientId: "codex",
+            token: preview.token,
+            ids: [0],
+            expectedRevision: preview.revision,
+          }
+        : {
+            clientId: "codex",
+            ids: [current.providers[0].id],
+            expectedRevision: current.revision,
+          },
+    );
+  },
+);
+
+it.each(["initial", "replacement"] as const)(
+  "releases a late %s export template token after unmount",
+  async (stage) => {
+    const user = userEvent.setup();
+    const pending = deferred<PreparedTemplate>();
+    const fallback = mock.command.getMockImplementation()!;
+    let preparations = 0;
+    mock.command.mockImplementation(
+      async (name: string, args?: Record<string, unknown>) => {
+        if (name === "prepare_sub2api_export") {
+          preparations++;
+          if (stage === "initial" || preparations === 2) return pending.promise;
+        }
+        return fallback(name, args);
+      },
+    );
+    const close = vi.fn();
+    const notify = vi.fn();
+    const { unmount } = render(
+      <ProviderExchange
+        mode="export"
+        state={state()}
+        clientId="claude"
+        close={close}
+        update={vi.fn()}
+        notify={notify}
+      />,
+    );
+    if (stage === "replacement") {
+      await screen.findByRole("checkbox", { name: /全选/ });
+      await user.click(screen.getByRole("button", { name: "更换模板" }));
+      expect(mock.command).toHaveBeenCalledWith("prepare_sub2api_export", {
+        clientId: "claude",
+        replaceTemplate: true,
+      });
+    }
+    unmount();
+    await act(async () => pending.resolve(structuredClone(pendingTemplate)));
+    expect(
+      mock.command.mock.calls.filter(
+        ([name]) => name === "cancel_sub2api_import",
+      ),
+    ).toEqual([
+      [
+        "cancel_sub2api_import",
+        { clientId: "claude", token: pendingTemplate.token },
+      ],
+    ]);
+    expect(
+      mock.command.mock.calls.filter(
+        ([name]) => name === "export_sub2api_providers",
+      ),
+    ).toHaveLength(0);
+    expect(close).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  },
+);
+
+it("releases both late import and prototype tokens when the dialog has already unmounted", async () => {
+  const next = { ...preview, template: pendingTemplate };
+  const pending = deferred<typeof next>();
+  mock.command.mockImplementationOnce(() => pending.promise);
+  const { unmount } = render(
+    <ProviderExchange
+      mode="import"
+      state={state()}
+      clientId="codex"
+      close={vi.fn()}
+      update={vi.fn()}
+      notify={vi.fn()}
+    />,
+  );
+  unmount();
+  await act(async () => pending.resolve(structuredClone(next)));
+  const cancelled = mock.command.mock.calls.filter(
+    ([name]) => name === "cancel_sub2api_import",
+  );
+  expect(cancelled).toHaveLength(2);
+  expect(cancelled).toEqual(expect.arrayContaining([
+    ["cancel_sub2api_import", { clientId: "codex", token: preview.token }],
+    [
+      "cancel_sub2api_import",
+      { clientId: "codex", token: pendingTemplate.token },
+    ],
+  ]));
 });

@@ -1411,7 +1411,12 @@ function AttemptDetails({
                 ],
                 ["本地结束", preciseDate(a.transfer.endedAt)],
                 ["上游读取", `${numeric(a.transfer.upstreamBytes)} B`],
-                ["交给下游网络层", `${numeric(a.transfer.downstreamBytes)} B`],
+                [a.transport === "websocket" ? "交给 WebSocket 层" : "交给 HTTP 层", `${numeric(a.transfer.downstreamBytes)} B`],
+                ...(a.transfer.connection ? [
+                  ["连接序号", `${a.transfer.connection.id.slice(0, 12)} · 请求 ${a.transfer.connection.requestSequence}`],
+                  ["连接累计 socket 写出", `${numeric(a.transfer.connection.socketWrittenBytes)} B（含 HTTP 头，未确认客户端接收）`],
+                  ["连接事件顺序", a.transfer.connection.events.map(e => `${e.sequence}. ${e.kind} · ${preciseDate(e.at)}`).join("\n") || "—"],
+                ] : []),
                 ["终态已交出", a.transfer.terminalHandedOff ? "是" : "未确认"],
                 [
                   "上游结束",
@@ -1611,6 +1616,8 @@ function endReason(a: Attempt): string {
         application_error: "上游返回应用错误",
         upstream_rejected: "上游拒绝请求",
         client_cancelled: "生成已取消",
+        downstream_write_timeout: "写入下游超时，完成状态未知",
+        downstream_transport_error: "下游传输异常，完成状态未知",
         gateway_stopped: "网关停止",
         upstream_disconnected: "上游提前断开",
         connect_failed: "上游连接失败",

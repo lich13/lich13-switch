@@ -32,29 +32,29 @@ pub async fn serve(
                 let Ok((socket,_))=result else{break};let g=gateway.clone();let mut stop=shutdown.clone();
                 tokio::spawn(async move{
                     let activity = std::sync::Arc::new(super::wire_progress::Activity::default());
+                    let (socket, socket_error) = super::wire_progress::observed_tcp(socket);
                     let socket = super::wire_progress::Tracked::new(socket, activity.clone());
-                    let deliveries = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::sync::Weak<super::protocol::Delivery>>::new()));
-                    let tracked = deliveries.clone();
                     let connection_activity = activity.clone();
                     let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
                         let g=g.clone();
                         let delivery = std::sync::Arc::new(super::protocol::Delivery::default());
-                        { let mut items = tracked.lock().unwrap(); items.retain(|w| w.strong_count() != 0); items.push(std::sync::Arc::downgrade(&delivery)); }
+                        delivery.track(activity.clone());
                         request.extensions_mut().insert(delivery);
                         request.extensions_mut().insert(ReceivedAt(crate::usage::model::now()));
                         request.extensions_mut().insert(activity.clone());
                         async move{Ok::<_,Infallible>(forward(g,request).await)}
                     });
-                    let connection=hyper::server::conn::http1::Builder::new().preserve_header_case(true)
+                    let connection=hyper::server::conn::http1::Builder::new().preserve_header_case(true).half_close(true)
                         .serve_connection(TokioIo::new(socket),service).with_upgrades();
                     tokio::pin!(connection);
-                    let result = tokio::select!{result= &mut connection=>result,_=stop.changed()=>{connection.as_mut().graceful_shutdown();connection.await}};
+                    let result = tokio::select!{
+                        result= &mut connection=>result,
+                        error=socket_error=>{connection_activity.failed(&error, false);return;},
+                        _=stop.changed()=>{connection_activity.event("gateway_stopping");connection.as_mut().graceful_shutdown();connection.await}
+                    };
                     if let Err(error) = result {
-                        for delivery in deliveries.lock().unwrap().iter().filter_map(std::sync::Weak::upgrade) {
-                            if !delivery.finished.load(std::sync::atomic::Ordering::Acquire) {
-                                delivery.error.store(if connection_activity.error_code() != 0 { connection_activity.error_code() } else if error.is_canceled() { 4 } else if error.is_closed() || error.is_incomplete_message() { 5 } else if error.is_parse() { 8 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
+                        connection_activity.event(if error.is_parse() { "http_parse_failed" } else if error.is_canceled() { "http_cancelled" } else { "http_connection_failed" });
+                        connection_activity.connection_failed(if connection_activity.error_code() != 0 { connection_activity.error_code() } else if error.is_canceled() { 4 } else if error.is_closed() || error.is_incomplete_message() { 5 } else if error.is_parse() { 8 } else { 2 });
                     }
                 });
             }
@@ -63,6 +63,7 @@ pub async fn serve(
 }
 type ForwardFrame = (
     Result<hyper::body::Frame<Bytes>, BoxError>,
+    bool,
     bool,
     tokio::sync::oneshot::Sender<()>,
 );
@@ -73,12 +74,7 @@ struct DeliveryGuard {
 impl Drop for DeliveryGuard {
     fn drop(&mut self) {
         if !self.complete {
-            let _ = self.delivery.error.compare_exchange(
-                0,
-                1,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            self.delivery.dropped();
         }
     }
 }
@@ -95,10 +91,33 @@ impl DownstreamEnd {
         seconds: u64,
     ) {
         if matches!(self, Self::Timeout) {
+            delivery.event("downstream_write_timeout");
             delivery
                 .error
                 .store(3, std::sync::atomic::Ordering::Relaxed);
             protocol.timeout("downstream_write", seconds);
+            delivery.settle();
+        }
+    }
+}
+async fn finish_delivery(
+    delivery: &super::protocol::Delivery,
+    protocol: &mut super::protocol::Protocol,
+    activity: &super::wire_progress::Activity,
+    shutdown: &mut Option<watch::Receiver<bool>>,
+    status: u16,
+    seconds: u64,
+) {
+    tokio::select! {
+        biased;
+        _ = stopping(shutdown) => { protocol.finish(Some(status), "GATEWAY_STOPPED"); }
+        result = super::wire_progress::writing(delivery.wait(), activity, seconds) => {
+            if result.is_err() {
+                DownstreamEnd::Timeout.record(delivery, protocol, seconds);
+            }
+            if delivery.error.load(std::sync::atomic::Ordering::Acquire) != 0 {
+                protocol.finish(Some(status), "CLIENT_DISCONNECTED");
+            }
         }
     }
 }
@@ -106,6 +125,7 @@ async fn send_frame(
     sender: &tokio::sync::mpsc::Sender<ForwardFrame>,
     frame: Result<hyper::body::Frame<Bytes>, BoxError>,
     terminal: bool,
+    complete: bool,
     activity: &super::wire_progress::Activity,
     seconds: u64,
 ) -> Result<(), DownstreamEnd> {
@@ -113,7 +133,7 @@ async fn send_frame(
         async {
             let (ack, received) = tokio::sync::oneshot::channel();
             sender
-                .send((frame, terminal, ack))
+                .send((frame, terminal, complete, ack))
                 .await
                 .map_err(|_| DownstreamEnd::Closed)?;
             received.await.map_err(|_| DownstreamEnd::Closed)
@@ -1434,6 +1454,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .cloned()
             .unwrap_or_default();
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<ForwardFrame>(2);
+        let empty = ended && prefix.is_empty();
+        if empty {
+            output_delivery.body_complete();
+        }
         let mut shutdown = gateway
             .0
             .inner
@@ -1457,17 +1481,29 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 attempted,
             );
             let mut disconnected = false;
-            for (frame, terminal, business) in prefix {
+            let prefix_len = prefix.len();
+            for (index, (frame, terminal, business)) in prefix.into_iter().enumerate() {
                 tokio::select! {
                     biased;
                     _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); return; }
-                    result = send_frame(&sender, Ok(frame), terminal, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
+                    result = send_frame(&sender, Ok(frame), terminal, ended && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
                 }
                 protocol.output_handed(business);
             }
             if ended {
+                drop(sender);
                 if disconnected {
                     protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
+                } else {
+                    finish_delivery(
+                        &delivery,
+                        &mut protocol,
+                        &activity,
+                        &mut shutdown,
+                        status.as_u16(),
+                        cfg.idle_seconds,
+                    )
+                    .await;
                 }
                 if protocol.succeeded() {
                     if protocol.delivered_success() {
@@ -1520,7 +1556,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             tokio::select! {
                                 biased;
                                 _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
-                                result = send_frame(&sender, Ok(frame), protocol.terminal().is_some(), &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
+                                result = send_frame(&sender, Ok(frame), protocol.terminal().is_some(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
                             }
                             if !disconnected {
                                 protocol.output_handed(protocol.business_observed());
@@ -1551,15 +1587,29 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         if !disconnected && protocol.transport_failure() {
                             tokio::select! {
                                 _ = stopping(&mut shutdown) => {}
-                                _ = send_frame(&sender, Err(std::io::Error::other("上游流中断").into()), false, &activity, cfg.idle_seconds) => {}
+                                _ = send_frame(&sender, Err(std::io::Error::other("上游流中断").into()), false, false, &activity, cfg.idle_seconds) => {}
                             }
                         }
                         break;
                     }
                 }
             }
+            // Close the body channel before waiting: Hyper must see its end in
+            // order to flush the final chunk/trailers. Socket completion is local
+            // write evidence, never an acknowledgement by the client.
+            drop(sender);
             if disconnected {
                 protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
+            } else {
+                finish_delivery(
+                    &delivery,
+                    &mut protocol,
+                    &activity,
+                    &mut shutdown,
+                    status.as_u16(),
+                    cfg.idle_seconds,
+                )
+                .await;
             }
             remember(&protocol, &g, &route, model.as_deref());
             observe_protocol(
@@ -1581,16 +1631,30 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 g.persist_success(&route.provider).await;
             }
         });
+        // Hyper may drop a Content-Length body immediately after its last frame,
+        // without polling it again for None. Mark that frame before yielding it.
+        let guard = DeliveryGuard {
+            delivery: output_delivery.clone(),
+            complete: empty,
+        };
         let output = async_stream::stream! {
-            let mut guard = DeliveryGuard { delivery: output_delivery.clone(), complete: false };
-            while let Some((frame, terminal, ack)) = receiver.recv().await {
+            let mut guard = guard;
+            while let Some((frame, terminal, complete, ack)) = receiver.recv().await {
                 let bytes = frame.as_ref().ok().and_then(|f| f.data_ref()).map_or(0, Bytes::len);
                 output_delivery.handed(bytes, terminal);
+                if frame.is_err() {
+                    guard.complete = true;
+                    output_delivery.event("response_body_aborted_upstream");
+                    output_delivery.settle();
+                } else if complete {
+                    guard.complete = true;
+                    output_delivery.body_complete();
+                }
                 let _ = ack.send(());
                 yield frame;
             }
             guard.complete = true;
-            output_delivery.finished.store(true, std::sync::atomic::Ordering::Release);
+            output_delivery.body_complete();
         };
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }

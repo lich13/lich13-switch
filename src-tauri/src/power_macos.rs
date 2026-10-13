@@ -79,16 +79,26 @@ fn request_with_timeout(value: Value, timeout_ms: u64) -> Result<Value> {
     Ok(response)
 }
 pub fn status() -> &'static str {
+    probe().0
+}
+/// Reuse the authenticated state reply; a second XPC probe can fail after the first succeeds.
+pub fn probe() -> (&'static str, Option<Value>) {
     if !installed_app() {
-        return "isolated";
+        return ("isolated", None);
     }
     if !Path::new(HELPER).exists() {
-        return "notInstalled";
+        return ("notInstalled", None);
     }
-    if request(json!({"op":"state"})).is_ok() {
-        "ready"
-    } else {
-        "needsRepair"
+    match request(json!({"op":"state"})) {
+        Ok(response)
+            if response["state"]["enabled"].is_boolean()
+                && response["state"]["batterySleep"]
+                    .as_u64()
+                    .is_some_and(|v| v <= 1440) =>
+        {
+            ("ready", Some(response))
+        }
+        _ => ("needsRepair", None),
     }
 }
 fn quote(s: &str) -> String {

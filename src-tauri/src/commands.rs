@@ -158,30 +158,171 @@ pub async fn prepare_sub2api_export(
     r: R<'_>,
     client_id: crate::gateway::ClientId,
     replace_template: Option<bool>,
-) -> Result<bool> {
+) -> Result<Option<crate::exchange_template::Prepared>> {
     use tauri_plugin_dialog::DialogExt;
     let gateway = r.gateway(client_id).clone();
     if gateway.exchange_has_template() && !replace_template.unwrap_or(false) {
-        return Ok(true);
+        return Ok(Some(crate::exchange_template::Prepared::ready()));
     }
     tauri::async_runtime::spawn_blocking(move || {
         let Some(file) = app
             .dialog()
             .file()
-            .set_title("选择 Sub2API 导出文件作为模板")
+            .set_title("选择完整的 Sub2API 模板（旧模板需重新选择）")
             .add_filter("Sub2API JSON", &["json"])
             .blocking_pick_file()
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let path = file
             .into_path()
             .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))?;
-        gateway.exchange_template(&path)?;
-        Ok(true)
+        gateway.exchange_template(&path).map(Some)
     })
     .await
     .map_err(|_| AppError::new("EXPORT", "模板读取失败"))?
+}
+#[tauri::command]
+pub fn select_sub2api_template(
+    r: R<'_>,
+    client_id: crate::gateway::ClientId,
+    token: String,
+    id: usize,
+) -> Result<()> {
+    r.gateway(client_id).exchange_select_template(&token, id)
+}
+
+#[tauri::command]
+pub async fn preview_account_import(
+    app: tauri::AppHandle,
+    r: R<'_>,
+) -> Result<Option<crate::core::exchange::Preview>> {
+    use tauri_plugin_dialog::DialogExt;
+    let r = r.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(files) = app
+            .dialog()
+            .file()
+            .set_title("选择 Codex、Sub2API 或 CLIProxyAPI 账号文件")
+            .add_filter("JSON", &["json"])
+            .blocking_pick_files()
+        else {
+            return Ok(None);
+        };
+        let paths = files
+            .into_iter()
+            .map(|f| {
+                f.into_path()
+                    .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        r.core.lock().unwrap().exchange_preview(&paths).map(Some)
+    })
+    .await
+    .map_err(|_| AppError::new("IMPORT", "账号文件读取失败"))?
+}
+#[tauri::command]
+pub fn cancel_account_exchange(r: R<'_>, token: String) {
+    r.core.lock().unwrap().exchange_cancel(&token);
+}
+#[tauri::command]
+pub async fn commit_account_import(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    token: String,
+    selected: Vec<crate::core::exchange::Selection>,
+    expected_revision: String,
+) -> Result<crate::core::ViewState> {
+    let _guard = r.official_tx.lock().await;
+    r.core
+        .lock()
+        .unwrap()
+        .exchange_commit(&token, &selected, &expected_revision)?;
+    crate::refresh(&app, &r)
+}
+#[tauri::command]
+pub fn preview_account_export(r: R<'_>) -> crate::core::exchange::ExportPreview {
+    let mut core = r.core.lock().unwrap();
+    core.exchange_prune();
+    core.exchange_export_preview()
+}
+#[tauri::command]
+pub async fn prepare_account_template(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    ids: Vec<String>,
+    replace_template: Option<bool>,
+) -> Result<Option<crate::exchange_template::Prepared>> {
+    use tauri_plugin_dialog::DialogExt;
+    if !replace_template.unwrap_or(false) && r.core.lock().unwrap().exchange_template_ready(&ids) {
+        return Ok(Some(crate::exchange_template::Prepared::ready()));
+    }
+    let r = r.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .set_title("选择独立的 Sub2API OAuth 模板")
+            .add_filter("JSON", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))?;
+        r.core
+            .lock()
+            .unwrap()
+            .exchange_prepare_template(&path)
+            .map(Some)
+    })
+    .await
+    .map_err(|_| AppError::new("EXPORT", "OAuth 模板读取失败"))?
+}
+#[tauri::command]
+pub fn select_account_template(r: R<'_>, token: String, id: usize) -> Result<()> {
+    r.core.lock().unwrap().exchange_select_template(&token, id)
+}
+#[tauri::command]
+pub async fn export_accounts(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    ids: Vec<String>,
+    expected_revision: String,
+    format: String,
+) -> Result<bool> {
+    use tauri_plugin_dialog::DialogExt;
+    let r = r.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = if format == "cliproxyapi" {
+            app.dialog()
+                .file()
+                .set_title("选择 CLIProxyAPI 账号导出目录")
+                .blocking_pick_folder()
+        } else if format == "sub2api" {
+            app.dialog()
+                .file()
+                .set_file_name("sub2api-oauth-accounts.json")
+                .add_filter("JSON", &["json"])
+                .blocking_save_file()
+        } else {
+            return Err(AppError::new("EXPORT", "导出格式不支持"));
+        };
+        let Some(file) = file else {
+            return Ok(false);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| AppError::new("PATH", "请选择本地路径"))?;
+        r.core
+            .lock()
+            .unwrap()
+            .exchange_export(&ids, &expected_revision, &format, &path)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| AppError::new("EXPORT", "账号导出失败"))?
 }
 #[tauri::command]
 pub async fn export_sub2api_providers(

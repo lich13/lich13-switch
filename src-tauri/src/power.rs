@@ -43,6 +43,9 @@ trait System: Send + Sync {
     fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<()>;
 }
 struct Native;
+#[cfg(test)]
+#[path = "power_v023_tests.rs"]
+mod v023_tests;
 pub struct Service {
     path: PathBuf,
     system: Arc<dyn System>,
@@ -73,7 +76,10 @@ impl Service {
     }
 
     pub fn set(&self, enabled: bool, expected: &str) -> Result<State> {
-        let _lock = self.lock.lock().unwrap();
+        let _lock = self
+            .lock
+            .try_lock()
+            .map_err(|_| AppError::new("BUSY", "电源操作正在进行"))?;
         self.set_locked(enabled, expected)
     }
     fn set_locked(&self, enabled: bool, expected: &str) -> Result<State> {
@@ -84,25 +90,49 @@ impl Service {
         if before.revision != expected {
             return Err(AppError::new("CONFLICT", "电源状态已变化，请重新操作"));
         }
-        self.system.prepare(false)?;
-        let prepared = self.state()?;
-        let installed_without_power_change = before.helper != "ready"
-            && before.supported == prepared.supported
-            && before.enabled == prepared.enabled
-            && before.battery_sleep == prepared.battery_sleep;
-        if prepared.revision != expected && !installed_without_power_change {
-            return Err(AppError::new("CONFLICT", "电源状态已变化，请重新操作"));
-        }
-        let before = prepared;
+        let repaired = before.helper != "ready";
+        let before = if repaired {
+            self.repair_for_toggle(&before)?
+        } else {
+            before
+        };
         // Restoration belongs exclusively to the privileged helper. An unverified
         // legacy user/script record must never supply a battery sleep value.
-        self.system.apply(&before, enabled, before.battery_sleep)?;
+        if let Err(error) = self.system.apply(&before, enabled, before.battery_sleep) {
+            if repaired || !matches!(error.code.as_str(), "POWER_HELPER" | "POWER_AUTH") {
+                return Err(error);
+            }
+            // An authorization can expire between read and set. At most one repair,
+            // then a fresh physical-state check before retrying the intended operation.
+            let repaired = self.repair_for_toggle(&before)?;
+            self.system
+                .apply(&repaired, enabled, repaired.battery_sleep)?;
+        }
         let actual = self.state()?;
         if actual.enabled != enabled {
             return Err(AppError::new("POWER", "电源状态再次变化，请重新操作"));
         }
         self.retire_legacy_record()?;
         Ok(actual)
+    }
+    fn repair_for_toggle(&self, before: &State) -> Result<State> {
+        self.system.prepare(true)?;
+        let prepared = self.state()?;
+        if before.supported != prepared.supported
+            || before.enabled != prepared.enabled
+            || before.battery_sleep != prepared.battery_sleep
+            || prepared.external_changed
+            || (before.helper == "ready" && before.ownership != prepared.ownership)
+        {
+            return Err(AppError::new(
+                "CONFLICT",
+                "修复期间电源状态已变化，请重新操作",
+            ));
+        }
+        if prepared.helper != "ready" {
+            return Err(AppError::new("POWER_HELPER", "修复后助手仍不可用"));
+        }
+        Ok(prepared)
     }
     fn retire_legacy_record(&self) -> Result<()> {
         match std::fs::remove_file(&self.path) {
@@ -185,14 +215,13 @@ impl System for Native {
         #[cfg(target_os = "macos")]
         {
             let mut state = parse(&output(&["-g"])?, &output(&["-g", "custom"])?)?;
-            state.helper = if state.supported {
-                crate::power_macos::status()
+            let (helper, response) = if state.supported {
+                crate::power_macos::probe()
             } else {
-                "unsupported"
-            }
-            .into();
-            if state.helper == "ready" {
-                let response = crate::power_macos::request(serde_json::json!({"op":"state"}))?;
+                ("unsupported", None)
+            };
+            state.helper = helper.into();
+            if let Some(response) = response {
                 let actual = &response["state"];
                 state.enabled = actual["enabled"]
                     .as_bool()
@@ -263,7 +292,11 @@ mod tests {
     }
     impl System for MockHelper {
         fn read(&self) -> Result<State> {
-            Ok(self.current.lock().unwrap().clone())
+            let mut state = self.current.lock().unwrap().clone();
+            if !self.ready.load(Ordering::SeqCst) && state.supported {
+                state.helper = "missing".into();
+            }
+            Ok(state)
         }
         fn prepare(&self, force: bool) -> Result<()> {
             self.prepares.fetch_add(1, Ordering::SeqCst);
@@ -384,7 +417,8 @@ mod tests {
 
     #[test]
     fn authorization_cancellation_preserves_state_and_legacy_record() {
-        let original = state(false, 3, "none", false);
+        let mut original = state(false, 3, "none", false);
+        original.helper = "missing".into();
         let (_dir, service, helper) = fixture(original.clone());
         helper.ready.store(false, Ordering::SeqCst);
         helper.cancelled.store(true, Ordering::SeqCst);
@@ -501,17 +535,23 @@ mod tests {
     }
 
     #[test]
-    fn ownership_changes_during_prepare_require_a_new_revision() {
+    fn ownership_changes_during_expired_authorization_repair_require_a_new_revision() {
         let original = state(true, 0, "application", false);
         let external = state(true, 0, "external", true);
         let (_dir, service, helper) = fixture(original.clone());
+        helper.reply(original.clone(), Some("POWER_AUTH"));
         *helper.after_prepare.lock().unwrap() = Some(external.clone());
         assert_eq!(
             service.set(false, &original.revision).unwrap_err().code,
             "CONFLICT"
         );
         assert_eq!(service.state().unwrap(), external);
-        assert!(helper.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            helper.calls.lock().unwrap().as_slice(),
+            &[(original, false, 0)]
+        );
+        assert_eq!(helper.prepares.load(Ordering::SeqCst), 1);
+        assert_eq!(helper.approvals.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -545,7 +585,7 @@ mod tests {
 
     #[test]
     fn removal_delegates_restoration_and_preserves_external_enabled_state() {
-        for (original, removed) in [
+        for (original, mut removed) in [
             (
                 state(true, 0, "application", false),
                 state(false, 7, "none", false),
@@ -561,6 +601,7 @@ mod tests {
                 state: removed.clone(),
                 error: None,
             });
+            removed.helper = "missing".into();
             assert_eq!(service.remove().unwrap(), removed);
             assert_eq!(helper.removals.load(Ordering::SeqCst), 1);
             assert!(helper.calls.lock().unwrap().is_empty());

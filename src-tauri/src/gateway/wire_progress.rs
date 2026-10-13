@@ -1,13 +1,82 @@
 //! Observe socket progress without changing bytes or treating control heartbeats as generation data.
 use std::{
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     task::{Context, Poll},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     time::Instant,
 };
+
+// Hyper stops polling reads during a response when half-close is allowed.
+// Share the existing read half so an error-only waiter can still see a reset;
+// it never consumes bytes or treats a read FIN as a cancelled response.
+pub struct Tcp {
+    read: Arc<tokio::net::tcp::OwnedReadHalf>,
+    write: tokio::net::tcp::OwnedWriteHalf,
+}
+pub fn observed_tcp(
+    socket: tokio::net::TcpStream,
+) -> (Tcp, impl std::future::Future<Output = std::io::Error>) {
+    let (read, write) = socket.into_split();
+    let read = Arc::new(read);
+    let monitor = read.clone();
+    let failed = async move {
+        if let Err(error) = monitor.ready(tokio::io::Interest::ERROR).await {
+            return error;
+        }
+        loop {
+            match monitor.as_ref().as_ref().take_error() {
+                Ok(Some(error)) | Err(error) => return error,
+                Ok(None) => {
+                    // Readiness may be spurious or another I/O poll may have
+                    // consumed the error. Do not cancel without socket evidence.
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+        }
+    };
+    (Tcp { read, write }, failed)
+}
+impl AsyncRead for Tcp {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let socket = self.read.as_ref().as_ref();
+        loop {
+            std::task::ready!(socket.poll_read_ready(cx))?;
+            match socket.try_read(buf.initialize_unfilled()) {
+                Ok(size) => {
+                    buf.advance(size);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+    }
+}
+impl AsyncWrite for Tcp {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.write).poll_write(cx, bytes)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.write).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.write).poll_shutdown(cx)
+    }
+}
 #[derive(Default)]
 struct ReadProgress {
     header: Vec<u8>,
@@ -65,6 +134,10 @@ pub struct Activity {
     write: Mutex<Instant>,
     websocket: std::sync::atomic::AtomicBool,
     io_error: std::sync::atomic::AtomicU8,
+    evidence: Mutex<crate::usage::model::ConnectionEvidence>,
+    sequence: std::sync::atomic::AtomicU64,
+    eof: std::sync::atomic::AtomicBool,
+    deliveries: Mutex<Vec<Weak<super::protocol::Delivery>>>,
 }
 impl Default for Activity {
     fn default() -> Self {
@@ -73,14 +146,78 @@ impl Default for Activity {
             write: Mutex::new(Instant::now()),
             websocket: Default::default(),
             io_error: Default::default(),
+            evidence: Mutex::new(crate::usage::model::ConnectionEvidence {
+                id: uuid::Uuid::new_v4().to_string(),
+                ..Default::default()
+            }),
+            sequence: Default::default(),
+            eof: Default::default(),
+            deliveries: Default::default(),
         }
     }
 }
 impl Activity {
+    pub fn track(&self, delivery: &Arc<super::protocol::Delivery>) {
+        let mut deliveries = self.deliveries.lock().unwrap();
+        deliveries.retain(|d| d.upgrade().is_some_and(|d| !d.is_settled()));
+        deliveries.push(Arc::downgrade(delivery));
+    }
+    fn flushed(&self) {
+        self.deliveries.lock().unwrap().retain(|delivery| {
+            let Some(delivery) = delivery.upgrade() else {
+                return false;
+            };
+            if delivery.is_settled() {
+                return false;
+            }
+            if delivery.finished.load(std::sync::atomic::Ordering::Acquire) {
+                self.event("socket_flush_complete");
+                delivery.settle();
+                return false;
+            }
+            true
+        });
+    }
+    pub fn connection_failed(&self, code: u8) {
+        for delivery in self
+            .deliveries
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|d| d.upgrade())
+        {
+            delivery.failed(code);
+        }
+    }
+    pub fn begin_request(&self) -> u64 {
+        let mut evidence = self.evidence.lock().unwrap();
+        evidence.request_sequence += 1;
+        evidence.request_sequence
+    }
+    pub fn snapshot(&self, request_sequence: u64) -> crate::usage::model::ConnectionEvidence {
+        let mut snapshot = self.evidence.lock().unwrap().clone();
+        snapshot.request_sequence = request_sequence;
+        snapshot
+    }
+    pub fn event(&self, kind: &str) {
+        let mut evidence = self.evidence.lock().unwrap();
+        let sequence = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if evidence.events.len() == 24 {
+            evidence.events.remove(0);
+        }
+        evidence.events.push(crate::usage::model::TransportEvent {
+            sequence,
+            at: crate::usage::model::now(),
+            kind: kind.into(),
+        });
+    }
     pub fn error_code(&self) -> u8 {
         self.io_error.load(std::sync::atomic::Ordering::Acquire)
     }
-    fn failed(&self, error: &std::io::Error, write: bool) {
+    pub fn failed(&self, error: &std::io::Error, write: bool) {
         let code = if matches!(
             error.kind(),
             std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
@@ -93,6 +230,14 @@ impl Activity {
         };
         self.io_error
             .store(code, std::sync::atomic::Ordering::Release);
+        self.event(if code == 6 {
+            "peer_reset"
+        } else if write {
+            "socket_write_failed"
+        } else {
+            "socket_read_failed"
+        });
+        self.connection_failed(code);
     }
 
     pub fn websocket(&self) {
@@ -126,6 +271,19 @@ impl<S: AsyncRead + Unpin> AsyncRead for Tracked<S> {
         if let Poll::Ready(Err(error)) = &result {
             self.activity.failed(error, false);
         }
+        if matches!(result, Poll::Ready(Ok(()))) {
+            let size = buf.filled().len() - before;
+            self.activity.evidence.lock().unwrap().read_bytes += size as u64;
+            if size == 0
+                && buf.remaining() > 0
+                && !self
+                    .activity
+                    .eof
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                self.activity.event("peer_read_eof");
+            }
+        }
         if matches!(result, Poll::Ready(Ok(())))
             && self
                 .activity
@@ -154,6 +312,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Tracked<S> {
         if let Poll::Ready(Ok(n)) = &result {
             if *n > 0 {
                 *self.activity.write.lock().unwrap() = Instant::now();
+                self.activity.evidence.lock().unwrap().socket_written_bytes += *n as u64;
             }
         }
         result
@@ -162,11 +321,17 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Tracked<S> {
         let result = Pin::new(&mut self.inner).poll_flush(cx);
         if let Poll::Ready(Err(error)) = &result {
             self.activity.failed(error, true);
+        } else if matches!(result, Poll::Ready(Ok(()))) {
+            self.activity.flushed();
         }
         result
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        let result = Pin::new(&mut self.inner).poll_shutdown(cx);
+        if matches!(result, Poll::Ready(_)) {
+            self.activity.event("socket_shutdown");
+        }
+        result
     }
 }
 pub async fn writing<F: std::future::Future>(

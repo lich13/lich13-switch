@@ -1,8 +1,9 @@
 //! Sub2API account exchange. Secrets stay in Rust and user-selected files.
 use super::{model, ClientId, Edit, Gateway, View};
+use crate::exchange_template::{self as template, Prepared};
 use crate::storage::{self, AppError, Result};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde::Serialize;
+use serde_json::Value;
 use std::{
     collections::HashSet,
     path::Path,
@@ -10,13 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_FILE: u64 = 8 * 1024 * 1024;
 #[derive(Default)]
 pub struct Service {
     pending: Mutex<Option<Pending>>,
+    templates: template::Service,
 }
 impl Service {
     pub(super) fn prune(&self) {
+        self.templates.prune();
         let mut pending = self.pending.lock().unwrap();
         if pending
             .as_ref()
@@ -47,66 +49,14 @@ pub struct Preview {
     pub revision: String,
     pub rows: Vec<Row>,
     pub unsupported_proxies: usize,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Template {
-    version: u32,
-    priority: u32,
-    rate_multiplier: f64,
-    auto_pause_on_expired: bool,
-}
-impl Default for Template {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            priority: 50,
-            rate_multiplier: 1.0,
-            auto_pause_on_expired: true,
-        }
-    }
+    pub template: Option<Prepared>,
 }
 fn invalid(message: &str) -> AppError {
     AppError::new("SUB2API_FILE", message)
 }
 fn read(path: &Path) -> Result<Value> {
-    if std::fs::metadata(path)
-        .map_err(|_| invalid("文件无法读取"))?
-        .len()
-        > MAX_FILE
-    {
-        return Err(invalid("文件超过 8 MiB"));
-    }
-    let raw = std::fs::read_to_string(path).map_err(|_| invalid("文件不是有效的 UTF-8 JSON"))?;
-    parse(&raw)
-}
-fn parse(raw: &str) -> Result<Value> {
-    if raw.len() > MAX_FILE as usize {
-        return Err(invalid("文件超过 8 MiB"));
-    }
-    let mut value = crate::configuration::parse_object(raw)?;
-    if value.get("accounts").is_none() && value.get("data").is_some_and(Value::is_object) {
-        value = value["data"].take();
-    }
-    if value
-        .get("type")
-        .is_some_and(|v| !matches!(v.as_str(), Some("sub2api-data" | "sub2api-bundle")))
-        || value
-            .get("version")
-            .is_some_and(|v| !matches!(v.as_u64(), Some(0 | 1)))
-    {
-        return Err(invalid("Sub2API 文件版本不支持"));
-    }
-    if !value
-        .get("accounts")
-        .and_then(Value::as_array)
-        .is_some_and(|a| !a.is_empty() && a.len() <= 1000)
-        || value.get("proxies").is_some_and(|v| !v.is_array())
-    {
-        return Err(invalid(
-            "请选择含 accounts 的 Sub2API 导出文件（最多 1000 项）",
-        ));
-    }
+    let value = template::read(path)?;
+    template::validate(&value)?;
     Ok(value)
 }
 fn platform(client: ClientId) -> &'static str {
@@ -168,51 +118,42 @@ impl Gateway {
         self.0.data.join("sub2api-template.json")
     }
     pub fn exchange_has_template(&self) -> bool {
-        self.template_path().is_file()
+        template::Service::load(&self.template_path(), platform(self.0.client), "apikey").is_ok()
     }
-    pub fn exchange_template(&self, path: &Path) -> Result<()> {
-        let value = read(path)?;
-        self.save_exchange_template(&value)
-    }
-    fn save_exchange_template(&self, value: &Value) -> Result<()> {
-        let account = value["accounts"]
-            .as_array()
-            .and_then(|a| {
-                a.iter()
-                    .find(|v| provider(v, self.0.client, self.view().settings.port).is_ok())
-            })
-            .ok_or_else(|| invalid("模板没有当前客户端的 API Key 格式"))?;
-        // Validate the schema, but never persist account names, URLs, keys,
-        // mappings, proxy data, error rules or provider-specific flags.
-        provider(account, self.0.client, self.view().settings.port)?;
-        let mut template = Template::default();
-        if let Some(v) = account.get("priority") {
-            template.priority = v
-                .as_u64()
-                .filter(|n| *n <= u32::MAX as u64)
-                .ok_or_else(|| invalid("模板优先级无效"))? as u32;
-        }
-        if let Some(v) = account.get("rate_multiplier").filter(|v| !v.is_null()) {
-            template.rate_multiplier = v
-                .as_f64()
-                .filter(|n| n.is_finite() && *n >= 0.0 && *n <= 100000.0)
-                .ok_or_else(|| invalid("模板倍率无效"))?;
-        }
-        if let Some(v) = account.get("auto_pause_on_expired") {
-            template.auto_pause_on_expired =
-                v.as_bool().ok_or_else(|| invalid("模板到期设置无效"))?;
-        }
-        storage::atomic_write(
+    pub fn exchange_template(&self, path: &Path) -> Result<Prepared> {
+        self.0.exchange.templates.prepare(
+            read(path)?,
             &self.template_path(),
-            &serde_json::to_vec(&template).map_err(|_| invalid("模板无法保存"))?,
-            None,
+            platform(self.0.client),
+            "apikey",
+        )
+    }
+    pub fn exchange_select_template(&self, token: &str, id: usize) -> Result<()> {
+        self.0.exchange.templates.select(
+            token,
+            id,
+            &self.template_path(),
+            platform(self.0.client),
+            "apikey",
         )
     }
     pub fn exchange_preview(&self, path: &Path) -> Result<Preview> {
         let value = read(path)?;
-        if !self.exchange_has_template() {
-            self.save_exchange_template(&value)?;
-        }
+        let prepared = if !self.exchange_has_template() {
+            self.0
+                .exchange
+                .templates
+                .prepare(
+                    value.clone(),
+                    &self.template_path(),
+                    platform(self.0.client),
+                    "apikey",
+                )
+                .ok()
+        } else {
+            None
+        };
+        let value = template::payload(&value);
         let state = self.0.inner.lock().unwrap();
         let mut seen: HashSet<_> = state
             .store
@@ -271,6 +212,7 @@ impl Gateway {
             token,
             revision,
             rows,
+            template: prepared,
             unsupported_proxies: value
                 .get("proxies")
                 .and_then(Value::as_array)
@@ -278,6 +220,7 @@ impl Gateway {
         })
     }
     pub fn exchange_cancel(&self, token: &str) {
+        self.0.exchange.templates.cancel(token);
         let mut pending = self.0.exchange.pending.lock().unwrap();
         if pending.as_ref().is_some_and(|p| p.token == token) {
             pending.take();
@@ -317,13 +260,9 @@ impl Gateway {
         Ok(view)
     }
     pub fn exchange_export(&self, ids: &[String], expected: &str, path: &Path) -> Result<()> {
-        let raw = storage::read_optional(&self.template_path())?
-            .ok_or_else(|| invalid("请先选择 Sub2API 模板"))?;
-        let template: Template =
-            serde_json::from_slice(&raw).map_err(|_| invalid("模板无效，请重新选择"))?;
-        if template.version != 1 {
-            return Err(invalid("模板版本不支持"));
-        }
+        let mut document =
+            template::Service::load(&self.template_path(), platform(self.0.client), "apikey")?;
+        let prototype = template::payload(&document)["accounts"][0].clone();
         let state = self.0.inner.lock().unwrap();
         if self.view_revision(&state) != expected {
             return Err(AppError::new(
@@ -335,18 +274,28 @@ impl Gateway {
         if ids.is_empty() {
             return Err(invalid("请至少选择一项"));
         }
-        let accounts = ids.iter().map(|id| {
-            if !seen.insert(id) { return Err(invalid("选择项重复")); }
-            let p = state.store.providers.iter().find(|p| &p.id == id).ok_or_else(|| invalid("供应商已删除"))?;
-            Ok(json!({"name":p.name,"platform":platform(self.0.client),"type":"apikey",
-                "credentials":{"api_key":p.token,"base_url":model::base_url(&p.base_url,state.store.settings.port)?.as_str().trim_end_matches('/')},
-                "extra":{},"concurrency":p.max_concurrency,"priority":template.priority,
-                "rate_multiplier":template.rate_multiplier,"auto_pause_on_expired":template.auto_pause_on_expired}))
-        }).collect::<Result<Vec<_>>>()?;
-        let content = serde_json::to_vec_pretty(&json!({"type":"sub2api-data","version":1,
-            "exported_at":chrono::Utc::now().to_rfc3339(),"proxies":[],"accounts":accounts}))
-        .map_err(|_| invalid("导出无法生成"))?;
+        let accounts = ids
+            .iter()
+            .map(|id| {
+                if !seen.insert(id) {
+                    return Err(invalid("选择项重复"));
+                }
+                let p = state
+                    .store
+                    .providers
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .ok_or_else(|| invalid("供应商已删除"))?;
+                let mut account = prototype.clone();
+                account["name"] = Value::String(p.name.clone());
+                account["credentials"]["base_url"] = Value::String(p.base_url.clone());
+                account["credentials"]["api_key"] = Value::String(p.token.clone());
+                Ok(account)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        template::payload_mut(&mut document)["accounts"] = Value::Array(accounts);
+        let content = serde_json::to_vec_pretty(&document).map_err(|_| invalid("导出无法生成"))?;
         drop(state);
-        storage::atomic_write(path, &content, None)
+        storage::atomic_write_bounded(path, &content, None, crate::core::exchange::VAULT_LIMIT)
     }
 }

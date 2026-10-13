@@ -34,6 +34,13 @@ export type Attempt = {
     endedAt: number;
     upstreamBytes: number;
     downstreamBytes: number;
+    connection?: {
+      id: string;
+      requestSequence: number;
+      readBytes: number;
+      socketWrittenBytes: number;
+      events: { sequence: number; at: number; kind: string }[];
+    } | null;
     terminalHandedOff: boolean;
     upstreamEof: boolean;
     upstreamEnd?: string | null;

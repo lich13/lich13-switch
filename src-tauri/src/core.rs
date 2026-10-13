@@ -8,6 +8,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "account_exchange.rs"]
+pub mod exchange;
+
+#[cfg(test)]
+#[path = "account_exchange_tests.rs"]
+mod account_exchange_tests;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
@@ -37,6 +44,8 @@ struct Profile {
     email: Option<String>,
     auth: String,
     updated_at: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    exchange: BTreeMap<String, exchange::Source>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +180,7 @@ pub struct Core {
     store: Store,
     auth_sync: Option<AuthSync>,
     checked_auth: Option<(String, String)>,
+    exchange: exchange::Service,
 }
 struct AuthInfo {
     identity: String,
@@ -445,7 +455,7 @@ impl Core {
     pub fn new(data_dir: PathBuf, default_home: PathBuf) -> Result<Self> {
         storage::private_dir(&data_dir)?;
         let path = data_dir.join("accounts.json");
-        let store = match storage::read_optional(&path)? {
+        let store = match storage::read_bounded(&path, exchange::VAULT_LIMIT)? {
             Some(bytes) => serde_json::from_slice::<Store>(&bytes)
                 .map_err(|_| AppError::new("STORE", "账号库无法读取，原文件已保留"))?,
             None => Store {
@@ -475,6 +485,7 @@ impl Core {
             store,
             auth_sync: None,
             checked_auth: None,
+            exchange: exchange::Service::default(),
         };
         if core.store.auth_sync_version == 0 {
             core.store.observed_auth_revisions.clear();
@@ -488,7 +499,12 @@ impl Core {
     fn persist(&self) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(&self.store)
             .map_err(|_| AppError::new("STORE", "无法保存账号库"))?;
-        storage::atomic_write(&self.data_dir.join("accounts.json"), &bytes, None)
+        storage::atomic_write_bounded(
+            &self.data_dir.join("accounts.json"),
+            &bytes,
+            None,
+            exchange::VAULT_LIMIT,
+        )
     }
     pub fn home(&self) -> PathBuf {
         PathBuf::from(&self.store.preferences.codex_home)
@@ -545,6 +561,7 @@ impl Core {
                 email: info.email,
                 auth: raw.into(),
                 updated_at: now(),
+                exchange: BTreeMap::new(),
             });
             id
         };
@@ -894,6 +911,7 @@ impl Core {
                         email: info.email.clone(),
                         auth: raw.into(),
                         updated_at: now(),
+                        exchange: BTreeMap::new(),
                     });
                     ("added", Some(id), "新账号已自动加入切换列表")
                 };

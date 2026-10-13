@@ -273,6 +273,7 @@ export async function run(
     [
       "preview_sub2api_import",
       "prepare_sub2api_export",
+      "select_sub2api_template",
       "export_sub2api_providers",
       "cancel_sub2api_import",
       "commit_sub2api_import",
@@ -302,6 +303,24 @@ export async function run(
     return result;
   }
   switch (name) {
+    case "preview_account_import":
+      return { token: "preview-official-import", revision: "preview-accounts", rows: [
+        { id: 0, name: "开发账号", format: "sub2api", identityHint: "93bd723015aa", duplicate: false, error: null },
+        { id: 1, name: "工作空间", format: "cliproxyapi", identityHint: "781e2dca0364", duplicate: true, error: null },
+        { id: 2, name: "第 3 项", format: "codex", identityHint: null, duplicate: false, error: "缺少完整的 id_token、access_token 或 refresh_token；不会生成替代 Token" },
+      ] };
+    case "commit_account_import":
+      if (!demo.accounts.some(a => a.id === "fixture-imported-official")) demo.accounts.push({ id: "fixture-imported-official", name: "开发账号", kind: "chatgpt", email: null, current: false, updatedAt: 0 });
+      break;
+    case "preview_account_export":
+      return { revision: "preview-accounts", rows: demo.accounts.map(a => ({ id: a.id, name: a.name, error: a.kind === "chatgpt" ? null : "仅支持 ChatGPT/Codex 官方 OAuth 账号" })) };
+    case "prepare_account_template":
+      return args.replaceTemplate ? { ready: false, token: "preview-oauth-template", rows: [{ id: 0, name: "标准 OAuth" }, { id: 1, name: "自定义并发 OAuth" }] } : { ready: true, token: null, rows: [] };
+    case "cancel_account_exchange":
+    case "select_account_template":
+      return;
+    case "export_accounts":
+      return true;
     case "notification_permission":
       return { permission: "granted", error: null, delivery: "idle" };
     case "test_notification":

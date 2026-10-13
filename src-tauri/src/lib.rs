@@ -4,6 +4,9 @@ mod commands;
 mod configuration;
 mod core;
 mod events;
+mod exchange_template;
+#[cfg(test)]
+mod exchange_template_tests;
 mod gateway;
 mod links;
 mod login;
@@ -1204,13 +1207,19 @@ pub fn run() {
         .position(|s| s == "--smoke-test")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+    let builder = tauri::Builder::default();
+    let builder = if smoke.is_none() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
             links::receive(app, args.iter().cloned());
             if !args.iter().any(|a| startup::is_login_argument(a)) {
                 let _ = show(app, None);
             }
         }))
+    } else {
+        // Smoke runs own a temporary data directory and must not notify the live app.
+        builder
+    };
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(move |app| {
@@ -1595,7 +1604,15 @@ pub fn run() {
             commands::commit_sub2api_import,
             commands::cancel_sub2api_import,
             commands::prepare_sub2api_export,
+            commands::select_sub2api_template,
             commands::export_sub2api_providers,
+            commands::preview_account_import,
+            commands::commit_account_import,
+            commands::cancel_account_exchange,
+            commands::preview_account_export,
+            commands::prepare_account_template,
+            commands::select_account_template,
+            commands::export_accounts,
             start_gateway,
             stop_gateway,
             query_provider_quota,

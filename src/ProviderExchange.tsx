@@ -3,11 +3,13 @@ import { Download, Upload, RefreshCw } from "lucide-react";
 import Modal from "./Modal";
 import { command } from "./bridge";
 import { errorOf, type ClientId, type GatewayState } from "./types";
+import TemplateChoice, { type PreparedTemplate } from "./TemplateChoice";
 
 type Preview = {
   token: string;
   revision: string;
   unsupportedProxies: number;
+  template?: PreparedTemplate | null;
   rows: {
     id: number;
     name: string;
@@ -39,6 +41,8 @@ export default function ProviderExchange({
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [template, setTemplate] = useState<PreparedTemplate | null>(null);
+  const templateToken = useRef<string | null>(null);
   const token = useRef<string | null>(null);
   const started = useRef(false);
   const mounted = useRef(true);
@@ -51,6 +55,8 @@ export default function ProviderExchange({
           clientId,
         });
         if (!mounted.current) {
+          if (next?.template?.token)
+            void command("cancel_sub2api_import", { clientId, token: next.template.token });
           if (next)
             void command("cancel_sub2api_import", {
               clientId,
@@ -65,14 +71,22 @@ export default function ProviderExchange({
           setSelected(
             next.rows.filter((r) => !r.error).map((r) => String(r.id)),
           );
-          setReady(true);
+          setTemplate(next.template ?? null);
+          templateToken.current = next.template?.token ?? null;
+          setReady(!next.template?.token);
         }
       } else {
-        const ok = await command<boolean>("prepare_sub2api_export", {
+        const ok = await command<PreparedTemplate | null>("prepare_sub2api_export", {
           clientId,
         });
+        if (!mounted.current && ok?.token) {
+          void command("cancel_sub2api_import", { clientId, token: ok.token });
+          return;
+        }
         if (mounted.current && ok) {
-          setReady(true);
+          setTemplate(ok);
+          templateToken.current = ok.token;
+          setReady(ok.ready);
           setSelected(state.providers.map((p) => p.id));
         }
       }
@@ -95,6 +109,8 @@ export default function ProviderExchange({
           clientId,
           token: token.current,
         });
+      if (templateToken.current)
+        void command("cancel_sub2api_import", { clientId, token: templateToken.current });
       onDirtyChange?.(false);
     };
   }, []);
@@ -173,6 +189,13 @@ export default function ProviderExchange({
           {preview?.unsupportedProxies} 条代理记录不支持导入
         </div>
       )}
+      {template?.token && <TemplateChoice key={template.token} template={template} busy={busy} select={id => {
+        setBusy(true);
+        setError("");
+        void command("select_sub2api_template", { clientId, token: template.token, id })
+          .then(() => { templateToken.current = null; setTemplate(null); setReady(true); })
+          .catch(e => setError(errorOf(e).message)).finally(() => setBusy(false));
+      }} />}
       {ready && (
         <>
           <label className="exchange-select-all">
@@ -219,7 +242,7 @@ export default function ProviderExchange({
           </div>
         </>
       )}
-      <div className="form-actions">
+      <div className="form-actions exchange-actions">
         {mode === "import" || !ready ? (
           <button disabled={busy} onClick={() => void choose()}>
             <RefreshCw size={14} />
@@ -230,10 +253,14 @@ export default function ProviderExchange({
             disabled={busy}
             onClick={() => {
               setBusy(true);
-              void command("prepare_sub2api_export", {
+              void command<PreparedTemplate | null>("prepare_sub2api_export", {
                 clientId,
                 replaceTemplate: true,
               })
+                .then(next => {
+                  if (!mounted.current) { if (next?.token) void command("cancel_sub2api_import", { clientId, token: next.token }); return; }
+                  if (next) { setTemplate(next); templateToken.current = next.token; setReady(next.ready); }
+                })
                 .catch((e) => setError(errorOf(e).message))
                 .finally(() => setBusy(false));
             }}
