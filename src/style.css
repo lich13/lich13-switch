@@ -2775,6 +2775,20 @@ select:focus-visible {
   margin-left: 6px;
   font-size: 11px;
 }
+.event-category {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font: 11px system-ui, sans-serif;
+  white-space: nowrap;
+}
+.event-category.circuit_error {
+  color: var(--danger, #e46b72);
+  border-color: currentColor;
+}
 .event-empty {
   padding: 60px 20px;
   text-align: center;

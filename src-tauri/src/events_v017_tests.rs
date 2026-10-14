@@ -1,6 +1,6 @@
 use super::delivery::{key, Gate};
 use crate::{
-    events::{Action, Reason, Record},
+    events::{Action, HealthScope, Reason, Record},
     gateway::ClientId,
 };
 use std::time::{Duration, Instant};
@@ -18,8 +18,25 @@ fn event(reason: Reason, action: Action) -> Record {
 }
 
 #[test]
-fn model_unavailable_remains_notifiable_while_transport_reconnects_stay_quiet() {
-    for action in [
+fn only_circuit_open_and_thread_handoff_reasons_are_notifiable() {
+    let reasons = [
+        Reason::ModelUnavailable,
+        Reason::Authentication,
+        Reason::UpstreamService,
+        Reason::Network,
+        Reason::RateLimit,
+        Reason::Capacity,
+        Reason::FailoverExhausted,
+        Reason::Failover,
+        Reason::CircuitOpen,
+        Reason::Recovered,
+        Reason::ConfigConflict,
+        Reason::StartupRecovery,
+        Reason::AccountSync,
+        Reason::ProtocolError,
+        Reason::ThreadHandoff,
+    ];
+    let actions = [
         Action::TryingNext,
         Action::Returned,
         Action::Waiting,
@@ -27,46 +44,35 @@ fn model_unavailable_remains_notifiable_while_transport_reconnects_stay_quiet() 
         Action::Recovered,
         Action::Routed,
         Action::Reconnecting,
+        Action::RetryingSame,
         Action::NotRetried,
-    ] {
-        assert!(
-            Reason::ModelUnavailable.notifiable(action),
-            "model unavailable {action:?}"
-        );
-    }
-    for reason in [
-        Reason::Network,
-        Reason::UpstreamService,
-        Reason::ProtocolError,
-        Reason::Capacity,
-        Reason::RateLimit,
-    ] {
-        for action in [
-            Action::TryingNext,
-            Action::Waiting,
-            Action::Reconnecting,
-            Action::Routed,
-        ] {
-            assert!(
-                !reason.notifiable(action),
-                "intermediate {reason:?} {action:?}"
-            );
-        }
-        for action in [Action::Returned, Action::NotRetried] {
-            assert!(reason.notifiable(action), "terminal {reason:?} {action:?}");
+    ];
+    for reason in reasons {
+        let expected = matches!(reason, Reason::CircuitOpen | Reason::ThreadHandoff);
+        for action in actions {
+            assert_eq!(reason.notifiable(action), expected, "{reason:?} {action:?}");
         }
     }
-    assert!(!Reason::Recovered.notifiable(Action::Recovered));
-    assert!(!Reason::Failover.notifiable(Action::Routed));
 }
 
 #[test]
-fn circuit_and_terminal_failure_notifications_share_one_accepted_delivery_window() {
+fn circuit_notifications_follow_health_scope_and_accepted_delivery_window() {
     let now = Instant::now();
     let mut gate = Gate::default();
-    let circuit = event(Reason::CircuitOpen, Action::Stopped);
+    let mut circuit = event(Reason::CircuitOpen, Action::Stopped);
+    circuit.details.health_scope = Some(HealthScope::Provider);
     let accepted = key(&circuit);
     assert!(gate.begin(&accepted, now));
+    gate.finish(&accepted, true, now);
+
+    let mut same_provider = circuit.clone();
+    same_provider.model = Some("fixture-other-model".into());
+    assert_eq!(key(&same_provider), accepted);
+
+    let mut model_scoped = circuit.clone();
+    model_scoped.details.health_scope = Some(HealthScope::Model);
+    assert_ne!(key(&model_scoped), accepted);
+
     for reason in [
         Reason::FailoverExhausted,
         Reason::Network,
@@ -79,18 +85,13 @@ fn circuit_and_terminal_failure_notifications_share_one_accepted_delivery_window
         terminal.status = Some(429);
         terminal.attempt = Some(8);
         terminal.details.upstream_code = Some("fixture-terminal".into());
-        assert_eq!(key(&terminal), accepted);
-        assert!(!gate.begin(&key(&terminal), now));
+        let terminal_key = key(&terminal);
+        assert_ne!(terminal_key, accepted);
+        assert!(gate.begin(&terminal_key, now + Duration::from_secs(299)));
+        gate.finish(&terminal_key, true, now + Duration::from_secs(299));
     }
-    gate.finish(&accepted, true, now);
-    assert!(!gate.begin(
-        &key(&event(Reason::Network, Action::NotRetried)),
-        now + Duration::from_secs(299)
-    ));
-    assert!(gate.begin(
-        &key(&event(Reason::FailoverExhausted, Action::Returned)),
-        now + Duration::from_secs(300)
-    ));
+    assert!(!gate.begin(&key(&same_provider), now + Duration::from_secs(299)));
+    assert!(gate.begin(&key(&same_provider), now + Duration::from_secs(300)));
 }
 
 #[test]

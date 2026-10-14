@@ -96,7 +96,7 @@ pub async fn get_app_events(
         .map_err(|_| AppError::new("LOG_READ", "日志读取失败"))
 }
 #[tauri::command]
-pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::Record> {
+pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::ClassifiedRecord> {
     r.diagnostics.detail(&id)
 }
 #[tauri::command]

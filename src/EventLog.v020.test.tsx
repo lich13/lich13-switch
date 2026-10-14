@@ -35,6 +35,49 @@ const baseRecord: EventRecord = {
 };
 
 let eventRecords: EventRecord[];
+type CircuitReason = NonNullable<
+  NonNullable<EventRecord["details"]>["circuit"]
+>["causeReason"];
+
+function circuitRecord({
+  causeReason,
+  retryAt,
+  waitSeconds,
+  status = 502,
+}: {
+  causeReason?: CircuitReason;
+  retryAt?: number;
+  waitSeconds?: number;
+  status?: number | null;
+} = {}): EventRecord {
+  return {
+    ...baseRecord,
+    id: "fixture-circuit-event",
+    firstAt: 1_760_000_030,
+    lastAt: 1_760_000_030,
+    reason: "circuit_open",
+    action: "stopped",
+    level: "error",
+    status,
+    errorCode: "CIRCUIT_OPEN",
+    category: "circuit_error",
+    details: {
+      healthScope: "provider",
+      waitSeconds,
+      circuit: {
+        causeReason,
+        retryAt,
+        failures: 3,
+        failureThreshold: 3,
+        failedRequests: 3,
+        requests: 3,
+        errorRate: 1,
+        minRequests: 1,
+        trigger: "consecutive_failures",
+      },
+    },
+  };
+}
 
 beforeEach(() => {
   mock.command.mockReset();
@@ -98,12 +141,19 @@ it("keeps HTTP status and WebSocket close code as separate detail values", async
   eventRecords = [
     {
       ...baseRecord,
+      reason: "circuit_open",
+      errorCode: "CIRCUIT_OPEN",
+      category: "circuit_error",
       details: {
+        healthScope: "provider",
         upstreamCode: "overloaded_error",
         localCode: "UPSTREAM_RESPONSE_ERROR",
         message: "上游暂时不可用",
         wsCloseCode: 1006,
+        waitSeconds: 45,
         circuit: {
+          causeReason: "upstream_service",
+          retryAt: 1_760_000_075,
           failures: 6,
           failureThreshold: 6,
           failedRequests: 6,
@@ -119,13 +169,14 @@ it("keeps HTTP status and WebSocket close code as separate detail values", async
   render(<EventLog />);
 
   await user.click(
-    (await screen.findByText("overloaded_error · 上游暂时不可用")).closest("button")!,
+    await screen.findByRole("button", { name: "供应商熔断" }),
   );
-  const dialog = await screen.findByRole("dialog", { name: "上游服务异常" });
+  const dialog = await screen.findByRole("dialog", { name: "供应商熔断" });
   expect(within(dialog).getByText("HTTP 502 · WS 1006", { exact: true })).toBeInTheDocument();
   expect(within(dialog).getByText("上游错误码").nextElementSibling).toHaveTextContent("overloaded_error");
   expect(within(dialog).getByText("本地分类").nextElementSibling).toHaveTextContent("UPSTREAM_RESPONSE_ERROR");
-  expect(within(dialog).getByText("触发条件").nextElementSibling).toHaveTextContent("5xx 连续失败达到阈值");
+  expect(within(dialog).getByText("影响范围").nextElementSibling).toHaveTextContent("整个供应商");
+  expect(within(dialog).getByText("触发条件").nextElementSibling).toHaveTextContent("连续失败 6/6");
 });
 
 it("renders the original-provider retry action in Chinese", async () => {
@@ -140,4 +191,72 @@ it("renders the original-provider retry action in Chinese", async () => {
   render(<EventLog />);
 
   expect(await screen.findByText("未计入熔断，原供应商等待重试", { exact: true })).toBeInTheDocument();
+});
+
+it("shows recorded circuit cause and deadline evidence in the detail drawer", async () => {
+  const retryAt = 1_760_000_090;
+  eventRecords = [
+    circuitRecord({
+      causeReason: "upstream_service",
+      retryAt,
+      waitSeconds: 60,
+    }),
+  ];
+  const user = userEvent.setup();
+  render(<EventLog />);
+
+  await user.click(
+    await screen.findByRole("button", { name: "供应商熔断" }),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "供应商熔断" });
+
+  expect(within(dialog).getByText("类别").nextElementSibling).toHaveTextContent(
+    "熔断错误",
+  );
+  expect(
+    within(dialog).getByText("熔断原因").nextElementSibling,
+  ).toHaveTextContent("HTTP 502");
+  expect(
+    within(dialog).getByText("熔断原因").nextElementSibling,
+  ).toHaveTextContent("上游服务异常");
+  expect(
+    within(dialog).getByText("触发条件").nextElementSibling,
+  ).toHaveTextContent("连续失败 3/3");
+  expect(
+    within(dialog).getByText("发生时等待").nextElementSibling,
+  ).toHaveTextContent("60 秒");
+
+  const expectedTime = new Date(retryAt * 1000).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  expect(
+    within(dialog).getByText("预计探测时间").nextElementSibling,
+  ).toHaveTextContent(expectedTime);
+});
+
+it("marks missing circuit cause and retry evidence unrecorded instead of trusting old waitSeconds", async () => {
+  eventRecords = [circuitRecord({ waitSeconds: 5, status: null })];
+  const user = userEvent.setup();
+  render(<EventLog />);
+
+  await user.click(
+    await screen.findByRole("button", { name: "供应商熔断" }),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "供应商熔断" });
+
+  expect(
+    within(dialog).getByText("熔断原因").nextElementSibling,
+  ).toHaveTextContent("原因未记录");
+  expect(
+    within(dialog).getByText("发生时等待").nextElementSibling,
+  ).toHaveTextContent("未记录");
+  expect(
+    within(dialog).getByText("预计探测时间").nextElementSibling,
+  ).toHaveTextContent("未记录");
+  expect(dialog).not.toHaveTextContent("5 秒");
 });

@@ -44,6 +44,9 @@ fn handoff_events(service: &events::Service) -> Vec<events::Record> {
             ..Default::default()
         })
         .items
+        .into_iter()
+        .map(|classified| classified.record)
+        .collect()
 }
 
 async fn wait_for_handoff(

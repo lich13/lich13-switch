@@ -48,6 +48,11 @@ pub struct Details {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CircuitEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause_reason: Option<super::Reason>,
+    /// Earliest permitted probe time, in Unix seconds; absent in old journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<u64>,
     pub failures: u32,
     pub failure_threshold: u32,
     pub failed_requests: u32,
@@ -226,6 +231,7 @@ impl Details {
             .and_then(|v| uuid::Uuid::parse_str(&v).ok().map(|id| id.to_string()));
         self.ws_close_code = self.ws_close_code.filter(|v| (1000..=4999).contains(v));
         if let Some(c) = &mut self.circuit {
+            c.retry_at = c.retry_at.filter(|v| (1..=253_402_300_799).contains(v));
             if ![
                 "consecutive_failures",
                 "transient_failures",

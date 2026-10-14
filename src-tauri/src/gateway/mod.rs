@@ -228,7 +228,12 @@ impl Gateway {
                 .collect()
         };
         for circuit in circuits {
-            if let Some(event) = circuit.take_open_event() {
+            if let Some(mut event) = circuit.take_open_event() {
+                event.notification_provider = view
+                    .providers
+                    .iter()
+                    .find(|p| Some(&p.id) == event.provider_id.as_ref())
+                    .and_then(|p| crate::events::safe_message(&p.name));
                 if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
                     events.emit(event);
                 }
@@ -504,6 +509,14 @@ impl Gateway {
     }
     pub fn subscribe(&self) -> broadcast::Receiver<()> {
         self.0.events.subscribe()
+    }
+    pub fn has_health_wait(&self) -> bool {
+        let state = self.0.inner.lock().unwrap();
+        state.circuits.values().any(|c| c.health().retry_in > 0)
+            || state
+                .model_circuits
+                .values()
+                .any(|models| models.circuits().iter().any(|c| c.health().retry_in > 0))
     }
     fn changed(&self) {
         let _ = self.0.events.send(());

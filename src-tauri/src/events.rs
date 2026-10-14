@@ -8,7 +8,7 @@ use crate::{
 pub use details::{safe_message, CircuitEvidence, Details, HealthScope, Phase};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::Path,
     sync::{mpsc, Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -43,24 +43,8 @@ pub enum Reason {
     ThreadHandoff,
 }
 impl Reason {
-    pub fn notifiable(self, action: Action) -> bool {
-        match self {
-            Self::ThreadHandoff
-            | Self::ModelUnavailable
-            | Self::Authentication
-            | Self::CircuitOpen
-            | Self::FailoverExhausted
-            | Self::ConfigConflict
-            | Self::StartupRecovery
-            | Self::AccountSync => true,
-            Self::Network | Self::UpstreamService | Self::ProtocolError => {
-                matches!(action, Action::Returned | Action::NotRetried)
-            }
-            Self::RateLimit | Self::Capacity => {
-                matches!(action, Action::Returned | Action::NotRetried)
-            }
-            Self::Recovered | Self::Failover => false,
-        }
+    pub fn notifiable(self, _action: Action) -> bool {
+        matches!(self, Self::CircuitOpen | Self::ThreadHandoff)
     }
     pub fn text(self) -> &'static str {
         match self {
@@ -155,6 +139,27 @@ pub enum Level {
     Error,
     Info,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Category {
+    OrdinaryError,
+    CircuitError,
+    Status,
+}
+/// Query-only classification. Persisted records keep their original schema.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifiedRecord {
+    #[serde(flatten)]
+    pub record: Record,
+    pub category: Category,
+}
+impl std::ops::Deref for ClassifiedRecord {
+    type Target = Record;
+    fn deref(&self) -> &Record {
+        &self.record
+    }
+}
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusGroup {
@@ -178,6 +183,8 @@ impl StatusGroup {
 pub struct Record {
     #[serde(skip)]
     pub notification_message: Option<String>,
+    #[serde(skip)]
+    pub notification_provider: Option<String>,
     pub id: String,
     pub first_at: u64,
     pub last_at: u64,
@@ -210,6 +217,7 @@ impl Record {
         let t = now();
         Self {
             notification_message: None,
+            notification_provider: None,
             id: uuid::Uuid::new_v4().to_string(),
             first_at: t,
             last_at: t,
@@ -240,6 +248,84 @@ impl Record {
         }
     }
     pub fn notification(&self) -> String {
+        self.notification_at(now())
+    }
+    fn notification_at(&self, timestamp: u64) -> String {
+        if self.reason == Reason::CircuitOpen {
+            let provider = self
+                .notification_provider
+                .as_deref()
+                .filter(|s| s.chars().count() <= 120)
+                .and_then(safe_message)
+                .filter(|s| !s.contains("[已隐去]"))
+                .unwrap_or_else(|| {
+                    format!(
+                        "供应商 {}",
+                        self.provider_id
+                            .as_deref()
+                            .map(|s| &s[..s.len().min(8)])
+                            .unwrap_or("未记录")
+                    )
+                });
+            let scope = match self.details.health_scope {
+                Some(HealthScope::Model) => format!(
+                    "模型熔断 · {}",
+                    self.model.as_deref().unwrap_or("模型未记录")
+                ),
+                Some(HealthScope::Provider) => "供应商熔断 · 全部模型".into(),
+                _ => "熔断 · 影响范围未记录".into(),
+            };
+            let evidence = self.details.circuit.as_ref();
+            let cause = self
+                .details
+                .upstream_code
+                .as_deref()
+                .or(self.details.local_code.as_deref());
+            let mut direct = Vec::new();
+            if let Some(status) = self.status {
+                direct.push(format!("HTTP {status}"));
+            }
+            if let Some(code) = cause {
+                direct.push(code.to_owned());
+            }
+            if let Some(message) = self.details.message.as_deref().and_then(safe_message) {
+                direct.push(message.chars().take(120).collect());
+            } else if let Some(reason) = evidence.and_then(|c| c.cause_reason) {
+                direct.push(reason.text().into());
+            }
+            if direct.is_empty() {
+                direct.push("原因未记录".into());
+            }
+            let trigger = evidence
+                .map(|c| match c.trigger.as_str() {
+                    "consecutive_failures" | "transient_failures" => {
+                        format!("连续失败 {}/{}", c.failures, c.failure_threshold)
+                    }
+                    "probe_failed" => "恢复探测失败".into(),
+                    "error_rate" => format!(
+                        "错误率 {:.0}% ≥ {:.0}%（{}/{}，至少 {} 次）",
+                        f64::from(c.failed_requests) / f64::from(c.requests.max(1)) * 100.,
+                        c.error_rate * 100.,
+                        c.failed_requests,
+                        c.requests,
+                        c.min_requests
+                    ),
+                    _ => "触发条件未记录".into(),
+                })
+                .unwrap_or_else(|| "触发条件未记录".into());
+            let wait = match evidence.and_then(|c| c.retry_at) {
+                Some(at) if at > timestamp => {
+                    format!("等待 {} 秒后可探测", at - timestamp)
+                }
+                Some(_) => "待请求探测".into(),
+                None => "等待时间未记录".into(),
+            };
+            return format!(
+                "{} · {provider}：{scope}；{}；{trigger}；{wait}",
+                self.client_id.map(ClientId::name).unwrap_or("应用"),
+                direct.join(" · ")
+            );
+        }
         if let Some(message) = &self.notification_message {
             return message.clone();
         }
@@ -254,13 +340,7 @@ impl Record {
                 .as_ref()
                 .map(|s| format!(" · {s}"))
                 .unwrap_or_default(),
-            if self.reason == Reason::CircuitOpen
-                && self.details.health_scope == Some(HealthScope::Model)
-            {
-                "当前模型暂不可用"
-            } else {
-                self.reason.text()
-            },
+            self.reason.text(),
             self.action.text()
         )
     }
@@ -338,6 +418,7 @@ pub struct Filter {
     pub client_id: Option<ClientId>,
     pub provider_id: Option<String>,
     pub level: Option<Level>,
+    pub category: Option<Category>,
     pub reason: Option<Reason>,
     pub status_group: Option<StatusGroup>,
     pub page: Option<usize>,
@@ -345,10 +426,31 @@ pub struct Filter {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
-    pub items: Vec<Record>,
+    pub items: Vec<ClassifiedRecord>,
     pub total: usize,
     pub page: usize,
     pub error: Option<String>,
+}
+impl Journal {
+    fn circuit_causes(&self, cutoff: u64) -> HashSet<&str> {
+        self.records
+            .iter()
+            .filter(|r| r.reason == Reason::CircuitOpen && r.last_at >= cutoff)
+            .filter_map(|r| r.details.cause_id.as_deref())
+            .collect()
+    }
+}
+fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
+    if record.reason == Reason::CircuitOpen || causes.contains(record.id.as_str()) {
+        Category::CircuitError
+    } else if matches!(
+        record.reason,
+        Reason::Failover | Reason::Recovered | Reason::ThreadHandoff
+    ) {
+        Category::Status
+    } else {
+        Category::OrdinaryError
+    }
 }
 fn load(path: &Path) -> Journal {
     let mut j = Journal::default();
@@ -550,6 +652,7 @@ impl Service {
     pub fn query(&self, f: Filter) -> Page {
         let j = self.journal.lock().unwrap();
         let cutoff = now().saturating_sub(RETENTION);
+        let causes = j.circuit_causes(cutoff);
         let mut rows: Vec<_> = j
             .records
             .iter()
@@ -563,10 +666,14 @@ impl Service {
                         .as_ref()
                         .is_none_or(|v| r.provider_id.as_ref() == Some(v))
                     && f.level.is_none_or(|v| r.level == v)
+                    && f.category.is_none_or(|v| classify(r, &causes) == v)
                     && f.reason.is_none_or(|v| r.reason == v)
                     && f.status_group.is_none_or(|v| v.matches(r.status))
             })
-            .cloned()
+            .map(|r| ClassifiedRecord {
+                record: r.clone(),
+                category: classify(r, &causes),
+            })
             .collect();
         rows.sort_by_key(|r| std::cmp::Reverse(r.last_at));
         let total = rows.len();
@@ -578,8 +685,10 @@ impl Service {
             error: j.error.clone(),
         }
     }
-    pub fn detail(&self, id: &str) -> Option<Record> {
+    pub fn detail(&self, id: &str) -> Option<ClassifiedRecord> {
         let journal = self.journal.lock().unwrap();
+        let cutoff = now().saturating_sub(RETENTION);
+        let causes = journal.circuit_causes(cutoff);
         let target = journal
             .aliases
             .iter()
@@ -590,12 +699,11 @@ impl Service {
         journal
             .records
             .iter()
-            .find(|r| {
-                r.reason != Reason::Recovered
-                    && r.id == target
-                    && r.last_at >= now().saturating_sub(RETENTION)
+            .find(|r| r.reason != Reason::Recovered && r.id == target && r.last_at >= cutoff)
+            .map(|r| ClassifiedRecord {
+                record: r.clone(),
+                category: classify(r, &causes),
             })
-            .cloned()
     }
     pub async fn clear(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
@@ -606,6 +714,10 @@ impl Service {
             .map_err(|_| AppError::new("LOG_WRITE", "日志清空失败"))?
     }
 }
+
+#[cfg(test)]
+#[path = "events_v0232_tests.rs"]
+mod v0232_tests;
 
 #[cfg(test)]
 mod v016_tests {

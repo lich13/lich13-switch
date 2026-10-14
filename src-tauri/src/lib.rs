@@ -1363,9 +1363,26 @@ pub fn run() {
                 let mut events = g.subscribe();
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    while let Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
-                        events.recv().await
-                    {
+                    let mut clock = tokio::time::interval(std::time::Duration::from_secs(1));
+                    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut waiting = false;
+                    loop {
+                        tokio::select! {
+                            event = events.recv() => {
+                                if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                                    break;
+                                }
+                                waiting = g.has_health_wait();
+                            }
+                            _ = clock.tick() => {
+                                let current = g.has_health_wait();
+                                let refresh = waiting || current;
+                                waiting = current;
+                                // Include the final zero so an idle open circuit
+                                // becomes visibly ready for a request probe.
+                                if !refresh { continue; }
+                            }
+                        }
                         g.report_diagnostics();
                         let _ = handle.emit("gateway-state", g.view());
                     }

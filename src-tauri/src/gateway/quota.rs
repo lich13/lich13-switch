@@ -557,7 +557,7 @@ fn sub2(v: &Value) -> Option<Data> {
     };
     d.key_status = match status {
         "disabled" => Some("已禁用"),
-        "expired" => Some("已过期"),
+        "expired" => Some("已到期"),
         "quota_exhausted" => Some("额度用尽"),
         _ if v["isValid"] == false => Some("Key 无效"),
         _ => None,
@@ -686,7 +686,7 @@ fn newapi(v: &Value) -> Option<Data> {
         expires_at_unix: expires,
         key_status: expires
             .filter(|t| *t < now() as i64)
-            .map(|_| "已过期".into()),
+            .map(|_| "已到期".into()),
         ..Default::default()
     })
 }
@@ -837,7 +837,7 @@ mod tests {
     fn newapi_units_expiry_and_unlimited_are_not_assumed() {
         let body = json!({"code":true,"data":{"object":"token_usage","total_available":1000,"total_used":500,"total_granted":1500,"unlimited_quota":false,"expires_at":1}});
         let d = newapi(&body).unwrap();
-        assert_eq!(d.key_status.as_deref(), Some("已过期"));
+        assert_eq!(d.key_status.as_deref(), Some("已到期"));
         assert_eq!(d.plans[0].unit, "额度单位");
         for (kind, unit, remaining) in [
             ("USD", "USD", 10.),

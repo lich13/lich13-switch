@@ -404,6 +404,38 @@ describe("quota display and refresh", () => {
     expect(within(usage as HTMLDetailsElement).getByText("1.23K")).toBeInTheDocument();
     expect(within(usage as HTMLDetailsElement).getByText("9.6M")).toBeInTheDocument();
   });
+  it("labels a real expired key as 已到期", () => {
+    const q = quotaFixture(provider, {
+      keyStatus: "已过期",
+      plans: [],
+    });
+
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+
+    expect(screen.getByText("已到期")).toBeInTheDocument();
+    expect(screen.queryByText("已过期")).not.toBeInTheDocument();
+  });
+  it("does not label an elapsed compact cache as a real quota expiry", () => {
+    const q = {
+      ...result(),
+      stale: true,
+      nextRefreshAt: Date.now() / 1000 - 60,
+    };
+
+    render(
+      <QuotaInfo
+        provider={provider}
+        quota={q}
+        compact
+        details={() => {}}
+        refresh={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
+    expect(screen.queryByText("已过期")).not.toBeInTheDocument();
+    expect(screen.queryByText("已到期")).not.toBeInTheDocument();
+  });
   it("disables manual refresh while an upstream retry backoff is active", () => {
     const refresh = vi.fn();
     const q = quotaFixture(provider, {
@@ -423,6 +455,7 @@ describe("quota display and refresh", () => {
   it("keeps previous successful values visible with a stale error, without inventing zero", async () => {
     render(<Harness />);
     await flush();
+    const retryAt = Date.now() / 1000 + 120;
     act(() =>
       mock.listeners.get("provider-quota")!({
         clientId: "codex",
@@ -431,12 +464,28 @@ describe("quota display and refresh", () => {
           state: "error",
           stale: true,
           error: "上游连接超时",
+          retryAt,
         },
       }),
     );
     expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
-    expect(screen.getByText("已过期")).toBeInTheDocument();
+    expect(screen.queryByText("已过期")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("上游连接超时");
+    expect(screen.getByRole("status")).toHaveTextContent("后重试");
+  });
+  it("retains the cached balance and retry time when a manual refresh fails", async () => {
+    const retryAt = Date.now() / 1000 + 120;
+    provider.quota = { ...result(), retryAt };
+    mock.command.mockRejectedValueOnce(new Error("真实上游错误"));
+
+    render(<Harness refreshSeconds={0} />);
+    fireEvent.click(screen.getByRole("button", { name: "全部刷新" }));
+    await flush();
+
+    expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
+    expect(screen.queryByText("已过期")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("真实上游错误");
+    expect(screen.getByRole("status")).toHaveTextContent("后重试");
   });
   it("discards late responses and events from a replaced credential version", async () => {
     let resolveOld!: (q: ProviderQuota) => void;
@@ -527,6 +576,31 @@ describe("quota display and refresh", () => {
       />,
     );
     expect(screen.getAllByText("无限制").length).toBeGreaterThan(0);
+    view.rerender(
+      <QuotaInfo
+        provider={provider}
+        quota={{
+          ...result(),
+          plans: [
+            {
+              ...result().plans[0],
+              remaining: null,
+              used: null,
+              total: null,
+            },
+          ],
+        }}
+        refresh={() => {}}
+      />,
+    );
+    expect(screen.getByText("剩余 未返回剩余额度")).toBeInTheDocument();
+    expect(screen.queryByText("剩余 0 USD")).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole("region", { name: "额度窗口" })).getByRole(
+        "row",
+        { name: /Key 配额/ },
+      ),
+    ).toHaveTextContent("—");
     view.rerender(
       <QuotaInfo
         provider={provider}

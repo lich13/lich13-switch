@@ -27,7 +27,7 @@ it("shows a model-scoped cooldown when the provider itself is healthy", () => {
     },
   ];
 
-  expect(providerStatus(p)).toBe("mini · 熔断 · 上游 429 · 7秒");
+  expect(providerStatus(p)).toBe("mini · 熔断 · 上游 429 · 等待7秒");
 });
 
 it("keeps provider cooldown ahead of a model-scoped cooldown", () => {

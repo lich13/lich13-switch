@@ -1,5 +1,5 @@
 //! A model's upstream capacity must never close unrelated models on the same key.
-use super::circuit::{Circuit, Health};
+use super::circuit::{Circuit, CircuitState, Health};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -16,6 +16,10 @@ pub struct ModelHealth {
     pub model: String,
     pub health: Health,
 }
+
+#[cfg(test)]
+#[path = "model_health_v0232_tests.rs"]
+mod v0232_tests;
 
 impl Models {
     pub fn circuit(&self, model: &str) -> Circuit {
@@ -42,12 +46,13 @@ impl Models {
             .iter()
             .filter_map(|(model, c)| {
                 let health = c.health();
-                (!health.available || health.failures != 0 || health.cause.is_some()).then(|| {
-                    ModelHealth {
-                        model: crate::events::safe_model(model)
-                            .unwrap_or_else(|| "未知模型".into()),
-                        health,
-                    }
+                (!health.available
+                    || health.state != CircuitState::Closed
+                    || health.failures != 0
+                    || health.cause.is_some())
+                .then(|| ModelHealth {
+                    model: crate::events::safe_model(model).unwrap_or_else(|| "未知模型".into()),
+                    health,
                 })
             })
             .collect();

@@ -34,7 +34,7 @@ it("turns a concrete transport cause into a short circuit status", () => {
     },
   };
 
-  expect(providerStatus(p)).toBe("熔断 · 首字超时 · 7秒");
+  expect(providerStatus(p)).toBe("熔断 · 首字超时 · 等待7秒");
 });
 
 it("distinguishes a 429 rate limit from other capacity waits", () => {

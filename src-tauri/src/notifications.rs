@@ -215,3 +215,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
 #[cfg(test)]
 #[path = "notifications/delivery_tests.rs"]
 mod delivery_tests;
+
+#[cfg(test)]
+#[path = "notifications/delivery_v0232_tests.rs"]
+mod delivery_v0232_tests;

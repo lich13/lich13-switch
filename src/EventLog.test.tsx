@@ -129,6 +129,120 @@ describe("event log", () => {
     });
   });
 
+  it("sends each selected category to the event query", async () => {
+    const user = userEvent.setup();
+    render(<EventLog />);
+    await screen.findByRole("button", { name: /模型不支持/ });
+
+    const filter = screen.getByRole("combobox", { name: "类别" });
+    for (const category of ["ordinary_error", "circuit_error", "status"]) {
+      await user.selectOptions(filter, category);
+      await waitFor(() => {
+        const [, args] = eventCalls().at(-1)!;
+        expect(args).toEqual({
+          filter: expect.objectContaining({
+            category,
+            page: 1,
+            from: null,
+            to: null,
+          }),
+        });
+      });
+    }
+  });
+
+  it("renders category labels, classifies legacy rows, and keeps five columns", async () => {
+    const categorized = (
+      id: string,
+      category: EventRecord["category"],
+      overrides: Partial<EventRecord> = {},
+    ): EventRecord => ({ ...record, ...overrides, id, category });
+    eventRecords = [
+      categorized("ordinary-category", "ordinary_error", {
+        reason: "upstream_service",
+        action: "returned",
+        level: "error",
+        status: 502,
+      }),
+      categorized("circuit-category", "circuit_error", {
+        reason: "circuit_open",
+        action: "returned",
+        level: "error",
+        status: 502,
+        details: { healthScope: "provider" },
+      }),
+      categorized("status-category", "status", {
+        reason: "thread_handoff",
+        action: "routed",
+        level: "info",
+        status: null,
+      }),
+      { ...record, id: "legacy-category" },
+    ];
+
+    render(<EventLog />);
+    await screen.findByRole("button", { name: /模型不支持/ });
+    const table = screen.getByRole("table");
+    await waitFor(() =>
+      expect(within(table).getAllByRole("row")).toHaveLength(5),
+    );
+
+    expect(
+      within(table)
+        .getAllByRole("columnheader")
+        .map((header) => header.textContent),
+    ).toEqual(["时间", "客户端 / 供应商", "状态", "错误摘要", "处理结果"]);
+    expect(within(table).getAllByText("普通错误")).toHaveLength(2);
+    expect(within(table).getByText("熔断错误")).toBeInTheDocument();
+    expect(within(table).getByText("状态记录")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["model", "模型熔断"],
+    ["provider", "供应商熔断"],
+  ] as const)(
+    "summarizes a %s circuit event with its HTTP cause and trigger",
+    async (healthScope, expectedLabel) => {
+      eventRecords = [
+        {
+          ...record,
+          id: `circuit-${healthScope}`,
+          reason: "circuit_open",
+          action: "returned",
+          level: "error",
+          status: 502,
+          errorCode: "CIRCUIT_OPEN",
+          category: "circuit_error",
+          details: {
+            healthScope,
+            circuit: {
+              causeReason: "upstream_service",
+              retryAt: 1_760_000_090,
+              failures: 3,
+              failureThreshold: 3,
+              failedRequests: 3,
+              requests: 3,
+              errorRate: 1,
+              minRequests: 1,
+              trigger: "consecutive_failures",
+            },
+          },
+        },
+      ];
+
+      render(<EventLog />);
+      const table = screen.getByRole("table");
+      await waitFor(() =>
+        expect(within(table).getAllByRole("row")).toHaveLength(2),
+      );
+      const summary = within(table).getAllByRole("button")[0];
+
+      expect(summary).toHaveTextContent(expectedLabel);
+      expect(summary).toHaveTextContent("HTTP 502");
+      expect(summary).toHaveTextContent("连续失败 3/3");
+    },
+  );
+
   it("paginates independently and pauses event reloads while hidden", async () => {
     const user = userEvent.setup();
     render(<EventLog />);

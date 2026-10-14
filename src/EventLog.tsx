@@ -52,6 +52,12 @@ const actions = {
   not_retried: "已输出，未重试",
 } as const;
 
+const categories = {
+  ordinary_error: "普通错误",
+  circuit_error: "熔断错误",
+  status: "状态记录",
+} as const;
+
 export type EventRecord = {
   id: string;
   firstAt: number;
@@ -64,6 +70,7 @@ export type EventRecord = {
   errorCode?: string;
   action: keyof typeof actions;
   level: "warning" | "error" | "info";
+  category?: keyof typeof categories;
   status: number | null;
   attempt: number | null;
   details?: {
@@ -82,6 +89,8 @@ export type EventRecord = {
     timeoutSeconds?: number | null;
     lastProgressMs?: number | null;
     circuit?: {
+      causeReason?: keyof typeof reasons | null;
+      retryAt?: number | null;
       failures: number;
       failureThreshold: number;
       failedRequests: number;
@@ -168,11 +177,52 @@ const timeoutPhases: Record<string, string> = {
   ws_handshake: "WebSocket 握手",
 };
 function reasonText(r: EventRecord) {
-  return r.reason === "circuit_open" && r.details?.healthScope === "model"
-    ? "模型暂不可用"
-    : reasons[r.reason];
+  if (r.reason !== "circuit_open") return reasons[r.reason];
+  if (r.details?.healthScope === "model") return "模型熔断";
+  return r.details?.healthScope === "provider" ? "供应商熔断" : "熔断";
+}
+function category(r: EventRecord): keyof typeof categories {
+  if (r.category) return r.category;
+  // Older API responses have no classification. Only an actual open event is
+  // sufficient evidence here; a counted failure alone never is.
+  if (r.reason === "circuit_open") return "circuit_error";
+  return ["failover", "thread_handoff", "recovered"].includes(r.reason)
+    ? "status"
+    : "ordinary_error";
+}
+function circuitCause(r: EventRecord) {
+  return [
+    r.status != null ? statusText(r.status) : null,
+    r.details?.upstreamCode ?? r.details?.localCode,
+    r.details?.message ||
+      (r.details?.circuit?.causeReason
+        ? reasons[r.details.circuit.causeReason]
+        : null),
+  ].filter(Boolean).join(" · ") || "原因未记录";
+}
+function circuitTrigger(r: EventRecord) {
+  const c = r.details?.circuit;
+  if (!c) return "触发条件未记录";
+  switch (c.trigger) {
+    case "transient_failures":
+    case "consecutive_failures":
+      return `连续失败 ${c.failures}/${c.failureThreshold}`;
+    case "error_rate":
+      return `错误率 ${(c.failedRequests / Math.max(1, c.requests) * 100).toFixed(0)}% ≥ ${(c.errorRate * 100).toFixed(0)}%（${c.failedRequests}/${c.requests}，至少 ${c.minRequests} 次）`;
+    case "probe_failed":
+      return "恢复探测失败";
+    default:
+      return "触发条件未记录";
+  }
 }
 function summary(r: EventRecord) {
+  if (r.reason === "circuit_open")
+    return [
+      reasonText(r),
+      r.details?.healthScope === "model" ? r.model : null,
+      circuitCause(r),
+      circuitTrigger(r),
+    ].filter(Boolean).join(" · ");
   return [
     r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r),
     r.details?.message || reasonText(r),
@@ -181,6 +231,10 @@ function summary(r: EventRecord) {
     .join(" · ");
 }
 function actionText(r: EventRecord) {
+  if (r.reason === "circuit_open")
+    return r.details?.circuit?.retryAt != null && r.details.waitSeconds != null
+      ? `等待 ${r.details.waitSeconds} 秒后可探测`
+      : "等待时间未记录";
   return `${r.details?.countedFailure === false ? "未计入熔断，" : ""}${r.details?.waitSeconds ? `${r.action === "retrying_same" ? "原供应商" : ""}等待 ${r.details.waitSeconds} 秒${r.action === "reconnecting" ? "重连" : "重试"}` : actions[r.action]}`;
 }
 function wireStatus(r: EventRecord) {
@@ -216,6 +270,7 @@ export default function EventLog({
     clientId: "",
     providerId: "",
     level: "",
+    category: "",
     reason: "",
     statusGroup: "" as StatusGroup,
     from: "",
@@ -481,6 +536,16 @@ export default function EventLog({
           <option value="no_status">无状态码</option>
         </select>
         <select
+          aria-label="类别"
+          value={filters.category}
+          onChange={(e) => change("category", e.target.value)}
+        >
+          <option value="">全部类别</option>
+          {Object.entries(categories).map(([key, label]) => (
+            <option key={key} value={key}>{label}</option>
+          ))}
+        </select>
+        <select
           aria-label="级别"
           value={filters.level}
           onChange={(e) => change("level", e.target.value)}
@@ -569,6 +634,9 @@ export default function EventLog({
                           });
                       }}
                     >
+                      <span className={"event-category " + category(r)}>
+                        {categories[category(r)]}
+                      </span>
                       {summary(r)}
                       {r.count > 1 && (
                         <span className="event-count">
@@ -673,6 +741,7 @@ function EventDetail({
         </header>
         <dl>
           {[
+            ["类别", categories[category(r)]],
             ["状态码", wireStatus(r)],
             [
               "影响范围",
@@ -702,6 +771,25 @@ function EventDetail({
             ["客户端", client(r.clientId)],
             ["供应商", provider],
             ["处理结果", actionText(r)],
+            ...(r.reason === "circuit_open"
+              ? [
+                  ["熔断原因", circuitCause(r)],
+                  ["触发条件", circuitTrigger(r)],
+                  [
+                    "发生时等待",
+                    r.details?.circuit?.retryAt != null && r.details.waitSeconds != null
+                      ? `${r.details.waitSeconds} 秒`
+                      : "未记录",
+                  ],
+                  [
+                    "预计探测时间",
+                    r.details?.circuit?.retryAt != null
+                      ? time(r.details.circuit.retryAt)
+                      : "未记录",
+                  ],
+                  ["触发事件", r.details?.causeId ?? "未记录"],
+                ]
+              : []),
             ...(r.details?.timeoutPhase
               ? [
                   [
@@ -728,23 +816,13 @@ function EventDetail({
                     `${r.details.circuit.failedRequests} / ${r.details.circuit.requests}`,
                   ],
                   [
-                    "触发条件",
-                    (
-                      {
-                        consecutive_failures: "连续失败达到阈值",
-                        transient_failures: "5xx 连续失败达到阈值",
-                        error_rate: "错误率达到阈值",
-                        probe_failed: "恢复探测失败",
-                      } as Record<string, string>
-                    )[r.details.circuit.trigger],
-                  ],
-                  [
                     "错误率阈值",
                     `${r.details.circuit.errorRate * 100}% / 最少 ${r.details.circuit.minRequests} 次`,
                   ],
                 ]
               : []),
-            ...(r.details?.causeId ? [["触发事件", r.details.causeId]] : []),
+            ...(r.reason !== "circuit_open" && r.details?.causeId
+              ? [["触发事件", r.details.causeId]] : []),
             ["模型", r.model || "未提供"],
             ["尝试次数", r.attempt ?? "—"],
             ["首次发生", time(r.firstAt)],

@@ -420,6 +420,13 @@ impl Permit {
                     s.cooldown(retry, "retry_after");
                 }
                 if !protected_single_provider && should_open {
+                    let opened_at = Instant::now();
+                    let until = opened_at + Duration::from_secs(cfg.cooldown_seconds);
+                    let wait = s
+                        .retry_until
+                        .unwrap_or(until)
+                        .max(until)
+                        .saturating_duration_since(opened_at);
                     if let Some(cause) = self.failure_event.take() {
                         use crate::events::{Action, CircuitEvidence, Reason, Record};
                         let mut event = Record::new(
@@ -433,7 +440,20 @@ impl Permit {
                         );
                         event.details = cause.details;
                         event.details.cause_id = Some(cause.id);
+                        // The source event may describe a short retry on this
+                        // request. Opening the circuit imposes a new deadline.
+                        event.details.wait_seconds =
+                            Some(wait.as_nanos().div_ceil(1_000_000_000) as u64);
                         event.details.circuit = Some(CircuitEvidence {
+                            cause_reason: Some(cause.reason),
+                            retry_at: Some(
+                                (std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    + wait)
+                                    .as_nanos()
+                                    .div_ceil(1_000_000_000) as u64,
+                            ),
                             failures: s.failures,
                             failure_threshold: threshold,
                             failed_requests: if !transient && !consecutive {
@@ -464,12 +484,16 @@ impl Permit {
                     s.phase = CircuitState::Open;
                     s.probe = false;
                     s.generation += 1;
-                    s.until = Some(Instant::now() + Duration::from_secs(cfg.cooldown_seconds));
+                    s.until = Some(until);
                 }
             }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "circuit_v0232_tests.rs"]
+mod v0232_tests;
 impl Drop for Permit {
     fn drop(&mut self) {
         if !self.complete {

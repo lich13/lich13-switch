@@ -1,4 +1,4 @@
-use crate::events::Record;
+use crate::events::{HealthScope, Reason, Record};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -27,22 +27,27 @@ pub fn key(r: &Record) -> String {
             r.details.handoff_scope.as_deref().unwrap_or(&r.id)
         );
     }
-    // All components already pass the event whitelist; no free-form response.
+    // Model failures have their own health scope; provider-wide failures must
+    // coalesce even when different models happened to trigger them.
+    if r.reason == Reason::CircuitOpen {
+        return format!(
+            "circuit:{:?}:{}:{:?}:{}",
+            r.client_id,
+            r.provider_id.as_deref().unwrap_or(""),
+            r.details.health_scope,
+            if r.details.health_scope == Some(HealthScope::Provider) {
+                ""
+            } else {
+                r.model.as_deref().unwrap_or("")
+            }
+        );
+    }
     format!(
         "{:?}:{}:{}:{:?}",
         r.client_id,
         r.provider_id.as_deref().unwrap_or(""),
         r.model.as_deref().unwrap_or(""),
-        match r.reason {
-            crate::events::Reason::CircuitOpen
-            | crate::events::Reason::FailoverExhausted
-            | crate::events::Reason::Network
-            | crate::events::Reason::UpstreamService
-            | crate::events::Reason::ProtocolError
-            | crate::events::Reason::RateLimit
-            | crate::events::Reason::Capacity => "terminal_failure".to_string(),
-            reason => format!("{reason:?}"),
-        }
+        r.reason
     )
 }
 impl Gate {

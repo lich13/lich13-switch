@@ -215,12 +215,10 @@ export function QuotaInfo({
 }) {
   const [showDetails, setShowDetails] = useState(false);
   const loading = quota?.state === "loading";
-  const stale =
-    quota?.stale ||
-    Boolean(quota?.successAt && quota.nextRefreshAt && Date.now() / 1000 >= quota.nextRefreshAt);
+  const keyStatus = quota?.keyStatus === "已过期" ? "已到期" : quota?.keyStatus;
   const headline = quota?.plans[0]
     ? `${quota.plans[0].unlimited ? "" : "剩余 "}${amount(quota.plans[0])}`
-    : (quota?.keyStatus ??
+    : (keyStatus ??
       (quota?.state === "unsupported"
         ? "不可查询"
         : quota?.state === "error"
@@ -260,7 +258,6 @@ export function QuotaInfo({
           <button className="quota-value" title={headline} onClick={details ?? (() => setShowDetails(true))}>
             {headline}
           </button>
-        {stale && <span className="quota-warning">已过期</span>}
         {quota?.error &&
           quota.state !== "unsupported" &&
           quota.plans.length > 0 && (
@@ -307,11 +304,8 @@ export function QuotaInfo({
         </button>
         </div>
       </div>
-      {((quota?.keyStatus && quota.plans.length > 0) || stale) && <div className="quota-notices">
-        {quota?.keyStatus && quota.plans.length > 0 && (
-          <span className="quota-warning">{quota.keyStatus}</span>
-        )}
-        {stale && <span className="quota-warning">已过期</span>}
+      {keyStatus && quota && quota.plans.length > 0 && <div className="quota-notices">
+        <span className="quota-warning">{keyStatus}</span>
       </div>}
       {quota?.error && (
         <div className="quota-error" role="status">
