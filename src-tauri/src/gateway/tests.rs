@@ -1232,7 +1232,7 @@ async fn recognized_expired_sub2_stops_protocol_probing() {
         .await
         .unwrap();
     assert_eq!(result.source.as_deref(), Some("sub2api"));
-    assert_eq!(result.key_status.as_deref(), Some("已过期"));
+    assert_eq!(result.key_status.as_deref(), Some("已到期"));
     assert_eq!(hits.load(Ordering::Relaxed), 1);
 }
 
