@@ -34,6 +34,8 @@ import {
   Check,
   RotateCcw,
   LoaderCircle,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { command, subscribe } from "./bridge";
 import {
@@ -627,6 +629,7 @@ function GatewayContent({
       )}
       {dialog?.kind === "provider" && (
         <GatewayDialog
+          key={`${clientId}:${dialog.item?.id ?? "new"}`}
           clientId={clientId}
           connectionMode={state.connectionMode}
           dialog={dialog}
@@ -798,6 +801,76 @@ function GatewayDialog({
   const [name, setName] = useState(dialog.item ? dialog.item.name : ""),
     [baseUrl, setBaseUrl] = useState(dialog.item?.baseUrl ?? ""),
     [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [revealed, setRevealed] = useState<{
+    value: string;
+    revision: string;
+  } | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  const revealSequence = useRef(0);
+  const currentRevision = useRef(revision);
+  currentRevision.current = revision;
+  const hideToken = useCallback(() => {
+    revealSequence.current += 1;
+    setShowToken(false);
+    setRevealed(null);
+    setRevealing(false);
+  }, []);
+  useEffect(() => {
+    hideToken();
+    let disposed = false;
+    let clean: (() => void) | undefined;
+    const visibility = () => {
+      if (document.visibilityState === "hidden") hideToken();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    void subscribe<boolean>("app-visibility", (visible) => {
+      if (!visible) hideToken();
+    }).then((fn) => {
+      if (disposed) fn();
+      else clean = fn;
+    });
+    return () => {
+      disposed = true;
+      revealSequence.current += 1;
+      clean?.();
+      document.removeEventListener("visibilitychange", visibility);
+    };
+  }, [clientId, dialog.item?.id, revision, hideToken]);
+  const toggleToken = async () => {
+    if (showToken) {
+      hideToken();
+      return;
+    }
+    setError("");
+    setShowToken(true);
+    if (token || !dialog.item) return;
+    const sequence = ++revealSequence.current;
+    setRevealing(true);
+    try {
+      const value = await command<string>("reveal_provider_token", {
+        clientId,
+        providerId: dialog.item.id,
+        expectedRevision: revision,
+      });
+      if (
+        sequence === revealSequence.current &&
+        currentRevision.current === revision
+      ) {
+        setRevealed({ value, revision });
+      }
+    } catch (e) {
+      if (
+        sequence === revealSequence.current &&
+        currentRevision.current === revision
+      ) {
+        setShowToken(false);
+        setError(errorOf(e).message);
+      }
+    } finally {
+      if (sequence === revealSequence.current) setRevealing(false);
+    }
+  };
   const initialDraft = useRef(JSON.stringify([name, baseUrl, token]));
   useEffect(() => {
     onDirtyChange?.(
@@ -863,14 +936,42 @@ function GatewayDialog({
               : connectionMode === "apiKey"
                 ? "OPENAI_API_KEY"
                 : "experimental_bearer_token"}
-            <input
-              required={!dialog.item}
-              type="password"
-              autoComplete="new-password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder={dialog.item ? "留空保留当前 Token" : "输入 Token"}
-            />
+            <span className="provider-token-input">
+              <input
+                required={!dialog.item}
+                type={showToken ? "text" : "password"}
+                autoComplete="new-password"
+                spellCheck={false}
+                value={
+                  showToken && revealed?.revision === revision
+                    ? revealed.value
+                    : token
+                }
+                onChange={(e) => {
+                  revealSequence.current += 1;
+                  setRevealed(null);
+                  setRevealing(false);
+                  setToken(e.target.value);
+                }}
+                placeholder={dialog.item ? "留空保留当前 Token" : "输入 Token"}
+              />
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={showToken ? "隐藏 Token" : "显示 Token"}
+                aria-pressed={showToken}
+                aria-busy={revealing}
+                onClick={() => void toggleToken()}
+              >
+                {revealing ? (
+                  <LoaderCircle size={16} className="spin" aria-hidden="true" />
+                ) : showToken ? (
+                  <EyeOff size={16} aria-hidden="true" />
+                ) : (
+                  <Eye size={16} aria-hidden="true" />
+                )}
+              </button>
+            </span>
           </label>
         </>
         {error && (

@@ -650,6 +650,15 @@ impl Protocol {
             usage.upstream_request(headers);
         }
     }
+    pub fn routing_evidence(&mut self, hints: Option<&super::replay::RequestHints>) {
+        if let Some(usage) = &mut self.usage {
+            usage.routing_evidence(
+                hints
+                    .map(|h| h.routing_evidence.clone())
+                    .unwrap_or_default(),
+            );
+        }
+    }
     pub fn watch_lifecycle(
         &mut self,
         stop: Option<tokio::sync::watch::Receiver<bool>>,

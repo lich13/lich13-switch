@@ -74,6 +74,8 @@ pub struct RequestHints {
     pub turn: TurnEvidence,
     #[serde(skip)]
     pub auxiliary: bool,
+    #[serde(skip)]
+    pub routing_evidence: crate::usage::model::RoutingEvidence,
 }
 impl RequestHints {
     pub fn from_value(value: serde_json::Value, projected: bool) -> Result<Self, BoxError> {
@@ -156,6 +158,37 @@ impl RequestHints {
         } else {
             TurnEvidence::Unknown
         };
+        use crate::usage::model::{RoutingEvidence, RoutingInput};
+        hints.routing_evidence = RoutingEvidence {
+            input: if hints.auxiliary {
+                RoutingInput::Warmup
+            } else if hints.previous_response_id.is_some() {
+                RoutingInput::ResponseCursor
+            } else if hints.compaction_trigger || hints.compacted_window.is_some() {
+                RoutingInput::Compaction
+            } else {
+                match hints.turn {
+                    TurnEvidence::First => RoutingInput::FirstTurn,
+                    TurnEvidence::History => RoutingInput::History,
+                    TurnEvidence::Unknown if value.get("input").is_none() => {
+                        RoutingInput::MissingInput
+                    }
+                    TurnEvidence::Unknown => RoutingInput::UnknownStructure,
+                }
+            },
+            has_tool_declarations: value
+                .get("input")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("type").and_then(serde_json::Value::as_str)
+                            == Some("additional_tools")
+                            && item.get("role").and_then(serde_json::Value::as_str)
+                                == Some("developer")
+                    })
+                }),
+            restriction: None,
+        };
         Ok(hints)
     }
 }
@@ -167,10 +200,19 @@ fn first_turn_input(input: Option<&serde_json::Value>) -> bool {
         Some(Value::Array(items)) if !items.is_empty() => {
             let mut users = 0;
             for item in items {
-                let kind = item
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("message");
+                let kind = match item.get("type") {
+                    None => "message",
+                    Some(Value::String(kind)) => kind,
+                    _ => return false,
+                };
+                // The current Codex client sends tool declarations inside input.
+                // They are initialization metadata, and cannot supply user/history evidence.
+                if kind == "additional_tools" {
+                    if item.get("role").and_then(Value::as_str) != Some("developer") {
+                        return false;
+                    }
+                    continue;
+                }
                 if !matches!(kind, "message" | "input_message") {
                     return false;
                 }

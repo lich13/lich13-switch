@@ -27,6 +27,8 @@ mod quota;
 mod replay;
 mod routing;
 mod thread_capacity;
+#[cfg(test)]
+mod token_v0233_tests;
 mod upstream_error;
 #[cfg(test)]
 mod v019_usage_tests;
@@ -34,6 +36,8 @@ mod v019_usage_tests;
 mod v020_tests;
 #[cfg(test)]
 mod v022_tests;
+#[cfg(test)]
+mod v0233_tests;
 mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
@@ -487,6 +491,34 @@ impl Gateway {
     }
     pub fn client_id(&self) -> ClientId {
         self.0.client
+    }
+    pub fn reveal_provider_token(
+        &self,
+        window_label: &str,
+        provider_id: &str,
+        expected_revision: &str,
+    ) -> Result<String> {
+        if window_label != "main" {
+            return Err(AppError::new("FORBIDDEN", "仅主窗口可查看供应商凭据"));
+        }
+        let state = self.0.inner.lock().unwrap();
+        if expected_revision != self.view_revision(&state)
+            || storage::revision(
+                storage::read_optional(&self.0.data.join("gateway.json"))?.as_deref(),
+            ) != state.revision
+        {
+            return Err(AppError::new(
+                "CONFLICT",
+                "供应商配置已变化，请重新打开编辑",
+            ));
+        }
+        state
+            .store
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .map(|provider| provider.token.clone())
+            .ok_or_else(|| AppError::new("PROVIDER", "供应商不存在"))
     }
     fn view_revision(&self, s: &Inner) -> String {
         // File revisions also include resume checkpoints, which change after successful

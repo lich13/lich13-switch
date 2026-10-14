@@ -605,6 +605,18 @@ impl AttemptTrace {
             thread.filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
         self.attempt.routing_decision = decision;
     }
+    pub fn routing_evidence(&mut self, mut evidence: model::RoutingEvidence) {
+        use model::{RoutingDecision as D, RoutingRestriction as R};
+        evidence.restriction = match self.attempt.routing_decision {
+            Some(D::NewThreadModelDenied) => Some(R::ModelMismatch),
+            Some(D::NewThreadModelCooling) => Some(R::ModelCooling),
+            Some(D::NewThreadProviderUnavailable) => Some(R::ProviderUnavailable),
+            Some(D::NewThreadCapacityFull | D::ReceiverCapacityFull) => Some(R::CapacityFull),
+            Some(D::NewThreadQueueWaiting) => Some(R::QueueWaiting),
+            _ => None,
+        };
+        self.attempt.routing_evidence = Some(evidence);
+    }
     pub fn upstream_request(&mut self, headers: &hyper::HeaderMap) {
         self.attempt.upstream_request_hash = ["x-request-id", "request-id", "openai-request-id"]
             .iter()

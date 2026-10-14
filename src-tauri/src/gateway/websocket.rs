@@ -1253,6 +1253,9 @@ async fn session_once(
                     })
             }),
         );
+        if !manual {
+            attempt_protocol.routing_evidence(first_hints.as_ref());
+        }
         attempt_protocol.watch_lifecycle(
             g.0.inner
                 .lock()
@@ -1580,6 +1583,9 @@ async fn session_once(
                     )
                 }),
             );
+            if !manual {
+                next.routing_evidence(hints.as_ref());
+            }
             next.watch_lifecycle(
                 g.0.inner
                     .lock()
@@ -1875,6 +1881,9 @@ async fn session_once(
                         )
                     }),
                 );
+                if !manual {
+                    next_protocol.routing_evidence(hints.as_ref());
+                }
                 next_protocol.watch_lifecycle(
                     g.0.inner
                         .lock()

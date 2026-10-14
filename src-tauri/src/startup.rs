@@ -13,14 +13,15 @@ pub fn is_login_argument(arg: &str) -> bool {
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct Preferences {
-    pub restore_gateway: bool,
+struct Preferences {
+    // Login-item state lives in the OS. Advance its edit revision on every save.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<String>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct View {
     pub launch_on_boot: bool,
-    pub restore_gateway: bool,
     pub revision: String,
 }
 pub struct Service {
@@ -34,9 +35,6 @@ impl Service {
             lock: Mutex::new(()),
         }
     }
-    pub fn preferences(&self) -> Result<Preferences> {
-        Ok(self.read()?.0)
-    }
     fn read(&self) -> Result<(Preferences, String)> {
         let raw = storage::read_optional(&self.path)?;
         let settings = raw
@@ -49,10 +47,9 @@ impl Service {
     }
     pub fn view(&self) -> Result<View> {
         let _guard = self.lock.lock().unwrap();
-        let (prefs, revision) = self.read()?;
+        let (_, revision) = self.read()?;
         Ok(View {
             launch_on_boot: registered()?,
-            restore_gateway: prefs.restore_gateway,
             revision,
         })
     }
@@ -89,7 +86,7 @@ impl Service {
         }
         Ok(())
     }
-    pub fn update(&self, enabled: bool, prefs: Preferences, expected: &str) -> Result<View> {
+    pub fn update(&self, enabled: bool, expected: &str) -> Result<View> {
         let _guard = self.lock.lock().unwrap();
         let (_, revision) = self.read()?;
         if revision != expected {
@@ -97,14 +94,16 @@ impl Service {
         }
         let previous = registered()?;
         register(enabled)?;
-        let bytes = serde_json::to_vec_pretty(&prefs).unwrap();
+        let bytes = serde_json::to_vec_pretty(&Preferences {
+            generation: Some(uuid::Uuid::new_v4().to_string()),
+        })
+        .unwrap();
         if let Err(e) = storage::atomic_write(&self.path, &bytes, Some(expected)) {
             let _ = register(previous);
             return Err(e);
         }
         Ok(View {
             launch_on_boot: enabled,
-            restore_gateway: prefs.restore_gateway,
             revision: storage::digest(&bytes),
         })
     }
@@ -290,7 +289,7 @@ fn is_login_event(event: u32, origin: Option<u32>) -> bool {
     [u32::from_be_bytes(*b"oapp"), u32::from_be_bytes(*b"rapp")].contains(&event)
         && origin == Some(u32::from_be_bytes(*b"lgit"))
 }
-pub fn silent(args: &[String], _prefs: &Preferences) -> bool {
+pub fn silent(args: &[String]) -> bool {
     login_source(args)
 }
 
@@ -305,12 +304,11 @@ mod tests {
             )),
             PathBuf::from("/Applications/lich13-switch.app")
         );
-        let prefs: Preferences = serde_json::from_str("{}").unwrap();
-        let old: Preferences =
+        let _: Preferences = serde_json::from_str("{}").unwrap();
+        let _: Preferences =
             serde_json::from_str(r#"{"launchToTray":false,"restoreGateway":true}"#).unwrap();
-        assert!(silent(&[LOGIN_ARG.into()], &old));
-        assert!(silent(&[LEGACY_LOGIN_ARG.into()], &old));
-        assert!(!prefs.restore_gateway);
+        assert!(silent(&[LOGIN_ARG.into()]));
+        assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
         assert!(is_login_event(
             u32::from_be_bytes(*b"oapp"),
             Some(u32::from_be_bytes(*b"lgit"))
@@ -324,6 +322,10 @@ mod tests {
             registration_path(r"C:\Program Files\lich13-switch\lich13-switch.exe", true),
             r#""C:\Program Files\lich13-switch\lich13-switch.exe""#
         );
-        assert!(silent(&[LOGIN_ARG.into()], &prefs));
+        assert!(silent(&[LOGIN_ARG.into()]));
     }
 }
+
+#[cfg(test)]
+#[path = "startup_v0233_tests.rs"]
+mod v0233_tests;

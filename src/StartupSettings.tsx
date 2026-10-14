@@ -19,21 +19,14 @@ export default function StartupSettings() {
       disposed = true;
     };
   }, []);
-  const update = async (
-    key: "launchOnBoot" | "restoreGateway",
-    value: boolean,
-  ) => {
+  const update = async (enabled: boolean) => {
     if (!state) return;
     setBusy(true);
     setError("");
-    const next = { ...state, [key]: value };
     try {
       setState(
         await command<StartupState>("set_startup", {
-          enabled: next.launchOnBoot,
-          preferences: {
-            restoreGateway: next.restoreGateway,
-          },
+          enabled,
           expectedRevision: state.revision,
         }),
       );
@@ -46,21 +39,14 @@ export default function StartupSettings() {
   return (
     <fieldset className="startup-settings" disabled={busy || !state}>
       <legend>启动</legend>
-      {(
-        [
-          ["launchOnBoot", "开机静默启动"],
-          ["restoreGateway", "启动时恢复网关"],
-        ] as const
-      ).map(([key, label]) => (
-        <label className="check-label" key={key}>
-          <input
-            type="checkbox"
-            checked={state?.[key] ?? false}
-            onChange={(e) => void update(key, e.target.checked)}
-          />
-          {label}
-        </label>
-      ))}
+      <label className="check-label">
+        <input
+          type="checkbox"
+          checked={state?.launchOnBoot ?? false}
+          onChange={(e) => void update(e.target.checked)}
+        />
+        开机静默启动
+      </label>
       {error && (
         <p className="form-error" role="alert">
           {error}

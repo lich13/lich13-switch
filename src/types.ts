@@ -187,7 +187,6 @@ export type GatewayState = {
 };
 export type StartupState = {
   launchOnBoot: boolean;
-  restoreGateway: boolean;
   revision: string;
 };
 

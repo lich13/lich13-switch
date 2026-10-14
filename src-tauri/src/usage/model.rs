@@ -473,6 +473,36 @@ pub enum RoutingDecision {
     NewThreadProviderUnavailable,
     NewThreadQueueWaiting,
 }
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingInput {
+    FirstTurn,
+    History,
+    ResponseCursor,
+    Compaction,
+    Warmup,
+    MissingInput,
+    UnknownStructure,
+    #[default]
+    MetadataUnavailable,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingRestriction {
+    ModelMismatch,
+    ModelCooling,
+    ProviderUnavailable,
+    CapacityFull,
+    QueueWaiting,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingEvidence {
+    pub input: RoutingInput,
+    pub has_tool_declarations: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restriction: Option<RoutingRestriction>,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TransferMetadata {
@@ -535,6 +565,8 @@ pub struct Attempt {
     pub upstream_request_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_decision: Option<RoutingDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_evidence: Option<RoutingEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inclusive_input_tokens: Option<u64>,
     #[serde(default)]
@@ -706,6 +738,7 @@ impl Default for Attempt {
             thread_hash: None,
             upstream_request_hash: None,
             routing_decision: None,
+            routing_evidence: None,
             compaction_kind: None,
             usage_status: String::new(),
             availability: Default::default(),

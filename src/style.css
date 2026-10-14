@@ -555,6 +555,15 @@ kbd {
   background: var(--elevated);
   color: var(--ink);
 }
+.provider-token-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.provider-token-input input {
+  flex: 1;
+  min-width: 0;
+}
 .modal {
   width: 440px;
   max-width: calc(100vw - 40px);

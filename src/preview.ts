@@ -126,7 +126,6 @@ let login: LoginState = {
 };
 let startup = {
   launchOnBoot: false,
-  restoreGateway: false,
   revision: "preview-startup",
 };
 let quick = { pinned: false, tab: "providers", visible: true };
@@ -258,12 +257,10 @@ export async function run(
       retryAt: null,
     };
   if (name === "get_startup") return { ...startup };
+  if (name === "reveal_provider_token") return "fixture-preview-token";
   if (name === "set_startup") {
     startup = {
       ...startup,
-      ...(args.preferences as {
-        restoreGateway: boolean;
-      }),
       launchOnBoot: Boolean(args.enabled),
       revision: crypto.randomUUID(),
     };

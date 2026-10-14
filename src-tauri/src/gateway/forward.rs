@@ -861,6 +861,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 },
             ),
         );
+        if gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses {
+            protocol.routing_evidence(hints.as_ref().ok());
+        }
         protocol.watch_lifecycle(
             gateway
                 .0

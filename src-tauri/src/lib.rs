@@ -580,15 +580,12 @@ async fn get_startup(r: tauri::State<'_, Arc<Runtime>>) -> Result<startup::View>
 async fn set_startup(
     r: tauri::State<'_, Arc<Runtime>>,
     enabled: bool,
-    preferences: startup::Preferences,
     expected_revision: String,
 ) -> Result<startup::View> {
     let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        r.startup.update(enabled, preferences, &expected_revision)
-    })
-    .await
-    .map_err(|_| AppError::new("STARTUP", "更新启动设置失败"))?
+    tauri::async_runtime::spawn_blocking(move || r.startup.update(enabled, &expected_revision))
+        .await
+        .map_err(|_| AppError::new("STARTUP", "更新启动设置失败"))?
 }
 #[tauri::command]
 async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>> {
@@ -844,6 +841,17 @@ fn get_gateway(client_id: gateway::ClientId, r: tauri::State<'_, Arc<Runtime>>) 
     r.gateway(client_id).view()
 }
 #[tauri::command]
+fn reveal_provider_token(
+    window: tauri::WebviewWindow,
+    client_id: gateway::ClientId,
+    provider_id: String,
+    expected_revision: String,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<String> {
+    r.gateway(client_id)
+        .reveal_provider_token(window.label(), &provider_id, &expected_revision)
+}
+#[tauri::command]
 async fn probe_provider_endpoints(
     client_id: gateway::ClientId,
     provider_id: String,
@@ -997,28 +1005,26 @@ async fn frontend_ready(
         // The report is written only after the exit handler verifies restoration.
         app.exit(0);
     } else {
-        if r.startup.preferences()?.restore_gateway {
-            for client in [gateway::ClientId::Codex, gateway::ClientId::Claude] {
-                if (client == gateway::ClientId::Codex
-                    && official::blocks_gateway(&r.data, &r.home(client)?))
-                    || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
-                {
-                    continue;
-                }
-                if let Err(e) = r.gateway(client).resume(&r.home(client)?).await {
-                    let e = AppError::new(&e.code, &format!("{}：{}", client.name(), e.message));
-                    r.diagnostics.emit(events::Record::new(
-                        Some(client),
-                        None,
-                        None,
-                        events::Reason::StartupRecovery,
-                        events::Action::Stopped,
-                        None,
-                        None,
-                    ));
-                    *r.startup_error.lock().unwrap() = Some(e.clone());
-                    let _ = app.emit("switch-error", e);
-                }
+        for client in [gateway::ClientId::Codex, gateway::ClientId::Claude] {
+            if (client == gateway::ClientId::Codex
+                && official::blocks_gateway(&r.data, &r.home(client)?))
+                || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
+            {
+                continue;
+            }
+            if let Err(e) = r.gateway(client).resume(&r.home(client)?).await {
+                let e = AppError::new(&e.code, &format!("{}：{}", client.name(), e.message));
+                r.diagnostics.emit(events::Record::new(
+                    Some(client),
+                    None,
+                    None,
+                    events::Reason::StartupRecovery,
+                    events::Action::Stopped,
+                    None,
+                    None,
+                ));
+                *r.startup_error.lock().unwrap() = Some(e.clone());
+                let _ = app.emit("switch-error", e);
             }
         }
         if !r.start_silently {
@@ -1248,7 +1254,7 @@ pub fn run() {
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
             let startup = startup::Service::new(&data);
-            let start_silently = smoke.is_none() && startup::silent(&args, &startup.preferences()?);
+            let start_silently = smoke.is_none() && startup::silent(&args);
             app.manage(quick::Panel::new(&data)?);
             let power = power::Service::new(&data);
             let mut core = Core::new(data.clone(), home)?;
@@ -1615,6 +1621,7 @@ pub fn run() {
             quick::hide_quick,
             quick::resize_quick,
             get_gateway,
+            reveal_provider_token,
             probe_provider_endpoints,
             update_gateway,
             commands::preview_sub2api_import,

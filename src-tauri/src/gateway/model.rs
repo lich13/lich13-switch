@@ -449,14 +449,19 @@ impl Store {
                 };
                 if let Some(id) = id {
                     let p = self.provider_mut(&id)?;
-                    p.base_url = u.as_str().trim_end_matches('/').to_owned();
+                    let base_url = u.as_str().trim_end_matches('/');
+                    let credentials_changed =
+                        p.base_url != base_url || (!token.is_empty() && p.token != token);
+                    p.base_url = base_url.to_owned();
                     if !token.is_empty() {
                         p.token = token;
                     }
                     if display_name.is_some() {
                         p.name = label;
                     }
-                    p.version = uuid::Uuid::new_v4().to_string();
+                    if credentials_changed {
+                        p.version = uuid::Uuid::new_v4().to_string();
+                    }
                 } else {
                     if token.trim().is_empty() {
                         return Err(AppError::new("TOKEN", "请输入供应商 Token"));

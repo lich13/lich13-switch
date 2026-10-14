@@ -1388,6 +1388,13 @@ function AttemptDetails({
                 ],
               ]
             : []),
+          ...(a.routingEvidence
+            ? ([
+                ["输入证据", routingInput(a.routingEvidence.input)],
+                ...(a.routingEvidence.hasToolDeclarations ? [["初始化声明", "包含工具声明"]] : []),
+                ...(a.routingEvidence.restriction ? [["准入限制", routingRestriction(a.routingEvidence.restriction)]] : []),
+              ] as [string, string][])
+            : []),
           ...(a.transfer
             ? ([
                 [
@@ -1661,6 +1668,27 @@ function routingReason(reason: string): string {
       } as Record<string, string>
     )[reason] ?? "调度原因未记录"
   );
+}
+function routingInput(value: string): string {
+  return ({
+    first_turn: "已确认首轮输入",
+    history: "包含历史消息或工具结果",
+    response_cursor: "包含响应游标",
+    compaction: "包含压缩边界或触发标记",
+    warmup: "预热或空输入",
+    missing_input: "缺少输入字段",
+    unknown_structure: "输入结构无法识别",
+    metadata_unavailable: "请求元数据无法读取",
+  } as Record<string, string>)[value] ?? "未记录";
+}
+function routingRestriction(value: string): string {
+  return ({
+    model_mismatch: "模型白名单不匹配",
+    model_cooling: "当前模型正在冷却",
+    provider_unavailable: "供应商健康状态不可用",
+    capacity_full: "并发或线程预留名额已满",
+    queue_waiting: "已有请求排队等待",
+  } as Record<string, string>)[value] ?? "未记录";
 }
 function Sources({
   state,

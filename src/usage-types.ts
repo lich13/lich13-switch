@@ -64,6 +64,11 @@ export type Attempt = {
   threadHash?: string | null;
   upstreamRequestHash?: string | null;
   routingDecision?: string | null;
+  routingEvidence?: {
+    input: string;
+    hasToolDeclarations: boolean;
+    restriction?: string | null;
+  } | null;
   pricingBasis?: string | null;
   mappingRevision?: string | null;
   repeatCount?: number;
