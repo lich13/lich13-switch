@@ -443,17 +443,13 @@ impl Registry {
             .entries
             .retain(|_, e| now().saturating_sub(e.updated) < RETENTION_MS || e.claim.is_some());
         if !state.entries.contains_key(&session) && state.entries.len() >= MAX_THREADS {
-            if let Some(oldest) = state
+            let oldest = state
                 .entries
                 .iter()
                 .filter(|(_, e)| e.claim.is_none())
                 .min_by_key(|(_, e)| e.updated)
-                .map(|(k, _)| k.clone())
-            {
-                state.entries.remove(&oldest);
-            } else {
-                return None;
-            }
+                .map(|(k, _)| k.clone())?;
+            state.entries.remove(&oldest);
         }
         state.sequence = state.sequence.saturating_add(1);
         let sequence = state.sequence;
