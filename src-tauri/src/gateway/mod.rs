@@ -11,6 +11,7 @@ mod client;
 mod registry;
 mod retired;
 pub use client::{claude_home, grok_home, ClientId};
+pub(crate) use retired::migrate as retire_legacy_proxy;
 mod admission;
 pub mod catalog;
 mod circuit;
@@ -47,6 +48,7 @@ mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
 mod takeover;
+pub(crate) use takeover::recover as recover_for_migration;
 #[cfg(test)]
 mod tests;
 use crate::storage::{self, AppError, Result};
@@ -377,10 +379,7 @@ impl Gateway {
         shared: Option<Arc<registry::Registry>>,
     ) -> Result<Self> {
         storage::private_dir(&data)?;
-        let error = takeover::recover(&data)
-            .and_then(|()| retired::migrate(&data))
-            .err()
-            .map(|e| e.message);
+        let error = crate::migrations::gateway(&data).err().map(|e| e.message);
         let upgrade_pending = error.is_some();
         let (mut store, revision) = Store::load(&data.join("gateway.json"))?;
         if revision == "missing" {
@@ -1373,9 +1372,7 @@ impl Gateway {
                     s.store = next;
                 }
             }
-            if let Err(e) =
-                takeover::recover(&self.0.data).and_then(|()| retired::migrate(&self.0.data))
-            {
+            if let Err(e) = crate::migrations::gateway(&self.0.data) {
                 s.error = Some(e.message.clone());
                 drop(s);
                 self.changed();

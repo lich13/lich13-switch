@@ -81,7 +81,7 @@ pub fn get_startup_error(r: R<'_>) -> Option<AppError> {
 
 #[tauri::command]
 pub fn cleanup_retired_data(r: R<'_>) -> Result<()> {
-    crate::cleanup::retired_statistics(&r.data)?;
+    crate::migrations::before_services(&r.data)?;
     *r.cleanup_error.lock().unwrap() = None;
     Ok(())
 }

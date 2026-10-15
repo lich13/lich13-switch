@@ -12,6 +12,7 @@ mod exchange_template_tests;
 mod gateway;
 mod links;
 mod login;
+mod migrations;
 mod notifications;
 mod official;
 mod power;
@@ -1290,7 +1291,7 @@ pub fn run() {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
                 });
-            let cleanup_error = cleanup::retired_statistics(&data).err();
+            let cleanup_error = migrations::before_services(&data).err();
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
             let grok = gateway.grok_companion(data.join("grok"))?;
@@ -1383,7 +1384,7 @@ pub fn run() {
             if runtime.smoke.is_none() {
                 let r = runtime.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    if let Err(e) = r.startup.migrate() {
+                    if let Err(e) = migrations::login_items(&r.startup) {
                         r.diagnostics.emit(events::Record::new(None,None,None,events::Reason::StartupRecovery,events::Action::Stopped,None,None));
                         *r.startup_error.lock().unwrap() = Some(e);
                     }
