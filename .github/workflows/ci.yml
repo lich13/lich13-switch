@@ -31,6 +31,8 @@ jobs:
         with:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
+      - run: python3 scripts/check-network-hosts.py
+      - run: python3 -m unittest discover -s scripts -p "test_*.py"
       - run: pnpm test
       - run: pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check

@@ -1,0 +1,13 @@
+{
+  "hosts": {
+    "api.github.com": {"purpose": "应用检查本仓库的最新 Release", "files": ["src-tauri/src/update.rs"]},
+    "raw.githubusercontent.com": {"purpose": "应用读取 Wei-Shaw/model-price-repo 的价格及 SHA-256", "files": ["src-tauri/src/usage/pricing.rs"]},
+    "github.com": {"purpose": "用户主动打开项目仓库或发布页；开发预览使用相同入口", "files": ["src-tauri/src/update.rs", "src/preview.ts"]},
+    "auth.openai.com": {"purpose": "识别原生 Codex CLI 的登录链接及模拟预览，不由应用发送账号请求", "files": ["src-tauri/src/login.rs", "src/preview.ts"]},
+    "chatgpt.com": {"purpose": "识别原生 Codex CLI 的登录链接", "files": ["src-tauri/src/login.rs"]},
+    "api.openai.com": {"purpose": "JWT 声明名称空间，不是请求地址", "files": ["src-tauri/src/core.rs", "src-tauri/src/account_exchange.rs"]},
+    "developer.apple.com": {"purpose": "源码注释中的系统 API 文档", "files": ["src-tauri/src/startup.rs"]},
+    "schema.tauri.app": {"purpose": "Tauri 配置的开发期 schema 标识", "files": ["src-tauri/tauri.conf.json"]}
+  },
+  "local_hosts": ["localhost", "ipc.localhost"]
+}
