@@ -52,6 +52,7 @@ struct Inner {
     price_hint: tokio::sync::Notify,
     backfilling: std::sync::atomic::AtomicBool,
     error: Mutex<Option<String>>,
+    settings_error: Mutex<Option<String>>,
     write_error: Mutex<Option<String>>,
     repair_error: Mutex<Option<String>>,
     pending_error: Mutex<Option<String>>,
@@ -154,6 +155,29 @@ impl Inner {
         records
     }
 }
+fn load_settings(path: &Path) -> (Settings, Option<String>) {
+    let bytes = match storage::read_optional(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return (Settings::default(), None),
+        Err(_) => {
+            return (
+                Settings::default(),
+                Some("用量设置无法读取，原文件已保留".into()),
+            )
+        }
+    };
+    if let Ok(settings) = serde_json::from_slice::<Settings>(&bytes) {
+        if settings.validate().is_ok() {
+            return (settings, None);
+        }
+    }
+    let message = if storage::preserve_corrupt(path, &bytes).is_ok() {
+        "用量设置损坏，原文件和私有备份已保留，暂用默认设置"
+    } else {
+        "用量设置损坏，原文件已保留但备份失败，暂用默认设置"
+    };
+    (Settings::default(), Some(message.into()))
+}
 impl Service {
     pub fn new(data: &Path) -> Self {
         let dir = data.join("usage");
@@ -165,13 +189,7 @@ impl Service {
             error = Some(e.message.clone());
         }
         let path = dir.join("settings.json");
-        let saved = storage::read_optional(&path);
-        let settings = saved
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_slice::<Settings>(&v).ok())
-            .filter(|v| v.validate().is_ok())
-            .unwrap_or_default();
+        let (settings, settings_error) = load_settings(&path);
         let (writer, receiver) = mpsc::sync_channel::<Record>(256);
         let (overflow, pending) = mpsc::sync_channel::<Record>(64);
         let (events, _) = broadcast::channel(32);
@@ -189,6 +207,7 @@ impl Service {
             price_hint: tokio::sync::Notify::new(),
             backfilling: std::sync::atomic::AtomicBool::new(false),
             error: Mutex::new(error),
+            settings_error: Mutex::new(settings_error),
             write_error: Mutex::new(write_error),
             repair_error: Mutex::new(None),
             pending_error: Mutex::new(None),
@@ -333,6 +352,7 @@ impl Service {
                 .clone())
                 .or_else(|| self.0.pending_error.lock().unwrap().clone())
                 .or_else(|| self.0.repair_error.lock().unwrap().clone())
+                .or_else(|| self.0.settings_error.lock().unwrap().clone())
                 .or_else(|| self.0.error.lock().unwrap().clone()),
         }
     }
@@ -344,6 +364,7 @@ impl Service {
             None,
         )?;
         *self.0.settings.write().unwrap() = settings;
+        *self.0.settings_error.lock().unwrap() = None;
         let _ = self.0.events.send(());
         Ok(self.state())
     }
@@ -772,3 +793,6 @@ impl Drop for AttemptTrace {
 mod pricing_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod settings_tests;

@@ -579,27 +579,14 @@ impl Core {
                 .map(|p| {
                     let bytes = serde_json::to_vec_pretty(&export_account(p, format, None)?)
                         .map_err(|_| invalid("导出无法生成"))?;
-                    let mut file = storage::private_tempfile(path)?;
-                    use std::io::Write;
-                    file.write_all(&bytes).map_err(storage::io_error)?;
-                    file.as_file().sync_all().map_err(storage::io_error)?;
+                    let file = storage::stage_write(path, &bytes, u64::MAX)?;
                     Ok((
                         file,
                         path.join(format!("codex-{}.json", uuid::Uuid::new_v4())),
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let mut published = Vec::new();
-            for (file, destination) in staged {
-                if file.persist_noclobber(&destination).is_err() {
-                    for owned in published {
-                        let _ = std::fs::remove_file(owned);
-                    }
-                    return Err(invalid("导出保存失败，已撤回本次写入"));
-                }
-                published.push(destination);
-            }
-            return Ok(());
+            return storage::publish_batch(staged);
         }
         let saved = template::Service::load(&self.oauth_template_path(), "openai", "oauth").ok();
         let first_envelope = profiles
