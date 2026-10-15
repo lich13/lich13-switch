@@ -40,7 +40,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "6.1.2",
     "jsdom": "^27.0.0",
-    "prettier": "3.8.3",
+    "prettier": "3.9.10",
     "sharp": "^0.35.5",
     "typescript": "7.0.2",
     "vite": "8.3.4",
