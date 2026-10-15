@@ -1,6 +1,7 @@
 use crate::errors::code;
 mod claude_profile;
 mod cleanup;
+mod cleanup_spool;
 mod commands;
 mod configuration;
 mod core;
@@ -1291,6 +1292,8 @@ pub fn run() {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
                 });
+            // Single-instance registration has completed; no current spool exists yet.
+            cleanup_spool::clean(&data);
             let cleanup_error = migrations::before_services(&data).err();
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
