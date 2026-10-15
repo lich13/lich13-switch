@@ -14,6 +14,10 @@ use std::{
 };
 use tokio::sync::{broadcast, Notify};
 
+#[cfg(test)]
+#[path = "admission_persistence_tests.rs"]
+mod persistence_tests;
+
 #[derive(Clone)]
 pub struct Scheduler(Arc<Shared>);
 struct Shared {
@@ -34,6 +38,9 @@ struct State {
     intake: HashMap<String, (bool, bool)>,
     active: HashMap<String, usize>,
     retention: super::thread_capacity::Retention,
+    // A failed write can be retried from the still-authoritative in-memory state.
+    // Retention::error instead means the initial ledger could not be trusted.
+    retention_write_error: bool,
     rpm: HashMap<String, VecDeque<RateStamp>>,
     rpm_pending: HashMap<String, usize>,
     rpm_path: PathBuf,
@@ -48,6 +55,7 @@ impl State {
             retention: super::thread_capacity::Retention::load(
                 &rpm_path.with_file_name("thread-reservations.json"),
             ),
+            retention_write_error: false,
             running: false,
             epoch: 0,
             next: 0,
@@ -349,22 +357,30 @@ impl Scheduler {
                 let Some(shared) = weak.upgrade() else {
                     break;
                 };
-                let snapshot = {
+                let (snapshot, retry_write) = {
                     let mut state = shared.state.lock().unwrap();
                     if state.retention.error {
                         continue;
                     }
                     state.retention.prune();
-                    state.retention.snapshot()
+                    (state.retention.snapshot(), state.retention_write_error)
                 };
-                if snapshot == previous {
+                if snapshot == previous && !retry_write {
                     continue;
                 }
                 if storage::atomic_write(&path, &snapshot, None).is_err() {
-                    shared.state.lock().unwrap().retention.error = true;
+                    shared.state.lock().unwrap().retention_write_error = true;
                     let _ = shared.events.send(());
                 } else {
                     previous = snapshot;
+                    let recovered = {
+                        let mut state = shared.state.lock().unwrap();
+                        std::mem::take(&mut state.retention_write_error)
+                    };
+                    if recovered {
+                        shared.wake.notify_waiters();
+                        let _ = shared.events.send(());
+                    }
                 }
             }
         });
@@ -379,7 +395,8 @@ impl Scheduler {
         self.0.state.lock().unwrap().retention.reserved(id)
     }
     pub fn retention_error(&self) -> bool {
-        self.0.state.lock().unwrap().retention.error
+        let state = self.0.state.lock().unwrap();
+        state.retention.error || state.retention_write_error
     }
     fn available(s: &State, id: &str, request: Option<u64>, manual: bool) -> bool {
         let limit = s.limits[id];
@@ -749,7 +766,7 @@ impl Scheduler {
                 }
                 s.retention.prune();
                 let request = budget.thread.as_ref().map(|t| t.ticket);
-                if request.is_some() && s.retention.error {
+                if request.is_some() && (s.retention.error || s.retention_write_error) {
                     break Err(Rejected::Unavailable);
                 }
                 let matching: Vec<_> = routes
