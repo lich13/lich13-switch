@@ -1300,6 +1300,13 @@ pub fn run() {
         .position(|s| s == "--smoke-test")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
+    let mut context = tauri::generate_context!();
+    if smoke.is_some() {
+        // Installer checks must not open the live application's WebView store.
+        for window in &mut context.config_mut().app.windows {
+            window.incognito = true;
+        }
+    }
     let builder = tauri::Builder::default();
     let builder = if smoke.is_none() {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
@@ -1422,7 +1429,7 @@ pub fn run() {
             runtime.grok.report_diagnostics();
             runtime.claude.report_diagnostics();
             links::receive(app.handle(), args.iter().cloned());
-            quick::Panel::create(app.handle())?;
+            quick::Panel::create(app.handle(), runtime.smoke.is_some())?;
             #[cfg(target_os = "macos")]
             if start_silently {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -1773,7 +1780,7 @@ pub fn run() {
             open_update_release,
             frontend_ready
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("lich13-switch initialization failed")
         .run(|app, event| {
             #[cfg(target_os = "macos")]

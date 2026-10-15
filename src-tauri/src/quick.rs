@@ -53,7 +53,7 @@ impl Panel {
             }),
         })
     }
-    pub fn create(app: &tauri::AppHandle) -> tauri::Result<()> {
+    pub fn create(app: &tauri::AppHandle, incognito: bool) -> tauri::Result<()> {
         WebviewWindowBuilder::new(
             app,
             "quick",
@@ -67,6 +67,7 @@ impl Panel {
         .skip_taskbar(true)
         .visible(false)
         .focused(false)
+        .incognito(incognito)
         .build()?;
         Ok(())
     }
