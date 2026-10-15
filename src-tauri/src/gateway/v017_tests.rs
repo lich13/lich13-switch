@@ -148,10 +148,17 @@ async fn http_200_sse_created_before_capacity_error_is_forwarded_without_retry()
 }
 
 #[tokio::test]
-async fn ordinary_and_permanent_http_200_sse_errors_remain_neutral_and_do_not_wait_forever() {
-    for event in [
-        r#"{"type":"error","error":{"code":"fixture_application_error","message":"fixture application failure"}}"#,
-        r#"{"type":"error","error":{"code":"insufficient_quota","message":"insufficient balance","status":429}}"#,
+async fn ordinary_http_200_sse_error_is_neutral_and_permanent_balance_rejection_counts_as_failure_without_waiting(
+) {
+    for (event, expected_failures) in [
+        (
+            r#"{"type":"error","error":{"code":"fixture_application_error","message":"fixture application failure"}}"#,
+            0,
+        ),
+        (
+            r#"{"type":"error","error":{"code":"insufficient_quota","message":"insufficient balance","status":429}}"#,
+            1,
+        ),
     ] {
         let hits = Arc::new(AtomicUsize::new(0));
         let count = hits.clone();
@@ -181,9 +188,10 @@ async fn ordinary_and_permanent_http_200_sse_errors_remain_neutral_and_do_not_wa
         .expect("non-capacity SSE error entered an unlimited wait");
         assert_eq!(response.status(), 200);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(std::str::from_utf8(&bytes).unwrap().contains(event));
+        let expected_body = format!("event: error\ndata: {event}\n\n");
+        assert_eq!(bytes.as_ref(), expected_body.as_bytes());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(g.view().providers[0].health.failures, 0);
+        assert_eq!(g.view().providers[0].health.failures, expected_failures);
         assert!(g.view().capacity_retries.is_empty());
         g.stop().await.unwrap();
     }
@@ -752,52 +760,75 @@ async fn websocket_handshake_capacity_can_recover_after_five_rejections_with_zer
 }
 
 #[tokio::test]
-async fn websocket_capacity_before_first_event_replays_exact_bytes_on_the_same_provider() {
-    let (port, seen) = native_server(0, |connection, mut socket, seen| async move {
-        capture_request(&mut socket, &seen).await;
-        if connection <= 5 {
-            socket
-                .send(yawc::Frame::text(CAPACITY_EVENT.to_owned()))
-                .await
-                .unwrap();
+async fn websocket_capacity_before_first_event_uses_backup_or_retries_same_provider_when_alone() {
+    for with_backup in [true, false] {
+        let (port, seen) = native_server(0, move |connection, mut socket, seen| async move {
+            capture_request(&mut socket, &seen).await;
+            if with_backup || connection <= 5 {
+                socket
+                    .send(yawc::Frame::text(CAPACITY_EVENT.to_owned()))
+                    .await
+                    .unwrap();
+            } else {
+                complete_native(socket).await;
+            }
+        })
+        .await;
+        let backup = if with_backup {
+            Some(
+                native_server(0, |_connection, mut socket, seen| async move {
+                    capture_request(&mut socket, &seen).await;
+                    complete_native(socket).await;
+                })
+                .await,
+            )
         } else {
-            complete_native(socket).await;
+            None
+        };
+        let mut urls = vec![format!("http://127.0.0.1:{port}/v1")];
+        if let Some((backup_port, _)) = &backup {
+            urls.push(format!("http://127.0.0.1:{backup_port}/v1"));
         }
-    })
-    .await;
-    let (backup, backup_seen) = native_server(0, |_connection, mut socket, seen| async move {
-        capture_request(&mut socket, &seen).await;
-        complete_native(socket).await;
-    })
-    .await;
-    let (t, g) = fixture(vec![
-        format!("http://127.0.0.1:{port}/v1"),
-        format!("http://127.0.0.1:{backup}/v1"),
-    ])
-    .await;
-    configure(&g, &t, 0);
-    start(&g, &t).await;
-    let mut client = concurrency::responses_client(&g).await;
-    client
-        .send(yawc::Frame::text(CREATE.to_owned()))
-        .await
-        .unwrap();
-    assert_eq!(next_ws(&mut client).await.unwrap().as_str(), CREATED);
-    assert_eq!(next_ws(&mut client).await.unwrap().as_str(), COMPLETED);
-    assert_eq!(seen.connections.load(Ordering::SeqCst), 6);
-    assert_eq!(
-        seen.frames.lock().unwrap().as_slice(),
-        &[CREATE.as_bytes(); 6]
-    );
-    assert_eq!(backup_seen.connections.load(Ordering::SeqCst), 0);
-    assert_eq!(g.view().providers[0].rpm_used, 6);
-    assert_eq!(g.view().providers[1].rpm_used, 0);
-    client
-        .send(yawc::Frame::close(1000.into(), "fixture done"))
-        .await
-        .unwrap();
-    drop(client);
-    g.stop().await.unwrap();
+        let (t, g) = fixture(urls).await;
+        configure(&g, &t, 0);
+        start(&g, &t).await;
+        let mut client = concurrency::responses_client(&g).await;
+        client
+            .send(yawc::Frame::text(CREATE.to_owned()))
+            .await
+            .unwrap();
+        assert_eq!(next_ws(&mut client).await.unwrap().as_str(), CREATED);
+        assert_eq!(next_ws(&mut client).await.unwrap().as_str(), COMPLETED);
+
+        let expected_primary_attempts = if with_backup { 1 } else { 6 };
+        let expected_primary_frames = vec![CREATE.as_bytes().to_vec(); expected_primary_attempts];
+        assert_eq!(
+            seen.connections.load(Ordering::SeqCst),
+            expected_primary_attempts
+        );
+        assert_eq!(
+            seen.frames.lock().unwrap().as_slice(),
+            expected_primary_frames.as_slice()
+        );
+        assert_eq!(g.view().providers[0].rpm_used, expected_primary_attempts);
+        if let Some((_, backup_seen)) = backup {
+            assert_eq!(backup_seen.connections.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                backup_seen.frames.lock().unwrap().as_slice(),
+                &[CREATE.as_bytes().to_vec()]
+            );
+            assert_eq!(g.view().providers[1].rpm_used, 1);
+        } else {
+            assert_eq!(g.view().providers.len(), 1);
+        }
+
+        client
+            .send(yawc::Frame::close(1000.into(), "fixture done"))
+            .await
+            .unwrap();
+        drop(client);
+        g.stop().await.unwrap();
+    }
 }
 
 #[tokio::test]
