@@ -261,7 +261,7 @@ fn unreadable_file_error_does_not_return_a_cached_value() {
 
     let first = read_fixture(&mut cache, &path, &mut parses).unwrap();
     let original_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
     if fs::read(&path).is_ok() {
         fs::set_permissions(&path, fs::Permissions::from_mode(original_mode)).unwrap();
         return;
