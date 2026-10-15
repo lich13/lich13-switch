@@ -405,7 +405,7 @@ impl Gateway {
                 p,
                 urls,
                 s.store.settings.endpoint_probe_seconds,
-                s.store.settings.port,
+                self.listener_view().port,
                 s.shutdown.as_ref().map(|s| s.subscribe()),
             )
         };

@@ -364,15 +364,15 @@ fn restore_reports_managed_external_edits_and_preserves_the_file() {
 }
 
 #[test]
-fn missing_config_uses_native_responses_profile_without_an_xai_fallback() {
+fn missing_config_does_not_guess_a_native_model_or_credentials() {
     let temp = tempfile::tempdir().unwrap();
     let (revision, text) = grok_config::read(temp.path()).unwrap();
 
     assert_eq!(revision, "missing");
     assert!(text.is_empty());
-    let profile = grok_config::profile(&text).unwrap();
-    assert_eq!(profile.model, "grok-4.5");
-    assert_eq!(profile.connection.protocol, Protocol::Responses);
+    let profile = grok_config::profile_with_env(&text, &|_| None).unwrap();
+    assert!(profile.model.is_empty());
+    assert!(!profile.protocol_known);
     assert!(profile.pair.base_url.is_none());
     assert!(profile.pair.token.is_none());
 }

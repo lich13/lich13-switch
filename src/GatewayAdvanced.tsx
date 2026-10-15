@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { errorOf, type ClientId, type GatewaySettings } from "./types";
+import { errorOf, type ClientId, type GatewaySettings, type GatewayListener } from "./types";
 import type { EditRevision } from "./gateway-edit";
 
 export default function Advanced({
   clientId,
   onDirtyChange,
   settings,
+  listener,
   revision,
   busy,
   save,
@@ -13,6 +14,7 @@ export default function Advanced({
   clientId: ClientId;
   onDirtyChange?: (dirty: boolean) => void;
   settings: GatewaySettings;
+  listener?: GatewayListener;
   revision: string;
   busy: boolean;
   save: (s: GatewaySettings, revision: EditRevision) => Promise<void>;
@@ -29,7 +31,7 @@ export default function Advanced({
     }
   }, [settings, revision, editing]);
   const fields: [keyof GatewaySettings, string][] = [
-    ["port", "本地端口"],
+    ["port", "共享本地端口"],
     ["maxRetries", "最大重试次数"],
     ["failureThreshold", "连续失败阈值"],
     ["transientFailureThreshold", "5xx 连续失败阈值"],
@@ -84,6 +86,7 @@ export default function Advanced({
             {label}
             <input
               type="number"
+              disabled={key === "port" && !!listener?.runningClients.length}
               required
               min={
                 key === "maxRetries"

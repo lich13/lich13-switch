@@ -23,7 +23,7 @@ use tokio::sync::watch;
 #[derive(Clone, Copy)]
 struct ReceivedAt(i64);
 pub async fn serve(
-    gateway: Gateway,
+    registry: std::sync::Arc<super::registry::Registry>,
     listener: tokio::net::TcpListener,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -31,20 +31,33 @@ pub async fn serve(
         tokio::select! {
             _=shutdown.changed()=>break,
             result=listener.accept()=>{
-                let Ok((socket,_))=result else{break};let g=gateway.clone();let mut stop=shutdown.clone();
+                let Ok((socket,_))=result else{break};let registry=registry.clone();let mut stop=shutdown.clone();
                 tokio::spawn(async move{
                     let activity = std::sync::Arc::new(super::wire_progress::Activity::default());
                     let (socket, socket_error) = super::wire_progress::observed_tcp(socket, activity.clone());
                     let socket = super::wire_progress::Tracked::new(socket, activity.clone());
                     let connection_activity = activity.clone();
                     let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
-                        let g=g.clone();
+                        let routed = super::listener::route(request.uri()).and_then(|(client, uri)| {
+                            *request.uri_mut() = uri;
+                            registry.gateway(client)
+                        });
                         let delivery = std::sync::Arc::new(super::protocol::Delivery::default());
                         delivery.track(activity.clone());
                         request.extensions_mut().insert(delivery);
                         request.extensions_mut().insert(ReceivedAt(crate::usage::model::now()));
                         request.extensions_mut().insert(activity.clone());
-                        async move{Ok::<_,Infallible>(forward(g,request).await)}
+                        async move{Ok::<_,Infallible>(match routed {
+                            Some(g) => {
+                                let mut client_stop = g.0.inner.lock().unwrap().shutdown.as_ref().map(watch::Sender::subscribe);
+                                tokio::select! {
+                                    biased;
+                                    _ = stopping(&mut client_stop) => error(StatusCode::SERVICE_UNAVAILABLE, code::GATEWAY_STOPPED, "客户端网关已停止"),
+                                    response = forward(g,request) => response,
+                                }
+                            },
+                            None => error(StatusCode::NOT_FOUND, code::CLIENT, "客户端网关路径不存在"),
+                        })}
                     });
                     let connection=hyper::server::conn::http1::Builder::new().preserve_header_case(true).half_close(true)
                         .serve_connection(TokioIo::new(socket),service).with_upgrades();

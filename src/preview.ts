@@ -282,6 +282,11 @@ export async function run(
     if (name === "commit_sub2api_import") emit("gateway-state", result);
     return result;
   }
+  if (["get_gateway_listener", "set_gateway_listener", "preview_grok_import", "cancel_grok_import", "commit_grok_import"].includes(name)) {
+    const result = gatewayPreview(name, args);
+    if (name === "commit_grok_import") emit("gateway-state", result);
+    return result;
+  }
   if (
     [
       "get_gateway",

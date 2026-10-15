@@ -1,5 +1,10 @@
 # Third-party notices
 
+The v0.25 shared listener and client path dispatch were independently implemented with architectural reference to cc-switch at `67d63e3e4c4b706a2aa45a13aff6636f41c528e3` (MIT), under the notice below. This application keeps distinct client credentials and state, and preserves native HTTP/SSE/WebSocket payloads without protocol adapters. Grok configuration precedence follows its native configuration documentation; the literal environment-file parser and recoverable import transaction are independently implemented.
+
+https://github.com/farion1231/cc-switch/blob/67d63e3e4c4b706a2aa45a13aff6636f41c528e3/src-tauri/src/proxy/server.rs
+https://docs.x.ai/build/settings
+
 The circuit breaker defaults, state machine, queue policy, HTTP error classification and associated test cases in `src-tauri/src/gateway/` are adapted from cc-switch at commit `1ee2fdc3a791f1e73476c631c7ab7ce8fac0638f`.
 
 Source: https://github.com/farion1231/cc-switch/tree/1ee2fdc3a791f1e73476c631c7ab7ce8fac0638f/src-tauri/src/proxy

@@ -6,6 +6,8 @@ import type {
   ConfigDocument,
   GatewaySettings,
   GatewayState,
+  GatewayListener,
+  GrokModel,
   GrokProtocol,
   LoginState,
   ModelCatalog,
@@ -91,6 +93,11 @@ export type ProviderImportPreview = {
     concurrency: number | null;
     error: string | null;
   }[];
+};
+export type GrokImportPreview = {
+  token: string | null; revision: string; models: GrokModel[]; selected: string;
+  environmentAvailable: boolean; environmentLoaded: boolean;
+  clearEnvironment: string[]; error: string | null;
 };
 export type GatewayEdit =
   | {
@@ -203,6 +210,11 @@ export type CommandMap = {
   hide_quick: Call<None, void>;
   resize_quick: Call<{ height: number }, void>;
   get_gateway: Call<Client, GatewayState>;
+  get_gateway_listener: Call<None, GatewayListener>;
+  set_gateway_listener: Call<{ port: number } & Revision, GatewayListener>;
+  preview_grok_import: Call<{ selected?: string | null; useEnvironment: boolean }, GrokImportPreview>;
+  commit_grok_import: Call<{ token: string } & Revision, GatewayState>;
+  cancel_grok_import: Call<{ token?: string | null }, void>;
   reveal_provider_token: Call<Provider & Revision, string>;
   probe_provider_endpoints: Call<Provider, GatewayState>;
   update_gateway: Call<

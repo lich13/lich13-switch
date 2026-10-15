@@ -10,7 +10,8 @@ export const gatewayDemo: GatewayState = {
   clientId: "codex",
   revision: "preview-gateway",
   running: false,
-  address: "http://127.0.0.1:15722/v1",
+  address: "http://127.0.0.1:15722/codex/v1",
+  listener: { port: 15722, revision: "preview-listener", runningClients: [] },
   mode: "manual",
   selected: "primary",
   lastSuccessful: null,
@@ -115,8 +116,8 @@ export const claudeGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo),
   clientId: "claude",
   revision: "preview-claude",
-  address: "http://127.0.0.1:15723",
-  settings: { ...gatewayDemo.settings, port: 15723 },
+  address: "http://127.0.0.1:15722/claude",
+  settings: { ...gatewayDemo.settings },
   selected: "claude-primary",
   configProvider: "claude-primary",
   providers: gatewayDemo.providers.map((p, i) => ({
@@ -154,11 +155,39 @@ if (densePreview) {
 }
 export const grokGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo), clientId: "grok", revision: "preview-grok",
-  address: "http://127.0.0.1:15724/v1", settings: { ...gatewayDemo.settings, port: 15724 },
+  address: "http://127.0.0.1:15722/grok/v1", settings: { ...gatewayDemo.settings },
   handoffWaiting: [], providers: gatewayDemo.providers.map(p => ({ ...structuredClone(p), protocol: "responses", handoffAfterCompaction: false, takeNewThreads: false, reservedThreads: 0 })),
 };
+function syncListener(port = gatewayDemo.settings.port, changed = false) {
+  const states = [gatewayDemo, claudeGatewayDemo, grokGatewayDemo];
+  const revision = changed ? crypto.randomUUID() : gatewayDemo.listener!.revision;
+  const runningClients = states.filter(state => state.running).map(state => state.clientId);
+  for (const state of states) {
+    state.settings.port = port;
+    state.listener = { port, revision, runningClients };
+    state.address = `http://127.0.0.1:${port}/${state.clientId === "claude" ? "claude" : `${state.clientId}/v1`}`;
+  }
+}
+syncListener();
 export function gatewayPreview(name: string, args: Record<string, unknown>) {
   const s = args.clientId === "claude" ? claudeGatewayDemo : args.clientId === "grok" ? grokGatewayDemo : gatewayDemo;
+  if (name === "get_gateway_listener") return gatewayDemo.listener;
+  if (name === "cancel_grok_import") return null;
+  if (name === "preview_grok_import") return {
+    token: args.useEnvironment ? "preview-grok-import" : null,
+    revision: grokGatewayDemo.revision, selected: "fixture-model",
+    models: [{ key: "fixture-model", model: "fixture-model", protocol: "responses", address: "https://example.invalid/v1", addressSource: "global", credentialAvailable: !!args.useEnvironment, missingEnvironment: args.useEnvironment ? [] : ["XAI_API_KEY"], error: null }],
+    environmentAvailable: true, environmentLoaded: !!args.useEnvironment,
+    clearEnvironment: ["GROK_MODELS_BASE_URL", "XAI_API_KEY"],
+    error: args.useEnvironment ? null : "未读取到 API 凭据；可确认读取 endpoint.env",
+  };
+  if (name === "commit_grok_import") return structuredClone(grokGatewayDemo);
+  if (name === "set_gateway_listener") {
+    const port = Number(args.port);
+    if (gatewayDemo.listener!.runningClients.length) throw new Error("请先停用全部客户端网关，再修改共享端口");
+    syncListener(port, true);
+    return gatewayDemo.listener;
+  }
   if (name === "preview_sub2api_import")
     return {
       token: "preview-sub2api",
@@ -225,11 +254,13 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     s.running = true;
     s.configState = "gateway";
     s.configProvider = null;
+    syncListener();
   }
   if (name === "stop_gateway") {
     s.running = false;
     s.configState = "provider";
     s.configProvider = s.selected;
+    syncListener();
   }
   if (name === "query_provider_quota") {
     const provider = s.providers.find((p) => p.id === args.providerId)!;
@@ -443,7 +474,14 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         throw new Error("连接方式无效");
       if (e.mode !== "auto") s.connectionMode = e.mode;
     }
-    if (e.op === "settings") s.settings = e.settings as GatewaySettings;
+    if (e.op === "settings") {
+      const settings = e.settings as GatewaySettings;
+      if (settings.port !== s.settings.port) {
+        if (gatewayDemo.listener!.runningClients.length) throw new Error("请先停用全部客户端网关，再修改共享端口");
+        syncListener(settings.port, true);
+      }
+      s.settings = settings;
+    }
     s.revision = crypto.randomUUID();
   }
   return structuredClone(s);

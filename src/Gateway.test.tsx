@@ -535,7 +535,7 @@ describe("client isolation", () => {
     render(<Gateway notify={() => {}} />);
     await screen.findByLabelText(`${state.providers[0].name} 操作`);
     await user.click(screen.getByText("高级设置", { selector: "summary" }));
-    const port = screen.getByRole("spinbutton", { name: "本地端口" });
+    const port = screen.getByRole("spinbutton", { name: "共享本地端口" });
     await user.clear(port);
     await user.type(port, "23456");
     await user.click(screen.getByRole("button", { name: "Claude Code" }));
@@ -563,7 +563,7 @@ describe("client isolation", () => {
     );
     await screen.findByLabelText(`${claudeState.providers[0].name} 操作`);
     await user.click(screen.getByText("高级设置", { selector: "summary" }));
-    expect(screen.getByRole("spinbutton", { name: "本地端口" })).toHaveValue(
+    expect(screen.getByRole("spinbutton", { name: "共享本地端口" })).toHaveValue(
       claudeState.settings.port,
     );
     expect(
@@ -575,7 +575,7 @@ describe("client isolation", () => {
       screen.queryByRole("dialog", { name: "确认操作" }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByText("高级设置", { selector: "summary" }));
-    expect(screen.getByRole("spinbutton", { name: "本地端口" })).toHaveValue(
+    expect(screen.getByRole("spinbutton", { name: "共享本地端口" })).toHaveValue(
       state.settings.port,
     );
   });

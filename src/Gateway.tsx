@@ -1,4 +1,5 @@
 import Advanced from "./GatewayAdvanced";
+import GrokImport from "./GrokImport";
 import GatewayDialog from "./GatewayProviderDialog";
 import { subscriptions } from "./subscriptions";
 import type { GatewayEdit } from "./bridge-contracts";
@@ -48,6 +49,7 @@ import {
 
 type Edit = GatewayEdit;
 type Dialog =
+  | { kind: "grokImport" }
   | { kind: "exchange"; mode: "import" | "export" }
   | { kind: "provider"; item?: Provider }
   | { kind: "settings"; item: Provider }
@@ -243,7 +245,10 @@ function GatewayContent({
       {clientId === "claude" && (
         <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
       )}
-      {clientId === "grok" && state.grokNativeAvailable && <button disabled={busy || state.running} onClick={() => run(() => edit({ op: "grokNative" }))}>恢复原生配置</button>}
+      {clientId === "grok" && <div className="gateway-toolbar">
+        <button disabled={busy || state.running} onClick={() => setDialog({ kind: "grokImport" })}>导入当前配置</button>
+        {state.grokNativeAvailable && <button disabled={busy || state.running} onClick={() => run(() => edit({ op: "grokNative" }))}>恢复原生配置</button>}
+      </div>}
       <div className="page-heading gateway-heading">
         <ClientSelection
           client={clientId}
@@ -559,6 +564,7 @@ function GatewayContent({
             clientId={clientId}
             onDirtyChange={markAdvanced}
             settings={state.settings}
+            listener={state.listener}
             revision={state.revision}
             busy={busy}
             save={async (settings, revision) => {
@@ -579,6 +585,7 @@ function GatewayContent({
           onDirtyChange={markDialog}
         />
       )}
+      {dialog?.kind === "grokImport" && <GrokImport close={() => setDialog(null)} update={setState} notify={notify} />}
       {dialog?.kind === "settings" && (
         <ProviderSettings
           key={`${dialog.item.id}:${dialogVersion}`}

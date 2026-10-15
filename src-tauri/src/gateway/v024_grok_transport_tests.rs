@@ -172,10 +172,29 @@ struct Fixture {
 
 impl Fixture {
     async fn new(upstream: &str) -> Self {
+        Self::new_with_config(native_config(upstream)).await
+    }
+
+    async fn new_with_config(config: String) -> Self {
+        Self::build(config, true).await
+    }
+
+    async fn new_manual_provider(upstream: &str) -> Self {
+        let fixture = Self::build(native_config(upstream), false).await;
+        add_provider(
+            &fixture,
+            upstream.to_owned(),
+            "fixture-original-grok-token",
+            Protocol::Responses,
+        );
+        fixture
+    }
+
+    async fn build(config: String, import_native_profile: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("grok-home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("config.toml"), native_config(upstream)).unwrap();
+        std::fs::write(home.join("config.toml"), &config).unwrap();
 
         let primary = Gateway::new(dir.path().join("primary-data")).unwrap();
         let gateway = primary
@@ -187,8 +206,10 @@ impl Fixture {
         gateway.set_usage(usage.clone());
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = reservation.local_addr().unwrap().port();
+        gateway
+            .set_listener_port(port, &gateway.listener_view().revision)
+            .unwrap();
         let mut settings = gateway.view().settings;
-        settings.port = port;
         settings.max_retries = 1;
         settings.connect_seconds = 2;
         settings.first_byte_seconds = 5;
@@ -199,7 +220,24 @@ impl Fixture {
             .edit(Edit::Settings { settings }, &gateway.view().revision, &home)
             .unwrap();
         drop(reservation);
+
+        // Grok discovery is read-only; import is an explicit preview/commit action.
         gateway.import_initial(&home).unwrap();
+        assert!(gateway.view().providers.is_empty());
+        assert_eq!(
+            std::fs::read(home.join("config.toml")).unwrap().as_slice(),
+            config.as_bytes()
+        );
+        if import_native_profile {
+            let preview = gateway.preview_grok_import(&home, None, false).unwrap();
+            let token = preview
+                .token
+                .as_deref()
+                .expect("fixture Grok config should be importable");
+            gateway
+                .commit_grok_import(&home, token, &preview.revision)
+                .unwrap();
+        }
 
         Self {
             gateway,
@@ -256,6 +294,21 @@ query_params = {{ "profile" = "fixture-profile-query", "replace" = "fixture-prof
     )
 }
 
+fn native_config_with_official_model(upstream: &str) -> String {
+    let mut config = native_config(upstream);
+    config.push_str(
+        r#"
+
+[model."fixture-official-native"]
+model = "fixture-official-native-model"
+base_url = "https://fixture-official-native.example.invalid/v1"
+api_key = "fixture-official-native-token"
+api_backend = "responses"
+"#,
+    );
+    config
+}
+
 fn add_provider(fixture: &Fixture, base_url: String, token: &str, protocol: Protocol) {
     fixture.edit(Edit::SaveGrokProvider {
         id: None,
@@ -269,13 +322,14 @@ fn add_provider(fixture: &Fixture, base_url: String, token: &str, protocol: Prot
 async fn gateway_request(gateway: &Gateway, path: &str, body: &[u8]) -> Response<Incoming> {
     let client: HttpClient =
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
-    let (token, port) = {
+    let token = {
         let state = gateway.0.inner.lock().unwrap();
-        (state.store.local_token.clone(), state.store.settings.port)
+        state.store.local_token.clone()
     };
+    let port = gateway.listener_view().port;
     let request = Request::builder()
         .method("POST")
-        .uri(format!("http://127.0.0.1:{port}{path}"))
+        .uri(format!("http://127.0.0.1:{port}/grok{path}"))
         .header("authorization", format!("Bearer {token}"))
         .header("x-api-key", "fixture-downstream-api-key")
         .header("content-type", "application/json")
@@ -598,7 +652,7 @@ async fn grok_gateway_routes_each_native_protocol_with_private_connection_data()
 async fn grok_native_selection_and_gateway_stop_restore_config_without_overwriting_conflicts() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let upstream = capturing_server(seen, RESPONSES_RESPONSE_BODY).await;
-    let fixture = Fixture::new(&upstream.url("/v1")).await;
+    let fixture = Fixture::new_manual_provider(&upstream.url("/v1")).await;
     let config_path = fixture.config_path();
     let original_config = std::fs::read(&config_path).unwrap();
     let provider_id = fixture.gateway.view().providers[0].id.clone();
@@ -659,7 +713,65 @@ async fn grok_native_selection_and_gateway_stop_restore_config_without_overwriti
 }
 
 #[tokio::test]
-async fn grok_manual_messages_connection_survives_import_initial_and_reopen() {
+async fn grok_managed_api_ignores_native_default_changes_and_preserves_them_on_stop() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = capturing_server(seen.clone(), RESPONSES_RESPONSE_BODY).await;
+    let config = native_config_with_official_model(&upstream.url("/v1"));
+    let fixture = Fixture::new_with_config(config).await;
+    fixture.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+
+    fixture.start().await;
+    let config_path = fixture.config_path();
+    let active_config = std::fs::read_to_string(&config_path).unwrap();
+    let mut external_doc = active_config.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        external_doc
+            .get("models")
+            .and_then(|models| models.get("default"))
+            .and_then(toml_edit::Item::as_str),
+        Some(grok_config::MANAGED)
+    );
+    external_doc["models"]["default"] = toml_edit::value("fixture-official-native");
+    let external_config = external_doc.to_string();
+    std::fs::write(&config_path, &external_config).unwrap();
+
+    let response = gateway_request(&fixture.gateway, "/v1/responses", RESPONSES_REQUEST).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_bytes(response).await.as_slice(),
+        RESPONSES_RESPONSE_BODY
+    );
+    let routed = requests(&seen);
+    assert_eq!(routed.len(), 1);
+    assert_body_and_model(
+        &routed[0],
+        RESPONSES_REQUEST,
+        "fixture-grok-responses-model",
+    );
+    // Imported native custom auth headers remain part of the managed connection.
+    assert_eq!(
+        routed[0].authorization.as_deref(),
+        Some("Bearer fixture-stale-auth")
+    );
+    assert!(routed[0].path_and_query.starts_with("/v1/responses"));
+
+    fixture.stop().await;
+    let stopped_config = std::fs::read_to_string(&config_path).unwrap();
+    let stopped_doc = stopped_config.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        stopped_doc
+            .get("models")
+            .and_then(|models| models.get("default"))
+            .and_then(toml_edit::Item::as_str),
+        Some("fixture-official-native")
+    );
+    assert!(!fixture.gateway.view().running);
+}
+
+#[tokio::test]
+async fn grok_initial_discovery_is_read_only_and_manual_connection_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("grok-home");
     std::fs::create_dir_all(&home).unwrap();
@@ -675,6 +787,13 @@ async fn grok_manual_messages_connection_survives_import_initial_and_reopen() {
     let primary = Gateway::new(primary_data.clone()).unwrap();
     let gateway = primary.grok_companion(grok_data.clone()).unwrap();
     assert!(!gateway.0.inner.lock().unwrap().store.initialized);
+    let native_before = std::fs::read(home.join("config.toml")).unwrap();
+    gateway.import_initial(&home).unwrap();
+    assert!(gateway.view().providers.is_empty());
+    assert_eq!(
+        std::fs::read(home.join("config.toml")).unwrap(),
+        native_before
+    );
     gateway
         .edit(
             Edit::SaveGrokProvider {

@@ -27,7 +27,11 @@ impl ClientId {
     pub fn address(self, port: u16) -> String {
         format!(
             "http://127.0.0.1:{port}{}",
-            if self == Self::Claude { "" } else { "/v1" }
+            match self {
+                Self::Codex => "/codex/v1",
+                Self::Claude => "/claude",
+                Self::Grok => "/grok/v1",
+            }
         )
     }
     pub fn config(self, home: &Path) -> PathBuf {
@@ -48,9 +52,9 @@ pub fn claude_home() -> String {
 }
 
 pub fn grok_home() -> String {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".grok")
+    std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".grok"))
         .to_string_lossy()
         .into_owned()
 }

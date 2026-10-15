@@ -13,15 +13,9 @@ pub(super) async fn claude_fixture(
     claude.import_initial(&home).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     claude
-        .edit(
-            Edit::Settings {
-                settings: Settings {
-                    port: listener.local_addr().unwrap().port(),
-                    ..Default::default()
-                },
-            },
-            &claude.view().revision,
-            &home,
+        .set_listener_port(
+            listener.local_addr().unwrap().port(),
+            &claude.listener_view().revision,
         )
         .unwrap();
     drop(listener);
@@ -164,7 +158,7 @@ async fn visual_config_save_keeps_gateway_fields_and_conflicts_do_not_lose_draft
     let stopped_pair = takeover::pair_for(ClientId::Claude, &stopped.text).unwrap();
     let expected_base = super::model::base_url(
         original_pair.base_url.as_deref().unwrap(),
-        claude.view().settings.port,
+        claude.listener_view().port,
     )
     .unwrap()
     .to_string();

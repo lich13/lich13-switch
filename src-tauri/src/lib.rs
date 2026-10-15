@@ -880,6 +880,50 @@ fn get_gateway(client_id: gateway::ClientId, r: tauri::State<'_, Arc<Runtime>>) 
     r.gateway(client_id).view()
 }
 #[tauri::command]
+fn get_gateway_listener(r: tauri::State<'_, Arc<Runtime>>) -> gateway::ListenerView {
+    r.gateway.listener_view()
+}
+#[tauri::command]
+fn set_gateway_listener(
+    port: u16,
+    expected_revision: String,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::ListenerView> {
+    r.gateway.set_listener_port(port, &expected_revision)
+}
+#[tauri::command]
+fn preview_grok_import(
+    selected: Option<String>,
+    use_environment: bool,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::GrokImportPreview> {
+    r.grok.preview_grok_import(
+        &r.home(gateway::ClientId::Grok)?,
+        selected.as_deref(),
+        use_environment,
+    )
+}
+#[tauri::command]
+fn cancel_grok_import(token: Option<String>, r: tauri::State<'_, Arc<Runtime>>) {
+    r.grok.cancel_grok_import(token.as_deref());
+}
+#[tauri::command]
+async fn commit_grok_import(
+    token: String,
+    expected_revision: String,
+    app: tauri::AppHandle,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::View> {
+    let _guard = r.official_tx.lock().await;
+    let view = r.grok.commit_grok_import(
+        &r.home(gateway::ClientId::Grok)?,
+        &token,
+        &expected_revision,
+    )?;
+    let _ = refresh(&app, &r);
+    Ok(view)
+}
+#[tauri::command]
 fn reveal_provider_token(
     window: tauri::WebviewWindow,
     client_id: gateway::ClientId,
@@ -1676,6 +1720,11 @@ pub fn run() {
             quick::hide_quick,
             quick::resize_quick,
             get_gateway,
+            get_gateway_listener,
+            set_gateway_listener,
+            preview_grok_import,
+            cancel_grok_import,
+            commit_grok_import,
             reveal_provider_token,
             probe_provider_endpoints,
             update_gateway,

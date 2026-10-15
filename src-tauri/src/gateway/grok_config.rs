@@ -94,7 +94,11 @@ pub struct Profile {
     pub pair: Pair,
     pub connection: Connection,
     pub model: String,
-    table: Table,
+    pub(super) table: Table,
+    pub selected: String,
+    pub address_source: Option<&'static str>,
+    pub credential_names: Vec<String>,
+    pub protocol_known: bool,
 }
 
 fn error(message: &str) -> AppError {
@@ -131,18 +135,37 @@ fn string(table: &Table, key: &str) -> Result<Option<String>> {
         .transpose()
 }
 fn environment_names(item: &Item) -> Result<Vec<&str>> {
+    let valid = |name: &str| {
+        !name.is_empty()
+            && name.len() <= 128
+            && name.bytes().enumerate().all(|(index, c)| {
+                c == b'_' || c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit())
+            })
+    };
     if let Some(name) = item.as_str() {
+        if !valid(name) {
+            return Err(error("Grok 环境变量名称无效"));
+        }
         return Ok(vec![name]);
     }
     item.as_array()
         .map(|v| {
             v.iter()
-                .map(|v| v.as_str().ok_or_else(|| error("Grok 环境变量名称无效")))
+                .map(|v| {
+                    v.as_str()
+                        .filter(|name| valid(name))
+                        .ok_or_else(|| error("Grok 环境变量名称无效"))
+                })
                 .collect()
         })
         .unwrap_or_else(|| Err(error("Grok 环境变量名称无效")))
 }
-fn headers(item: Option<&Item>, env: bool, out: &mut BTreeMap<String, String>) -> Result<()> {
+fn headers(
+    item: Option<&Item>,
+    env: bool,
+    resolve: &impl Fn(&str) -> Option<String>,
+    out: &mut BTreeMap<String, String>,
+) -> Result<()> {
     let Some(item) = item else {
         return Ok(());
     };
@@ -169,7 +192,7 @@ fn headers(item: Option<&Item>, env: bool, out: &mut BTreeMap<String, String>) -
             .as_str()
             .ok_or_else(|| error("Grok 请求头必须是字符串"))?;
         let resolved = if env {
-            std::env::var(source).ok().filter(|s| !s.is_empty())
+            resolve(source).filter(|s| !s.is_empty())
         } else {
             Some(source.to_owned())
         };
@@ -183,13 +206,16 @@ fn headers(item: Option<&Item>, env: bool, out: &mut BTreeMap<String, String>) -
     Ok(())
 }
 pub fn profile(text: &str) -> Result<Profile> {
+    profile_with_env(text, &|name| std::env::var(name).ok())
+}
+pub fn profile_with_env(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Result<Profile> {
     validate(text)?;
     let doc = parse(text)?;
     let selected = doc
         .get("models")
         .and_then(|v| v.get("default"))
         .and_then(Item::as_str)
-        .unwrap_or("grok-4.5");
+        .unwrap_or("");
     let selected_table = doc.get("model").and_then(|v| v.get(selected));
     let mut table = Table::new();
     if let Some(provider) = selected_table
@@ -207,13 +233,59 @@ pub fn profile(text: &str) -> Result<Profile> {
         let selected_table = selected_table
             .as_table_like()
             .ok_or_else(|| error("Grok 模型配置无效"))?;
+        let own_auth = selected_table
+            .get("api_key")
+            .and_then(Item::as_str)
+            .is_some_and(|v| !v.trim().is_empty())
+            || selected_table
+                .get("env_key")
+                .map(environment_names)
+                .transpose()?
+                .is_some_and(|v| !v.is_empty())
+            || selected_table.contains_key("auth_provider")
+            || selected_table.contains_key("auth_provider_command");
+        let inherited_auth = table.contains_key("api_key")
+            || table.contains_key("env_key")
+            || table.contains_key("auth_provider")
+            || table.contains_key("auth");
+        if own_auth {
+            for key in [
+                "api_key",
+                "env_key",
+                "auth_provider",
+                "auth_provider_command",
+                "auth",
+            ] {
+                table.remove(key);
+            }
+        }
         for (key, item) in selected_table.iter() {
+            if matches!(key, "extra_headers" | "query_params" | "env_http_headers")
+                && item.as_table_like().is_some_and(|t| t.is_empty())
+            {
+                continue;
+            }
+            if !own_auth && inherited_auth && matches!(key, "api_key" | "env_key" | "auth_provider")
+            {
+                continue;
+            }
             table.insert(key, item.clone());
         }
+    }
+    if table.contains_key("auth_provider_command")
+        || table.contains_key("auth_provider")
+        || table.contains_key("auth")
+    {
+        return Err(error(
+            "Grok 当前模型使用外部认证，请在原生客户端管理；不会执行认证命令",
+        ));
     }
     if table.contains_key("mtls_cert_dir") {
         return Err(error("Grok 当前模型使用 mTLS，不能直接接管其认证配置"));
     }
+    // Complete custom models have Grok's documented chat_completions default.
+    // A sparse native override needs catalog evidence; discovery does not guess.
+    let protocol_known = table.contains_key("api_backend") || table.contains_key("model");
     let protocol = match string(&table, "api_backend")?.as_deref() {
         Some("responses") => Protocol::Responses,
         Some("messages") => Protocol::Messages,
@@ -222,24 +294,89 @@ pub fn profile(text: &str) -> Result<Profile> {
         None => Protocol::ChatCompletions,
         _ => return Err(error("Grok 当前 API 协议不受支持")),
     };
-    let token = if let Some(token) = string(&table, "api_key")? {
-        (!token.is_empty()).then_some(token)
-    } else if let Some(names) = table.get("env_key") {
-        environment_names(names)?
-            .into_iter()
-            .find_map(|name| std::env::var(name).ok().filter(|s| !s.is_empty()))
+    let preferred = resolve("GROK_AUTH_PREFERRED_METHOD").or_else(|| {
+        doc.get("auth")
+            .and_then(|v| v.get("preferred_method"))
+            .and_then(Item::as_str)
+            .map(str::to_owned)
+    });
+    if preferred
+        .as_deref()
+        .is_some_and(|v| !matches!(v, "api_key" | "oidc"))
+    {
+        return Err(error("Grok 认证方式无法识别"));
+    }
+    let credential_names = table
+        .get("env_key")
+        .map(environment_names)
+        .transpose()?
+        .unwrap_or_else(|| {
+            if table.contains_key("api_key") {
+                Vec::new()
+            } else {
+                vec!["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"]
+            }
+        })
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    // Grok's model credentials take precedence over the global login preference.
+    // The preference only governs the global credential fallback.
+    let model_auth = table.contains_key("api_key") || table.contains_key("env_key");
+    let api_auth = model_auth || preferred.as_deref() != Some("oidc");
+    let token = if api_auth {
+        string(&table, "api_key")?
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                credential_names
+                    .iter()
+                    .find_map(|name| resolve(name).filter(|s| !s.is_empty()))
+            })
     } else {
         None
     };
-    let base_url = string(&table, "base_url")?.or(string(&table, "api_base_url")?);
+    let endpoint = |key: &str| {
+        doc.get("endpoints")
+            .and_then(|v| v.get(key))
+            .and_then(Item::as_str)
+            .map(str::to_owned)
+    };
+    let candidates = [
+        (
+            if api_auth {
+                string(&table, "api_base_url")?
+            } else {
+                None
+            },
+            "modelApi",
+        ),
+        (string(&table, "base_url")?, "model"),
+        (resolve("GROK_MODELS_BASE_URL"), "environment"),
+        (endpoint("models_base_url"), "global"),
+        (
+            if api_auth {
+                resolve("GROK_XAI_API_BASE_URL").or_else(|| endpoint("xai_api_base_url"))
+            } else {
+                None
+            },
+            "globalApi",
+        ),
+    ];
+    let resolved = candidates
+        .into_iter()
+        .find(|(value, _)| value.as_ref().is_some_and(|v| !v.is_empty()));
+    let (base_url, address_source) = resolved
+        .map(|(value, source)| (value, Some(source)))
+        .unwrap_or_default();
     let mut extra = BTreeMap::new();
     headers(
         doc.get("models").and_then(|v| v.get("extra_headers")),
         false,
+        resolve,
         &mut extra,
     )?;
-    headers(table.get("extra_headers"), false, &mut extra)?;
-    headers(table.get("env_http_headers"), true, &mut extra)?;
+    headers(table.get("extra_headers"), false, resolve, &mut extra)?;
+    headers(table.get("env_http_headers"), true, resolve, &mut extra)?;
     let mut query = BTreeMap::new();
     if let Some(item) = table.get("query_params") {
         for (key, value) in item
@@ -266,21 +403,29 @@ pub fn profile(text: &str) -> Result<Profile> {
         },
         model,
         table,
+        selected: selected.to_owned(),
+        address_source,
+        credential_names,
+        protocol_known,
     })
 }
 pub fn pair(text: &str) -> Result<Pair> {
-    Ok(profile(text)?.pair)
+    Ok(api_profile(text)?.pair)
+}
+pub fn api_profile(text: &str) -> Result<Profile> {
+    let mut doc = parse(text)?;
+    if doc.get("model").and_then(|v| v.get(MANAGED)).is_some() {
+        if !doc.contains_key("models") {
+            doc["models"] = Item::Table(Table::new());
+        }
+        doc["models"]["default"] = value(MANAGED);
+    }
+    profile(&doc.to_string())
 }
 pub fn fingerprint(text: &str) -> Result<String> {
-    let p = profile(text)?;
-    let doc = parse(text)?;
-    let selected = doc
-        .get("models")
-        .and_then(|v| v.get("default"))
-        .and_then(Item::as_str)
-        .unwrap_or("grok-4.5");
+    let p = api_profile(text)?;
     Ok(storage::digest(
-        &serde_json::to_vec(&(selected, p.model, p.pair, p.connection))
+        &serde_json::to_vec(&(p.selected, p.model, p.pair, p.connection))
             .map_err(|_| error("Grok 配置摘要失败"))?,
     ))
 }
@@ -292,35 +437,63 @@ pub fn read(home: &Path) -> Result<(String, String)> {
     Ok((revision, text))
 }
 
-/// Only the selector and our own model are owned; original models stay untouched.
+/// Legacy snapshots own the selector too; independent API snapshots own only our model.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     before: String,
     applied: String,
+    #[serde(default)]
+    independent: bool,
 }
 impl Snapshot {
     pub fn new(text: &str, target: &Pair) -> Result<Self> {
         Self::with_protocol(text, target, None)
     }
     pub fn with_protocol(text: &str, target: &Pair, protocol: Option<Protocol>) -> Result<Self> {
-        Self::build(text, target, protocol, None)
+        Self::build(text, target, protocol, None, false)
     }
     pub fn with_connection(text: &str, target: &Pair, connection: &Connection) -> Result<Self> {
-        Self::build(text, target, Some(connection.protocol), Some(connection))
+        Self::build(
+            text,
+            target,
+            Some(connection.protocol),
+            Some(connection),
+            false,
+        )
+    }
+    pub fn api(text: &str, target: &Pair, connection: &Connection, direct: bool) -> Result<Self> {
+        Self::build(
+            text,
+            target,
+            Some(connection.protocol),
+            direct.then_some(connection),
+            true,
+        )
     }
     fn build(
         text: &str,
         target: &Pair,
         protocol: Option<Protocol>,
         connection: Option<&Connection>,
+        independent: bool,
     ) -> Result<Self> {
-        let profile = profile(text)?;
+        let profile = if independent {
+            api_profile(text)?
+        } else {
+            profile(text)?
+        };
+        if profile.model.is_empty() {
+            return Err(error("Grok 未明确选择模型，无法创建 API 模型入口"));
+        }
         let mut doc = parse(text)?;
         let selected = doc
             .get("models")
             .and_then(|v| v.get("default"))
             .and_then(Item::as_str);
-        if selected != Some(MANAGED) && doc.get("model").and_then(|v| v.get(MANAGED)).is_some() {
+        if !independent
+            && selected != Some(MANAGED)
+            && doc.get("model").and_then(|v| v.get(MANAGED)).is_some()
+        {
             return Err(error("Grok 已有同名受管模型，请先在配置编辑器中处理"));
         }
         let base = target
@@ -379,7 +552,9 @@ impl Snapshot {
         if !doc.contains_key("model") {
             doc["model"] = Item::Table(Table::new());
         }
-        if let Some(previous) = doc["models"].get("default").and_then(Item::as_value) {
+        if independent {
+            // Native model selection belongs to Grok, including while this API entry is active.
+        } else if let Some(previous) = doc["models"].get("default").and_then(Item::as_value) {
             let mut selected = toml_edit::Value::from(MANAGED);
             *selected.decor_mut() = previous.decor().clone();
             doc["models"]["default"] = Item::Value(selected);
@@ -390,14 +565,19 @@ impl Snapshot {
         Ok(Self {
             before: text.into(),
             applied: doc.to_string(),
+            independent,
         })
     }
-    fn owned(text: &str) -> Result<(Option<String>, Option<String>)> {
+    fn owned(&self, text: &str) -> Result<(Option<String>, Option<String>)> {
         let doc = parse(text)?;
         Ok((
-            doc.get("models")
-                .and_then(|v| v.get("default"))
-                .map(ToString::to_string),
+            (!self.independent)
+                .then(|| {
+                    doc.get("models")
+                        .and_then(|v| v.get("default"))
+                        .map(ToString::to_string)
+                })
+                .flatten(),
             doc.get("model")
                 .and_then(|v| v.get(MANAGED))
                 .map(ToString::to_string),
@@ -420,8 +600,8 @@ impl Snapshot {
         if current == target {
             return Ok(());
         }
-        let owned = Self::owned(current)?;
-        if owned != Self::owned(&self.applied)? && owned != Self::owned(&self.before)? {
+        let owned = self.owned(current)?;
+        if owned != self.owned(&self.applied)? && owned != self.owned(&self.before)? {
             return Err(AppError::new(
                 code::CONFLICT,
                 "Grok 受管模型已被外部修改，已保留当前配置",
@@ -433,6 +613,9 @@ impl Snapshot {
             let desired = parse(target)?;
             let mut doc = parse(current)?;
             for (section, key) in [("models", "default"), ("model", MANAGED)] {
+                if self.independent && section == "models" {
+                    continue;
+                }
                 if let Some(next) = desired.get(section).and_then(|v| v.get(key)) {
                     if !doc.contains_key(section) {
                         doc[section] = Item::Table(Table::new());
@@ -447,7 +630,7 @@ impl Snapshot {
         storage::atomic_write(path, output.as_bytes(), Some(&revision))
     }
     pub fn unchanged(&self, text: &str) -> Result<bool> {
-        Ok(Self::owned(text)? == Self::owned(&self.applied)?)
+        Ok(self.owned(text)? == self.owned(&self.applied)?)
     }
     pub fn applied(&self) -> &str {
         &self.applied

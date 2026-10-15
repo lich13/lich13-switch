@@ -4,11 +4,23 @@ mod api_login_v020_tests;
 mod claude_config;
 mod codex_api;
 pub(crate) mod grok_config;
+mod grok_import;
+pub use grok_import::Preview as GrokImportPreview;
 #[cfg(test)]
 mod grok_config_tests;
+#[cfg(test)]
+mod v025_grok_config_tests;
+#[cfg(test)]
+mod v025_grok_import_tests;
+#[cfg(test)]
+mod v025_listener_tests;
+#[cfg(test)]
+mod v025_transport_tests;
 pub(crate) use takeover::manages_auth;
 mod client;
+mod listener;
 mod registry;
+pub use listener::View as ListenerView;
 mod retired;
 pub use client::{claude_home, grok_home, ClientId};
 pub(crate) use retired::migrate as retire_legacy_proxy;
@@ -103,6 +115,8 @@ pub struct ProviderView {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct View {
+    pub listener: ListenerView,
+    pub grok_models: Vec<grok_import::ModelView>,
     pub grok_native_available: bool,
     pub client_id: ClientId,
     pub revision: String,
@@ -134,7 +148,6 @@ struct Inner {
     running: bool,
     upgrade_pending: bool,
     shutdown: Option<watch::Sender<bool>>,
-    listener_task: Option<tokio::task::JoinHandle<()>>,
     error: Option<String>,
     circuits: HashMap<String, Circuit>,
     model_circuits: HashMap<String, model_health::Models>,
@@ -143,6 +156,7 @@ struct Inner {
     home: Option<PathBuf>,
 }
 struct Shared {
+    grok_import: grok_import::Service,
     client: ClientId,
     diagnostics: Mutex<Option<crate::events::Service>>,
     usage: Mutex<Option<crate::usage::Service>>,
@@ -382,7 +396,10 @@ impl Gateway {
         shared: Option<Arc<registry::Registry>>,
     ) -> Result<Self> {
         storage::private_dir(&data)?;
-        let error = crate::migrations::gateway(&data).err().map(|e| e.message);
+        let error = crate::migrations::gateway(&data)
+            .and_then(|()| grok_import::recover(&data))
+            .err()
+            .map(|e| e.message);
         let upgrade_pending = error.is_some();
         let (mut store, revision) = Store::load(&data.join("gateway.json"))?;
         if revision == "missing" {
@@ -390,7 +407,7 @@ impl Gateway {
         }
         let registry = match shared {
             Some(n) => n,
-            None => Arc::new(registry::Registry::default()),
+            None => Arc::new(registry::Registry::new(data.clone(), store.settings.port)?),
         };
         let spool = storage::private_tempdir(&data, "gateway-spool-")?;
         let (events, _) = broadcast::channel(32);
@@ -398,6 +415,7 @@ impl Gateway {
         admission.configure(&store.providers, false);
         admission.configure_retention(store.settings.thread_idle_release_seconds);
         let gateway = Self(Arc::new(Shared {
+            grok_import: grok_import::Service::default(),
             client,
             diagnostics: Mutex::new(None),
             usage: Mutex::new(None),
@@ -409,7 +427,6 @@ impl Gateway {
                 running: false,
                 upgrade_pending,
                 shutdown: None,
-                listener_task: None,
                 error,
                 circuits: HashMap::new(),
                 model_circuits: HashMap::new(),
@@ -437,6 +454,10 @@ impl Gateway {
         let _guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
         s.home = Some(home.to_owned());
+        // Grok discovery is read-only. Its explicit import preview owns migration.
+        if self.0.client == ClientId::Grok {
+            return Ok(());
+        }
         if s.upgrade_pending {
             return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
         }
@@ -563,6 +584,7 @@ impl Gateway {
             &s.store.provider_endpoints,
             &s.store.grok_connections,
             &s.store.grok_native,
+            &s.store.grok_api_model,
             &s.store.connection,
             &s.store.settings,
             &s.store.mode,
@@ -571,8 +593,12 @@ impl Gateway {
             s.running,
             &s.home,
             s.upgrade_pending,
+            // Hash the listener revision separately below (serde tuples are bounded).
         );
-        storage::digest(&serde_json::to_vec(&editable).expect("serializable gateway configuration"))
+        storage::digest(
+            &serde_json::to_vec(&(editable, self.listener_view().revision))
+                .expect("serializable gateway configuration"),
+        )
     }
     pub fn subscribe(&self) -> broadcast::Receiver<()> {
         self.0.events.subscribe()
@@ -588,7 +614,40 @@ impl Gateway {
     fn changed(&self) {
         let _ = self.0.events.send(());
     }
+    pub fn listener_view(&self) -> ListenerView {
+        self.0.registry.listener.view()
+    }
+    pub fn set_listener_port(&self, port: u16, expected: &str) -> Result<ListenerView> {
+        let _lifecycle = self
+            .0
+            .registry
+            .lifecycle
+            .try_lock()
+            .map_err(|_| AppError::new(code::GATEWAY_ACTIVE, "网关正在启停，请稍后再试"))?;
+        let _mutation = self.0.registry.mutation.lock().unwrap();
+        for peer in self
+            .0
+            .registry
+            .gateways
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+        {
+            let state = peer.inner.lock().unwrap();
+            for provider in &state.store.providers {
+                for url in Self::endpoint_urls(&state.store, provider) {
+                    model::base_url(&url, port)?;
+                }
+            }
+        }
+        self.0.registry.listener.set_port(port, expected)?;
+        self.0.registry.update_ports();
+        self.0.registry.changed();
+        Ok(self.listener_view())
+    }
     pub fn view(&self) -> View {
+        let listener = self.0.registry.listener.view();
         let s = self.0.inner.lock().unwrap();
         let (occupied, waiting) = self.0.admission.counts();
         let health = |key: String| s.circuits.get(&key).cloned().unwrap_or_default().health();
@@ -605,10 +664,7 @@ impl Gateway {
         if let Some(Ok((_, pair))) = &config {
             config_state = "unsaved";
             if pair
-                == &takeover::Pair::new(
-                    &self.0.client.address(s.store.settings.port),
-                    &s.store.local_token,
-                )
+                == &takeover::Pair::new(&self.0.client.address(listener.port), &s.store.local_token)
             {
                 config_state = "gateway";
             } else if let Some(p) = s
@@ -622,6 +678,18 @@ impl Gateway {
             }
         }
         View {
+            listener: listener.clone(),
+            grok_models: if self.0.client == ClientId::Grok {
+                s.home
+                    .as_ref()
+                    .and_then(|home| grok_config::read(home).ok())
+                    .and_then(|(_, text)| {
+                        grok_import::discover(&text, &|name| std::env::var(name).ok()).ok()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
             client_id: self.0.client,
             grok_native_available: s.store.grok_native.is_some(),
             config_revision,
@@ -641,10 +709,13 @@ impl Gateway {
             last_successful: s.last_successful.clone(),
             revision: self.view_revision(&s),
             running: s.running,
-            address: self.0.client.address(s.store.settings.port),
+            address: self.0.client.address(listener.port),
             mode: s.store.mode.clone(),
             selected: s.store.selected.clone(),
-            settings: s.store.settings.clone(),
+            settings: Settings {
+                port: listener.port,
+                ..s.store.settings.clone()
+            },
             providers: s
                 .store
                 .providers
@@ -736,7 +807,8 @@ impl Gateway {
                         .then(|| "线程名额记录不可用，请检查私有数据目录".into())
                 }),
             recovery_pending: s.upgrade_pending
-                || self.0.data.join("gateway-recovery.json").exists(),
+                || self.0.data.join("gateway-recovery.json").exists()
+                || self.0.data.join("grok-import.json").exists(),
         }
     }
     pub fn observe_home(&self, home: &Path) {
@@ -750,6 +822,7 @@ impl Gateway {
             &self.0.data,
             s.running
                 || self.0.data.join("gateway-recovery.json").exists()
+                || self.0.data.join("grok-import.json").exists()
                 || self.claude_official(),
         )
     }
@@ -763,6 +836,12 @@ impl Gateway {
         expected: &str,
     ) -> Result<crate::configuration::Document> {
         let s = self.0.inner.lock().unwrap();
+        if self.0.data.join("grok-import.json").exists() {
+            return Err(AppError::new(
+                code::RECOVERY,
+                "请先处理未完成的 Grok 导入事务",
+            ));
+        }
         crate::configuration::validate(self.0.client, text)?;
         if self.0.client == ClientId::Claude {
             if let Some(data) = self.0.data.parent() {
@@ -818,7 +897,9 @@ impl Gateway {
         })
     }
     pub fn guarded_home(&self) -> bool {
-        self.view().running || self.0.data.join("gateway-recovery.json").exists()
+        self.view().running
+            || self.0.data.join("gateway-recovery.json").exists()
+            || self.0.data.join("grok-import.json").exists()
     }
     pub fn edit(&self, edit: Edit, expected: &str, home: &Path) -> Result<View> {
         self.edit_checked(edit, expected, home, None)
@@ -830,12 +911,36 @@ impl Gateway {
         home: &Path,
         config_revision: Option<&str>,
     ) -> Result<View> {
+        // Compatibility for callers of the pre-shared Settings API. The listener
+        // file remains authoritative, including when the later client save fails.
+        let port_change = match &edit {
+            Edit::Settings { settings } if settings.port != self.listener_view().port => {
+                Some(settings.port)
+            }
+            _ => None,
+        };
+        let _port_lifecycle =
+            if port_change.is_some() {
+                Some(
+                    self.0.registry.lifecycle.try_lock().map_err(|_| {
+                        AppError::new(code::GATEWAY_ACTIVE, "网关正在启停，请稍后再试")
+                    })?,
+                )
+            } else {
+                None
+            };
         let _network_guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
         if expected != self.view_revision(&s) {
             return Err(AppError::new(
                 code::CONFLICT,
                 "网关设置已变化，请使用最新状态重试",
+            ));
+        }
+        if self.0.data.join("grok-import.json").exists() {
+            return Err(AppError::new(
+                code::RECOVERY,
+                "请先处理未完成的 Grok 导入事务",
             ));
         }
         if self.0.client != ClientId::Codex && matches!(&edit, Edit::TakeoverProvider { .. }) {
@@ -948,6 +1053,7 @@ impl Gateway {
             ));
         }
         let mut next = s.store.clone();
+        next.settings.port = self.listener_view().port;
         match edit {
             Edit::Connection { mode } => {
                 if self.0.client != ClientId::Codex || s.running {
@@ -970,6 +1076,12 @@ impl Gateway {
                 };
             }
             Edit::Import => {
+                if self.0.client == ClientId::Grok {
+                    return Err(AppError::new(
+                        code::GROK_CONFIG,
+                        "请先预览 Grok 配置，再确认导入",
+                    ));
+                }
                 let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
                 next.edit(
                     Edit::SaveProvider {
@@ -992,7 +1104,7 @@ impl Gateway {
             edit => next.edit(edit, s.running)?,
         }
         if self.0.client == ClientId::Grok && s.running {
-            let active_protocol = grok_config::profile(&grok_config::read(home)?.1)?
+            let active_protocol = grok_config::api_profile(&grok_config::read(home)?.1)?
                 .connection
                 .protocol;
             let selected_protocol =
@@ -1039,6 +1151,12 @@ impl Gateway {
                 }
             }
         }
+        if let Some(port) = port_change {
+            self.0
+                .registry
+                .listener
+                .set_port(port, &self.listener_view().revision)?;
+        }
         let revision = if s.running || direct_select {
             let p = Self::exit_provider(&next, s.last_successful.as_deref())?;
             let target = takeover::Pair::new(&p.base_url, &p.token);
@@ -1054,12 +1172,17 @@ impl Gateway {
                     .get(&p.id)
                     .cloned()
                     .unwrap_or_default();
-                let mut snapshot =
-                    grok_config::Snapshot::with_connection(&text, &target, &connection)?;
+                let mut snapshot = if next.grok_api_model.is_some() {
+                    grok_config::Snapshot::api(&text, &target, &connection, true)?
+                } else {
+                    grok_config::Snapshot::with_connection(&text, &target, &connection)?
+                };
                 if let Some(original) = &next.grok_native {
                     snapshot.retain_original(original);
                 }
-                next.grok_native = Some(snapshot);
+                if next.grok_api_model.is_none() {
+                    next.grok_native = Some(snapshot);
+                }
             }
             let resume_target = if self.0.client == ClientId::Grok && s.running {
                 takeover::exit_pair(&self.0.data)?
@@ -1122,7 +1245,7 @@ impl Gateway {
         drop(s);
         self.0.registry.update_ports();
         self.0.clients.lock().unwrap().clear();
-        self.changed();
+        self.0.registry.changed();
         Ok(self.view())
     }
     pub async fn start(&self, expected: &str, home: &Path) -> Result<View> {
@@ -1146,6 +1269,7 @@ impl Gateway {
                 "请先切换到 Claude API 配置，再启用网关",
             ));
         }
+        let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
         let (port, token) = {
             let s = self.0.inner.lock().unwrap();
@@ -1159,14 +1283,22 @@ impl Gateway {
             if s.upgrade_pending {
                 return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
             }
+            if self.0.data.join("grok-import.json").exists() {
+                return Err(AppError::new(
+                    code::RECOVERY,
+                    "请先处理未完成的 Grok 导入事务",
+                ));
+            }
             if s.store.providers.is_empty() {
                 return Err(AppError::new(code::PROVIDER, "请先添加供应商"));
             }
-            (s.store.settings.port, s.store.local_token.clone())
+            (
+                self.0.registry.listener.view().port,
+                s.store.local_token.clone(),
+            )
         };
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-            .await
-            .map_err(|_| AppError::new(code::PORT, "无法绑定本地端口，请检查端口占用或修改端口"))?;
+        let listener = self.0.registry.listener.prepare().await?;
+        self.0.registry.listener.check_revision()?;
         {
             let s = self.0.inner.lock().unwrap();
             if self.view_revision(&s) != expected {
@@ -1176,7 +1308,7 @@ impl Gateway {
                 ));
             }
         }
-        let (tx, rx) = watch::channel(false);
+        let (tx, _rx) = watch::channel(false);
         {
             let mut s = self.0.inner.lock().unwrap();
             if self.view_revision(&s) != expected {
@@ -1228,12 +1360,11 @@ impl Gateway {
                 .configure_retention(s.store.settings.thread_idle_release_seconds);
             self.0.compaction.provider_names(&s.store.providers);
         }
-        let gateway = self.clone();
-        let task = tokio::spawn(async move {
-            forward::serve(gateway, listener, rx).await;
-        });
-        self.0.inner.lock().unwrap().listener_task = Some(task);
-        self.changed();
+        self.0
+            .registry
+            .listener
+            .activate(self.0.client, listener, self.0.registry.clone());
+        self.0.registry.changed();
         Ok(self.view())
     }
     pub async fn stop(&self) -> Result<View> {
@@ -1305,8 +1436,9 @@ impl Gateway {
         expected_config: Option<&str>,
         preserve_intent: bool,
     ) -> Result<View> {
+        let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
-        let listener_task = {
+        {
             let mut s = self.0.inner.lock().unwrap();
             if let (Some(expected), Some(home)) = (expected_config, &s.home) {
                 if takeover::read_connection(self.0.client, home, &s.store.connection)?.0
@@ -1375,7 +1507,9 @@ impl Gateway {
                     s.store = next;
                 }
             }
-            if let Err(e) = crate::migrations::gateway(&self.0.data) {
+            if let Err(e) = crate::migrations::gateway(&self.0.data)
+                .and_then(|()| grok_import::recover(&self.0.data))
+            {
                 s.error = Some(e.message.clone());
                 drop(s);
                 self.changed();
@@ -1399,13 +1533,10 @@ impl Gateway {
                 .configure_retention(s.store.settings.thread_idle_release_seconds);
             self.0.compaction.provider_names(&s.store.providers);
             s.error = None;
-            s.listener_task.take()
         };
-        if let Some(task) = listener_task {
-            let _ = task.await;
-        }
+        self.0.registry.listener.deactivate(self.0.client).await;
         self.0.clients.lock().unwrap().clear();
-        self.changed();
+        self.0.registry.changed();
         Ok(self.view())
     }
     async fn persist_success(&self, provider: &Provider) {
@@ -1537,7 +1668,7 @@ impl Gateway {
                 client: Client::builder(TokioExecutor::new())
                     .retry_canceled_requests(false)
                     .build(
-                        Connector::new(Duration::from_secs(10), s.store.settings.port)
+                        Connector::new(Duration::from_secs(10), self.listener_view().port)
                             .with_ports(self.0.registry.ports.clone()),
                     ),
             };
@@ -1633,7 +1764,7 @@ impl Gateway {
                     .build(
                         Connector::new(
                             Duration::from_secs(s.store.settings.connect_seconds),
-                            s.store.settings.port,
+                            self.listener_view().port,
                         )
                         .with_ports(self.0.registry.ports.clone()),
                     )

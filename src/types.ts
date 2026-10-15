@@ -161,7 +161,15 @@ export type Provider = {
   handoffAfterCompaction?: boolean;
   takeNewThreads?: boolean;
 };
+export type GatewayListener = { port: number; revision: string; runningClients: ClientId[] };
+export type GrokModel = {
+  key: string; model: string; protocol: GrokProtocol | null;
+  address: string | null; addressSource: string | null;
+  credentialAvailable: boolean; missingEnvironment: string[]; error: string | null;
+};
 export type GatewayState = {
+  listener?: GatewayListener;
+  grokModels?: GrokModel[];
   grokNativeAvailable?: boolean;
   clientId: ClientId;
   revision: string;

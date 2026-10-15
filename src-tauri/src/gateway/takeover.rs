@@ -472,11 +472,15 @@ fn grok_snapshot(
         .cloned()
         .unwrap_or_default();
     let text = super::grok_config::read(home)?.1;
-    Ok(Some(if provider_pair.is_some() {
-        super::grok_config::Snapshot::with_protocol(&text, target, Some(connection.protocol))?
-    } else {
-        super::grok_config::Snapshot::with_connection(&text, target, &connection)?
-    }))
+    Ok(Some(
+        if store.as_ref().is_some_and(|s| s.grok_api_model.is_some()) {
+            super::grok_config::Snapshot::api(&text, target, &connection, provider_pair.is_none())?
+        } else if provider_pair.is_some() {
+            super::grok_config::Snapshot::with_protocol(&text, target, Some(connection.protocol))?
+        } else {
+            super::grok_config::Snapshot::with_connection(&text, target, &connection)?
+        },
+    ))
 }
 pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
     load(data)?

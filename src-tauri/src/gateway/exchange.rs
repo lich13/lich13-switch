@@ -156,13 +156,14 @@ impl Gateway {
         };
         let value = template::payload(&value);
         let state = self.0.inner.lock().unwrap();
+        let port = self.listener_view().port;
         let mut seen: HashSet<_> = state
             .store
             .providers
             .iter()
             .map(|p| {
                 (
-                    model::base_url(&p.base_url, state.store.settings.port)
+                    model::base_url(&p.base_url, port)
                         .map(|u| u.to_string())
                         .unwrap_or_else(|_| p.base_url.clone()),
                     p.token.clone(),
@@ -172,7 +173,7 @@ impl Gateway {
         let mut providers = Vec::new();
         let mut rows = Vec::new();
         for (id, raw) in value["accounts"].as_array().unwrap().iter().enumerate() {
-            let parsed = provider(raw, self.0.client, state.store.settings.port).and_then(|p| {
+            let parsed = provider(raw, self.0.client, port).and_then(|p| {
                 if !seen.insert((p.base_url.clone(), p.token.clone())) {
                     Err(invalid("相同地址和 Key 已存在"))
                 } else {

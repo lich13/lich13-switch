@@ -1,0 +1,189 @@
+//! One loopback listener; client state and cancellation remain in each Gateway.
+use super::{forward, registry::Registry, ClientId};
+use crate::{
+    errors::code,
+    storage::{self, AppError, Result},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Config {
+    version: u32,
+    port: u16,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct View {
+    pub port: u16,
+    pub revision: String,
+    pub running_clients: Vec<ClientId>,
+}
+
+struct State {
+    port: u16,
+    revision: String,
+    clients: Vec<ClientId>,
+    shutdown: Option<watch::Sender<bool>>,
+    task: Option<JoinHandle<()>>,
+}
+pub struct Listener {
+    path: PathBuf,
+    state: Mutex<State>,
+}
+impl Listener {
+    pub fn load(path: PathBuf, legacy_codex_port: u16) -> Result<Self> {
+        let raw = storage::read_optional(&path)?;
+        let config = match raw.as_deref() {
+            Some(raw) => serde_json::from_slice::<Config>(raw)
+                .map_err(|_| AppError::new(code::SETTINGS, "共享网关配置损坏，已保留原文件"))?,
+            None => Config {
+                version: 1,
+                port: legacy_codex_port,
+            },
+        };
+        if config.version != 1 || config.port == 0 {
+            return Err(AppError::new(code::SETTINGS, "共享网关配置版本或端口无效"));
+        }
+        let revision = if raw.is_none() {
+            let bytes = serde_json::to_vec_pretty(&config)
+                .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;
+            storage::atomic_write(&path, &bytes, Some("missing"))?;
+            storage::digest(&bytes)
+        } else {
+            storage::revision(raw.as_deref())
+        };
+        Ok(Self {
+            path,
+            state: Mutex::new(State {
+                port: config.port,
+                revision,
+                clients: Vec::new(),
+                shutdown: None,
+                task: None,
+            }),
+        })
+    }
+    pub fn view(&self) -> View {
+        let s = self.state.lock().unwrap();
+        View {
+            port: s.port,
+            revision: s.revision.clone(),
+            running_clients: s.clients.clone(),
+        }
+    }
+    pub fn check_revision(&self) -> Result<()> {
+        if storage::revision(storage::read_optional(&self.path)?.as_deref()) != self.view().revision
+        {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "共享网关配置已被外部修改，请重新打开应用后重试",
+            ));
+        }
+        Ok(())
+    }
+    pub fn set_port(&self, port: u16, expected: &str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        if expected != s.revision {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "共享端口已变化，请刷新后重试",
+            ));
+        }
+        if !s.clients.is_empty() {
+            return Err(AppError::new(
+                code::GATEWAY_ACTIVE,
+                "请先停用全部客户端网关，再修改共享端口",
+            ));
+        }
+        if port == 0 {
+            return Err(AppError::new(code::SETTINGS, "本地端口必须为 1–65535"));
+        }
+        let bytes = serde_json::to_vec_pretty(&Config { version: 1, port })
+            .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;
+        storage::atomic_write(&self.path, &bytes, Some(&s.revision))?;
+        s.port = port;
+        s.revision = storage::digest(&bytes);
+        Ok(())
+    }
+    /// Caller holds Registry::lifecycle until config commit and activation finish.
+    pub async fn prepare(&self) -> Result<Option<TcpListener>> {
+        self.check_revision()?;
+        let view = self.view();
+        if !view.running_clients.is_empty() {
+            return Ok(None);
+        }
+        TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, view.port))
+            .await
+            .map(Some)
+            .map_err(|_| {
+                AppError::new(code::PORT, "无法绑定共享本地端口，请检查端口占用或修改端口")
+            })
+    }
+    pub fn activate(
+        &self,
+        client: ClientId,
+        listener: Option<TcpListener>,
+        registry: Arc<Registry>,
+    ) {
+        let mut s = self.state.lock().unwrap();
+        if !s.clients.contains(&client) {
+            s.clients.push(client);
+        }
+        if let Some(listener) = listener {
+            let (shutdown, rx) = watch::channel(false);
+            s.shutdown = Some(shutdown);
+            s.task = Some(tokio::spawn(forward::serve(registry, listener, rx)));
+        }
+    }
+    pub async fn deactivate(&self, client: ClientId) {
+        let task = {
+            let mut s = self.state.lock().unwrap();
+            s.clients.retain(|id| *id != client);
+            if s.clients.is_empty() {
+                if let Some(shutdown) = s.shutdown.take() {
+                    let _ = shutdown.send(true);
+                }
+                s.task.take()
+            } else {
+                None
+            }
+        };
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+}
+
+/// Match a complete path component, never infer the client from a model or token.
+pub fn route(uri: &hyper::Uri) -> Option<(ClientId, hyper::Uri)> {
+    let path = uri.path();
+    let (client, prefix) = if path == "/codex" || path.starts_with("/codex/") {
+        (ClientId::Codex, "/codex")
+    } else if path == "/claude" || path.starts_with("/claude/") {
+        (ClientId::Claude, "/claude")
+    } else if path == "/grok" || path.starts_with("/grok/") {
+        (ClientId::Grok, "/grok")
+    } else if path == "/v1" || path.starts_with("/v1/") {
+        (ClientId::Codex, "")
+    } else {
+        return None;
+    };
+    let remaining = &uri.path_and_query()?.as_str()[prefix.len()..];
+    let remaining = if remaining.is_empty() {
+        "/".to_owned()
+    } else if remaining.starts_with('?') {
+        format!("/{remaining}")
+    } else {
+        remaining.to_owned()
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(remaining.parse().ok()?);
+    Some((client, hyper::Uri::from_parts(parts).ok()?))
+}

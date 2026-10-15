@@ -627,12 +627,7 @@ async fn crash_recovery_keeps_auto_mode_last_success_as_resume_fingerprint() {
     start(&g, &t).await;
     g.successful_response(&routes(&g)[1].provider);
     // Stop the listener without the exit handler, as in a process crash.
-    let task = {
-        let mut s = g.0.inner.lock().unwrap();
-        s.shutdown.take().unwrap().send(true).unwrap();
-        s.listener_task.take().unwrap()
-    };
-    task.await.unwrap();
+    g.0.registry.listener.deactivate(ClientId::Codex).await;
     drop(g);
     let next = Gateway::new(t.path().to_path_buf()).unwrap();
     assert!(std::fs::read_to_string(t.path().join("config.toml"))

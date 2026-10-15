@@ -167,6 +167,8 @@ pub struct Store {
     pub grok_native: Option<super::grok_config::Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_resume: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_api_model: Option<String>,
     pub settings: Settings,
     pub mode: String,
     pub selected: Option<String>,
@@ -193,6 +195,7 @@ impl Default for Store {
             grok_connections: BTreeMap::new(),
             grok_native: None,
             grok_resume: None,
+            grok_api_model: None,
             settings: Settings::default(),
             mode: "manual".into(),
             selected: None,
