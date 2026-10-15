@@ -273,7 +273,12 @@ it("applies source selection to totals and request pages and resets pagination",
     within(source)
       .getAllByRole("option")
       .map((option) => option.textContent),
-  ).toEqual(["全部（去重）", "本网关", "本机会话"]);
+  ).toEqual([
+    "请求统计（去重）",
+    "本网关",
+    "Codex / Claude 会话",
+    "Grok 轮次汇总（独立）",
+  ]);
   await user.click(screen.getByRole("button", { name: "下一页" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("get_usage_logs", {
