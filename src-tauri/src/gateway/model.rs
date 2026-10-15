@@ -26,6 +26,19 @@ pub struct Provider {
     #[serde(default)]
     pub take_new_threads: bool,
 }
+// Existing defaults: three retries allow four total upstream attempts.
+const DEFAULT_MAX_RETRIES: usize = 3;
+const DEFAULT_FAILURE_THRESHOLD: u32 = 4;
+const DEFAULT_SUCCESS_THRESHOLD: u32 = 2;
+const DEFAULT_COOLDOWN_SECONDS: u64 = 60;
+const DEFAULT_ERROR_RATE: f64 = 0.6;
+const DEFAULT_MIN_REQUESTS: u32 = 10;
+// These phase limits have different meanings even where the values match.
+const DEFAULT_FIRST_BYTE_SECONDS: u64 = 600;
+const DEFAULT_IDLE_SECONDS: u64 = 600;
+const DEFAULT_TOTAL_SECONDS: u64 = 600;
+const DEFAULT_CONNECT_SECONDS: u64 = 15;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -82,22 +95,22 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             port: 15722,
-            max_retries: 3,
-            failure_threshold: 4,
+            max_retries: DEFAULT_MAX_RETRIES,
+            failure_threshold: DEFAULT_FAILURE_THRESHOLD,
             transient_failure_threshold: default_transient_failure_threshold(),
-            success_threshold: 2,
-            cooldown_seconds: 60,
+            success_threshold: DEFAULT_SUCCESS_THRESHOLD,
+            cooldown_seconds: DEFAULT_COOLDOWN_SECONDS,
             rate_limit_seconds: default_rate_limit_seconds(),
             capacity_retry_seconds: default_capacity_retry_seconds(),
             websocket_retry_seconds: default_capacity_retry_seconds(),
             thread_idle_release_seconds: default_thread_idle_seconds(),
             endpoint_probe_seconds: default_endpoint_probe_seconds(),
-            error_rate: 0.6,
-            min_requests: 10,
-            first_byte_seconds: 600,
-            idle_seconds: 600,
-            total_seconds: 600,
-            connect_seconds: 15,
+            error_rate: DEFAULT_ERROR_RATE,
+            min_requests: DEFAULT_MIN_REQUESTS,
+            first_byte_seconds: DEFAULT_FIRST_BYTE_SECONDS,
+            idle_seconds: DEFAULT_IDLE_SECONDS,
+            total_seconds: DEFAULT_TOTAL_SECONDS,
+            connect_seconds: DEFAULT_CONNECT_SECONDS,
             queue_seconds: default_wait_seconds(),
             max_waiting: default_max_waiting(),
         }

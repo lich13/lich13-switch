@@ -259,7 +259,7 @@ fn local_failure(code: &str) -> Box<crate::events::Details> {
     })
 }
 fn record_failure(
-    permits: &mut forward::Permits,
+    permits: &mut super::health_settlement::Permits,
     g: &Gateway,
     route: &Route,
     model: Option<&str>,
@@ -918,7 +918,7 @@ fn disconnect_turn(
         details,
     );
     if let Some(u) = &observed {
-        forward::settle_protocol(u, &mut admission.permits, cfg, Some(101));
+        super::health_settlement::settle_protocol(u, &mut admission.permits, cfg, Some(101));
     } else {
         admission.permits.failure(cfg, None);
     }
@@ -2426,7 +2426,7 @@ async fn session_once(
                                     if let Some(failure) = first_event_failure(&frame) { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts); }
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
-                                    forward::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
+                                    super::health_settlement::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
                                 }
 
                             }

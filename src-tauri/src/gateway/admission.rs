@@ -1,6 +1,8 @@
 //! Request slots and bounded FIFO admission. Behavior informed by Sub2API
 //! a3eb7ef3 concurrency_service / account scheduler; independently implemented in Rust.
-use super::{circuit::Circuit, forward::Permits, model::Provider, routing::Requirement, Route};
+use super::{
+    circuit::Circuit, health_settlement::Permits, model::Provider, routing::Requirement, Route,
+};
 use crate::errors::code;
 use crate::storage;
 use serde::{Deserialize, Serialize};
