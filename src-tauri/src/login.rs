@@ -303,11 +303,7 @@ pub async fn run_with_callbacks(
     events: mpsc::Sender<LoginState>,
     mut callbacks: mpsc::Receiver<CallbackRequest>,
 ) -> Result<Option<String>> {
-    let temp = tempfile::Builder::new()
-        .prefix("lich13-switch-login-")
-        .tempdir()
-        .map_err(storage::io_error)?;
-    storage::protect(temp.path(), true)?;
+    let temp = storage::private_tempdir(&std::env::temp_dir(), "lich13-switch-login-")?;
     let mut cmd = command(cli)?;
     cmd.arg("login")
         .args(["-c", "cli_auth_credentials_store=\"file\""])

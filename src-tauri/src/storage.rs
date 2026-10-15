@@ -2,6 +2,8 @@ use crate::errors::code;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
+mod private;
+pub use private::{private_tempdir, private_tempfile, PrivateTempDir};
 
 pub type Result<T> = std::result::Result<T, AppError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +63,7 @@ pub fn revision(bytes: Option<&[u8]>) -> String {
     bytes.map(digest).unwrap_or_else(|| "missing".into())
 }
 pub fn private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(io_error)?;
+    private::create_tree(path).map_err(io_error)?;
     protect(path, true)
 }
 #[cfg(unix)]
@@ -144,8 +146,7 @@ pub fn atomic_write_bounded(
     if !parent.exists() {
         private_dir(parent)?;
     }
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
-    protect(temp.path(), false)?;
+    let mut temp = private_tempfile(parent)?;
     temp.write_all(bytes).map_err(io_error)?;
     temp.as_file().sync_all().map_err(io_error)?;
     let current = read_bounded(path, limit)?;

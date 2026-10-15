@@ -279,8 +279,7 @@ impl Replay {
                         return Err(io::Error::other("请求超过 1 GiB").into());
                     }
                     if writer.is_none() && memory.len() + chunk.len() > MEMORY_LIMIT {
-                        let f = tempfile::NamedTempFile::new_in(dir)?;
-                        storage::protect(f.path(), false)?;
+                        let f = storage::private_tempfile(dir)?;
                         let mut file = tokio::fs::File::from_std(f.reopen()?);
                         file.write_all(&memory).await?;
                         memory.clear();

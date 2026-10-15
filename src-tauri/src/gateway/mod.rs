@@ -147,7 +147,7 @@ struct Shared {
     lifecycle: tokio::sync::Mutex<()>,
     clients: Mutex<HashMap<String, HttpClient>>,
     data: PathBuf,
-    spool: tempfile::TempDir,
+    spool: storage::PrivateTempDir,
     active: AtomicUsize,
     events: broadcast::Sender<()>,
     quota: quota::Service,
@@ -390,11 +390,7 @@ impl Gateway {
             Some(n) => n,
             None => Arc::new(registry::Registry::default()),
         };
-        let spool = tempfile::Builder::new()
-            .prefix("gateway-spool-")
-            .tempdir_in(&data)
-            .map_err(storage::io_error)?;
-        storage::protect(spool.path(), true)?;
+        let spool = storage::private_tempdir(&data, "gateway-spool-")?;
         let (events, _) = broadcast::channel(32);
         let admission = admission::Scheduler::new(events.clone(), data.join("rpm-window.json"));
         admission.configure(&store.providers, false);

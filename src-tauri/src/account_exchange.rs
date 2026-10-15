@@ -579,9 +579,7 @@ impl Core {
                 .map(|p| {
                     let bytes = serde_json::to_vec_pretty(&export_account(p, format, None)?)
                         .map_err(|_| invalid("导出无法生成"))?;
-                    let mut file =
-                        tempfile::NamedTempFile::new_in(path).map_err(storage::io_error)?;
-                    storage::protect(file.path(), false)?;
+                    let mut file = storage::private_tempfile(path)?;
                     use std::io::Write;
                     file.write_all(&bytes).map_err(storage::io_error)?;
                     file.as_file().sync_all().map_err(storage::io_error)?;

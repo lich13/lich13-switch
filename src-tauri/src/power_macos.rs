@@ -188,7 +188,7 @@ pub fn ensure(force: bool) -> Result<()> {
     let hash = take(unsafe { gs_power_identity() })
         .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or_else(|| AppError::new(code::POWER_AUTH, "无法校验当前应用签名"))?;
-    let folder = tempfile::tempdir().map_err(storage::io_error)?;
+    let folder = storage::private_tempdir(&std::env::temp_dir(), ".tmp")?;
     let payload = folder.path().join("power-helper");
     storage::atomic_write(&payload, IMAGE, None)?;
     let stage = format!(
