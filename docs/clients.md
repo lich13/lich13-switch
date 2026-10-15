@@ -53,4 +53,3 @@ Claude 网关页和配置页提供“官方／API”切换。首次启用官方�
 设置中的“CC Switch 链接”读取系统默认接收应用，可选择已安装且支持协议的 lich13-switch、CC Switch 或 lich13studio。macOS 直接设置并回读；Windows 打开系统默认应用界面完成选择。安装、启动和刷新均不抢占默认关联。
 
 支持 `ccswitch://v1/import?resource=provider&app=codex` 和 `app=claude`。导入预览显示目标客户端，重复检测按客户端隔离。接收后确认名称和地址，再新增供应商；不切换当前供应商、不启停网关、不改 Codex 配置。部署子路径原样保留，凭据只在 Rust 内存中等待确认。已有表单草稿会保留，导入排队处理。其他资源、客户端、脚本和远程配置不导入。
-
