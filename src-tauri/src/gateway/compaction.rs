@@ -837,6 +837,24 @@ impl Lease {
         }
         routes
     }
+    /// A failed attempt before any output opens the ordinary fallback queue.
+    /// The compaction claim still gates the eventual atomic ownership commit;
+    /// its priority-limited receivers apply only to proactive handoff.
+    pub fn candidates_after_failure(
+        &self,
+        mut routes: Vec<super::Route>,
+        requirement: &super::routing::Requirement,
+    ) -> Vec<super::Route> {
+        if !self.handoff {
+            return self.candidates_for(routes, requirement);
+        }
+        routes.retain(|route| {
+            self.owner.as_deref() == Some(&route.provider.id)
+                || !self.strict
+                || accepts(&route.provider, Intake::Compacted)
+        });
+        routes
+    }
     /// Close this one opportunity at the first output, including response.created.
     /// The in-flight winning claim remains valid solely to commit that same turn.
     pub fn output_started(&self, provider: &str) {

@@ -117,7 +117,7 @@ type StatusGroup =
   | "no_status";
 
 const client = (id: ClientId | null) =>
-  id === "codex" ? "Codex" : id === "claude" ? "Claude Code" : "应用";
+  id === "codex" ? "Codex" : id === "claude" ? "Claude Code" : id === "grok" ? "Grok Build" : "应用";
 
 const time = (seconds: number) =>
   new Date(seconds * 1000).toLocaleString("zh-CN", {
@@ -369,7 +369,7 @@ export default function EventLog({
         return next;
       });
 
-    for (const id of ["codex", "claude"] as const)
+    for (const id of ["codex", "claude", "grok"] as const)
       void command<GatewayState>("get_gateway", { clientId: id })
         .then((s) => {
           if (!disposed) accept(s);
@@ -506,6 +506,7 @@ export default function EventLog({
           <option value="">全部客户端</option>
           <option value="codex">Codex</option>
           <option value="claude">Claude Code</option>
+          <option value="grok">Grok Build</option>
         </select>
         <select
           aria-label="供应商"

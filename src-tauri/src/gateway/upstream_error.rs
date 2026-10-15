@@ -169,6 +169,41 @@ pub fn temporary_capacity_event(value: &Value) -> bool {
         !strings(error).any(global_fault) && strings(error).any(capacity_message)
     })
 }
+/// Explicit retry/reset fields from a bounded error envelope. Free-form text
+/// and successful response content are never interpreted as timing evidence.
+pub(super) fn retry_after_value(value: &Value) -> Option<std::time::Duration> {
+    retry_after_fields(envelope(value, false, 0)?)
+}
+fn retry_after_fields(error: &Value) -> Option<std::time::Duration> {
+    let number = |v: &Value| v.as_u64().or_else(|| v.as_str()?.parse().ok());
+    let relative = ["retry_after", "retry_after_seconds", "resets_in_seconds"]
+        .into_iter()
+        .filter_map(|key| error.get(key).and_then(number))
+        .max();
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let absolute = ["resets_at", "reset_at", "reset_at_unix"]
+        .into_iter()
+        .filter_map(|key| error.get(key))
+        .filter_map(|value| {
+            number(value).or_else(|| {
+                chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+                    .ok()
+                    .and_then(|date| u64::try_from(date.timestamp()).ok())
+            })
+        })
+        .map(|at| at.saturating_sub(now))
+        .max();
+    relative
+        .max(absolute)
+        .map(|seconds| std::time::Duration::from_secs(seconds.min(86_400)))
+}
+pub(super) fn retry_after_http(bytes: &[u8]) -> Option<std::time::Duration> {
+    if bytes.len() > LIMIT {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(bytes).ok()?;
+    retry_after_fields(envelope(&value, true, 0)?)
+}
 pub fn model_http(status: u16, bytes: &[u8]) -> bool {
     if status < 400 || status == 429 || bytes.len() > LIMIT {
         return false;
@@ -237,7 +272,6 @@ pub(super) fn permanent_rejection(body: &[u8]) -> bool {
         "insufficient_account_balance",
         "account_balance_insufficient",
         "api_key_quota_exhausted",
-        "usage_limit_exceeded",
         "insufficient_user_quota",
         "balance_exhausted",
         "balance_not_enough",

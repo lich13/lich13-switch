@@ -147,6 +147,12 @@ pub struct Store {
     pub providers: Vec<Provider>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_endpoints: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub grok_connections: BTreeMap<String, super::grok_config::Connection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_native: Option<super::grok_config::Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_resume: Option<String>,
     pub settings: Settings,
     pub mode: String,
     pub selected: Option<String>,
@@ -170,6 +176,9 @@ impl Default for Store {
             connection: Default::default(),
             providers: vec![],
             provider_endpoints: BTreeMap::new(),
+            grok_connections: BTreeMap::new(),
+            grok_native: None,
+            grok_resume: None,
             settings: Settings::default(),
             mode: "manual".into(),
             selected: None,
@@ -202,6 +211,15 @@ pub enum Edit {
         #[serde(default)]
         name: Option<String>,
     },
+    SaveGrokProvider {
+        id: Option<String>,
+        base_url: String,
+        token: String,
+        #[serde(default)]
+        name: Option<String>,
+        protocol: super::grok_config::Protocol,
+    },
+    GrokNative,
     RenameProvider {
         id: String,
         name: String,
@@ -379,6 +397,44 @@ impl Store {
     }
     pub fn edit(&mut self, edit: Edit, running: bool) -> Result<()> {
         match edit {
+            Edit::SaveGrokProvider {
+                id,
+                base_url,
+                token,
+                name,
+                protocol,
+            } => {
+                let existing = id.clone();
+                let replacing_token = !token.is_empty();
+                self.edit(
+                    Edit::SaveProvider {
+                        id,
+                        base_url,
+                        token,
+                        name,
+                    },
+                    running,
+                )?;
+                let id = existing
+                    .or_else(|| self.providers.last().map(|p| p.id.clone()))
+                    .ok_or_else(|| AppError::new("PROVIDER", "供应商不存在"))?;
+                let connection = self.grok_connections.entry(id.clone()).or_default();
+                let mut connection_changed = false;
+                if replacing_token {
+                    // An explicitly edited credential replaces imported auth
+                    // headers too; otherwise the old secret wins at dispatch.
+                    connection_changed |= connection.headers.remove("authorization").is_some();
+                    connection_changed |= connection.headers.remove("x-api-key").is_some();
+                }
+                if connection.protocol != protocol {
+                    connection.protocol = protocol;
+                    connection_changed = true;
+                }
+                if connection_changed {
+                    self.provider_mut(&id)?.version = uuid::Uuid::new_v4().to_string();
+                }
+            }
+            Edit::GrokNative => return Err(AppError::new("GROK_CONFIG", "需要原生配置事务")),
             Edit::ImportProviders { providers } => {
                 if providers.is_empty() || providers.len() > 1000 {
                     return Err(AppError::new("IMPORT", "请选择 1–1000 项"));
@@ -493,6 +549,7 @@ impl Store {
                 let values = endpoint_urls(&primary, &base_urls, self.settings.port)?;
                 if values.is_empty() {
                     self.provider_endpoints.remove(&id);
+                    self.grok_connections.remove(&id);
                 } else {
                     self.provider_endpoints.insert(id, values);
                 }

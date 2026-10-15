@@ -97,6 +97,9 @@ pub fn validate(client: ClientId, text: &str) -> Result<()> {
     if client == ClientId::Codex {
         return crate::core::validate_config(text);
     }
+    if client == ClientId::Grok {
+        return crate::gateway::grok_config::validate(text);
+    }
     let v = parse_object(text)?;
     let check = |path: &str, valid: fn(&Value) -> bool, label: &str| -> Result<()> {
         if v.pointer(path).is_some_and(|x| !valid(x)) {
@@ -148,7 +151,7 @@ pub fn validate(client: ClientId, text: &str) -> Result<()> {
     Ok(())
 }
 fn backup(client: ClientId, data: &Path) -> std::path::PathBuf {
-    data.join(if client == ClientId::Codex {
+    data.join(if client != ClientId::Claude {
         "previous-config.toml"
     } else {
         "previous-settings.json"

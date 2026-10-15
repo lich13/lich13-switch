@@ -44,13 +44,14 @@ pub fn set_usage_settings(r: R<'_>, settings: Settings) -> Result<State> {
 pub async fn sync_usage(r: R<'_>, rebuild: Option<String>) -> Result<State> {
     if rebuild
         .as_deref()
-        .is_some_and(|s| !matches!(s, "codex" | "claude"))
+        .is_some_and(|s| !matches!(s, "codex" | "claude" | "grok"))
     {
         return Err(failure("未知的会话来源"));
     }
     let roots = vec![
         ("codex".into(), r.home(crate::gateway::ClientId::Codex)?),
         ("claude".into(), r.home(crate::gateway::ClientId::Claude)?),
+        ("grok".into(), r.home(crate::gateway::ClientId::Grok)?),
     ];
     let s = r.usage.clone();
     tokio::task::spawn_blocking(move || s.sync(&roots, rebuild.as_deref()))
@@ -168,6 +169,8 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                             .map(|p| ("codex".into(), p)),
                         r.home(crate::gateway::ClientId::Claude)
                             .map(|p| ("claude".into(), p)),
+                        r.home(crate::gateway::ClientId::Grok)
+                            .map(|p| ("grok".into(), p)),
                     ]
                     .into_iter()
                     .collect::<Result<Vec<_>>>();

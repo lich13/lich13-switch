@@ -526,6 +526,11 @@ impl Scheduler {
         }
         result
     }
+    pub(super) fn capacity_available(&self, id: &str, budget: &Budget, manual: bool) -> bool {
+        let mut state = self.0.state.lock().unwrap();
+        state.retention.prune();
+        Self::available(&state, id, budget.thread.as_ref().map(|t| t.ticket), manual)
+    }
     pub fn capacity_retries(&self) -> Vec<CapacityRetry> {
         self.retries(WaitKind::Capacity)
     }

@@ -23,6 +23,8 @@ mod v020_tests;
 mod v0212_storage_tests;
 #[cfg(test)]
 mod v022_tests;
+#[cfg(test)]
+mod v024_grok_tests;
 use crate::storage::{self, Result};
 use model::*;
 use pricing::{Pricing, Quote};
@@ -458,6 +460,7 @@ impl Service {
             id: uuid::Uuid::new_v4().to_string(),
             at: now(),
             attempts: Mutex::new(Vec::new()),
+            failover: Mutex::new(None),
             recording: self.settings().recording,
         }))
     }
@@ -511,6 +514,7 @@ struct TraceInner {
     id: String,
     at: i64,
     attempts: Mutex<Vec<Attempt>>,
+    failover: Mutex<Option<crate::gateway::failover::Evidence>>,
     recording: bool,
 }
 impl Drop for TraceInner {
@@ -533,6 +537,7 @@ impl Drop for TraceInner {
         }
         let record = Record {
             id: self.id.clone(),
+            failover_evidence: self.failover.get_mut().unwrap().take(),
             client: self.client.clone(),
             source: "proxy".into(),
             started_at: self.at,
@@ -564,6 +569,9 @@ pub struct AttemptTrace {
     done: bool,
 }
 impl Trace {
+    pub fn failover(&self, evidence: crate::gateway::failover::Evidence) {
+        *self.0.failover.lock().unwrap() = Some(evidence);
+    }
     pub fn attempt(&self, provider: &str, stream: bool, transport: &str) -> AttemptTrace {
         let settings = self.0.service.settings();
         let prices = self.0.service.0.prices.as_ref().map(Pricing::frozen);
@@ -624,8 +632,12 @@ impl AttemptTrace {
             .filter(|v| !v.is_empty() && v.len() <= 512)
             .map(|v| storage::digest(v.as_bytes()));
     }
-    pub fn is_claude(&self) -> bool {
-        self.trace.0.client == "claude"
+    pub fn anthropic(&self) -> Option<bool> {
+        match self.trace.0.client.as_str() {
+            "claude" => Some(true),
+            "grok" => None,
+            _ => Some(false),
+        }
     }
     pub fn update(&mut self, m: &Meter, status: Option<u16>, outcome: Option<&str>) {
         self.attempt.tokens.merge(&m.tokens);

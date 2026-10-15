@@ -26,7 +26,9 @@ const V022_WINDOW: &str = "fixture-v022-window";
 const V022_CAPACITY: &[u8] = b"data: {\"type\":\"error\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Selected model is at capacity\"}}\n\n";
 const V022_TEMPORARY_429: &[u8] =
     br#"{"error":{"code":"rate_limit_exceeded","message":"selected model is at capacity"}}"#;
-const V022_HARD_429: &[u8] =
+const V022_BALANCE_429: &[u8] =
+    br#"{"error":{"code":"INSUFFICIENT_BALANCE","message":"fixture balance exhausted"}}"#;
+const V022_USAGE_LIMIT_429: &[u8] =
     br#"{"error":{"code":"USAGE_LIMIT_EXCEEDED","message":"fixture usage limit"}}"#;
 
 async fn v022_server<F, Fut>(handler: F) -> u16
@@ -382,27 +384,42 @@ async fn v022_model_capacity_isolated_so_same_provider_accepts_astra() {
 }
 
 #[test]
-fn v022_permanent_429_markers_are_provider_scope_and_rate_limit_stays_temporary() {
+fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary() {
     let chinese_balance = serde_json::to_vec(&json!({
         "error": {"message": "\u{4f59}\u{989d}\u{8017}\u{5c3d}"}
     }))
     .unwrap();
     for body in [
-        br#"{"error":{"code":"USAGE_LIMIT_EXCEEDED"}}"#.as_slice(),
         br#"{"error":{"code":"API_KEY_QUOTA_EXHAUSTED"}}"#.as_slice(),
         br#"{"error":{"code":"INSUFFICIENT_BALANCE"}}"#.as_slice(),
         chinese_balance.as_slice(),
-        br#"{"errorKey":"USAGE_LIMIT_EXCEEDED","errorMessage":"fixture quota"}"#.as_slice(),
     ] {
         assert!(
             super::upstream_error::permanent_rejection(body),
-            "expected permanent marker in {:?}",
+            "expected explicit balance or key marker in {:?}",
             std::str::from_utf8(body).unwrap()
         );
         let details = super::upstream_error::details_http(body);
         assert_eq!(
             details.health_scope,
             Some(crate::events::HealthScope::Provider)
+        );
+    }
+
+    for body in [
+        br#"{"error":{"code":"USAGE_LIMIT_EXCEEDED"}}"#.as_slice(),
+        br#"{"errorKey":"USAGE_LIMIT_EXCEEDED","errorMessage":"fixture quota"}"#.as_slice(),
+    ] {
+        assert!(
+            !super::upstream_error::permanent_rejection(body),
+            "usage-limit marker should remain temporary: {:?}",
+            std::str::from_utf8(body).unwrap()
+        );
+        let details = super::upstream_error::details_http(body);
+        assert_eq!(details.health_scope, None);
+        assert_eq!(
+            details.upstream_code.as_deref(),
+            Some("USAGE_LIMIT_EXCEEDED")
         );
     }
 
@@ -423,7 +440,7 @@ async fn v022_usage_limit_429_fails_over_to_p2_without_capacity_wait() {
     let p1_count = p1_hits.clone();
     let p1_port = v022_server(move |_| {
         p1_count.fetch_add(1, Ordering::SeqCst);
-        async { v022_json_response(StatusCode::TOO_MANY_REQUESTS, V022_HARD_429) }
+        async { v022_json_response(StatusCode::TOO_MANY_REQUESTS, V022_USAGE_LIMIT_429) }
     })
     .await;
     let p2_hits = Arc::new(AtomicUsize::new(0));
@@ -453,7 +470,7 @@ async fn v022_usage_limit_429_fails_over_to_p2_without_capacity_wait() {
         Duration::from_secs(2),
         v022_request(
             &gateway,
-            "fixture-v022-hard-429-failover",
+            "fixture-v022-usage-limit-429-failover",
             br#"{"model":"fixture-model","input":[{"role":"user","content":"previous"},{"role":"assistant","content":"answer"},{"role":"user","content":"followup"}]}"#.to_vec(),
         ),
     )
@@ -462,7 +479,7 @@ async fn v022_usage_limit_429_fails_over_to_p2_without_capacity_wait() {
         Ok(response) => response,
         Err(_) => {
             gateway.stop().await.unwrap();
-            panic!("hard 429 failover waited for the 60-second capacity delay");
+            panic!("usage-limit 429 failover waited for the 60-second capacity delay");
         }
     };
     assert_eq!(response.status(), StatusCode::OK);
@@ -477,12 +494,12 @@ async fn v022_usage_limit_429_fails_over_to_p2_without_capacity_wait() {
 }
 
 #[tokio::test]
-async fn v022_usage_limit_429_with_one_provider_returns_original_body_without_waiting() {
+async fn v022_insufficient_balance_429_with_one_provider_returns_original_body_without_waiting() {
     let p1_hits = Arc::new(AtomicUsize::new(0));
     let p1_count = p1_hits.clone();
     let p1_port = v022_server(move |_| {
         p1_count.fetch_add(1, Ordering::SeqCst);
-        async { v022_json_response(StatusCode::TOO_MANY_REQUESTS, V022_HARD_429) }
+        async { v022_json_response(StatusCode::TOO_MANY_REQUESTS, V022_BALANCE_429) }
     })
     .await;
     let (dir, gateway) = v022_fixture(vec![format!("http://127.0.0.1:{p1_port}/v1")]).await;
@@ -500,7 +517,7 @@ async fn v022_usage_limit_429_with_one_provider_returns_original_body_without_wa
         Duration::from_secs(2),
         v022_request(
             &gateway,
-            "fixture-v022-hard-429-single",
+            "fixture-v022-balance-429-single",
             br#"{"model":"fixture-model","input":[{"role":"user","content":"previous"},{"role":"assistant","content":"answer"},{"role":"user","content":"followup"}]}"#.to_vec(),
         ),
     )
@@ -509,11 +526,11 @@ async fn v022_usage_limit_429_with_one_provider_returns_original_body_without_wa
         Ok(response) => response,
         Err(_) => {
             gateway.stop().await.unwrap();
-            panic!("single-provider hard 429 waited for the capacity delay");
+            panic!("single-provider balance rejection waited for the capacity delay");
         }
     };
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(v022_body(response).await, V022_HARD_429);
+    assert_eq!(v022_body(response).await, V022_BALANCE_429);
     assert_eq!(p1_hits.load(Ordering::SeqCst), 1);
     gateway.stop().await.unwrap();
 }
@@ -527,7 +544,7 @@ async fn v022_temporary_capacity_then_hard_429_does_not_revive_denied_provider()
         async move {
             match attempt {
                 1 => v022_json_response(StatusCode::TOO_MANY_REQUESTS, V022_TEMPORARY_429),
-                2 => v022_json_response(StatusCode::TOO_MANY_REQUESTS, V022_HARD_429),
+                2 => v022_json_response(StatusCode::TOO_MANY_REQUESTS, V022_BALANCE_429),
                 _ => v022_json_response(
                     StatusCode::OK,
                     br#"{"provider":"fixture-revived"}"#.as_slice(),
@@ -558,7 +575,7 @@ async fn v022_temporary_capacity_then_hard_429_does_not_revive_denied_provider()
     .await
     .expect("mixed capacity and hard rejection did not settle");
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(v022_body(response).await, V022_HARD_429);
+    assert_eq!(v022_body(response).await, V022_BALANCE_429);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     gateway.stop().await.unwrap();
 }

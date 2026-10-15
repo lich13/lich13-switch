@@ -595,6 +595,7 @@ export default function App() {
                 revision={state.configRevision}
                 home={state.preferences.codexHome}
                 claudeHome={state.preferences.claudeHome ?? "~/.claude"}
+                grokHome={state.preferences.grokHome ?? "~/.grok"}
                 theme={theme}
                 onDirty={setDirty}
                 onMessage={notify}

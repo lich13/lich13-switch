@@ -30,7 +30,7 @@ vi.mock("./bridge", () => ({
 }));
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirmAction }));
 import Gateway from "./Gateway";
-import { claudeGatewayDemo, gatewayDemo } from "./gateway-preview";
+import { claudeGatewayDemo, gatewayDemo, grokGatewayDemo } from "./gateway-preview";
 
 type CommandArgs = {
   clientId?: ClientId;
@@ -90,6 +90,7 @@ beforeEach(() => {
   gateways = {
     codex: structuredClone(gatewayDemo),
     claude: structuredClone(claudeGatewayDemo),
+    grok: structuredClone(grokGatewayDemo),
   };
   revealToken = async (clientId) => `fixture-stored-${clientId}-token`;
   nextUpdateError = null;

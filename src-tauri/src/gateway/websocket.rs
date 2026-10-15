@@ -200,6 +200,22 @@ struct AttemptFailure {
     details: Box<crate::events::Details>,
 }
 impl AttemptFailure {
+    fn classification(&self) -> super::failover::Failure {
+        use super::failover::Failure;
+        if self.hard_rejection() {
+            Failure::AccountRejected
+        } else if self.model_unavailable {
+            Failure::ModelUnavailable
+        } else if self.capacity || self.status == Some(429) {
+            Failure::RateLimit
+        } else if self.transport_failure() {
+            Failure::Transport
+        } else if self.context_incompatible || self.unsupported {
+            Failure::Protocol
+        } else {
+            Failure::UpstreamService
+        }
+    }
     fn hard_rejection(&self) -> bool {
         if self.details.health_scope == Some(crate::events::HealthScope::Provider) {
             return true;
@@ -384,6 +400,7 @@ async fn take_slot(
     budget: &mut Budget,
     requirement: &Requirement,
     immediate: bool,
+    failover: &mut super::failover::Tracker,
 ) -> Result<Admission, Failure> {
     if *client.closed.borrow() {
         return Err((1000, "client closed"));
@@ -401,6 +418,7 @@ async fn take_slot(
     )
     .await?
     .map_err(|reason| {
+        failover.rejected(&reason);
         if matches!(reason, Rejected::Model) {
             (1008, requirement.code())
         } else {
@@ -450,17 +468,16 @@ async fn upstream_native(
 ) -> Result<Peer, AttemptFailure> {
     let mut request = Request::new(replay::empty());
     *request.method_mut() = hyper::Method::GET;
-    *request.uri_mut() = forward::target_for(route.client_id, &route.provider.base_url, uri)
-        .map_err(|_| AttemptFailure {
-            status: None,
-            retry: None,
-            capacity: false,
-            unsupported: false,
-            model_unavailable: false,
-            context_incompatible: false,
-            model_payload: None,
-            details: Default::default(),
-        })?;
+    *request.uri_mut() = route.target(uri).map_err(|_| AttemptFailure {
+        status: None,
+        retry: None,
+        capacity: false,
+        unsupported: false,
+        model_unavailable: false,
+        context_incompatible: false,
+        model_payload: None,
+        details: Default::default(),
+    })?;
     *request.headers_mut() = original.clone();
     let headers = request.headers_mut();
     forward::clean_headers(headers, true);
@@ -482,6 +499,20 @@ async fn upstream_native(
                 details: Default::default(),
             })?,
     );
+    if let Some(connection) = &route.grok {
+        connection
+            .authenticate(headers, &route.provider.token)
+            .map_err(|_| AttemptFailure {
+                status: Some(400),
+                retry: None,
+                capacity: false,
+                unsupported: false,
+                model_unavailable: false,
+                context_incompatible: false,
+                model_payload: None,
+                details: local_failure("GROK_AUTH"),
+            })?;
+    }
     let key = STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
     headers.insert(header::SEC_WEBSOCKET_KEY, key.parse().unwrap());
     headers.insert(
@@ -544,6 +575,7 @@ async fn upstream_native(
             .to_owned();
         let prefix = response_prefix(response.into_body(), 128 * 1024, settings).await;
         let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
+        let retry = retry.max(super::upstream_error::retry_after_http(&decoded));
         let details = super::upstream_error::details_http(&decoded);
         let global_rejection = details.health_scope == Some(crate::events::HealthScope::Provider);
         let model_unavailable = super::upstream_error::model_http(status.as_u16(), &decoded);
@@ -678,7 +710,11 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
     let v = value(frame)?;
     let mut observation = super::protocol::Observation::default();
     observation.value(&v);
+    let details = super::upstream_error::details_value(&v, false);
+    let temporary = super::upstream_error::temporary_capacity_event(&v);
     if !observation.compaction_incompatible
+        && !temporary
+        && details.health_scope != Some(crate::events::HealthScope::Provider)
         && !matches!(
             observation.terminal,
             Some(super::protocol::Terminal::Failure | super::protocol::Terminal::ModelUnavailable)
@@ -701,24 +737,25 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
         .and_then(|v| v.as_u64())
         .and_then(|v| u16::try_from(v).ok())
         .unwrap_or(502);
-    let details = super::upstream_error::details_value(&v, false);
     let capacity = details.health_scope != Some(crate::events::HealthScope::Provider)
-        && (matches!(
-            code,
-            "rate_limit_exceeded"
-                | "rate_limit_error"
-                | "overloaded_error"
-                | "model_capacity_exceeded"
-                | "server_is_overloaded"
-                | "slow_down"
-                | "usage_limit_reached"
-        ) || forward::capacity_message(
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            frame.payload(),
-        ));
+        && (temporary
+            || matches!(
+                code,
+                "rate_limit_exceeded"
+                    | "rate_limit_error"
+                    | "overloaded_error"
+                    | "model_capacity_exceeded"
+                    | "server_is_overloaded"
+                    | "slow_down"
+                    | "usage_limit_reached"
+            )
+            || forward::capacity_message(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                frame.payload(),
+            ));
     Some(AttemptFailure {
         status: Some(101),
-        retry: None,
+        retry: super::upstream_error::retry_after_value(&v),
         capacity,
         unsupported: false,
         model_unavailable: super::upstream_error::model_error(&v),
@@ -1033,10 +1070,12 @@ async fn session_once(
             crate::usage::model::Operation::Model
         },
     );
+    let mut failover = super::failover::Tracker::new(usage_trace.clone());
     let (mut upstream, admission, initial_protocol) = loop {
         if ordinary_attempts > cfg.max_retries
             || (unknown_affinity && !capacity_protected && attempts > 0)
         {
+            failover.finish(super::failover::Exit::AttemptsExhausted);
             g.record_final(
                 last_error.as_ref(),
                 previous_provider.as_deref(),
@@ -1056,6 +1095,7 @@ async fn session_once(
         }
         if ids.is_empty() {
             if !capacity_pending {
+                failover.finish(super::failover::Exit::NoEligibleProvider);
                 g.record_final(
                     last_error.as_ref(),
                     previous_provider.as_deref(),
@@ -1076,6 +1116,14 @@ async fn session_once(
             if *client.closed.borrow() {
                 return Ok(());
             }
+            failover.wait(
+                if capacity_retry_after.is_some() {
+                    super::failover::WaitKind::RetryAfter
+                } else {
+                    super::failover::WaitKind::CapacityRetry
+                },
+                forward::capacity_delay(cfg, capacity_retry_after).as_secs(),
+            );
             while_connecting(
                 client,
                 g.0.admission.wait_capacity(
@@ -1094,7 +1142,11 @@ async fn session_once(
             });
             routes = ids
                 .iter()
-                .filter_map(|id| g.route(id).map(|r| (id.clone(), r)))
+                .filter_map(|id| {
+                    g.route(id)
+                        .filter(|r| r.accepts_protocol(uri.path()))
+                        .map(|r| (id.clone(), r))
+                })
                 .collect();
             if ids.is_empty() {
                 return Err((1013, "provider queue is empty"));
@@ -1107,7 +1159,11 @@ async fn session_once(
         let mut candidates: Vec<_> = ids
             .iter()
             .filter_map(|id| routes.get(id).cloned())
+            .filter(|r| r.accepts_protocol(uri.path()))
             .collect();
+        if attempts > 0 {
+            budget.handoff_owner = None;
+        }
         let matches_model = candidates
             .iter()
             .any(|r| requirement.allows(r.provider.allowed_models.as_deref()));
@@ -1122,7 +1178,11 @@ async fn session_once(
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
-            candidates = lease.candidates_for(candidates, &requirement);
+            candidates = if attempts > 0 {
+                lease.candidates_after_failure(candidates, &requirement)
+            } else {
+                lease.candidates_for(candidates, &requirement)
+            };
         } else if g.client_id() == super::ClientId::Codex
             && !manual
             && pinned.is_none()
@@ -1130,6 +1190,33 @@ async fn session_once(
         {
             candidates = super::compaction::unidentified_candidates(candidates);
         }
+        let stage = if unknown_affinity {
+            super::failover::Stage::UnknownOwner
+        } else if pinned.is_some() {
+            super::failover::Stage::CursorPinned
+        } else if attempts > 0 {
+            super::failover::Stage::FailureFallback
+        } else if ownership.as_ref().is_some_and(|l| l.handoff) {
+            super::failover::Stage::ProactiveHandoff
+        } else {
+            super::failover::Stage::Initial
+        };
+        let observed: Vec<_> = g
+            .routing_ids(pinned.as_deref())
+            .iter()
+            .filter_map(|id| g.route(id))
+            .filter(|r| ids.contains(&r.provider.id) || !r.accepts_protocol(uri.path()))
+            .collect();
+        failover.candidates(
+            g,
+            stage,
+            &observed,
+            &candidates,
+            &requirement,
+            uri.path(),
+            &budget,
+            manual,
+        );
         if matches_model
             && !candidates
                 .iter()
@@ -1139,6 +1226,7 @@ async fn session_once(
                 ids.clear();
                 continue;
             }
+            failover.finish(super::failover::Exit::NoEligibleProvider);
             g.record_policy_rejection(
                 current_model.as_deref(),
                 true,
@@ -1163,6 +1251,7 @@ async fn session_once(
             &mut budget,
             &requirement,
             capacity_pending,
+            &mut failover,
         )
         .await
         {
@@ -1290,6 +1379,7 @@ async fn session_once(
                 break (upstream, admission, attempt_protocol);
             }
             Err(failure) => {
+                failover.failure(failure.classification());
                 attempt_protocol.finish(
                     failure.status,
                     if failure.transport_failure() {
@@ -1315,7 +1405,7 @@ async fn session_once(
                         .and_then(|lease| lease.owner.as_ref())
                         .filter(|id| ids.contains(id))
                     {
-                        ids = vec![owner.clone()];
+                        retry_owner = Some(owner.clone());
                         continue;
                     }
                     if let Some(payload) = failure.model_payload {
@@ -1411,9 +1501,11 @@ async fn session_once(
                 }
 
                 if !retryable {
+                    failover.finish(super::failover::Exit::PermanentRejection);
                     return Err((1008, "upstream rejected websocket handshake"));
                 }
                 if let Some(delay) = retry_delay {
+                    failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
                     let source = CapacitySource {
                         provider_id: admission.route.provider.id.clone(),
                         reset_generation: admission.reset_generation,
@@ -1449,6 +1541,10 @@ async fn session_once(
     let mut replay_frame = first.clone();
     let mut retry_pending = false;
     let mut retry_immediately = false;
+    let mut retry_fallback = false;
+    let mut fallback_capacity = false;
+    let mut turn_failed = std::collections::HashSet::new();
+    let mut rejected_frame: Option<Frame> = None;
     let mut tail_deadline = None;
     let mut previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)> = None;
     let mut protocol = Some(initial_protocol);
@@ -1486,6 +1582,65 @@ async fn session_once(
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
     loop {
         if retry_pending {
+            let requirement = Requirement::model(current_model.as_deref());
+            let hints = value(&replay_frame)
+                .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+            let movable = retry_fallback
+                && !manual
+                && !unknown_affinity
+                && hints
+                    .as_ref()
+                    .is_some_and(|h| h.previous_response_id.is_none());
+            let candidates_for = |failed: &std::collections::HashSet<String>| {
+                let candidates: Vec<_> = g
+                    .routing_ids(None)
+                    .iter()
+                    .filter_map(|id| g.route(id))
+                    .filter(|r| {
+                        !failed.contains(&r.provider.id)
+                            && !hard_denied
+                                .contains(&(r.provider.id.clone(), r.provider.version.clone()))
+                            && r.accepts_protocol(uri.path())
+                            && requirement.allows(r.provider.allowed_models.as_deref())
+                    })
+                    .collect();
+                if let Some(lease) = &ownership {
+                    lease.candidates_after_failure(candidates, &requirement)
+                } else if g.client_id() == super::ClientId::Codex {
+                    super::compaction::unidentified_candidates(candidates)
+                } else {
+                    candidates
+                }
+            };
+            let mut retry_routes = if movable {
+                candidates_for(&turn_failed)
+            } else {
+                vec![route.clone()]
+            };
+            let alternative = movable && !retry_routes.is_empty();
+            if movable && retry_routes.is_empty() && (retry_capacity || fallback_capacity) {
+                turn_failed.clear();
+                retry_routes = candidates_for(&turn_failed);
+            }
+            if retry_fallback
+                && (retry_routes.is_empty()
+                    || (!movable
+                        && hard_denied.contains(&(
+                            route.provider.id.clone(),
+                            route.provider.version.clone(),
+                        )))
+                    || ordinary_attempts > cfg.max_retries)
+            {
+                failover.finish(if ordinary_attempts > cfg.max_retries {
+                    super::failover::Exit::AttemptsExhausted
+                } else {
+                    super::failover::Exit::NoEligibleProvider
+                });
+                if let Some(frame) = rejected_frame.take() {
+                    client.send(frame).await?;
+                }
+                return Err((1013, "all eligible providers failed"));
+            }
             let delay = if retry_immediately {
                 0
             } else if retry_capacity {
@@ -1499,21 +1654,37 @@ async fn session_once(
                     .retry_in,
             );
             retry_immediately = false;
-            let waited = while_connecting(
-                client,
-                g.0.admission.wait_websocket(
-                    &route.provider.id,
-                    Duration::from_secs(delay),
-                    cfg.max_waiting,
-                ),
-            )
-            .await;
+            if !alternative {
+                failover.wait(
+                    if retry_capacity {
+                        super::failover::WaitKind::CapacityRetry
+                    } else {
+                        super::failover::WaitKind::TransientRetry
+                    },
+                    delay,
+                );
+            }
+            let waited = if alternative {
+                Ok(Ok(()))
+            } else {
+                while_connecting(
+                    client,
+                    g.0.admission.wait_websocket(
+                        &route.provider.id,
+                        Duration::from_secs(delay),
+                        cfg.max_waiting,
+                    ),
+                )
+                .await
+            };
             match waited {
                 Err(TURN_CANCELLED) => {
+                    failover.finish(super::failover::Exit::Cancelled);
                     retry_pending = false;
                     thread_request = None;
                     protocol = None;
                     usage_trace = None;
+                    failover.detach();
                     cancellation(client).await?;
                     continue;
                 }
@@ -1532,32 +1703,92 @@ async fn session_once(
                 .as_ref()
                 .filter(|lease| lease.handoff)
                 .and_then(|lease| lease.owner.clone());
-            budget.pin_provider();
+            if movable {
+                budget.handoff_owner = None;
+                if let Some(lease) = &ownership {
+                    let (intake, owner) = lease.admission_policy();
+                    budget.set_intake(intake, owner);
+                }
+            } else {
+                budget.pin_provider();
+            }
             if capacity_protected {
                 budget.protect_capacity();
             }
+            let observed: Vec<_> = g
+                .routing_ids(pinned.as_deref())
+                .iter()
+                .filter_map(|id| g.route(id))
+                .collect();
+            failover.candidates(
+                g,
+                if movable {
+                    super::failover::Stage::FailureFallback
+                } else if unknown_affinity {
+                    super::failover::Stage::UnknownOwner
+                } else {
+                    super::failover::Stage::CursorPinned
+                },
+                &observed,
+                &retry_routes,
+                &requirement,
+                uri.path(),
+                &budget,
+                manual,
+            );
             let acquired = take_slot(
                 g,
                 client,
-                std::slice::from_ref(&route),
+                &retry_routes,
                 manual,
                 cfg,
                 &mut budget,
                 &Requirement::model(current_model.as_deref()),
                 false,
+                &mut failover,
             )
             .await;
             let mut admission = match acquired {
                 Err(TURN_CANCELLED) => {
+                    failover.finish(super::failover::Exit::Cancelled);
                     retry_pending = false;
                     thread_request = None;
                     protocol = None;
                     usage_trace = None;
+                    failover.detach();
                     cancellation(client).await?;
                     continue;
                 }
                 result => result?,
             };
+            if ownership
+                .as_ref()
+                .is_some_and(|lease| !lease.admitted(&admission.route.provider.id))
+            {
+                admission.permits.neutral(cfg);
+                continue;
+            }
+            let previous = route.provider.id.clone();
+            route = g
+                .endpoint_route(
+                    admission.route.clone(),
+                    conversation.as_deref(),
+                    None,
+                    false,
+                )
+                .await
+                .map_err(|_| (1013, "ENDPOINT_AFFINITY"))?;
+            admission.route = route.clone();
+            if previous != route.provider.id {
+                g.record(
+                    Some(&route.provider.id),
+                    current_model.as_deref(),
+                    crate::events::Reason::Failover,
+                    crate::events::Action::Routed,
+                    None,
+                    None,
+                );
+            }
             admission.commit_rpm().map_err(rejected)?;
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
@@ -1605,18 +1836,21 @@ async fn session_once(
             .await;
             match opened {
                 Err(TURN_CANCELLED) => {
+                    failover.finish(super::failover::Exit::Cancelled);
                     turn = None;
                     if let Some(u) = &mut protocol {
                         u.finish(None, "CANCELLED");
                     }
                     protocol = None;
                     usage_trace = None;
+                    failover.detach();
                     retry_pending = false;
                     cancellation(client).await?;
                     continue;
                 }
                 Err(error) => return Err(error),
                 Ok(Err(failure)) => {
+                    failover.failure(failure.classification());
                     let mut admission = turn.take().unwrap();
                     record_failure(
                         &mut admission.permits,
@@ -1652,7 +1886,31 @@ async fn session_once(
                         ordinary_attempts = ordinary_attempts.saturating_sub(1);
                         capacity_protected = true;
                     }
-                    retry_capacity = failure.capacity;
+                    fallback_capacity |= failure.capacity;
+                    retry_capacity = fallback_capacity;
+                    if movable
+                        && (failure.capacity
+                            || failure.hard_rejection()
+                            || failure.model_unavailable
+                            || failure.retryable())
+                    {
+                        failover.failure(failure.classification());
+                        turn_failed.insert(route.provider.id.clone());
+                        if failure.hard_rejection() {
+                            hard_denied.insert((
+                                route.provider.id.clone(),
+                                route.provider.version.clone(),
+                            ));
+                        }
+                        if failure.capacity {
+                            admission.permits.capacity_limited(cfg, failure.retry);
+                        } else if failure.model_unavailable {
+                            admission.permits.neutral(cfg);
+                        } else {
+                            admission.permits.failure(cfg, failure.retry);
+                        }
+                        continue;
+                    }
                     if failure.model_unavailable
                         || failure.unsupported
                         || failure.hard_rejection()
@@ -1808,6 +2066,32 @@ async fn session_once(
                     let (intake, owner) = lease.admission_policy();
                     budget.set_intake(intake, owner);
                 }
+                usage_trace = g.usage_operation(
+                    model.as_deref(),
+                    if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+                        crate::usage::model::Operation::Compaction
+                    } else {
+                        crate::usage::model::Operation::Model
+                    },
+                );
+                failover = super::failover::Tracker::new(usage_trace.clone());
+                failover.candidates(
+                    g,
+                    if hints
+                        .as_ref()
+                        .is_some_and(|h| h.previous_response_id.is_some())
+                    {
+                        super::failover::Stage::CursorPinned
+                    } else {
+                        super::failover::Stage::Initial
+                    },
+                    std::slice::from_ref(&route),
+                    std::slice::from_ref(&route),
+                    &requirement,
+                    uri.path(),
+                    &budget,
+                    manual,
+                );
                 let acquired = take_slot(
                     g,
                     client,
@@ -1817,6 +2101,7 @@ async fn session_once(
                     &mut budget,
                     &requirement,
                     false,
+                    &mut failover,
                 )
                 .await;
                 match acquired {
@@ -1845,16 +2130,13 @@ async fn session_once(
                 ordinary_attempts = 1;
                 capacity_protected = false;
                 retry_capacity = false;
+                retry_fallback = false;
+                fallback_capacity = false;
+                turn_failed.clear();
+                hard_denied.clear();
+                rejected_frame = None;
                 terminal_error = false;
                 replay_frame = frame.clone();
-                usage_trace = g.usage_operation(
-                    current_model.as_deref(),
-                    if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
-                        crate::usage::model::Operation::Compaction
-                    } else {
-                        crate::usage::model::Operation::Model
-                    },
-                );
                 let mut next_protocol = super::protocol::Protocol::new(true);
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
                 next_protocol.attach_thread(thread_request.clone());
@@ -1904,6 +2186,25 @@ async fn session_once(
                         {
                             Ok(peer) => upstream = Upstream::Native(peer),
                             Err(failure) => {
+                                failover.failure(failure.classification());
+                                let can_fail_over = !manual
+                                    && !unknown_affinity
+                                    && hints
+                                        .as_ref()
+                                        .is_some_and(|h| h.previous_response_id.is_none())
+                                    && (failure.capacity
+                                        || failure.hard_rejection()
+                                        || failure.model_unavailable
+                                        || failure.retryable());
+                                if can_fail_over {
+                                    turn_failed.insert(route.provider.id.clone());
+                                    if failure.hard_rejection() {
+                                        hard_denied.insert((
+                                            route.provider.id.clone(),
+                                            route.provider.version.clone(),
+                                        ));
+                                    }
+                                }
                                 if let Some(mut admission) = turn.take() {
                                     record_failure(
                                         &mut admission.permits,
@@ -1911,7 +2212,9 @@ async fn session_once(
                                         &route,
                                         current_model.as_deref(),
                                         &failure,
-                                        if failure.capacity {
+                                        if can_fail_over {
+                                            crate::events::Action::TryingNext
+                                        } else if failure.capacity {
                                             crate::events::Action::Waiting
                                         } else if !failure.model_unavailable
                                             && !failure.unsupported
@@ -1935,9 +2238,10 @@ async fn session_once(
                                             },
                                         );
                                     }
-                                    if failure.model_unavailable
-                                        || failure.unsupported
-                                        || failure.hard_rejection()
+                                    if !can_fail_over
+                                        && (failure.model_unavailable
+                                            || failure.unsupported
+                                            || failure.hard_rejection())
                                     {
                                         if failure.hard_rejection() {
                                             admission.permits.failure(cfg, failure.retry);
@@ -1946,7 +2250,11 @@ async fn session_once(
                                         }
                                         return Err((1008, "upstream rejected websocket"));
                                     }
-                                    if failure.capacity {
+                                    if failure.hard_rejection() {
+                                        admission.permits.failure(cfg, failure.retry);
+                                    } else if failure.model_unavailable {
+                                        admission.permits.neutral(cfg);
+                                    } else if failure.capacity {
                                         admission.permits.capacity_limited(cfg, failure.retry);
                                     } else if failure.status == Some(429) {
                                         admission.permits.rate_limited(cfg, failure.retry);
@@ -1961,7 +2269,9 @@ async fn session_once(
                                     ordinary_attempts = ordinary_attempts.saturating_sub(1);
                                     capacity_protected = true;
                                 }
-                                retry_capacity = failure.capacity;
+                                fallback_capacity |= failure.capacity;
+                                retry_capacity = fallback_capacity;
+                                retry_fallback = can_fail_over;
                                 retry_pending = ordinary_attempts <= cfg.max_retries;
                                 if !retry_pending {
                                     return Err((1013, "websocket reconnect retries exhausted"));
@@ -2005,7 +2315,7 @@ async fn session_once(
             _ = async { if let Some((_, at)) = &previous_usage { tokio::time::sleep_until(*at).await } else { std::future::pending::<()>().await } } => { previous_usage = None; },
             _ = async { if let Some(at) = tail_deadline { tokio::time::sleep_until(at).await } else { std::future::pending::<()>().await } }, if turn.is_none() => {
                 protocol = None;
-                usage_trace = None;
+                usage_trace = None; failover.detach();
                 tail_deadline = None;
             },
             event = next_upstream(&mut upstream), if turn.is_some() || protocol.is_some() || matches!(upstream, Upstream::Native(_)) => {
@@ -2018,7 +2328,7 @@ async fn session_once(
                     if turn.is_none() && !terminal_error && route.client_id == super::ClientId::Codex {
                         upstream = Upstream::Disconnected;
                         protocol = None;
-                        usage_trace = None;
+                        usage_trace = None; failover.detach();
                         tail_deadline = None;
                         continue;
                     }
@@ -2068,14 +2378,27 @@ async fn session_once(
                         }
                     }
                 }
-                // After binding, capacity retries stay on this provider and
-                // reuse the original turn only before any business event is sent.
-                if route.client_id == super::ClientId::Codex && turn.is_some() && !received {
-                    if let Some(failure) = first_event_failure(&frame).filter(|f| f.capacity) {
-                        if let Some(mut admission) = turn.take() { record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Waiting, attempts); admission.permits.capacity_limited(cfg, failure.retry); }
+                // A structured rejection before the first output is replay-safe.
+                // Re-evaluate the same failure queue used by HTTP, retaining the
+                // compaction claim and the exact original response.create frame.
+                if route.client_id != super::ClientId::Claude && turn.is_some() && !received {
+                    if let Some(failure) = first_event_failure(&frame).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable) {
+                        failover.failure(failure.classification());
+                        turn_failed.insert(route.provider.id.clone());
+                        if failure.hard_rejection() { hard_denied.insert((route.provider.id.clone(), route.provider.version.clone())); }
+                        if let Some(mut admission) = turn.take() {
+                            record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::TryingNext, attempts);
+                            if failure.capacity { admission.permits.capacity_limited(cfg, failure.retry); }
+                            else if failure.model_unavailable { admission.permits.neutral(cfg); }
+                            else { admission.permits.failure(cfg, failure.retry); }
+                        }
                         if let Some(mut u) = protocol.take() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), "UPSTREAM_ERROR"); }
-                        ordinary_attempts = ordinary_attempts.saturating_sub(1);
-                        capacity_protected = true; retry_capacity = true; retry_pending = true;
+                        if failure.capacity { ordinary_attempts = ordinary_attempts.saturating_sub(1); capacity_protected = true; }
+                        rejected_frame = Some(frame);
+                        fallback_capacity |= failure.capacity;
+                        retry_capacity = fallback_capacity;
+                        retry_fallback = true;
+                        retry_pending = true;
                         upstream = Upstream::Disconnected;
                         continue;
                     }
@@ -2109,6 +2432,7 @@ async fn session_once(
                 }
                 let frame_bytes = frame.payload().len();
                 let business = !frame.opcode().is_control();
+                if business { failover.finish(super::failover::Exit::Forwarded); }
                 let sending = tokio::time::Instant::now();
                 if let Err(error) = client.send(frame).await {
                     if let Some(u) = &mut protocol { u.finish(None, "CLIENT_DISCONNECTED"); }

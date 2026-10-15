@@ -17,6 +17,8 @@ pub struct Observation {
     pub expects_terminal: bool,
     pub first_event_model_error: Option<bool>,
     pub first_event_capacity_error: Option<bool>,
+    pub first_event_account_error: Option<bool>,
+    pub retry_after: Option<std::time::Duration>,
     pub capacity_error: bool,
     pub compaction_fingerprint: Option<String>,
     pub compaction_incompatible: bool,
@@ -85,6 +87,9 @@ impl Observation {
         let has_error = details != crate::events::Details::default();
         if has_error {
             self.error = details;
+            self.retry_after = self
+                .retry_after
+                .max(super::upstream_error::retry_after_value(outer));
         }
         if let Some(id) = response_id {
             self.response_id = Some(id.into());
@@ -322,6 +327,7 @@ impl Sink {
             // prefix. Observation failure cannot stall transparent forwarding.
             self.observation.first_event_model_error = Some(false);
             self.observation.first_event_capacity_error = Some(false);
+            self.observation.first_event_account_error = Some(false);
         }
         if self.data_len <= 16 && self.data_prefix.trim_ascii() == b"[DONE]" {
             self.observation.done();
@@ -336,6 +342,10 @@ impl Sink {
                     Some(super::upstream_error::model_error(&v));
                 self.observation.first_event_capacity_error =
                     Some(super::upstream_error::temporary_capacity_event(&v));
+                self.observation.first_event_account_error = Some(
+                    super::upstream_error::details_value(&v, false).health_scope
+                        == Some(crate::events::HealthScope::Provider),
+                );
             }
             self.observation.value_projected(&v, true);
         } else {
@@ -629,7 +639,7 @@ impl Protocol {
         self.progress(bytes);
     }
     pub fn attach_usage(&mut self, usage: crate::usage::AttemptTrace) {
-        self.observation.meter.anthropic = Some(usage.is_claude());
+        self.observation.meter.anthropic = usage.anthropic();
         self.usage = Some(usage);
     }
     pub fn context(

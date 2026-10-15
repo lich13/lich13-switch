@@ -49,6 +49,7 @@ struct Runtime {
     imports: Mutex<links::Imports>,
     gateway: gateway::Gateway,
     claude: gateway::Gateway,
+    grok: gateway::Gateway,
     login: Mutex<login::Session>,
     claude_login: Mutex<claude_profile::login::Session>,
     quitting: AtomicBool,
@@ -93,6 +94,7 @@ impl Runtime {
         match client {
             gateway::ClientId::Codex => &self.gateway,
             gateway::ClientId::Claude => &self.claude,
+            gateway::ClientId::Grok => &self.grok,
         }
     }
     fn home(&self, client: gateway::ClientId) -> Result<PathBuf> {
@@ -100,13 +102,15 @@ impl Runtime {
         Ok(match client {
             gateway::ClientId::Codex => core.home(),
             gateway::ClientId::Claude => PathBuf::from(core.preferences().claude_home),
+            gateway::ClientId::Grok => PathBuf::from(core.preferences().grok_home),
         })
     }
     async fn stop_gateways(&self) -> Result<()> {
         let _official_guard = self.official_tx.lock().await;
         let a = self.gateway.stop_for_exit().await;
         let b = self.claude.stop_for_exit().await;
-        a.and(b).map(|_| ())
+        let c = self.grok.stop_for_exit().await;
+        a.and(b).and(c).map(|_| ())
     }
 }
 struct SmokeSnapshot {
@@ -491,7 +495,7 @@ async fn save_config(
     let home = r.home(client)?;
     if client == gateway::ClientId::Codex {
         official::guard_save(&r.data, &home, &text)?;
-    } else {
+    } else if client == gateway::ClientId::Claude {
         claude_profile::guard_save(&r.data, &home, &claude_profile::user_home()?, &text)?;
     }
     let doc = r
@@ -515,6 +519,7 @@ fn set_quota_refresh(
     let state = lock(&r.core)?.set_quota_refresh(seconds, expected_seconds)?;
     r.gateway.set_quota_interval(seconds);
     r.claude.set_quota_interval(seconds);
+    r.grok.set_quota_interval(seconds);
     publish(&app, state.clone());
     Ok(state)
 }
@@ -552,6 +557,12 @@ async fn set_preferences(
             "请先停止 Claude Code 网关并处理恢复事务",
         ));
     }
+    if r.grok.guarded_home() && lock(&r.core)?.preferences().grok_home != preferences.grok_home {
+        return Err(AppError::new(
+            "GATEWAY",
+            "请先停止 Grok Build 网关并处理恢复事务",
+        ));
+    }
     let s = {
         let mut core = lock(&r.core)?;
         preferences.quota_refresh_seconds = core.preferences().quota_refresh_seconds;
@@ -561,11 +572,14 @@ async fn set_preferences(
         .set_quota_interval(s.preferences.quota_refresh_seconds);
     r.claude
         .set_quota_interval(s.preferences.quota_refresh_seconds);
+    r.grok
+        .set_quota_interval(s.preferences.quota_refresh_seconds);
     if s.preferences.system_notifications {
         notifications::on_manual_open(&app);
     }
     r.gateway.observe_home(&r.home(gateway::ClientId::Codex)?);
     r.claude.observe_home(&r.home(gateway::ClientId::Claude)?);
+    r.grok.observe_home(&r.home(gateway::ClientId::Grok)?);
     publish(&app, s.clone());
     Ok(s)
 }
@@ -1005,7 +1019,11 @@ async fn frontend_ready(
         // The report is written only after the exit handler verifies restoration.
         app.exit(0);
     } else {
-        for client in [gateway::ClientId::Codex, gateway::ClientId::Claude] {
+        for client in [
+            gateway::ClientId::Codex,
+            gateway::ClientId::Claude,
+            gateway::ClientId::Grok,
+        ] {
             if (client == gateway::ClientId::Codex
                 && official::blocks_gateway(&r.data, &r.home(client)?))
                 || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
@@ -1253,6 +1271,7 @@ pub fn run() {
             let cleanup_error = cleanup::retired_statistics(&data).err();
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
+            let grok = gateway.grok_companion(data.join("grok"))?;
             let startup = startup::Service::new(&data);
             let start_silently = smoke.is_none() && startup::silent(&args);
             app.manage(quick::Panel::new(&data)?);
@@ -1261,9 +1280,11 @@ pub fn run() {
             if let Some(fixture) = &fixture {
                 storage::private_dir(&core.home())?;
                 storage::private_dir(&fixture.path().join("claude"))?;
+                storage::private_dir(&fixture.path().join("grok"))?;
                 let mut preferences = core.preferences();
                 preferences.claude_home =
                     fixture.path().join("claude").to_string_lossy().into_owned();
+                preferences.grok_home = fixture.path().join("grok").to_string_lossy().into_owned();
                 core.set_preferences(preferences)?;
             }
             let codex_import_error = if smoke.is_none() { gateway.import_initial(&core.home()).err() } else { None };
@@ -1280,14 +1301,18 @@ pub fn run() {
             } else {
                 None
             };
+            let grok_import_error = if smoke.is_none() { grok.import_initial(&PathBuf::from(core.preferences().grok_home)).err() } else { None };
             gateway.set_quota_interval(core.preferences().quota_refresh_seconds);
+            grok.set_quota_interval(core.preferences().quota_refresh_seconds);
             claude.set_quota_interval(core.preferences().quota_refresh_seconds);
             let diagnostics = events::Service::new(&data);
             gateway.set_diagnostics(diagnostics.clone());
             claude.set_diagnostics(diagnostics.clone());
+            grok.set_diagnostics(diagnostics.clone());
             let usage = usage::Service::new(&data);
             gateway.set_usage(usage.clone());
             claude.set_usage(usage.clone());
+            grok.set_usage(usage.clone());
             let runtime = Arc::new(Runtime {
                 usage,
                 diagnostics,
@@ -1296,6 +1321,7 @@ pub fn run() {
                 imports: Mutex::new(links::Imports::default()),
                 gateway,
                 claude,
+                grok,
                 login: Mutex::new(Default::default()),
                 claude_login: Mutex::new(Default::default()),
                 quitting: AtomicBool::new(false),
@@ -1308,7 +1334,7 @@ pub fn run() {
                 power,
                 frontend_started: AtomicBool::new(false),
                 force_quitting: AtomicBool::new(false),
-                startup_error: Mutex::new(codex_import_error.or(claude_import_error)),
+                startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error)),
                 cleanup_error: Mutex::new(cleanup_error),
                 official_tx: tokio::sync::Mutex::new(()),
             });
@@ -1320,7 +1346,9 @@ pub fn run() {
             app.manage(runtime.clone());
             notifications::connect(app.handle(), &runtime.diagnostics);
             usage::commands::connect(app.handle(), &runtime);
+            runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
             runtime.gateway.report_diagnostics();
+            runtime.grok.report_diagnostics();
             runtime.claude.report_diagnostics();
             links::receive(app.handle(), args.iter().cloned());
             quick::Panel::create(app.handle())?;
@@ -1339,7 +1367,7 @@ pub fn run() {
                     }
                 });
             }
-            for g in [runtime.gateway.clone(), runtime.claude.clone()] {
+            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone()] {
                 let probes = g.clone();
                 tauri::async_runtime::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -1519,14 +1547,14 @@ pub fn run() {
                             }
                         }
                     }
-                    for client in [gateway::ClientId::Codex, gateway::ClientId::Claude] {
+                    for client in [gateway::ClientId::Codex, gateway::ClientId::Claude, gateway::ClientId::Grok] {
                         if let Ok(doc) = runtime.home(client).and_then(|home| runtime.gateway(client).read_config(&home)) {
                             let stamp = (doc.path.clone(), doc.revision.clone(), doc.guarded);
                             if config_versions.get(&client) != Some(&stamp) {
                                 config_versions.insert(client, stamp);
                                 let _ = handle.emit("config-state", serde_json::json!({"clientId":client,"revision":doc.revision,"guarded":doc.guarded}));
-                                if client == gateway::ClientId::Claude {
-                                    let _ = handle.emit("gateway-state", runtime.claude.view());
+                                if client != gateway::ClientId::Codex {
+                                    let _ = handle.emit("gateway-state", runtime.gateway(client).view());
                                 }
                             }
                         }

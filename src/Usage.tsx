@@ -25,6 +25,7 @@ import {
   numeric,
   tokenTotal,
   type Attempt,
+  type Tokens,
   type Dashboard,
   type Group,
   type UsageFilter,
@@ -95,7 +96,7 @@ export default function Usage({
     [live, setLive] = useState(true);
   const [client, setClient] = useState(""),
     [provider, setProvider] = useState(""),
-    [source, setSource] = useState<"" | "proxy" | "sessions">(""),
+    [source, setSource] = useState<"" | "proxy" | "sessions" | "grok_sessions">(""),
     [model, setModel] = useState(""),
     [operation, setOperation] = useState(""),
     [status, setStatus] = useState(""),
@@ -262,6 +263,7 @@ export default function Usage({
     void Promise.all([
       command<GatewayState>("get_gateway", { clientId: "codex" }),
       command<GatewayState>("get_gateway", { clientId: "claude" }),
+      command<GatewayState>("get_gateway", { clientId: "grok" }),
     ])
       .then((g) => {
         if (!gone)
@@ -377,7 +379,7 @@ export default function Usage({
         </div>
       </header>
       <div className="usage-metrics">
-        <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
+        <Metric label="估算费用" value={source === "grok_sessions" ? "—" : money(t?.cost)} title={source === "grok_sessions" ? "轮次汇总不估算费用" : t?.cost} />
         <Metric
           label="已报告 Token"
           value={t ? compact(tokenTotal(t.tokens)) : "—"}
@@ -398,6 +400,7 @@ export default function Usage({
           title={firstTokenTitle(t)}
         />
       </div>
+      {source === "grok_sessions" && <p className="muted">Grok 会话按用户轮次汇总，一轮可包含多次模型调用；此来源独立统计，不与网关请求相加。</p>}
       <div className="usage-filters">
         <select
           aria-label="用量客户端"
@@ -410,6 +413,7 @@ export default function Usage({
           <option value="">全部客户端</option>
           <option value="codex">Codex</option>
           <option value="claude">Claude Code</option>
+          <option value="grok">Grok Build</option>
         </select>
         <select
           aria-label="用量供应商"
@@ -442,9 +446,10 @@ export default function Usage({
           value={source}
           onChange={(e) => choose(setSource, e.target.value as typeof source)}
         >
-          <option value="">全部（去重）</option>
+          <option value="">请求统计（去重）</option>
           <option value="proxy">本网关</option>
-          <option value="sessions">本机会话</option>
+          <option value="sessions">Codex / Claude 会话</option>
+          <option value="grok_sessions">Grok 轮次汇总（独立）</option>
         </select>
         <select
           aria-label="请求类型"
@@ -494,7 +499,7 @@ export default function Usage({
       )}
       <div className="usage-tabs" role="tablist" aria-label="用量明细">
         {[
-          ["requests", "请求日志"],
+          ["requests", source === "grok_sessions" ? "轮次日志" : "请求日志"],
           ["providers", "供应商"],
           ["models", "模型"],
           ["pricing", "定价"],
@@ -545,6 +550,7 @@ export default function Usage({
                 {logs.rows.map((r) => {
                   const a = r.attempts.at(-1);
                   if (!a) return null;
+                  const tokens = r.source === "grok" ? promptTokens(r.attempts) : a.tokens;
                   return (
                     <tr
                       key={r.id}
@@ -556,7 +562,7 @@ export default function Usage({
                       onKeyDown={(e) => {
                         if (e.key === "Enter") void open(r);
                       }}
-                      aria-label={`${date(r.finishedAt ?? r.startedAt)} ${name(a.provider)} 请求详情`}
+                      aria-label={`${date(r.finishedAt ?? r.startedAt)} ${name(a.provider)} ${r.source === "grok" ? "轮次详情" : "请求详情"}`}
                     >
                       <td title={preciseDate(r.finishedAt ?? r.startedAt)}>
                         {a.status != null && a.status >= 400 && (
@@ -588,23 +594,23 @@ export default function Usage({
                             : (a.responseModel ?? a.requestedModel ?? "—")
                         }
                       >
-                        <Model a={a} />
+                        {r.source === "grok" && r.attempts.length > 1 ? `多个模型（${r.attempts.length}）` : <Model a={a} />}
                       </td>
                       <td>
                         <NumberValue
-                          value={a.tokens.input}
+                          value={tokens.input}
                           missing={missingReason(a, "input", r.source)}
                         />
                       </td>
                       <td>
                         <NumberValue
-                          value={a.tokens.output}
+                          value={tokens.output}
                           missing={missingReason(a, "output", r.source)}
                         />
                       </td>
                       <td>
                         <NumberValue
-                          value={a.tokens.cacheRead}
+                          value={tokens.cacheRead}
                           missing={missingReason(a, "cache_read", r.source)}
                         />
                       </td>
@@ -622,7 +628,7 @@ export default function Usage({
               </tbody>
             </table>
             {logs.rows.length === 0 && (
-              <div className="usage-empty">暂无请求</div>
+              <div className="usage-empty">{source === "grok_sessions" ? "暂无轮次" : "暂无请求"}</div>
             )}
           </div>
           <Pagination page={logs.page} total={logs.total} onChange={setPage} />
@@ -642,6 +648,7 @@ export default function Usage({
                 : id
           }
           kind={tab === "providers" ? "供应商" : "模型"}
+          nativeSummary={source === "grok_sessions"}
           view={rankings[tab]}
           onChange={(v) =>
             setRankings((previous) => ({ ...previous, [tab]: v }))
@@ -950,24 +957,26 @@ function Ranking({
   groups,
   name,
   kind,
+  nativeSummary,
   view,
   onChange,
 }: {
   groups: Group[];
   name: (id: string) => string;
   kind: string;
+  nativeSummary: boolean;
   view: RankingView;
   onChange: (view: RankingView) => void;
 }) {
   const sorted = [...groups].sort((a, b) => {
     const value = (g: Group) =>
       view.sort === "cost"
-        ? Number(g.totals.cost)
+        ? (nativeSummary ? null : Number(g.totals.cost))
         : view.sort === "tokens"
           ? tokenTotal(g.totals.tokens)
           : view.sort === "firstToken"
             ? averageFirstToken(g.totals)
-            : g.totals.requests;
+            : nativeSummary ? g.totals.attempts : g.totals.requests;
     const av = value(a),
       bv = value(b);
     if (av == null || bv == null)
@@ -983,7 +992,7 @@ function Ranking({
             <tr>
               <th>{kind}</th>
               {[
-                ["requests", "请求"],
+                ["requests", nativeSummary ? "模型调用" : "请求"],
                 ["tokens", "Token"],
                 ["cost", "费用"],
               ].map(([key, label]) => (
@@ -1038,12 +1047,12 @@ function Ranking({
                 <tr key={id}>
                   <td title={name(id)}>{name(id)}</td>
                   <td>
-                    <NumberValue value={t.requests} />
+                    <NumberValue value={nativeSummary ? t.attempts : t.requests} />
                   </td>
                   <td>
                     <NumberValue value={tokenTotal(t.tokens)} />
                   </td>
-                  <td title={t.cost}>{money(t.cost)}</td>
+                  <td title={nativeSummary ? "轮次汇总不估算费用" : t.cost}>{nativeSummary ? "—" : money(t.cost)}</td>
                   <td>
                     {t.statusKnown
                       ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
@@ -1131,6 +1140,23 @@ export function Drawer({
     </dialog>
   );
 }
+const failoverLabels: Record<string, string> = {
+  initial: "初次分配", proactive_handoff: "主动压缩交接", failure_fallback: "失败后重新选商",
+  cursor_pinned: "响应游标固定", unknown_owner: "归属未确认",
+  rate_limit: "临时限流", account_rejected: "账号明确拒绝", model_unavailable: "模型不可用",
+  upstream_service: "上游服务错误", transport: "连接或传输错误", protocol: "协议错误",
+  model: "模型限制", conversation_policy: "线程接管策略", health: "健康限制", capacity: "并发容量", rpm: "RPM 限制",
+  forwarded: "已开始交付响应", no_eligible_provider: "没有合格替代", attempts_exhausted: "重试次数耗尽",
+  permanent_rejection: "明确拒绝", cancelled: "转发已取消", stopped: "网关停止", admission_rejected: "准入受限",
+  capacity_retry: "容量重试", retry_after: "上游重试限制", transient_retry: "短暂错误重试", admission: "等待准入",
+};
+function promptTokens(attempts: Attempt[]): Tokens {
+  const keys: (keyof Tokens)[] = ["inclusiveInput", "input", "output", "cacheRead", "cacheWrite", "cacheWrite5m", "cacheWrite1h", "imageInput", "imageOutput", "audioInput", "audioOutput"];
+  return Object.fromEntries(keys.map(key => {
+    const values = attempts.map(a => a.tokens[key]).filter((value): value is number => value != null);
+    return [key, values.length ? values.reduce((sum, value) => sum + value, 0) : null];
+  })) as Tokens;
+}
 function Detail({
   record: r,
   name,
@@ -1140,13 +1166,16 @@ function Detail({
   name: (id: string | null) => string;
   onClose: () => void;
 }) {
-  const a = r.attempts.at(-1)!;
+  const last = r.attempts.at(-1)!;
+  const a: Attempt = r.source === "grok" && r.attempts.length > 1
+    ? { ...last, tokens: promptTokens(r.attempts), requestedModel: null, responseModel: null, durationMs: r.finishedAt == null ? 0 : r.finishedAt - r.startedAt, repeatCount: r.attempts.reduce((sum, a) => sum + (a.repeatCount ?? 1), 0) }
+    : last;
   const total = r.attempts.reduce(
     (sum, a) => sum + Number(a.price?.cost ?? 0),
     0,
   );
   return (
-    <Drawer title="请求详情" onClose={onClose}>
+    <Drawer title={r.source === "grok" ? "Grok 轮次详情" : "请求详情"} onClose={onClose}>
       <div className="usage-detail-status">
         <b>
           {a.status == null
@@ -1168,7 +1197,16 @@ function Detail({
             "来源",
             r.source === "proxy" ? "网关" : clientName(r.source) + " 会话",
           ],
-          ["请求 ID", r.id],
+          [r.source === "grok" ? "轮次 ID" : "请求 ID", r.id],
+          ...(r.source === "grok" ? [["模型调用", numeric(r.attempts.reduce((sum, a) => sum + (a.repeatCount ?? 1), 0))]] as [string, React.ReactNode][] : []),
+          ...(r.failoverEvidence ? ([
+            ["故障转移阶段", failoverLabels[r.failoverEvidence.stage] ?? "未记录"],
+            ["失败分类", r.failoverEvidence.failure ? failoverLabels[r.failoverEvidence.failure] : "未记录"],
+            ["候选观察", `${r.failoverEvidence.eligibleCandidates} 个可用候选`],
+            ...Object.entries(r.failoverEvidence.exclusions).map(([reason, count]) => [`排除 · ${failoverLabels[reason] ?? reason}`, `${count} 个`]),
+            ...(r.failoverEvidence.wait ? [["等待依据", `${failoverLabels[r.failoverEvidence.wait.kind] ?? "未记录"} · ${r.failoverEvidence.wait.seconds} 秒`]] : []),
+            ["转发退出", r.failoverEvidence.exit ? failoverLabels[r.failoverEvidence.exit] ?? "未记录" : "未记录"],
+          ] as [string, React.ReactNode][]) : []),
           [
             "列表时间依据",
             r.source !== "proxy"
@@ -1195,23 +1233,23 @@ function Detail({
       />
       {r.attempts.length > 1 && (
         <>
-          <h3>此前尝试</h3>
+          <h3>{r.source === "grok" ? "模型用量" : "此前尝试"}</h3>
           <dl className="usage-detail-grid">
-            <dt>全部尝试费用</dt>
+            <dt>{r.source === "grok" ? "估算费用" : "全部尝试费用"}</dt>
             <dd>
               {r.attempts.some((a) => !a.price || a.compactedUnpriced)
                 ? "含未定价项 · "
                 : ""}
-              {money(String(total))}
+              {r.source === "grok" ? "—" : money(String(total))}
             </dd>
-            <dt>实际尝试</dt>
+            <dt>{r.source === "grok" ? "模型调用" : "实际尝试"}</dt>
             <dd>
               {numeric(
                 r.attempts.reduce((sum, a) => sum + (a.repeatCount ?? 1), 0),
               )}
             </dd>
           </dl>
-          {r.attempts.slice(0, -1).map((attempt, i) => (
+          {(r.source === "grok" ? r.attempts : r.attempts.slice(0, -1)).map((attempt, i) => (
             <details key={attempt.id}>
               <summary>
                 {i + 1} · {name(attempt.provider)} · {attempt.status ?? "—"}
@@ -1731,7 +1769,7 @@ function Sources({
   return (
     <Drawer title="数据来源" onClose={onClose}>
       <div className="usage-source-list">
-        {["proxy", "codex", "claude"].map((id) => (
+        {["proxy", "codex", "claude", "grok"].map((id) => (
           <div key={id}>
             <b>{id === "proxy" ? "网关" : clientName(id)}</b>
             <span>{numeric(counts[id] ?? 0)} 条</span>
@@ -1796,6 +1834,7 @@ function Sources({
         >
           重建 Claude 用量
         </button>
+        <button disabled={busy || state.syncing} onClick={() => void confirmAction("重建 Grok Build 轮次汇总？网关记录会保留。").then(ok => { if(ok) return run("sync_usage", { rebuild: "grok" }); })}>重建 Grok 用量</button>
       </div>
       <form
         onSubmit={(e) => {

@@ -10,6 +10,8 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
+#[path = "grok_sessions.rs"]
+mod grok;
 const MAX_LINE: u64 = 256 * 1024 * 1024;
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -253,11 +255,14 @@ pub fn sync(
     rebuild: bool,
 ) -> Result<Report> {
     let mut paths = Vec::new();
-    if client == "codex" {
+    if client == "codex" || client == "grok" {
         files(&home.join("sessions"), 0, &mut paths)?;
         files(&home.join("archived_sessions"), 0, &mut paths)?;
     } else {
         files(&home.join("projects"), 0, &mut paths)?;
+    }
+    if client == "grok" {
+        paths.retain(|p| p.file_name().is_some_and(|n| n == "updates.jsonl"));
     }
     paths.sort();
     let mut parents = BTreeMap::new();
@@ -365,16 +370,22 @@ pub fn sync(
                 };
                 let record = if client == "codex" {
                     codex(&v, &mut c, at, &prefix)
+                } else if client == "grok" {
+                    grok::parse(&v, &mut c, at)
                 } else {
                     claude(&v, &mut c, at)
                 };
                 if let Some(mut r) = record {
-                    if let Some(a) = r.attempts.last_mut() {
+                    for a in &mut r.attempts {
                         a.cost_multiplier = settings.multiplier.clone();
                         a.pricing_model = a.response_model.clone().or(a.requested_model.clone());
-                        a.price = pricing
-                            .quote(a.pricing_model.as_deref(), &settings.multiplier)
-                            .calculate(&a.tokens, a.service_tier.as_deref());
+                        a.price = (client != "grok")
+                            .then(|| {
+                                pricing
+                                    .quote(a.pricing_model.as_deref(), &settings.multiplier)
+                                    .calculate(&a.tokens, a.service_tier.as_deref())
+                            })
+                            .flatten();
                     }
                     if rows.len() >= 100_000 {
                         return Err(failure("单文件会话用量超过安全处理限制"));

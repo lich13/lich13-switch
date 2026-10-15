@@ -95,7 +95,16 @@ export type Attempt = {
   serviceTier: string | null;
   price: PriceSnapshot | null;
 };
+export type FailoverEvidence = {
+  stage: "initial" | "proactive_handoff" | "failure_fallback" | "cursor_pinned" | "unknown_owner";
+  failure: "rate_limit" | "account_rejected" | "model_unavailable" | "upstream_service" | "transport" | "protocol" | null;
+  eligibleCandidates: number;
+  exclusions: Record<string, number>;
+  wait: { kind: string; seconds: number } | null;
+  exit: string | null;
+};
 export type UsageRecord = {
+  failoverEvidence?: FailoverEvidence | null;
   finishedAt?: number | null;
   id: string;
   client: string;
@@ -128,7 +137,7 @@ export type Totals = {
 };
 export type Group = { id: string; totals: Totals };
 export type UsageFilter = {
-  source?: "proxy" | "sessions";
+  source?: "proxy" | "sessions" | "grok_sessions";
   operation?: string;
   start?: number;
   end?: number;
@@ -184,7 +193,7 @@ export type UsageState = {
   error: string | null;
 };
 export type ProviderPriceMapping = {
-  client: "codex" | "claude";
+  client: "codex" | "claude" | "grok";
   provider: string;
   enabled: boolean;
   matchOn: "request" | "response";
@@ -234,7 +243,7 @@ export const tokenTotal = (t: Tokens) =>
         0,
       );
 export const clientName = (c: string) =>
-  c === "codex" ? "Codex" : c === "claude" ? "Claude Code" : c;
+  c === "codex" ? "Codex" : c === "claude" ? "Claude Code" : c === "grok" ? "Grok Build" : c;
 export function speed(a: Attempt, estimated: boolean) {
   const ms = estimated
     ? a.durationMs

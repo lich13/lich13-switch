@@ -276,8 +276,9 @@ pub fn eligible(f: &Filter, alias: &str, review: bool) -> String {
     };
     match f.source.as_deref() {
         Some("proxy") => format!("{effective} AND {alias}.source='proxy'"),
-        Some("sessions") => format!("{alias}.source<>'proxy' AND ({effective} OR ({alias}.effective=0 AND {alias}.duplicate_of IN (SELECT id FROM records WHERE source='proxy' UNION SELECT id FROM receipts WHERE source='proxy') AND NOT EXISTS(SELECT 1 FROM records peer WHERE peer.source<>'proxy' AND peer.duplicate_of={alias}.duplicate_of AND (peer.time<{alias}.time OR (peer.time={alias}.time AND peer.id<{alias}.id)))))"),
-        _ => effective,
+        Some("sessions") => format!("{alias}.source NOT IN ('proxy','grok') AND ({effective} OR ({alias}.effective=0 AND {alias}.duplicate_of IN (SELECT id FROM records WHERE source='proxy' UNION SELECT id FROM receipts WHERE source='proxy') AND NOT EXISTS(SELECT 1 FROM records peer WHERE peer.source<>'proxy' AND peer.duplicate_of={alias}.duplicate_of AND (peer.time<{alias}.time OR (peer.time={alias}.time AND peer.id<{alias}.id)))))"),
+        Some("grok_sessions") => format!("{effective} AND {alias}.source='grok'"),
+        _ => format!("{effective} AND {alias}.source<>'grok'"),
     }
 }
 pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>) {
@@ -294,6 +295,8 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
         if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
             if column == "model" && f.source.as_deref() == Some("proxy") {
                 terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics original WHERE original.kind=2 AND original.owner={alias}.id AND original.requests>0 AND original.model=?)"));
+            } else if column == "model" && grok_model_filter(f).is_some() {
+                terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics native WHERE native.kind=0 AND native.owner={alias}.id AND native.model=?)"));
             } else {
                 terms.push(format!("{alias}.{column}=?"));
             }
@@ -365,7 +368,11 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
         ("model", &f.model),
     ] {
         if let Some(v) = value.as_ref().filter(|v| !v.is_empty()) {
-            daily.push(format!("json_extract(d.body,'$.{key}')=?"));
+            if key == "model" && grok_model_filter(f).is_some() {
+                daily.push("EXISTS(SELECT 1 FROM usage_metrics native WHERE native.kind=1 AND native.owner=d.id AND native.model=?)".into());
+            } else {
+                daily.push(format!("json_extract(d.body,'$.{key}')=?"));
+            }
             args.push(Value::Text(v.clone()));
         }
     }
@@ -383,12 +390,26 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
     args.push(Value::Text(
         f.source
             .as_deref()
-            .filter(|s| matches!(*s, "proxy" | "sessions"))
+            .filter(|s| matches!(*s, "proxy" | "sessions" | "grok_sessions"))
             .unwrap_or("all")
             .into(),
     ));
-    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.* FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner) ",daily.join(" AND "));
+    // A native prompt can contain several models. Select the complete prompt
+    // for logs, but aggregate only the requested model's counters. Its round
+    // count comes from the prompt, independently of the final model's ordinal.
+    let (round_count, subset) = if let Some(model) = grok_model_filter(f) {
+        args.push(Value::Text(model.into()));
+        (",(SELECT max(turn.requests) FROM usage_metrics turn WHERE turn.kind=x.kind AND turn.owner=x.owner) matched_rounds", " WHERE x.model=?")
+    } else {
+        ("", "")
+    };
+    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.*{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
     (cte, args)
+}
+fn grok_model_filter(f: &Filter) -> Option<&str> {
+    (f.source.as_deref() == Some("grok_sessions"))
+        .then(|| f.model.as_deref().filter(|model| !model.is_empty()))
+        .flatten()
 }
 pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
     let start = f.start.unwrap_or(0);
@@ -401,13 +422,28 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     // Only the final attempt has a request count. Attribute a missing price to
     // that row once, consulting earlier attempts only if its own price exists.
     // This avoids sorting every request ID for a second logical aggregation.
-    let total_sum=SUM.replace("coalesce(sum(unpriced),0)","coalesce(sum(CASE WHEN requests>0 AND (unpriced>0 OR EXISTS(SELECT 1 FROM usage_metrics a WHERE a.kind=m.kind AND a.owner=m.owner AND a.unpriced>0)) THEN requests ELSE 0 END),0)");
+    let sum = if grok_model_filter(f).is_some() {
+        SUM.replace("sum(requests)", "sum(matched_rounds)")
+            .replace("sum(sessions)", "sum(matched_rounds)")
+    } else {
+        SUM.to_owned()
+    };
+    let total_sum = if grok_model_filter(f).is_some() {
+        sum.clone()
+    } else {
+        sum.replace("coalesce(sum(unpriced),0)","coalesce(sum(CASE WHEN requests>0 AND (unpriced>0 OR EXISTS(SELECT 1 FROM usage_metrics a WHERE a.kind=m.kind AND a.owner=m.owner AND a.unpriced>0)) THEN requests ELSE 0 END),0)")
+    };
     // Source badges only use request counts, not a full cost/token aggregate.
-    let source_sum="coalesce(sum(requests),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0,0,0,0,0";
+    let count = if grok_model_filter(f).is_some() {
+        "matched_rounds"
+    } else {
+        "requests"
+    };
+    let source_sum=format!("coalesce(sum({count}),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0,0,0,0,0");
     let sql=format!("{cte}
       SELECT 'totals','',{total_sum},{rolled} FROM m
-      UNION ALL SELECT 'provider',coalesce(provider,'session'),{SUM},0 FROM m GROUP BY coalesce(provider,'session')
-      UNION ALL SELECT 'model',coalesce(model,'unknown'),{SUM},0 FROM m GROUP BY coalesce(model,'unknown')
+      UNION ALL SELECT 'provider',coalesce(provider,'session'),{sum},0 FROM m GROUP BY coalesce(provider,'session')
+      UNION ALL SELECT 'model',coalesce(model,'unknown'),{sum},0 FROM m GROUP BY coalesce(model,'unknown')
       UNION ALL SELECT 'source',source,{source_sum},0 FROM m GROUP BY source");
     let mut stmt = db(c.prepare(&sql))?;
     let rows = db(

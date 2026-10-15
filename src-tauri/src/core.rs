@@ -21,6 +21,8 @@ pub struct Preferences {
     pub codex_home: String,
     #[serde(default = "crate::gateway::claude_home")]
     pub claude_home: String,
+    #[serde(default = "crate::gateway::grok_home")]
+    pub grok_home: String,
     pub cli_path: String,
     pub theme: String,
     #[serde(default = "default_quota_refresh")]
@@ -464,6 +466,7 @@ impl Core {
                 preferences: Preferences {
                     codex_home: default_home.to_string_lossy().into(),
                     claude_home: crate::gateway::claude_home(),
+                    grok_home: crate::gateway::grok_home(),
                     cli_path: String::new(),
                     theme: "system".into(),
                     quota_refresh_seconds: default_quota_refresh(),
@@ -1108,6 +1111,9 @@ impl Core {
         if prefs.quota_refresh_seconds != 0 && !(10..=86400).contains(&prefs.quota_refresh_seconds)
         {
             return Err(AppError::new("PREFERENCES", "刷新间隔需为 10–86400 秒"));
+        }
+        if !Path::new(&prefs.grok_home).is_absolute() {
+            return Err(AppError::new("PATH", "Grok Build 目录必须是绝对路径"));
         }
         if !Path::new(&prefs.claude_home).is_absolute() {
             return Err(AppError::new("PATH", "Claude 配置目录必须是绝对路径"));

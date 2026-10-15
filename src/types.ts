@@ -1,7 +1,8 @@
-export type ClientId = "codex" | "claude";
+export type ClientId = "codex" | "claude" | "grok";
 export type Preferences = {
   codexHome: string;
   claudeHome?: string;
+  grokHome?: string;
   cliPath: string;
   theme: "system" | "dark" | "light";
   quotaRefreshSeconds?: number;
@@ -127,7 +128,9 @@ export type Health = {
     wsCloseCode: number | null;
   } | null;
 };
+export type GrokProtocol = "responses" | "chat_completions" | "messages";
 export type Provider = {
+  protocol?: GrokProtocol | null;
   id: string;
   name: string;
   baseUrl: string;
@@ -158,6 +161,7 @@ export type Provider = {
   takeNewThreads?: boolean;
 };
 export type GatewayState = {
+  grokNativeAvailable?: boolean;
   clientId: ClientId;
   revision: string;
   running: boolean;

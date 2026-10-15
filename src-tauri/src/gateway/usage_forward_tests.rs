@@ -120,6 +120,11 @@ impl Fixture {
         std::fs::create_dir(&home).unwrap();
         let data = dir.path().join("gateway-data");
         let gateway = match client {
+            ClientId::Grok => {
+                let config = format!("[models]\ndefault='fixture'\n[model.fixture]\nmodel='fixture-model'\napi_backend='responses'\nbase_url={}\napi_key={}\n", serde_json::to_string(&urls[0]).unwrap(), serde_json::to_string(FIXTURE_KEY).unwrap());
+                std::fs::write(home.join("config.toml"), config).unwrap();
+                Gateway::new_client(data, ClientId::Grok, None).unwrap()
+            }
             ClientId::Codex => {
                 let config = format!(
                     "model_provider='custom'\n[model_providers.custom]\nbase_url={}\nexperimental_bearer_token={}\nwire_api='responses'\n",

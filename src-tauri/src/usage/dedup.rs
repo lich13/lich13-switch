@@ -19,7 +19,9 @@ fn provider(r: &Record) -> Option<&str> {
     r.final_attempt().and_then(|a| a.provider.as_deref())
 }
 fn compatible(a: &Record, b: &Record) -> bool {
-    a.client == b.client
+    a.source != "grok"
+        && b.source != "grok"
+        && a.client == b.client
         && a.final_attempt().map(|a| a.operation) == b.final_attempt().map(|a| a.operation)
         && (provider(a).is_none() || provider(b).is_none() || provider(a) == provider(b))
 }
@@ -42,7 +44,7 @@ fn fingerprint(a: &Record, b: &Record) -> bool {
         })
 }
 fn rows(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
-    let mut stmt=db(c.prepare("SELECT body FROM records WHERE id=?6 UNION SELECT body FROM records WHERE ?2 IS NOT NULL AND client=?1 AND response=?2 UNION SELECT body FROM records WHERE ?3 IS NOT NULL AND client=?1 AND signature=?3 AND source<>?7 AND (source='proxy' OR ?7='proxy') AND time BETWEEN ?4 AND ?5"))?;
+    let mut stmt=db(c.prepare("SELECT body FROM records WHERE id=?6 UNION SELECT body FROM records WHERE ?2 IS NOT NULL AND client=?1 AND response=?2 UNION SELECT body FROM records WHERE ?3 IS NOT NULL AND client=?1 AND signature=?3 AND source<>'grok' AND source<>?7 AND (source='proxy' OR ?7='proxy') AND time BETWEEN ?4 AND ?5"))?;
     let rows = db(stmt.query_map(
         params![
             seed.client,
@@ -76,6 +78,9 @@ fn state(
     Ok(())
 }
 pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
+    if seed.source == "grok" {
+        return Ok(());
+    }
     let mut all = rows(c, seed)?;
     if seed.source != "proxy" {
         let mut seen: std::collections::BTreeSet<String> =
@@ -91,7 +96,7 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
         all.extend(connected);
     }
     for r in &all {
-        let mut archived_stmt=db(c.prepare("SELECT id,response FROM (SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?2 IS NOT NULL AND response=?2 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) UNION SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?5 IS NOT NULL AND signature=?5 AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=?2 THEN 0 ELSE 1 END,id LIMIT 3"))?;
+        let mut archived_stmt=db(c.prepare("SELECT id,response FROM (SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?2 IS NOT NULL AND response=?2 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) UNION SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?5 IS NOT NULL AND signature=?5 AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) AND source<>'grok' AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=?2 THEN 0 ELSE 1 END,id LIMIT 3"))?;
         let archived = db(archived_stmt.query_map(
             params![
                 r.client,

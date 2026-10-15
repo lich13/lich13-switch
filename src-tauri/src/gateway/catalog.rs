@@ -41,7 +41,12 @@ impl Service {
             permits: Semaphore::new(3),
         }
     }
-    pub async fn query(&self, input: Query, force: bool) -> Result<View> {
+    pub async fn query_with_connection(
+        &self,
+        input: Query,
+        force: bool,
+        connection: Option<&super::grok_config::Connection>,
+    ) -> Result<View> {
         let began = Instant::now();
         let key = format!("{}:{}", input.id, input.version);
         let entry = {
@@ -80,7 +85,7 @@ impl Service {
             .acquire()
             .await
             .map_err(|_| AppError::new("MODELS", "模型查询已停止"))?;
-        let result = tokio::time::timeout(Duration::from_secs(10), fetch(&input)).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), fetch(&input, connection)).await;
         entry.view.checked_at = Some(now());
         entry.view.retry_at = None;
         match result {
@@ -104,15 +109,26 @@ impl Service {
     }
 }
 type Failure = (String, Option<u64>);
-async fn fetch(input: &Query) -> std::result::Result<Vec<String>, Failure> {
+async fn fetch(
+    input: &Query,
+    connection: Option<&super::grok_config::Connection>,
+) -> std::result::Result<Vec<String>, Failure> {
     let fail = |message: &str| (message.to_owned(), None);
-    let claude = input.client_id == super::ClientId::Claude;
+    let claude = input.client_id == super::ClientId::Claude
+        || connection.is_some_and(|c| c.protocol == super::grok_config::Protocol::Messages);
     let target = super::forward::target_for(
         input.client_id,
         &input.base,
         &"/v1/models".parse().expect("static model path"),
     )
     .map_err(|_| fail("模型接口地址无效"))?;
+    let target = if let Some(connection) = connection {
+        connection
+            .query_uri(target)
+            .map_err(|_| fail("模型接口地址无效"))?
+    } else {
+        target
+    };
     let mut url = url::Url::parse(&target.to_string()).map_err(|_| fail("模型接口地址无效"))?;
     let mut models = Vec::new();
     let mut total = 0usize;
@@ -127,9 +143,14 @@ async fn fetch(input: &Query) -> std::result::Result<Vec<String>, Failure> {
         if claude {
             builder = builder.header("anthropic-version", "2023-06-01");
         }
-        let request = builder
+        let mut request = builder
             .body(replay::empty())
             .map_err(|_| fail("供应商地址或 Key 格式无效"))?;
+        if let Some(connection) = connection {
+            connection
+                .authenticate(request.headers_mut(), &input.token)
+                .map_err(|_| fail("供应商请求头无效"))?;
+        }
         let mut response = input.client.request(request).await.map_err(|e| {
             fail(
                 &connector::classify(&e)
@@ -197,8 +218,14 @@ async fn fetch(input: &Query) -> std::result::Result<Vec<String>, Failure> {
         if !cursors.insert(cursor.to_owned()) || cursors.len() > 100 {
             return Err(fail("模型分页重复或超出上限"));
         }
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "after_id")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
         url.query_pairs_mut()
             .clear()
+            .extend_pairs(pairs)
             .append_pair("after_id", cursor);
     }
     models.sort();

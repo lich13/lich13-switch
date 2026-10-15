@@ -48,6 +48,7 @@ export const demo: ViewState = {
   currentState: "saved",
   preferences: {
     claudeHome: "~/.claude",
+    grokHome: "~/.grok",
     codexHome: "~/.codex",
     cliPath: "",
     theme: "system",
@@ -91,6 +92,7 @@ let doc: ConfigDocument = {
   revision: "preview",
   path: "~/.codex/config.toml",
 };
+let grokDoc: ConfigDocument = { ...doc, clientId: "grok", path: "~/.grok/config.toml", revision: "preview-grok-config", text: '[models]\ndefault = "grok-4.5"\n' };
 let claudeDoc: ConfigDocument = {
   clientId: "claude",
   guarded: false,
@@ -403,7 +405,7 @@ export async function run(
       demo.accounts = demo.accounts.filter((a) => a.id !== args.id);
       break;
     case "read_config":
-      return { ...(args.clientId === "claude" ? claudeDoc : doc) };
+      return { ...(args.clientId === "claude" ? claudeDoc : args.clientId === "grok" ? grokDoc : doc) };
     case "read_previous_config":
       if (!previousConfig[String(args.clientId)])
         throw new Error("没有可恢复的配置");
@@ -418,7 +420,7 @@ export async function run(
       return;
     case "save_config": {
       await run("validate_config", args);
-      const current = args.clientId === "claude" ? claudeDoc : doc;
+      const current = args.clientId === "claude" ? claudeDoc : args.clientId === "grok" ? grokDoc : doc;
       if (args.expectedRevision !== current.revision)
         throw { code: "CONFLICT", message: "配置已被外部修改，草稿已保留" };
       previousConfig[current.clientId] = current.text;
@@ -429,6 +431,7 @@ export async function run(
         canRestore: true,
       };
       if (args.clientId === "claude") claudeDoc = next;
+      else if (args.clientId === "grok") grokDoc = next;
       else {
         doc = next;
         demo.configRevision = doc.revision;

@@ -30,7 +30,7 @@ import {
   type AppError,
   type ClientId,
 } from "./types";
-import ClientSelection, { useClientSelection } from "./ClientSelection";
+import ClientSelection, { clientName, useClientSelection } from "./ClientSelection";
 import ClaudeSettings from "./ClaudeSettings";
 import { changes, get, sensitive } from "./claude-settings";
 import Modal from "./Modal";
@@ -79,6 +79,7 @@ type Props = {
   revision: string;
   home: string;
   claudeHome: string;
+  grokHome?: string;
   theme: "light" | "dark";
   onDirty: (value: boolean) => void;
   onMessage: (s: string) => void;
@@ -93,7 +94,7 @@ export default function ConfigEditor(props: Props) {
     },
     [props.onDirty],
   );
-  const home = clientId === "claude" ? props.claudeHome : props.home;
+  const home = clientId === "claude" ? props.claudeHome : clientId === "grok" ? (props.grokHome ?? "~/.grok") : props.home;
   return (
     <EditorContent
       key={`${clientId}:${home}`}
@@ -222,7 +223,7 @@ function EditorContent({
       setConflict(false);
       onMessage(
         restart
-          ? `配置已保存，请重新打开 ${clientId === "claude" ? "Claude Code" : "Codex"}`
+          ? `配置已保存，请重新打开 ${clientName(clientId)}`
           : "配置已保存",
       );
     } catch (e) {

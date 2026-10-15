@@ -36,6 +36,8 @@ struct Journal {
     version: u32,
     #[serde(default)]
     connection: Connection,
+    #[serde(default)]
+    grok: Option<super::grok_config::Snapshot>,
     path: PathBuf,
     before: Pair,
     applied: Pair,
@@ -120,6 +122,12 @@ fn write_record(
     expected: Option<&str>,
     allowed: Option<&[&Pair]>,
 ) -> Result<()> {
+    if let Some(snapshot) = &record.grok {
+        if record.live && target != &record.applied {
+            return snapshot.restore(&record.path);
+        }
+        return snapshot.apply(&record.path, expected);
+    }
     if let (ClientId::Codex, Connection::ApiKey { provider }) = (record.client, &record.connection)
     {
         let home = record
@@ -152,14 +160,19 @@ pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
             "缺少 config.toml，请先在配置编辑器中设置 custom",
         ));
     }
-    let text = std::str::from_utf8(raw.as_deref().unwrap_or(b"{}"))
-        .map_err(|_| AppError::new("CONFIG", "配置不是 UTF-8"))?;
+    let text = std::str::from_utf8(raw.as_deref().unwrap_or(if client == ClientId::Claude {
+        b"{}"
+    } else {
+        b""
+    }))
+    .map_err(|_| AppError::new("CONFIG", "配置不是 UTF-8"))?;
     Ok((storage::revision(raw.as_deref()), pair_for(client, text)?))
 }
 pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
     match client {
         ClientId::Codex => pair(&parse(text)?),
         ClientId::Claude => super::claude_config::pair(text),
+        ClientId::Grok => super::grok_config::pair(text),
     }
 }
 #[cfg(test)]
@@ -260,8 +273,12 @@ fn write_pair(
     if expected.is_some_and(|e| e != revision) {
         return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
     }
-    let text = std::str::from_utf8(raw.as_deref().unwrap_or(b"{}"))
-        .map_err(|_| AppError::new("TOML", "配置不是 UTF-8"))?;
+    let text = std::str::from_utf8(raw.as_deref().unwrap_or(if client == ClientId::Claude {
+        b"{}"
+    } else {
+        b""
+    }))
+    .map_err(|_| AppError::new("TOML", "配置不是 UTF-8"))?;
     let current = pair_for(client, text)?;
     if allowed.is_some_and(|pairs| !pairs.contains(&&current)) {
         return Err(AppError::new(
@@ -272,6 +289,9 @@ fn write_pair(
     let output = match client {
         ClientId::Codex => patch(text, target)?,
         ClientId::Claude => super::claude_config::patch(text, target)?,
+        ClientId::Grok => super::grok_config::Snapshot::new(text, target)?
+            .applied()
+            .to_owned(),
     };
     if raw.is_none() || output != text {
         storage::atomic_write(path, output.as_bytes(), Some(&revision))?;
@@ -378,12 +398,23 @@ pub fn attach_store_for(
     }
     let mut record = Journal {
         version: 2,
+        grok: grok_snapshot(
+            client,
+            home,
+            &Pair::new(&client.address(port), token),
+            store.as_ref().map(|(_, s)| s.as_str()),
+            Some(&exit),
+        )?,
         connection,
         client,
         path: client.config(home),
+        exit: if client == ClientId::Grok {
+            before.clone()
+        } else {
+            exit
+        },
         before,
         applied: Pair::new(&client.address(port), token),
-        exit,
         live: true,
         config_applied: false,
         store_before: store.as_ref().and_then(|(before, _)| before.clone()),
@@ -402,6 +433,86 @@ pub fn attach_store_for(
     record.config_applied = true;
     save(data, &record)?;
     complete_store(data, &mut record)
+}
+fn grok_snapshot(
+    client: ClientId,
+    home: &Path,
+    target: &Pair,
+    store: Option<&str>,
+    provider_pair: Option<&Pair>,
+) -> Result<Option<super::grok_config::Snapshot>> {
+    if client != ClientId::Grok {
+        return Ok(None);
+    }
+    let store = store
+        .map(serde_json::from_str::<super::model::Store>)
+        .transpose()
+        .map_err(|_| AppError::new("STORE", "Grok 网关配置无效"))?;
+    let connection = store
+        .as_ref()
+        .and_then(|s| {
+            s.providers
+                .iter()
+                .find(|p| {
+                    provider_pair.is_some_and(|pair| {
+                        pair.base_url.as_deref() == Some(&p.base_url)
+                            && pair.token.as_deref() == Some(&p.token)
+                    })
+                })
+                .or_else(|| {
+                    s.selected
+                        .as_ref()
+                        .and_then(|id| s.providers.iter().find(|p| &p.id == id))
+                })
+                .and_then(|p| s.grok_connections.get(&p.id))
+        })
+        .cloned()
+        .unwrap_or_default();
+    let text = super::grok_config::read(home)?.1;
+    Ok(Some(if provider_pair.is_some() {
+        super::grok_config::Snapshot::with_protocol(&text, target, Some(connection.protocol))?
+    } else {
+        super::grok_config::Snapshot::with_connection(&text, target, &connection)?
+    }))
+}
+pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
+    load(data)?
+        .and_then(|r| r.grok)
+        .ok_or_else(|| AppError::new("RECOVERY", "缺少 Grok 配置事务"))?
+        .unchanged(text)
+}
+pub fn restore_grok_native(
+    data: &Path,
+    home: &Path,
+    snapshot: super::grok_config::Snapshot,
+    before_store: String,
+    after_store: String,
+    expected: &str,
+) -> Result<()> {
+    if data.join(FILE).exists() {
+        return Err(AppError::new("RECOVERY", "请先停止网关并处理配置事务"));
+    }
+    let (revision, current) = read_for(ClientId::Grok, home)?;
+    if revision != expected {
+        return Err(AppError::new("CONFLICT", "Grok 配置已变化"));
+    }
+    let record = Journal {
+        client: ClientId::Grok,
+        version: 2,
+        connection: Connection::Bearer,
+        path: ClientId::Grok.config(home),
+        before: current.clone(),
+        applied: current,
+        exit: snapshot.original_pair()?,
+        live: true,
+        config_applied: true,
+        store_before: Some(before_store),
+        store_after: Some(after_store),
+        grok: Some(snapshot),
+    };
+    // The same recovery journal completes both files if a write is interrupted.
+    save(data, &record)?;
+    detach(data)
 }
 pub fn exit_pair(data: &Path) -> Result<Option<Pair>> {
     Ok(load(data)?.map(|r| r.exit))
@@ -423,7 +534,10 @@ pub fn commit_store_for(
             return Err(AppError::new("RECOVERY", "请先停止网关并完成待处理事务"));
         }
         let (_, current) = read_connection(client, home, &record.connection)?;
-        if current != record.applied {
+        if current != record.applied
+            || (client == ClientId::Grok
+                && !grok_unchanged(data, &super::grok_config::read(home)?.1)?)
+        {
             return Err(AppError::new("CONFLICT", "受管地址或 Token 已被外部修改"));
         }
         record
@@ -438,6 +552,7 @@ pub fn commit_store_for(
         }
         Journal {
             version: 2,
+            grok: grok_snapshot(client, home, &target, Some(&after_store), None)?,
             connection,
             client,
             path: client.config(home),
@@ -450,7 +565,9 @@ pub fn commit_store_for(
             store_after: None,
         }
     };
-    record.exit = target;
+    if client != ClientId::Grok || !running {
+        record.exit = target;
+    }
     record.store_before = before_store;
     record.store_after = Some(after_store);
     save(data, &record)?;
@@ -493,7 +610,15 @@ pub fn detach(data: &Path) -> Result<()> {
     } else {
         vec![&record.before, &record.applied, &record.exit]
     };
-    write_record(data, &record, &record.exit, None, Some(&allowed))?;
+    if let Some(snapshot) = &record.grok {
+        if record.live {
+            snapshot.restore(&record.path)?;
+        } else {
+            snapshot.apply(&record.path, None)?;
+        }
+    } else {
+        write_record(data, &record, &record.exit, None, Some(&allowed))?;
+    }
     complete_store(data, &mut record)?;
     fs::remove_file(data.join(FILE)).map_err(storage::io_error)
 }
@@ -666,6 +791,7 @@ mod tests {
         let mut record = Journal {
             client: ClientId::Codex,
             connection: Connection::Bearer,
+            grok: None,
             version: 2,
             path: path.clone(),
             before: old,

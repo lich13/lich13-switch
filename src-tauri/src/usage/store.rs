@@ -534,7 +534,7 @@ impl Store {
             return Ok(());
         }
         let mut records = Vec::new();
-        for scope in [None, Some("proxy"), Some("sessions")] {
+        for scope in [None, Some("proxy"), Some("sessions"), Some("grok_sessions")] {
             let selected = self.records(
                 &Filter {
                     end: Some(cutoff - 1),
@@ -689,7 +689,7 @@ impl Store {
         records: &[Record],
         cursors: &[(String, String)],
     ) -> Result<()> {
-        if !matches!(source, "codex" | "claude") {
+        if !matches!(source, "codex" | "claude" | "grok") {
             return Err(failure("只可重建会话来源"));
         }
         let tx = db(self.connection.transaction())?;

@@ -13,10 +13,10 @@ export default function ProviderPriceMappings({ view, busy, save, close }: {
   const original = useRef(JSON.stringify(draft));
   const baseline = useRef(view.revision);
   const [retry, setRetry] = useState(false), [error, setError] = useState("");
-  const [providers, setProviders] = useState<Record<ClientId, { id: string; name: string }[]>>({ codex: [], claude: [] });
+  const [providers, setProviders] = useState<Record<ClientId, { id: string; name: string }[]>>({ codex: [], claude: [], grok: [] });
   useEffect(() => {
     let disposed = false;
-    void Promise.all((["codex", "claude"] as const).map(async (clientId) => {
+    void Promise.all((["codex", "claude", "grok"] as const).map(async (clientId) => {
       const state = await command<GatewayState>("get_gateway", { clientId });
       return [clientId, state.providers.map(({ id, name }) => ({ id, name }))] as const;
     })).then((values) => { if (!disposed) setProviders(Object.fromEntries(values) as typeof providers); })
@@ -37,7 +37,7 @@ export default function ProviderPriceMappings({ view, busy, save, close }: {
         {draft.map((rule, index) => <fieldset key={index} disabled={busy} className="price-mapping-rule">
           <div className="price-mapping-heading"><label><input type="checkbox" aria-label={`启用映射 ${index + 1}`} checked={rule.enabled} onChange={(e) => change(index, { enabled: e.target.checked })} />启用</label>
             <button type="button" className="icon-button" aria-label={`删除映射 ${index + 1}`} onClick={() => setDraft(draft.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>
-          <div className="usage-price-fields"><label className="usage-field">客户端<select value={rule.client} onChange={(e) => change(index, { client: e.target.value as ClientId, provider: "" })}><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
+          <div className="usage-price-fields"><label className="usage-field">客户端<select value={rule.client} onChange={(e) => change(index, { client: e.target.value as ClientId, provider: "" })}><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="grok">Grok Build</option></select></label>
             <label className="usage-field">供应商<select value={rule.provider} onChange={(e) => change(index, { provider: e.target.value })}><option value="">选择供应商</option>
               {!providers[rule.client].some((p) => p.id === rule.provider) && rule.provider && <option value={rule.provider}>已删除供应商</option>}
               {providers[rule.client].map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label></div>

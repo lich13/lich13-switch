@@ -141,7 +141,29 @@ impl Default for Projector {
 fn retained(key: &str) -> bool {
     matches!(
         key,
-        "response"
+        "params"
+            | "update"
+            | "_meta"
+            | "sessionUpdate"
+            | "prompt_id"
+            | "elapsed_ms"
+            | "modelId"
+            | "inputTokens"
+            | "outputTokens"
+            | "cachedReadTokens"
+            | "cacheReadInputTokens"
+            | "cacheCreationTokens"
+            | "cacheCreationInputTokens"
+            | "modelCalls"
+            | "apiDurationMs"
+            | "modelUsage"
+            | "retry_after"
+            | "retry_after_seconds"
+            | "resets_in_seconds"
+            | "resets_at"
+            | "reset_at"
+            | "reset_at_unix"
+            | "response"
             | "message"
             | "data"
             | "result"
@@ -243,7 +265,9 @@ impl Projector {
                             Container::Array(items) => {
                                 matches!(f.role.as_str(), "input" | "output") || items.len() < ITEMS
                             }
-                            Container::Object(map) => map.len() < ITEMS && retained(key),
+                            Container::Object(map) => {
+                                map.len() < ITEMS && (retained(key) || f.role == "modelUsage")
+                            }
                         },
                 )
             })
@@ -273,7 +297,10 @@ impl Projector {
                     return;
                 }
                 if let Some(key) = frame.key.take() {
-                    if frame.keep && retained(&key) && map.len() < ITEMS {
+                    if frame.keep
+                        && (retained(&key) || frame.role == "modelUsage")
+                        && map.len() < ITEMS
+                    {
                         if map.contains_key(&key) {
                             self.failed = true;
                             return;

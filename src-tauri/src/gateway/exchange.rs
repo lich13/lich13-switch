@@ -60,7 +60,7 @@ fn read(path: &Path) -> Result<Value> {
     Ok(value)
 }
 fn platform(client: ClientId) -> &'static str {
-    if client == ClientId::Codex {
+    if client != ClientId::Claude {
         "openai"
     } else {
         "anthropic"
@@ -286,6 +286,15 @@ impl Gateway {
                     .iter()
                     .find(|p| &p.id == id)
                     .ok_or_else(|| invalid("供应商已删除"))?;
+                if self.0.client == ClientId::Grok
+                    && state
+                        .store
+                        .grok_connections
+                        .get(id)
+                        .is_some_and(|c| c.protocol == super::grok_config::Protocol::Messages)
+                {
+                    return Err(invalid("Grok Messages 供应商不能导出到 OpenAI 账号模板"));
+                }
                 let mut account = prototype.clone();
                 account["name"] = Value::String(p.name.clone());
                 account["credentials"]["base_url"] = Value::String(p.base_url.clone());

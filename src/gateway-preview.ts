@@ -152,8 +152,13 @@ if (densePreview) {
     { providerId: receiver.id, state: "awaiting_request" },
   ];
 }
+export const grokGatewayDemo: GatewayState = {
+  ...structuredClone(gatewayDemo), clientId: "grok", revision: "preview-grok",
+  address: "http://127.0.0.1:15724/v1", settings: { ...gatewayDemo.settings, port: 15724 },
+  handoffWaiting: [], providers: gatewayDemo.providers.map(p => ({ ...structuredClone(p), protocol: "responses", handoffAfterCompaction: false, takeNewThreads: false, reservedThreads: 0 })),
+};
 export function gatewayPreview(name: string, args: Record<string, unknown>) {
-  const s = args.clientId === "claude" ? claudeGatewayDemo : gatewayDemo;
+  const s = args.clientId === "claude" ? claudeGatewayDemo : args.clientId === "grok" ? grokGatewayDemo : gatewayDemo;
   if (name === "preview_sub2api_import")
     return {
       token: "preview-sub2api",

@@ -244,6 +244,7 @@ function GatewayContent({
       {clientId === "claude" && (
         <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
       )}
+      {clientId === "grok" && state.grokNativeAvailable && <button disabled={busy || state.running} onClick={() => run(() => edit({ op: "grokNative" }))}>恢复原生配置</button>}
       <div className="page-heading gateway-heading">
         <ClientSelection
           client={clientId}
@@ -801,6 +802,7 @@ function GatewayDialog({
   const [name, setName] = useState(dialog.item ? dialog.item.name : ""),
     [baseUrl, setBaseUrl] = useState(dialog.item?.baseUrl ?? ""),
     [token, setToken] = useState("");
+  const [protocol, setProtocol] = useState(dialog.item?.protocol ?? "responses");
   const [showToken, setShowToken] = useState(false);
   const [revealed, setRevealed] = useState<{
     value: string;
@@ -871,12 +873,12 @@ function GatewayDialog({
       if (sequence === revealSequence.current) setRevealing(false);
     }
   };
-  const initialDraft = useRef(JSON.stringify([name, baseUrl, token]));
+  const initialDraft = useRef(JSON.stringify([name, baseUrl, token, protocol]));
   useEffect(() => {
     onDirtyChange?.(
-      JSON.stringify([name, baseUrl, token]) !== initialDraft.current,
+      JSON.stringify([name, baseUrl, token, protocol]) !== initialDraft.current,
     );
-  }, [name, baseUrl, token, onDirtyChange]);
+  }, [name, baseUrl, token, protocol, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const title = `${dialog.item ? "编辑" : "添加"}供应商`;
   return (
@@ -888,7 +890,8 @@ function GatewayDialog({
           setError("");
           setBusy(true);
           const payload: Edit = {
-            op: "saveProvider",
+            op: clientId === "grok" ? "saveGrokProvider" : "saveProvider",
+            ...(clientId === "grok" ? { protocol } : {}),
             id: dialog.item?.id ?? null,
             baseUrl,
             token,
@@ -915,6 +918,7 @@ function GatewayDialog({
               />
             </label>
           )}
+          {clientId === "grok" && <label>API 协议<select value={protocol} onChange={e => setProtocol(e.target.value as typeof protocol)}><option value="responses">Responses</option><option value="chat_completions">Chat Completions</option><option value="messages">Messages</option></select></label>}
           <label>
             {clientId === "claude" ? "ANTHROPIC_BASE_URL" : "base_url"}
             <input
@@ -933,7 +937,7 @@ function GatewayDialog({
           <label>
             {clientId === "claude"
               ? "ANTHROPIC_AUTH_TOKEN"
-              : connectionMode === "apiKey"
+              : clientId === "grok" ? "api_key" : connectionMode === "apiKey"
                 ? "OPENAI_API_KEY"
                 : "experimental_bearer_token"}
             <span className="provider-token-input">

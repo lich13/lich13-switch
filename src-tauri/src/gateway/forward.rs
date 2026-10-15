@@ -304,6 +304,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         .into_iter()
         .filter_map(|id| gateway.route(&id).map(|r| (id, r)))
         .collect();
+    routes.retain(|_, route| route.accepts_protocol(request.uri().path()));
+    ids.retain(|id| routes.contains_key(id));
     let active = Active::new(gateway.clone());
     let websocket = request
         .headers()
@@ -483,6 +485,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     } else {
         gateway.usage_operation(model.as_deref(), operation)
     };
+    let mut failover = super::failover::Tracker::new(usage_trace.clone());
     let mut last = None;
     let mut last_error: Option<crate::events::Record> = None;
     let mut attempted = 0usize;
@@ -519,6 +522,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         if ids.is_empty() {
             if capacity_pending && ordinary_attempts <= settings.max_retries {
                 let delay = capacity_delay(&settings, capacity_retry_after);
+                failover.wait(
+                    if capacity_retry_after.is_some() {
+                        super::failover::WaitKind::RetryAfter
+                    } else {
+                        super::failover::WaitKind::CapacityRetry
+                    },
+                    delay.as_secs(),
+                );
                 let _waiting_since = Instant::now();
                 match gateway
                     .0
@@ -528,6 +539,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 {
                     Ok(()) => {}
                     Err(Rejected::Stopped) => {
+                        failover.finish(super::failover::Exit::Stopped);
                         return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
                     }
                     Err(_) => break,
@@ -541,7 +553,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 });
                 routes = ids
                     .iter()
-                    .filter_map(|id| gateway.route(id).map(|r| (id.clone(), r)))
+                    .filter_map(|id| {
+                        gateway
+                            .route(id)
+                            .filter(|r| r.accepts_protocol(parts.uri.path()))
+                            .map(|r| (id.clone(), r))
+                    })
                     .collect();
                 if ids.is_empty() {
                     break;
@@ -557,6 +574,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .iter()
             .filter_map(|id| routes.get(id).cloned())
             .collect();
+        let mut observed_candidates = candidates.clone();
+        observed_candidates.extend(
+            gateway
+                .routing_ids(pinned.as_deref())
+                .iter()
+                .filter_map(|id| gateway.route(id))
+                .filter(|r| !r.accepts_protocol(parts.uri.path())),
+        );
         let matches_model = candidates
             .iter()
             .any(|r| requirement.allows(r.provider.allowed_models.as_deref()));
@@ -571,7 +596,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
-            candidates = lease.candidates_for(candidates, &requirement);
+            candidates = if attempted > 0 {
+                lease.candidates_after_failure(candidates, &requirement)
+            } else {
+                lease.candidates_for(candidates, &requirement)
+            };
         } else if gateway.client_id() == super::ClientId::Codex
             && mode == "auto"
             && pinned.is_none()
@@ -579,6 +608,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         {
             candidates = super::compaction::unidentified_candidates(candidates);
         }
+        let stage = if unknown_affinity {
+            super::failover::Stage::UnknownOwner
+        } else if pinned.is_some() {
+            super::failover::Stage::CursorPinned
+        } else if attempted > 0 {
+            super::failover::Stage::FailureFallback
+        } else if ownership.as_ref().is_some_and(|l| l.handoff) {
+            super::failover::Stage::ProactiveHandoff
+        } else {
+            super::failover::Stage::Initial
+        };
+        failover.candidates(
+            &gateway,
+            stage,
+            &observed_candidates,
+            &candidates,
+            &requirement,
+            parts.uri.path(),
+            &wait_budget,
+            mode == "manual",
+        );
         if matches_model
             && !candidates
                 .iter()
@@ -591,6 +641,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 break;
             }
+            failover.finish(super::failover::Exit::NoEligibleProvider);
             gateway.record_policy_rejection(
                 model.as_deref(),
                 false,
@@ -615,6 +666,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             wait_budget.set_intake(intake, owner);
         }
         let _admission_started = Instant::now();
+        if attempted > 0 {
+            // Admission rechecks policy atomically. Its proactive priority gate
+            // must also yield to the failure queue, without dropping the claim.
+            wait_budget.handoff_owner = None;
+        }
         let mut admission = match gateway
             .0
             .admission
@@ -627,6 +683,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 capacity_pending,
             )
             .await
+            .inspect_err(|reason| failover.rejected(reason))
         {
             Ok(value) => value,
             Err(Rejected::Full | Rejected::Timeout) => {
@@ -749,6 +806,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         {
             Ok(route) => route,
             Err(reason) => {
+                failover.finish(super::failover::Exit::AdmissionRejected);
                 admission.permits.neutral(&settings);
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -777,7 +835,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
         let reset_generation = admission.reset_generation;
         ids.retain(|id| id != &route.provider.id);
-        let uri = match target_for(route.client_id, &route.provider.base_url, &parts.uri) {
+        let uri = match route.target(&parts.uri) {
             Ok(uri) => uri,
             Err(_) => continue,
         };
@@ -794,6 +852,18 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             continue;
         };
         upstream.headers_mut().insert(header::AUTHORIZATION, auth);
+        if let Some(connection) = &route.grok {
+            if connection
+                .authenticate(upstream.headers_mut(), &route.provider.token)
+                .is_err()
+            {
+                return error(
+                    StatusCode::BAD_GATEWAY,
+                    "GROK_AUTH",
+                    "Grok 供应商认证配置无效",
+                );
+            }
+        }
         if !replay.has_trailers() {
             upstream.headers_mut().insert(
                 header::CONTENT_LENGTH,
@@ -881,6 +951,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let mut response = match response {
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
+                failover.failure(super::failover::Failure::Transport);
                 let category = connector::classify(&e);
                 last_category = match category {
                     Some(connector::ConnectError::Tls) => "TLS",
@@ -906,6 +977,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 continue;
             }
             Err(_) => {
+                failover.failure(super::failover::Failure::Transport);
                 last_category = "FIRST_BYTE_TIMEOUT";
                 protocol.timeout("response_headers", settings.first_byte_seconds);
                 last_error = Some(admission.permits.report(
@@ -946,6 +1018,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         protocol.response(status.as_u16(), response_stream, encoding);
         protocol.response_headers(response.headers());
         if status == StatusCode::SWITCHING_PROTOCOLS && websocket {
+            failover.finish(super::failover::Exit::Forwarded);
             admission.permits.success(&settings);
             let Admission { permits, slot, .. } = admission;
             let upstream_upgrade = hyper::upgrade::on(&mut response);
@@ -1027,6 +1100,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 _ => Vec::new(),
             };
+            let cooldown = cooldown.max(super::upstream_error::retry_after_http(&decoded));
             let compact_error = ownership.as_ref().is_some_and(|lease| {
                 lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
             }) && protocol.observation.compaction_incompatible;
@@ -1036,7 +1110,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     .and_then(|lease| lease.owner.as_ref())
                     .filter(|owner| ids.contains(owner))
                 {
-                    ids = vec![owner.clone()];
+                    retry_owner = Some(owner.clone());
                 }
             }
             let model_error = protocol.observation.terminal
@@ -1052,7 +1126,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             let capacity = !model_error
                 && !hard_rejection
-                && route.client_id == super::ClientId::Codex
+                && route.client_id != super::ClientId::Claude
                 && (protocol.observation.capacity_error || capacity_message(status, &decoded));
             if capacity && !websocket {
                 ordinary_attempts = ordinary_attempts.saturating_sub(1);
@@ -1080,6 +1154,17 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 None
             };
+            failover.failure(if hard_rejection {
+                super::failover::Failure::AccountRejected
+            } else if model_error {
+                super::failover::Failure::ModelUnavailable
+            } else if status == StatusCode::TOO_MANY_REQUESTS || capacity {
+                super::failover::Failure::RateLimit
+            } else if compact_error {
+                super::failover::Failure::Protocol
+            } else {
+                super::failover::Failure::UpstreamService
+            });
             let will_retry = retryable
                 && !ids.is_empty()
                 && ordinary_attempts <= settings.max_retries
@@ -1147,6 +1232,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             last_category = "HTTP";
             if !retryable {
+                failover.finish(super::failover::Exit::PermanentRejection);
                 return last.unwrap_or_else(|| {
                     error(
                         StatusCode::BAD_GATEWAY,
@@ -1156,6 +1242,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 });
             }
             if let Some(delay) = retry_delay {
+                failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
                 // Release the failed attempt before registering a bounded wait.
                 // Keep the original spool, model, and response cursor untouched.
                 drop(admission);
@@ -1175,6 +1262,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 {
                     Ok(()) => {}
                     Err(Rejected::Stopped) => {
+                        failover.finish(super::failover::Exit::Stopped);
                         return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
                     }
                     Err(_) => break,
@@ -1285,6 +1373,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.finish(Some(status.as_u16()), failure_kind);
         }
         if failed && protocol.transport_failure() {
+            failover.failure(super::failover::Failure::Transport);
             last_error = Some(admission.permits.report(
                 &gateway,
                 &route,
@@ -1332,17 +1421,21 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .and_then(|lease| lease.owner.as_ref())
                 .filter(|owner| ids.contains(owner))
             {
-                ids = vec![owner.clone()];
+                retry_owner = Some(owner.clone());
             }
         }
-        let initial_hard_rejection = protocol.terminal().is_some()
-            && protocol.observation.error.health_scope
-                == Some(crate::events::HealthScope::Provider);
+        let initial_hard_rejection = if stream {
+            protocol.observation.first_event_account_error == Some(true)
+        } else {
+            ended
+                && protocol.observation.error.health_scope
+                    == Some(crate::events::HealthScope::Provider)
+        };
         if initial_hard_rejection {
             hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
         }
         let initial_capacity = !initial_hard_rejection
-            && route.client_id == super::ClientId::Codex
+            && route.client_id != super::ClientId::Claude
             && !websocket
             && !initial_model_error
             && if stream {
@@ -1355,11 +1448,21 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             || initial_compact_error
             || initial_hard_rejection
         {
+            failover.failure(if initial_hard_rejection {
+                super::failover::Failure::AccountRejected
+            } else if initial_capacity {
+                super::failover::Failure::RateLimit
+            } else if initial_model_error {
+                super::failover::Failure::ModelUnavailable
+            } else {
+                super::failover::Failure::Protocol
+            });
             let cooldown = response_parts
                 .headers
                 .get(header::RETRY_AFTER)
                 .and_then(|h| h.to_str().ok())
-                .and_then(circuit::retry_after);
+                .and_then(circuit::retry_after)
+                .max(protocol.observation.retry_after);
             if initial_capacity {
                 ordinary_attempts = ordinary_attempts.saturating_sub(1);
                 capacity_protected = true;
@@ -1377,7 +1480,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 !ids.is_empty() && ordinary_attempts <= settings.max_retries && !unknown_affinity;
             let mut details = protocol.observation.error.clone();
             details.phase = Some(crate::events::Phase::Response);
-            details.counted_failure = Some(false);
+            details.counted_failure = Some(initial_hard_rejection);
             last_error = Some(admission.permits.report(
                 &gateway,
                 &route,
@@ -1404,6 +1507,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             ));
             if initial_capacity {
                 admission.permits.capacity_limited(&settings, cooldown);
+            } else if initial_hard_rejection {
+                admission.permits.failure(&settings, cooldown);
             } else {
                 admission.permits.neutral(&settings);
             }
@@ -1433,6 +1538,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             };
             continue;
         }
+        failover.finish(super::failover::Exit::Forwarded);
         let Admission {
             mut permits, slot, ..
         } = admission;
@@ -1661,6 +1767,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         };
         return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
     }
+    failover.finish(if ordinary_attempts > settings.max_retries {
+        super::failover::Exit::AttemptsExhausted
+    } else {
+        super::failover::Exit::NoEligibleProvider
+    });
     gateway.record_final(
         last_error.as_ref(),
         previous_provider.as_deref(),

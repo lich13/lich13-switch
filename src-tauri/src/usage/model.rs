@@ -798,6 +798,9 @@ impl Attempt {
         })
     }
     pub fn calculate_price(&self, pricing: &super::pricing::Pricing) -> Option<PriceSnapshot> {
+        if self.transport == "session_prompt" {
+            return None;
+        }
         if self.operation == Operation::WebSearch {
             self.search_price()
         } else {
@@ -810,6 +813,8 @@ impl Attempt {
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_evidence: Option<crate::gateway::failover::Evidence>,
     pub id: String,
     pub client: String,
     pub source: String,
