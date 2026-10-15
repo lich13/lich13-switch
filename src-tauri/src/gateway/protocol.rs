@@ -1,5 +1,6 @@
 //! Bounded observation only: bytes forwarded by the gateway are never altered.
 use super::metadata::Projector;
+use crate::errors::code;
 use serde_json::Value;
 use std::io::Write;
 
@@ -792,7 +793,7 @@ impl Protocol {
         if self.finished {
             if matches!(
                 reason,
-                "CLIENT_DISCONNECTED" | "GATEWAY_STOPPED" | "CANCELLED"
+                code::CLIENT_DISCONNECTED | code::GATEWAY_STOPPED | code::CANCELLED
             ) {
                 self.record_end(reason);
             }
@@ -800,20 +801,20 @@ impl Protocol {
         }
         self.finished = true;
         self.delivery.event(match reason {
-            "OK" => "upstream_eof",
-            "STREAM_INTERRUPTED" => "upstream_read_failed",
-            "STREAM_TIMEOUT" | "FIRST_BYTE_TIMEOUT" => "upstream_timeout",
-            "GATEWAY_STOPPED" => "gateway_stopping",
-            "CANCELLED" => "request_cancelled",
-            "CLIENT_DISCONNECTED" => "response_consumer_closed",
+            code::OK => "upstream_eof",
+            code::STREAM_INTERRUPTED => "upstream_read_failed",
+            code::STREAM_TIMEOUT | code::FIRST_BYTE_TIMEOUT => "upstream_timeout",
+            code::GATEWAY_STOPPED => "gateway_stopping",
+            code::CANCELLED => "request_cancelled",
+            code::CLIENT_DISCONNECTED => "response_consumer_closed",
             _ => "upstream_observation_ended",
         });
-        self.transfer.upstream_eof = reason == "OK";
+        self.transfer.upstream_eof = reason == code::OK;
         self.transfer.upstream_end = match reason {
-            "OK" => Some("EOF".into()),
-            "STREAM_INTERRUPTED" => Some("DISCONNECTED".into()),
-            "STREAM_TIMEOUT" | "FIRST_BYTE_TIMEOUT" => Some("TIMEOUT".into()),
-            "NETWORK" | "TLS" => Some("CONNECT_FAILED".into()),
+            code::OK => Some("EOF".into()),
+            code::STREAM_INTERRUPTED => Some("DISCONNECTED".into()),
+            code::STREAM_TIMEOUT | code::FIRST_BYTE_TIMEOUT => Some("TIMEOUT".into()),
+            code::NETWORK | code::TLS => Some("CONNECT_FAILED".into()),
             _ => None,
         };
         self.status = self.status.or(status);
@@ -828,25 +829,29 @@ impl Protocol {
         self.ended_early = !self.terminal_received
             && matches!(
                 reason,
-                "CLIENT_DISCONNECTED" | "GATEWAY_STOPPED" | "CANCELLED" | "UNSETTLED"
+                code::CLIENT_DISCONNECTED | code::GATEWAY_STOPPED | code::CANCELLED | "UNSETTLED"
             );
         self.transport_failure = self.observation.terminal.is_none()
             && matches!(
                 reason,
-                "NETWORK" | "TLS" | "FIRST_BYTE_TIMEOUT" | "STREAM_TIMEOUT" | "STREAM_INTERRUPTED"
+                code::NETWORK
+                    | code::TLS
+                    | code::FIRST_BYTE_TIMEOUT
+                    | code::STREAM_TIMEOUT
+                    | code::STREAM_INTERRUPTED
             );
         if self.transport_failure {
             self.observation.error.local_code = Some(
                 match reason {
-                    "TLS" => "TLS_HANDSHAKE_FAILED",
-                    "NETWORK" => "CONNECTION_FAILED",
+                    code::TLS => code::TLS_HANDSHAKE_FAILED,
+                    code::NETWORK => code::CONNECTION_FAILED,
                     other => other,
                 }
                 .into(),
             );
         }
         if self.observation.terminal.is_none() {
-            if reason == "OK"
+            if reason == code::OK
                 && self.stream
                 && self.observation.expects_terminal
                 && !self.observation.incomplete
@@ -854,20 +859,20 @@ impl Protocol {
                 // EOF before a terminal event is a transport/incomplete-stream
                 // failure, unlike an explicit response.failed event.
                 self.transport_failure = true;
-                self.observation.error.local_code = Some("STREAM_INTERRUPTED".into());
+                self.observation.error.local_code = Some(code::STREAM_INTERRUPTED.into());
             }
             self.observation.terminal = Some(match reason {
-                "OK" if self.stream && self.observation.expects_terminal => {
+                code::OK if self.stream && self.observation.expects_terminal => {
                     if self.observation.incomplete {
                         Terminal::Unknown
                     } else {
                         Terminal::Failure
                     }
                 }
-                "OK" => Terminal::Success,
-                "HTTP" | "CLIENT_ERROR" => Terminal::Rejected,
-                "CANCELLED" | "GATEWAY_STOPPED" => Terminal::Cancelled,
-                "CLIENT_DISCONNECTED" | "UNSETTLED" => Terminal::Unknown,
+                code::OK => Terminal::Success,
+                code::HTTP | code::CLIENT_ERROR => Terminal::Rejected,
+                code::CANCELLED | code::GATEWAY_STOPPED => Terminal::Cancelled,
+                code::CLIENT_DISCONNECTED | "UNSETTLED" => Terminal::Unknown,
                 _ => Terminal::Failure,
             });
         }
@@ -883,7 +888,7 @@ impl Protocol {
                 Some(Terminal::Unknown) => EndCause::UpstreamIncomplete,
                 _ => EndCause::ApplicationError,
             },
-            "CLIENT_DISCONNECTED" => match self
+            code::CLIENT_DISCONNECTED => match self
                 .delivery
                 .error
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -893,21 +898,21 @@ impl Protocol {
                 2 | 4 | 7 | 8 => EndCause::DownstreamTransportError,
                 _ => EndCause::ClientDisconnected,
             },
-            "GATEWAY_STOPPED" => EndCause::GatewayStopped,
-            "CANCELLED" => EndCause::ClientCancelled,
+            code::GATEWAY_STOPPED => EndCause::GatewayStopped,
+            code::CANCELLED => EndCause::ClientCancelled,
             _ if self.status.is_some_and(|s| s >= 400) => EndCause::UpstreamRejected,
-            "FIRST_BYTE_TIMEOUT" => EndCause::FirstByteTimeout,
-            "STREAM_TIMEOUT" => EndCause::StreamTimeout,
-            "STREAM_INTERRUPTED" => EndCause::UpstreamDisconnected,
-            "NETWORK" | "TLS" => EndCause::ConnectFailed,
+            code::FIRST_BYTE_TIMEOUT => EndCause::FirstByteTimeout,
+            code::STREAM_TIMEOUT => EndCause::StreamTimeout,
+            code::STREAM_INTERRUPTED => EndCause::UpstreamDisconnected,
+            code::NETWORK | code::TLS => EndCause::ConnectFailed,
             "UNSETTLED" => EndCause::Unsettled,
             _ if self.observation.incomplete => EndCause::ParseIncomplete,
-            "OK" if self.succeeded() => EndCause::Completed,
-            "OK" => EndCause::UpstreamDisconnected,
+            code::OK if self.succeeded() => EndCause::Completed,
+            code::OK => EndCause::UpstreamDisconnected,
             _ => EndCause::Unsettled,
         };
-        if reason == "CLIENT_DISCONNECTED" {
-            self.transfer.downstream_error = Some("CLIENT_DISCONNECTED".into());
+        if reason == code::CLIENT_DISCONNECTED {
+            self.transfer.downstream_error = Some(code::CLIENT_DISCONNECTED.into());
         }
         self.snapshot_delivery();
         if let Some(usage) = &mut self.usage {
@@ -957,9 +962,9 @@ impl Drop for Protocol {
         // A dropped handler is not evidence of an explicit client cancellation.
         // Flush only the bytes already observed; never continue the generation.
         let reason = if self.stop.as_ref().is_some_and(|s| *s.borrow()) {
-            "GATEWAY_STOPPED"
+            code::GATEWAY_STOPPED
         } else if self.downstream.as_ref().is_some_and(|s| *s.borrow()) {
-            "CLIENT_DISCONNECTED"
+            code::CLIENT_DISCONNECTED
         } else {
             "UNSETTLED"
         };

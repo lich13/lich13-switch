@@ -1,3 +1,4 @@
+use crate::errors::code;
 use hyper::Uri;
 use hyper_util::{
     client::legacy::connect::{Connected, Connection},
@@ -83,10 +84,10 @@ pub fn classify(error: &(dyn std::error::Error + 'static)) -> Option<ConnectErro
 }
 pub fn diagnostic_code(error: &(dyn std::error::Error + 'static)) -> &'static str {
     match classify(error) {
-        Some(ConnectError::TargetTimeout) => "CONNECT_TIMEOUT",
-        Some(ConnectError::Tls) => "TLS_HANDSHAKE_FAILED",
-        Some(ConnectError::Loop) => "GATEWAY_LOOP",
-        _ => "CONNECTION_FAILED",
+        Some(ConnectError::TargetTimeout) => code::CONNECT_TIMEOUT,
+        Some(ConnectError::Tls) => code::TLS_HANDSHAKE_FAILED,
+        Some(ConnectError::Loop) => code::GATEWAY_LOOP,
+        _ => code::CONNECTION_FAILED,
     }
 }
 #[derive(Clone)]

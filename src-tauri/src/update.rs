@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -157,32 +158,32 @@ pub async fn latest() -> Result<Info> {
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| AppError::new("UPDATE", "无法初始化更新检查"))?;
+        .map_err(|_| AppError::new(code::UPDATE, "无法初始化更新检查"))?;
     let response = client
         .get(LATEST_RELEASE_API)
         .header(reqwest::header::USER_AGENT, "lich13-switch")
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .map_err(|_| AppError::new("UPDATE", "无法连接 GitHub"))?;
+        .map_err(|_| AppError::new(code::UPDATE, "无法连接 GitHub"))?;
     if !response.status().is_success() {
-        return Err(AppError::new("UPDATE", "GitHub 更新检查失败"));
+        return Err(AppError::new(code::UPDATE, "GitHub 更新检查失败"));
     }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(AppError::new("UPDATE", "更新信息过大"));
+        return Err(AppError::new(code::UPDATE, "更新信息过大"));
     }
     let body = response
         .bytes()
         .await
-        .map_err(|_| AppError::new("UPDATE", "无法读取更新信息"))?;
+        .map_err(|_| AppError::new(code::UPDATE, "无法读取更新信息"))?;
     if body.len() > MAX_RESPONSE_BYTES {
-        return Err(AppError::new("UPDATE", "更新信息过大"));
+        return Err(AppError::new(code::UPDATE, "更新信息过大"));
     }
-    let release: Release =
-        serde_json::from_slice(&body).map_err(|_| AppError::new("UPDATE", "更新信息格式无效"))?;
+    let release: Release = serde_json::from_slice(&body)
+        .map_err(|_| AppError::new(code::UPDATE, "更新信息格式无效"))?;
     Ok(build_info(
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
@@ -191,11 +192,11 @@ pub async fn latest() -> Result<Info> {
 }
 
 pub fn open_repository() -> Result<()> {
-    open::that(REPOSITORY_URL).map_err(|_| AppError::new("OPEN", "无法打开 GitHub"))
+    open::that(REPOSITORY_URL).map_err(|_| AppError::new(code::OPEN, "无法打开 GitHub"))
 }
 
 pub fn open_releases() -> Result<()> {
-    open::that(RELEASES_URL).map_err(|_| AppError::new("OPEN", "无法打开 GitHub"))
+    open::that(RELEASES_URL).map_err(|_| AppError::new(code::OPEN, "无法打开 GitHub"))
 }
 
 #[cfg(test)]

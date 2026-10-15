@@ -1,8 +1,10 @@
+use crate::errors::code;
 mod claude_profile;
 mod cleanup;
 mod commands;
 mod configuration;
 mod core;
+mod errors;
 mod events;
 mod exchange_template;
 #[cfg(test)]
@@ -70,12 +72,12 @@ impl Runtime {
     fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
         if matches!(
             error.code.as_str(),
-            "CONFLICT"
-                | "RECOVERY"
+            code::CONFLICT
+                | code::RECOVERY
                 | "GUARDED"
                 | "CONFIG_CHANGED"
                 | "OFFICIAL_CONFLICT"
-                | "GATEWAY_ACTIVE"
+                | code::GATEWAY_ACTIVE
         ) {
             self.diagnostics.emit(events::Record::new(
                 Some(client),
@@ -156,17 +158,17 @@ fn login_active(s: &login::LoginState) -> bool {
 }
 fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
     m.lock()
-        .map_err(|_| AppError::new("STATE", "应用状态异常，请重新启动 lich13-switch"))
+        .map_err(|_| AppError::new(code::STATE, "应用状态异常，请重新启动 lich13-switch"))
 }
 fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
     notifications::on_manual_open(app);
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Regular)
-        .map_err(|_| AppError::new("WINDOW", "无法显示主窗口"))?;
+        .map_err(|_| AppError::new(code::WINDOW, "无法显示主窗口"))?;
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         w.show()
-            .map_err(|_| AppError::new("WINDOW", "无法显示主窗口"))?;
+            .map_err(|_| AppError::new(code::WINDOW, "无法显示主窗口"))?;
         let _ = w.set_focus();
         let _ = w.emit("app-visibility", true);
         if let Some(page) = page {
@@ -216,11 +218,11 @@ fn open_main(
     if page.as_ref().is_some_and(|p| {
         !["accounts", "config", "gateway", "logs", "settings"].contains(&p.as_str())
     }) {
-        return Err(AppError::new("WINDOW", "无效页面"));
+        return Err(AppError::new(code::WINDOW, "无效页面"));
     }
     quick::hide_quick(app.clone())?;
     if let Some(id) = event_id {
-        uuid::Uuid::parse_str(&id).map_err(|_| AppError::new("EVENT", "日志标识无效"))?;
+        uuid::Uuid::parse_str(&id).map_err(|_| AppError::new(code::EVENT, "日志标识无效"))?;
         show(&app, None)?;
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.emit("event-log", serde_json::json!({"id":id,"clientId":client_id.unwrap_or_default(),"providerId":provider_id}));
@@ -312,7 +314,7 @@ async fn switch_account(
         && official_view.account_id.as_deref() != Some(id.as_str())
     {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "请先关闭官方账号连接，再切换其他账号",
         ));
     }
@@ -345,10 +347,10 @@ async fn use_official_account(
         .accounts
         .iter()
         .find(|a| a.id == account_id)
-        .ok_or_else(|| AppError::new("ACCOUNT", "账号不存在"))?;
+        .ok_or_else(|| AppError::new(code::ACCOUNT, "账号不存在"))?;
     if account.kind != "chatgpt" {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "只有 ChatGPT 账号可以使用官方连接",
         ));
     }
@@ -356,10 +358,16 @@ async fn use_official_account(
         if state.official_mode.account_id.as_deref() == Some(account_id.as_str()) {
             return Ok(state);
         }
-        return Err(AppError::new("OFFICIAL_MODE", "已有官方账号连接，请先关闭"));
+        return Err(AppError::new(
+            code::OFFICIAL_MODE,
+            "已有官方账号连接，请先关闭",
+        ));
     }
     if r.gateway.view().recovery_pending && !r.gateway.view().running {
-        return Err(AppError::new("RECOVERY", "请先处理 Codex 网关的恢复事务"));
+        return Err(AppError::new(
+            code::RECOVERY,
+            "请先处理 Codex 网关的恢复事务",
+        ));
     }
     let gateway_was_running = r.gateway.view().running;
     if gateway_was_running {
@@ -371,7 +379,10 @@ async fn use_official_account(
         && config_revision != expected_config_revision
         && !expected_config_revision.is_empty()
     {
-        return Err(AppError::new("CONFLICT", "Codex 配置已变化，请刷新后重试"));
+        return Err(AppError::new(
+            code::CONFLICT,
+            "Codex 配置已变化，请刷新后重试",
+        ));
     }
     let auth_revision = expected_auth_revision.clone();
     official::enable_with_switch(&r.data, &home, &account_id, &config_revision, || {
@@ -423,11 +434,11 @@ async fn import_auth_file(
             .blocking_pick_file()
     })
     .await
-    .map_err(|_| AppError::new("DIALOG", "无法打开文件选择器"))?;
+    .map_err(|_| AppError::new(code::DIALOG, "无法打开文件选择器"))?;
     if let Some(path) = path {
         let path = path
             .into_path()
-            .map_err(|_| AppError::new("PATH", "请选择本地文件"))?;
+            .map_err(|_| AppError::new(code::PATH, "请选择本地文件"))?;
         lock(&r.core)?.import_file(&path, None)?;
         Ok(Some(refresh(&app, &r)?))
     } else {
@@ -456,7 +467,7 @@ fn delete_account(
         == Some(id.as_str())
     {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "请先关闭官方账号连接，再删除该账号",
         ));
     }
@@ -535,17 +546,20 @@ async fn set_preferences(
         "waiting" | "cancelling"
     ) && lock(&r.core)?.preferences().claude_home != preferences.claude_home
     {
-        return Err(AppError::new("LOGIN_BUSY", "请先完成或取消 Claude 登录"));
+        return Err(AppError::new(
+            code::LOGIN_BUSY,
+            "请先完成或取消 Claude 登录",
+        ));
     }
     if login_active(&lock(&r.login)?.state) {
-        return Err(AppError::new("LOGIN_BUSY", "请先完成或取消登录"));
+        return Err(AppError::new(code::LOGIN_BUSY, "请先完成或取消登录"));
     }
     if (r.gateway.guarded_home()
         || official::blocks_gateway(&r.data, &r.home(gateway::ClientId::Codex)?))
         && lock(&r.core)?.preferences().codex_home != preferences.codex_home
     {
         return Err(AppError::new(
-            "GATEWAY_ACTIVE",
+            code::GATEWAY_ACTIVE,
             "更换 Codex 目录前请先停用网关并恢复配置",
         ));
     }
@@ -553,13 +567,13 @@ async fn set_preferences(
         && lock(&r.core)?.preferences().claude_home != preferences.claude_home
     {
         return Err(AppError::new(
-            "GATEWAY",
+            code::GATEWAY,
             "请先停止 Claude Code 网关并处理恢复事务",
         ));
     }
     if r.grok.guarded_home() && lock(&r.core)?.preferences().grok_home != preferences.grok_home {
         return Err(AppError::new(
-            "GATEWAY",
+            code::GATEWAY,
             "请先停止 Grok Build 网关并处理恢复事务",
         ));
     }
@@ -588,7 +602,7 @@ async fn get_startup(r: tauri::State<'_, Arc<Runtime>>) -> Result<startup::View>
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || r.startup.view())
         .await
-        .map_err(|_| AppError::new("STARTUP", "读取启动设置失败"))?
+        .map_err(|_| AppError::new(code::STARTUP, "读取启动设置失败"))?
 }
 #[tauri::command]
 async fn set_startup(
@@ -599,7 +613,7 @@ async fn set_startup(
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || r.startup.update(enabled, &expected_revision))
         .await
-        .map_err(|_| AppError::new("STARTUP", "更新启动设置失败"))?
+        .map_err(|_| AppError::new(code::STARTUP, "更新启动设置失败"))?
 }
 #[tauri::command]
 async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>> {
@@ -612,12 +626,12 @@ async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>
         p.map(|p| {
             p.into_path()
                 .map(|p| p.to_string_lossy().into())
-                .map_err(|_| AppError::new("PATH", "请选择本地路径"))
+                .map_err(|_| AppError::new(code::PATH, "请选择本地路径"))
         })
         .transpose()
     })
     .await
-    .map_err(|_| AppError::new("DIALOG", "无法选择路径"))?
+    .map_err(|_| AppError::new(code::DIALOG, "无法选择路径"))?
 }
 #[tauri::command]
 fn get_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<login::LoginState> {
@@ -632,7 +646,7 @@ fn start_login(
     expected_credential_revision: Option<String>,
 ) -> Result<login::LoginState> {
     if !["browser", "device"].contains(&mode.as_str()) {
-        return Err(AppError::new("LOGIN_MODE", "登录方式无效"));
+        return Err(AppError::new(code::LOGIN_MODE, "登录方式无效"));
     }
     let prefs = lock(&r.core)?.preferences();
     let cli = login::resolve_cli(&prefs.cli_path)?;
@@ -641,12 +655,17 @@ fn start_login(
             id,
             expected_credential_revision.as_deref().unwrap_or_default(),
         )?),
-        Some(_) => return Err(AppError::new("LOGIN_MODE", "指定账号刷新请使用设备码登录")),
+        Some(_) => {
+            return Err(AppError::new(
+                code::LOGIN_MODE,
+                "指定账号刷新请使用设备码登录",
+            ))
+        }
         None => None,
     };
     let mut session = lock(&r.login)?;
     if login_active(&session.state) {
-        return Err(AppError::new("LOGIN_BUSY", "已有登录正在进行"));
+        return Err(AppError::new(code::LOGIN_BUSY, "已有登录正在进行"));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(2);
@@ -687,7 +706,7 @@ fn start_login(
         let mut final_state = match result {
             Ok(Some(raw)) => match lock(&runtime.login).and_then(|s| {
                 if s.cancel.is_none() {
-                    return Err(AppError::new("LOGIN_CANCELLED", "登录已取消"));
+                    return Err(AppError::new(code::LOGIN_CANCELLED, "登录已取消"));
                 }
                 let mut c = lock(&runtime.core)?;
                 match target.as_ref() {
@@ -760,8 +779,8 @@ fn open_login_url(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
         .auth_url
         .as_ref()
         .or(s.state.url.as_ref())
-        .ok_or_else(|| AppError::new("LOGIN_URL", "登录链接尚未生成"))?;
-    open::that(url).map_err(|_| AppError::new("OPEN", "无法打开浏览器"))
+        .ok_or_else(|| AppError::new(code::LOGIN_URL, "登录链接尚未生成"))?;
+    open::that(url).map_err(|_| AppError::new(code::OPEN, "无法打开浏览器"))
 }
 #[tauri::command]
 fn copy_login_value(
@@ -785,12 +804,12 @@ async fn complete_login_callback(
             || !["starting", "waiting"].contains(&session.state.phase.as_str())
             || !session.state.callback_ready
         {
-            return Err(AppError::new("LOGIN_STATE", "当前浏览器登录会话不可用"));
+            return Err(AppError::new(code::LOGIN_STATE, "当前浏览器登录会话不可用"));
         }
         session
             .callback
             .clone()
-            .ok_or_else(|| AppError::new("LOGIN_STATE", "当前登录会话尚未准备回调"))?
+            .ok_or_else(|| AppError::new(code::LOGIN_STATE, "当前登录会话尚未准备回调"))?
     };
     let (reply, result) = tokio::sync::oneshot::channel();
     callback
@@ -799,13 +818,16 @@ async fn complete_login_callback(
             reply,
         })
         .await
-        .map_err(|_| AppError::new("LOGIN_STATE", "登录会话已结束，请重新开始"))?;
+        .map_err(|_| AppError::new(code::LOGIN_STATE, "登录会话已结束，请重新开始"))?;
     result
         .await
-        .map_err(|_| AppError::new("LOGIN_STATE", "登录会话已结束，请重新开始"))??;
+        .map_err(|_| AppError::new(code::LOGIN_STATE, "登录会话已结束，请重新开始"))??;
     let mut session = lock(&r.login)?;
     if session.cancel.is_none() || !login_active(&session.state) {
-        return Err(AppError::new("LOGIN_STATE", "登录会话已结束，请重新开始"));
+        return Err(AppError::new(
+            code::LOGIN_STATE,
+            "登录会话已结束，请重新开始",
+        ));
     }
     session.state.message = "已提交，等待登录完成".into();
     let state = session.state.clone();
@@ -922,7 +944,7 @@ async fn start_gateway(
         && official::blocks_gateway(&r.data, &r.home(client_id)?)
     {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "请先关闭官方账号连接，再启动 Codex 网关",
         ));
     }
@@ -1001,7 +1023,7 @@ async fn frontend_ready(
                 let rev = c.state()?.auth_revision;
                 c.switch_account(id, &rev)?;
                 if c.state()?.config_revision != cfg {
-                    return Err(AppError::new("SMOKE", "配置发生意外变化"));
+                    return Err(AppError::new(code::SMOKE, "配置发生意外变化"));
                 }
             }
             Ok(())
@@ -1086,7 +1108,7 @@ fn report_exit_smoke(app: &tauri::AppHandle, r: &Runtime, restored: Result<()>) 
     let result = (|| -> Result<()> {
         let snapshot = lock(&r.smoke_result)?
             .take()
-            .ok_or_else(|| AppError::new("SMOKE", "退出验收未初始化"))??;
+            .ok_or_else(|| AppError::new(code::SMOKE, "退出验收未初始化"))??;
         restored?;
         if !r.quit_pending.load(Ordering::Relaxed)
             || r.gateway.guarded_home()
@@ -1096,7 +1118,7 @@ fn report_exit_smoke(app: &tauri::AppHandle, r: &Runtime, restored: Result<()>) 
             || snapshot.auth != storage::read_optional(&snapshot.home.join("auth.json"))?
             || snapshot.config != storage::read_optional(&snapshot.home.join("config.toml"))?
         {
-            return Err(AppError::new("SMOKE", "正常退出未恢复配置"));
+            return Err(AppError::new(code::SMOKE, "正常退出未恢复配置"));
         }
         Ok(())
     })();
@@ -1178,7 +1200,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
         &home,
     )?;
     if live != storage::read_optional(&home.join("config.toml"))? {
-        return Err(AppError::new("SMOKE", "运行中换商修改了配置"));
+        return Err(AppError::new(code::SMOKE, "运行中换商修改了配置"));
     }
     let config = config.map(|raw| {
         String::from_utf8(raw)
@@ -1200,18 +1222,18 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
         connection.read_to_end(&mut response),
     )
     .await
-    .map_err(|_| AppError::new("SMOKE", "网关响应超时"))?
+    .map_err(|_| AppError::new(code::SMOKE, "网关响应超时"))?
     .map_err(storage::io_error)?;
     r.gateway.stop().await?;
     if !r.claude.view().running {
-        return Err(AppError::new("SMOKE", "双网关状态未隔离"));
+        return Err(AppError::new(code::SMOKE, "双网关状态未隔离"));
     }
     r.claude.stop().await?;
     if !response.starts_with(b"HTTP/1.1 401")
         || auth != storage::read_optional(&home.join("auth.json"))?
         || config != storage::read_optional(&home.join("config.toml"))?
     {
-        return Err(AppError::new("SMOKE", "网关或恢复校验失败"));
+        return Err(AppError::new(code::SMOKE, "网关或恢复校验失败"));
     }
     Ok(())
 }
@@ -1291,7 +1313,7 @@ pub fn run() {
             let claude_import_error = if smoke.is_none() {
                 let home=std::path::PathBuf::from(core.preferences().claude_home);
                 let recovery=if claude_profile::recovery_pending(&data) && claude_profile::login::running_sessions()? {
-                    Err(AppError::new("CLAUDE_RUNNING","请先退出 Claude Code，再恢复配置切换事务"))
+                    Err(AppError::new(code::CLAUDE_RUNNING,"请先退出 Claude Code，再恢复配置切换事务"))
                 } else {claude_profile::recover(&data,&home,&claude_profile::user_home()?)};
                 match recovery {
                     Err(e)=>Some(e),

@@ -4,6 +4,7 @@
 //! `model_providers.custom` table.  It comments those exact lines while the
 //! official account is active and restores the original bytes when disabled.
 
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -116,7 +117,7 @@ fn lines(text: &str) -> Vec<Line> {
 fn active_custom(text: &str) -> Result<()> {
     let doc = text
         .parse::<Document<String>>()
-        .map_err(|_| AppError::new("TOML", "配置不是有效的 TOML，请先修复配置"))?;
+        .map_err(|_| AppError::new(code::TOML, "配置不是有效的 TOML，请先修复配置"))?;
     let profile = doc.get("profile").and_then(|v| v.as_str());
     let selector = profile
         .and_then(|p| doc.get("profiles")?.get(p)?.get("model_provider"))
@@ -124,7 +125,7 @@ fn active_custom(text: &str) -> Result<()> {
         .and_then(|v| v.as_str());
     if selector != Some("custom") {
         return Err(AppError::new(
-            "CUSTOM",
+            code::CUSTOM,
             "当前生效的 provider 不是 custom，请在配置编辑器中处理",
         ));
     }
@@ -134,7 +135,7 @@ fn active_custom(text: &str) -> Result<()> {
         .is_some_and(|v| v.as_table().is_some());
     if !has_custom {
         return Err(AppError::new(
-            "CUSTOM",
+            code::CUSTOM,
             "缺少现有 model_providers.custom，请在配置编辑器中处理",
         ));
     }
@@ -157,12 +158,12 @@ fn scan(text: &str) -> Result<Scan> {
     active_custom(text)?;
     let doc = text
         .parse::<Document<String>>()
-        .map_err(|_| AppError::new("TOML", "配置不是有效的 TOML，请先修复配置"))?;
+        .map_err(|_| AppError::new(code::TOML, "配置不是有效的 TOML，请先修复配置"))?;
     let custom = doc
         .get("model_providers")
         .and_then(|v| v.get("custom"))
         .and_then(|v| v.as_table())
-        .ok_or_else(|| AppError::new("OFFICIAL_MODE", "custom 不是独立表，无法安全接管"))?;
+        .ok_or_else(|| AppError::new(code::OFFICIAL_MODE, "custom 不是独立表，无法安全接管"))?;
     let all = lines(text);
     let header = all
         .iter()
@@ -172,7 +173,7 @@ fn scan(text: &str) -> Result<Scan> {
         .collect::<Vec<_>>();
     if header.len() != 1 {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "custom 表必须是唯一的独立表，无法安全接管",
         ));
     }
@@ -190,18 +191,21 @@ fn scan(text: &str) -> Result<Scan> {
     for (n, key) in KEYS.iter().enumerate() {
         if let Some((parsed_key, item)) = custom.get_key_value(key) {
             if parsed_key.get() != *key {
-                return Err(AppError::new("OFFICIAL_MODE", "受管字段使用了非标准键名"));
+                return Err(AppError::new(
+                    code::OFFICIAL_MODE,
+                    "受管字段使用了非标准键名",
+                ));
             }
             let span = item
                 .span()
-                .ok_or_else(|| AppError::new("OFFICIAL_MODE", "无法定位受管字段"))?;
+                .ok_or_else(|| AppError::new(code::OFFICIAL_MODE, "无法定位受管字段"))?;
             let i = all
                 .iter()
                 .position(|line| span.start >= line.start && span.start < line.end)
-                .ok_or_else(|| AppError::new("OFFICIAL_MODE", "无法定位受管字段行"))?;
+                .ok_or_else(|| AppError::new(code::OFFICIAL_MODE, "无法定位受管字段行"))?;
             if i <= start || i >= end || span.end > all[i].end || !assignment(&all[i].body, key) {
                 return Err(AppError::new(
-                    "OFFICIAL_MODE",
+                    code::OFFICIAL_MODE,
                     "受管字段必须是独立的单行赋值",
                 ));
             }
@@ -210,7 +214,7 @@ fn scan(text: &str) -> Result<Scan> {
                 _ => item.as_value().and_then(|v| v.as_str()).is_some(),
             };
             if !valid {
-                return Err(AppError::new("OFFICIAL_MODE", "受管字段类型无效"));
+                return Err(AppError::new(code::OFFICIAL_MODE, "受管字段类型无效"));
             }
             fields[n] = Some(i);
         }
@@ -225,7 +229,10 @@ fn scan(text: &str) -> Result<Scan> {
         for (n, key) in KEYS.iter().enumerate() {
             if assignment(rest, key) {
                 if comments[n].is_some() || fields[n].is_some() {
-                    return Err(AppError::new("OFFICIAL_MODE", "受管字段重复，无法安全接管"));
+                    return Err(AppError::new(
+                        code::OFFICIAL_MODE,
+                        "受管字段重复，无法安全接管",
+                    ));
                 }
                 comments[n] = Some(i);
             }
@@ -275,7 +282,7 @@ fn load(data: &Path) -> Result<Option<Record>> {
         return Ok(None);
     };
     let record: Record = serde_json::from_slice(&raw)
-        .map_err(|_| AppError::new("OFFICIAL_MODE", "官方账号事务记录损坏，请保留现场"))?;
+        .map_err(|_| AppError::new(code::OFFICIAL_MODE, "官方账号事务记录损坏，请保留现场"))?;
     if record.version != 1
         || record.fields.len() != KEYS.len()
         || record.path.as_os_str().is_empty()
@@ -287,7 +294,7 @@ fn load(data: &Path) -> Result<Option<Record>> {
         || !["enabling", "enabled", "disabling", "conflict"].contains(&record.stage.as_str())
     {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "官方账号事务记录格式无效，请保留现场",
         ));
     }
@@ -296,7 +303,7 @@ fn load(data: &Path) -> Result<Option<Record>> {
 
 fn save(data: &Path, record: &Record) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(record)
-        .map_err(|_| AppError::new("OFFICIAL_MODE", "无法保存官方账号事务记录"))?;
+        .map_err(|_| AppError::new(code::OFFICIAL_MODE, "无法保存官方账号事务记录"))?;
     let prior = storage::read_optional(&record_path(data))?;
     storage::atomic_write(
         &record_path(data),
@@ -318,7 +325,7 @@ fn verify_record(text: &str, record: &Record) -> Result<Scan> {
             (None, None, None, None) => (),
             _ => {
                 return Err(AppError::new(
-                    "CONFLICT",
+                    code::CONFLICT,
                     "官方账号受管字段已被外部修改，请先处理冲突",
                 ))
             }
@@ -421,24 +428,30 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
 ) -> Result<OfficialModeView> {
     if load(data)?.is_some() {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "已有官方账号事务，请先处理现有状态",
         ));
     }
     let path = home.join("config.toml");
     let prior = storage::read_optional(&path)?;
     if storage::revision(prior.as_deref()) != expected {
-        return Err(AppError::new("CONFLICT", "Codex 配置已变化，请刷新后重试"));
+        return Err(AppError::new(
+            code::CONFLICT,
+            "Codex 配置已变化，请刷新后重试",
+        ));
     }
     let raw = prior.ok_or_else(|| {
-        AppError::new("CUSTOM", "缺少 config.toml，请先在配置编辑器中设置 custom")
+        AppError::new(
+            code::CUSTOM,
+            "缺少 config.toml，请先在配置编辑器中设置 custom",
+        )
     })?;
     let text =
-        String::from_utf8(raw).map_err(|_| AppError::new("CONFIG", "Codex 配置不是 UTF-8"))?;
+        String::from_utf8(raw).map_err(|_| AppError::new(code::CONFIG, "Codex 配置不是 UTF-8"))?;
     let scan = scan(&text)?;
     if scan.comments.iter().any(Option::is_some) {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "受管字段已存在注释，无法安全接管",
         ));
     }
@@ -474,15 +487,15 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         return Err(error);
     }
     let written = storage::read_optional(&path)?
-        .ok_or_else(|| AppError::new("VERIFY", "官方配置写入后无法读取"))?;
+        .ok_or_else(|| AppError::new(code::VERIFY, "官方配置写入后无法读取"))?;
     let written_text = String::from_utf8(written)
-        .map_err(|_| AppError::new("VERIFY", "官方配置写入后不是 UTF-8"))?;
+        .map_err(|_| AppError::new(code::VERIFY, "官方配置写入后不是 UTF-8"))?;
     if verify_record(&written_text, &record).is_err() {
         let rollback = restore_record(data, home, &record);
         let _ = fs::remove_file(record_path(data));
-        return Err(rollback
-            .err()
-            .unwrap_or_else(|| AppError::new("VERIFY", "官方账号配置写入后校验失败，请处理现场")));
+        return Err(rollback.err().unwrap_or_else(|| {
+            AppError::new(code::VERIFY, "官方账号配置写入后校验失败，请处理现场")
+        }));
     }
     if let Err(error) = switch_account() {
         match restore_record(data, home, &record) {
@@ -493,7 +506,7 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
                 record.stage = "conflict".into();
                 let _ = save(data, &record);
                 return Err(AppError::new(
-                    "CONFLICT",
+                    code::CONFLICT,
                     &format!("账号切换失败，配置恢复失败：{}", rollback.message),
                 ));
             }
@@ -512,7 +525,7 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
                 record.stage = "conflict".into();
                 let _ = save(data, &record);
                 return Err(AppError::new(
-                    "CONFLICT",
+                    code::CONFLICT,
                     &format!("官方模式记录失败，配置恢复失败：{}", rollback.message),
                 ));
             }
@@ -523,7 +536,7 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         Ok(view(data, home))
     } else {
         Err(AppError::new(
-            "VERIFY",
+            code::VERIFY,
             "官方账号配置写入后校验失败，请处理现场",
         ))
     }
@@ -532,9 +545,9 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
 fn restore_record(_data: &Path, home: &Path, record: &Record) -> Result<()> {
     let path = home.join("config.toml");
     let raw = storage::read_optional(&path)?
-        .ok_or_else(|| AppError::new("CONFLICT", "Codex 配置不存在，无法恢复"))?;
+        .ok_or_else(|| AppError::new(code::CONFLICT, "Codex 配置不存在，无法恢复"))?;
     let text = String::from_utf8(raw.clone())
-        .map_err(|_| AppError::new("CONFIG", "Codex 配置不是 UTF-8"))?;
+        .map_err(|_| AppError::new(code::CONFIG, "Codex 配置不是 UTF-8"))?;
     let scan = verify_record(&text, record)?;
     let mut replacements = Vec::new();
     for (n, field) in record.fields.iter().enumerate() {
@@ -552,23 +565,24 @@ fn restore_record(_data: &Path, home: &Path, record: &Record) -> Result<()> {
 }
 
 pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeView> {
-    let record = load(data)?.ok_or_else(|| AppError::new("OFFICIAL_MODE", "官方账号模式未启用"))?;
+    let record =
+        load(data)?.ok_or_else(|| AppError::new(code::OFFICIAL_MODE, "官方账号模式未启用"))?;
     let path = home.join("config.toml");
     if record.path != path {
         return Err(AppError::new(
-            "CONFLICT",
+            code::CONFLICT,
             "Codex 配置目录已变化，请处理官方模式冲突",
         ));
     }
     let raw = storage::read_optional(&path)?
-        .ok_or_else(|| AppError::new("CONFLICT", "Codex 配置不存在，无法恢复"))?;
+        .ok_or_else(|| AppError::new(code::CONFLICT, "Codex 配置不存在，无法恢复"))?;
     let text =
-        String::from_utf8(raw).map_err(|_| AppError::new("CONFIG", "Codex 配置不是 UTF-8"))?;
+        String::from_utf8(raw).map_err(|_| AppError::new(code::CONFIG, "Codex 配置不是 UTF-8"))?;
     let _ = expected; // unrelated edits are allowed; managed lines are checked below
     let managed_scan = verify_record(&text, &record)?;
     if record.stage == "conflict" {
         return Err(AppError::new(
-            "CONFLICT",
+            code::CONFLICT,
             "官方账号配置存在冲突，请先恢复受管字段",
         ));
     }
@@ -588,14 +602,14 @@ pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeV
         Some(&storage::revision(Some(text.as_bytes()))),
     )?;
     let restored = storage::read_optional(&path)?
-        .ok_or_else(|| AppError::new("VERIFY", "恢复后无法读取 Codex 配置"))?;
-    let restored_text =
-        String::from_utf8(restored).map_err(|_| AppError::new("VERIFY", "恢复后配置不是 UTF-8"))?;
+        .ok_or_else(|| AppError::new(code::VERIFY, "恢复后无法读取 Codex 配置"))?;
+    let restored_text = String::from_utf8(restored)
+        .map_err(|_| AppError::new(code::VERIFY, "恢复后配置不是 UTF-8"))?;
     let restored_scan = scan(&restored_text)?;
     for (n, field) in record.fields.iter().enumerate() {
         match (&field.original, restored_scan.fields[n]) {
             (Some(_), Some(_)) | (None, None) => {}
-            _ => return Err(AppError::new("VERIFY", "官方账号配置恢复校验失败")),
+            _ => return Err(AppError::new(code::VERIFY, "官方账号配置恢复校验失败")),
         }
     }
     fs::remove_file(record_path(data)).map_err(storage::io_error)?;
@@ -608,7 +622,7 @@ pub fn guard_save(data: &Path, home: &Path, text: &str) -> Result<()> {
     };
     if !view(data, home).enabled {
         return Err(AppError::new(
-            "OFFICIAL_MODE",
+            code::OFFICIAL_MODE,
             "官方账号事务存在冲突，请先关闭官方连接",
         ));
     }
@@ -694,10 +708,10 @@ mod tests {
         fs::write(home.join("config.toml"), TEXT).unwrap();
         let before = storage::revision(Some(TEXT.as_bytes()));
         let error = enable_with_switch(&data, &home, "acct", &before, || {
-            Err(AppError::new("ACCOUNT", "账号切换失败"))
+            Err(AppError::new(code::ACCOUNT, "账号切换失败"))
         })
         .unwrap_err();
-        assert_eq!(error.code, "ACCOUNT");
+        assert_eq!(error.code, code::ACCOUNT);
         assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), TEXT);
         assert!(!record_path(&data).exists());
     }

@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::{
     events,
     storage::{AppError, Result},
@@ -53,7 +54,7 @@ pub async fn notification_permission(
         request.unwrap_or(false) && r.core.lock().unwrap().preferences().system_notifications;
     tauri::async_runtime::spawn_blocking(move || state(&app, request))
         .await
-        .map_err(|_| AppError::new("NOTIFICATION", "通知状态读取失败"))
+        .map_err(|_| AppError::new(code::NOTIFICATION, "通知状态读取失败"))
 }
 pub fn on_manual_open(app: &tauri::AppHandle) {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
@@ -93,12 +94,12 @@ async fn submit(app: tauri::AppHandle, body: String) -> Result<()> {
         let current = permission(false, &app.config().identifier)?;
         *LAST_PERMISSION.lock().unwrap() = Some(current.clone());
         if current != "granted" {
-            return Err(AppError::new("NOTIFICATION_DENIED", "系统未允许通知"));
+            return Err(AppError::new(code::NOTIFICATION_DENIED, "系统未允许通知"));
         }
         native::send(&app.config().identifier, "lich13-switch", &body)
     })
     .await
-    .map_err(|_| AppError::new("NOTIFICATION", "通知发送任务中断"))?
+    .map_err(|_| AppError::new(code::NOTIFICATION, "通知发送任务中断"))?
 }
 #[tauri::command]
 pub async fn test_notification(app: tauri::AppHandle) -> Result<State> {
@@ -110,7 +111,7 @@ pub async fn test_notification(app: tauri::AppHandle) -> Result<State> {
     }
     tauri::async_runtime::spawn_blocking(move || state(&app, false))
         .await
-        .map_err(|_| AppError::new("NOTIFICATION", "通知状态读取失败"))
+        .map_err(|_| AppError::new(code::NOTIFICATION, "通知状态读取失败"))
 }
 #[tauri::command]
 pub fn open_notification_settings() -> Result<()> {
@@ -120,11 +121,11 @@ pub fn open_notification_settings() -> Result<()> {
     let target = "ms-settings:notifications";
     #[cfg(not(any(target_os = "macos", windows)))]
     return Err(AppError::new(
-        "NOTIFICATION",
+        code::NOTIFICATION,
         "此平台不支持系统通知设置入口",
     ));
     #[cfg(any(target_os = "macos", windows))]
-    open::that(target).map_err(|_| AppError::new("NOTIFICATION", "无法打开系统通知设置"))
+    open::that(target).map_err(|_| AppError::new(code::NOTIFICATION, "无法打开系统通知设置"))
 }
 pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
     native::initialize();
@@ -161,7 +162,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
                     let journal = journal.clone();
                     tauri::async_runtime::spawn(async move {
                         publish_delivery(&app, delivery::Status::Pending, None);
-                        let mut result = Err(AppError::new("NOTIFICATION", "通知尚未发送"));
+                        let mut result = Err(AppError::new(code::NOTIFICATION, "通知尚未发送"));
                         for attempt in 0..3 {
                             if !app
                                 .state::<Arc<Runtime>>()
@@ -178,7 +179,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
                                 || result
                                     .as_ref()
                                     .err()
-                                    .is_some_and(|e| e.code == "NOTIFICATION_DENIED")
+                                    .is_some_and(|e| e.code == code::NOTIFICATION_DENIED)
                             {
                                 break;
                             }

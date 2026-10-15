@@ -1,4 +1,5 @@
 //! Reversible Claude global profiles. OAuth stores never belong to this transaction.
+use crate::errors::code;
 mod catalog;
 pub mod commands;
 mod json;
@@ -82,11 +83,11 @@ pub struct View {
     pub warnings: Vec<String>,
 }
 fn fail(message: &str) -> AppError {
-    AppError::new("CLAUDE_PROFILE", message)
+    AppError::new(code::CLAUDE_PROFILE, message)
 }
 fn conflict() -> AppError {
     AppError::new(
-        "CLAUDE_PROFILE_CONFLICT",
+        code::CLAUDE_PROFILE_CONFLICT,
         "Claude 配置已被外部修改，请核对后重试",
     )
 }
@@ -341,7 +342,7 @@ fn rollback(data: &Path, user_home: &Path, tx: &Transaction) -> Result<()> {
     }
     if failed {
         return Err(AppError::new(
-            "CLAUDE_PROFILE_CONFLICT",
+            code::CLAUDE_PROFILE_CONFLICT,
             "部分配置发生外部变更，恢复记录已保留",
         ));
     }

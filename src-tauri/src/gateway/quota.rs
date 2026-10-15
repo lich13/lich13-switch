@@ -1,5 +1,6 @@
 //! Read-only provider quota queries. Never participate in business routing or circuit health.
 use super::{circuit, connector, replay, HttpClient};
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 use http_body_util::BodyExt;
 use hyper::{header, Request};
@@ -257,7 +258,7 @@ impl Service {
             }
             rx.changed()
                 .await
-                .map_err(|_| AppError::new("QUOTA", "额度查询已取消"))?;
+                .map_err(|_| AppError::new(code::QUOTA, "额度查询已取消"))?;
         }
     }
 }
@@ -701,7 +702,7 @@ fn convert(d: &mut Data, status: &Value) {
     let (unit, rate) = match kind {
         Some("USD") => ("USD".to_string(), Some(1.)),
         Some("CNY") => ("CNY".to_string(), n(s, "usd_exchange_rate")),
-        Some("CUSTOM") => (
+        Some(code::CUSTOM) => (
             string(s, "custom_currency_symbol").unwrap_or_else(|| "自定义单位".into()),
             n(s, "custom_currency_exchange_rate"),
         ),
@@ -842,7 +843,7 @@ mod tests {
         for (kind, unit, remaining) in [
             ("USD", "USD", 10.),
             ("CNY", "CNY", 70.),
-            ("CUSTOM", "点", 20.),
+            (code::CUSTOM, "点", 20.),
             ("TOKENS", "额度单位", 1000.),
         ] {
             let mut d = newapi(&body).unwrap();

@@ -1,5 +1,6 @@
 //! Grok's native model configuration. Credentials and transaction snapshots stay in Rust.
 use super::takeover::Pair;
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
@@ -97,7 +98,7 @@ pub struct Profile {
 }
 
 fn error(message: &str) -> AppError {
-    AppError::new("GROK_CONFIG", message)
+    AppError::new(code::GROK_CONFIG, message)
 }
 fn parse(text: &str) -> Result<DocumentMut> {
     text.parse().map_err(|_| error("Grok 配置不是有效的 TOML"))
@@ -412,7 +413,7 @@ impl Snapshot {
         let raw = storage::read_optional(path)?;
         let revision = storage::revision(raw.as_deref());
         if expected.is_some_and(|r| r != revision) {
-            return Err(AppError::new("CONFLICT", "Grok 配置已变化"));
+            return Err(AppError::new(code::CONFLICT, "Grok 配置已变化"));
         }
         let current = std::str::from_utf8(raw.as_deref().unwrap_or_default())
             .map_err(|_| error("Grok 配置不是 UTF-8"))?;
@@ -422,7 +423,7 @@ impl Snapshot {
         let owned = Self::owned(current)?;
         if owned != Self::owned(&self.applied)? && owned != Self::owned(&self.before)? {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "Grok 受管模型已被外部修改，已保留当前配置",
             ));
         }

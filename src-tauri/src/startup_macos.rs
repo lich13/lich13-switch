@@ -1,4 +1,5 @@
 //! A per-user LaunchAgent. Disabling never unloads/kills the running application.
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use std::{
     path::{Path, PathBuf},
@@ -6,7 +7,7 @@ use std::{
 };
 const LABEL: &str = "com.lich13.gpt-switch";
 fn failure() -> AppError {
-    AppError::new("STARTUP", "LaunchAgent 操作失败，请检查系统登录项设置")
+    AppError::new(code::STARTUP, "LaunchAgent 操作失败，请检查系统登录项设置")
 }
 fn location() -> Result<PathBuf> {
     Ok(dirs::home_dir()
@@ -85,7 +86,7 @@ pub fn actual(executable: &Path) -> Result<bool> {
     let actual = plist::Value::from_reader_xml(bytes.as_slice()).map_err(|_| failure())?;
     if actual != expected {
         return Err(AppError::new(
-            "STARTUP",
+            code::STARTUP,
             "本应用 LaunchAgent 内容不匹配，请重新启用开机启动",
         ));
     }

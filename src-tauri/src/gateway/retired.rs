@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use std::path::Path;
 
@@ -5,20 +6,20 @@ use std::path::Path;
 pub fn migrate(data: &Path) -> Result<()> {
     if data.join("gateway-recovery.json").exists() {
         return Err(AppError::new(
-            "RECOVERY",
+            code::RECOVERY,
             "请先处理未完成事务，再清理旧代理",
         ));
     }
     let path = data.join("gateway.json");
     if let Some(raw) = storage::read_optional(&path)? {
         let mut v: serde_json::Value = serde_json::from_slice(&raw)
-            .map_err(|_| AppError::new("STORE", "网关存储无效，未执行清理"))?;
+            .map_err(|_| AppError::new(code::STORE, "网关存储无效，未执行清理"))?;
         let object = v
             .as_object_mut()
-            .ok_or_else(|| AppError::new("STORE", "网关存储无效"))?;
+            .ok_or_else(|| AppError::new(code::STORE, "网关存储无效"))?;
         let schema = object.get("schema").and_then(|v| v.as_u64());
         if !matches!(schema, Some(1 | 2)) {
-            return Err(AppError::new("STORE", "网关存储版本不受支持"));
+            return Err(AppError::new(code::STORE, "网关存储版本不受支持"));
         }
         let mut changed = object.remove("proxies").is_some() || schema != Some(2);
         if let Some(providers) = object.get_mut("providers").and_then(|v| v.as_array_mut()) {
@@ -31,7 +32,7 @@ pub fn migrate(data: &Path) -> Result<()> {
         if changed {
             object.insert("schema".into(), 2.into());
             let bytes = serde_json::to_vec_pretty(&v)
-                .map_err(|_| AppError::new("STORE", "网关迁移失败"))?;
+                .map_err(|_| AppError::new(code::STORE, "网关迁移失败"))?;
             storage::atomic_write(&path, &bytes, Some(&storage::digest(&raw)))?;
         }
     }
@@ -39,8 +40,8 @@ pub fn migrate(data: &Path) -> Result<()> {
     match std::fs::symlink_metadata(&profiles) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Ok(meta) if !meta.is_dir() => std::fs::remove_file(&profiles)
-            .map_err(|_| AppError::new("CLEANUP", "无法移除旧代理文件，请检查权限后重试")),
-        _ => Err(AppError::new("CLEANUP", "旧代理文件状态异常，未删除")),
+            .map_err(|_| AppError::new(code::CLEANUP, "无法移除旧代理文件，请检查权限后重试")),
+        _ => Err(AppError::new(code::CLEANUP, "旧代理文件状态异常，未删除")),
     }
 }
 

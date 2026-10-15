@@ -1,5 +1,6 @@
 //! Credential-free endpoint probes and bounded, hash-only conversation affinity.
 use super::{connector, model::Provider, replay, Connector, Gateway, HttpClient, Route};
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use futures_util::{stream, StreamExt};
 use http_body_util::BodyExt;
@@ -174,7 +175,7 @@ impl Service {
                 .cloned()
                 .ok_or_else(|| {
                     AppError::new(
-                        "ENDPOINT_REMOVED",
+                        code::ENDPOINT_REMOVED,
                         "线程使用的端点已移除，请恢复该端点或重新开启线程",
                     )
                 })
@@ -193,7 +194,7 @@ impl Service {
             let mut pins = self.pins.lock().unwrap();
             if pins.error {
                 return Err(AppError::new(
-                    "ENDPOINT_AFFINITY",
+                    code::ENDPOINT_AFFINITY,
                     "端点归属记录无法读取，已停止自动切换",
                 ));
             }
@@ -239,9 +240,9 @@ impl Service {
     }
     fn persist(&self, pins: &mut Pins) -> Result<()> {
         let raw = serde_json::to_vec(&pins.entries)
-            .map_err(|_| AppError::new("ENDPOINT_AFFINITY", "端点归属记录无法保存"))?;
+            .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存"))?;
         storage::atomic_write(&self.path, &raw, None)
-            .map_err(|_| AppError::new("ENDPOINT_AFFINITY", "端点归属记录无法保存，未发送请求"))
+            .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求"))
     }
     pub fn remember(&self, provider: &Provider, response: &str) {
         if response.is_empty() || response.len() > 1024 {
@@ -345,7 +346,7 @@ impl Gateway {
                 .providers
                 .iter()
                 .find(|p| p.id == route.provider.id && p.version == route.provider.version)
-                .ok_or_else(|| AppError::new("PROVIDER", "供应商配置已变化"))?
+                .ok_or_else(|| AppError::new(code::PROVIDER, "供应商配置已变化"))?
                 .clone();
             let urls = Self::endpoint_urls(&s.store, &provider);
             (provider, urls)
@@ -363,7 +364,7 @@ impl Gateway {
             )
         })
         .await
-        .map_err(|_| AppError::new("ENDPOINT_AFFINITY", "端点归属检查失败"))??;
+        .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属检查失败"))??;
         Ok(route)
     }
     pub async fn probe_endpoints(&self, id: &str, force: bool) -> Result<super::View> {
@@ -377,7 +378,7 @@ impl Gateway {
             .iter()
             .any(|p| p.id == id)
         {
-            return Err(AppError::new("PROVIDER", "供应商不存在"));
+            return Err(AppError::new(code::PROVIDER, "供应商不存在"));
         }
         let requested = Instant::now();
         let gate = self
@@ -397,7 +398,7 @@ impl Gateway {
                 .providers
                 .iter()
                 .find(|p| p.id == id)
-                .ok_or_else(|| AppError::new("PROVIDER", "供应商不存在"))?
+                .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?
                 .clone();
             let urls = Self::endpoint_urls(&s.store, &p);
             (
@@ -445,7 +446,7 @@ impl Gateway {
         };
         let rows = tokio::select! {
             rows = probes => rows,
-            _ = stopping => return Err(AppError::new("GATEWAY_STOPPED", "网关已停止，测速已取消")),
+            _ = stopping => return Err(AppError::new(code::GATEWAY_STOPPED, "网关已停止，测速已取消")),
         };
         let s = self.0.inner.lock().unwrap();
         if let Some(current) = s.store.providers.iter().find(|p| p.id == id) {

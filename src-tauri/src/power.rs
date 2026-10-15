@@ -1,4 +1,5 @@
 //! Battery clamshell control through the narrowly scoped, authorized power helper.
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -37,7 +38,7 @@ trait System: Send + Sync {
         Ok(())
     }
     fn remove(&self) -> Result<()> {
-        Err(AppError::new("UNSUPPORTED", "此设备不支持电源助手"))
+        Err(AppError::new(code::UNSUPPORTED, "此设备不支持电源助手"))
     }
     fn read(&self) -> Result<State>;
     fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<()>;
@@ -79,16 +80,16 @@ impl Service {
         let _lock = self
             .lock
             .try_lock()
-            .map_err(|_| AppError::new("BUSY", "电源操作正在进行"))?;
+            .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
         self.set_locked(enabled, expected)
     }
     fn set_locked(&self, enabled: bool, expected: &str) -> Result<State> {
         let before = self.state()?;
         if !before.supported {
-            return Err(AppError::new("UNSUPPORTED", "此设备不支持电池合盖控制"));
+            return Err(AppError::new(code::UNSUPPORTED, "此设备不支持电池合盖控制"));
         }
         if before.revision != expected {
-            return Err(AppError::new("CONFLICT", "电源状态已变化，请重新操作"));
+            return Err(AppError::new(code::CONFLICT, "电源状态已变化，请重新操作"));
         }
         let repaired = before.helper != "ready";
         let before = if repaired {
@@ -99,7 +100,7 @@ impl Service {
         // Restoration belongs exclusively to the privileged helper. An unverified
         // legacy user/script record must never supply a battery sleep value.
         if let Err(error) = self.system.apply(&before, enabled, before.battery_sleep) {
-            if repaired || !matches!(error.code.as_str(), "POWER_HELPER" | "POWER_AUTH") {
+            if repaired || !matches!(error.code.as_str(), code::POWER_HELPER | code::POWER_AUTH) {
                 return Err(error);
             }
             // An authorization can expire between read and set. At most one repair,
@@ -110,7 +111,7 @@ impl Service {
         }
         let actual = self.state()?;
         if actual.enabled != enabled {
-            return Err(AppError::new("POWER", "电源状态再次变化，请重新操作"));
+            return Err(AppError::new(code::POWER, "电源状态再次变化，请重新操作"));
         }
         self.retire_legacy_record()?;
         Ok(actual)
@@ -125,12 +126,12 @@ impl Service {
             || (before.helper == "ready" && before.ownership != prepared.ownership)
         {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "修复期间电源状态已变化，请重新操作",
             ));
         }
         if prepared.helper != "ready" {
-            return Err(AppError::new("POWER_HELPER", "修复后助手仍不可用"));
+            return Err(AppError::new(code::POWER_HELPER, "修复后助手仍不可用"));
         }
         Ok(prepared)
     }
@@ -138,7 +139,7 @@ impl Service {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(AppError::new("POWER", "电源已更新，旧恢复记录清理失败")),
+            Err(_) => Err(AppError::new(code::POWER, "电源已更新，旧恢复记录清理失败")),
         }
     }
 }
@@ -149,9 +150,9 @@ fn output(args: &[&str]) -> Result<String> {
         .output()
         .map_err(storage::io_error)?;
     if !result.status.success() {
-        return Err(AppError::new("POWER", "无法读取系统电源状态"));
+        return Err(AppError::new(code::POWER, "无法读取系统电源状态"));
     }
-    String::from_utf8(result.stdout).map_err(|_| AppError::new("POWER", "无法读取系统电源状态"))
+    String::from_utf8(result.stdout).map_err(|_| AppError::new(code::POWER, "无法读取系统电源状态"))
 }
 #[cfg(any(target_os = "macos", test))]
 fn parse(general: &str, custom: &str) -> Result<State> {
@@ -186,7 +187,7 @@ fn parse(general: &str, custom: &str) -> Result<State> {
     }
     match (flag, minutes) {
         (Some("0" | "1"), Some(n)) => Ok(State::new(true, flag == Some("1"), n)),
-        _ => Err(AppError::new("POWER", "无法读取合盖休眠状态")),
+        _ => Err(AppError::new(code::POWER, "无法读取合盖休眠状态")),
     }
 }
 impl System for Native {
@@ -198,7 +199,7 @@ impl System for Native {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = force;
-            Err(AppError::new("UNSUPPORTED", "此设备不支持电源助手"))
+            Err(AppError::new(code::UNSUPPORTED, "此设备不支持电源助手"))
         }
     }
     fn remove(&self) -> Result<()> {
@@ -208,7 +209,7 @@ impl System for Native {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Err(AppError::new("UNSUPPORTED", "此设备不支持电源助手"))
+            Err(AppError::new(code::UNSUPPORTED, "此设备不支持电源助手"))
         }
     }
     fn read(&self) -> Result<State> {
@@ -225,11 +226,11 @@ impl System for Native {
                 let actual = &response["state"];
                 state.enabled = actual["enabled"]
                     .as_bool()
-                    .ok_or_else(|| AppError::new("POWER", "电源状态无效"))?;
+                    .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))?;
                 state.battery_sleep = actual["batterySleep"]
                     .as_u64()
                     .filter(|n| *n <= 1440)
-                    .ok_or_else(|| AppError::new("POWER", "电源状态无效"))?
+                    .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))?
                     as u16;
                 state.ownership = actual["ownership"].as_str().unwrap_or("external").into();
                 state.external_changed = actual["externalChanged"].as_bool().unwrap_or(false);
@@ -253,7 +254,7 @@ impl System for Native {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (before, enabled, minutes);
-            Err(AppError::new("UNSUPPORTED", "此设备不支持电池合盖控制"))
+            Err(AppError::new(code::UNSUPPORTED, "此设备不支持电池合盖控制"))
         }
     }
 }
@@ -303,7 +304,7 @@ mod tests {
             if force || !self.ready.load(Ordering::SeqCst) {
                 self.approvals.fetch_add(1, Ordering::SeqCst);
                 if self.cancelled.load(Ordering::SeqCst) {
-                    return Err(AppError::new("POWER_AUTH", "已取消系统授权"));
+                    return Err(AppError::new(code::POWER_AUTH, "已取消系统授权"));
                 }
                 self.ready.store(true, Ordering::SeqCst);
             }
@@ -315,7 +316,7 @@ mod tests {
         fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<()> {
             let mut state = self.current.lock().unwrap();
             if state.revision != before.revision {
-                return Err(AppError::new("CONFLICT", "外部状态变化"));
+                return Err(AppError::new(code::CONFLICT, "外部状态变化"));
             }
             self.calls
                 .lock()
@@ -425,7 +426,7 @@ mod tests {
         std::fs::write(&service.path, "legacy").unwrap();
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
-            "POWER_AUTH"
+            code::POWER_AUTH
         );
         assert_eq!(service.state().unwrap(), original);
         assert_eq!(std::fs::read_to_string(&service.path).unwrap(), "legacy");
@@ -516,7 +517,7 @@ mod tests {
 
             assert_eq!(
                 service.set(true, &original.revision).unwrap_err().code,
-                "CONFLICT"
+                code::CONFLICT
             );
             assert_eq!(service.state().unwrap(), prepared);
             assert!(helper.calls.lock().unwrap().is_empty());
@@ -529,7 +530,7 @@ mod tests {
     fn stale_revision_does_not_prepare_or_call_helper() {
         let original = state(false, 7, "none", false);
         let (_dir, service, helper) = fixture(original);
-        assert_eq!(service.set(true, "stale").unwrap_err().code, "CONFLICT");
+        assert_eq!(service.set(true, "stale").unwrap_err().code, code::CONFLICT);
         assert_eq!(helper.prepares.load(Ordering::SeqCst), 0);
         assert!(helper.calls.lock().unwrap().is_empty());
     }
@@ -539,11 +540,11 @@ mod tests {
         let original = state(true, 0, "application", false);
         let external = state(true, 0, "external", true);
         let (_dir, service, helper) = fixture(original.clone());
-        helper.reply(original.clone(), Some("POWER_AUTH"));
+        helper.reply(original.clone(), Some(code::POWER_AUTH));
         *helper.after_prepare.lock().unwrap() = Some(external.clone());
         assert_eq!(
             service.set(false, &original.revision).unwrap_err().code,
-            "CONFLICT"
+            code::CONFLICT
         );
         assert_eq!(service.state().unwrap(), external);
         assert_eq!(
@@ -560,10 +561,10 @@ mod tests {
         let external = state(false, 4, "none", true);
         let (_dir, service, helper) = fixture(original.clone());
         std::fs::write(&service.path, "legacy").unwrap();
-        helper.reply(external.clone(), Some("CONFLICT"));
+        helper.reply(external.clone(), Some(code::CONFLICT));
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
-            "CONFLICT"
+            code::CONFLICT
         );
         assert_eq!(service.state().unwrap(), external);
         assert_eq!(helper.calls.lock().unwrap().len(), 1);
@@ -577,7 +578,7 @@ mod tests {
         helper.reply(original.clone(), None);
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
-            "POWER"
+            code::POWER
         );
         assert_eq!(service.state().unwrap(), original);
         assert_eq!(helper.calls.lock().unwrap().len(), 1);
@@ -617,9 +618,9 @@ mod tests {
         std::fs::write(&service.path, "legacy").unwrap();
         *helper.remove_reply.lock().unwrap() = Some(Reply {
             state: original.clone(),
-            error: Some("POWER"),
+            error: Some(code::POWER),
         });
-        assert_eq!(service.remove().unwrap_err().code, "POWER");
+        assert_eq!(service.remove().unwrap_err().code, code::POWER);
         assert_eq!(service.state().unwrap(), original);
         assert_eq!(std::fs::read_to_string(&service.path).unwrap(), "legacy");
         assert!(helper.calls.lock().unwrap().is_empty());

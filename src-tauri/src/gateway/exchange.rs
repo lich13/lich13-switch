@@ -1,5 +1,6 @@
 //! Sub2API account exchange. Secrets stay in Rust and user-selected files.
 use super::{model, ClientId, Edit, Gateway, View};
+use crate::errors::code;
 use crate::exchange_template::{self as template, Prepared};
 use crate::storage::{self, AppError, Result};
 use serde::Serialize;
@@ -52,7 +53,7 @@ pub struct Preview {
     pub template: Option<Prepared>,
 }
 fn invalid(message: &str) -> AppError {
-    AppError::new("SUB2API_FILE", message)
+    AppError::new(code::SUB2API_FILE, message)
 }
 fn read(path: &Path) -> Result<Value> {
     let value = template::read(path)?;
@@ -266,7 +267,7 @@ impl Gateway {
         let state = self.0.inner.lock().unwrap();
         if self.view_revision(&state) != expected {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "网关设置已变化，请使用最新状态重试",
             ));
         }

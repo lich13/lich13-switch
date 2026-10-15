@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -53,15 +54,18 @@ impl Session {
             || self.state.mode != "device"
             || !["starting", "waiting"].contains(&self.state.phase.as_str())
         {
-            return Err(AppError::new("LOGIN_STATE", "设备码登录已结束或正在取消"));
+            return Err(AppError::new(
+                code::LOGIN_STATE,
+                "设备码登录已结束或正在取消",
+            ));
         }
         let value = match kind {
             CopyKind::Url => self.state.url.as_deref(),
             CopyKind::Code => self.state.code.as_deref(),
         }
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::new("LOGIN_PENDING", "登录链接或设备码尚未生成"))?;
-        write(value).map_err(|_| AppError::new("CLIPBOARD", "无法写入剪贴板，请重试"))
+        .ok_or_else(|| AppError::new(code::LOGIN_PENDING, "登录链接或设备码尚未生成"))?;
+        write(value).map_err(|_| AppError::new(code::CLIPBOARD, "无法写入剪贴板，请重试"))
     }
 }
 impl Default for Session {
@@ -83,7 +87,7 @@ pub fn resolve_cli(configured: &str) -> Result<PathBuf> {
             return Ok(p);
         }
         return Err(AppError::new(
-            "CLI",
+            code::CLI,
             "配置的 Codex CLI 不存在，请在设置中重新选择",
         ));
     }
@@ -121,7 +125,7 @@ pub fn resolve_cli(configured: &str) -> Result<PathBuf> {
         }
     }
     Err(AppError::new(
-        "CLI_MISSING",
+        code::CLI_MISSING,
         "未找到官方 Codex CLI，请安装后在设置中选择其路径",
     ))
 }
@@ -137,7 +141,7 @@ fn command(path: &Path) -> Result<tokio::process::Command> {
             .join("node_modules/@openai/codex/bin/codex.js");
         if !entry.is_file() {
             return Err(AppError::new(
-                "CLI",
+                code::CLI,
                 "此 CMD 不是标准 Codex npm 安装，请选择 codex.exe",
             ));
         }
@@ -333,7 +337,7 @@ pub async fn run_with_callbacks(
     cmd.process_group(0);
     let mut child = cmd.spawn().map_err(|_| {
         AppError::new(
-            "CLI_START",
+            code::CLI_START,
             "无法启动 Codex CLI，请检查可执行文件及 Node.js 环境",
         )
     })?;
@@ -370,7 +374,7 @@ pub async fn run_with_callbacks(
     let result = loop {
         tokio::select! {
             _=&mut cancel=>{terminate(&mut child).await;break Ok(None);},
-            _=tokio::time::sleep_until(deadline)=>{terminate(&mut child).await;break Err(AppError::new("LOGIN_TIMEOUT","登录已超时，请重试"));},
+            _=tokio::time::sleep_until(deadline)=>{terminate(&mut child).await;break Err(AppError::new(code::LOGIN_TIMEOUT,"登录已超时，请重试"));},
             Some(request)=callbacks.recv(), if mode == "browser" => {
                 let result = process_callback(&request.url, state.callback_port, temp.path()).await;
                 if result.is_ok() {
@@ -382,9 +386,9 @@ pub async fn run_with_callbacks(
             Some(line)=rx.recv()=>{let before=state.clone();update_prompt(&mut state,&line);if state!=before{let _=events.send(state.clone()).await;}},
             status=child.wait()=>{
                 break (|| {
-                    if !status.map_err(storage::io_error)?.success(){return Err(AppError::new("LOGIN_FAILED","官方登录未完成；请检查浏览器授权、网络或改用设备码登录"));}
-                    let raw=storage::read_optional(&temp.path().join("auth.json"))?.ok_or_else(||AppError::new("LOGIN_EMPTY","登录进程未生成 auth.json，请检查本机认证策略"))?;
-                    String::from_utf8(raw).map(Some).map_err(|_|AppError::new("LOGIN_FORMAT","登录生成的凭据格式无效"))
+                    if !status.map_err(storage::io_error)?.success(){return Err(AppError::new(code::LOGIN_FAILED,"官方登录未完成；请检查浏览器授权、网络或改用设备码登录"));}
+                    let raw=storage::read_optional(&temp.path().join("auth.json"))?.ok_or_else(||AppError::new(code::LOGIN_EMPTY,"登录进程未生成 auth.json，请检查本机认证策略"))?;
+                    String::from_utf8(raw).map(Some).map_err(|_|AppError::new(code::LOGIN_FORMAT,"登录生成的凭据格式无效"))
                 })();
             }
         }
@@ -393,13 +397,17 @@ pub async fn run_with_callbacks(
     err.abort();
     let _ = out.await;
     let _ = err.await;
-    temp.close()
-        .map_err(|_| AppError::new("LOGIN_CLEANUP", "登录临时目录无法清理，请检查临时目录权限"))?;
+    temp.close().map_err(|_| {
+        AppError::new(
+            code::LOGIN_CLEANUP,
+            "登录临时目录无法清理，请检查临时目录权限",
+        )
+    })?;
     result
 }
 
 fn callback_error(message: &str) -> AppError {
-    AppError::new("LOGIN_CALLBACK", message)
+    AppError::new(code::LOGIN_CALLBACK, message)
 }
 
 fn validate_callback(raw: &str, expected_port: Option<u16>) -> Result<(String, u16)> {
@@ -459,28 +467,31 @@ fn callback_id_token(raw: &str) -> Result<String> {
 fn auth_matches_callback(path: &Path, id_token: &str) -> Result<()> {
     let raw = storage::read_optional(path)?.ok_or_else(|| {
         AppError::new(
-            "LOGIN_PENDING",
+            code::LOGIN_PENDING,
             "尚未完成当前会话授权，请先在浏览器完成登录",
         )
     })?;
     let value: serde_json::Value = serde_json::from_slice(&raw)
-        .map_err(|_| AppError::new("LOGIN_PENDING", "当前登录会话尚未生成完整凭据"))?;
+        .map_err(|_| AppError::new(code::LOGIN_PENDING, "当前登录会话尚未生成完整凭据"))?;
     let tokens = value
         .get("tokens")
         .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| AppError::new("LOGIN_PENDING", "尚未生成完整 ChatGPT 凭据"))?;
+        .ok_or_else(|| AppError::new(code::LOGIN_PENDING, "尚未生成完整 ChatGPT 凭据"))?;
     for key in ["id_token", "access_token", "refresh_token"] {
         if tokens
             .get(key)
             .and_then(serde_json::Value::as_str)
             .is_none_or(str::is_empty)
         {
-            return Err(AppError::new("LOGIN_PENDING", "尚未生成完整 ChatGPT 凭据"));
+            return Err(AppError::new(
+                code::LOGIN_PENDING,
+                "尚未生成完整 ChatGPT 凭据",
+            ));
         }
     }
     if tokens.get("id_token").and_then(serde_json::Value::as_str) != Some(id_token) {
         return Err(AppError::new(
-            "LOGIN_PENDING",
+            code::LOGIN_PENDING,
             "回调地址与当前登录会话不匹配",
         ));
     }
@@ -504,7 +515,7 @@ async fn process_callback(raw: &str, expected_port: Option<u16>, temp: &Path) ->
             {
                 if current != id_token {
                     return Err(AppError::new(
-                        "LOGIN_PENDING",
+                        code::LOGIN_PENDING,
                         "回调地址与当前登录会话不匹配",
                     ));
                 }
@@ -516,7 +527,7 @@ async fn process_callback(raw: &str, expected_port: Option<u16>, temp: &Path) ->
     loop {
         match auth_matches_callback(&auth_path, &id_token) {
             Ok(()) => return Ok(()),
-            Err(error) if error.code == "LOGIN_PENDING" && Instant::now() < deadline => {
+            Err(error) if error.code == code::LOGIN_PENDING && Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(error) => return Err(error),
@@ -630,7 +641,7 @@ mod tests {
         let err = s
             .copy_value(CopyKind::Code, |_| Err("ABCD-EFGH must not leak"))
             .unwrap_err();
-        assert_eq!(err.code, "CLIPBOARD");
+        assert_eq!(err.code, code::CLIPBOARD);
         assert!(!err.message.contains("ABCD"));
         for phase in ["cancelling", "cancelled", "success", "error", "idle"] {
             s.state.phase = phase.into();
@@ -797,7 +808,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            "LOGIN_PENDING"
+            code::LOGIN_PENDING
         );
     }
     #[tokio::test]

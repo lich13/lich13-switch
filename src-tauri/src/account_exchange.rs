@@ -1,5 +1,6 @@
 //! Account exchange is deliberately separate from native authentication files.
 use super::{auth_info, claims, clean_name, now, older, Core, Profile};
+use crate::errors::code;
 use crate::{
     exchange_template as template,
     storage::{self, AppError, Result},
@@ -114,10 +115,10 @@ pub struct ExportPreview {
 }
 
 fn invalid(message: &str) -> AppError {
-    AppError::new("ACCOUNT_EXCHANGE", message)
+    AppError::new(code::ACCOUNT_EXCHANGE, message)
 }
 fn conflict() -> AppError {
-    AppError::new("CONFLICT", "账号库或凭据已变化，请重新预览后选择")
+    AppError::new(code::CONFLICT, "账号库或凭据已变化，请重新预览后选择")
 }
 fn text(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| !s.is_empty())

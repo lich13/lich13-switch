@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::{
     gateway,
     storage::{AppError, Result},
@@ -56,7 +57,7 @@ pub struct Imports {
     handled: VecDeque<(String, Instant)>,
 }
 fn invalid(message: &str) -> AppError {
-    AppError::new("IMPORT_LINK", message)
+    AppError::new(code::IMPORT_LINK, message)
 }
 fn parse(raw: &str) -> Result<Pending> {
     if raw.len() > 64 * 1024 {

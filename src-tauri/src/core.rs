@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -200,10 +201,10 @@ fn claims(token: &str) -> Option<Value> {
 }
 fn auth_info(raw: &str) -> Result<AuthInfo> {
     if raw.len() > 2 * 1024 * 1024 {
-        return Err(AppError::new("AUTH", "凭据文件超过 2 MiB"));
+        return Err(AppError::new(code::AUTH, "凭据文件超过 2 MiB"));
     }
     let d: Value =
-        serde_json::from_str(raw).map_err(|_| AppError::new("AUTH", "凭据不是有效的 JSON"))?;
+        serde_json::from_str(raw).map_err(|_| AppError::new(code::AUTH, "凭据不是有效的 JSON"))?;
     let mode = d.get("auth_mode").and_then(Value::as_str);
     if mode == Some("apikey")
         || (mode.is_none()
@@ -215,7 +216,7 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
             .get("OPENAI_API_KEY")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| AppError::new("AUTH", "缺少有效的 OPENAI_API_KEY"))?;
+            .ok_or_else(|| AppError::new(code::AUTH, "缺少有效的 OPENAI_API_KEY"))?;
         return Ok(AuthInfo {
             identity: storage::digest(format!("api:{key}").as_bytes()),
             kind: "apiKey".into(),
@@ -224,21 +225,24 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
     }
     if mode.is_some_and(|m| m != "chatgpt") {
         return Err(AppError::new(
-            "AUTH",
+            code::AUTH,
             "此认证格式暂不支持，请导入 Codex 的 ChatGPT 或 API Key 凭据",
         ));
     }
     let tokens = d
         .get("tokens")
         .and_then(Value::as_object)
-        .ok_or_else(|| AppError::new("AUTH", "缺少 ChatGPT tokens 或 OPENAI_API_KEY"))?;
+        .ok_or_else(|| AppError::new(code::AUTH, "缺少 ChatGPT tokens 或 OPENAI_API_KEY"))?;
     for field in ["access_token", "refresh_token", "id_token"] {
         if tokens
             .get(field)
             .and_then(Value::as_str)
             .is_none_or(|v| v.is_empty())
         {
-            return Err(AppError::new("AUTH", "ChatGPT 凭据缺少必要的 Token 字段"));
+            return Err(AppError::new(
+                code::AUTH,
+                "ChatGPT 凭据缺少必要的 Token 字段",
+            ));
         }
     }
     let id = claims(tokens["id_token"].as_str().unwrap_or_default()).unwrap_or(Value::Null);
@@ -250,7 +254,7 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             AppError::new(
-                "AUTH",
+                code::AUTH,
                 "无法识别 ChatGPT 账号身份，请重新登录或导入完整凭据",
             )
         })?;
@@ -273,7 +277,7 @@ struct LoginPrincipal {
 }
 fn login_principal(raw: &str) -> Result<LoginPrincipal> {
     let value: Value =
-        serde_json::from_str(raw).map_err(|_| AppError::new("AUTH", "凭据不是有效的 JSON"))?;
+        serde_json::from_str(raw).map_err(|_| AppError::new(code::AUTH, "凭据不是有效的 JSON"))?;
     let claims: Vec<_> = ["id_token", "access_token"]
         .iter()
         .filter_map(|field| value["tokens"][field].as_str().and_then(claims))
@@ -298,7 +302,7 @@ fn login_principal(raw: &str) -> Result<LoginPrincipal> {
     subjects.dedup();
     if users.len() > 1 || (users.is_empty() && subjects.len() > 1) {
         return Err(AppError::new(
-            "LOGIN_IDENTITY",
+            code::LOGIN_IDENTITY,
             "登录凭据身份不一致，请重新登录",
         ));
     }
@@ -308,7 +312,7 @@ fn login_principal(raw: &str) -> Result<LoginPrincipal> {
     };
     if principal.user.is_none() && principal.subject.is_none() {
         return Err(AppError::new(
-            "LOGIN_IDENTITY_UNKNOWN",
+            code::LOGIN_IDENTITY_UNKNOWN,
             "无法确认登录账号，请重新登录",
         ));
     }
@@ -379,13 +383,13 @@ fn older(incoming: &str, stored: &str) -> bool {
 }
 pub fn validate_config(text: &str) -> Result<()> {
     if text.len() > 2 * 1024 * 1024 {
-        return Err(AppError::new("CONFIG", "配置文件超过 2 MiB"));
+        return Err(AppError::new(code::CONFIG, "配置文件超过 2 MiB"));
     }
     text.parse::<toml::Table>().map(|_| ()).map_err(|e| {
         let offset = e.span().map(|s| s.start).unwrap_or(0).min(text.len());
         let prefix = text.get(..offset).unwrap_or_default();
         AppError {
-            code: "TOML".into(),
+            code: code::TOML.into(),
             message: "TOML 语法错误，请检查标记位置附近的引号、括号或重复字段".into(),
             line: Some(prefix.bytes().filter(|b| *b == b'\n').count() + 1),
             column: Some(
@@ -459,7 +463,7 @@ impl Core {
         let path = data_dir.join("accounts.json");
         let store = match storage::read_bounded(&path, exchange::VAULT_LIMIT)? {
             Some(bytes) => serde_json::from_slice::<Store>(&bytes)
-                .map_err(|_| AppError::new("STORE", "账号库无法读取，原文件已保留"))?,
+                .map_err(|_| AppError::new(code::STORE, "账号库无法读取，原文件已保留"))?,
             None => Store {
                 schema: 1,
                 profiles: vec![],
@@ -479,7 +483,7 @@ impl Core {
         };
         if store.schema != 1 {
             return Err(AppError::new(
-                "STORE_VERSION",
+                code::STORE_VERSION,
                 "账号库版本较新，请更新 lich13-switch",
             ));
         }
@@ -501,7 +505,7 @@ impl Core {
     }
     fn persist(&self) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(&self.store)
-            .map_err(|_| AppError::new("STORE", "无法保存账号库"))?;
+            .map_err(|_| AppError::new(code::STORE, "无法保存账号库"))?;
         storage::atomic_write_bounded(
             &self.data_dir.join("accounts.json"),
             &bytes,
@@ -525,7 +529,7 @@ impl Core {
                 .is_some_and(|disk| disk.identity == info.identity)
             {
                 if crate::gateway::manages_auth(&self.data_dir, &self.home()) {
-                    return Err(AppError::new("MANAGED", "网关临时凭据不能保存为账号"));
+                    return Err(AppError::new(code::MANAGED, "网关临时凭据不能保存为账号"));
                 }
                 self.store.observed_auth_revisions.insert(
                     self.store.preferences.codex_home.clone(),
@@ -580,7 +584,7 @@ impl Core {
         let info = auth_info(raw)?;
         if info.kind != "chatgpt" {
             return Err(AppError::new(
-                "LOGIN_AUTH",
+                code::LOGIN_AUTH,
                 "官方登录未生成完整 ChatGPT 凭据",
             ));
         }
@@ -619,14 +623,17 @@ impl Core {
             .profiles
             .iter()
             .find(|p| p.id == id)
-            .ok_or_else(|| AppError::new("ACCOUNT", "账号已被删除"))?;
+            .ok_or_else(|| AppError::new(code::ACCOUNT, "账号已被删除"))?;
         if profile.kind != "chatgpt" {
-            return Err(AppError::new("LOGIN_AUTH", "仅 ChatGPT 账号支持设备码刷新"));
+            return Err(AppError::new(
+                code::LOGIN_AUTH,
+                "仅 ChatGPT 账号支持设备码刷新",
+            ));
         }
         let revision = storage::digest(profile.auth.as_bytes());
         if revision != expected {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "该账号凭据已更新，请刷新列表后重试",
             ));
         }
@@ -648,7 +655,7 @@ impl Core {
         let info = auth_info(raw)?;
         if info.kind != "chatgpt" {
             return Err(AppError::new(
-                "LOGIN_IDENTITY",
+                code::LOGIN_IDENTITY,
                 "请使用指定 ChatGPT 账号登录",
             ));
         }
@@ -657,19 +664,19 @@ impl Core {
             .profiles
             .iter()
             .position(|p| p.id == target.id)
-            .ok_or_else(|| AppError::new("ACCOUNT", "登录期间账号已被删除，未保存新凭据"))?;
+            .ok_or_else(|| AppError::new(code::ACCOUNT, "登录期间账号已被删除，未保存新凭据"))?;
         if storage::digest(self.store.profiles[index].auth.as_bytes()) != target.credential_revision
             || self.home() != target.home
         {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "登录期间账号凭据或配置目录已变化，未覆盖",
             ));
         }
         let principal = login_principal(raw)?;
         if !principal.matches(&login_principal(&self.store.profiles[index].auth)?) {
             return Err(AppError::new(
-                "LOGIN_IDENTITY",
+                code::LOGIN_IDENTITY,
                 "登录的不是指定账号，未替换凭据",
             ));
         }
@@ -691,7 +698,7 @@ impl Core {
                         && login_principal(&p.auth).is_ok_and(|other| principal.matches(&other))))
         }) {
             return Err(AppError::new(
-                "LOGIN_DUPLICATE",
+                code::LOGIN_DUPLICATE,
                 "新凭据已属于另一个已保存账号，未覆盖",
             ));
         }
@@ -699,7 +706,7 @@ impl Core {
         let before = storage::read_optional(&path)?;
         if storage::revision(before.as_deref()) != target.auth_revision {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "登录期间当前账号文件已变化，未覆盖",
             ));
         }
@@ -716,7 +723,7 @@ impl Core {
             }
         }
         let mut value: Value = serde_json::from_str(&self.store.profiles[index].auth)
-            .map_err(|_| AppError::new("AUTH", "已保存凭据格式无效"))?;
+            .map_err(|_| AppError::new(code::AUTH, "已保存凭据格式无效"))?;
         // Replace the complete authentication unit, including absent fields.
         // In particular never pair new tokens with an old account_id/API key.
         if let Some(root) = value.as_object_mut() {
@@ -731,10 +738,10 @@ impl Core {
         }
         merge(
             &mut value,
-            serde_json::from_str(raw).map_err(|_| AppError::new("AUTH", "新凭据格式无效"))?,
+            serde_json::from_str(raw).map_err(|_| AppError::new(code::AUTH, "新凭据格式无效"))?,
         );
         let merged = serde_json::to_string_pretty(&value)
-            .map_err(|_| AppError::new("AUTH", "无法保存新凭据"))?;
+            .map_err(|_| AppError::new(code::AUTH, "无法保存新凭据"))?;
         let old = self.store.clone();
         if target.current {
             storage::atomic_write(&path, merged.as_bytes(), Some(&target.auth_revision))?;
@@ -760,7 +767,7 @@ impl Core {
                 .is_err()
                 {
                     return Err(AppError::new(
-                        "CONFLICT",
+                        code::CONFLICT,
                         "账号库保存失败，当前凭据已变化，未覆盖现场",
                     ));
                 }
@@ -773,7 +780,7 @@ impl Core {
     }
     pub fn add_api_key(&mut self, name: &str, key: &str) -> Result<String> {
         if key.trim().is_empty() || key.contains(['\n', '\r']) {
-            return Err(AppError::new("KEY", "请输入单行有效 API Key"));
+            return Err(AppError::new(code::KEY, "请输入单行有效 API Key"));
         }
         let raw = serde_json::to_string_pretty(
             &json!({"auth_mode":"apikey","OPENAI_API_KEY":key.trim()}),
@@ -783,9 +790,9 @@ impl Core {
     }
     pub fn import_file(&mut self, path: &Path, name: Option<String>) -> Result<String> {
         let bytes = storage::read_optional(path)?
-            .ok_or_else(|| AppError::new("MISSING", "所选文件不存在"))?;
+            .ok_or_else(|| AppError::new(code::MISSING, "所选文件不存在"))?;
         let raw = String::from_utf8(bytes)
-            .map_err(|_| AppError::new("UTF8", "凭据文件必须使用 UTF-8 编码"))?;
+            .map_err(|_| AppError::new(code::UTF8, "凭据文件必须使用 UTF-8 编码"))?;
         self.import_raw(&raw, name)
     }
     pub fn rename(&mut self, id: &str, name: &str) -> Result<()> {
@@ -795,7 +802,7 @@ impl Core {
             .profiles
             .iter_mut()
             .find(|p| p.id == id)
-            .ok_or_else(|| AppError::new("ACCOUNT", "账号不存在"))?
+            .ok_or_else(|| AppError::new(code::ACCOUNT, "账号不存在"))?
             .name = label;
         if let Err(e) = self.persist() {
             self.store = old;
@@ -867,7 +874,7 @@ impl Core {
                 std::thread::sleep(std::time::Duration::from_millis(60));
                 if storage::read_optional(&self.home().join("auth.json"))? != auth {
                     return Err(AppError::new(
-                        "AUTH_PENDING",
+                        code::AUTH_PENDING,
                         "账号文件正在写入，稍后自动重试",
                     ));
                 }
@@ -1035,14 +1042,14 @@ impl Core {
     pub fn switch_account(&mut self, id: &str, expected: &str) -> Result<ViewState> {
         if crate::gateway::manages_auth(&self.data_dir, &self.home()) {
             return Err(AppError::new(
-                "GATEWAY_ACTIVE",
+                code::GATEWAY_ACTIVE,
                 "请先关闭普通 API 网关并处理恢复事务，再切换账号",
             ));
         }
         let state = self.state()?;
         if state.auth_revision != expected {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "账号文件已变化，列表已刷新，请重新选择",
             ));
         }
@@ -1051,13 +1058,13 @@ impl Core {
             .profiles
             .iter()
             .find(|p| p.id == id)
-            .ok_or_else(|| AppError::new("ACCOUNT", "账号不存在"))?;
+            .ok_or_else(|| AppError::new(code::ACCOUNT, "账号不存在"))?;
         auth_info(&profile.auth)?;
         let raw = profile.auth.clone();
         let path = self.home().join("auth.json");
         let previous = storage::read_optional(&path)?;
         if storage::revision(previous.as_deref()) != expected {
-            return Err(AppError::new("CONFLICT", "账号文件已变化，请重新选择"));
+            return Err(AppError::new(code::CONFLICT, "账号文件已变化，请重新选择"));
         }
         if let Some(bytes) = previous {
             storage::atomic_write(&self.data_dir.join("previous-auth.json"), &bytes, None)?;
@@ -1070,7 +1077,7 @@ impl Core {
         let bytes = storage::read_optional(&path)?;
         let revision = storage::revision(bytes.as_deref());
         let text = String::from_utf8(bytes.unwrap_or_default())
-            .map_err(|_| AppError::new("UTF8", "配置必须使用 UTF-8 编码"))?;
+            .map_err(|_| AppError::new(code::UTF8, "配置必须使用 UTF-8 编码"))?;
         Ok(ConfigDocument {
             text,
             revision,
@@ -1083,7 +1090,7 @@ impl Core {
         let bytes = storage::read_optional(&path)?;
         if expected != storage::revision(bytes.as_deref()) {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "配置已被其他程序修改。草稿已保留，请重新读取并合并后保存",
             ));
         }
@@ -1095,10 +1102,10 @@ impl Core {
     }
     pub fn set_quota_refresh(&mut self, seconds: u64, expected: u64) -> Result<ViewState> {
         if seconds != 0 && !(10..=86400).contains(&seconds) {
-            return Err(AppError::new("PREFERENCES", "刷新间隔需为 10–86400 秒"));
+            return Err(AppError::new(code::PREFERENCES, "刷新间隔需为 10–86400 秒"));
         }
         if self.store.preferences.quota_refresh_seconds != expected {
-            return Err(AppError::new("CONFLICT", "额度刷新设置已变化，请重试"));
+            return Err(AppError::new(code::CONFLICT, "额度刷新设置已变化，请重试"));
         }
         self.store.preferences.quota_refresh_seconds = seconds;
         if let Err(e) = self.persist() {
@@ -1110,26 +1117,26 @@ impl Core {
     pub fn set_preferences(&mut self, prefs: Preferences) -> Result<ViewState> {
         if prefs.quota_refresh_seconds != 0 && !(10..=86400).contains(&prefs.quota_refresh_seconds)
         {
-            return Err(AppError::new("PREFERENCES", "刷新间隔需为 10–86400 秒"));
+            return Err(AppError::new(code::PREFERENCES, "刷新间隔需为 10–86400 秒"));
         }
         if !Path::new(&prefs.grok_home).is_absolute() {
-            return Err(AppError::new("PATH", "Grok Build 目录必须是绝对路径"));
+            return Err(AppError::new(code::PATH, "Grok Build 目录必须是绝对路径"));
         }
         if !Path::new(&prefs.claude_home).is_absolute() {
-            return Err(AppError::new("PATH", "Claude 配置目录必须是绝对路径"));
+            return Err(AppError::new(code::PATH, "Claude 配置目录必须是绝对路径"));
         }
         if !["system", "dark", "light"].contains(&prefs.theme.as_str()) {
-            return Err(AppError::new("THEME", "主题无效"));
+            return Err(AppError::new(code::THEME, "主题无效"));
         }
         let root = PathBuf::from(&prefs.codex_home);
         if !root.is_absolute() || !root.is_dir() {
-            return Err(AppError::new("PATH", "请选择已存在的 Codex 配置目录"));
+            return Err(AppError::new(code::PATH, "请选择已存在的 Codex 配置目录"));
         }
         if !prefs.cli_path.is_empty()
             && (!Path::new(&prefs.cli_path).is_absolute() || !Path::new(&prefs.cli_path).is_file())
         {
             return Err(AppError::new(
-                "CLI",
+                code::CLI,
                 "请选择 Codex CLI 可执行文件的绝对路径",
             ));
         }
@@ -1149,7 +1156,10 @@ impl Core {
 fn clean_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
-        Err(AppError::new("NAME", "名称需为 1–100 个字符，不能包含换行"))
+        Err(AppError::new(
+            code::NAME,
+            "名称需为 1–100 个字符，不能包含换行",
+        ))
     } else {
         Ok(name.into())
     }
@@ -1239,7 +1249,7 @@ mod tests {
         std::fs::write(c.home().join("auth.json"), "external").unwrap();
         assert_eq!(
             c.switch_account(&a, "missing").unwrap_err().code,
-            "CONFLICT"
+            code::CONFLICT
         );
         assert_eq!(
             std::fs::read_to_string(c.home().join("auth.json")).unwrap(),

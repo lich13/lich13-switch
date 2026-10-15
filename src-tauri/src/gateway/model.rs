@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -129,7 +130,7 @@ impl Settings {
             .iter()
             .any(|s| *s == 0 || *s > 86400)
         {
-            return Err(AppError::new("SETTINGS", "端口、阈值和超时参数无效"));
+            return Err(AppError::new(code::SETTINGS, "端口、阈值和超时参数无效"));
         }
         Ok(())
     }
@@ -289,14 +290,14 @@ pub enum Edit {
 pub fn name(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > 120 || value.chars().any(char::is_control) {
-        Err(AppError::new("NAME", "名称应为 1–120 个可见字符"))
+        Err(AppError::new(code::NAME, "名称应为 1–120 个可见字符"))
     } else {
         Ok(value.to_owned())
     }
 }
 pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
     let mut u = url::Url::parse(value.trim())
-        .map_err(|_| AppError::new("URL", "请输入完整的 HTTP 或 HTTPS base_url"))?;
+        .map_err(|_| AppError::new(code::URL, "请输入完整的 HTTP 或 HTTPS base_url"))?;
     if !["http", "https"].contains(&u.scheme())
         || u.host_str().is_none()
         || !u.username().is_empty()
@@ -305,7 +306,7 @@ pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
         || u.fragment().is_some()
     {
         return Err(AppError::new(
-            "URL",
+            code::URL,
             "base_url 只接受不含认证、查询参数及片段的 HTTP(S) 地址",
         ));
     }
@@ -316,7 +317,7 @@ pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
             .is_ok_and(|ip| ip.is_loopback()))
         && u.port_or_known_default() == Some(port)
     {
-        return Err(AppError::new("LOOP", "上游不能指向本网关"));
+        return Err(AppError::new(code::LOOP, "上游不能指向本网关"));
     }
     normalize_api_path(&mut u);
     Ok(u)
@@ -353,7 +354,7 @@ impl Store {
         let raw = storage::read_optional(path)?;
         let mut store: Self = match &raw {
             Some(raw) => {
-                let invalid = || AppError::new("STORE", "网关存储无法读取，请保留原文件");
+                let invalid = || AppError::new(code::STORE, "网关存储无法读取，请保留原文件");
                 let value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
                 serde_json::from_value(value).map_err(|_| invalid())?
@@ -361,7 +362,7 @@ impl Store {
             None => Self::default(),
         };
         if !matches!(store.schema, 1 | 2) {
-            return Err(AppError::new("STORE", "网关存储版本不受支持"));
+            return Err(AppError::new(code::STORE, "网关存储版本不受支持"));
         }
         if !store.phase_timeouts {
             if store.settings.first_byte_seconds == 60 {
@@ -385,7 +386,7 @@ impl Store {
     }
     pub fn persist(&self, path: &Path, expected: &str) -> Result<String> {
         let raw = serde_json::to_vec_pretty(self)
-            .map_err(|_| AppError::new("STORE", "无法保存网关设置"))?;
+            .map_err(|_| AppError::new(code::STORE, "无法保存网关设置"))?;
         storage::atomic_write(path, &raw, Some(expected))?;
         Ok(storage::digest(&raw))
     }
@@ -393,7 +394,7 @@ impl Store {
         self.providers
             .iter_mut()
             .find(|p| p.id == id)
-            .ok_or_else(|| AppError::new("PROVIDER", "供应商不存在"))
+            .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
     }
     pub fn edit(&mut self, edit: Edit, running: bool) -> Result<()> {
         match edit {
@@ -417,7 +418,7 @@ impl Store {
                 )?;
                 let id = existing
                     .or_else(|| self.providers.last().map(|p| p.id.clone()))
-                    .ok_or_else(|| AppError::new("PROVIDER", "供应商不存在"))?;
+                    .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
                 let connection = self.grok_connections.entry(id.clone()).or_default();
                 let mut connection_changed = false;
                 if replacing_token {
@@ -434,10 +435,10 @@ impl Store {
                     self.provider_mut(&id)?.version = uuid::Uuid::new_v4().to_string();
                 }
             }
-            Edit::GrokNative => return Err(AppError::new("GROK_CONFIG", "需要原生配置事务")),
+            Edit::GrokNative => return Err(AppError::new(code::GROK_CONFIG, "需要原生配置事务")),
             Edit::ImportProviders { providers } => {
                 if providers.is_empty() || providers.len() > 1000 {
-                    return Err(AppError::new("IMPORT", "请选择 1–1000 项"));
+                    return Err(AppError::new(code::IMPORT, "请选择 1–1000 项"));
                 }
                 let mut pairs = std::collections::HashSet::new();
                 for p in &self.providers {
@@ -450,7 +451,7 @@ impl Store {
                     p.name = name(&p.name)?;
                     let u = base_url(&p.base_url, self.settings.port)?;
                     if !pairs.insert((u.to_string(), p.token.clone())) {
-                        return Err(AppError::new("DUPLICATE", "相同地址和 Key 已存在"));
+                        return Err(AppError::new(code::DUPLICATE, "相同地址和 Key 已存在"));
                     }
                     p.base_url = u.as_str().trim_end_matches('/').into();
                     p.queued = false;
@@ -471,7 +472,7 @@ impl Store {
                             u.as_str().trim_end_matches('/') == url.as_str().trim_end_matches('/')
                         })
                 }) {
-                    return Err(AppError::new("DUPLICATE", "该供应商已存在"));
+                    return Err(AppError::new(code::DUPLICATE, "该供应商已存在"));
                 }
                 let selected = self.selected.clone();
                 self.edit(
@@ -493,7 +494,7 @@ impl Store {
             } => {
                 let u = base_url(&raw, self.settings.port)?;
                 if token.contains(['\r', '\n']) {
-                    return Err(AppError::new("TOKEN", "Token 不得包含换行"));
+                    return Err(AppError::new(code::TOKEN, "Token 不得包含换行"));
                 }
                 let label = if let Some(value) = display_name
                     .as_deref()
@@ -520,7 +521,7 @@ impl Store {
                     }
                 } else {
                     if token.trim().is_empty() {
-                        return Err(AppError::new("TOKEN", "请输入供应商 Token"));
+                        return Err(AppError::new(code::TOKEN, "请输入供应商 Token"));
                     }
                     let id = uuid::Uuid::new_v4().to_string();
                     self.providers.push(Provider {
@@ -567,7 +568,7 @@ impl Store {
                 let index = values
                     .iter()
                     .position(|url| url == &selected)
-                    .ok_or_else(|| AppError::new("ENDPOINT", "辅助端点已变化，请刷新后重试"))?;
+                    .ok_or_else(|| AppError::new(code::ENDPOINT, "辅助端点已变化，请刷新后重试"))?;
                 values[index] = primary;
                 // Swapping roles does not change credentials or the endpoint set.
                 // Keep the provider version so existing conversations retain affinity.
@@ -588,7 +589,7 @@ impl Store {
             } => {
                 if max_concurrency > 100000 {
                     return Err(AppError::new(
-                        "CONCURRENCY",
+                        code::CONCURRENCY,
                         "并发上限应为 0–100000，0 表示不限",
                     ));
                 }
@@ -596,7 +597,10 @@ impl Store {
             }
             Edit::RpmProvider { id, max_rpm } => {
                 if max_rpm > 100000 {
-                    return Err(AppError::new("RPM", "RPM 上限应为 0–100000，0 表示不限"));
+                    return Err(AppError::new(
+                        code::RPM,
+                        "RPM 上限应为 0–100000，0 表示不限",
+                    ));
                 }
                 self.provider_mut(&id)?.max_rpm = max_rpm;
             }
@@ -612,7 +616,7 @@ impl Store {
                                 || model.contains('*')
                             {
                                 return Err(AppError::new(
-                                    "MODELS",
+                                    code::MODELS,
                                     "模型 ID 应为 1–256 字节，不能包含控制字符或通配符",
                                 ));
                             }
@@ -621,7 +625,7 @@ impl Store {
                             }
                         }
                         if result.is_empty() || result.len() > 4096 {
-                            return Err(AppError::new("MODELS", "白名单应包含 1–4096 个模型"));
+                            return Err(AppError::new(code::MODELS, "白名单应包含 1–4096 个模型"));
                         }
                         Ok(result)
                     })
@@ -655,7 +659,7 @@ impl Store {
                 take_new_threads,
             } => {
                 if handoff_after_compaction.is_none() && take_new_threads.is_none() {
-                    return Err(AppError::new("SETTINGS", "请选择要修改的接管开关"));
+                    return Err(AppError::new(code::SETTINGS, "请选择要修改的接管开关"));
                 }
                 let provider = self.provider_mut(&id)?;
                 if let Some(value) = handoff_after_compaction {
@@ -675,7 +679,10 @@ impl Store {
                         .iter()
                         .any(|id| !self.providers.iter().any(|p| &p.id == id))
                 {
-                    return Err(AppError::new("QUEUE", "排序必须包含每个供应商且不能重复"));
+                    return Err(AppError::new(
+                        code::QUEUE,
+                        "排序必须包含每个供应商且不能重复",
+                    ));
                 }
                 self.providers
                     .sort_by_key(|p| ids.iter().position(|id| id == &p.id).unwrap_or(usize::MAX));
@@ -687,14 +694,14 @@ impl Store {
             }
             Edit::Mode { mode } => {
                 if !["manual", "auto"].contains(&mode.as_str()) {
-                    return Err(AppError::new("MODE", "模式无效"));
+                    return Err(AppError::new(code::MODE, "模式无效"));
                 }
                 self.mode = mode;
             }
             Edit::Settings { settings } => {
                 settings.validate()?;
                 if running && settings.port != self.settings.port {
-                    return Err(AppError::new("RUNNING", "修改端口前请先停用网关"));
+                    return Err(AppError::new(code::RUNNING, "修改端口前请先停用网关"));
                 }
                 for p in &self.providers {
                     base_url(&p.base_url, settings.port)?;
@@ -716,11 +723,11 @@ impl Store {
 
 pub fn endpoint_urls(primary: &str, values: &[String], port: u16) -> Result<Vec<String>> {
     if values.len() > 8 {
-        return Err(AppError::new("ENDPOINT", "最多添加 8 个辅助端点"));
+        return Err(AppError::new(code::ENDPOINT, "最多添加 8 个辅助端点"));
     }
     let canonical = |raw: &str| -> Result<String> {
         if raw.len() > 2048 || raw.chars().any(char::is_control) {
-            return Err(AppError::new("ENDPOINT", "端点地址过长或含有无效字符"));
+            return Err(AppError::new(code::ENDPOINT, "端点地址过长或含有无效字符"));
         }
         Ok(base_url(raw, port)?
             .as_str()

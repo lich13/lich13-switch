@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::{
     power, process_control,
     storage::{AppError, Result},
@@ -11,7 +12,7 @@ pub async fn get_clamshell_state(r: R<'_>) -> Result<power::State> {
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || r.power.state())
         .await
-        .map_err(|_| AppError::new("POWER", "电源状态读取失败"))?
+        .map_err(|_| AppError::new(code::POWER, "电源状态读取失败"))?
 }
 #[tauri::command]
 pub async fn set_clamshell_awake(
@@ -29,7 +30,7 @@ pub async fn set_clamshell_awake(
         result
     })
     .await
-    .map_err(|_| AppError::new("POWER", "电源设置失败"))?
+    .map_err(|_| AppError::new(code::POWER, "电源设置失败"))?
 }
 #[tauri::command]
 pub async fn install_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<power::State> {
@@ -42,7 +43,7 @@ pub async fn install_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<pow
         result
     })
     .await
-    .map_err(|_| AppError::new("POWER", "助手安装失败"))?
+    .map_err(|_| AppError::new(code::POWER, "助手安装失败"))?
 }
 #[tauri::command]
 pub async fn remove_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<power::State> {
@@ -55,17 +56,17 @@ pub async fn remove_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<powe
         result
     })
     .await
-    .map_err(|_| AppError::new("POWER", "助手移除失败"))?
+    .map_err(|_| AppError::new(code::POWER, "助手移除失败"))?
 }
 #[tauri::command]
 pub async fn force_quit_codex_clients(r: R<'_>) -> Result<process_control::Outcome> {
     if r.force_quitting.swap(true, Ordering::AcqRel) {
-        return Err(AppError::new("BUSY", "正在退出客户端"));
+        return Err(AppError::new(code::BUSY, "正在退出客户端"));
     }
     let runtime = r.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(process_control::force_quit)
         .await
-        .map_err(|_| AppError::new("PROCESS", "退出客户端失败"));
+        .map_err(|_| AppError::new(code::PROCESS, "退出客户端失败"));
     runtime.force_quitting.store(false, Ordering::Release);
     result?
 }
@@ -93,7 +94,7 @@ pub async fn get_app_events(
     let service = r.diagnostics.clone();
     tauri::async_runtime::spawn_blocking(move || service.query(filter))
         .await
-        .map_err(|_| AppError::new("LOG_READ", "日志读取失败"))
+        .map_err(|_| AppError::new(code::LOG_READ, "日志读取失败"))
 }
 #[tauri::command]
 pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::ClassifiedRecord> {
@@ -123,11 +124,11 @@ pub async fn preview_sub2api_import(
         };
         let path = file
             .into_path()
-            .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))?;
+            .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))?;
         gateway.exchange_preview(&path).map(Some)
     })
     .await
-    .map_err(|_| AppError::new("IMPORT", "导入文件读取失败"))?
+    .map_err(|_| AppError::new(code::IMPORT, "导入文件读取失败"))?
 }
 #[tauri::command]
 pub async fn commit_sub2api_import(
@@ -176,11 +177,11 @@ pub async fn prepare_sub2api_export(
         };
         let path = file
             .into_path()
-            .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))?;
+            .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))?;
         gateway.exchange_template(&path).map(Some)
     })
     .await
-    .map_err(|_| AppError::new("EXPORT", "模板读取失败"))?
+    .map_err(|_| AppError::new(code::EXPORT, "模板读取失败"))?
 }
 #[tauri::command]
 pub fn select_sub2api_template(
@@ -213,13 +214,13 @@ pub async fn preview_account_import(
             .into_iter()
             .map(|f| {
                 f.into_path()
-                    .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))
+                    .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))
             })
             .collect::<Result<Vec<_>>>()?;
         r.core.lock().unwrap().exchange_preview(&paths).map(Some)
     })
     .await
-    .map_err(|_| AppError::new("IMPORT", "账号文件读取失败"))?
+    .map_err(|_| AppError::new(code::IMPORT, "账号文件读取失败"))?
 }
 #[tauri::command]
 pub fn cancel_account_exchange(r: R<'_>, token: String) {
@@ -270,7 +271,7 @@ pub async fn prepare_account_template(
         };
         let path = file
             .into_path()
-            .map_err(|_| AppError::new("PATH", "请选择本地 JSON 文件"))?;
+            .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))?;
         r.core
             .lock()
             .unwrap()
@@ -278,7 +279,7 @@ pub async fn prepare_account_template(
             .map(Some)
     })
     .await
-    .map_err(|_| AppError::new("EXPORT", "OAuth 模板读取失败"))?
+    .map_err(|_| AppError::new(code::EXPORT, "OAuth 模板读取失败"))?
 }
 #[tauri::command]
 pub fn select_account_template(r: R<'_>, token: String, id: usize) -> Result<()> {
@@ -307,14 +308,14 @@ pub async fn export_accounts(
                 .add_filter("JSON", &["json"])
                 .blocking_save_file()
         } else {
-            return Err(AppError::new("EXPORT", "导出格式不支持"));
+            return Err(AppError::new(code::EXPORT, "导出格式不支持"));
         };
         let Some(file) = file else {
             return Ok(false);
         };
         let path = file
             .into_path()
-            .map_err(|_| AppError::new("PATH", "请选择本地路径"))?;
+            .map_err(|_| AppError::new(code::PATH, "请选择本地路径"))?;
         r.core
             .lock()
             .unwrap()
@@ -322,7 +323,7 @@ pub async fn export_accounts(
         Ok(true)
     })
     .await
-    .map_err(|_| AppError::new("EXPORT", "账号导出失败"))?
+    .map_err(|_| AppError::new(code::EXPORT, "账号导出失败"))?
 }
 #[tauri::command]
 pub async fn export_sub2api_providers(
@@ -346,10 +347,10 @@ pub async fn export_sub2api_providers(
         };
         let path = file
             .into_path()
-            .map_err(|_| AppError::new("PATH", "请选择本地文件"))?;
+            .map_err(|_| AppError::new(code::PATH, "请选择本地文件"))?;
         gateway.exchange_export(&ids, &expected_revision, &path)?;
         Ok(true)
     })
     .await
-    .map_err(|_| AppError::new("EXPORT", "导出保存失败"))?
+    .map_err(|_| AppError::new(code::EXPORT, "导出保存失败"))?
 }

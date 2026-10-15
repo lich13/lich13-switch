@@ -1,4 +1,5 @@
 //! Process termination is deliberately tested with a fake inventory only.
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 use serde::Serialize;
 use std::{
@@ -38,7 +39,7 @@ fn run(backend: &mut dyn Processes, own_pid: u32) -> Result<Outcome> {
     let own = inventory
         .iter()
         .find(|p| p.pid == own_pid)
-        .ok_or_else(|| AppError::new("PROCESS", "无法确认当前用户"))?;
+        .ok_or_else(|| AppError::new(code::PROCESS, "无法确认当前用户"))?;
     let eligible: HashMap<_, _> = inventory
         .iter()
         .filter(|p| p.user == own.user && !p.user.is_empty())

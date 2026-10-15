@@ -1,4 +1,5 @@
 //! Tray panel lifecycle, following Sub2Ops 4d0eafc1 interaction behavior.
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Mutex, time::Duration};
@@ -39,7 +40,7 @@ impl Panel {
         let preferences = storage::read_optional(&path)?
             .map(|raw| {
                 serde_json::from_slice(&raw)
-                    .map_err(|_| AppError::new("PANEL", "快捷面板设置无法读取"))
+                    .map_err(|_| AppError::new(code::PANEL, "快捷面板设置无法读取"))
             })
             .transpose()?
             .unwrap_or_default();
@@ -72,13 +73,13 @@ impl Panel {
     pub fn show(app: &tauri::AppHandle, anchor: Option<tauri::Rect>) -> Result<()> {
         let window = app
             .get_webview_window("quick")
-            .ok_or_else(|| AppError::new("PANEL", "快捷面板未创建"))?;
+            .ok_or_else(|| AppError::new(code::PANEL, "快捷面板未创建"))?;
         let anchor = anchor
             .or_else(|| {
                 app.tray_by_id("switch")
                     .and_then(|t| t.rect().ok().flatten())
             })
-            .ok_or_else(|| AppError::new("PANEL", "无法定位托盘图标"))?;
+            .ok_or_else(|| AppError::new(code::PANEL, "无法定位托盘图标"))?;
         let panel = app.state::<Panel>();
         let height = {
             let mut life = panel.lifecycle.lock().unwrap();
@@ -91,13 +92,13 @@ impl Panel {
             position(&window, anchor, height)?;
             #[cfg(target_os = "macos")]
             app.show()
-                .map_err(|_| AppError::new("PANEL", "无法显示快捷面板"))?;
+                .map_err(|_| AppError::new(code::PANEL, "无法显示快捷面板"))?;
             window
                 .show()
-                .map_err(|_| AppError::new("PANEL", "无法显示快捷面板"))?;
+                .map_err(|_| AppError::new(code::PANEL, "无法显示快捷面板"))?;
             window
                 .set_focus()
-                .map_err(|_| AppError::new("PANEL", "无法聚焦快捷面板"))?;
+                .map_err(|_| AppError::new(code::PANEL, "无法聚焦快捷面板"))?;
             let _ = window.emit("panel-visibility", true);
             Ok(())
         })();
@@ -167,7 +168,7 @@ fn position(window: &tauri::WebviewWindow, anchor: tauri::Rect, height: f64) -> 
     let size = anchor.size.to_physical::<f64>(1.);
     let monitors = window
         .available_monitors()
-        .map_err(|_| AppError::new("PANEL", "无法读取屏幕区域"))?;
+        .map_err(|_| AppError::new(code::PANEL, "无法读取屏幕区域"))?;
     let monitor = monitors
         .iter()
         .find(|m| {
@@ -179,7 +180,7 @@ fn position(window: &tauri::WebviewWindow, anchor: tauri::Rect, height: f64) -> 
                 && p.y < mp.y as f64 + ms.height as f64
         })
         .or_else(|| monitors.first())
-        .ok_or_else(|| AppError::new("PANEL", "没有可用屏幕"))?;
+        .ok_or_else(|| AppError::new(code::PANEL, "没有可用屏幕"))?;
     let area = monitor.work_area();
     let (x, y, width, height) = bounds(
         (p.x, p.y, size.width, size.height),
@@ -195,7 +196,7 @@ fn position(window: &tauri::WebviewWindow, anchor: tauri::Rect, height: f64) -> 
     window
         .set_size(tauri::PhysicalSize::new(width, height))
         .and_then(|_| window.set_position(tauri::PhysicalPosition::new(x, y)))
-        .map_err(|_| AppError::new("PANEL", "无法定位快捷面板"))
+        .map_err(|_| AppError::new(code::PANEL, "无法定位快捷面板"))
 }
 #[tauri::command]
 pub fn get_quick(app: tauri::AppHandle, panel: tauri::State<'_, Panel>) -> serde_json::Value {
@@ -216,13 +217,13 @@ pub fn set_quick(
     }
     if let Some(tab) = tab {
         if !["providers", "accounts"].contains(&tab.as_str()) {
-            return Err(AppError::new("PANEL", "无效快捷页面"));
+            return Err(AppError::new(code::PANEL, "无效快捷页面"));
         }
         next.tab = tab;
     }
     storage::atomic_write(
         &panel.path,
-        &serde_json::to_vec(&next).map_err(|_| AppError::new("PANEL", "无法保存快捷设置"))?,
+        &serde_json::to_vec(&next).map_err(|_| AppError::new(code::PANEL, "无法保存快捷设置"))?,
         None,
     )?;
     *prefs = next.clone();
@@ -240,7 +241,7 @@ pub fn hide_quick(app: tauri::AppHandle) -> Result<()> {
     }
     if let Some(w) = app.get_webview_window("quick") {
         w.hide()
-            .map_err(|_| AppError::new("PANEL", "无法关闭快捷面板"))?;
+            .map_err(|_| AppError::new(code::PANEL, "无法关闭快捷面板"))?;
         let _ = w.emit("panel-visibility", false);
     }
     Ok(())
@@ -252,7 +253,7 @@ pub fn resize_quick(
     height: f64,
 ) -> Result<()> {
     if window.label() != "quick" || !height.is_finite() {
-        return Err(AppError::new("PANEL", "窗口尺寸无效"));
+        return Err(AppError::new(code::PANEL, "窗口尺寸无效"));
     }
     let panel = app.state::<Panel>();
     let anchor = {

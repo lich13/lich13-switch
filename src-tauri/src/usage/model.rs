@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,7 @@ pub fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 pub fn failure(message: &str) -> AppError {
-    AppError::new("USAGE", message)
+    AppError::new(code::USAGE, message)
 }
 pub fn decimal(value: &str) -> Option<Decimal> {
     Decimal::from_str(value)

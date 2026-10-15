@@ -1,4 +1,5 @@
 //! The only elevation is installation of a verified, narrow helper. Normal toggles use XPC.
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde_json::{json, Value};
 use std::{
@@ -42,7 +43,7 @@ pub fn request(value: Value) -> Result<Value> {
 fn request_with_timeout(value: Value, timeout_ms: u64) -> Result<Value> {
     if !installed_app() {
         return Err(AppError::new(
-            "POWER_ISOLATED",
+            code::POWER_ISOLATED,
             "请从 /Applications 中的正式应用使用电源助手",
         ));
     }
@@ -55,15 +56,18 @@ fn request_with_timeout(value: Value, timeout_ms: u64) -> Result<Value> {
     let response =
         take(unsafe { gs_power_request(input.as_ptr(), requirement.as_ptr(), timeout_ms) })
             .ok_or_else(|| {
-                AppError::new("POWER_HELPER", "电源助手不可用或应用版本未授权，请修复助手")
+                AppError::new(
+                    code::POWER_HELPER,
+                    "电源助手不可用或应用版本未授权，请修复助手",
+                )
             })?;
     let response: Value = serde_json::from_str(&response)
-        .map_err(|_| AppError::new("POWER_HELPER", "电源助手响应无效"))?;
+        .map_err(|_| AppError::new(code::POWER_HELPER, "电源助手响应无效"))?;
     if let Some(e) = response.get("error") {
         let code = e
             .get("code")
             .and_then(Value::as_str)
-            .unwrap_or("POWER_HELPER");
+            .unwrap_or(code::POWER_HELPER);
         let message = e
             .get("message")
             .and_then(Value::as_str)
@@ -72,7 +76,7 @@ fn request_with_timeout(value: Value, timeout_ms: u64) -> Result<Value> {
     }
     if response.get("version") != Some(&json!(1)) {
         return Err(AppError::new(
-            "POWER_HELPER",
+            code::POWER_HELPER,
             "电源助手版本不兼容，请修复助手",
         ));
     }
@@ -143,7 +147,7 @@ trap '/bin/rm -f -- {stage}' EXIT
 fn installation_result(output: &std::process::Output) -> Result<()> {
     if !output.status.success() {
         return Err(AppError::new(
-            "POWER_AUTH",
+            code::POWER_AUTH,
             if String::from_utf8_lossy(&output.stderr).contains("-128") {
                 "已取消系统授权"
             } else {
@@ -153,19 +157,19 @@ fn installation_result(output: &std::process::Output) -> Result<()> {
     }
     let result: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
         AppError::new(
-            "POWER_INSTALL_RESULT",
+            code::POWER_INSTALL_RESULT,
             "安装结果无效，无法确认注册状态，请重新修复助手",
         )
     })?;
     if let Some(error) = result.get("error") {
         return Err(AppError::new(
-            error["code"].as_str().unwrap_or("POWER_INSTALL_RESULT"),
+            error["code"].as_str().unwrap_or(code::POWER_INSTALL_RESULT),
             error["message"].as_str().unwrap_or("电源助手安装未完成"),
         ));
     }
     if result.get("version") != Some(&json!(1)) {
         return Err(AppError::new(
-            "POWER_INSTALL_RESULT",
+            code::POWER_INSTALL_RESULT,
             "安装结果版本无效，请重新修复助手",
         ));
     }
@@ -174,7 +178,7 @@ fn installation_result(output: &std::process::Output) -> Result<()> {
 pub fn ensure(force: bool) -> Result<()> {
     if !installed_app() {
         return Err(AppError::new(
-            "POWER_ISOLATED",
+            code::POWER_ISOLATED,
             "隔离程序不注册系统电源助手",
         ));
     }
@@ -183,7 +187,7 @@ pub fn ensure(force: bool) -> Result<()> {
     }
     let hash = take(unsafe { gs_power_identity() })
         .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| AppError::new("POWER_AUTH", "无法校验当前应用签名"))?;
+        .ok_or_else(|| AppError::new(code::POWER_AUTH, "无法校验当前应用签名"))?;
     let folder = tempfile::tempdir().map_err(storage::io_error)?;
     let payload = folder.path().join("power-helper");
     storage::atomic_write(&payload, IMAGE, None)?;
@@ -237,7 +241,7 @@ pub fn ensure(force: bool) -> Result<()> {
     installation_result(&child.wait_with_output().map_err(storage::io_error)?)?;
     if !verified {
         return Err(AppError::new(
-            "POWER_INSTALL_CONNECT",
+            code::POWER_INSTALL_CONNECT,
             "助手未通过应用连接校验，请重新修复",
         ));
     }
@@ -249,6 +253,7 @@ pub fn remove() -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
+    use crate::errors::code;
     use std::os::unix::process::ExitStatusExt;
     #[test]
     fn install_errors_preserve_stage_and_never_reveal_raw_stderr() {
@@ -321,7 +326,7 @@ mod tests {
     fn isolated_binary_never_installs_or_calls_production_service() {
         assert!(!super::installed_app());
         assert_eq!(super::status(), "isolated");
-        assert_eq!(super::ensure(false).unwrap_err().code, "POWER_ISOLATED");
+        assert_eq!(super::ensure(false).unwrap_err().code, code::POWER_ISOLATED);
         assert!(super::request(serde_json::json!({"op":"set"})).is_err());
     }
     #[test]

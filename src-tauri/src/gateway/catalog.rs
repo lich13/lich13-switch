@@ -4,6 +4,7 @@ use super::{
     quota::{now, Query},
     replay,
 };
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 use http_body_util::BodyExt;
 use hyper::{header, Request};
@@ -84,7 +85,7 @@ impl Service {
             .permits
             .acquire()
             .await
-            .map_err(|_| AppError::new("MODELS", "模型查询已停止"))?;
+            .map_err(|_| AppError::new(code::MODELS, "模型查询已停止"))?;
         let result = tokio::time::timeout(Duration::from_secs(10), fetch(&input, connection)).await;
         entry.view.checked_at = Some(now());
         entry.view.retry_at = None;

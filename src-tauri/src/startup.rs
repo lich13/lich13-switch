@@ -1,4 +1,5 @@
 //! Native login items, matching lich13studio's installed-bundle/hidden-launch behavior.
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ impl Service {
             .as_deref()
             .map(serde_json::from_slice)
             .transpose()
-            .map_err(|_| AppError::new("STARTUP", "启动设置无法读取"))?
+            .map_err(|_| AppError::new(code::STARTUP, "启动设置无法读取"))?
             .unwrap_or_default();
         Ok((settings, storage::revision(raw.as_deref())))
     }
@@ -68,7 +69,7 @@ impl Service {
                     return Err(system_error(e));
                 }
                 if old.is_enabled().map_err(system_error)? {
-                    return Err(AppError::new("STARTUP", "旧登录项未能移除"));
+                    return Err(AppError::new(code::STARTUP, "旧登录项未能移除"));
                 }
             }
         }
@@ -90,7 +91,10 @@ impl Service {
         let _guard = self.lock.lock().unwrap();
         let (_, revision) = self.read()?;
         if revision != expected {
-            return Err(AppError::new("CONFLICT", "启动设置已变化，请重新打开设置"));
+            return Err(AppError::new(
+                code::CONFLICT,
+                "启动设置已变化，请重新打开设置",
+            ));
         }
         let previous = registered()?;
         register(enabled)?;
@@ -130,7 +134,7 @@ fn registered() -> Result<bool> {
                 .map_err(storage::io_error)?;
             if actual != format!("{} {LOGIN_ARG}", launch.get_app_path()) {
                 return Err(AppError::new(
-                    "STARTUP",
+                    code::STARTUP,
                     "启动路径已变化，请重新启用开机启动",
                 ));
             }
@@ -143,7 +147,10 @@ fn register(enabled: bool) -> Result<()> {
     {
         let exe = executable()?;
         if bundle_path(&exe).extension().is_none_or(|e| e != "app") {
-            return Err(AppError::new("STARTUP", "请使用正式安装的应用设置开机启动"));
+            return Err(AppError::new(
+                code::STARTUP,
+                "请使用正式安装的应用设置开机启动",
+            ));
         }
         crate::startup_macos::set(enabled, &exe)
     }
@@ -157,7 +164,7 @@ fn register(enabled: bool) -> Result<()> {
         }
         .map_err(system_error)?;
         if registered()? != enabled {
-            return Err(AppError::new("STARTUP", "启动注册状态不匹配"));
+            return Err(AppError::new(code::STARTUP, "启动注册状态不匹配"));
         }
         Ok(())
     }
@@ -165,7 +172,7 @@ fn register(enabled: bool) -> Result<()> {
 
 fn system_error(_: auto_launch::Error) -> AppError {
     AppError::new(
-        "STARTUP",
+        code::STARTUP,
         "系统登录项操作失败，请检查系统的登录项与自动化权限",
     )
 }
@@ -185,17 +192,17 @@ fn auto_launch(silent: bool) -> Result<AutoLaunch> {
     };
     if cfg!(target_os = "macos") && path.extension().is_none_or(|e| e != "app") {
         return Err(AppError::new(
-            "STARTUP",
+            code::STARTUP,
             "请在安装后的 lich13-switch.app 中设置开机启动",
         ));
     }
     let path = path
         .to_str()
-        .ok_or_else(|| AppError::new("STARTUP", "安装路径无法读取"))?;
+        .ok_or_else(|| AppError::new(code::STARTUP, "安装路径无法读取"))?;
     // auto-launch's macOS AppleScript backend quotes these strings directly.
     if path.contains(['"', '\n', '\r']) || (cfg!(target_os = "macos") && path.contains('\\')) {
         return Err(AppError::new(
-            "STARTUP",
+            code::STARTUP,
             "安装路径含不支持的字符，请移动到标准应用目录",
         ));
     }
@@ -240,14 +247,14 @@ pub fn smoke_registration() -> Result<()> {
             .map_err(storage::io_error)?;
         let expected = format!("{} {LOGIN_ARG}", entry.get_app_path());
         if value != expected || !entry.is_enabled().map_err(system_error)? {
-            return Err(AppError::new("SMOKE", "Windows 启动项校验失败"));
+            return Err(AppError::new(code::SMOKE, "Windows 启动项校验失败"));
         }
         Ok(())
     })();
     entry.disable().map_err(system_error)?;
     checked?;
     if entry.is_enabled().map_err(system_error)? {
-        return Err(AppError::new("SMOKE", "Windows 启动项未解除"));
+        return Err(AppError::new(code::SMOKE, "Windows 启动项未解除"));
     }
     Ok(())
 }

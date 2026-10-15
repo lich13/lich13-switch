@@ -1,4 +1,5 @@
 use super::*;
+use crate::errors::code;
 use crate::{gateway::ClientId, Runtime};
 use std::sync::Arc;
 use tauri::Emitter;
@@ -25,7 +26,7 @@ pub async fn switch_claude_profile(
     }
     if login::running_sessions()? {
         return Err(AppError::new(
-            "CLAUDE_RUNNING",
+            code::CLAUDE_RUNNING,
             "请先退出正在运行的 Claude Code 会话",
         ));
     }
@@ -78,7 +79,7 @@ pub async fn recover_claude_profile(r: R<'_>, app: tauri::AppHandle) -> Result<V
     let _guard = r.official_tx.lock().await;
     if login::running_sessions()? {
         return Err(AppError::new(
-            "CLAUDE_RUNNING",
+            code::CLAUDE_RUNNING,
             "请先退出正在运行的 Claude Code 会话",
         ));
     }
@@ -128,7 +129,7 @@ pub async fn start_claude_login(r: R<'_>, app: tauri::AppHandle) -> Result<login
     }
     if login::running_sessions()? {
         return Err(AppError::new(
-            "CLAUDE_RUNNING",
+            code::CLAUDE_RUNNING,
             "请先退出正在运行的 Claude Code 会话",
         ));
     }

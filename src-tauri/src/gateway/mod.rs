@@ -1,3 +1,4 @@
+use crate::errors::code;
 #[cfg(test)]
 mod api_login_v020_tests;
 mod claude_config;
@@ -348,7 +349,7 @@ impl Gateway {
             Some(0),
         );
         event.details = Details {
-            local_code: Some("NO_ELIGIBLE_PROVIDER".into()),
+            local_code: Some(code::NO_ELIGIBLE_PROVIDER.into()),
             message: Some(message.into()),
             phase: Some(Phase::Admission),
             counted_failure: Some(false),
@@ -439,7 +440,7 @@ impl Gateway {
         let mut s = self.0.inner.lock().unwrap();
         s.home = Some(home.to_owned());
         if s.upgrade_pending {
-            return Err(AppError::new("CLEANUP", "请先处理未完成的升级清理"));
+            return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
         }
         if s.store.initialized {
             return Ok(());
@@ -510,13 +511,13 @@ impl Gateway {
             let base = pair
                 .base_url
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| AppError::new("IMPORT", "配置缺少供应商地址"))?;
+                .ok_or_else(|| AppError::new(code::IMPORT, "配置缺少供应商地址"))?;
             let token = pair
                 .token
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| AppError::new("IMPORT", "auth.json 缺少 API Key"))?;
+                .ok_or_else(|| AppError::new(code::IMPORT, "auth.json 缺少 API Key"))?;
             if token.starts_with("gs_") && base.contains("127.0.0.1") {
-                return Err(AppError::new("MANAGED", "不能导入网关的本地凭据"));
+                return Err(AppError::new(code::MANAGED, "不能导入网关的本地凭据"));
             }
             Ok((base, token))
         } else {
@@ -533,7 +534,7 @@ impl Gateway {
         expected_revision: &str,
     ) -> Result<String> {
         if window_label != "main" {
-            return Err(AppError::new("FORBIDDEN", "仅主窗口可查看供应商凭据"));
+            return Err(AppError::new(code::FORBIDDEN, "仅主窗口可查看供应商凭据"));
         }
         let state = self.0.inner.lock().unwrap();
         if expected_revision != self.view_revision(&state)
@@ -542,7 +543,7 @@ impl Gateway {
             ) != state.revision
         {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "供应商配置已变化，请重新打开编辑",
             ));
         }
@@ -552,7 +553,7 @@ impl Gateway {
             .iter()
             .find(|provider| provider.id == provider_id)
             .map(|provider| provider.token.clone())
-            .ok_or_else(|| AppError::new("PROVIDER", "供应商不存在"))
+            .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
     }
     fn view_revision(&self, s: &Inner) -> String {
         // File revisions also include resume checkpoints, which change after successful
@@ -789,7 +790,7 @@ impl Gateway {
             };
             if !unchanged {
                 return Err(AppError::new(
-                    "GATEWAY_ACTIVE",
+                    code::GATEWAY_ACTIVE,
                     "请先停用网关并处理恢复事务，再修改连接地址或 Token",
                 ));
             }
@@ -813,7 +814,7 @@ impl Gateway {
         };
         p.ok_or_else(|| {
             AppError::new(
-                "PROVIDER",
+                code::PROVIDER,
                 "没有关闭网关时可用的供应商，请选择供应商或加入故障转移队列",
             )
         })
@@ -835,12 +836,12 @@ impl Gateway {
         let mut s = self.0.inner.lock().unwrap();
         if expected != self.view_revision(&s) {
             return Err(AppError::new(
-                "CONFLICT",
+                code::CONFLICT,
                 "网关设置已变化，请使用最新状态重试",
             ));
         }
         if self.0.client != ClientId::Codex && matches!(&edit, Edit::TakeoverProvider { .. }) {
-            return Err(AppError::new("SETTINGS", "接管策略仅适用于 Codex"));
+            return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
         }
         if self.0.client != ClientId::Codex
             && matches!(
@@ -854,26 +855,26 @@ impl Gateway {
                 }
             )
         {
-            return Err(AppError::new("SETTINGS", "接管策略仅适用于 Codex"));
+            return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
         }
         if self.0.client != ClientId::Grok
             && matches!(&edit, Edit::SaveGrokProvider { .. } | Edit::GrokNative)
         {
-            return Err(AppError::new("CLIENT", "此操作仅适用于 Grok Build"));
+            return Err(AppError::new(code::CLIENT, "此操作仅适用于 Grok Build"));
         }
         if matches!(&edit, Edit::GrokNative) {
             if s.running {
-                return Err(AppError::new("GATEWAY_ACTIVE", "请先停用 Grok 网关"));
+                return Err(AppError::new(code::GATEWAY_ACTIVE, "请先停用 Grok 网关"));
             }
             let snapshot = s
                 .store
                 .grok_native
                 .clone()
-                .ok_or_else(|| AppError::new("GROK_CONFIG", "没有待恢复的原生配置"))?;
+                .ok_or_else(|| AppError::new(code::GROK_CONFIG, "没有待恢复的原生配置"))?;
             let (revision, text) = grok_config::read(home)?;
             if config_revision.is_some_and(|r| r != revision) || !snapshot.unchanged(&text)? {
                 return Err(AppError::new(
-                    "CONFLICT",
+                    code::CONFLICT,
                     "Grok 受管模型已变化，已保留当前配置",
                 ));
             }
@@ -883,17 +884,18 @@ impl Gateway {
             next.resume = None;
             let path = self.0.data.join("gateway.json");
             let before = storage::read_optional(&path)?
-                .ok_or_else(|| AppError::new("STORE", "网关配置缺失"))?;
+                .ok_or_else(|| AppError::new(code::STORE, "网关配置缺失"))?;
             if storage::revision(Some(&before)) != s.revision {
-                return Err(AppError::new("CONFLICT", "网关存储已变化"));
+                return Err(AppError::new(code::CONFLICT, "网关存储已变化"));
             }
             let after = serde_json::to_string_pretty(&next)
-                .map_err(|_| AppError::new("STORE", "无法保存 Grok 配置"))?;
+                .map_err(|_| AppError::new(code::STORE, "无法保存 Grok 配置"))?;
             takeover::restore_grok_native(
                 &self.0.data,
                 home,
                 snapshot,
-                String::from_utf8(before).map_err(|_| AppError::new("STORE", "网关配置无效"))?,
+                String::from_utf8(before)
+                    .map_err(|_| AppError::new(code::STORE, "网关配置无效"))?,
                 after.clone(),
                 &revision,
             )?;
@@ -905,7 +907,7 @@ impl Gateway {
         }
         if let Edit::Reset { id } = &edit {
             if !s.store.providers.iter().any(|p| &p.id == id) {
-                return Err(AppError::new("PROVIDER", "供应商不存在"));
+                return Err(AppError::new(code::PROVIDER, "供应商不存在"));
             }
             let prefix = format!("provider:{id}:");
             let circuits: Vec<_> = s
@@ -926,15 +928,15 @@ impl Gateway {
             return Ok(self.view());
         }
         if !s.running && self.0.data.join("gateway-recovery.json").exists() {
-            return Err(AppError::new("RECOVERY", "请先处理未完成的配置事务"));
+            return Err(AppError::new(code::RECOVERY, "请先处理未完成的配置事务"));
         }
         if s.upgrade_pending {
-            return Err(AppError::new("CLEANUP", "请先处理未完成的升级清理"));
+            return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
         }
         let direct_select = !s.running && matches!(&edit, Edit::Select { .. });
         if direct_select && self.claude_official() {
             return Err(AppError::new(
-                "CLAUDE_OFFICIAL",
+                code::CLAUDE_OFFICIAL,
                 "请先切换到 Claude API 配置",
             ));
         }
@@ -943,7 +945,7 @@ impl Gateway {
             && crate::official::blocks_gateway(&self.0.data, home)
         {
             return Err(AppError::new(
-                "OFFICIAL_MODE",
+                code::OFFICIAL_MODE,
                 "官方账号连接期间不能切换网关供应商",
             ));
         }
@@ -952,12 +954,12 @@ impl Gateway {
             Edit::Connection { mode } => {
                 if self.0.client != ClientId::Codex || s.running {
                     return Err(AppError::new(
-                        "GATEWAY_ACTIVE",
+                        code::GATEWAY_ACTIVE,
                         "请先关闭 Codex 网关再修改连接方式",
                     ));
                 }
                 if crate::official::blocks_gateway(&self.0.data, home) {
-                    return Err(AppError::new("OFFICIAL_MODE", "请先关闭官方账号连接"));
+                    return Err(AppError::new(code::OFFICIAL_MODE, "请先关闭官方账号连接"));
                 }
                 next.connection = match mode.as_str() {
                     "auto" => codex_api::detect(home)?,
@@ -966,7 +968,7 @@ impl Gateway {
                         takeover::read_for(ClientId::Codex, home)?;
                         codex_api::Connection::Bearer
                     }
-                    _ => return Err(AppError::new("SETTINGS", "连接方式无效")),
+                    _ => return Err(AppError::new(code::SETTINGS, "连接方式无效")),
                 };
             }
             Edit::Import => {
@@ -1004,7 +1006,7 @@ impl Gateway {
                 })?;
             if selected_protocol != active_protocol {
                 return Err(AppError::new(
-                    "GROK_PROTOCOL",
+                    code::GROK_PROTOCOL,
                     "请先停用 Grok 网关，再切换 API 协议",
                 ));
             }
@@ -1046,7 +1048,7 @@ impl Gateway {
                 let (_, text) = grok_config::read(home)?;
                 if let Some(original) = &next.grok_native {
                     if !original.unchanged(&text)? {
-                        return Err(AppError::new("CONFLICT", "Grok 受管模型已被外部修改"));
+                        return Err(AppError::new(code::CONFLICT, "Grok 受管模型已被外部修改"));
                     }
                 }
                 let connection = next
@@ -1063,7 +1065,7 @@ impl Gateway {
             }
             let resume_target = if self.0.client == ClientId::Grok && s.running {
                 takeover::exit_pair(&self.0.data)?
-                    .ok_or_else(|| AppError::new("RECOVERY", "缺少 Grok 恢复目标"))?
+                    .ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 恢复目标"))?
             } else {
                 target.clone()
             };
@@ -1075,10 +1077,10 @@ impl Gateway {
             let path = self.0.data.join("gateway.json");
             let old = storage::read_optional(&path)?;
             if storage::revision(old.as_deref()) != s.revision {
-                return Err(AppError::new("CONFLICT", "网关存储已被外部修改"));
+                return Err(AppError::new(code::CONFLICT, "网关存储已被外部修改"));
             }
             let after = serde_json::to_string_pretty(&next)
-                .map_err(|_| AppError::new("STORE", "无法写入网关设置"))?;
+                .map_err(|_| AppError::new(code::STORE, "无法写入网关设置"))?;
             takeover::commit_store_for(
                 self.0.client,
                 &self.0.data,
@@ -1136,13 +1138,13 @@ impl Gateway {
     ) -> Result<View> {
         if self.0.client == ClientId::Codex && crate::official::blocks_gateway(&self.0.data, home) {
             return Err(AppError::new(
-                "OFFICIAL_MODE",
+                code::OFFICIAL_MODE,
                 "请先关闭官方账号连接，再启动 Codex 网关",
             ));
         }
         if self.claude_official() {
             return Err(AppError::new(
-                "CLAUDE_OFFICIAL",
+                code::CLAUDE_OFFICIAL,
                 "请先切换到 Claude API 配置，再启用网关",
             ));
         }
@@ -1150,34 +1152,37 @@ impl Gateway {
         let (port, token) = {
             let s = self.0.inner.lock().unwrap();
             if expected != self.view_revision(&s) {
-                return Err(AppError::new("CONFLICT", "网关设置已变化，请重试"));
+                return Err(AppError::new(code::CONFLICT, "网关设置已变化，请重试"));
             }
             if s.running {
                 drop(s);
                 return Ok(self.view());
             }
             if s.upgrade_pending {
-                return Err(AppError::new("CLEANUP", "请先处理未完成的升级清理"));
+                return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
             }
             if s.store.providers.is_empty() {
-                return Err(AppError::new("PROVIDER", "请先添加供应商"));
+                return Err(AppError::new(code::PROVIDER, "请先添加供应商"));
             }
             (s.store.settings.port, s.store.local_token.clone())
         };
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .await
-            .map_err(|_| AppError::new("PORT", "无法绑定本地端口，请检查端口占用或修改端口"))?;
+            .map_err(|_| AppError::new(code::PORT, "无法绑定本地端口，请检查端口占用或修改端口"))?;
         {
             let s = self.0.inner.lock().unwrap();
             if self.view_revision(&s) != expected {
-                return Err(AppError::new("CONFLICT", "绑定端口期间设置已变化，请重试"));
+                return Err(AppError::new(
+                    code::CONFLICT,
+                    "绑定端口期间设置已变化，请重试",
+                ));
             }
         }
         let (tx, rx) = watch::channel(false);
         {
             let mut s = self.0.inner.lock().unwrap();
             if self.view_revision(&s) != expected {
-                return Err(AppError::new("CONFLICT", "设置已变化，请重试"));
+                return Err(AppError::new(code::CONFLICT, "设置已变化，请重试"));
             }
             let p = Self::exit_provider(&s.store, None)?;
             let exit = takeover::Pair::new(&p.base_url, &p.token);
@@ -1198,10 +1203,10 @@ impl Gateway {
             });
             let before = storage::read_optional(&self.0.data.join("gateway.json"))?;
             if storage::revision(before.as_deref()) != s.revision {
-                return Err(AppError::new("CONFLICT", "网关存储已被外部修改"));
+                return Err(AppError::new(code::CONFLICT, "网关存储已被外部修改"));
             }
             let after = serde_json::to_string_pretty(&next)
-                .map_err(|_| AppError::new("STORE", "无法生成网关启动事务"))?;
+                .map_err(|_| AppError::new(code::STORE, "无法生成网关启动事务"))?;
             takeover::attach_store_for(
                 self.0.client,
                 &self.0.data,
@@ -1263,7 +1268,7 @@ impl Gateway {
         let result = async {
             if intent.home != home {
                 return Err(AppError::new(
-                    "RESUME_CONFLICT",
+                    code::RESUME_CONFLICT,
                     "客户端目录已变化，自动恢复已停止",
                 ));
             }
@@ -1275,14 +1280,14 @@ impl Gateway {
                     != Some(&grok_config::fingerprint(&grok_config::read(home)?.1)?)
                 {
                     return Err(AppError::new(
-                        "RESUME_CONFLICT",
+                        code::RESUME_CONFLICT,
                         "Grok 原生模型或连接已变化，自动恢复已停止",
                     ));
                 }
             }
             if pair.fingerprint() != intent.pair_hash {
                 return Err(AppError::new(
-                    "RESUME_CONFLICT",
+                    code::RESUME_CONFLICT,
                     "受管地址或 Token 在退出后已被修改，自动恢复已停止",
                 ));
             }
@@ -1309,7 +1314,7 @@ impl Gateway {
                 if takeover::read_connection(self.0.client, home, &s.store.connection)?.0
                     != expected
                 {
-                    return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
+                    return Err(AppError::new(code::CONFLICT, "配置已变化，请刷新后重试"));
                 }
             }
             if !preserve_intent {
@@ -1320,7 +1325,7 @@ impl Gateway {
                         let home = s
                             .home
                             .as_ref()
-                            .ok_or_else(|| AppError::new("STATE", "缺少运行目录"))?;
+                            .ok_or_else(|| AppError::new(code::STATE, "缺少运行目录"))?;
                         let exit = takeover::exit_pair(&self.0.data)?;
                         let target = match exit.as_ref() {
                             Some(pair) => pair.clone(),
@@ -1332,7 +1337,7 @@ impl Gateway {
                                 )?;
                                 if pair.fingerprint() != intent.pair_hash {
                                     return Err(AppError::new(
-                                        "RECOVERY",
+                                        code::RECOVERY,
                                         "缺少停止目标且配置未恢复",
                                     ));
                                 }
@@ -1342,10 +1347,10 @@ impl Gateway {
                         intent.pair_hash = target.fingerprint();
                         let before = storage::read_optional(&self.0.data.join("gateway.json"))?;
                         if storage::revision(before.as_deref()) != s.revision {
-                            return Err(AppError::new("CONFLICT", "网关存储已被外部修改"));
+                            return Err(AppError::new(code::CONFLICT, "网关存储已被外部修改"));
                         }
                         let after = serde_json::to_string_pretty(&next)
-                            .map_err(|_| AppError::new("STORE", "无法生成停止事务"))?;
+                            .map_err(|_| AppError::new(code::STORE, "无法生成停止事务"))?;
                         if exit.is_some() {
                             takeover::commit_store_for(
                                 self.0.client,
@@ -1446,7 +1451,7 @@ impl Gateway {
                 let home = s
                     .home
                     .as_ref()
-                    .ok_or_else(|| AppError::new("STATE", "缺少运行目录"))?;
+                    .ok_or_else(|| AppError::new(code::STATE, "缺少运行目录"))?;
                 let mut next = s.store.clone();
                 next.resume = Some(model::Resume {
                     home: home.clone(),
@@ -1455,10 +1460,10 @@ impl Gateway {
                 });
                 let before = storage::read_optional(&self.0.data.join("gateway.json"))?;
                 if storage::revision(before.as_deref()) != s.revision {
-                    return Err(AppError::new("CONFLICT", "网关存储已被外部修改"));
+                    return Err(AppError::new(code::CONFLICT, "网关存储已被外部修改"));
                 }
                 let after = serde_json::to_string_pretty(&next)
-                    .map_err(|_| AppError::new("STORE", "无法记录最近供应商"))?;
+                    .map_err(|_| AppError::new(code::STORE, "无法记录最近供应商"))?;
                 takeover::commit_store_for(
                     self.0.client,
                     &self.0.data,
@@ -1501,7 +1506,10 @@ impl Gateway {
             .iter()
             .any(|p| p.id == id && Self::quota_version(&s.store, p) == version)
         {
-            return Err(AppError::new("STALE", "供应商配置已变化，已丢弃旧额度结果"));
+            return Err(AppError::new(
+                code::STALE,
+                "供应商配置已变化，已丢弃旧额度结果",
+            ));
         }
         Ok(result)
     }
@@ -1516,7 +1524,7 @@ impl Gateway {
                 .providers
                 .iter()
                 .find(|p| p.id == id)
-                .ok_or_else(|| AppError::new("PROVIDER", "供应商不存在"))?;
+                .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
             let connection = (self.client_id() == ClientId::Grok).then(|| {
                 s.store
                     .grok_connections
@@ -1555,7 +1563,10 @@ impl Gateway {
             .iter()
             .any(|p| p.id == id && Self::quota_version(&s.store, p) == version)
         {
-            return Err(AppError::new("STALE", "供应商配置已变化，已丢弃旧模型列表"));
+            return Err(AppError::new(
+                code::STALE,
+                "供应商配置已变化，已丢弃旧模型列表",
+            ));
         }
         Ok(result)
     }

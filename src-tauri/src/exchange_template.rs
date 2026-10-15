@@ -1,4 +1,5 @@
 //! Private, lossless Sub2API templates. Only the selected prototype is retained.
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +12,7 @@ use std::{
 pub const MAX_FILE: u64 = 8 * 1024 * 1024;
 
 pub fn invalid(message: &str) -> AppError {
-    AppError::new("EXCHANGE_TEMPLATE", message)
+    AppError::new(code::EXCHANGE_TEMPLATE, message)
 }
 
 pub fn read(path: &Path) -> Result<Value> {

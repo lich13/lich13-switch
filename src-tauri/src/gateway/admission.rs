@@ -1,6 +1,7 @@
 //! Request slots and bounded FIFO admission. Behavior informed by Sub2API
 //! a3eb7ef3 concurrency_service / account scheduler; independently implemented in Rust.
 use super::{circuit::Circuit, forward::Permits, model::Provider, routing::Requirement, Route};
+use crate::errors::code;
 use crate::storage;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -279,7 +280,7 @@ fn persist_rpm(path: &Path, rpm: &HashMap<String, VecDeque<RateStamp>>) -> stora
         })
         .collect();
     let bytes = serde_json::to_vec(&PersistedRpm { providers })
-        .map_err(|_| crate::storage::AppError::new("RPM_LEDGER", "无法保存 RPM 状态"))?;
+        .map_err(|_| crate::storage::AppError::new(code::RPM_LEDGER, "无法保存 RPM 状态"))?;
     storage::atomic_write(path, &bytes, None)
 }
 impl Budget {

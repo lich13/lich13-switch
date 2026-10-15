@@ -1,5 +1,6 @@
 //! File-backed Codex API authentication. No provider/model/auth-store rewrites.
 use super::takeover::Pair;
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,7 +24,7 @@ pub enum Connection {
 }
 
 fn invalid(message: &str) -> AppError {
-    AppError::new("CODEX_AUTH", message)
+    AppError::new(code::CODEX_AUTH, message)
 }
 fn document(text: &str) -> Result<Document<&str>> {
     Document::parse(text).map_err(|_| invalid("Codex 配置不是有效 TOML"))
@@ -321,7 +322,7 @@ pub fn write(
     let (revision, current) = read(home, id)?;
     if expected.is_some_and(|e| e != revision) || allowed.is_some_and(|a| !a.contains(&&current)) {
         return Err(AppError::new(
-            "CONFLICT",
+            code::CONFLICT,
             "base_url 或 auth.json 已变化，请刷新后重试",
         ));
     }
@@ -329,7 +330,7 @@ pub fn write(
     if config_before != text(home)?
         || auth_before != storage::read_bounded(&home.join("auth.json"), LIMIT)?
     {
-        return Err(AppError::new("CONFLICT", "API 配置正在变化，请重试"));
+        return Err(AppError::new(code::CONFLICT, "API 配置正在变化，请重试"));
     }
     let url = target
         .base_url

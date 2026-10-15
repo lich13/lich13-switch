@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::{
     gateway::ClientId,
     storage::{self, AppError, Result},
@@ -75,7 +76,7 @@ impl<'de> Deserialize<'de> for Unique {
 fn json_error(e: serde_json::Error) -> AppError {
     // Parser errors can echo source values; return position without the payload.
     AppError {
-        code: "JSON".into(),
+        code: code::JSON.into(),
         message: if e.to_string().starts_with("配置包含重复字段") {
             "配置包含重复字段".into()
         } else {
@@ -89,7 +90,7 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
     serde_json::from_str::<Unique>(text).map_err(json_error)?;
     let v: Value = serde_json::from_str(text).map_err(json_error)?;
     if !v.is_object() {
-        return Err(AppError::new("JSON", "配置根节点必须是对象"));
+        return Err(AppError::new(code::JSON, "配置根节点必须是对象"));
     }
     Ok(v)
 }
@@ -103,7 +104,10 @@ pub fn validate(client: ClientId, text: &str) -> Result<()> {
     let v = parse_object(text)?;
     let check = |path: &str, valid: fn(&Value) -> bool, label: &str| -> Result<()> {
         if v.pointer(path).is_some_and(|x| !valid(x)) {
-            return Err(AppError::new("CONFIG_TYPE", &format!("{label}类型无效")));
+            return Err(AppError::new(
+                code::CONFIG_TYPE,
+                &format!("{label}类型无效"),
+            ));
         }
         Ok(())
     };
@@ -146,7 +150,7 @@ pub fn validate(client: ClientId, text: &str) -> Result<()> {
         .and_then(Value::as_object)
         .is_some_and(|e| e.values().any(|x| !x.is_string()))
     {
-        return Err(AppError::new("CONFIG_TYPE", "环境变量的值必须是字符串"));
+        return Err(AppError::new(code::CONFIG_TYPE, "环境变量的值必须是字符串"));
     }
     Ok(())
 }
@@ -168,7 +172,7 @@ pub fn read(client: ClientId, home: &Path, data: &Path, guarded: bool) -> Result
             Vec::new()
         }
     }))
-    .map_err(|_| AppError::new("UTF8", "配置必须使用 UTF-8 编码"))?;
+    .map_err(|_| AppError::new(code::UTF8, "配置必须使用 UTF-8 编码"))?;
     Ok(Document {
         client_id: client,
         text,
@@ -180,8 +184,8 @@ pub fn read(client: ClientId, home: &Path, data: &Path, guarded: bool) -> Result
 }
 pub fn previous(client: ClientId, data: &Path) -> Result<String> {
     let bytes = storage::read_optional(&backup(client, data))?
-        .ok_or_else(|| AppError::new("RESTORE", "没有可恢复的配置"))?;
-    String::from_utf8(bytes).map_err(|_| AppError::new("UTF8", "历史配置不是 UTF-8"))
+        .ok_or_else(|| AppError::new(code::RESTORE, "没有可恢复的配置"))?;
+    String::from_utf8(bytes).map_err(|_| AppError::new(code::UTF8, "历史配置不是 UTF-8"))
 }
 pub fn save(
     client: ClientId,
@@ -196,7 +200,7 @@ pub fn save(
     let previous = storage::read_optional(&path)?;
     if storage::revision(previous.as_deref()) != expected {
         return Err(AppError::new(
-            "CONFLICT",
+            code::CONFLICT,
             "配置已被其他程序修改，草稿已保留。请重新读取后合并",
         ));
     }
@@ -245,7 +249,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .code,
-            "CONFLICT"
+            code::CONFLICT
         );
         assert!(!home.join("config.toml").exists());
         assert!(!home.join("auth.json").exists());

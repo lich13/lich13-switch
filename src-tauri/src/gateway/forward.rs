@@ -7,6 +7,7 @@ use super::{
     routing::{self, Requirement},
     Active, Gateway, Route,
 };
+use crate::errors::code;
 use crate::events::{Action, Reason};
 use bytes::Bytes;
 use http_body_util::{BodyExt, StreamBody};
@@ -110,13 +111,13 @@ async fn finish_delivery(
 ) {
     tokio::select! {
         biased;
-        _ = stopping(shutdown) => { protocol.finish(Some(status), "GATEWAY_STOPPED"); }
+        _ = stopping(shutdown) => { protocol.finish(Some(status), code::GATEWAY_STOPPED); }
         result = super::wire_progress::writing(delivery.wait(), activity, seconds) => {
             if result.is_err() {
                 DownstreamEnd::Timeout.record(delivery, protocol, seconds);
             }
             if delivery.error.load(std::sync::atomic::Ordering::Acquire) != 0 {
-                protocol.finish(Some(status), "CLIENT_DISCONNECTED");
+                protocol.finish(Some(status), code::CLIENT_DISCONNECTED);
             }
         }
     }
@@ -284,10 +285,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         )
     };
     if !running {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
+        return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
     }
     if !authorized(request.headers(), &token) {
-        return error(StatusCode::UNAUTHORIZED, "LOCAL_AUTH", "本地网关认证失败");
+        return error(
+            StatusCode::UNAUTHORIZED,
+            code::LOCAL_AUTH,
+            "本地网关认证失败",
+        );
     }
     // Capture all route versions before receiving the request body: edits only affect new requests.
     let provider_ids: Vec<_> = gateway
@@ -341,7 +346,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         _ => {
             return error(
                 StatusCode::BAD_REQUEST,
-                "BODY",
+                code::BODY,
                 "请求未完整接收、超过 1 GiB 或已取消",
             );
         }
@@ -467,7 +472,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             if lease.is_none() {
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "CONVERSATION_OWNERSHIP",
+                    code::CONVERSATION_OWNERSHIP,
                     "线程归属记录暂不可用，请检查网关状态",
                 );
             }
@@ -492,7 +497,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     let mut ordinary_attempts = 0usize;
     let mut capacity_protected = false;
     let mut previous_provider: Option<String> = None;
-    let mut last_category = "NO_PROVIDER";
+    let mut last_category = code::NO_PROVIDER;
     let mut wait_budget = Budget::new(settings.queue_seconds);
     wait_budget.track(
         &gateway.0.admission,
@@ -540,7 +545,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Ok(()) => {}
                     Err(Rejected::Stopped) => {
                         failover.finish(super::failover::Exit::Stopped);
-                        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
+                        return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
                     }
                     Err(_) => break,
                 }
@@ -649,7 +654,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             );
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "NO_ELIGIBLE_PROVIDER",
+                code::NO_ELIGIBLE_PROVIDER,
                 "没有符合线程接管策略的供应商",
             );
         }
@@ -696,7 +701,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 let mut response = error(
                     StatusCode::TOO_MANY_REQUESTS,
-                    "CAPACITY",
+                    code::CAPACITY,
                     "供应商并发已满，等待队列已满或等待超时",
                 );
                 response
@@ -714,7 +719,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 let mut response = error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "PROVIDERS_COOLING_DOWN",
+                    code::PROVIDERS_COOLING_DOWN,
                     "供应商正在冷却或恢复探测，请稍后重试",
                 );
                 response
@@ -725,12 +730,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             Err(Rejected::RateLimited(seconds)) => {
                 rpm_retry_after = Some(Duration::from_secs(seconds.max(1)));
                 if attempted > 0 {
-                    last_category = "RPM_LIMIT";
+                    last_category = code::RPM_LIMIT;
                     break;
                 }
                 let mut response = error(
                     StatusCode::TOO_MANY_REQUESTS,
-                    "RPM_LIMIT",
+                    code::RPM_LIMIT,
                     "供应商已达到 RPM 上限，等待后重试",
                 );
                 response
@@ -741,12 +746,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             Err(Rejected::RateLedger) => {
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "RPM_LEDGER",
+                    code::RPM_LEDGER,
                     "RPM 状态暂不可用，请稍后重试",
                 );
             }
             Err(Rejected::Stopped) => {
-                return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
+                return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
             }
             Err(Rejected::Model) => {
                 if attempted > 0 {
@@ -777,7 +782,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 );
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "NO_ELIGIBLE_PROVIDER",
+                    code::NO_ELIGIBLE_PROVIDER,
                     "没有符合线程接管策略的供应商",
                 );
             }
@@ -823,7 +828,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             if gateway.0.compaction.error().is_some() {
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "CONVERSATION_OWNERSHIP",
+                    code::CONVERSATION_OWNERSHIP,
                     "线程归属记录暂不可用",
                 );
             }
@@ -859,7 +864,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             {
                 return error(
                     StatusCode::BAD_GATEWAY,
-                    "GROK_AUTH",
+                    code::GROK_AUTH,
                     "Grok 供应商认证配置无效",
                 );
             }
@@ -876,7 +881,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             admission.permits.neutral(&settings);
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "RPM_LEDGER",
+                code::RPM_LEDGER,
                 "RPM 状态暂不可用，请稍后重试",
             );
         }
@@ -954,8 +959,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 failover.failure(super::failover::Failure::Transport);
                 let category = connector::classify(&e);
                 last_category = match category {
-                    Some(connector::ConnectError::Tls) => "TLS",
-                    _ => "NETWORK",
+                    Some(connector::ConnectError::Tls) => code::TLS,
+                    _ => code::NETWORK,
                 };
                 last_error = Some(admission.permits.report(
                     &gateway,
@@ -978,7 +983,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             Err(_) => {
                 failover.failure(super::failover::Failure::Transport);
-                last_category = "FIRST_BYTE_TIMEOUT";
+                last_category = code::FIRST_BYTE_TIMEOUT;
                 protocol.timeout("response_headers", settings.first_byte_seconds);
                 last_error = Some(admission.permits.report(
                     &gateway,
@@ -990,7 +995,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     attempted,
                     crate::events::Details {
                         phase: Some(crate::events::Phase::Headers),
-                        local_code: Some("FIRST_BYTE_TIMEOUT".into()),
+                        local_code: Some(code::FIRST_BYTE_TIMEOUT.into()),
                         counted_failure: Some(true),
                         ..protocol.observation.error.clone()
                     },
@@ -1041,9 +1046,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     protocol.finish(
                         Some(101),
                         if result.is_ok() {
-                            "OK"
+                            code::OK
                         } else {
-                            "STREAM_INTERRUPTED"
+                            code::STREAM_INTERRUPTED
                         },
                     );
                     if protocol.succeeded() {
@@ -1090,7 +1095,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let decoded = match &captured {
                 Ok(body) => {
                     let encoded = body.prefix(2 * 1024 * 1024).await.unwrap_or_default();
-                    protocol.finish(Some(status.as_u16()), "HTTP");
+                    protocol.finish(Some(status.as_u16()), code::HTTP);
                     let encoding = response_parts
                         .headers
                         .get(header::CONTENT_ENCODING)
@@ -1225,18 +1230,18 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 admission.permits.neutral(&settings);
             }
             if let Ok(body) = captured {
-                protocol.finish(Some(status.as_u16()), "HTTP");
+                protocol.finish(Some(status.as_u16()), code::HTTP);
                 last = Some(Response::from_parts(response_parts, body.body()));
             } else {
-                protocol.finish(Some(status.as_u16()), "STREAM_INTERRUPTED");
+                protocol.finish(Some(status.as_u16()), code::STREAM_INTERRUPTED);
             }
-            last_category = "HTTP";
+            last_category = code::HTTP;
             if !retryable {
                 failover.finish(super::failover::Exit::PermanentRejection);
                 return last.unwrap_or_else(|| {
                     error(
                         StatusCode::BAD_GATEWAY,
-                        "UPSTREAM_BODY",
+                        code::UPSTREAM_BODY,
                         "上游错误响应读取失败",
                     )
                 });
@@ -1263,7 +1268,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Ok(()) => {}
                     Err(Rejected::Stopped) => {
                         failover.finish(super::failover::Exit::Stopped);
-                        return error(StatusCode::SERVICE_UNAVAILABLE, "STOPPED", "网关已停止");
+                        return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
                     }
                     Err(_) => break,
                 }
@@ -1310,7 +1315,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let mut prefix_bytes = 0;
         let mut ended = false;
         let mut failed = false;
-        let mut failure_kind = "FIRST_BYTE_TIMEOUT";
+        let mut failure_kind = code::FIRST_BYTE_TIMEOUT;
         loop {
             match tokio::time::timeout_at(first_deadline, body.frame()).await {
                 Ok(Some(Ok(frame))) => {
@@ -1345,11 +1350,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 result => {
                     failed = true;
                     failure_kind = if result.is_err() && prefix_bytes != 0 {
-                        "STREAM_TIMEOUT"
+                        code::STREAM_TIMEOUT
                     } else if result.is_err() {
-                        "FIRST_BYTE_TIMEOUT"
+                        code::FIRST_BYTE_TIMEOUT
                     } else {
-                        "STREAM_INTERRUPTED"
+                        code::STREAM_INTERRUPTED
                     };
                     break;
                 }
@@ -1397,7 +1402,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         if ended {
             protocol.finish(
                 Some(status.as_u16()),
-                if status.is_success() { "OK" } else { "HTTP" },
+                if status.is_success() {
+                    code::OK
+                } else {
+                    code::HTTP
+                },
             );
             if protocol.terminal().is_some() {
                 if let Some((_, terminal, business)) = prefix.last_mut() {
@@ -1475,7 +1484,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 });
                 capacity_retry_after = capacity_retry_after.max(cooldown);
             }
-            protocol.finish(Some(status.as_u16()), "HTTP");
+            protocol.finish(Some(status.as_u16()), code::HTTP);
             let will_retry =
                 !ids.is_empty() && ordinary_attempts <= settings.max_retries && !unknown_affinity;
             let mut details = protocol.observation.error.clone();
@@ -1530,11 +1539,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 StreamBody::new(rejected).boxed_unsync(),
             ));
             last_category = if initial_hard_rejection {
-                "UPSTREAM_REJECTED"
+                code::UPSTREAM_REJECTED
             } else if initial_capacity {
-                "CAPACITY"
+                code::CAPACITY
             } else {
-                "MODEL_UNAVAILABLE"
+                code::MODEL_UNAVAILABLE
             };
             continue;
         }
@@ -1594,7 +1603,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             for (index, (frame, terminal, business)) in prefix.into_iter().enumerate() {
                 tokio::select! {
                     biased;
-                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); return; }
+                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); return; }
                     result = send_frame(&sender, Ok(frame), terminal, ended && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
                 }
                 protocol.output_handed(business);
@@ -1602,7 +1611,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             if ended {
                 drop(sender);
                 if disconnected {
-                    protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
+                    protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
                 } else {
                     finish_delivery(
                         &delivery,
@@ -1627,7 +1636,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             loop {
                 if disconnected || sender.is_closed() {
                     active.take();
-                    protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
+                    protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
                     permits.neutral(&cfg);
                     break;
                 }
@@ -1636,7 +1645,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 let limit = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
                 let next = tokio::select! {
                     biased;
-                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
+                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
                     _ = sender.closed(), if !disconnected => { disconnected = true; continue; }
                     frame = tokio::time::timeout_at(limit, body.frame()) => frame,
                 };
@@ -1647,8 +1656,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         }
                         let complete = body.is_end_stream();
                         if complete {
-                            protocol
-                                .finish(Some(status.as_u16()), if neutral { "HTTP" } else { "OK" });
+                            protocol.finish(
+                                Some(status.as_u16()),
+                                if neutral { code::HTTP } else { code::OK },
+                            );
                         }
                         remember(&protocol, &g, &route, model.as_deref());
                         observe_protocol(
@@ -1664,7 +1675,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         if !disconnected {
                             tokio::select! {
                                 biased;
-                                _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), "GATEWAY_STOPPED"); permits.neutral(&cfg); break; }
+                                _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
                                 result = send_frame(&sender, Ok(frame), protocol.terminal().is_some(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
                             }
                             if !disconnected {
@@ -1676,7 +1687,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         }
                     }
                     Ok(None) => {
-                        protocol.finish(Some(status.as_u16()), if neutral { "HTTP" } else { "OK" });
+                        protocol.finish(
+                            Some(status.as_u16()),
+                            if neutral { code::HTTP } else { code::OK },
+                        );
                         // EOF may finish a JSON value or an SSE event without a
                         // trailing newline. All preceding body frames were acknowledged.
                         delivery.handed(0, protocol.terminal().is_some());
@@ -1685,9 +1699,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                     result => {
                         let category = if result.is_err() {
-                            "STREAM_TIMEOUT"
+                            code::STREAM_TIMEOUT
                         } else {
-                            "STREAM_INTERRUPTED"
+                            code::STREAM_INTERRUPTED
                         };
                         if result.is_err() {
                             protocol.timeout("stream_idle", cfg.idle_seconds);
@@ -1708,7 +1722,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             // write evidence, never an acknowledgement by the client.
             drop(sender);
             if disconnected {
-                protocol.finish(Some(status.as_u16()), "CLIENT_DISCONNECTED");
+                protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
             } else {
                 finish_delivery(
                     &delivery,
@@ -1780,10 +1794,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         attempted,
     );
     last.unwrap_or_else(|| {
-        if last_category == "RPM_LIMIT" {
+        if last_category == code::RPM_LIMIT {
             let mut response = error(
                 StatusCode::TOO_MANY_REQUESTS,
-                "RPM_LIMIT",
+                code::RPM_LIMIT,
                 "供应商已达到 RPM 上限，等待后重试",
             );
             response.headers_mut().insert(

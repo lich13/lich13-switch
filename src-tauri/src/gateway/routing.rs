@@ -1,4 +1,5 @@
 //! Model policy is independent of transport versions, health and capacity.
+use crate::errors::code;
 /// Give an established conversation two short, cancellable retries on its
 /// owner before ordinary failover. These still consume the normal retry budget.
 pub fn transient_delay(
@@ -34,9 +35,9 @@ impl Requirement {
     }
     pub fn code(&self) -> &'static str {
         if matches!(self, Self::Unknown) {
-            "MODEL_UNDETERMINED"
+            code::MODEL_UNDETERMINED
         } else {
-            "MODEL_NOT_ALLOWED"
+            code::MODEL_NOT_ALLOWED
         }
     }
     pub fn message(&self) -> &'static str {

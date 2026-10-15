@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 #[cfg(target_os = "macos")]
 pub fn permission(request: bool, _id: &str) -> Result<String> {
@@ -19,7 +20,7 @@ pub fn permission(request: bool, _id: &str) -> Result<String> {
         let _: () = msg_send![&*center, getNotificationSettingsWithCompletionHandler:&*callback];
         let status = rx
             .recv_timeout(std::time::Duration::from_secs(10))
-            .map_err(|_| AppError::new("NOTIFICATION", "通知权限读取超时"))?;
+            .map_err(|_| AppError::new(code::NOTIFICATION, "通知权限读取超时"))?;
         if status == 0 && request {
             let (tx, rx) = std::sync::mpsc::channel();
             let callback = block2::RcBlock::new(move |granted: Bool, error: *mut AnyObject| {
@@ -34,11 +35,11 @@ pub fn permission(request: bool, _id: &str) -> Result<String> {
             let _: () = msg_send![&*center, requestAuthorizationWithOptions:7usize, completionHandler:&*callback];
             let result = rx
                 .recv_timeout(std::time::Duration::from_secs(120))
-                .map_err(|_| AppError::new("NOTIFICATION", "通知授权尚未完成"))?;
+                .map_err(|_| AppError::new(code::NOTIFICATION, "通知授权尚未完成"))?;
             return result
                 .map(|ok| if ok { "granted" } else { "denied" }.into())
                 .map_err(|code| {
-                    AppError::new("NOTIFICATION", &format!("系统通知授权失败（{code}）"))
+                    AppError::new(code::NOTIFICATION, &format!("系统通知授权失败（{code}）"))
                 });
         }
         Ok(match status {
@@ -58,7 +59,7 @@ pub fn permission(_request: bool, id: &str) -> Result<String> {
     };
     let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id))
         .and_then(|n| n.Setting())
-        .map_err(|_| AppError::new("NOTIFICATION", "无法读取系统通知设置"))?;
+        .map_err(|_| AppError::new(code::NOTIFICATION, "无法读取系统通知设置"))?;
     Ok(if setting == NotificationSetting::Enabled {
         "granted"
     } else {
@@ -131,10 +132,10 @@ mod mac {
         match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(None) => Ok(()),
             Ok(Some(code)) => Err(AppError::new(
-                "NOTIFICATION",
+                code::NOTIFICATION,
                 &format!("系统拒绝通知（{code}）"),
             )),
-            Err(_) => Err(AppError::new("NOTIFICATION", "系统未确认接收通知")),
+            Err(_) => Err(AppError::new(code::NOTIFICATION, "系统未确认接收通知")),
         }
     }
 }
@@ -172,12 +173,15 @@ pub fn send(id: &str, title: &str, body: &str) -> Result<()> {
     };
     run().map_err(|e| {
         AppError::new(
-            "NOTIFICATION",
+            code::NOTIFICATION,
             &format!("系统拒绝通知（{:08X}）", e.code().0 as u32),
         )
     })
 }
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn send(_id: &str, _title: &str, _body: &str) -> Result<()> {
-    Err(AppError::new("NOTIFICATION", "此平台未提供原生通知通道"))
+    Err(AppError::new(
+        code::NOTIFICATION,
+        "此平台未提供原生通知通道",
+    ))
 }

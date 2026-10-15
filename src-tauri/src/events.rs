@@ -1,4 +1,5 @@
 //! Exception-only journal. Only bounded, sanitized error details cross this boundary.
+use crate::errors::code;
 #[path = "event_details.rs"]
 mod details;
 use crate::{
@@ -85,25 +86,7 @@ impl Reason {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ErrorCode {
-    ModelUnavailable,
-    AuthenticationFailed,
-    UpstreamServiceError,
-    NetworkError,
-    RateLimited,
-    CapacityLimited,
-    FailoverExhausted,
-    Failover,
-    CircuitOpen,
-    Recovered,
-    ConfigConflict,
-    StartupRecoveryFailed,
-    AccountSyncError,
-    ProtocolError,
-    ThreadHandoff,
-}
+pub use crate::errors::ErrorCode;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -709,9 +692,9 @@ impl Service {
         let (tx, rx) = oneshot::channel();
         self.sender
             .try_send(Job::Clear(tx))
-            .map_err(|_| AppError::new("LOG_BUSY", "日志繁忙，请重试"))?;
+            .map_err(|_| AppError::new(code::LOG_BUSY, "日志繁忙，请重试"))?;
         rx.await
-            .map_err(|_| AppError::new("LOG_WRITE", "日志清空失败"))?
+            .map_err(|_| AppError::new(code::LOG_WRITE, "日志清空失败"))?
     }
 }
 

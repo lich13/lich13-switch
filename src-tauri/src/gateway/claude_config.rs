@@ -1,5 +1,6 @@
 //! Locate JSON values with serde's byte offsets; never reserialize unrelated settings.
 use super::takeover::Pair;
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -12,7 +13,7 @@ struct Member {
 }
 fn invalid() -> AppError {
     AppError::new(
-        "CLAUDE_CONFIG",
+        code::CLAUDE_CONFIG,
         "Claude settings.json 无效，请检查 JSON 和 env 两字段",
     )
 }
@@ -68,7 +69,7 @@ fn unique<'a>(members: &'a [Member], key: &str) -> Result<Option<&'a Member>> {
     let value = found.next();
     if found.next().is_some() {
         return Err(AppError::new(
-            "CLAUDE_CONFIG",
+            code::CLAUDE_CONFIG,
             "Claude 配置存在重复的受管字段",
         ));
     }

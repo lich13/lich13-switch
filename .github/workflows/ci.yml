@@ -32,6 +32,7 @@ jobs:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
       - run: python3 scripts/check-network-hosts.py
+      - run: python3 scripts/check-error-codes.py
       - run: python3 -m unittest discover -s scripts -p "test_*.py"
       - run: pnpm test
       - run: pnpm build

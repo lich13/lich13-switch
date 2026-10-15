@@ -1,3 +1,4 @@
+use crate::errors::code;
 use crate::storage::{AppError, Result};
 use std::path::Path;
 
@@ -18,13 +19,13 @@ pub fn retired_statistics(data: &Path) -> Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Ok(meta) if !meta.is_dir() => std::fs::remove_file(&path).map_err(|_| {
                 AppError::new(
-                    "CLEANUP",
+                    code::CLEANUP,
                     &format!("无法移除旧数据 {name}，请检查权限后重试"),
                 )
             })?,
             _ => {
                 return Err(AppError::new(
-                    "CLEANUP",
+                    code::CLEANUP,
                     &format!("旧数据 {name} 无法清理，请检查文件状态"),
                 ))
             }

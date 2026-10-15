@@ -1,3 +1,4 @@
+use crate::errors::code;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
@@ -28,7 +29,7 @@ impl std::fmt::Display for AppError {
 }
 impl std::error::Error for AppError {}
 pub fn io_error(_: std::io::Error) -> AppError {
-    AppError::new("IO", "文件操作失败，请检查路径、权限和磁盘空间")
+    AppError::new(code::IO, "文件操作失败，请检查路径、权限和磁盘空间")
 }
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -40,12 +41,15 @@ pub fn read_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => {
             return Err(AppError::new(
-                "SYMLINK",
+                code::SYMLINK,
                 "目标文件是符号链接，请选择实际文件所在目录",
             ))
         }
         Ok(m) if !m.is_file() || m.len() > limit => {
-            return Err(AppError::new("FILE_TYPE", "文件不是普通文件或超过允许大小"))
+            return Err(AppError::new(
+                code::FILE_TYPE,
+                "文件不是普通文件或超过允许大小",
+            ))
         }
         Ok(_) => (),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -96,7 +100,7 @@ pub fn protect(path: &Path, _directory: bool) -> Result<()> {
             ptr::null_mut(),
         ) == 0
         {
-            return Err(AppError::new("PERMISSIONS", "无法限制文件访问权限"));
+            return Err(AppError::new(code::PERMISSIONS, "无法限制文件访问权限"));
         }
         let mut present = 0;
         let mut defaulted = 0;
@@ -117,7 +121,7 @@ pub fn protect(path: &Path, _directory: bool) -> Result<()> {
         };
         LocalFree(descriptor);
         if code != 0 {
-            return Err(AppError::new("PERMISSIONS", "无法限制文件访问权限"));
+            return Err(AppError::new(code::PERMISSIONS, "无法限制文件访问权限"));
         }
     }
     Ok(())
@@ -132,11 +136,11 @@ pub fn atomic_write_bounded(
     limit: u64,
 ) -> Result<()> {
     if bytes.len() as u64 > limit {
-        return Err(AppError::new("FILE_SIZE", "文件超过允许大小"));
+        return Err(AppError::new(code::FILE_SIZE, "文件超过允许大小"));
     }
     let parent = path
         .parent()
-        .ok_or_else(|| AppError::new("PATH", "目标路径无效"))?;
+        .ok_or_else(|| AppError::new(code::PATH, "目标路径无效"))?;
     if !parent.exists() {
         private_dir(parent)?;
     }
@@ -147,7 +151,7 @@ pub fn atomic_write_bounded(
     let current = read_bounded(path, limit)?;
     if expected.is_some_and(|e| e != revision(current.as_deref())) {
         return Err(AppError::new(
-            "CONFLICT",
+            code::CONFLICT,
             "文件已被其他程序修改，请重新读取后再操作",
         ));
     }
@@ -159,7 +163,7 @@ pub fn atomic_write_bounded(
     let actual = read_bounded(path, limit)?;
     if actual.as_deref() != Some(bytes) {
         return Err(AppError::new(
-            "VERIFY",
+            code::VERIFY,
             "文件写入后发生变化，请重新读取确认",
         ));
     }

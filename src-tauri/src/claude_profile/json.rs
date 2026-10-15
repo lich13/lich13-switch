@@ -1,4 +1,5 @@
 //! Top-level field edits preserve every unrelated byte, including CRLF/indent.
+use crate::errors::code;
 use crate::{
     configuration,
     storage::{AppError, Result},
@@ -12,7 +13,7 @@ struct Member {
     value: Range<usize>,
 }
 fn invalid() -> AppError {
-    AppError::new("CLAUDE_PROFILE", "Claude 配置结构无效")
+    AppError::new(code::CLAUDE_PROFILE, "Claude 配置结构无效")
 }
 fn whitespace(text: &str, at: &mut usize) {
     while text

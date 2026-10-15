@@ -4,6 +4,7 @@ use super::{
     codex_api::{self, Connection},
     ClientId,
 };
+use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -51,7 +52,8 @@ struct Journal {
     store_after: Option<String>,
 }
 fn parse(text: &str) -> Result<Document<&str>> {
-    Document::parse(text).map_err(|_| AppError::new("TOML", "配置不是有效的 TOML，请先修复配置"))
+    Document::parse(text)
+        .map_err(|_| AppError::new(code::TOML, "配置不是有效的 TOML，请先修复配置"))
 }
 fn custom<'a>(doc: &'a Document<&str>) -> Result<&'a Item> {
     let profile = doc.get("profile").and_then(Item::as_str);
@@ -61,7 +63,7 @@ fn custom<'a>(doc: &'a Document<&str>) -> Result<&'a Item> {
         .and_then(Item::as_str);
     if selector != Some("custom") {
         return Err(AppError::new(
-            "CUSTOM",
+            code::CUSTOM,
             "当前生效的 provider 不是 custom，请在配置编辑器中处理",
         ));
     }
@@ -70,7 +72,7 @@ fn custom<'a>(doc: &'a Document<&str>) -> Result<&'a Item> {
         .filter(|p| p.as_table_like().is_some())
         .ok_or_else(|| {
             AppError::new(
-                "CUSTOM",
+                code::CUSTOM,
                 "缺少现有 model_providers.custom，请在配置编辑器中处理",
             )
         })
@@ -80,9 +82,9 @@ fn pair(doc: &Document<&str>) -> Result<Pair> {
     let read = |key| -> Result<Option<String>> {
         p.get(key)
             .map(|v| {
-                v.as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| AppError::new("CUSTOM", "custom 的地址和 Token 必须是字符串"))
+                v.as_str().map(str::to_owned).ok_or_else(|| {
+                    AppError::new(code::CUSTOM, "custom 的地址和 Token 必须是字符串")
+                })
             })
             .transpose()
     };
@@ -106,14 +108,14 @@ fn stored_connection(store: Option<&str>) -> Result<Connection> {
         return Ok(Connection::Bearer);
     };
     let value: serde_json::Value =
-        serde_json::from_str(store).map_err(|_| AppError::new("STORE", "网关连接方式无效"))?;
+        serde_json::from_str(store).map_err(|_| AppError::new(code::STORE, "网关连接方式无效"))?;
     value
         .get("connection")
         .cloned()
         .map(serde_json::from_value)
         .transpose()
         .map(|v| v.unwrap_or_default())
-        .map_err(|_| AppError::new("STORE", "网关连接方式无效"))
+        .map_err(|_| AppError::new(code::STORE, "网关连接方式无效"))
 }
 fn write_record(
     data: &Path,
@@ -133,7 +135,7 @@ fn write_record(
         let home = record
             .path
             .parent()
-            .ok_or_else(|| AppError::new("RECOVERY", "API 恢复路径无效"))?;
+            .ok_or_else(|| AppError::new(code::RECOVERY, "API 恢复路径无效"))?;
         codex_api::write(data, home, provider, target, expected, allowed)
     } else {
         write_pair(record.client, &record.path, target, expected, allowed)
@@ -156,7 +158,7 @@ pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
     let raw = storage::read_optional(&client.config(home))?;
     if raw.is_none() && client == ClientId::Codex {
         return Err(AppError::new(
-            "CUSTOM",
+            code::CUSTOM,
             "缺少 config.toml，请先在配置编辑器中设置 custom",
         ));
     }
@@ -165,7 +167,7 @@ pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
     } else {
         b""
     }))
-    .map_err(|_| AppError::new("CONFIG", "配置不是 UTF-8"))?;
+    .map_err(|_| AppError::new(code::CONFIG, "配置不是 UTF-8"))?;
     Ok((storage::revision(raw.as_deref()), pair_for(client, text)?))
 }
 pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
@@ -188,14 +190,14 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
     for (key, next) in KEYS.into_iter().zip([&target.base_url, &target.token]) {
         let next = next
             .as_ref()
-            .ok_or_else(|| AppError::new("CUSTOM", "供应商地址和 Token 不完整"))?;
+            .ok_or_else(|| AppError::new(code::CUSTOM, "供应商地址和 Token 不完整"))?;
         let encoded = toml_edit::Value::from(next.clone()).to_string();
         if let Some(item) = p.get(key) {
             if item.as_str() != Some(next) {
                 let span = item
                     .as_value()
                     .and_then(|v| v.span())
-                    .ok_or_else(|| AppError::new("TOML", "无法定位配置字段"))?;
+                    .ok_or_else(|| AppError::new(code::TOML, "无法定位配置字段"))?;
                 edits.push((span, encoded));
             }
         } else {
@@ -222,7 +224,7 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
         if let Some(t) = container.as_inline_table() {
             let span = t
                 .span()
-                .ok_or_else(|| AppError::new("TOML", "无法定位内联表"))?;
+                .ok_or_else(|| AppError::new(code::TOML, "无法定位内联表"))?;
             let at = span.end - 1;
             let join = if t.is_empty() { "" } else { ", " };
             edits.push((at..at, format!("{join}{}", items.join(", "))));
@@ -234,7 +236,7 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
                 let span = container
                     .as_table()
                     .and_then(|t| t.span())
-                    .ok_or_else(|| AppError::new("TOML", "无法定位 custom 表"))?;
+                    .ok_or_else(|| AppError::new(code::TOML, "无法定位 custom 表"))?;
                 text[span.end..]
                     .find('\n')
                     .map(|i| span.end + i + 1)
@@ -254,7 +256,7 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
         output.replace_range(span, &value);
     }
     if pair(&parse(&output)?)? != *target {
-        return Err(AppError::new("VERIFY", "两字段配置验证失败"));
+        return Err(AppError::new(code::VERIFY, "两字段配置验证失败"));
     }
     Ok(output)
 }
@@ -267,22 +269,22 @@ fn write_pair(
 ) -> Result<()> {
     let raw = storage::read_optional(path)?;
     if raw.is_none() && client == ClientId::Codex {
-        return Err(AppError::new("CONFLICT", "配置已被移除"));
+        return Err(AppError::new(code::CONFLICT, "配置已被移除"));
     }
     let revision = storage::revision(raw.as_deref());
     if expected.is_some_and(|e| e != revision) {
-        return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
+        return Err(AppError::new(code::CONFLICT, "配置已变化，请刷新后重试"));
     }
     let text = std::str::from_utf8(raw.as_deref().unwrap_or(if client == ClientId::Claude {
         b"{}"
     } else {
         b""
     }))
-    .map_err(|_| AppError::new("TOML", "配置不是 UTF-8"))?;
+    .map_err(|_| AppError::new(code::TOML, "配置不是 UTF-8"))?;
     let current = pair_for(client, text)?;
     if allowed.is_some_and(|pairs| !pairs.contains(&&current)) {
         return Err(AppError::new(
-            "CONFLICT",
+            code::CONFLICT,
             "受管地址或 Token 已被外部修改，已保留现场与事务记录",
         ));
     }
@@ -303,7 +305,8 @@ fn save(data: &Path, record: &Journal) -> Result<()> {
     let prior = storage::read_optional(&path)?;
     storage::atomic_write(
         &path,
-        &serde_json::to_vec(record).map_err(|_| AppError::new("RECOVERY", "无法生成事务记录"))?,
+        &serde_json::to_vec(record)
+            .map_err(|_| AppError::new(code::RECOVERY, "无法生成事务记录"))?,
         Some(&storage::revision(prior.as_deref())),
     )
 }
@@ -312,16 +315,16 @@ fn load(data: &Path) -> Result<Option<Journal>> {
         return Ok(None);
     };
     let value: serde_json::Value = serde_json::from_slice(&raw)
-        .map_err(|_| AppError::new("RECOVERY", "恢复记录损坏，请保留并检查"))?;
+        .map_err(|_| AppError::new(code::RECOVERY, "恢复记录损坏，请保留并检查"))?;
     if value.get("version").and_then(|v| v.as_u64()) != Some(2) {
         return Err(AppError::new(
-            "RECOVERY",
+            code::RECOVERY,
             "旧版接管记录尚未解除；已保留配置，请在配置编辑器中处理",
         ));
     }
     serde_json::from_value(value)
         .map(Some)
-        .map_err(|_| AppError::new("RECOVERY", "恢复记录格式无效"))
+        .map_err(|_| AppError::new(code::RECOVERY, "恢复记录格式无效"))
 }
 fn complete_store(data: &Path, record: &mut Journal) -> Result<()> {
     if let Some(after) = &record.store_after {
@@ -347,13 +350,13 @@ pub fn import_for(client: ClientId, home: &Path) -> Result<(String, String)> {
     let base = p
         .base_url
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::new("IMPORT", "配置缺少供应商地址"))?;
+        .ok_or_else(|| AppError::new(code::IMPORT, "配置缺少供应商地址"))?;
     let token = p
         .token
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::new("IMPORT", "配置缺少供应商 Token"))?;
+        .ok_or_else(|| AppError::new(code::IMPORT, "配置缺少供应商 Token"))?;
     if token.starts_with("gs_") && base.contains("127.0.0.1") {
-        return Err(AppError::new("MANAGED", "不能导入网关的本地凭据"));
+        return Err(AppError::new(code::MANAGED, "不能导入网关的本地凭据"));
     }
     Ok((base, token))
 }
@@ -389,12 +392,12 @@ pub fn attach_store_for(
     store: Option<(Option<String>, String)>,
 ) -> Result<()> {
     if data.join(FILE).exists() {
-        return Err(AppError::new("RECOVERY", "请先处理现有配置事务"));
+        return Err(AppError::new(code::RECOVERY, "请先处理现有配置事务"));
     }
     let connection = stored_connection(store.as_ref().map(|(_, after)| after.as_str()))?;
     let (revision, before) = read_connection(client, home, &connection)?;
     if revision != expected {
-        return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
+        return Err(AppError::new(code::CONFLICT, "配置已变化，请刷新后重试"));
     }
     let mut record = Journal {
         version: 2,
@@ -447,7 +450,7 @@ fn grok_snapshot(
     let store = store
         .map(serde_json::from_str::<super::model::Store>)
         .transpose()
-        .map_err(|_| AppError::new("STORE", "Grok 网关配置无效"))?;
+        .map_err(|_| AppError::new(code::STORE, "Grok 网关配置无效"))?;
     let connection = store
         .as_ref()
         .and_then(|s| {
@@ -478,7 +481,7 @@ fn grok_snapshot(
 pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
     load(data)?
         .and_then(|r| r.grok)
-        .ok_or_else(|| AppError::new("RECOVERY", "缺少 Grok 配置事务"))?
+        .ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 配置事务"))?
         .unchanged(text)
 }
 pub fn restore_grok_native(
@@ -490,11 +493,11 @@ pub fn restore_grok_native(
     expected: &str,
 ) -> Result<()> {
     if data.join(FILE).exists() {
-        return Err(AppError::new("RECOVERY", "请先停止网关并处理配置事务"));
+        return Err(AppError::new(code::RECOVERY, "请先停止网关并处理配置事务"));
     }
     let (revision, current) = read_for(ClientId::Grok, home)?;
     if revision != expected {
-        return Err(AppError::new("CONFLICT", "Grok 配置已变化"));
+        return Err(AppError::new(code::CONFLICT, "Grok 配置已变化"));
     }
     let record = Journal {
         client: ClientId::Grok,
@@ -529,26 +532,33 @@ pub fn commit_store_for(
     expected_config: Option<&str>,
 ) -> Result<()> {
     let mut record = if running {
-        let record = load(data)?.ok_or_else(|| AppError::new("RECOVERY", "缺少网关事务记录"))?;
+        let record =
+            load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少网关事务记录"))?;
         if record.store_after.is_some() {
-            return Err(AppError::new("RECOVERY", "请先停止网关并完成待处理事务"));
+            return Err(AppError::new(
+                code::RECOVERY,
+                "请先停止网关并完成待处理事务",
+            ));
         }
         let (_, current) = read_connection(client, home, &record.connection)?;
         if current != record.applied
             || (client == ClientId::Grok
                 && !grok_unchanged(data, &super::grok_config::read(home)?.1)?)
         {
-            return Err(AppError::new("CONFLICT", "受管地址或 Token 已被外部修改"));
+            return Err(AppError::new(
+                code::CONFLICT,
+                "受管地址或 Token 已被外部修改",
+            ));
         }
         record
     } else {
         if data.join(FILE).exists() {
-            return Err(AppError::new("RECOVERY", "请先处理待恢复的配置事务"));
+            return Err(AppError::new(code::RECOVERY, "请先处理待恢复的配置事务"));
         }
         let connection = stored_connection(Some(&after_store))?;
         let (revision, before) = read_connection(client, home, &connection)?;
         if expected_config.is_some_and(|e| e != revision) {
-            return Err(AppError::new("CONFLICT", "配置已变化，请刷新后重试"));
+            return Err(AppError::new(code::CONFLICT, "配置已变化，请刷新后重试"));
         }
         Journal {
             version: 2,
@@ -590,9 +600,10 @@ pub fn commit_store_for(
 }
 #[cfg(test)]
 pub fn update_exit(data: &Path, target: Pair) -> Result<()> {
-    let mut record = load(data)?.ok_or_else(|| AppError::new("RECOVERY", "缺少网关事务记录"))?;
+    let mut record =
+        load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少网关事务记录"))?;
     if record.store_after.is_some() {
-        return Err(AppError::new("RECOVERY", "供应商事务尚未完成"));
+        return Err(AppError::new(code::RECOVERY, "供应商事务尚未完成"));
     }
     if record.exit != target {
         record.exit = target;
@@ -628,7 +639,7 @@ pub fn recover(data: &Path) -> Result<()> {
         return Ok(());
     };
     let v: serde_json::Value =
-        serde_json::from_slice(&raw).map_err(|_| AppError::new("RECOVERY", "恢复记录损坏"))?;
+        serde_json::from_slice(&raw).map_err(|_| AppError::new(code::RECOVERY, "恢复记录损坏"))?;
     if v.get("version").and_then(|v| v.as_u64()) == Some(2) {
         return detach(data);
     }
@@ -637,19 +648,19 @@ pub fn recover(data: &Path) -> Result<()> {
         .get("path")
         .and_then(|v| v.as_str())
         .map(Path::new)
-        .ok_or_else(|| AppError::new("RECOVERY", "旧恢复记录无效"))?;
+        .ok_or_else(|| AppError::new(code::RECOVERY, "旧恢复记录无效"))?;
     let text = fs::read_to_string(path).map_err(storage::io_error)?;
     let doc = parse(&text)?;
     let current = pair(&doc)?;
     let applied = v
         .get("applied")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::new("RECOVERY", "旧恢复记录无效"))?;
+        .ok_or_else(|| AppError::new(code::RECOVERY, "旧恢复记录无效"))?;
     let old = parse(applied)?;
     let managed = old
         .get("model_providers")
         .and_then(|p| p.get("gpt_switch_gateway"))
-        .ok_or_else(|| AppError::new("RECOVERY", "无法确认旧恢复记录的来源，已保留现场"))?;
+        .ok_or_else(|| AppError::new(code::RECOVERY, "无法确认旧恢复记录的来源，已保留现场"))?;
     let still_managed = doc
         .get("model_providers")
         .and_then(|p| p.get("gpt_switch_gateway"))
@@ -661,7 +672,7 @@ pub fn recover(data: &Path) -> Result<()> {
             == current.token.as_deref();
     if still_managed {
         return Err(AppError::new(
-            "RECOVERY",
+            code::RECOVERY,
             "旧版接管尚未解除，已保留配置，请通过配置编辑器处理",
         ));
     }
