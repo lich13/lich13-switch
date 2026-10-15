@@ -21,6 +21,7 @@ static NSDictionary *Approved;
 #ifdef POWER_TEST
 static NSDictionary *TestState;
 static BOOL TestFailWrite;
+static BOOL TestFailDirectorySync;
 static NSUInteger TestFieldWrites, TestFailFieldWrite, TestExternalAfterFieldWrite, TestFailRecordAfterFieldWrite;
 static NSDictionary *TestExternalState;
 static NSMutableDictionary *TestFiles;
@@ -46,6 +47,22 @@ static BOOL safeRootPath(NSString *path, BOOL directory) {
     struct stat st;
     return lstat(path.fileSystemRepresentation,&st)==0 && safeRootMetadata(st.st_uid,st.st_mode,directory);
 }
+static BOOL syncParent(NSString *path) {
+#ifdef POWER_TEST
+    if(TestFailDirectorySync)return NO;
+#endif
+    int fd=open(path.stringByDeletingLastPathComponent.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
+    if(fd<0)return NO;
+    int result;
+    do{result=fsync(fd);}while(result<0&&errno==EINTR);
+    BOOL ok=result==0;
+    if(close(fd)!=0)ok=NO;
+    return ok;
+}
+static BOOL removeDurably(NSString *path) {
+    if(unlink(path.fileSystemRepresentation)!=0&&errno!=ENOENT)return NO;
+    return syncParent(path);
+}
 static BOOL atomicData(NSString *path, NSData *data, mode_t mode) {
     NSString *tmp = [path stringByAppendingFormat:@".%@", NSUUID.UUID.UUIDString];
     int fd = open(tmp.fileSystemRepresentation, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, mode);
@@ -56,6 +73,7 @@ static BOOL atomicData(NSString *path, NSData *data, mode_t mode) {
     if(fchmod(fd,mode)||fsync(fd))ok=NO;
     close(fd);
     if(ok)ok=rename(tmp.fileSystemRepresentation,path.fileSystemRepresentation)==0;
+    if(ok)ok=syncParent(path);
     if(!ok)unlink(tmp.fileSystemRepresentation);
     return ok;
 }
@@ -63,9 +81,9 @@ static BOOL writeJSON(NSString *path, NSDictionary *data) {
 #ifdef POWER_TEST
     if(TestFailWrite)return NO;
     if(data)TestFiles[path]=data;else[TestFiles removeObjectForKey:path];
-    return YES;
+    return !TestFailDirectorySync;
 #else
-    if(!data)return unlink(path.fileSystemRepresentation)==0||errno==ENOENT;
+    if(!data)return removeDurably(path);
     return atomicData(path,jsonData(data),0600);
 #endif
 }
@@ -267,7 +285,7 @@ static BOOL safeDirectory(NSString *path) {
     return safeRootPath(path,YES);
 }
 static BOOL restoreFile(NSString *path, NSData *data, mode_t mode) {
-    return data ? atomicData(path,data,mode) : unlink(path.fileSystemRepresentation)==0||errno==ENOENT;
+    return data ? atomicData(path,data,mode) : removeDurably(path);
 }
 #include "power_install.h"
 #ifndef POWER_TEST
@@ -330,12 +348,13 @@ int main(int argc, const char *argv[]) {
 }
 #else
 #define CHECK(v) do { if(!(v)){fprintf(stderr,"power test failed at %d\n",__LINE__);return 1;} } while(0)
+#include "power_storage_tests.h"
 static NSDictionary *testState(BOOL enabled, NSInteger minutes) {
     return @{@"supported":@YES,@"enabled":@(enabled),@"batterySleep":@(minutes)};
 }
 static void testReset(BOOL enabled, NSInteger minutes) {
     TestFiles=[NSMutableDictionary dictionary];TestState=testState(enabled,minutes);
-    TestFailWrite=NO;TestFieldWrites=0;TestFailFieldWrite=0;
+    TestFailWrite=NO;TestFailDirectorySync=NO;TestFieldWrites=0;TestFailFieldWrite=0;
     TestExternalAfterFieldWrite=0;TestExternalState=nil;TestFailRecordAfterFieldWrite=0;
 }
 static NSDictionary *testSet(BOOL enabled) {
@@ -349,6 +368,7 @@ static BOOL testView(NSString *ownership, BOOL externalChanged) {
 }
 int main(void) {
     @autoreleasepool {
+        CHECK(testStoragePersistence());
         CHECK(testInstallTransactions());
         NSDictionary *approved=@{@"uid":@501,@"path":AppBinary};
         CHECK(identityMatches(501,AppBinary,YES,approved));
