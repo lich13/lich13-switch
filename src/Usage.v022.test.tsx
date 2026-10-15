@@ -129,11 +129,13 @@ function dashboard(): Dashboard {
 }
 
 let records: UsageRecord[];
+let usageLogsPending: Promise<void> | null = null;
 
 beforeEach(() => {
   mock.command.mockReset();
   mock.listeners.clear();
   records = [record()];
+  usageLogsPending = null;
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
     value: "visible",
@@ -152,6 +154,7 @@ beforeEach(() => {
         case "get_usage_dashboard":
           return dashboard();
         case "get_usage_logs": {
+          if (usageLogsPending) await usageLogsPending;
           const filter = args.filter as UsageFilter;
           const page = filter.page ?? 1;
           const rows: UsagePage["rows"] = records.slice(
@@ -186,7 +189,7 @@ it("uses the second-level finishedAt value for rows and the cell title", async (
   render(<Usage />);
   const table = await screen.findByRole("table");
   expect(within(table).getByRole("columnheader", { name: "结束时间" })).toBeInTheDocument();
-  const row = within(table).getAllByRole("row")[1];
+  const row = await screen.findByRole("row", { name: /请求详情$/ });
   const cell = within(row).getAllByRole("cell")[0];
   expect(cell).toHaveAttribute(
     "title",
@@ -215,8 +218,18 @@ it("uses the second-level finishedAt value for rows and the cell title", async (
 
 it("opens one detail request and preserves protocol end precision and event-time basis", async () => {
   const user = userEvent.setup();
+  let releaseUsageLogs!: () => void;
+  usageLogsPending = new Promise<void>((resolve) => {
+    releaseUsageLogs = resolve;
+  });
   render(<Usage />);
-  const row = (await screen.findByRole("table")).querySelector("tbody tr")!;
+  const table = await screen.findByRole("table");
+  expect(within(table).getAllByRole("row")).toHaveLength(1);
+  expect(
+    within(table).queryByRole("row", { name: /请求详情$/ }),
+  ).not.toBeInTheDocument();
+  releaseUsageLogs();
+  const row = await screen.findByRole("row", { name: /请求详情$/ });
   await user.click(row);
   const dialog = await screen.findByRole("dialog", { name: "请求详情" });
   expect(
@@ -247,7 +260,7 @@ it("labels a session row by its finished event and keeps one session detail requ
   ];
   const user = userEvent.setup();
   render(<Usage />);
-  const row = (await screen.findByRole("table")).querySelector("tbody tr")!;
+  const row = await screen.findByRole("row", { name: /请求详情$/ });
   await user.click(row);
   const dialog = await screen.findByRole("dialog", { name: "请求详情" });
   expect(detailValue(dialog, "列表时间依据")).toHaveTextContent("会话事件时间");
