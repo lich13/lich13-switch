@@ -82,21 +82,69 @@ pub(super) mod windows {
         ptr,
     };
     use windows_sys::Win32::{
-        Foundation::{LocalFree, INVALID_HANDLE_VALUE},
+        Foundation::{CloseHandle, LocalFree, INVALID_HANDLE_VALUE},
         Security::{
-            Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            SECURITY_ATTRIBUTES,
+            Authorization::{
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            },
+            GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
         },
         Storage::FileSystem::{
             CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY, FILE_GENERIC_READ,
             FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
+
+    fn creation_sddl() -> io::Result<Vec<u16>> {
+        unsafe {
+            let mut token = ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut length = 0;
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut length);
+            if length < std::mem::size_of::<TOKEN_USER>() as u32 || length > 65536 {
+                CloseHandle(token);
+                return Err(io::Error::other("invalid process user information"));
+            }
+            // TOKEN_USER and its SID require aligned storage until conversion ends.
+            let mut buffer = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
+            let read = GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            );
+            let error = io::Error::last_os_error();
+            CloseHandle(token);
+            if read == 0 {
+                return Err(error);
+            }
+            let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
+            let mut sid = ptr::null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut sid) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut sddl: Vec<u16> = "O:".encode_utf16().collect();
+            let mut cursor = sid;
+            while *cursor != 0 {
+                sddl.push(*cursor);
+                cursor = cursor.add(1);
+            }
+            LocalFree(sid.cast());
+            // Elevated tokens may default new objects to a group owner. Set the
+            // actual user explicitly so OWNER RIGHTS never grants that group access.
+            sddl.extend("D:P(A;OICI;FA;;;OW)\0".encode_utf16());
+            Ok(sddl)
+        }
+    }
 
     pub(super) struct Descriptor(pub *mut std::ffi::c_void);
     impl Descriptor {
         pub(super) fn new() -> io::Result<Self> {
-            let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)\0".encode_utf16().collect();
+            let sddl = creation_sddl()?;
             let mut descriptor = ptr::null_mut();
             if unsafe {
                 ConvertStringSecurityDescriptorToSecurityDescriptorW(

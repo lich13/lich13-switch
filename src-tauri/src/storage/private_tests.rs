@@ -128,12 +128,14 @@ fn atomic_replacement_leaves_a_private_final_file() {
 mod windows_acl {
     use std::{ffi::c_void, os::windows::ffi::OsStrExt, path::Path, ptr, slice};
     use windows_sys::Win32::{
-        Foundation::LocalFree,
+        Foundation::{CloseHandle, LocalFree, ERROR_INSUFFICIENT_BUFFER},
         Security::Authorization::{ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT},
         Security::{
-            EqualSid, GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-            DACL_SECURITY_INFORMATION, INHERITED_ACE, SE_DACL_PROTECTED,
+            EqualSid, GetAce, GetSecurityDescriptorControl, TokenUser, ACCESS_ALLOWED_ACE,
+            ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERITED_ACE, OWNER_SECURITY_INFORMATION,
+            SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
         },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
@@ -148,20 +150,34 @@ mod windows_acl {
         }
     }
 
-    fn security_descriptor(path: &Path) -> (LocalAllocation, *mut ACL) {
+    struct TokenHandle(windows_sys::Win32::Foundation::HANDLE);
+
+    impl Drop for TokenHandle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    fn security_descriptor(
+        path: &Path,
+        security_information: u32,
+    ) -> (LocalAllocation, *mut c_void, *mut ACL) {
         let name = path
             .as_os_str()
             .encode_wide()
             .chain(Some(0))
             .collect::<Vec<_>>();
+        let mut owner = ptr::null_mut();
         let mut dacl = ptr::null_mut();
         let mut descriptor = ptr::null_mut();
         let result = unsafe {
             GetNamedSecurityInfoW(
                 name.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
+                security_information,
+                &mut owner,
                 ptr::null_mut(),
                 &mut dacl,
                 ptr::null_mut(),
@@ -169,11 +185,65 @@ mod windows_acl {
             )
         };
         assert_eq!(result, 0);
-        (LocalAllocation(descriptor), dacl)
+        (LocalAllocation(descriptor), owner, dacl)
+    }
+
+    fn current_token_user_sid() -> (*mut c_void, Vec<usize>) {
+        let mut token = ptr::null_mut();
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+            0,
+            "OpenProcessToken failed"
+        );
+        let token = TokenHandle(token);
+
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                windows_sys::Win32::Security::GetTokenInformation(
+                    token.0,
+                    TokenUser,
+                    ptr::null_mut(),
+                    0,
+                    &mut required,
+                )
+            },
+            0,
+            "TokenUser size query unexpectedly succeeded"
+        );
+        let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        assert_eq!(
+            error, ERROR_INSUFFICIENT_BUFFER,
+            "TokenUser size query failed with an unexpected Win32 error"
+        );
+        assert!(
+            required as usize >= std::mem::size_of::<TOKEN_USER>(),
+            "TokenUser buffer size was invalid"
+        );
+
+        let word_count = (required as usize).div_ceil(std::mem::size_of::<usize>());
+        let mut buffer = vec![0usize; word_count];
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::Security::GetTokenInformation(
+                    token.0,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    required,
+                    &mut required,
+                )
+            },
+            0,
+            "GetTokenInformation(TokenUser) failed"
+        );
+
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        assert!(!user.User.Sid.is_null(), "TokenUser SID is missing");
+        (user.User.Sid, buffer)
     }
 
     pub(super) fn snapshot(path: &Path) -> (u16, Vec<u8>) {
-        let (descriptor, dacl) = security_descriptor(path);
+        let (descriptor, _owner, dacl) = security_descriptor(path, DACL_SECURITY_INFORMATION);
         assert!(!dacl.is_null());
         let mut control = 0;
         let mut revision = 0;
@@ -187,7 +257,15 @@ mod windows_acl {
     }
 
     pub(super) fn assert_private(path: &Path) {
-        let (descriptor, dacl) = security_descriptor(path);
+        let (descriptor, owner, dacl) =
+            security_descriptor(path, DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION);
+        assert!(!owner.is_null(), "security descriptor has no owner");
+        let (token_user, _token_user_buffer) = current_token_user_sid();
+        assert_ne!(
+            unsafe { EqualSid(owner, token_user) },
+            0,
+            "created object owner does not match TokenUser"
+        );
         assert!(!dacl.is_null());
 
         let mut control = 0;
