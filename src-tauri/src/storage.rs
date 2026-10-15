@@ -141,11 +141,21 @@ pub fn stage_write(parent: &Path, bytes: &[u8], limit: u64) -> Result<tempfile::
         return Err(AppError::new(code::FILE_SIZE, "文件超过允许大小"));
     }
     let mut temp = private_tempfile(parent)?;
+    #[cfg(test)]
+    if faults::take(faults::Point::ShortWrite) {
+        temp.write_all(&bytes[..bytes.len() / 2])
+            .map_err(io_error)?;
+        return Err(faults::error());
+    }
     temp.write_all(bytes).map_err(io_error)?;
+    #[cfg(test)]
+    faults::check(faults::Point::FileSync)?;
     temp.as_file().sync_all().map_err(io_error)?;
     Ok(temp)
 }
 pub fn sync_parent(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    faults::check(faults::Point::DirectorySync)?;
     #[cfg(unix)]
     {
         let parent = path
@@ -252,6 +262,8 @@ pub fn atomic_write_bounded(
             "文件已被其他程序修改，请重新读取后再操作",
         ));
     }
+    #[cfg(test)]
+    faults::check(faults::Point::Replace)?;
     temp.persist(path).map_err(|e| io_error(e.error))?;
     sync_parent(path)?;
     let actual = read_bounded(path, limit)?;
@@ -265,5 +277,50 @@ pub fn atomic_write_bounded(
 }
 
 #[cfg(test)]
+#[path = "storage_fault_tests.rs"]
+mod fault_tests;
+#[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
+
+// Thread-local, single-use faults leave parallel tests and release builds alone.
+#[cfg(test)]
+mod faults {
+    use super::{io_error, AppError, Result};
+    use std::cell::Cell;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Point {
+        ShortWrite,
+        FileSync,
+        Replace,
+        DirectorySync,
+    }
+    thread_local! { static NEXT: Cell<Option<Point>> = const { Cell::new(None) }; }
+    pub struct Guard(Option<Point>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            NEXT.set(self.0);
+        }
+    }
+    pub fn inject(point: Point) -> Guard {
+        Guard(NEXT.replace(Some(point)))
+    }
+    pub fn take(point: Point) -> bool {
+        if NEXT.get() == Some(point) {
+            NEXT.set(None);
+            true
+        } else {
+            false
+        }
+    }
+    pub fn error() -> AppError {
+        io_error(std::io::Error::other("injected storage failure"))
+    }
+    pub fn check(point: Point) -> Result<()> {
+        if take(point) {
+            Err(error())
+        } else {
+            Ok(())
+        }
+    }
+}
