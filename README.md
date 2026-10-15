@@ -179,7 +179,7 @@ v0.9.0 已移除应用内供应商代理。升级先完成恢复事务，再清�
 
 ## 开发与验证
 
-需要 Node.js 24.21.0 LTS、pnpm 12.11.2、Rust stable（当前 1.99.0） 和 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。
+Node.js 版本见 [.nvmrc](.nvmrc)，pnpm 版本见 [package.json](package.json) 的 `packageManager`，Rust 版本与组件见 [rust-toolchain.toml](rust-toolchain.toml)。CI 使用同一来源；另需 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。
 
 ```sh
 pnpm install --frozen-lockfile
