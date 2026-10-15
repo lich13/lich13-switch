@@ -1,6 +1,7 @@
+import { subscriptions } from "./subscriptions";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import { confirmAction } from "./confirmation";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 
@@ -102,7 +103,7 @@ export type EventRecord = {
   };
 };
 
-type EventPage = {
+export type EventPage = {
   items: EventRecord[];
   total: number;
   page: number;
@@ -308,7 +309,7 @@ export default function EventLog({
       providerId: current.providerId ?? "",
     }));
     setPage(1);
-    void command<EventRecord | null>("get_app_event", { id: current.id })
+    void command("get_app_event", { id: current.id })
       .then((record) => {
         if (record && request === detailSequence.current) setSelected(record);
       })
@@ -323,7 +324,7 @@ export default function EventLog({
       const filter = Object.fromEntries(
         Object.entries(filters).filter(([, value]) => value),
       );
-      const result = await command<EventPage>("get_app_events", {
+      const result = await command("get_app_events", {
         filter: {
           ...filter,
           page,
@@ -353,7 +354,7 @@ export default function EventLog({
 
   useEffect(() => {
     let disposed = false;
-    const clean: (() => void)[] = [];
+    const events = subscriptions((e) => setError(errorOf(e).message));
     let timer: number;
 
     const accept = (s: GatewayState) =>
@@ -370,19 +371,16 @@ export default function EventLog({
       });
 
     for (const id of ["codex", "claude", "grok"] as const)
-      void command<GatewayState>("get_gateway", { clientId: id })
+      void command("get_gateway", { clientId: id })
         .then((s) => {
           if (!disposed) accept(s);
         })
         .catch(() => {});
 
-    const watch = <T,>(name: string, fn: (value: T) => void) =>
-      void subscribe<T>(name, (value) => {
-        if (!disposed) fn(value);
-      }).then((c) => (disposed ? c() : clean.push(c)));
+    const watch = events.watch;
 
-    watch<GatewayState>("gateway-state", accept);
-    watch<boolean>("app-visibility", setNativeVisible);
+    watch("gateway-state", accept);
+    watch("app-visibility", setNativeVisible);
     watch("app-event", () => {
       if (visible) {
         window.clearTimeout(timer);
@@ -397,7 +395,7 @@ export default function EventLog({
     return () => {
       disposed = true;
       window.clearTimeout(timer);
-      clean.forEach((c) => c());
+      events.dispose();
       document.removeEventListener("visibilitychange", visibility);
     };
   }, [visible, load]);
@@ -622,7 +620,7 @@ export default function EventLog({
                       onClick={(e) => {
                         e.currentTarget.focus({ preventScroll: true });
                         const request = ++detailSequence.current;
-                        void command<EventRecord | null>("get_app_event", {
+                        void command("get_app_event", {
                           id: r.id,
                         })
                           .then((value) => {

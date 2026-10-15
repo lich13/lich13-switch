@@ -1,3 +1,4 @@
+import { subscriptions } from "./subscriptions";
 import ClaudeProfile from "./ClaudeProfile";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
@@ -23,7 +24,7 @@ import {
   History,
   ListChecks,
 } from "lucide-react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import {
   errorOf,
   type ConfigDocument,
@@ -138,7 +139,7 @@ function EditorContent({
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     try {
-      const d = await command<ConfigDocument>("read_config", { clientId });
+      const d = await command("read_config", { clientId });
       if (seq !== loadSeq.current) return;
       setDoc(d);
       setText(d.text);
@@ -162,25 +163,20 @@ function EditorContent({
     };
   }, [load, home]);
   useEffect(() => {
-    let disposed = false,
-      unlisten: (() => void) | undefined;
-    void subscribe<{ clientId: ClientId; revision: string; guarded: boolean }>(
+    const events = subscriptions((e) => setError(errorOf(e)));
+    events.watch(
       "config-state",
       (s) => {
-        if (disposed || s.clientId !== clientId) return;
+        if (s.clientId !== clientId) return;
         setDoc((d) => (d ? { ...d, guarded: s.guarded } : d));
         if (docRef.current && s.revision !== docRef.current.revision) {
           if (textRef.current !== docRef.current.text) setConflict(true);
           else void load();
         }
       },
-    ).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
+    );
     return () => {
-      disposed = true;
-      unlisten?.();
+      events.dispose();
     };
   }, [clientId, load]);
   useEffect(() => {
@@ -201,7 +197,7 @@ function EditorContent({
     setBusy(true);
     setError(null);
     try {
-      const d = await command<ConfigDocument>("save_config", {
+      const d = await command("save_config", {
         clientId,
         text: submitted,
         expectedRevision: current.revision,
@@ -431,7 +427,7 @@ function EditorContent({
                 !(await confirmAction("恢复上次配置会替换当前草稿。", "恢复"))
               )
                 return;
-              void command<string>("read_previous_config", { clientId })
+              void command("read_previous_config", { clientId })
                 .then(update)
                 .catch((e) => setError(errorOf(e)));
             }}

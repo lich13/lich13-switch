@@ -1,5 +1,6 @@
+import { subscriptions } from "./subscriptions";
 import { useEffect, useState } from "react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import { errorOf } from "./types";
 export type PowerState = {
   supported: boolean;
@@ -22,31 +23,29 @@ export default function PowerSettings() {
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   useEffect(() => {
-    let disposed = false,
-      clean = () => {};
-    void command<PowerState>("get_clamshell_state")
+    let disposed = false;
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    void command("get_clamshell_state")
       .then((s) => {
         if (!disposed) setState(s);
       })
       .catch((e) => {
         if (!disposed) setError(errorOf(e).message);
       });
-    void subscribe<PowerState>("clamshell-state", (s) => {
-      if (!disposed) setState(s);
-    }).then((c) => (disposed ? c() : (clean = c)));
+    events.watch("clamshell-state", setState);
     return () => {
       disposed = true;
-      clean();
+      events.dispose();
     };
   }, []);
-  const action = async (op: string) => {
+  const action = async (op: "install_power_helper" | "remove_power_helper") => {
     setBusy(true);
     setError("");
     try {
-      setState(await command<PowerState>(op));
+      setState(await command(op));
     } catch (e) {
       setError(errorOf(e).message);
-      await command<PowerState>("get_clamshell_state")
+      await command("get_clamshell_state")
         .then(setState)
         .catch(() => {});
     } finally {

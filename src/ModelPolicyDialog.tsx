@@ -45,7 +45,7 @@ export default function ModelPolicyDialog({
     const current = ++generation.current;
     setLoading(true);
     try {
-      const result = await command<ModelCatalog>("list_provider_models", {
+      const result = await command("list_provider_models", {
         clientId,
         providerId: provider.id,
         force,

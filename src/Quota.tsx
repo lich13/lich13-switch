@@ -1,7 +1,8 @@
+import { subscriptions } from "./subscriptions";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import Modal from "./Modal";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import { compact as compactNumber } from "./usage-types";
 import {
   errorOf,
@@ -14,10 +15,13 @@ import {
 export function useProviderQuota(
   providers: Provider[],
   active: boolean,
-  visibilityEvent = "app-visibility",
+  visibilityEvent: "app-visibility" | "panel-visibility" = "app-visibility",
   clientId: ClientId = "codex",
   refreshSeconds = 60,
+  onError?: (message: string) => void,
 ) {
+  const failure = useRef(onError);
+  failure.current = onError;
   const latest = useRef(providers);
   latest.current = providers;
   const [values, setValues] = useState<Record<string, ProviderQuota>>({});
@@ -40,26 +44,17 @@ export function useProviderQuota(
   }, []);
   useEffect(() => {
     mounted.current = true;
-    const clean: (() => void)[] = [];
-    let disposed = false;
-    for (const promise of [
-      subscribe<{ clientId: ClientId; quota: ProviderQuota }>(
-        "provider-quota",
-        (e) => {
-          if (e.clientId === clientId) accept(e.quota);
-        },
-      ),
-      subscribe<boolean>(visibilityEvent, setNativeVisible),
-    ]) {
-      void promise.then((fn) => (disposed ? fn() : clean.push(fn)));
-    }
+    const events = subscriptions((e) => failure.current?.(errorOf(e).message));
+    events.watch("provider-quota", (e) => {
+      if (e.clientId === clientId) accept(e.quota);
+    });
+    events.watch(visibilityEvent, setNativeVisible);
     const onVisibility = () =>
       setVisible(document.visibilityState !== "hidden");
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      disposed = true;
       mounted.current = false;
-      clean.forEach((fn) => fn());
+      events.dispose();
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [accept, visibilityEvent, clientId]);
@@ -72,7 +67,7 @@ export function useProviderQuota(
       flights.current.add(flight);
       try {
         accept(
-          await command<ProviderQuota>("query_provider_quota", {
+          await command("query_provider_quota", {
             clientId,
             providerId: id,
             force,

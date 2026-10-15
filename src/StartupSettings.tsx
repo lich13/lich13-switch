@@ -8,7 +8,7 @@ export default function StartupSettings() {
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let disposed = false;
-    void command<StartupState>("get_startup")
+    void command("get_startup")
       .then((s) => {
         if (!disposed) setState(s);
       })
@@ -25,7 +25,7 @@ export default function StartupSettings() {
     setError("");
     try {
       setState(
-        await command<StartupState>("set_startup", {
+        await command("set_startup", {
           enabled,
           expectedRevision: state.revision,
         }),

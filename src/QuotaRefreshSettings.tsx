@@ -38,7 +38,7 @@ export default function QuotaRefreshSettings({
     setBusy(true);
     setError("");
     try {
-      await command<ViewState>("set_quota_refresh", {
+      await command("set_quota_refresh", {
         seconds: value,
         expectedSeconds: retry ? seconds : baseline.current,
       });

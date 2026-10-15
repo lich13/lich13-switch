@@ -1,3 +1,4 @@
+import type { GatewayEdit } from "./bridge-contracts";
 import { command } from "./bridge";
 import type { ClientId, GatewayState } from "./types";
 
@@ -8,16 +9,16 @@ export type EditRevision = string | null;
 export async function saveGatewayEdit(
   clientId: ClientId,
   current: GatewayState,
-  edit: Record<string, unknown>,
+  edit: GatewayEdit,
   expected: EditRevision | undefined,
   update: (state: GatewayState) => void,
 ): Promise<void> {
   if (expected === null) {
-    current = await command<GatewayState>("get_gateway", { clientId });
+    current = await command("get_gateway", { clientId });
     update(current);
   }
   try {
-    update(await command<GatewayState>("update_gateway", {
+    update(await command("update_gateway", {
       clientId,
       edit,
       expectedRevision: expected ?? current.revision,
@@ -26,7 +27,7 @@ export async function saveGatewayEdit(
         : {}),
     }));
   } catch (error) {
-    await command<GatewayState>("get_gateway", { clientId }).then(update).catch(() => {});
+    await command("get_gateway", { clientId }).then(update).catch(() => {});
     throw error;
   }
 }

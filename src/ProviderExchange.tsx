@@ -5,19 +5,7 @@ import { command } from "./bridge";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 import TemplateChoice, { type PreparedTemplate } from "./TemplateChoice";
 
-type Preview = {
-  token: string;
-  revision: string;
-  unsupportedProxies: number;
-  template?: PreparedTemplate | null;
-  rows: {
-    id: number;
-    name: string;
-    baseUrl: string | null;
-    concurrency: number | null;
-    error: string | null;
-  }[];
-};
+import type { ProviderImportPreview as Preview } from "./bridge-contracts";
 export default function ProviderExchange({
   mode,
   state,
@@ -51,17 +39,17 @@ export default function ProviderExchange({
     setError("");
     try {
       if (mode === "import") {
-        const next = await command<Preview | null>("preview_sub2api_import", {
+        const next = await command("preview_sub2api_import", {
           clientId,
         });
         if (!mounted.current) {
           if (next?.template?.token)
-            void command("cancel_sub2api_import", { clientId, token: next.template.token });
+            void command("cancel_sub2api_import", { clientId, token: next.template.token }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
           if (next)
             void command("cancel_sub2api_import", {
               clientId,
               token: next.token,
-            });
+            }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
           return;
         }
         if (next) {
@@ -76,11 +64,11 @@ export default function ProviderExchange({
           setReady(!next.template?.token);
         }
       } else {
-        const ok = await command<PreparedTemplate | null>("prepare_sub2api_export", {
+        const ok = await command("prepare_sub2api_export", {
           clientId,
         });
         if (!mounted.current && ok?.token) {
-          void command("cancel_sub2api_import", { clientId, token: ok.token });
+          void command("cancel_sub2api_import", { clientId, token: ok.token }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
           return;
         }
         if (mounted.current && ok) {
@@ -108,9 +96,9 @@ export default function ProviderExchange({
         void command("cancel_sub2api_import", {
           clientId,
           token: token.current,
-        });
+        }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
       if (templateToken.current)
-        void command("cancel_sub2api_import", { clientId, token: templateToken.current });
+        void command("cancel_sub2api_import", { clientId, token: templateToken.current }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
       onDirtyChange?.(false);
     };
   }, []);
@@ -134,9 +122,10 @@ export default function ProviderExchange({
     setError("");
     try {
       if (mode === "import") {
-        const next = await command<GatewayState>("commit_sub2api_import", {
+        if (!preview) return;
+        const next = await command("commit_sub2api_import", {
           clientId,
-          token: preview?.token,
+          token: preview.token,
           ids: selected.map(Number),
           expectedRevision: revision,
         });
@@ -145,7 +134,7 @@ export default function ProviderExchange({
         notify(`已导入 ${selected.length} 个供应商`);
         close();
       } else {
-        const saved = await command<boolean>("export_sub2api_providers", {
+        const saved = await command("export_sub2api_providers", {
           clientId,
           ids: selected,
           expectedRevision: revision,
@@ -160,7 +149,7 @@ export default function ProviderExchange({
       setError(failure.message);
       if (failure.code === "CONFLICT") {
         try {
-          const latest = await command<GatewayState>("get_gateway", {
+          const latest = await command("get_gateway", {
             clientId,
           });
           update(latest);
@@ -192,6 +181,7 @@ export default function ProviderExchange({
       {template?.token && <TemplateChoice key={template.token} template={template} busy={busy} select={id => {
         setBusy(true);
         setError("");
+        if (!template.token) return;
         void command("select_sub2api_template", { clientId, token: template.token, id })
           .then(() => { templateToken.current = null; setTemplate(null); setReady(true); })
           .catch(e => setError(errorOf(e).message)).finally(() => setBusy(false));
@@ -253,12 +243,12 @@ export default function ProviderExchange({
             disabled={busy}
             onClick={() => {
               setBusy(true);
-              void command<PreparedTemplate | null>("prepare_sub2api_export", {
+              void command("prepare_sub2api_export", {
                 clientId,
                 replaceTemplate: true,
               })
                 .then(next => {
-                  if (!mounted.current) { if (next?.token) void command("cancel_sub2api_import", { clientId, token: next.token }); return; }
+                  if (!mounted.current) { if (next?.token) void command("cancel_sub2api_import", { clientId, token: next.token }).catch((e) => { if (mounted.current) setError(errorOf(e).message); }); return; }
                   if (next) { setTemplate(next); templateToken.current = next.token; setReady(next.ready); }
                 })
                 .catch((e) => setError(errorOf(e).message))

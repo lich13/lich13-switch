@@ -4,9 +4,7 @@ import TemplateChoice, { type PreparedTemplate } from "./TemplateChoice";
 import { command } from "./bridge";
 import { errorOf, type ViewState } from "./types";
 
-type Row = { id: number; name: string; format: string; identityHint: string | null; duplicate: boolean; error: string | null };
-type Preview = { token: string; revision: string; rows: Row[] };
-type ExportPreview = { revision: string; rows: { id: string; name: string; error: string | null }[] };
+import type { AccountImportPreview as Preview, AccountExportPreview as ExportPreview } from "./bridge-contracts";
 const formatName = (format: string) => ({ codex: "Codex", sub2api: "Sub2API", cliproxyapi: "CLIProxyAPI" }[format] ?? format);
 
 export default function AccountExchange({ mode, close, update, notify }: {
@@ -31,15 +29,15 @@ export default function AccountExchange({ mode, close, update, notify }: {
   };
   const choose = () => perform(async () => {
     if (mode === "import") {
-      const next = await command<Preview | null>("preview_account_import");
+      const next = await command("preview_account_import");
       if (!next) return;
-      if (!mounted.current) { void command("cancel_account_exchange", { token: next.token }); return; }
+      if (!mounted.current) { void command("cancel_account_exchange", { token: next.token }).catch((e) => { if (mounted.current) setError(errorOf(e).message); }); return; }
       token.current = next.token;
       setPreview(next);
       setStale(false);
       setSelected(next.rows.filter(r => !r.error && !r.duplicate).map(r => String(r.id)));
     } else {
-      const next = await command<ExportPreview>("preview_account_export");
+      const next = await command("preview_account_export");
       if (!mounted.current) return;
       setExportPreview(next);
       setStale(false);
@@ -52,7 +50,7 @@ export default function AccountExchange({ mode, close, update, notify }: {
     return () => {
       mounted.current = false;
       for (const value of [token.current, templateToken.current])
-        if (value) void command("cancel_account_exchange", { token: value });
+        if (value) void command("cancel_account_exchange", { token: value }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
     };
   }, []);
   const rows = mode === "import" ? (preview?.rows ?? []).map(r => ({ ...r, id: String(r.id), description:
@@ -60,9 +58,9 @@ export default function AccountExchange({ mode, close, update, notify }: {
     : (exportPreview?.rows ?? []).map(r => ({ ...r, duplicate: false, description: r.error ?? "ChatGPT / Codex" }));
   const available = rows.filter(r => !r.error && !r.duplicate).map(r => r.id);
   const prepare = async (replaceTemplate = false) => {
-    const next = await command<PreparedTemplate | null>("prepare_account_template", { ids: selected, replaceTemplate });
+    const next = await command("prepare_account_template", { ids: selected, replaceTemplate });
     if (!mounted.current) {
-      if (next?.token) void command("cancel_account_exchange", { token: next.token });
+      if (next?.token) void command("cancel_account_exchange", { token: next.token }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
       return false;
     }
     if (next) { setTemplate(next); templateToken.current = next.token; }
@@ -71,12 +69,12 @@ export default function AccountExchange({ mode, close, update, notify }: {
   const save = () => perform(async () => {
     if (!selected.length) return;
     if (mode === "import" && preview) {
-      const next = await command<ViewState>("commit_account_import", { token: preview.token, expectedRevision: preview.revision,
+      const next = await command("commit_account_import", { token: preview.token, expectedRevision: preview.revision,
         selected: selected.map(id => ({ id: Number(id), update: preview.rows.find(r => r.id === Number(id))?.duplicate === true })) });
       token.current = null; update(next); notify(`已保存 ${selected.length} 个账号`); close();
     } else if (exportPreview) {
       if (format === "sub2api" && !(await prepare())) return;
-      if (await command<boolean>("export_accounts", { ids: selected, expectedRevision: exportPreview.revision, format })) {
+      if (await command("export_accounts", { ids: selected, expectedRevision: exportPreview.revision, format })) {
         notify(`已导出 ${selected.length} 个账号`); close();
       }
     }
@@ -96,6 +94,7 @@ export default function AccountExchange({ mode, close, update, notify }: {
       </select>
     </label>}
     {template?.token ? <TemplateChoice key={template.token} template={template} busy={busy} select={id => void perform(async () => {
+      if (!template.token) return;
       await command("select_account_template", { token: template.token, id });
       templateToken.current = null; setTemplate(null);
     })} /> : <>

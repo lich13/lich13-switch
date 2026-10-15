@@ -36,7 +36,7 @@ export default function ProviderSettings({ provider, runtime, clientId, revision
   const load = async (force: boolean) => {
     const current = ++generation.current; setLoading(true);
     try {
-      const result = await command<ModelCatalog>("list_provider_models", { clientId, providerId: provider.id, force });
+      const result = await command("list_provider_models", { clientId, providerId: provider.id, force });
       if (current === generation.current) { setCatalog(result); setCatalogError(""); }
     } catch (e) { if (current === generation.current) setCatalogError(errorOf(e).message); }
     finally { if (current === generation.current) setLoading(false); }

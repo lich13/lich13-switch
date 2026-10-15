@@ -561,12 +561,12 @@ export default function ClaudeSettings({
     setLoading(true);
     setError("");
     try {
-      const gateway = await command<GatewayState>("get_gateway", {
+      const gateway = await command("get_gateway", {
         clientId: "claude",
       });
       const id = gateway.selected ?? gateway.providers[0]?.id;
       if (!id) throw new Error("请先添加 Claude 供应商");
-      const list = await command<{ models: string[] }>("list_provider_models", {
+      const list = await command("list_provider_models", {
         clientId: "claude",
         providerId: id,
         force: true,

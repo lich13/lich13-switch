@@ -1,3 +1,4 @@
+import type { GatewayEdit } from "./bridge-contracts";
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpDown, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { command } from "./bridge";
@@ -8,7 +9,7 @@ import { errorOf, type ClientId, type GatewayState, type Provider } from "./type
 
 export default function ProviderEndpoints({ provider, runtime, clientId, revision, save, update, close, onDirtyChange }: {
   provider: Provider; runtime: Provider; clientId: ClientId; revision: string;
-  save: (edit: Record<string, unknown>, revision: EditRevision) => Promise<void>;
+  save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   update: (state: GatewayState) => void; close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
@@ -34,7 +35,7 @@ export default function ProviderEndpoints({ provider, runtime, clientId, revisio
   const leave = async () => {
     if (!busy && (!dirty || await confirmAction("放弃未保存的端点修改？"))) close();
   };
-  const submit = async (edit: Record<string, unknown>, closing: boolean) => {
+  const submit = async (edit: GatewayEdit, closing: boolean) => {
     if (busy) return;
     setBusy(true); setError(""); setNotice("");
     try {
@@ -48,7 +49,7 @@ export default function ProviderEndpoints({ provider, runtime, clientId, revisio
   const measure = async () => {
     setProbing(true); setError("");
     try {
-      const state = await command<GatewayState>("probe_provider_endpoints", { clientId, providerId: provider.id });
+      const state = await command("probe_provider_endpoints", { clientId, providerId: provider.id });
       if (mounted.current) update(state);
     } catch (e) { if (mounted.current) setError(errorOf(e).message); }
     finally { if (mounted.current) setProbing(false); }

@@ -1,18 +1,15 @@
+import { subscriptions } from "./subscriptions";
 import { useCallback, useEffect, useState } from "react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import { errorOf } from "./types";
-type Handlers = {
-  current: string | null;
-  apps: { id: string; name: string; path: string }[];
-  systemPicker: boolean;
-};
+import type { LinkHandlers as Handlers } from "./bridge-contracts";
 export default function LinkSettings() {
   const [state, setState] = useState<Handlers | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [cleanup, setCleanup] = useState(false);
   const refresh = useCallback(() => {
-    void command<Handlers>("get_link_handler_state")
+    void command("get_link_handler_state")
       .then(setState)
       .catch((e) => setError(errorOf(e).message));
   }, []);
@@ -20,11 +17,11 @@ export default function LinkSettings() {
     refresh();
     window.addEventListener("focus", refresh);
     let disposed = false;
-    let off = () => {};
-    void subscribe<boolean>("app-visibility", (v) => {
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    events.watch("app-visibility", (v) => {
       if (v) refresh();
-    }).then((c) => (disposed ? c() : (off = c)));
-    void command<{ code: string; message: string } | null>("get_startup_error")
+    });
+    void command("get_startup_error")
       .then((e) => {
         setCleanup(e?.code === "CLEANUP");
         if (e?.code === "CLEANUP") setError(e.message);
@@ -33,7 +30,7 @@ export default function LinkSettings() {
     return () => {
       disposed = true;
       window.removeEventListener("focus", refresh);
-      off();
+      events.dispose();
     };
   }, [refresh]);
   return (
@@ -49,7 +46,7 @@ export default function LinkSettings() {
             const id = e.target.value;
             setBusy(true);
             setError("");
-            void command<Handlers>("set_link_handler", { appId: id })
+            void command("set_link_handler", { appId: id })
               .then((s) => {
                 setState(s);
                 if (!s.systemPicker && s.current !== id)

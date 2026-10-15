@@ -17,7 +17,7 @@ export default function ProviderPriceMappings({ view, busy, save, close }: {
   useEffect(() => {
     let disposed = false;
     void Promise.all((["codex", "claude", "grok"] as const).map(async (clientId) => {
-      const state = await command<GatewayState>("get_gateway", { clientId });
+      const state = await command("get_gateway", { clientId });
       return [clientId, state.providers.map(({ id, name }) => ({ id, name }))] as const;
     })).then((values) => { if (!disposed) setProviders(Object.fromEntries(values) as typeof providers); })
       .catch((e) => { if (!disposed) setError(errorOf(e).message); });

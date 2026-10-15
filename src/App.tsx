@@ -1,3 +1,4 @@
+import { subscriptions } from "./subscriptions";
 import { confirmAction } from "./confirmation";
 import {
   Suspense,
@@ -40,7 +41,7 @@ import {
   Trash2,
   Pencil,
 } from "lucide-react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import AuthSyncNotice from "./AuthSyncNotice";
 import AccountPlan from "./AccountPlan";
 import AccountExchange from "./AccountExchange";
@@ -161,10 +162,10 @@ export default function App() {
   }, []);
   useEffect(() => {
     let disposed = false;
-    const cleaners: (() => void)[] = [];
+    const events = subscriptions((e) => setError(errorOf(e).message));
     void Promise.all([
-      command<ViewState>("get_state"),
-      command<LoginState>("get_login"),
+      command("get_state"),
+      command("get_login"),
     ])
       .then(([s, l]) => {
         if (!disposed) {
@@ -176,11 +177,10 @@ export default function App() {
         }
       })
       .catch((e) => setError(errorOf(e).message));
-    const events: [string, (p: unknown) => void][] = [
-      ["switch-state", (p) => setState(p as ViewState)],
-      ["switch-notice", (p) => setMessage(String(p))],
-      ["switch-error", (p) => setError(errorOf(p).message)],
-      [
+    events.watch("switch-state", setState);
+    events.watch("switch-notice", setMessage);
+    events.watch("switch-error", (p) => setError(errorOf(p).message));
+    events.watch(
         "navigate",
         (p) =>
           p === "settings"
@@ -190,14 +190,15 @@ export default function App() {
                   !(await confirmAction("打开设置会丢弃未保存的草稿。"))
                 )
                   return;
+                if (disposed) return;
                 setPage("accounts");
                 setDirty(false);
                 setThemePreview(null);
                 setDialog("settings");
               })()
             : navigate(p === "config" || p === "gateway" || p === "logs" ? p : "accounts"),
-      ],
-      [
+    );
+    events.watch(
         "provider-settings",
         async (p) => {
           if (
@@ -205,34 +206,30 @@ export default function App() {
             !(await confirmAction("打开白名单会丢弃未保存的草稿。"))
           )
             return;
+          if (disposed) return;
           setPage("gateway");
           setDirty(false);
           setFocusProvider({
             ...(typeof p === "string"
               ? { id: p, clientId: "codex" as const }
-              : (p as { id: string; clientId: ClientId })),
+              : p),
             sequence: Date.now(),
           });
         },
-      ],
-      ["event-log", async (p) => {
+    );
+    events.watch("event-log", async (p) => {
         if ((gatewayDirty.current || usageDirty.current || dirtyRef.current) && !(await confirmAction("查看日志会丢弃未保存的草稿。"))) return;
+        if (disposed) return;
         setPage("logs"); setDirty(false);
-        setFocusEvent({ ...(p as { id: string; clientId: ClientId; providerId: string | null }), sequence: Date.now() });
-      }],
-      ["login-state", (p) => setLogin(p as LoginState)],
-    ];
-    for (const [event, fn] of events)
-      void subscribe(event, fn).then((clean) => {
-        if (disposed) clean();
-        else cleaners.push(clean);
-      });
+        setFocusEvent({ ...p, sequence: Date.now() });
+    });
+    events.watch("login-state", setLogin);
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const change = () => setSystemDark(media.matches);
     media.addEventListener("change", change);
     return () => {
       disposed = true;
-      cleaners.forEach((c) => c());
+      events.dispose();
       media.removeEventListener("change", change);
     };
   }, [navigate]);
@@ -267,7 +264,7 @@ export default function App() {
   const switchAccount = (a: Account) =>
     void action(async () => {
       if (!state) return;
-      const s = await command<ViewState>("switch_account", {
+      const s = await command("switch_account", {
         id: a.id,
         expectedRevision: state.authRevision,
       });
@@ -277,7 +274,7 @@ export default function App() {
   const useOfficial = (a: Account) =>
     void action(async () => {
       if (!state) return;
-      const s = await command<ViewState>("use_official_account", {
+      const s = await command("use_official_account", {
         accountId: a.id,
         expectedAuthRevision: state.authRevision,
         expectedConfigRevision: state.configRevision,
@@ -288,7 +285,7 @@ export default function App() {
   const disableOfficial = () =>
     void action(async () => {
       if (!state) return;
-      const s = await command<ViewState>("disable_official_account", {
+      const s = await command("disable_official_account", {
         expectedConfigRevision: state.configRevision,
       });
       setState(s);
@@ -730,7 +727,7 @@ function AddAccount({
     [busy, setBusy] = useState(false);
   const running = ["starting", "waiting", "cancelling"].includes(login.phase);
   const started = useRef(false);
-  const startDevice = async () => setLogin(await command<LoginState>("start_login", {
+  const startDevice = async () => setLogin(await command("start_login", {
     mode: "device", ...(target ? { targetAccountId: target.id, expectedCredentialRevision: target.credentialRevision } : {}),
   }));
   useEffect(() => {
@@ -804,7 +801,7 @@ function AddAccount({
                 event.preventDefault();
                 if (!callbackDraft.trim()) return;
                 void perform(async () => {
-                  const next = await command<LoginState>("complete_login_callback", {
+                  const next = await command("complete_login_callback", {
                     callbackUrl: callbackDraft.trim(),
                   });
                   setLogin(next);
@@ -967,7 +964,7 @@ function SettingsForm({
   const checkForUpdates = () => {
     setChecking(true);
     setError("");
-    void command<UpdateInfo>("check_for_updates")
+    void command("check_for_updates")
       .then(setUpdate)
       .catch((e) => setError(errorOf(e).message))
       .finally(() => setChecking(false));
@@ -989,7 +986,7 @@ function SettingsForm({
       onSubmit={(e) => {
         e.preventDefault();
         setBusy(true);
-        void command<ViewState>("set_preferences", { preferences: prefs })
+        void command("set_preferences", { preferences: prefs })
           .then(onDone)
           .catch((e) => setError(errorOf(e).message))
           .finally(() => setBusy(false));
@@ -1077,7 +1074,7 @@ function AccountEdit({
       onSubmit={(e) => {
         e.preventDefault();
         setBusy(true);
-        void command<ViewState>(
+        void command(
           dialog.action === "rename" ? "rename_account" : "delete_account",
           { id: dialog.account.id, name },
         )

@@ -1,3 +1,7 @@
+import Advanced from "./GatewayAdvanced";
+import GatewayDialog from "./GatewayProviderDialog";
+import { subscriptions } from "./subscriptions";
+import type { GatewayEdit } from "./bridge-contracts";
 import QuotaRefreshSettings from "./QuotaRefreshSettings";
 import ClaudeProfile from "./ClaudeProfile";
 import ClientSelection, {
@@ -33,11 +37,8 @@ import {
   MoreHorizontal,
   Check,
   RotateCcw,
-  LoaderCircle,
-  Eye,
-  EyeOff,
 } from "lucide-react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import {
   errorOf,
   type GatewayState,
@@ -45,7 +46,7 @@ import {
   type Provider,
 } from "./types";
 
-type Edit = Record<string, unknown>;
+type Edit = GatewayEdit;
 type Dialog =
   | { kind: "exchange"; mode: "import" | "export" }
   | { kind: "provider"; item?: Provider }
@@ -139,24 +140,22 @@ function GatewayContent({
     "app-visibility",
     clientId,
     quotaRefreshSeconds,
+    setError,
   );
   useEffect(() => {
-    let disposed = false,
-      clean: (() => void) | undefined;
-    void command<GatewayState>("get_gateway", { clientId })
+    let disposed = false;
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    void command("get_gateway", { clientId })
       .then((s) => {
         if (!disposed && (s.clientId ?? "codex") === clientId) setState(s);
       })
       .catch((e) => setError(errorOf(e).message));
-    void subscribe<GatewayState>("gateway-state", (s) => {
-      if (!disposed && (s.clientId ?? "codex") === clientId) setState(s);
-    }).then((c) => {
-      if (disposed) c();
-      else clean = c;
+    events.watch("gateway-state", (s) => {
+      if ((s.clientId ?? "codex") === clientId) setState(s);
     });
     return () => {
       disposed = true;
-      clean?.();
+      events.dispose();
     };
   }, []);
   const focusHandled = useRef<number | null>(null);
@@ -206,7 +205,7 @@ function GatewayContent({
   const toggle = () =>
     run(async () => {
       setState(
-        await command<GatewayState>(
+        await command(
           state.running || state.recoveryPending
             ? "stop_gateway"
             : "start_gateway",
@@ -644,360 +643,5 @@ function GatewayContent({
         />
       )}
     </section>
-  );
-}
-function Advanced({
-  clientId,
-  onDirtyChange,
-  settings,
-  revision,
-  busy,
-  save,
-}: {
-  clientId: ClientId;
-  onDirtyChange?: (dirty: boolean) => void;
-  settings: GatewaySettings;
-  revision: string;
-  busy: boolean;
-  save: (s: GatewaySettings, revision: EditRevision) => Promise<void>;
-}) {
-  const [draft, setDraft] = useState(settings),
-    [error, setError] = useState("");
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
-  const [editing, setEditing] = useState(false);
-  const baseRevision = useRef<EditRevision>(revision);
-  useEffect(() => {
-    if (!editing) {
-      setDraft(settings);
-      baseRevision.current = revision;
-    }
-  }, [settings, revision, editing]);
-  const fields: [keyof GatewaySettings, string][] = [
-    ["port", "本地端口"],
-    ["maxRetries", "最大重试次数"],
-    ["failureThreshold", "连续失败阈值"],
-    ["transientFailureThreshold", "5xx 连续失败阈值"],
-    ["successThreshold", "恢复成功次数"],
-    ["cooldownSeconds", "熔断等待 / 秒"],
-    ["rateLimitSeconds", "429 默认冷却 / 秒"],
-    ...(clientId === "codex"
-      ? [
-          ["websocketRetrySeconds", "WebSocket 断开等待 / 秒"] as [
-            keyof GatewaySettings,
-            string,
-          ],
-          ["threadIdleReleaseSeconds", "线程空闲释放 / 秒"] as [
-            keyof GatewaySettings,
-            string,
-          ],
-          ["capacityRetrySeconds", "容量错误等待 / 秒"] as [
-            keyof GatewaySettings,
-            string,
-          ],
-        ]
-      : []),
-    ["errorRate", "错误率阈值 (0–1)"],
-    ["minRequests", "最小请求数"],
-    ["firstByteSeconds", "首字节 / 秒"],
-    ["idleSeconds", "流静默 / 秒"],
-    ["totalSeconds", "请求上传 / 秒"],
-    ["connectSeconds", "连接超时 / 秒"],
-    ["endpointProbeSeconds", "端点测速间隔 / 秒"],
-    ["queueSeconds", "排队等待 / 秒"],
-    ["maxWaiting", "最多等待请求"],
-  ];
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        setError("");
-        void save(draft, baseRevision.current)
-          .then(() => {
-            setEditing(false);
-            onDirtyChange?.(false);
-          })
-          .catch((e) => {
-            baseRevision.current = null;
-            setError(errorOf(e).message);
-          });
-      }}
-    >
-      <div className="settings-grid">
-        {fields.map(([key, label]) => (
-          <label key={key}>
-            {label}
-            <input
-              type="number"
-              required
-              min={
-                key === "maxRetries"
-                  ? 0
-                  : key === "errorRate"
-                    ? 0.01
-                    : key === "endpointProbeSeconds"
-                      ? 10
-                      : 1
-              }
-              max={
-                key === "capacityRetrySeconds" ||
-                key === "websocketRetrySeconds" ||
-                key === "threadIdleReleaseSeconds" ||
-                key === "endpointProbeSeconds"
-                  ? 86400
-                  : key === "transientFailureThreshold"
-                    ? 1000
-                    : undefined
-              }
-              step={key === "errorRate" ? 0.01 : 1}
-              value={
-                draft[key] ??
-                (key === "transientFailureThreshold"
-                  ? 6
-                  : key === "threadIdleReleaseSeconds" ||
-                      key === "endpointProbeSeconds"
-                    ? 300
-                    : "")
-              }
-              onChange={(e) => {
-                if (!editing) baseRevision.current = revision;
-                setEditing(true);
-                onDirtyChange?.(true);
-                setDraft({ ...draft, [key]: Number(e.target.value) });
-              }}
-            />
-          </label>
-        ))}
-      </div>
-      {error && (
-        <div role="alert" className="form-error">
-          {error}
-        </div>
-      )}
-      <button disabled={busy} className="secondary">
-        {baseRevision.current === null ? "重试" : "保存参数"}
-      </button>
-    </form>
-  );
-}
-function GatewayDialog({
-  clientId,
-  connectionMode,
-  dialog,
-  revision,
-  close,
-  save,
-  onDirtyChange,
-}: {
-  clientId: ClientId;
-  connectionMode?: "bearer" | "apiKey";
-  dialog: Extract<NonNullable<Dialog>, { kind: "provider" }>;
-  close: () => void;
-  revision: string;
-  save: (p: Edit, revision: EditRevision) => Promise<void>;
-  onDirtyChange?: (dirty: boolean) => void;
-}) {
-  const baseline = useRef<EditRevision>(revision);
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const [name, setName] = useState(dialog.item ? dialog.item.name : ""),
-    [baseUrl, setBaseUrl] = useState(dialog.item?.baseUrl ?? ""),
-    [token, setToken] = useState("");
-  const [protocol, setProtocol] = useState(dialog.item?.protocol ?? "responses");
-  const [showToken, setShowToken] = useState(false);
-  const [revealed, setRevealed] = useState<{
-    value: string;
-    revision: string;
-  } | null>(null);
-  const [revealing, setRevealing] = useState(false);
-  const revealSequence = useRef(0);
-  const currentRevision = useRef(revision);
-  currentRevision.current = revision;
-  const hideToken = useCallback(() => {
-    revealSequence.current += 1;
-    setShowToken(false);
-    setRevealed(null);
-    setRevealing(false);
-  }, []);
-  useEffect(() => {
-    hideToken();
-    let disposed = false;
-    let clean: (() => void) | undefined;
-    const visibility = () => {
-      if (document.visibilityState === "hidden") hideToken();
-    };
-    document.addEventListener("visibilitychange", visibility);
-    void subscribe<boolean>("app-visibility", (visible) => {
-      if (!visible) hideToken();
-    }).then((fn) => {
-      if (disposed) fn();
-      else clean = fn;
-    });
-    return () => {
-      disposed = true;
-      revealSequence.current += 1;
-      clean?.();
-      document.removeEventListener("visibilitychange", visibility);
-    };
-  }, [clientId, dialog.item?.id, revision, hideToken]);
-  const toggleToken = async () => {
-    if (showToken) {
-      hideToken();
-      return;
-    }
-    setError("");
-    setShowToken(true);
-    if (token || !dialog.item) return;
-    const sequence = ++revealSequence.current;
-    setRevealing(true);
-    try {
-      const value = await command<string>("reveal_provider_token", {
-        clientId,
-        providerId: dialog.item.id,
-        expectedRevision: revision,
-      });
-      if (
-        sequence === revealSequence.current &&
-        currentRevision.current === revision
-      ) {
-        setRevealed({ value, revision });
-      }
-    } catch (e) {
-      if (
-        sequence === revealSequence.current &&
-        currentRevision.current === revision
-      ) {
-        setShowToken(false);
-        setError(errorOf(e).message);
-      }
-    } finally {
-      if (sequence === revealSequence.current) setRevealing(false);
-    }
-  };
-  const initialDraft = useRef(JSON.stringify([name, baseUrl, token, protocol]));
-  useEffect(() => {
-    onDirtyChange?.(
-      JSON.stringify([name, baseUrl, token, protocol]) !== initialDraft.current,
-    );
-  }, [name, baseUrl, token, protocol, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
-  const title = `${dialog.item ? "编辑" : "添加"}供应商`;
-  return (
-    <Modal title={title} close={close} busy={busy}>
-      <form
-        className="gateway-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setError("");
-          setBusy(true);
-          const payload: Edit = {
-            op: clientId === "grok" ? "saveGrokProvider" : "saveProvider",
-            ...(clientId === "grok" ? { protocol } : {}),
-            id: dialog.item?.id ?? null,
-            baseUrl,
-            token,
-          };
-          if (!dialog.item) payload.name = name;
-          void save(payload, baseline.current)
-            .catch((e) => {
-              baseline.current = null;
-              setError(errorOf(e).message);
-            })
-            .finally(() => setBusy(false));
-        }}
-      >
-        <>
-          {!dialog.item && (
-            <label>
-              名称
-              <input
-                type="text"
-                maxLength={120}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="可选"
-              />
-            </label>
-          )}
-          {clientId === "grok" && <label>API 协议<select value={protocol} onChange={e => setProtocol(e.target.value as typeof protocol)}><option value="responses">Responses</option><option value="chat_completions">Chat Completions</option><option value="messages">Messages</option></select></label>}
-          <label>
-            {clientId === "claude" ? "ANTHROPIC_BASE_URL" : "base_url"}
-            <input
-              required
-              type="url"
-              autoFocus
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder={
-                clientId === "claude"
-                  ? "https://api.example.com"
-                  : "https://api.example.com/v1"
-              }
-            />
-          </label>
-          <label>
-            {clientId === "claude"
-              ? "ANTHROPIC_AUTH_TOKEN"
-              : clientId === "grok" ? "api_key" : connectionMode === "apiKey"
-                ? "OPENAI_API_KEY"
-                : "experimental_bearer_token"}
-            <span className="provider-token-input">
-              <input
-                required={!dialog.item}
-                type={showToken ? "text" : "password"}
-                autoComplete="new-password"
-                spellCheck={false}
-                value={
-                  showToken && revealed?.revision === revision
-                    ? revealed.value
-                    : token
-                }
-                onChange={(e) => {
-                  revealSequence.current += 1;
-                  setRevealed(null);
-                  setRevealing(false);
-                  setToken(e.target.value);
-                }}
-                placeholder={dialog.item ? "留空保留当前 Token" : "输入 Token"}
-              />
-              <button
-                type="button"
-                className="icon-button"
-                aria-label={showToken ? "隐藏 Token" : "显示 Token"}
-                aria-pressed={showToken}
-                aria-busy={revealing}
-                onClick={() => void toggleToken()}
-              >
-                {revealing ? (
-                  <LoaderCircle size={16} className="spin" aria-hidden="true" />
-                ) : showToken ? (
-                  <EyeOff size={16} aria-hidden="true" />
-                ) : (
-                  <Eye size={16} aria-hidden="true" />
-                )}
-              </button>
-            </span>
-          </label>
-        </>
-        {error && (
-          <div className="banner error" role="alert">
-            {error}
-          </div>
-        )}
-        <div className="form-actions">
-          <button
-            type="button"
-            className="secondary"
-            disabled={busy}
-            onClick={close}
-          >
-            取消
-          </button>
-          <button className="primary" disabled={busy}>
-            {busy && <LoaderCircle size={15} className="spin" />}
-            {baseline.current === null ? "重试" : "保存"}
-          </button>
-        </div>
-      </form>
-    </Modal>
   );
 }

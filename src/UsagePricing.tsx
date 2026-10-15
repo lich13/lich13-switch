@@ -1,3 +1,4 @@
+import { subscriptions } from "./subscriptions";
 import { useEffect, useMemo, useState } from "react";
 import {
   Download,
@@ -9,11 +10,11 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import ProviderPriceMappings from "./ProviderPriceMappings";
-import { Drawer } from "./Usage";
+import { Drawer } from "./UsageDrawer";
 import type { PricingConfig, PricingView, UsageState } from "./usage-types";
 const fields = [
   ["input_cost_per_token", "输入"],
@@ -41,21 +42,19 @@ export default function Pricing({
     [busy, setBusy] = useState(false),
     [limit, setLimit] = useState(50);
   useEffect(() => {
-    let disposed = false,
-      off = () => {};
+    let disposed = false;
+    const events = subscriptions((e) => setError(errorOf(e).message));
     const read = () =>
-      void command<PricingView>("get_pricing")
+      void command("get_pricing")
         .then((s) => {
           if (!disposed) setView(s);
         })
         .catch((e) => !disposed && setError(errorOf(e).message));
     read();
-    void subscribe("pricing-state", read).then((c) =>
-      disposed ? c() : (off = c),
-    );
+    events.watch("pricing-state", read);
     return () => {
       disposed = true;
-      off();
+      events.dispose();
     };
   }, []);
   useEffect(() => {
@@ -68,7 +67,7 @@ export default function Pricing({
     setError("");
     try {
       setView(
-        await command<PricingView>("configure_pricing", {
+        await command("configure_pricing", {
           config,
           expectedRevision: revision ?? view.revision,
         }),
@@ -76,18 +75,18 @@ export default function Pricing({
     } catch (e) {
       setError(errorOf(e).message);
       try {
-        setView(await command<PricingView>("get_pricing"));
+        setView(await command("get_pricing"));
       } catch {}
       throw e;
     } finally {
       setBusy(false);
     }
   };
-  const action = async (name: string) => {
+  const action = async (name: "update_pricing" | "reload_pricing" | "open_pricing_directory") => {
     setBusy(true);
     setError("");
     try {
-      const result = await command<PricingView>(name);
+      const result = await command(name);
       if (result?.models) setView(result);
     } catch (e) {
       setError(errorOf(e).message);
@@ -598,7 +597,7 @@ function BillingSettings({
   const [original, setOriginal] = useState("");
   useEffect(() => {
     let disposed = false;
-    void command<UsageState>("get_usage_state")
+    void command("get_usage_state")
       .then((s) => {
         if (!disposed) {
           const d = {
@@ -631,9 +630,9 @@ function BillingSettings({
           if (!draft || busy) return;
           setBusy(true);
           setError("");
-          void command<UsageState>("get_usage_state")
+          void command("get_usage_state")
             .then((current) =>
-              command<UsageState>("set_usage_settings", {
+              command("set_usage_settings", {
                 settings: { ...current.settings, ...draft },
               }),
             )

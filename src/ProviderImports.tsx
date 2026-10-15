@@ -1,13 +1,9 @@
+import { subscriptions } from "./subscriptions";
 import { useCallback, useEffect, useState } from "react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 import Modal from "./Modal";
-type Pending = {
-  clientId?: ClientId;
-  id: string;
-  name: string;
-  baseUrl: string;
-};
+import type { PendingImport as Pending } from "./bridge-contracts";
 export default function ProviderImports({
   notify,
   blocked = false,
@@ -22,20 +18,18 @@ export default function ProviderImports({
     [error, setError] = useState(""),
     [available, setAvailable] = useState(false);
   const refresh = useCallback(() => {
-    void command<Pending[]>("get_provider_imports")
+    void command("get_provider_imports")
       .then((q) => setQueue(q ?? []))
       .catch((e) => setError(errorOf(e).message));
   }, []);
   useEffect(() => {
     let disposed = false;
-    let off = () => {};
+    const events = subscriptions((e) => setError(errorOf(e).message));
     refresh();
-    void subscribe("provider-imports", refresh).then((c) =>
-      disposed ? c() : (off = c),
-    );
+    events.watch("provider-imports", refresh);
     return () => {
       disposed = true;
-      off();
+      events.dispose();
     };
   }, [refresh]);
   useEffect(() => {
@@ -53,7 +47,7 @@ export default function ProviderImports({
   useEffect(() => {
     if (!active && available && !blocked && queue[0]) {
       let disposed = false;
-      void command<GatewayState>("get_gateway", {
+      void command("get_gateway", {
         clientId: queue[0]?.clientId ?? "codex",
       })
         .then((s) => {
@@ -133,7 +127,7 @@ export default function ProviderImports({
               })
               .catch(async (e) => {
                 setError(errorOf(e).message);
-                const state = await command<GatewayState>("get_gateway", {
+                const state = await command("get_gateway", {
                   clientId: active.clientId ?? "codex",
                 }).catch(() => null);
                 if (state) setRevision(state.revision);

@@ -1,3 +1,5 @@
+import { subscriptions } from "./subscriptions";
+import type { GatewayEdit } from "./bridge-contracts";
 import ClientSelection, {
   useClientSelection,
   clientName,
@@ -16,7 +18,7 @@ import {
   RotateCcw,
   Network,
 } from "lucide-react";
-import { command, preview, subscribe } from "./bridge";
+import { command, preview } from "./bridge";
 import { errorOf, type GatewayState, type ViewState } from "./types";
 import { QuotaInfo, useProviderQuota } from "./Quota";
 import {
@@ -31,11 +33,7 @@ import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
 import ProviderEndpoints from "./ProviderEndpoints";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
-type Preferences = {
-  pinned: boolean;
-  tab: "providers" | "accounts";
-  visible?: boolean;
-};
+import type { QuickPreferences as Preferences } from "./bridge-contracts";
 export default function QuickPanel() {
   const [clientId, select] = useClientSelection("quick");
   return (
@@ -72,26 +70,24 @@ function QuickContent({
     "panel-visibility",
     clientId,
     accounts?.preferences.quotaRefreshSeconds ?? 60,
+    setError,
   );
   useEffect(() => {
     let disposed = false;
-    const clean: (() => void)[] = [];
-    const watch = <T,>(event: string, fn: (v: T) => void) =>
-      void subscribe<T>(event, (v) => {
-        if (!disposed) fn(v);
-      }).then((c) => (disposed ? c() : clean.push(c)));
-    watch<ViewState>("switch-state", setAccounts);
-    watch<GatewayState>("gateway-state", (s) => {
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    const watch = events.watch;
+    watch("switch-state", setAccounts);
+    watch("gateway-state", (s) => {
       if ((s.clientId ?? "codex") === clientId) setGateway(s);
     });
-    watch<Preferences>("quick-state", setPrefs);
-    watch<boolean>("panel-visibility", setVisible);
-    watch<string>("switch-notice", setNotice);
-    watch<unknown>("switch-error", (e) => setError(errorOf(e).message));
+    watch("quick-state", setPrefs);
+    watch("panel-visibility", setVisible);
+    watch("switch-notice", setNotice);
+    watch("switch-error", (e) => setError(errorOf(e).message));
     void Promise.all([
-      command<ViewState>("get_state"),
-      command<GatewayState>("get_gateway", { clientId }),
-      command<Preferences>("get_quick"),
+      command("get_state"),
+      command("get_gateway", { clientId }),
+      command("get_quick"),
     ])
       .then(([a, g, p]) => {
         if (!disposed) {
@@ -104,7 +100,7 @@ function QuickContent({
       .catch((e) => {
         if (!disposed) setError(errorOf(e).message);
       });
-    void command<{ message: string } | null>("get_startup_error")
+    void command("get_startup_error")
       .then((e) => {
         if (e && !disposed) setError(e.message);
       })
@@ -114,7 +110,7 @@ function QuickContent({
     media.addEventListener("change", change);
     return () => {
       disposed = true;
-      clean.forEach((c) => c());
+      events.dispose();
       media.removeEventListener("change", change);
     };
   }, []);
@@ -139,7 +135,7 @@ function QuickContent({
         !document.querySelector("dialog[open]") &&
         !event.defaultPrevented
       )
-        void command("hide_quick");
+        void command("hide_quick").catch((e) => setError(errorOf(e).message));
     };
     document.addEventListener("keydown", escape);
     return () => document.removeEventListener("keydown", escape);
@@ -158,7 +154,7 @@ function QuickContent({
   };
   const run = (fn: () => Promise<void>) => void action(fn).catch(() => {});
   const edit = async (
-    edit: Record<string, unknown>,
+    edit: GatewayEdit,
     expected?: EditRevision,
   ) => {
     if (!gateway) return;
@@ -226,7 +222,7 @@ function QuickContent({
         <button
           className="icon-button"
           aria-label="关闭快捷面板"
-          onClick={() => void command("hide_quick")}
+          onClick={() => void command("hide_quick").catch((e) => setError(errorOf(e).message))}
         >
           <X size={16} />
         </button>
