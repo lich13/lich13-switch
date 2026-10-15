@@ -183,12 +183,31 @@ pub struct Core {
     store: Store,
     auth_sync: Option<AuthSync>,
     checked_auth: Option<(String, String)>,
+    auth_cache: crate::auth_cache::Cache<PolledAuth>,
     exchange: exchange::Service,
 }
+#[derive(Clone)]
 struct AuthInfo {
     identity: String,
     kind: String,
     email: Option<String>,
+}
+struct PolledAuth {
+    bytes: Option<Vec<u8>>,
+    revision: String,
+    info: Option<Result<AuthInfo>>,
+    times: CredentialTimes,
+}
+impl PolledAuth {
+    fn parse(bytes: Option<Vec<u8>>) -> Self {
+        let raw = bytes.as_deref().and_then(|b| std::str::from_utf8(b).ok());
+        Self {
+            revision: storage::revision(bytes.as_deref()),
+            info: raw.map(auth_info),
+            times: raw.map(CredentialTimes::parse).unwrap_or_default(),
+            bytes,
+        }
+    }
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -326,14 +345,17 @@ impl LoginPrincipal {
         }
     }
 }
-fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return (None, None);
-    };
-    let limit = (now() as i64 + 300).saturating_mul(1_000_000);
-    let refresh = value
-        .get("last_refresh")
-        .and_then(|v| {
+#[derive(Default)]
+struct CredentialTimes {
+    refresh: Option<i64>,
+    issued: Vec<i64>,
+}
+impl CredentialTimes {
+    fn parse(raw: &str) -> Self {
+        let Ok(value) = serde_json::from_str::<Value>(raw) else {
+            return Self::default();
+        };
+        let refresh = value.get("last_refresh").and_then(|v| {
             v.as_i64()
                 .and_then(|n| {
                     // Older CLI versions and imports may use seconds or milliseconds.
@@ -350,29 +372,45 @@ fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
                             .map(|d| d.timestamp_micros())
                     })
                 })
-        })
-        .filter(|t| *t > 0 && *t <= limit);
-    let issued = ["access_token", "id_token"]
-        .iter()
-        .filter_map(|key| {
-            value
-                .get("tokens")?
-                .get(key)?
-                .as_str()
-                .and_then(claims)?
-                .get("iat")?
-                .as_i64()
-        })
-        .filter(|t| *t > 0 && *t <= now() as i64 + 300)
-        .max();
-    (refresh, issued)
+        });
+        let issued = ["access_token", "id_token"]
+            .iter()
+            .filter_map(|key| {
+                value
+                    .get("tokens")?
+                    .get(key)?
+                    .as_str()
+                    .and_then(claims)?
+                    .get("iat")?
+                    .as_i64()
+            })
+            .collect();
+        Self { refresh, issued }
+    }
+    fn current(&self) -> (Option<i64>, Option<i64>) {
+        // Time validity remains dynamic even when the auth bytes are unchanged.
+        let limit = (now() as i64 + 300).saturating_mul(1_000_000);
+        let refresh = self.refresh.filter(|t| *t > 0 && *t <= limit);
+        let issued = self
+            .issued
+            .iter()
+            .copied()
+            .filter(|t| *t > 0 && *t <= now() as i64 + 300)
+            .max();
+        (refresh, issued)
+    }
 }
+fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
+    CredentialTimes::parse(raw).current()
+}
+#[cfg(test)]
 fn token_is_newer(incoming: &str, stored: &str) -> bool {
     matches!((credential_times(incoming).1, credential_times(stored).1), (Some(a), Some(b)) if a > b)
 }
 fn older(incoming: &str, stored: &str) -> bool {
-    let (a, ai) = credential_times(incoming);
-    let (b, bi) = credential_times(stored);
+    older_times(credential_times(incoming), credential_times(stored))
+}
+fn older_times((a, ai): (Option<i64>, Option<i64>), (b, bi): (Option<i64>, Option<i64>)) -> bool {
     // A rotated token is stronger evidence than the local refresh clock.
     if let (Some(a), Some(b)) = (ai, bi) {
         if a != b {
@@ -492,6 +530,7 @@ impl Core {
             store,
             auth_sync: None,
             checked_auth: None,
+            auth_cache: Default::default(),
             exchange: exchange::Service::default(),
         };
         if core.store.auth_sync_version == 0 {
@@ -838,31 +877,31 @@ impl Core {
         Ok(())
     }
     pub fn state(&mut self) -> Result<ViewState> {
-        let auth = storage::read_optional(&self.home().join("auth.json"))?;
+        let polled = self
+            .auth_cache
+            .read(&self.home().join("auth.json"), PolledAuth::parse)?;
+        let auth = &polled.bytes;
         let config = storage::read_optional(&self.home().join("config.toml"))?;
         let managed = crate::gateway::manages_auth(&self.data_dir, &self.home());
-        let info = auth
-            .as_deref()
-            .filter(|_| !managed)
-            .and_then(|b| std::str::from_utf8(b).ok())
-            .map(auth_info);
+        let info = if managed { None } else { polled.info.clone() };
         let identity = info
             .as_ref()
             .and_then(|i| i.as_ref().ok())
             .map(|i| i.identity.as_str());
-        let auth_revision = storage::revision(auth.as_deref());
+        let auth_revision = polled.revision.clone();
+        let incoming_times = polled.times.current();
         let root = self.store.preferences.codex_home.clone();
         // Reconsider a previously rejected revision when its token is provably newer.
         // Deleted identities remain suppressed, and explicit imports are not undone.
         let newer_token = auth
             .as_deref()
             .and_then(|b| std::str::from_utf8(b).ok())
-            .is_some_and(|raw| {
+            .is_some_and(|_| {
                 self.store
                     .profiles
                     .iter()
                     .find(|p| Some(p.identity.as_str()) == identity)
-                    .is_some_and(|p| token_is_newer(raw, &p.auth))
+                    .is_some_and(|p| matches!((incoming_times.1, credential_times(&p.auth).1), (Some(a), Some(b)) if a > b))
             });
         let changed = !managed
             && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
@@ -872,7 +911,8 @@ impl Core {
             // A valid intermediate JSON document can still be part of a non-atomic write.
             if self.checked_auth.as_ref() != Some(&(root.clone(), auth_revision.clone())) {
                 std::thread::sleep(std::time::Duration::from_millis(60));
-                if storage::read_optional(&self.home().join("auth.json"))? != auth {
+                if storage::read_optional(&self.home().join("auth.json"))? != *auth {
+                    self.auth_cache.clear();
                     return Err(AppError::new(
                         code::AUTH_PENDING,
                         "账号文件正在写入，稍后自动重试",
@@ -890,7 +930,7 @@ impl Core {
                     .iter_mut()
                     .find(|p| p.identity == info.identity)
                 {
-                    if older(raw, &profile.auth) {
+                    if older_times(incoming_times, credential_times(&profile.auth)) {
                         (
                             "older",
                             Some(profile.id.clone()),
@@ -968,7 +1008,7 @@ impl Core {
                 if auth
                     .as_deref()
                     .and_then(|b| std::str::from_utf8(b).ok())
-                    .is_some_and(|raw| older(raw, &profile.auth))
+                    .is_some_and(|_| older_times(incoming_times, credential_times(&profile.auth)))
                 {
                     self.set_sync(
                         "older",

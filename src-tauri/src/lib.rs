@@ -1,4 +1,5 @@
 use crate::errors::code;
+mod auth_cache;
 mod claude_profile;
 mod cleanup;
 mod cleanup_spool;
