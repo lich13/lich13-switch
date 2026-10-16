@@ -68,4 +68,14 @@ pnpm tauri dev
 
 `pnpm icons` 从原创 SVG 生成 9 档 PNG、黑白托盘图标、ICNS 和 ICO。发布通过 CI 构建 macOS Apple Silicon DMG 与 Windows x64 NSIS 安装包及校验和；真实 OAuth 和操作系统托盘交互验收与自动冒烟测试分别记录。
 
+依赖审计使用 `cargo audit --file src-tauri/Cargo.lock` 和 `pnpm audit`。v0.25.3 核验时，Rust 没有漏洞类告警，但保留以下 7 条维护／健全性警告；定向检查没有可兼容更新，不添加忽略列表掩盖它们。
+
+| 间接依赖 | 告警与约束 |
+| --- | --- |
+| `proc-macro-error 1.0.4` | RUSTSEC-2024-0370，未维护；由 GTK 3 的宏依赖引入，不在 macOS／Windows 依赖树中。 |
+| `glib 0.18.5` | RUSTSEC-2024-0429，迭代器健全性问题；由 Tauri 的 Linux GTK 3 链约束，不在 macOS／Windows 依赖树中。不能只替换为不兼容的 GLib 大版本。 |
+| `unic-char-property`／`unic-char-range` | RUSTSEC-2025-0081／RUSTSEC-2025-0075，未维护；由 `tauri-utils → urlpattern → unic-ucd-ident` 引入。 |
+| `unic-common`／`unic-ucd-version` | RUSTSEC-2025-0080／RUSTSEC-2025-0098，未维护；由同一链中的 `unic-ucd-version` 引入。 |
+| `unic-ucd-ident` | RUSTSEC-2025-0100，未维护；需上游兼容迁移后再移除，不能通过增添另一个版本消除现有引用。 |
+
 MIT License。独立项目，与 OpenAI 无隶属关系。
