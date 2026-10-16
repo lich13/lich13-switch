@@ -964,7 +964,7 @@ fn compacted_unknown_prices_stay_unknown_after_backfill_and_daily_rollup() {
     store
         .write_batch(std::slice::from_ref(&record), None)
         .unwrap();
-    store.backfill(&pricing, "1").unwrap();
+    store.backfill(&pricing).unwrap();
     let saved = store.detail(&record.id).unwrap();
     assert!(saved.attempts[0].price.is_none());
     assert_eq!(saved.attempts[0].compacted_unpriced, Some(2));

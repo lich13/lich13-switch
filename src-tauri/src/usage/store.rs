@@ -192,6 +192,7 @@ impl Store {
         if version < 10 {
             db(connection.execute_batch("BEGIN IMMEDIATE; ALTER TABLE records ADD COLUMN local_sequence INTEGER NOT NULL DEFAULT 0; UPDATE records SET local_sequence=rowid; INSERT OR REPLACE INTO metadata(key,value) SELECT 'record_sequence',coalesce(max(local_sequence),0) FROM records; INSERT OR IGNORE INTO metadata(key,value) VALUES('finish_time_after',''); PRAGMA user_version=10; COMMIT;"))?;
         }
+        super::pending_prices::ensure(&connection)?;
         Ok(Self {
             connection,
             overview_cache: Default::default(),
@@ -613,8 +614,8 @@ impl Store {
         db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[cutoff.to_string()]))?;
         db(tx.commit())
     }
-    pub fn backfill(&mut self, pricing: &Pricing, _multiplier: &str) -> Result<()> {
-        let mut stmt = db(self.connection.prepare("SELECT body FROM records WHERE EXISTS(SELECT 1 FROM json_each(body,'$.attempts') WHERE json_extract(value,'$.price') IS NULL)"))?;
+    pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {
+        let mut stmt = db(self.connection.prepare(super::pending_prices::SELECT))?;
         let all = db(stmt.query_map([], |r| r.get::<_, String>(0)))?
             .collect::<rusqlite::Result<Vec<_>>>();
         let all = db(all)?;

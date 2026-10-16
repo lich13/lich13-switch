@@ -3,6 +3,9 @@ pub mod commands;
 mod dedup;
 mod maintenance;
 pub mod model;
+mod pending_prices;
+#[cfg(test)]
+mod pending_prices_tests;
 pub mod pricing;
 mod query;
 mod sessions;
@@ -316,8 +319,7 @@ impl Service {
         }
         let service = self.clone();
         std::thread::spawn(move || {
-            let result = service
-                .query(|store| store.backfill(service.prices()?, &service.settings().multiplier));
+            let result = service.query(|store| store.backfill(service.prices()?));
             if let Err(error) = result {
                 *service.0.error.lock().unwrap() = Some(error.message);
             }
@@ -455,11 +457,9 @@ impl Service {
             return Ok(view);
         }
         let s = self.clone();
-        tokio::task::spawn_blocking(move || {
-            s.query(|store| store.backfill(s.prices()?, &s.settings().multiplier))
-        })
-        .await
-        .map_err(|_| failure("价格补算中断"))??;
+        tokio::task::spawn_blocking(move || s.query(|store| store.backfill(s.prices()?)))
+            .await
+            .map_err(|_| failure("价格补算中断"))??;
         let _ = self.0.events.send(());
         Ok(view)
     }

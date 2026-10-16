@@ -1321,8 +1321,8 @@ fn backfill_preserves_priced_history_and_original_multipliers_in_details_and_dai
             ),
         ],
     );
-    for multiplier in ["99", "100"] {
-        store.backfill(&prices, multiplier).unwrap();
+    for _ in 0..2 {
+        store.backfill(&prices).unwrap();
         assert_eq!(
             serde_json::to_value(&store.detail("fixture-priced").unwrap().attempts[0].price)
                 .unwrap(),
@@ -1643,7 +1643,7 @@ fn partially_unpriced_attempts_keep_known_cost_in_details_and_daily_totals() {
             json!({"input_cost_per_token": "0.2", "output_cost_per_token": "0.4"}),
         )],
     );
-    store.backfill(&prices, "1").unwrap();
+    store.backfill(&prices).unwrap();
     let totals = store.dashboard(&all_time()).unwrap().totals;
     assert_eq!((totals.requests, totals.unpriced), (1, 1));
     assert_eq!(totals.cost, "5.2");
@@ -1655,7 +1655,7 @@ fn partially_unpriced_attempts_keep_known_cost_in_details_and_daily_totals() {
         )],
     );
     for _ in 0..2 {
-        store.backfill(&prices, "1").unwrap();
+        store.backfill(&prices).unwrap();
         let totals = store.dashboard(&all_time()).unwrap().totals;
         assert_eq!((totals.requests, totals.unpriced), (1, 0));
         assert_eq!(totals.cost, "11.2");

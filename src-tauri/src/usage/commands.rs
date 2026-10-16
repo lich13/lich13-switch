@@ -71,11 +71,9 @@ pub async fn configure_pricing(
 ) -> Result<pricing::View> {
     let result = r.usage.prices()?.configure(config, &expected_revision)?;
     let service = r.usage.clone();
-    tokio::task::spawn_blocking(move || {
-        service.query(|db| db.backfill(service.prices()?, &service.settings().multiplier))
-    })
-    .await
-    .map_err(|_| failure("价格补算中断"))??;
+    tokio::task::spawn_blocking(move || service.query(|db| db.backfill(service.prices()?)))
+        .await
+        .map_err(|_| failure("价格补算中断"))??;
     let _ = app.emit("usage-state", ());
     let _ = app.emit("pricing-state", ());
     Ok(result)
@@ -90,11 +88,9 @@ pub async fn update_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::
 pub async fn reload_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::View> {
     let result = r.usage.prices()?.reload()?;
     let service = r.usage.clone();
-    tokio::task::spawn_blocking(move || {
-        service.query(|db| db.backfill(service.prices()?, &service.settings().multiplier))
-    })
-    .await
-    .map_err(|_| failure("价格补算中断"))??;
+    tokio::task::spawn_blocking(move || service.query(|db| db.backfill(service.prices()?)))
+        .await
+        .map_err(|_| failure("价格补算中断"))??;
     let _ = app.emit("usage-state", ());
     let _ = app.emit("pricing-state", ());
     Ok(result)
