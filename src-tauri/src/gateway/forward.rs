@@ -20,6 +20,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
+#[cfg(test)]
+#[path = "error_frame_delivery_tests.rs"]
+mod error_frame_delivery_tests;
 #[derive(Clone, Copy)]
 struct ReceivedAt(i64);
 pub async fn serve(
@@ -108,11 +111,16 @@ impl DownstreamEnd {
     ) {
         if matches!(self, Self::Timeout) {
             delivery.event("downstream_write_timeout");
-            delivery
-                .error
-                .store(3, std::sync::atomic::Ordering::Relaxed);
+            let _ = delivery.error.compare_exchange(
+                0,
+                3,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             protocol.timeout("downstream_write", seconds);
             delivery.settle();
+        } else if !delivery.is_settled() {
+            delivery.dropped();
         }
     }
 }
@@ -159,6 +167,36 @@ async fn send_frame(
     )
     .await
     .map_err(|_| DownstreamEnd::Timeout)?
+}
+
+/// An error frame has the same delivery deadline as data. Its failed handoff
+/// must settle delivery now, not start a second wait after discarding the error.
+async fn send_error_frame(
+    sender: &tokio::sync::mpsc::Sender<ForwardFrame>,
+    protocol: &mut super::protocol::Protocol,
+    activity: &super::wire_progress::Activity,
+    shutdown: &mut Option<watch::Receiver<bool>>,
+    status: u16,
+    seconds: u64,
+) -> bool {
+    let delivery = protocol.delivery();
+    tokio::select! {
+        biased;
+        _ = stopping(shutdown) => {
+            delivery.event("gateway_stopping");
+            delivery.settle();
+            protocol.finish(Some(status), code::GATEWAY_STOPPED);
+            false
+        }
+        result = send_frame(sender, Err(std::io::Error::other("上游流中断").into()), false, false, activity, seconds) => {
+            if let Err(reason) = result {
+                reason.record(&delivery, protocol, seconds);
+                true
+            } else {
+                false
+            }
+        }
+    }
 }
 pub(super) fn error(status: StatusCode, code: &str, message: &str) -> Response<WireBody> {
     Response::builder().status(status).header(header::CONTENT_TYPE,"application/json")
@@ -1612,10 +1650,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 if failed && !disconnected {
                     // Preserve the received prefix, then expose the transport failure.
                     // A clean EOF here would hide an incomplete generation.
-                    tokio::select! {
-                        _ = stopping(&mut shutdown) => {}
-                        _ = send_frame(&sender, Err(std::io::Error::other("上游流中断").into()), false, false, &activity, cfg.idle_seconds) => {}
-                    }
+                    disconnected = send_error_frame(
+                        &sender,
+                        &mut protocol,
+                        &activity,
+                        &mut shutdown,
+                        status.as_u16(),
+                        cfg.idle_seconds,
+                    )
+                    .await;
                 }
                 drop(sender);
                 if disconnected {
@@ -1716,10 +1759,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         }
                         protocol.finish(Some(status.as_u16()), category);
                         if !disconnected && protocol.transport_failure() {
-                            tokio::select! {
-                                _ = stopping(&mut shutdown) => {}
-                                _ = send_frame(&sender, Err(std::io::Error::other("上游流中断").into()), false, false, &activity, cfg.idle_seconds) => {}
-                            }
+                            disconnected = send_error_frame(
+                                &sender,
+                                &mut protocol,
+                                &activity,
+                                &mut shutdown,
+                                status.as_u16(),
+                                cfg.idle_seconds,
+                            )
+                            .await;
                         }
                         break;
                     }
