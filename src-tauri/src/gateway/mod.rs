@@ -276,7 +276,9 @@ impl Gateway {
     pub fn report_diagnostics(&self) {
         self.0.exchange.prune();
         use crate::events::{Action, Reason};
-        let view = self.view();
+        let Ok(view) = self.try_view() else {
+            return;
+        };
         let circuits: Vec<_> = {
             let state = self.0.inner.lock().unwrap();
             state
@@ -467,7 +469,7 @@ impl Gateway {
             catalog: catalog::Service::new(),
             admission,
         }));
-        registry.register(&gateway.0, &local_token);
+        registry.register(&gateway.0, &local_token)?;
         Ok(gateway)
     }
     fn replace_store(&self, state: &mut Inner, store: Store) {
@@ -582,7 +584,7 @@ impl Gateway {
             return Err(AppError::new(code::FORBIDDEN, "仅主窗口可查看供应商凭据"));
         }
         let state = self.0.inner.lock().unwrap();
-        if expected_revision != self.view_revision(&state)
+        if expected_revision != self.view_revision(&state)?
             || storage::revision(
                 storage::read_optional(&self.0.data.join("gateway.json"))?.as_deref(),
             ) != state.revision
@@ -600,8 +602,8 @@ impl Gateway {
             .map(|provider| provider.token.clone())
             .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
     }
-    fn view_revision(&self, s: &Inner) -> String {
-        self.view_revision_with_listener(s, &self.listener_view().revision)
+    fn view_revision(&self, s: &Inner) -> Result<String> {
+        Ok(self.view_revision_with_listener(s, &self.try_listener_view()?.revision))
     }
     fn view_revision_with_listener(&self, s: &Inner, listener_revision: &str) -> String {
         // File revisions also include resume checkpoints, which change after successful
@@ -643,7 +645,7 @@ impl Gateway {
     fn changed(&self) {
         let _ = self.0.events.send(());
     }
-    pub fn listener_view(&self) -> ListenerView {
+    pub fn try_listener_view(&self) -> Result<ListenerView> {
         self.0.registry.listener.view()
     }
     pub fn set_listener_port(&self, port: u16, expected: &str) -> Result<ListenerView> {
@@ -663,13 +665,21 @@ impl Gateway {
             }
         }
         self.0.registry.listener.set_port(port, expected)?;
-        self.0.registry.update_ports();
+        self.0.registry.update_ports()?;
         self.0.registry.changed();
-        Ok(self.listener_view())
+        self.try_listener_view()
     }
+    #[cfg(test)]
     pub fn view(&self) -> View {
-        let listener = self.0.registry.listener.view();
-        let s = self.0.inner.lock().unwrap();
+        self.try_view().expect("healthy test gateway")
+    }
+    #[cfg(test)]
+    pub fn listener_view(&self) -> ListenerView {
+        self.try_listener_view().expect("healthy test listener")
+    }
+    pub fn try_view(&self) -> Result<View> {
+        let listener = self.0.registry.listener.view()?;
+        let s = self.request_state()?;
         let (occupied, waiting) = self.0.admission.counts();
         let health = |key: String| s.circuits.get(&key).cloned().unwrap_or_default().health();
         let config = s
@@ -700,7 +710,7 @@ impl Gateway {
                 config_provider = Some(p.id.clone());
             }
         }
-        View {
+        Ok(View {
             listener: listener.clone(),
             grok_models: if self.0.client == ClientId::Grok {
                 s.home
@@ -730,7 +740,7 @@ impl Gateway {
                 None
             },
             last_successful: s.last_successful.clone(),
-            revision: self.view_revision(&s),
+            revision: self.view_revision(&s)?,
             running: s.running,
             address: self.0.client.address(listener.port),
             mode: s.store.mode.clone(),
@@ -832,7 +842,7 @@ impl Gateway {
             recovery_pending: s.upgrade_pending
                 || self.0.data.join("gateway-recovery.json").exists()
                 || self.0.data.join("grok-import.json").exists(),
-        }
+        })
     }
     pub fn observe_home(&self, home: &Path) {
         self.0.inner.lock().unwrap().home = Some(home.to_owned());
@@ -920,7 +930,8 @@ impl Gateway {
         })
     }
     pub fn guarded_home(&self) -> bool {
-        self.view().running
+        self.try_view().is_err()
+            || self.request_state().is_ok_and(|state| state.running)
             || self.0.data.join("gateway-recovery.json").exists()
             || self.0.data.join("grok-import.json").exists()
     }
@@ -937,7 +948,7 @@ impl Gateway {
         // Compatibility for callers of the pre-shared Settings API. The listener
         // file remains authoritative, including when the later client save fails.
         let port_change = match &edit {
-            Edit::Settings { settings } if settings.port != self.listener_view().port => {
+            Edit::Settings { settings } if settings.port != self.try_listener_view()?.port => {
                 Some(settings.port)
             }
             _ => None,
@@ -954,7 +965,7 @@ impl Gateway {
             };
         let _network_guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
-        if expected != self.view_revision(&s) {
+        if expected != self.view_revision(&s)? {
             return Err(AppError::new(
                 code::CONFLICT,
                 "网关设置已变化，请使用最新状态重试",
@@ -1029,7 +1040,7 @@ impl Gateway {
             s.revision = storage::digest(after.as_bytes());
             drop(s);
             self.changed();
-            return Ok(self.view());
+            return self.try_view();
         }
         if let Edit::Reset { id } = &edit {
             if !s.store.providers.iter().any(|p| &p.id == id) {
@@ -1051,7 +1062,7 @@ impl Gateway {
             self.0.admission.reset_provider(id, &circuits);
             drop(s);
             self.changed();
-            return Ok(self.view());
+            return self.try_view();
         }
         if !s.running && self.0.data.join("gateway-recovery.json").exists() {
             return Err(AppError::new(code::RECOVERY, "请先处理未完成的配置事务"));
@@ -1076,7 +1087,7 @@ impl Gateway {
             ));
         }
         let mut next = s.store.clone();
-        next.settings.port = self.listener_view().port;
+        next.settings.port = self.try_listener_view()?.port;
         match edit {
             Edit::Connection { mode } => {
                 if self.0.client != ClientId::Codex || s.running {
@@ -1170,7 +1181,7 @@ impl Gateway {
             self.0
                 .registry
                 .listener
-                .set_port(port, &self.listener_view().revision)?;
+                .set_port(port, &self.try_listener_view()?.revision)?;
         }
         let revision = if s.running || direct_select {
             let p = Self::exit_provider(&next, s.last_successful.as_deref())?;
@@ -1258,10 +1269,10 @@ impl Gateway {
                 .collect(),
         );
         drop(s);
-        self.0.registry.update_ports();
+        self.0.registry.update_ports()?;
         self.0.clients.lock().unwrap().clear();
         self.0.registry.changed();
-        Ok(self.view())
+        self.try_view()
     }
     pub async fn start(&self, expected: &str, home: &Path) -> Result<View> {
         self.start_checked(expected, home, None).await
@@ -1288,12 +1299,12 @@ impl Gateway {
         let _guard = self.0.lifecycle.lock().await;
         let token = {
             let s = self.0.inner.lock().unwrap();
-            if expected != self.view_revision(&s) {
+            if expected != self.view_revision(&s)? {
                 return Err(AppError::new(code::CONFLICT, "网关设置已变化，请重试"));
             }
             if s.running {
                 drop(s);
-                return Ok(self.view());
+                return self.try_view();
             }
             if s.upgrade_pending {
                 return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
@@ -1310,7 +1321,7 @@ impl Gateway {
             s.store.local_token.clone()
         };
         let listener = self.0.registry.listener.prepare().await?;
-        self.0.registry.update_ports();
+        self.0.registry.update_ports()?;
         if listener.revision != listener.previous_revision {
             self.0.registry.changed();
         }
@@ -1369,35 +1380,39 @@ impl Gateway {
             }
             let after = serde_json::to_string_pretty(&next)
                 .map_err(|_| AppError::new(code::STORE, "无法生成网关启动事务"))?;
-            takeover::attach_store_for(
+            self.0.registry.listener.activate_with(
                 self.0.client,
-                &self.0.data,
-                home,
-                listener.port,
-                &token,
-                exit,
-                config_revision.unwrap_or(&current),
-                Some((before.map(|b| String::from_utf8(b).unwrap()), after.clone())),
+                listener.socket,
+                self.0.registry.clone(),
+                || {
+                    takeover::attach_store_for(
+                        self.0.client,
+                        &self.0.data,
+                        home,
+                        listener.port,
+                        &token,
+                        exit,
+                        config_revision.unwrap_or(&current),
+                        Some((before.map(|b| String::from_utf8(b).unwrap()), after.clone())),
+                    )?;
+                    self.replace_store(&mut s, next);
+                    s.revision = storage::digest(after.as_bytes());
+                    s.home = Some(home.to_owned());
+                    s.last_successful = None;
+                    s.running = true;
+                    s.shutdown = Some(tx);
+                    s.error = listener.notice;
+                    self.0.admission.configure(&s.store.providers, true);
+                    self.0
+                        .admission
+                        .configure_retention(s.store.settings.thread_idle_release_seconds);
+                    self.0.compaction.provider_names(&s.store.providers);
+                    Ok(())
+                },
             )?;
-            self.replace_store(&mut s, next);
-            s.revision = storage::digest(after.as_bytes());
-            s.home = Some(home.to_owned());
-            s.last_successful = None;
-            s.running = true;
-            s.shutdown = Some(tx);
-            s.error = listener.notice;
-            self.0.admission.configure(&s.store.providers, true);
-            self.0
-                .admission
-                .configure_retention(s.store.settings.thread_idle_release_seconds);
-            self.0.compaction.provider_names(&s.store.providers);
         }
-        self.0
-            .registry
-            .listener
-            .activate(self.0.client, listener.socket, self.0.registry.clone());
         self.0.registry.changed();
-        Ok(self.view())
+        self.try_view()
     }
     pub async fn stop(&self) -> Result<View> {
         self.stop_checked(None).await
@@ -1418,7 +1433,7 @@ impl Gateway {
         let (revision, intent, connection) = {
             let s = self.0.inner.lock().unwrap();
             (
-                self.view_revision(&s),
+                self.view_revision(&s)?,
                 s.store.resume.clone(),
                 s.store.connection.clone(),
             )
@@ -1452,7 +1467,7 @@ impl Gateway {
                     && pair.is_gateway(
                         self.0.client,
                         &state.store.local_token,
-                        &[self.listener_view().port, state.store.settings.port],
+                        &[self.try_listener_view()?.port, state.store.settings.port],
                     )
                     && state.store.providers.iter().any(|provider| {
                         takeover::Pair::new(&provider.base_url, &provider.token).fingerprint()
@@ -1483,6 +1498,26 @@ impl Gateway {
     ) -> Result<View> {
         let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
+        if let Err(error) = self.0.registry.listener.view() {
+            // A poisoned shared lifecycle cannot identify its remaining clients
+            // reliably. Cancel actual client resources before recovering files;
+            // a configuration conflict must not strand the listener or requests.
+            for peer in self.0.registry.gateways() {
+                if let Ok(mut state) = peer.inner.lock() {
+                    if let Some(shutdown) = state.shutdown.take() {
+                        let _ = shutdown.send(true);
+                    }
+                    state.running = false;
+                    state.error = Some(error.message.clone());
+                    peer.admission.configure(&state.store.providers, false);
+                }
+            }
+            let _ = self.0.registry.listener.deactivate(self.0.client).await;
+            self.0.registry.changed();
+            crate::migrations::gateway(&self.0.data)?;
+            grok_import::recover(&self.0.data)?;
+            return Err(error);
+        }
         {
             let mut s = self.0.inner.lock().unwrap();
             if let (Some(expected), Some(home)) = (expected_config, &s.home) {
@@ -1576,10 +1611,11 @@ impl Gateway {
             self.0.compaction.provider_names(&s.store.providers);
             s.error = None;
         };
-        self.0.registry.listener.deactivate(self.0.client).await;
+        let stopped = self.0.registry.listener.deactivate(self.0.client).await;
         self.0.clients.lock().unwrap().clear();
         self.0.registry.changed();
-        Ok(self.view())
+        stopped?;
+        self.try_view()
     }
     async fn persist_success(&self, provider: &Provider) {
         let gateway = self.clone();
@@ -1712,7 +1748,7 @@ impl Gateway {
                 client: Client::builder(TokioExecutor::new())
                     .retry_canceled_requests(false)
                     .build(
-                        Connector::new(Duration::from_secs(10), self.listener_view().port)
+                        Connector::new(Duration::from_secs(10), self.try_listener_view()?.port)
                             .with_ports(self.0.registry.ports.clone()),
                     ),
             };

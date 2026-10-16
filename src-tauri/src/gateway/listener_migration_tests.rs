@@ -55,14 +55,14 @@ fn missing_config_creates_v2_with_new_default_or_inherited_legacy_port() {
     let no_store_path = temp.path().join("no-store.json");
     let no_store = Listener::load(no_store_path.clone(), None).unwrap();
 
-    assert_eq!(no_store.view().port, NEW_DEFAULT_PORT);
+    assert_eq!(no_store.view().unwrap().port, NEW_DEFAULT_PORT);
     assert_config(&no_store_path, 2, NEW_DEFAULT_PORT);
 
     let legacy_port = free_port_excluding(&[NEW_DEFAULT_PORT]);
     let legacy_path = temp.path().join("legacy-store.json");
     let inherited = Listener::load(legacy_path.clone(), Some(legacy_port)).unwrap();
 
-    assert_eq!(inherited.view().port, legacy_port);
+    assert_eq!(inherited.view().unwrap().port, legacy_port);
     assert_config(&legacy_path, 2, legacy_port);
 }
 
@@ -181,7 +181,7 @@ async fn both_default_ports_occupied_leave_the_v1_file_and_listener_state_unchan
     write_config(&path, 1, legacy_default);
     let listener = Listener::load(path.clone(), Some(legacy_default)).unwrap();
     let saved_bytes = fs::read(&path).unwrap();
-    let view_before = listener.view();
+    let view_before = listener.view().unwrap();
 
     let error = listener
         .prepare_at(new_default, legacy_default)
@@ -191,7 +191,7 @@ async fn both_default_ports_occupied_leave_the_v1_file_and_listener_state_unchan
 
     assert_eq!(error.code, "PORT");
     assert_eq!(fs::read(&path).unwrap(), saved_bytes);
-    let view_after = listener.view();
+    let view_after = listener.view().unwrap();
     assert_eq!(view_after.port, view_before.port);
     assert_eq!(view_after.revision, view_before.revision);
 }
@@ -203,7 +203,7 @@ async fn external_config_change_conflicts_before_migration_and_preserves_externa
     let [new_default, legacy_default, external_port] = distinct_free_ports(3).try_into().unwrap();
     write_config(&path, 1, legacy_default);
     let listener = Listener::load(path.clone(), Some(legacy_default)).unwrap();
-    let view_before = listener.view();
+    let view_before = listener.view().unwrap();
 
     write_config(&path, 2, external_port);
     let external_bytes = fs::read(&path).unwrap();
@@ -215,7 +215,7 @@ async fn external_config_change_conflicts_before_migration_and_preserves_externa
 
     assert_eq!(error.code, "CONFLICT");
     assert_eq!(fs::read(&path).unwrap(), external_bytes);
-    let view_after = listener.view();
+    let view_after = listener.view().unwrap();
     assert_eq!(view_after.port, view_before.port);
     assert_eq!(view_after.revision, view_before.revision);
 }
@@ -243,7 +243,7 @@ async fn persist_failure_keeps_listener_config_and_state_unchanged() {
     write_config(&path, 1, legacy_default);
     let listener = Listener::load(path.clone(), Some(legacy_default)).unwrap();
     let saved_bytes = fs::read(&path).unwrap();
-    let view_before = listener.view();
+    let view_before = listener.view().unwrap();
     let _fault = crate::storage::faults::inject(crate::storage::faults::Point::Replace);
 
     let error = listener
@@ -254,7 +254,7 @@ async fn persist_failure_keeps_listener_config_and_state_unchanged() {
 
     assert_eq!(error.code, "IO");
     assert_eq!(fs::read(&path).unwrap(), saved_bytes);
-    let view_after = listener.view();
+    let view_after = listener.view().unwrap();
     assert_eq!(view_after.port, view_before.port);
     assert_eq!(view_after.revision, view_before.revision);
 }
@@ -266,7 +266,7 @@ async fn directory_sync_failure_keeps_listener_inactive_even_if_v2_was_published
     let [new_default, legacy_default] = distinct_free_ports(2).try_into().unwrap();
     write_config(&path, 1, legacy_default);
     let listener = Listener::load(path.clone(), Some(legacy_default)).unwrap();
-    let view_before = listener.view();
+    let view_before = listener.view().unwrap();
     let _fault = crate::storage::faults::inject(crate::storage::faults::Point::DirectorySync);
 
     let error = listener
@@ -277,7 +277,7 @@ async fn directory_sync_failure_keeps_listener_inactive_even_if_v2_was_published
 
     assert_eq!(error.code, "IO");
     assert_config(&path, 2, new_default);
-    let view_after = listener.view();
+    let view_after = listener.view().unwrap();
     assert_eq!(view_after.port, view_before.port);
     assert_eq!(view_after.revision, view_before.revision);
     assert!(view_after.running_clients.is_empty());
@@ -329,7 +329,7 @@ async fn running_client_reuses_listener_without_binding_again() {
         state.clients.push(super::ClientId::Codex);
     }
     let saved_bytes = fs::read(&path).unwrap();
-    let view_before = listener.view();
+    let view_before = listener.view().unwrap();
 
     let prepared = listener
         .prepare_at(new_default, legacy_default)

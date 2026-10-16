@@ -156,7 +156,7 @@ impl Gateway {
         };
         let value = template::payload(&value);
         let state = self.0.inner.lock().unwrap();
-        let port = self.listener_view().port;
+        let port = self.try_listener_view()?.port;
         let mut seen: HashSet<_> = state
             .store
             .providers
@@ -204,7 +204,7 @@ impl Gateway {
             providers.push(parsed.ok());
         }
         let token = uuid::Uuid::new_v4().to_string();
-        let revision = self.view_revision(&state);
+        let revision = self.view_revision(&state)?;
         *self.0.exchange.pending.lock().unwrap() = Some(Pending {
             token: token.clone(),
             at: Instant::now(),
@@ -266,7 +266,7 @@ impl Gateway {
             template::Service::load(&self.template_path(), platform(self.0.client), "apikey")?;
         let prototype = template::payload(&document)["accounts"][0].clone();
         let state = self.0.inner.lock().unwrap();
-        if self.view_revision(&state) != expected {
+        if self.view_revision(&state)? != expected {
             return Err(AppError::new(
                 code::CONFLICT,
                 "网关设置已变化，请使用最新状态重试",

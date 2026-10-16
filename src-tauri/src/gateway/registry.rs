@@ -21,7 +21,7 @@ pub struct Registry {
 impl Registry {
     pub fn new(data: PathBuf, port: Option<u16>) -> Result<Self> {
         let listener = Listener::load(data.join("gateway-listener.json"), port)?;
-        let port = listener.view().port;
+        let port = listener.view()?.port;
         Ok(Self {
             mutation: Mutex::new(()),
             tokens: RwLock::new(Arc::new(Vec::new())),
@@ -84,7 +84,8 @@ impl Registry {
             let _ = gateway.events.send(());
         }
     }
-    pub fn register(&self, shared: &Arc<Shared>, token: &str) {
+    pub fn register(&self, shared: &Arc<Shared>, token: &str) -> Result<()> {
+        self.update_ports()?;
         self.update_tokens(|entries| {
             entries.retain(|entry| entry.client != shared.client);
             entries.push(TokenEntry {
@@ -93,7 +94,7 @@ impl Registry {
                 shared: Arc::downgrade(shared),
             });
         });
-        self.update_ports();
+        Ok(())
     }
     /// Publish only after the private store transaction has committed or reloaded.
     pub(super) fn publish_token(&self, shared: &Arc<Shared>, token: &str) {
@@ -112,9 +113,11 @@ impl Registry {
             entries.retain(|entry| !std::ptr::eq(entry.shared.as_ptr(), shared));
         });
     }
-    pub fn update_ports(&self) {
+    pub fn update_ports(&self) -> Result<()> {
         // Published as a whole after a listener transaction; never mutate in place.
-        *super::locks::published(&self.ports) = vec![self.listener.view().port];
+        let port = self.listener.view()?.port;
+        *super::locks::published(&self.ports) = vec![port];
+        Ok(())
     }
 }
 

@@ -281,6 +281,16 @@ fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     publish(app, state.clone());
     Ok(state)
 }
+fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
+    match gateway.try_view() {
+        Ok(view) => {
+            let _ = app.emit("gateway-state", view);
+        }
+        Err(error) => {
+            let _ = app.emit("switch-error", error);
+        }
+    }
+}
 fn state_for(r: &Runtime) -> Result<ViewState> {
     let (mut state, home) = {
         let mut core = lock(&r.core)?;
@@ -366,13 +376,13 @@ async fn use_official_account(
             "已有官方账号连接，请先关闭",
         ));
     }
-    if r.gateway.view().recovery_pending && !r.gateway.view().running {
+    if r.gateway.try_view()?.recovery_pending && !r.gateway.try_view()?.running {
         return Err(AppError::new(
             code::RECOVERY,
             "请先处理 Codex 网关的恢复事务",
         ));
     }
-    let gateway_was_running = r.gateway.view().running;
+    let gateway_was_running = r.gateway.try_view()?.running;
     if gateway_was_running {
         r.gateway.stop_checked(None).await?;
     }
@@ -873,15 +883,18 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
     });
 }
 #[tauri::command]
-fn get_gateway(client_id: gateway::ClientId, r: tauri::State<'_, Arc<Runtime>>) -> gateway::View {
+fn get_gateway(
+    client_id: gateway::ClientId,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::View> {
     if let Ok(home) = r.home(client_id) {
         r.gateway(client_id).observe_home(&home);
     }
-    r.gateway(client_id).view()
+    r.gateway(client_id).try_view()
 }
 #[tauri::command]
-fn get_gateway_listener(r: tauri::State<'_, Arc<Runtime>>) -> gateway::ListenerView {
-    r.gateway.listener_view()
+fn get_gateway_listener(r: tauri::State<'_, Arc<Runtime>>) -> Result<gateway::ListenerView> {
+    r.gateway.try_listener_view()
 }
 #[tauri::command]
 fn set_gateway_listener(
@@ -1137,17 +1150,17 @@ async fn prepare_exit_smoke(r: &Runtime) -> Result<SmokeSnapshot> {
         home,
     };
     r.gateway
-        .start(&r.gateway.view().revision, &snapshot.home)
+        .start(&r.gateway.try_view()?.revision, &snapshot.home)
         .await?;
     r.gateway.edit(
         gateway::Edit::Select {
-            id: r.gateway.view().providers[0].id.clone(),
+            id: r.gateway.try_view()?.providers[0].id.clone(),
         },
-        &r.gateway.view().revision,
+        &r.gateway.try_view()?.revision,
         &snapshot.home,
     )?;
     r.claude
-        .start(&r.claude.view().revision, &snapshot.claude_home)
+        .start(&r.claude.try_view()?.revision, &snapshot.claude_home)
         .await?;
     Ok(snapshot)
 }
@@ -1195,7 +1208,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
                 ..Default::default()
             },
         },
-        &r.gateway.view().revision,
+        &r.gateway.try_view()?.revision,
         &home,
     )?;
     r.gateway.edit(
@@ -1205,7 +1218,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
             token: "fixture-only".into(),
             name: None,
         },
-        &r.gateway.view().revision,
+        &r.gateway.try_view()?.revision,
         &home,
     )?;
     r.gateway.edit(
@@ -1215,25 +1228,27 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
             token: "fixture-backup".into(),
             name: None,
         },
-        &r.gateway.view().revision,
+        &r.gateway.try_view()?.revision,
         &home,
     )?;
     let claude_home = r.home(gateway::ClientId::Claude)?;
     storage::atomic_write(&claude_home.join("settings.json"), br#"{"env":{"ANTHROPIC_BASE_URL":"https://claude.example.invalid","ANTHROPIC_AUTH_TOKEN":"fixture-claude"},"model":"keep"}"#, Some("missing"))?;
     r.claude.import_initial(&claude_home)?;
-    r.gateway.start(&r.gateway.view().revision, &home).await?;
-    r.claude
-        .start(&r.claude.view().revision, &claude_home)
+    r.gateway
+        .start(&r.gateway.try_view()?.revision, &home)
         .await?;
-    if r.gateway.view().settings.port != port || r.claude.view().settings.port != port {
+    r.claude
+        .start(&r.claude.try_view()?.revision, &claude_home)
+        .await?;
+    if r.gateway.try_view()?.settings.port != port || r.claude.try_view()?.settings.port != port {
         return Err(AppError::new(code::SMOKE, "共享网关端口不一致"));
     }
     let live = storage::read_optional(&home.join("config.toml"))?;
     r.gateway.edit(
         gateway::Edit::Select {
-            id: r.gateway.view().providers[1].id.clone(),
+            id: r.gateway.try_view()?.providers[1].id.clone(),
         },
-        &r.gateway.view().revision,
+        &r.gateway.try_view()?.revision,
         &home,
     )?;
     if live != storage::read_optional(&home.join("config.toml"))? {
@@ -1262,7 +1277,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
     .map_err(|_| AppError::new(code::SMOKE, "网关响应超时"))?
     .map_err(storage::io_error)?;
     r.gateway.stop().await?;
-    if !r.claude.view().running {
+    if !r.claude.try_view()?.running {
         return Err(AppError::new(code::SMOKE, "双网关状态未隔离"));
     }
     r.claude.stop().await?;
@@ -1486,7 +1501,7 @@ pub fn run() {
                             }
                         }
                         g.report_diagnostics();
-                        let _ = handle.emit("gateway-state", g.view());
+                        publish_gateway(&handle, &g);
                     }
                 });
             }
@@ -1600,7 +1615,7 @@ pub fn run() {
                                 runtime.gateway.observe_home(
                                     &lock(&runtime.core).map(|c| c.home()).unwrap_or_default(),
                                 );
-                                let _ = handle.emit("gateway-state", runtime.gateway.view());
+                                publish_gateway(&handle, &runtime.gateway);
                                 last = Some(s.clone());
                                 publish(&handle, s);
                             }
@@ -1622,7 +1637,7 @@ pub fn run() {
                                 config_versions.insert(client, stamp);
                                 let _ = handle.emit("config-state", serde_json::json!({"clientId":client,"revision":doc.revision,"guarded":doc.guarded}));
                                 if client != gateway::ClientId::Codex {
-                                    let _ = handle.emit("gateway-state", runtime.gateway(client).view());
+                                    publish_gateway(&handle, runtime.gateway(client));
                                 }
                             }
                         }

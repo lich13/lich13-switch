@@ -529,7 +529,7 @@ impl Gateway {
                 p,
                 urls,
                 s.store.settings.endpoint_probe_seconds,
-                self.listener_view().port,
+                self.try_listener_view()?.port,
                 s.shutdown.as_ref().map(|s| s.subscribe()),
             )
         };
@@ -537,7 +537,7 @@ impl Gateway {
         let recent = Service::fresh(&super::locks::cache(&self.0.endpoints.samples), id, &config)
             .is_some_and(|b| b.checked >= requested);
         if recent || (!force && !self.0.endpoints.due(&provider, &urls, seconds)) {
-            return Ok(self.view());
+            return self.try_view();
         }
         let client = Client::builder(TokioExecutor::new())
             .pool_max_idle_per_host(1)
@@ -587,7 +587,7 @@ impl Gateway {
         }
         drop(s);
         self.changed();
-        Ok(self.view())
+        self.try_view()
     }
     pub async fn probe_due_endpoints(&self) {
         let ids = {

@@ -71,7 +71,7 @@ pub async fn switch_claude_profile(
             serde_json::json!({"clientId":"claude","revision":doc.revision,"guarded":doc.guarded}),
         );
     }
-    let _ = app.emit("gateway-state", r.claude.view());
+    crate::publish_gateway(&app, &r.claude);
     Ok(result)
 }
 #[tauri::command]

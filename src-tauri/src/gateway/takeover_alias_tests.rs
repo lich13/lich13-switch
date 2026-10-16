@@ -200,7 +200,13 @@ async fn restart_recovers_old_journal_before_attaching_the_new_address() {
             .start(&gateway.view().revision, &home)
             .await
             .unwrap();
-        gateway.0.registry.listener.deactivate(client).await;
+        gateway
+            .0
+            .registry
+            .listener
+            .deactivate(client)
+            .await
+            .unwrap();
         let journal = gateway.0.data.join("gateway-recovery.json");
         let canonical = client.address(port);
         let legacy = old_address(client, port);

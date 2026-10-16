@@ -452,7 +452,7 @@ impl Gateway {
         }
         let mut preview = Preview {
             token: None,
-            revision: self.view_revision(&s),
+            revision: self.view_revision(&s)?,
             models: discover(&config, &resolve)?,
             selected: doc
                 .get("models")
@@ -485,7 +485,7 @@ impl Gateway {
             )?;
             super::model::base_url(
                 p.pair.base_url.as_deref().unwrap(),
-                self.listener_view().port,
+                self.try_listener_view()?.port,
             )?;
             let mut clear: BTreeSet<String> = p
                 .credential_names
@@ -551,7 +551,7 @@ impl Gateway {
             || self.0.data.join("gateway-recovery.json").exists()
             || p.home != home
             || expected != p.revision
-            || expected != self.view_revision(&s)
+            || expected != self.view_revision(&s)?
         {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -574,7 +574,7 @@ impl Gateway {
             .base_url
             .clone()
             .ok_or_else(|| error("API 地址缺失"))?;
-        let base = super::model::base_url(&base, self.listener_view().port)?
+        let base = super::model::base_url(&base, self.try_listener_view()?.port)?
             .as_str()
             .trim_end_matches('/')
             .to_owned();
@@ -585,7 +585,7 @@ impl Gateway {
             .clone()
             .ok_or_else(|| error("API 凭据缺失"))?;
         let mut next = s.store.clone();
-        next.settings.port = self.listener_view().port;
+        next.settings.port = self.try_listener_view()?.port;
         let id = if let Some(existing) = next
             .providers
             .iter()
@@ -683,6 +683,6 @@ impl Gateway {
         drop(pending);
         drop(s);
         self.changed();
-        Ok(self.view())
+        self.try_view()
     }
 }
