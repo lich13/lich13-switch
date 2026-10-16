@@ -45,7 +45,7 @@ trait System: Send + Sync {
 }
 struct Native;
 #[cfg(test)]
-#[path = "power_v023_tests.rs"]
+#[path = "power_repair_tests.rs"]
 mod v023_tests;
 pub struct Service {
     path: PathBuf,

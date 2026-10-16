@@ -13,7 +13,7 @@ use tauri::{Emitter, Manager};
 mod delivery;
 mod native;
 #[cfg(test)]
-#[path = "events_v017_tests.rs"]
+#[path = "events_notification_scope_tests.rs"]
 mod v017_tests;
 use native::permission;
 static ASKING: AtomicBool = AtomicBool::new(false);
@@ -218,5 +218,5 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
 mod delivery_tests;
 
 #[cfg(test)]
-#[path = "notifications/delivery_v0232_tests.rs"]
+#[path = "notifications/circuit_delivery_tests.rs"]
 mod delivery_v0232_tests;

@@ -492,7 +492,7 @@ impl Permit {
 }
 
 #[cfg(test)]
-#[path = "circuit_v0232_tests.rs"]
+#[path = "circuit_deadline_tests.rs"]
 mod v0232_tests;
 impl Drop for Permit {
     fn drop(&mut self) {

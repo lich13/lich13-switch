@@ -504,9 +504,7 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         "a dispatched request that times out before its first event must not be retried"
     );
 
-    let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
     let first = g.view().providers[0].id.clone();
@@ -1275,13 +1273,13 @@ mod revisions;
 #[path = "model_tests.rs"]
 mod models;
 
-#[path = "v061_tests.rs"]
+#[path = "failover_transport_tests.rs"]
 mod v061;
 
 #[path = "import_tests.rs"]
 mod imports;
 
-#[path = "v080_tests.rs"]
+#[path = "claude_gateway_tests.rs"]
 mod v080;
 
 #[path = "capacity_tests.rs"]
@@ -1298,11 +1296,11 @@ mod quota_v013;
 #[path = "../events_tests.rs"]
 mod events_v013;
 
-#[path = "v016_tests.rs"]
+#[path = "websocket_reconnect_tests.rs"]
 mod v016;
 
-#[path = "v017_tests.rs"]
+#[path = "capacity_retry_tests.rs"]
 mod v017;
 
-#[path = "v019_compaction_tests.rs"]
+#[path = "compaction_handoff_tests.rs"]
 mod v019_compaction;

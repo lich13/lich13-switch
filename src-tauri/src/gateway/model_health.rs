@@ -18,7 +18,7 @@ pub struct ModelHealth {
 }
 
 #[cfg(test)]
-#[path = "model_health_v0232_tests.rs"]
+#[path = "model_probe_tests.rs"]
 mod v0232_tests;
 
 impl Models {

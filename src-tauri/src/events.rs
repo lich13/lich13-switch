@@ -714,7 +714,7 @@ impl Service {
 }
 
 #[cfg(test)]
-#[path = "events_v0232_tests.rs"]
+#[path = "events_categories_tests.rs"]
 mod v0232_tests;
 
 #[cfg(test)]

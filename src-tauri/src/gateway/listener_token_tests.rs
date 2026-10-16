@@ -4,14 +4,7 @@ use hyper::{
     header::{self, HeaderValue},
     HeaderMap, Uri,
 };
-use std::{
-    fs,
-    net::TcpListener as StdTcpListener,
-    path::Path,
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{fs, net::TcpListener as StdTcpListener, path::Path, sync::mpsc, thread, time::Duration};
 use tempfile::TempDir;
 
 const CODEX_TOKEN: &str = "gs_fixture_codex_local_token";
@@ -368,9 +361,8 @@ async fn route_does_not_wait_for_another_gateways_inner_lock() {
     let authorization = bearer(CODEX_TOKEN);
     let request_headers = headers(Some(&authorization), None);
     let registry = fixture.codex.0.registry.clone();
-    let mut route_task = tokio::task::spawn_blocking(move || {
-        route(&uri, &request_headers, &registry)
-    });
+    let mut route_task =
+        tokio::task::spawn_blocking(move || route(&uri, &request_headers, &registry));
     let timely = tokio::time::timeout(Duration::from_millis(100), &mut route_task).await;
 
     release_tx.send(()).unwrap();
@@ -386,7 +378,10 @@ async fn route_does_not_wait_for_another_gateways_inner_lock() {
     );
     assert_eq!(
         result,
-        Ok((ClientId::Codex, "/v1/responses?model=fixture".parse().unwrap()))
+        Ok((
+            ClientId::Codex,
+            "/v1/responses?model=fixture".parse().unwrap()
+        ))
     );
 }
 
@@ -469,7 +464,9 @@ fn unregistering_an_old_shared_does_not_remove_its_reregistered_replacement() {
 
     assert!(old_weak.upgrade().is_none(), "dropped Shared should expire");
     assert_eq!(
-        registry.gateway(ClientId::Claude).map(|gateway| gateway.client_id()),
+        registry
+            .gateway(ClientId::Claude)
+            .map(|gateway| gateway.client_id()),
         Some(ClientId::Claude),
         "unregistering the old instance must preserve its replacement"
     );

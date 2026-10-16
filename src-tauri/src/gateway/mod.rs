@@ -1,6 +1,6 @@
 use crate::errors::code;
 #[cfg(test)]
-mod api_login_v020_tests;
+mod api_login_tests;
 mod claude_config;
 mod codex_api;
 pub(crate) mod grok_config;
@@ -9,13 +9,11 @@ pub use grok_import::Preview as GrokImportPreview;
 #[cfg(test)]
 mod grok_config_tests;
 #[cfg(test)]
-mod v025_grok_config_tests;
+mod grok_import_tests;
 #[cfg(test)]
-mod v025_grok_import_tests;
+mod shared_listener_tests;
 #[cfg(test)]
-mod v025_listener_tests;
-#[cfg(test)]
-mod v025_transport_tests;
+mod shared_transport_tests;
 pub(crate) use takeover::manages_auth;
 mod client;
 #[cfg(test)]
@@ -40,6 +38,8 @@ mod exchange_tests;
 pub(crate) mod failover;
 #[cfg(test)]
 mod first_byte_timeout_tests;
+#[cfg(test)]
+mod first_turn_structure_tests;
 mod forward;
 mod health_settlement;
 #[cfg(test)]
@@ -49,6 +49,10 @@ mod interruption_tests;
 pub(crate) mod metadata;
 mod model;
 mod model_health;
+#[cfg(test)]
+mod model_isolation_tests;
+#[cfg(test)]
+mod new_thread_policy_tests;
 #[cfg(test)]
 mod partial_response_tests;
 mod protocol;
@@ -62,16 +66,10 @@ mod replay_policy;
 mod routing;
 mod thread_capacity;
 #[cfg(test)]
-mod token_v0233_tests;
+mod token_reveal_tests;
 mod upstream_error;
 #[cfg(test)]
-mod v019_usage_tests;
-#[cfg(test)]
-mod v020_tests;
-#[cfg(test)]
-mod v022_tests;
-#[cfg(test)]
-mod v0233_tests;
+mod usage_stream_tests;
 mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
@@ -1890,14 +1888,14 @@ mod usage_protocol_tests;
 mod usage_forward_tests;
 
 #[cfg(test)]
-mod v023_delivery_tests;
+mod transport_delivery_tests;
 
 #[cfg(test)]
-mod v024_failover_evidence_tests;
+mod failover_evidence_tests;
 #[cfg(test)]
-mod v024_failover_tests;
+mod failure_fallback_tests;
 #[cfg(test)]
-mod v024_grok_transport_tests;
+mod grok_protocol_tests;
 
 #[cfg(test)]
 mod request_state_poison_tests;

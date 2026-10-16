@@ -334,5 +334,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "startup_v0233_tests.rs"]
+#[path = "startup_restore_tests.rs"]
 mod v0233_tests;
