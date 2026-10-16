@@ -79,6 +79,12 @@ impl Listener {
             }),
         })
     }
+    pub(super) fn request_port(&self) -> Result<u16> {
+        self.state
+            .lock()
+            .map(|state| state.port)
+            .map_err(|_| AppError::new(code::STORE, "共享网关状态不可用，请重新打开应用"))
+    }
     pub fn view(&self) -> View {
         let s = self.state.lock().unwrap();
         View {

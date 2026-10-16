@@ -475,7 +475,7 @@ impl Delivery {
             activity.begin_request(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        *self.activity.lock().unwrap() = Some(activity.clone());
+        *super::locks::published(&self.activity) = Some(activity.clone());
         activity.track(self);
     }
     pub fn is_settled(&self) -> bool {
@@ -498,7 +498,7 @@ impl Delivery {
         }
     }
     pub async fn wait(&self) {
-        if self.activity.lock().unwrap().is_none() {
+        if super::locks::published(&self.activity).is_none() {
             return;
         }
         while !self.is_settled() {
@@ -514,7 +514,7 @@ impl Delivery {
         }
     }
     pub fn event(&self, kind: &str) {
-        if let Some(activity) = self.activity.lock().unwrap().as_ref() {
+        if let Some(activity) = super::locks::published(&self.activity).as_ref() {
             activity.event(kind);
         }
     }
@@ -522,7 +522,7 @@ impl Delivery {
         if self.finished.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let activity = self.activity.lock().unwrap();
+        let activity = super::locks::published(&self.activity);
         let code = activity.as_ref().map_or(0, |a| a.error_code());
         if let Some(activity) = activity.as_ref() {
             activity.event("response_body_cancelled");
@@ -606,11 +606,7 @@ impl Protocol {
         self.thread = thread;
     }
     pub fn diagnostics(&mut self, gateway: &super::Gateway, provider: &str, model: Option<&str>) {
-        self.diagnostics = gateway
-            .0
-            .diagnostics
-            .lock()
-            .unwrap()
+        self.diagnostics = super::locks::published(&gateway.0.diagnostics)
             .clone()
             .map(|service| {
                 (
@@ -993,11 +989,7 @@ impl Protocol {
         self.transfer.terminal_event = self.observation.terminal_event.clone();
         self.transfer.terminal_status = self.observation.terminal_status.clone();
         self.transfer.incomplete_reason = self.observation.incomplete_reason.clone();
-        self.transfer.connection = self
-            .delivery
-            .activity
-            .lock()
-            .unwrap()
+        self.transfer.connection = super::locks::published(&self.delivery.activity)
             .as_ref()
             .map(|activity| activity.snapshot(self.delivery.request_sequence.load(Relaxed)));
         self.transfer.response_hash = self
@@ -1131,7 +1123,9 @@ impl Drop for Protocol {
             code::GATEWAY_STOPPED
         } else if self.downstream.as_ref().is_some_and(|s| *s.borrow())
             || matches!(
-                self.delivery.error.load(std::sync::atomic::Ordering::Acquire),
+                self.delivery
+                    .error
+                    .load(std::sync::atomic::Ordering::Acquire),
                 2..=8
             )
         {
@@ -1210,3 +1204,7 @@ impl Observer {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "protocol_poison_tests.rs"]
+mod poison_tests;

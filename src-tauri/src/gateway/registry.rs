@@ -113,6 +113,11 @@ impl Registry {
         });
     }
     pub fn update_ports(&self) {
-        *self.ports.lock().unwrap() = vec![self.listener.view().port];
+        // Published as a whole after a listener transaction; never mutate in place.
+        *super::locks::published(&self.ports) = vec![self.listener.view().port];
     }
 }
+
+#[cfg(test)]
+#[path = "registry_poison_tests.rs"]
+mod poison_tests;

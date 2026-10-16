@@ -52,7 +52,10 @@ pub async fn serve(
                         request.extensions_mut().insert(activity.clone());
                         async move{Ok::<_,Infallible>(match routed {
                             Ok(g) => {
-                                let mut client_stop = g.0.inner.lock().unwrap().shutdown.as_ref().map(watch::Sender::subscribe);
+                                let mut client_stop = match g.request_state() {
+                                    Ok(state) => state.shutdown.as_ref().map(watch::Sender::subscribe),
+                                    Err(e) => return Ok(error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message)),
+                                };
                                 tokio::select! {
                                     biased;
                                     _ = stopping(&mut client_stop) => error(StatusCode::SERVICE_UNAVAILABLE, code::GATEWAY_STOPPED, "客户端网关已停止"),
@@ -297,7 +300,10 @@ pub(super) fn capacity_delay(settings: &Settings, retry: Option<Duration>) -> Du
 }
 async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<WireBody> {
     let (settings, mode, mut ids, token, running) = {
-        let s = gateway.0.inner.lock().unwrap();
+        let s = match gateway.request_state() {
+            Ok(state) => state,
+            Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message),
+        };
         let ids = if s.store.mode == "auto" {
             s.store
                 .providers
@@ -327,16 +333,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         );
     }
     // Capture all route versions before receiving the request body: edits only affect new requests.
-    let provider_ids: Vec<_> = gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .store
-        .providers
-        .iter()
-        .map(|p| p.id.clone())
-        .collect();
+    let provider_ids: Vec<_> = match gateway.request_state() {
+        Ok(state) => state,
+        Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message),
+    }
+    .store
+    .providers
+    .iter()
+    .map(|p| p.id.clone())
+    .collect();
     let mut routes: std::collections::HashMap<_, _> = provider_ids
         .into_iter()
         .filter_map(|id| gateway.route(&id).map(|r| (id, r)))
@@ -416,15 +421,16 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     let continuation = match &hints {
         Ok(hints) if hints.previous_response_id.is_some() => {
             let previous = hints.previous_response_id.as_ref().unwrap();
-            let owner = gateway
-                .0
-                .inner
-                .lock()
-                .unwrap()
-                .affinity
-                .get(previous)
-                .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
-                .cloned();
+            let owner = match gateway.request_state() {
+                Ok(state) => state,
+                Err(e) => {
+                    return error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message)
+                }
+            }
+            .affinity
+            .get(previous)
+            .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
+            .cloned();
             if let Some((owner, previous_model, _)) = owner {
                 pinned = Some(owner.clone());
                 ids = vec![owner];
@@ -973,14 +979,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.routing_evidence(hints.as_ref().ok());
         }
         protocol.watch_lifecycle(
-            gateway
-                .0
-                .inner
-                .lock()
-                .unwrap()
-                .shutdown
-                .as_ref()
-                .map(watch::Sender::subscribe),
+            match gateway.request_state() {
+                Ok(state) => state,
+                Err(e) => {
+                    return error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message)
+                }
+            }
+            .shutdown
+            .as_ref()
+            .map(watch::Sender::subscribe),
             None,
         );
         let deadline =
@@ -1630,14 +1637,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         if empty {
             output_delivery.body_complete();
         }
-        let mut shutdown = gateway
-            .0
-            .inner
-            .lock()
-            .unwrap()
-            .shutdown
-            .as_ref()
-            .map(watch::Sender::subscribe);
+        let mut shutdown = match gateway.request_state() {
+            Ok(state) => state,
+            Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message),
+        }
+        .shutdown
+        .as_ref()
+        .map(watch::Sender::subscribe);
         tokio::spawn(async move {
             let mut active = Some(active);
             let mut slot = Some(slot);

@@ -120,7 +120,7 @@ impl Connector {
             || self
                 .ports
                 .as_ref()
-                .is_some_and(|p| p.lock().unwrap().contains(&port))
+                .is_some_and(|p| super::locks::published(p).contains(&port))
     }
     pub async fn connect(&self, uri: Uri) -> Result<Transport, ConnectError> {
         let host = uri

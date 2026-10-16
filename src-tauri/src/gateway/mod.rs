@@ -21,6 +21,7 @@ mod client;
 #[cfg(test)]
 mod client_cancel_tests;
 mod listener;
+mod locks;
 mod registry;
 pub use listener::View as ListenerView;
 mod retired;
@@ -298,7 +299,7 @@ impl Gateway {
                     .iter()
                     .find(|p| Some(&p.id) == event.provider_id.as_ref())
                     .and_then(|p| crate::events::safe_message(&p.name));
-                if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
+                if let Some(events) = locks::published(&self.0.diagnostics).as_ref() {
                     events.emit(event);
                 }
             }
@@ -325,7 +326,7 @@ impl Gateway {
         self.0
             .compaction
             .provider_names(&self.0.inner.lock().unwrap().store.providers);
-        *self.0.diagnostics.lock().unwrap() = Some(events);
+        *locks::published(&self.0.diagnostics) = Some(events);
     }
     fn record(
         &self,
@@ -336,7 +337,7 @@ impl Gateway {
         status: Option<u16>,
         attempt: Option<u32>,
     ) {
-        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(events) = locks::published(&self.0.diagnostics).as_ref() {
             events.emit(crate::events::Record::new(
                 Some(self.0.client),
                 provider,
@@ -371,7 +372,7 @@ impl Gateway {
             event.details = cause.details.clone();
             event.details.cause_id = Some(cause.id.clone());
         }
-        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(service) = locks::published(&self.0.diagnostics).as_ref() {
             service.emit(event);
         }
     }
@@ -393,7 +394,7 @@ impl Gateway {
             counted_failure: Some(false),
             ..Default::default()
         };
-        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(service) = locks::published(&self.0.diagnostics).as_ref() {
             service.emit(event);
         }
     }
@@ -1589,7 +1590,9 @@ impl Gateway {
         let _ = tokio::task::spawn_blocking(move || gateway.successful_response(&provider)).await;
     }
     fn successful_response(&self, provider: &Provider) {
-        let mut s = self.0.inner.lock().unwrap();
+        let Ok(mut s) = self.request_state() else {
+            return;
+        };
         if !s.running
             || !s
                 .store
@@ -1768,8 +1771,18 @@ impl Gateway {
             }
         }
     }
+    // Poison may follow a partial config/affinity transaction. Request paths
+    // must fail closed instead of reusing that state or panicking again.
+    fn request_state(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
+        self.0
+            .inner
+            .lock()
+            .map_err(|_| AppError::new(code::STORE, "网关状态不可用，请重新打开应用"))
+    }
     fn routing_ids(&self, pinned: Option<&str>) -> Vec<String> {
-        let s = self.0.inner.lock().unwrap();
+        let Ok(s) = self.request_state() else {
+            return vec![];
+        };
         if let Some(id) = pinned {
             s.store
                 .providers
@@ -1789,13 +1802,14 @@ impl Gateway {
         }
     }
     fn route(&self, id: &str) -> Option<Route> {
-        let mut s = self.0.inner.lock().unwrap();
+        let mut s = self.request_state().ok()?;
         let provider = s.store.providers.iter().find(|p| p.id == id)?.clone();
         let provider_circuit = s.circuits.entry(pkey(&provider)).or_default().clone();
         let model_circuits = s.model_circuits.entry(pkey(&provider)).or_default().clone();
         self.sync_single_protection(&s);
         let key = format!("{}:{}", pkey(&provider), s.store.settings.connect_seconds);
-        let mut clients = self.0.clients.lock().unwrap();
+        let mut clients = locks::cache(&self.0.clients);
+        let port = self.0.registry.listener.request_port().ok()?;
         let client = clients
             .entry(key)
             .or_insert_with(|| {
@@ -1804,11 +1818,8 @@ impl Gateway {
                     .pool_max_idle_per_host(8)
                     .retry_canceled_requests(false)
                     .build(
-                        Connector::new(
-                            Duration::from_secs(s.store.settings.connect_seconds),
-                            self.listener_view().port,
-                        )
-                        .with_ports(self.0.registry.ports.clone()),
+                        Connector::new(Duration::from_secs(s.store.settings.connect_seconds), port)
+                            .with_ports(self.0.registry.ports.clone()),
                     )
             })
             .clone();
@@ -1835,7 +1846,9 @@ impl Gateway {
         if id.is_empty() || id.len() > 1024 {
             return;
         }
-        let mut s = self.0.inner.lock().unwrap();
+        let Ok(mut s) = self.request_state() else {
+            return;
+        };
         s.affinity
             .retain(|_, (_, _, at)| at.elapsed() < Duration::from_secs(3600));
         if s.affinity.len() >= 4096 {
@@ -1884,3 +1897,6 @@ mod v024_failover_evidence_tests;
 mod v024_failover_tests;
 #[cfg(test)]
 mod v024_grok_transport_tests;
+
+#[cfg(test)]
+mod request_state_poison_tests;

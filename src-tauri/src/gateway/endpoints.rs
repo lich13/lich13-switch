@@ -14,6 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn poisoned_affinity() -> AppError {
+    AppError::new(
+        code::ENDPOINT_AFFINITY,
+        "端点归属状态不可用，已停止自动切换",
+    )
+}
+
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_PINS: usize = 8192;
 const PIN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -140,7 +147,7 @@ impl Service {
     }
     pub fn measurements(&self, provider: &Provider, urls: &[String]) -> Vec<Measurement> {
         Self::fresh(
-            &self.samples.lock().unwrap(),
+            &super::locks::cache(&self.samples),
             &provider.id,
             &Self::config(provider, urls),
         )
@@ -158,7 +165,7 @@ impl Service {
     pub fn due(&self, provider: &Provider, urls: &[String], seconds: u64) -> bool {
         urls.len() > 1
             && Self::fresh(
-                &self.samples.lock().unwrap(),
+                &super::locks::cache(&self.samples),
                 &provider.id,
                 &Self::config(provider, urls),
             )
@@ -166,15 +173,15 @@ impl Service {
     }
     pub fn retain(&self, providers: &[Provider]) {
         let contains = |id: &String| providers.iter().any(|p| &p.id == id);
-        self.samples.lock().unwrap().retain(|id, _| contains(id));
-        self.flights.lock().unwrap().retain(|id, _| contains(id));
+        super::locks::cache(&self.samples).retain(|id, _| contains(id));
+        super::locks::cache(&self.flights).retain(|id, _| contains(id));
     }
     pub fn diagnostics(&self, client: super::ClientId, events: crate::events::Service) {
-        *self.diagnostics.lock().unwrap() = Some((client, events));
+        *super::locks::published(&self.diagnostics) = Some((client, events));
     }
     fn refresh_failed(&self, provider: &Provider) {
         use crate::events::{Action, Details, ErrorCode, Level, Phase, Reason, Record};
-        if let Some((client, events)) = self.diagnostics.lock().unwrap().as_ref() {
+        if let Some((client, events)) = super::locks::published(&self.diagnostics).as_ref() {
             let mut event = Record::new(
                 Some(*client),
                 Some(&provider.id),
@@ -217,7 +224,7 @@ impl Service {
                 })
         };
         if let Some(previous) = previous {
-            let responses = self.responses.lock().unwrap();
+            let responses = self.responses.lock().map_err(|_| poisoned_affinity())?;
             if let Some(pin) = responses
                 .get(&pin_key(provider, "response", previous))
                 .filter(|pin| now().saturating_sub(pin.updated) < 60 * 60 * 1000)
@@ -228,7 +235,7 @@ impl Service {
         if let Some(thread) = thread {
             let key = pin_key(provider, "thread", thread);
             let existing = {
-                let pins = self.pins.lock().unwrap();
+                let pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
                 if pins.error {
                     return Err(AppError::new(
                         code::ENDPOINT_AFFINITY,
@@ -246,9 +253,9 @@ impl Service {
             }
             // Only writers serialize. Existing ownership reads do not wait for
             // another key's fsync, and a failed write cannot poison their path.
-            let _writer = self.write.lock().unwrap();
+            let _writer = self.write.lock().map_err(|_| poisoned_affinity())?;
             let pin = {
-                let mut pins = self.pins.lock().unwrap();
+                let mut pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
                 if let Some(pin) = pins.entries.get(&key) {
                     return resolve(&pin.endpoint);
                 }
@@ -292,7 +299,9 @@ impl Service {
             return;
         };
         let pin = {
-            let mut pins = self.pins.lock().unwrap();
+            let Ok(mut pins) = self.pins.lock() else {
+                return;
+            };
             let Some(pin) = pins.entries.get(key).cloned() else {
                 return;
             };
@@ -318,7 +327,7 @@ impl Service {
     /// lock for disk I/O, then publish only the successfully persisted changes.
     fn persist_pin(&self, key: &str, pin: Pin, trim: bool) -> Result<()> {
         let (raw, removed) = {
-            let pins = self.pins.lock().unwrap();
+            let pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
             let mut candidate: HashMap<&str, &Pin> = pins
                 .entries
                 .iter()
@@ -356,7 +365,7 @@ impl Service {
         storage::atomic_write(&self.path, &raw, None).map_err(|_| {
             AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求")
         })?;
-        let mut pins = self.pins.lock().unwrap();
+        let mut pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
         for removed in removed {
             pins.entries.remove(&removed);
             pins.refresh_attempts.remove(&removed);
@@ -369,7 +378,9 @@ impl Service {
         if response.is_empty() || response.len() > 1024 {
             return;
         }
-        let mut pins = self.responses.lock().unwrap();
+        let Ok(mut pins) = self.responses.lock() else {
+            return;
+        };
         trim_pins(&mut pins, 60 * 60 * 1000);
         pins.insert(
             pin_key(provider, "response", response),
@@ -461,7 +472,7 @@ impl Gateway {
         fresh: bool,
     ) -> Result<Route> {
         let (provider, urls) = {
-            let s = self.0.inner.lock().unwrap();
+            let s = self.request_state()?;
             let provider = s
                 .store
                 .providers
@@ -490,10 +501,7 @@ impl Gateway {
     }
     pub async fn probe_endpoints(&self, id: &str, force: bool) -> Result<super::View> {
         if !self
-            .0
-            .inner
-            .lock()
-            .unwrap()
+            .request_state()?
             .store
             .providers
             .iter()
@@ -502,18 +510,13 @@ impl Gateway {
             return Err(AppError::new(code::PROVIDER, "供应商不存在"));
         }
         let requested = Instant::now();
-        let gate = self
-            .0
-            .endpoints
-            .flights
-            .lock()
-            .unwrap()
+        let gate = super::locks::cache(&self.0.endpoints.flights)
             .entry(id.to_owned())
             .or_default()
             .clone();
         let _flight = gate.lock().await;
         let (provider, urls, seconds, port, mut stop) = {
-            let s = self.0.inner.lock().unwrap();
+            let s = self.request_state()?;
             let p = s
                 .store
                 .providers
@@ -531,7 +534,7 @@ impl Gateway {
             )
         };
         let config = Service::config(&provider, &urls);
-        let recent = Service::fresh(&self.0.endpoints.samples.lock().unwrap(), id, &config)
+        let recent = Service::fresh(&super::locks::cache(&self.0.endpoints.samples), id, &config)
             .is_some_and(|b| b.checked >= requested);
         if recent || (!force && !self.0.endpoints.due(&provider, &urls, seconds)) {
             return Ok(self.view());
@@ -569,10 +572,10 @@ impl Gateway {
             rows = probes => rows,
             _ = stopping => return Err(AppError::new(code::GATEWAY_STOPPED, "网关已停止，测速已取消")),
         };
-        let s = self.0.inner.lock().unwrap();
+        let s = self.request_state()?;
         if let Some(current) = s.store.providers.iter().find(|p| p.id == id) {
             if Service::config(current, &Self::endpoint_urls(&s.store, current)) == config {
-                self.0.endpoints.samples.lock().unwrap().insert(
+                super::locks::cache(&self.0.endpoints.samples).insert(
                     id.to_owned(),
                     Batch {
                         config,
@@ -588,7 +591,7 @@ impl Gateway {
     }
     pub async fn probe_due_endpoints(&self) {
         let ids = {
-            let s = self.0.inner.lock().unwrap();
+            let Ok(s) = self.request_state() else { return };
             if !s.running {
                 return;
             }
@@ -619,3 +622,7 @@ mod io_tests;
 #[cfg(test)]
 #[path = "endpoints_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "endpoints_poison_tests.rs"]
+mod poison_tests;

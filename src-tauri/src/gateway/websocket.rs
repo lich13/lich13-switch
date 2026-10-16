@@ -367,14 +367,15 @@ pub(super) fn accept(
             "WebSocket 握手无效",
         );
     };
-    let stop = gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .shutdown
-        .as_ref()
-        .map(|s| s.subscribe());
+    let stop = match gateway.request_state() {
+        Ok(state) => state,
+        Err(e) => {
+            return forward::error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message)
+        }
+    }
+    .shutdown
+    .as_ref()
+    .map(|s| s.subscribe());
     tokio::spawn(async move {
         let _active = active;
         let Ok(socket) = future.await else {
@@ -783,15 +784,16 @@ fn turn_model(
 ) -> Result<Option<String>, Failure> {
     let v = value(frame).ok_or((1008, "invalid response.create"))?;
     let previous = v.get("previous_response_id").and_then(|v| v.as_str());
-    let remembered = previous.and_then(|id| {
-        g.0.inner
-            .lock()
-            .unwrap()
+    let remembered = if let Some(id) = previous {
+        g.request_state()
+            .map_err(|_| (1011, code::STORE))?
             .affinity
             .get(id)
             .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
             .cloned()
-    });
+    } else {
+        None
+    };
     if let Some((owner, _, _)) = &remembered {
         if pinned.is_some_and(|p| p != owner) {
             return Err((1008, "response context belongs to another provider"));
@@ -837,7 +839,12 @@ async fn session(
         .await
         {
             Err((1999, "compaction handoff")) => {
-                current_cfg = g.0.inner.lock().unwrap().store.settings.clone();
+                current_cfg = g
+                    .request_state()
+                    .map_err(|_| (1011, code::STORE))?
+                    .store
+                    .settings
+                    .clone();
                 current_ids = g.routing_ids(None);
                 current_routes = current_ids
                     .iter()
@@ -993,7 +1000,7 @@ async fn session_once(
             .and_then(|v| v.as_str())
             .map(str::to_owned)
     }) {
-        let s = g.0.inner.lock().unwrap();
+        let s = g.request_state().map_err(|_| (1011, code::STORE))?;
         if let Some((owner, _, _)) = s
             .affinity
             .get(&previous)
@@ -1360,9 +1367,8 @@ async fn session_once(
             attempt_protocol.routing_evidence(first_hints.as_ref());
         }
         attempt_protocol.watch_lifecycle(
-            g.0.inner
-                .lock()
-                .unwrap()
+            g.request_state()
+                .map_err(|_| (1011, code::STORE))?
                 .shutdown
                 .as_ref()
                 .map(|s| s.subscribe()),
@@ -1835,9 +1841,8 @@ async fn session_once(
                 next.routing_evidence(hints.as_ref());
             }
             next.watch_lifecycle(
-                g.0.inner
-                    .lock()
-                    .unwrap()
+                g.request_state()
+                    .map_err(|_| (1011, code::STORE))?
                     .shutdown
                     .as_ref()
                     .map(|s| s.subscribe()),
@@ -2009,7 +2014,7 @@ async fn session_once(
                 let hints = value(&frame)
                     .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
                 let enabled = {
-                    let state = g.0.inner.lock().unwrap();
+                    let state = g.request_state().map_err(|_| (1011, code::STORE))?;
                     state.store.mode == "auto"
                 };
                 if g.client_id() == super::ClientId::Codex
@@ -2185,9 +2190,8 @@ async fn session_once(
                     next_protocol.routing_evidence(hints.as_ref());
                 }
                 next_protocol.watch_lifecycle(
-                    g.0.inner
-                        .lock()
-                        .unwrap()
+                    g.request_state()
+                        .map_err(|_| (1011, code::STORE))?
                         .shutdown
                         .as_ref()
                         .map(|s| s.subscribe()),

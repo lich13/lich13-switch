@@ -131,7 +131,7 @@ impl Permits {
         if let Some(p) = target {
             p.set_failure_event(event.clone());
         }
-        if let Some(service) = g.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(service) = super::locks::published(&g.0.diagnostics).as_ref() {
             service.emit(event.clone());
         }
         event
