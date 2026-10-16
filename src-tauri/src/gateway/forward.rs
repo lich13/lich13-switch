@@ -1,5 +1,6 @@
 use super::{
     admission::{Admission, Budget, CapacitySource, Rejected},
+    attempt::{DeliveryGuard, DownstreamEnd},
     circuit,
     connector::{self, BoxError},
     health_settlement::observe_protocol,
@@ -89,44 +90,6 @@ type ForwardFrame = (
     bool,
     tokio::sync::oneshot::Sender<()>,
 );
-struct DeliveryGuard {
-    delivery: std::sync::Arc<super::protocol::Delivery>,
-    complete: bool,
-}
-impl Drop for DeliveryGuard {
-    fn drop(&mut self) {
-        if !self.complete {
-            self.delivery.dropped();
-        }
-    }
-}
-#[derive(Clone, Copy)]
-enum DownstreamEnd {
-    Closed,
-    Timeout,
-}
-impl DownstreamEnd {
-    fn record(
-        self,
-        delivery: &super::protocol::Delivery,
-        protocol: &mut super::protocol::Protocol,
-        seconds: u64,
-    ) {
-        if matches!(self, Self::Timeout) {
-            delivery.event("downstream_write_timeout");
-            let _ = delivery.error.compare_exchange(
-                0,
-                3,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            protocol.timeout("downstream_write", seconds);
-            delivery.settle();
-        } else if !delivery.is_settled() {
-            delivery.dropped();
-        }
-    }
-}
 async fn finish_delivery(
     delivery: &super::protocol::Delivery,
     protocol: &mut super::protocol::Protocol,
@@ -140,7 +103,7 @@ async fn finish_delivery(
         _ = stopping(shutdown) => { protocol.finish(Some(status), code::GATEWAY_STOPPED); }
         result = super::wire_progress::writing(delivery.wait(), activity, seconds) => {
             if result.is_err() {
-                DownstreamEnd::Timeout.record(delivery, protocol, seconds);
+                DownstreamEnd::Timeout(seconds).record(delivery, protocol);
             }
             if delivery.error.load(std::sync::atomic::Ordering::Acquire) != 0 {
                 protocol.finish(Some(status), code::CLIENT_DISCONNECTED);
@@ -169,7 +132,7 @@ async fn send_frame(
         seconds,
     )
     .await
-    .map_err(|_| DownstreamEnd::Timeout)?
+    .map_err(|_| DownstreamEnd::Timeout(seconds))?
 }
 
 /// An error frame has the same delivery deadline as data. Its failed handoff
@@ -193,7 +156,7 @@ async fn send_error_frame(
         }
         result = send_frame(sender, Err(std::io::Error::other("上游流中断").into()), false, false, activity, seconds) => {
             if let Err(reason) = result {
-                reason.record(&delivery, protocol, seconds);
+                reason.record(&delivery, protocol);
                 true
             } else {
                 false
@@ -1424,12 +1387,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.finish(Some(status.as_u16()), failure_kind);
         }
         if failed
-            && super::replay_policy::transport_retry(
+            && super::attempt::transport_retry(
                 prefix_bytes != 0,
                 protocol.transport_failure(),
+                failure_kind,
             )
-            && (failure_kind != code::FIRST_BYTE_TIMEOUT
-                || super::replay_policy::first_byte_timeout_retry(true))
         {
             failover.failure(super::failover::Failure::Transport);
             last_error = Some(admission.permits.report(
@@ -1664,7 +1626,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 tokio::select! {
                     biased;
                     _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); return; }
-                    result = send_frame(&sender, Ok(frame), terminal, ended && !failed && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
+                    result = send_frame(&sender, Ok(frame), terminal, ended && !failed && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; break; } }
                 }
                 protocol.output_handed(business);
             }
@@ -1749,7 +1711,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             tokio::select! {
                                 biased;
                                 _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
-                                result = send_frame(&sender, Ok(frame), protocol.terminal_observed(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
+                                result = send_frame(&sender, Ok(frame), protocol.terminal_observed(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; } }
                             }
                             if !disconnected {
                                 protocol.output_handed(protocol.business_observed());

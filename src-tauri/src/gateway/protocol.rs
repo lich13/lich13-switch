@@ -618,14 +618,11 @@ impl Protocol {
             });
     }
     pub fn downstream_closed(&mut self, activity: &super::wire_progress::Activity, writing: bool) {
-        let error = activity.error_code();
-        self.delivery.failed(if error != 0 {
-            error
-        } else if writing {
-            7
-        } else {
-            5
-        });
+        super::attempt::DownstreamEnd::PeerClosed {
+            error: activity.error_code(),
+            writing,
+        }
+        .record(&self.delivery(), self);
         self.finish(None, code::CLIENT_DISCONNECTED);
     }
     pub fn request_received(&mut self, at: i64) {

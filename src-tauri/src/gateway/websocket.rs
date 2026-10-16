@@ -884,14 +884,13 @@ fn disconnect_turn(
     }
     let terminal = observed.as_ref().and_then(|u| u.terminal());
     let transport = observed.as_ref().is_none_or(|u| u.transport_failure());
-    let retry = super::replay_policy::transport_retry(
+    let retry = super::attempt::transport_retry(
         received,
         route.client_id == super::ClientId::Codex
             && can_replay
             && ordinary_attempts <= cfg.max_retries
-            && transport
-            && (category != code::FIRST_BYTE_TIMEOUT
-                || super::replay_policy::first_byte_timeout_retry(true)),
+            && transport,
+        category,
     );
     let mut details = observed
         .as_ref()

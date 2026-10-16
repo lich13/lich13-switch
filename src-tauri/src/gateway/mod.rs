@@ -28,6 +28,7 @@ mod retired;
 pub use client::{claude_home, grok_home, ClientId};
 pub(crate) use retired::migrate as retire_legacy_proxy;
 mod admission;
+mod attempt;
 pub mod catalog;
 mod circuit;
 mod compaction;
