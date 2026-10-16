@@ -584,12 +584,58 @@ impl Snapshot {
         ))
     }
     pub fn apply(&self, path: &Path, expected: Option<&str>) -> Result<()> {
-        self.write_owned(path, &self.applied, expected)
+        self.write_owned(path, &self.applied, expected, false)
     }
     pub fn restore(&self, path: &Path) -> Result<()> {
-        self.write_owned(path, &self.before, None)
+        self.write_owned(path, &self.before, None, false)
     }
-    fn write_owned(&self, path: &Path, target: &str, expected: Option<&str>) -> Result<()> {
+    pub fn restore_gateway(&self, path: &Path) -> Result<()> {
+        self.write_owned(path, &self.before, None, true)
+    }
+    /// Only a live gateway journal grants alias compatibility. Direct provider
+    /// snapshots keep their original, exact owned-field checks.
+    pub fn gateway_unchanged(&self, text: &str) -> Result<bool> {
+        if self.unchanged(text)? {
+            return Ok(true);
+        }
+        let expected = pair(&self.applied)?;
+        let current = pair(text)?;
+        let (Some(base), Some(token)) = (&expected.base_url, &expected.token) else {
+            return Ok(false);
+        };
+        let Some(port) = url::Url::parse(base)
+            .ok()
+            .and_then(|url| url.port_or_known_default())
+        else {
+            return Ok(false);
+        };
+        let ports = [port, super::client::DEFAULT_SHARED_PORT];
+        if !expected.is_gateway(super::ClientId::Grok, token, &ports)
+            || !current.is_gateway(super::ClientId::Grok, token, &ports)
+        {
+            return Ok(false);
+        }
+        let mut doc = parse(text)?;
+        let Some(field) = doc
+            .get_mut("model")
+            .and_then(|models| models.get_mut(MANAGED))
+            .and_then(|model| model.get_mut("base_url"))
+            .and_then(Item::as_value_mut)
+        else {
+            return Ok(false);
+        };
+        let mut canonical = toml_edit::Value::from(base.clone());
+        *canonical.decor_mut() = field.decor().clone();
+        *field = canonical;
+        self.unchanged(&doc.to_string())
+    }
+    fn write_owned(
+        &self,
+        path: &Path,
+        target: &str,
+        expected: Option<&str>,
+        gateway_aliases: bool,
+    ) -> Result<()> {
         let raw = storage::read_optional(path)?;
         let revision = storage::revision(raw.as_deref());
         if expected.is_some_and(|r| r != revision) {
@@ -601,7 +647,10 @@ impl Snapshot {
             return Ok(());
         }
         let owned = self.owned(current)?;
-        if owned != self.owned(&self.applied)? && owned != self.owned(&self.before)? {
+        if owned != self.owned(&self.applied)?
+            && owned != self.owned(&self.before)?
+            && !(gateway_aliases && self.gateway_unchanged(current)?)
+        {
             return Err(AppError::new(
                 code::CONFLICT,
                 "Grok 受管模型已被外部修改，已保留当前配置",

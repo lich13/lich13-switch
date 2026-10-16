@@ -467,6 +467,17 @@ impl Gateway {
         };
         let prepared = (|| -> Result<Pending> {
             let p = grok_config::profile_with_env(&doc.to_string(), &resolve)?;
+            if p.pair
+                .token
+                .as_deref()
+                .is_some_and(|token| token.starts_with("gs_"))
+                && p.pair
+                    .base_url
+                    .as_deref()
+                    .is_some_and(super::client::loopback_address)
+            {
+                return Err(AppError::new(code::MANAGED, "不能导入网关的本地凭据"));
+            }
             let after_config = migrate(
                 &config,
                 &p,

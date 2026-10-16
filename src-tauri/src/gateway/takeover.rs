@@ -84,6 +84,24 @@ struct Journal {
     #[serde(default)]
     store_after: Option<String>,
 }
+fn managed_alias(record: &Journal, current: &Pair) -> bool {
+    let (Some(base), Some(token)) = (&record.applied.base_url, &record.applied.token) else {
+        return false;
+    };
+    let Some(port) = url::Url::parse(base)
+        .ok()
+        .and_then(|url| url.port_or_known_default())
+    else {
+        return false;
+    };
+    record.live
+        && record.applied.is_gateway(record.client, token, &[port])
+        && current.is_gateway(
+            record.client,
+            token,
+            &[port, super::client::DEFAULT_SHARED_PORT],
+        )
+}
 fn parse(text: &str) -> Result<Document<&str>> {
     Document::parse(text)
         .map_err(|_| AppError::new(code::TOML, "配置不是有效的 TOML，请先修复配置"))
@@ -159,7 +177,7 @@ fn write_record(
 ) -> Result<()> {
     if let Some(snapshot) = &record.grok {
         if record.live && target != &record.applied {
-            return snapshot.restore(&record.path);
+            return snapshot.restore_gateway(&record.path);
         }
         return snapshot.apply(&record.path, expected);
     }
@@ -516,10 +534,15 @@ fn grok_snapshot(
     ))
 }
 pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
-    load(data)?
-        .and_then(|r| r.grok)
-        .ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 配置事务"))?
-        .unchanged(text)
+    let record = load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 配置事务"))?;
+    let snapshot = record
+        .grok
+        .ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 配置事务"))?;
+    if record.live {
+        snapshot.gateway_unchanged(text)
+    } else {
+        snapshot.unchanged(text)
+    }
 }
 pub fn restore_grok_native(
     data: &Path,
@@ -578,7 +601,7 @@ pub fn commit_store_for(
             ));
         }
         let (_, current) = read_connection(client, home, &record.connection)?;
-        if current != record.applied
+        if (current != record.applied && !managed_alias(&record, &current))
             || (client == ClientId::Grok
                 && !grok_unchanged(data, &super::grok_config::read(home)?.1)?)
         {
@@ -653,14 +676,28 @@ pub fn detach(data: &Path) -> Result<()> {
     let Some(mut record) = load(data)? else {
         return Ok(());
     };
-    let allowed = if record.config_applied {
+    let current = if record.grok.is_none() {
+        let home = record
+            .path
+            .parent()
+            .ok_or_else(|| AppError::new(code::RECOVERY, "恢复路径无效"))?;
+        Some(read_connection(record.client, home, &record.connection)?.1)
+    } else {
+        None
+    };
+    let mut allowed = if record.config_applied {
         vec![&record.applied, &record.exit]
     } else {
         vec![&record.before, &record.applied, &record.exit]
     };
+    if let Some(current) = &current {
+        if managed_alias(&record, current) {
+            allowed.push(current);
+        }
+    }
     if let Some(snapshot) = &record.grok {
         if record.live {
-            snapshot.restore(&record.path)?;
+            snapshot.restore_gateway(&record.path)?;
         } else {
             snapshot.apply(&record.path, None)?;
         }

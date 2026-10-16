@@ -68,6 +68,8 @@ mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
 mod takeover;
+#[cfg(test)]
+mod takeover_alias_tests;
 pub(crate) use takeover::recover as recover_for_migration;
 #[cfg(test)]
 mod tests;
@@ -1331,6 +1333,18 @@ impl Gateway {
             let exit = takeover::Pair::new(&p.base_url, &p.token);
             let (current, original_pair) =
                 takeover::read_connection(self.0.client, home, &s.store.connection)?;
+            if self.0.client == ClientId::Grok
+                && original_pair.is_gateway(
+                    self.0.client,
+                    &s.store.local_token,
+                    &[listener.port, s.store.settings.port],
+                )
+            {
+                return Err(AppError::new(
+                    code::RECOVERY,
+                    "缺少 Grok 原始连接的恢复依据，已保留当前配置",
+                ));
+            }
             let mut next = s.store.clone();
             next.local_token.clone_from(&token);
             for provider in &next.providers {
@@ -1433,7 +1447,20 @@ impl Gateway {
                     ));
                 }
             }
-            if pair.fingerprint() != intent.pair_hash {
+            let known_legacy = {
+                let state = self.0.inner.lock().unwrap();
+                self.0.client != ClientId::Grok
+                    && pair.is_gateway(
+                        self.0.client,
+                        &state.store.local_token,
+                        &[self.listener_view().port, state.store.settings.port],
+                    )
+                    && state.store.providers.iter().any(|provider| {
+                        takeover::Pair::new(&provider.base_url, &provider.token).fingerprint()
+                            == intent.pair_hash
+                    })
+            };
+            if pair.fingerprint() != intent.pair_hash && !known_legacy {
                 return Err(AppError::new(
                     code::RESUME_CONFLICT,
                     "受管地址或 Token 在退出后已被修改，自动恢复已停止",
