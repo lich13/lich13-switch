@@ -586,6 +586,7 @@ impl Snapshot {
     pub fn apply(&self, path: &Path, expected: Option<&str>) -> Result<()> {
         self.write_owned(path, &self.applied, expected, false)
     }
+    #[cfg(test)]
     pub fn restore(&self, path: &Path) -> Result<()> {
         self.write_owned(path, &self.before, None, false)
     }
