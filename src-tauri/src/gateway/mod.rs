@@ -18,6 +18,8 @@ mod v025_listener_tests;
 mod v025_transport_tests;
 pub(crate) use takeover::manages_auth;
 mod client;
+#[cfg(test)]
+mod client_cancel_tests;
 mod listener;
 mod registry;
 pub use listener::View as ListenerView;

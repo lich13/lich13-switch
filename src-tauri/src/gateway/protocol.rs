@@ -1129,7 +1129,15 @@ impl Drop for Protocol {
         // Flush only the bytes already observed; never continue the generation.
         let reason = if self.stop.as_ref().is_some_and(|s| *s.borrow()) {
             code::GATEWAY_STOPPED
-        } else if self.downstream.as_ref().is_some_and(|s| *s.borrow()) {
+        } else if self.downstream.as_ref().is_some_and(|s| *s.borrow())
+            || matches!(
+                self.delivery.error.load(std::sync::atomic::Ordering::Acquire),
+                2..=8
+            )
+        {
+            // Hyper may drop the request future before response headers exist.
+            // Retain an observed socket failure; body cancellation alone (1)
+            // still cannot establish why the client stopped reading.
             code::CLIENT_DISCONNECTED
         } else {
             "UNSETTLED"
