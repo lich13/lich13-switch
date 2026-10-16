@@ -8,10 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
-use hyper::{
-    body::Incoming,
-    Request, Response, StatusCode,
-};
+use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{
     client::legacy::Client,
     rt::{TokioExecutor, TokioIo},
@@ -44,10 +41,8 @@ const PARTIAL_SSE: &[u8] =
     b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture-partial-prefix\"}";
 const SSE_CAPACITY: &[u8] = b"data: {\"type\":\"error\",\"error\":{\"code\":\"USAGE_LIMIT_EXCEEDED\",\"message\":\"fixture capacity\"}}\n\n";
 const SSE_COMPLETED: &[u8] = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-completed\",\"model\":\"fixture-model\",\"status\":\"completed\"}}\n\n";
-const WS_CREATE: &str =
-    r#"{"type":"response.create","model":"fixture-model","input":"fixture"}"#;
-const WS_COMPLETED: &str =
-    r#"{"type":"response.completed","response":{"id":"fixture-ws-response","model":"fixture-model","status":"completed"}}"#;
+const WS_CREATE: &str = r#"{"type":"response.create","model":"fixture-model","input":"fixture"}"#;
+const WS_COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-ws-response","model":"fixture-model","status":"completed"}}"#;
 
 #[derive(Clone, Default)]
 struct Tasks(Arc<Mutex<Vec<JoinHandle<()>>>>);
@@ -117,7 +112,9 @@ where
     tasks.spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let handler = handler.clone();
-            accepted.spawn(async move { handler(stream).await; });
+            accepted.spawn(async move {
+                handler(stream).await;
+            });
         }
     });
     TestServer { port, tasks }
@@ -157,7 +154,11 @@ impl Fixture {
         settings.websocket_retry_seconds = 1;
         settings.capacity_retry_seconds = 1;
         gateway
-            .edit(Edit::Settings { settings }, &gateway.view().revision, dir.path())
+            .edit(
+                Edit::Settings { settings },
+                &gateway.view().revision,
+                dir.path(),
+            )
             .unwrap();
         for (index, url) in urls.iter().enumerate() {
             gateway
@@ -175,7 +176,9 @@ impl Fixture {
         }
         gateway
             .edit(
-                Edit::Mode { mode: "auto".into() },
+                Edit::Mode {
+                    mode: "auto".into(),
+                },
                 &gateway.view().revision,
                 dir.path(),
             )
@@ -204,8 +207,8 @@ impl Fixture {
     }
 
     async fn request(&self, streaming: bool) -> Response<Incoming> {
-        let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
-            .build(Connector::new(Duration::from_secs(2), 0));
+        let client: Client<_, WireBody> =
+            Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
         let (token, port) = self.auth();
         let body = if streaming {
             br#"{"model":"fixture-model","stream":true,"input":"fixture"}"#.as_slice()
@@ -267,7 +270,10 @@ async fn read_http_request(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     loop {
         let count = stream.read(&mut chunk).await?;
         if count == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "fixture request ended"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "fixture request ended",
+            ));
         }
         received.extend_from_slice(&chunk[..count]);
         let Some(boundary) = received.windows(4).position(|part| part == b"\r\n\r\n") else {
@@ -322,10 +328,7 @@ enum HttpFault {
     EmptyResponse,
 }
 
-async fn fault_http_server(
-    fault: HttpFault,
-    requests: Arc<AtomicUsize>,
-) -> TestServer {
+async fn fault_http_server(fault: HttpFault, requests: Arc<AtomicUsize>) -> TestServer {
     tcp_server(move |mut stream| {
         let requests = requests.clone();
         async move {
@@ -350,26 +353,17 @@ async fn fault_http_server(
             if attempt == 0 {
                 if matches!(fault, HttpFault::PartialSse) {
                     let expected = PARTIAL_SSE.len() + 128;
-                    let _ = write_raw_response(
-                        &mut stream,
-                        "text/event-stream",
-                        expected,
-                        PARTIAL_SSE,
-                    )
-                    .await;
+                    let _ =
+                        write_raw_response(&mut stream, "text/event-stream", expected, PARTIAL_SSE)
+                            .await;
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 reset_tcp(&stream);
                 drop(stream);
             } else {
                 let retry = br#"{"provider":"first-retry"}"#;
-                let _ = write_raw_response(
-                    &mut stream,
-                    "application/json",
-                    retry.len(),
-                    retry,
-                )
-                .await;
+                let _ =
+                    write_raw_response(&mut stream, "application/json", retry.len(), retry).await;
             }
         }
     })
@@ -451,8 +445,14 @@ async fn http_partial_sse_prefix_is_returned_with_error_without_replay_after_res
     settled(&fixture.gateway).await;
     fixture.stop().await;
 
-    assert_eq!(body, PARTIAL_SSE, "the original incomplete SSE prefix must be preserved");
-    assert!(error.is_some(), "partial upstream output must end with a stream error");
+    assert_eq!(
+        body, PARTIAL_SSE,
+        "the original incomplete SSE prefix must be preserved"
+    );
+    assert!(
+        error.is_some(),
+        "partial upstream output must end with a stream error"
+    );
     assert_eq!(first_requests.load(Ordering::SeqCst), 1);
     assert_eq!(fallback_requests.load(Ordering::SeqCst), 0);
 }
@@ -540,8 +540,12 @@ async fn http_first_sse_capacity_event_still_fails_over() {
     settled(&fixture.gateway).await;
     fixture.stop().await;
 
-    assert!(std::str::from_utf8(&body).unwrap().contains("response.completed"));
-    assert!(!std::str::from_utf8(&body).unwrap().contains("USAGE_LIMIT_EXCEEDED"));
+    assert!(std::str::from_utf8(&body)
+        .unwrap()
+        .contains("response.completed"));
+    assert!(!std::str::from_utf8(&body)
+        .unwrap()
+        .contains("USAGE_LIMIT_EXCEEDED"));
     assert_eq!(first_requests.load(Ordering::SeqCst), 1);
     assert_eq!(fallback_requests.load(Ordering::SeqCst), 1);
 }
@@ -554,7 +558,10 @@ async fn raw_http_headers(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     loop {
         let count = stream.read(&mut chunk).await?;
         if count == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "fixture handshake ended"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "fixture handshake ended",
+            ));
         }
         received.extend_from_slice(&chunk[..count]);
         if let Some(end) = received.windows(4).position(|part| part == b"\r\n\r\n") {
@@ -588,7 +595,10 @@ async fn upgrade_or_models(mut stream: TcpStream) -> io::Result<Option<FixtureWe
             .then_some(value.trim())
     });
     let Some(key) = key else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "fixture handshake omitted key"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "fixture handshake omitted key",
+        ));
     };
     let mut digest_input = key.as_bytes().to_vec();
     digest_input.extend_from_slice(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
@@ -640,10 +650,7 @@ enum WsFirstAttempt {
     PingReset,
 }
 
-async fn partial_ws_server(
-    first_attempt: WsFirstAttempt,
-    creates: Arc<AtomicUsize>,
-) -> TestServer {
+async fn partial_ws_server(first_attempt: WsFirstAttempt, creates: Arc<AtomicUsize>) -> TestServer {
     let handshakes = Arc::new(AtomicUsize::new(0));
     tcp_server(move |stream| {
         let handshakes = handshakes.clone();
@@ -716,11 +723,7 @@ async fn next_client_frame(ws: &mut yawc::TcpWebSocket) -> yawc::Frame {
 async fn partial_ws_case(first_attempt: WsFirstAttempt) {
     let creates = Arc::new(AtomicUsize::new(0));
     let upstream = partial_ws_server(first_attempt, creates.clone()).await;
-    let fixture = Fixture::new(
-        vec![format!("http://127.0.0.1:{}/v1", upstream.port)],
-        true,
-    )
-    .await;
+    let fixture = Fixture::new(vec![format!("http://127.0.0.1:{}/v1", upstream.port)], true).await;
     fixture.start().await;
     let mut client = fixture.ws_client().await;
     client
@@ -736,7 +739,11 @@ async fn partial_ws_case(first_attempt: WsFirstAttempt) {
     fixture.stop().await;
 
     assert_eq!(frame.opcode(), yawc::OpCode::Close);
-    assert_eq!(creates.load(Ordering::SeqCst), 1, "response.create must not be replayed after partial data");
+    assert_eq!(
+        creates.load(Ordering::SeqCst),
+        1,
+        "response.create must not be replayed after partial data"
+    );
 }
 
 #[tokio::test]
@@ -753,11 +760,7 @@ async fn websocket_partial_data_frame_reset_does_not_replay_response_create() {
 async fn websocket_control_ping_does_not_block_safe_response_create_retry() {
     let creates = Arc::new(AtomicUsize::new(0));
     let upstream = partial_ws_server(WsFirstAttempt::PingReset, creates.clone()).await;
-    let fixture = Fixture::new(
-        vec![format!("http://127.0.0.1:{}/v1", upstream.port)],
-        true,
-    )
-    .await;
+    let fixture = Fixture::new(vec![format!("http://127.0.0.1:{}/v1", upstream.port)], true).await;
     fixture.start().await;
     let mut client = fixture.ws_client().await;
     client
@@ -766,15 +769,18 @@ async fn websocket_control_ping_does_not_block_safe_response_create_retry() {
         .unwrap();
 
     let frame = next_client_frame(&mut client).await;
-    let is_completed = frame.opcode() == yawc::OpCode::Text
-        && frame.as_str().contains("response.completed");
+    let is_completed =
+        frame.opcode() == yawc::OpCode::Text && frame.as_str().contains("response.completed");
     client
         .send(yawc::Frame::close(1000.into(), "fixture complete"))
         .await
         .ok();
     fixture.stop().await;
 
-    assert!(is_completed, "the control-frame-only disconnect must allow a safe retry");
+    assert!(
+        is_completed,
+        "the control-frame-only disconnect must allow a safe retry"
+    );
     assert_eq!(creates.load(Ordering::SeqCst), 2);
 }
 
@@ -813,11 +819,7 @@ async fn reused_turn_ws_server(creates: Arc<AtomicUsize>) -> TestServer {
 async fn websocket_reused_session_does_not_inherit_previous_turn_progress() {
     let creates = Arc::new(AtomicUsize::new(0));
     let upstream = reused_turn_ws_server(creates.clone()).await;
-    let fixture = Fixture::new(
-        vec![format!("http://127.0.0.1:{}/v1", upstream.port)],
-        true,
-    )
-    .await;
+    let fixture = Fixture::new(vec![format!("http://127.0.0.1:{}/v1", upstream.port)], true).await;
     fixture.start().await;
     let mut client = fixture.ws_client().await;
     client
@@ -832,14 +834,17 @@ async fn websocket_reused_session_does_not_inherit_previous_turn_progress() {
         .await
         .unwrap();
     let second = next_client_frame(&mut client).await;
-    let second_completed = second.opcode() == yawc::OpCode::Text
-        && second.as_str().contains("response.completed");
+    let second_completed =
+        second.opcode() == yawc::OpCode::Text && second.as_str().contains("response.completed");
     client
         .send(yawc::Frame::close(1000.into(), "fixture complete"))
         .await
         .ok();
     fixture.stop().await;
 
-    assert!(second_completed, "the second turn should retry despite earlier turn output");
+    assert!(
+        second_completed,
+        "the second turn should retry despite earlier turn output"
+    );
     assert_eq!(creates.load(Ordering::SeqCst), 3);
 }
