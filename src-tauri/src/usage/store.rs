@@ -845,3 +845,7 @@ fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Resul
     }
     Ok(r)
 }
+
+#[cfg(test)]
+#[path = "query_plan_tests.rs"]
+mod query_plan_tests;
