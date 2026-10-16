@@ -155,8 +155,30 @@ IFS= read -r _
     }
 
     fn capture(&mut self, target: &Entry) -> io::Result<Captured> {
-        let inventory = [self.shell.clone(), target.clone()];
-        let captured = capture(&[&inventory[1]], &inventory);
+        let mut inventory = vec![target.clone()];
+        let mut parent = target.parent;
+        let mut found_shell = false;
+        for _ in 0..64 {
+            let Some(pid) = parent else {
+                break;
+            };
+            if pid == target.pid {
+                break;
+            }
+            let ancestor = wait_for_entry(&mut self.native, pid, IO_TIMEOUT)?;
+            parent = ancestor.parent;
+            found_shell |= shell(&ancestor);
+            inventory.push(ancestor);
+            if found_shell {
+                break;
+            }
+        }
+        if !found_shell {
+            return Err(io::Error::other(
+                "isolated process has no shell ancestor in its parent chain",
+            ));
+        }
+        let captured = capture(&[&inventory[0]], &inventory);
         let Some(captured) = captured.into_iter().next() else {
             return Err(io::Error::other("terminal capture returned no candidate"));
         };

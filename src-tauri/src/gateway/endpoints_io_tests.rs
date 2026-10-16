@@ -186,7 +186,7 @@ fn failed_new_pin_restores_entries_trimmed_for_capacity_and_retry_commits() {
     let injected = faults::inject(faults::Point::Replace);
     let result = service.select(
         &provider,
-        &[provider.base_url.clone()],
+        std::slice::from_ref(&provider.base_url),
         Some(thread),
         None,
         false,
@@ -209,7 +209,7 @@ fn failed_new_pin_restores_entries_trimmed_for_capacity_and_retry_commits() {
     let selected = service
         .select(
             &provider,
-            &[provider.base_url.clone()],
+            std::slice::from_ref(&provider.base_url),
             Some(thread),
             None,
             false,
@@ -243,7 +243,7 @@ fn successful_initial_pin_matches_the_persisted_entries() {
     let selected = service
         .select(
             &provider,
-            &[provider.base_url.clone()],
+            std::slice::from_ref(&provider.base_url),
             Some(thread),
             None,
             false,
