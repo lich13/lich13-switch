@@ -207,7 +207,17 @@ async fn incompatible_compaction_context_falls_back_without_circuit_failure_or_b
     )
     .await;
     promote_second(&g, &t);
-    let bytes = input();
+    let bytes = json!({
+        "model":"fixture-model",
+        "prompt_cache_key":"fixture-prompt-cache-key",
+        "input":[
+            {"type":"compaction","encrypted_content":WINDOW},
+            {"role":"user","content":"fixture"}
+        ],
+        "future":{"unchanged":true}
+    })
+    .to_string()
+    .into_bytes();
     assert_eq!(
         call(&g, "fixture-fallback", "/codex/responses", bytes.clone()).await["provider"],
         "old"
@@ -368,15 +378,27 @@ async fn websocket_handoff_changes_only_upstream_between_completed_turns() {
         ws_turn(&mut peer, ordinary).await["response"]["provider"],
         "old"
     );
-    assert_eq!(ws_turn(&mut peer,json!({"type":"response.create","model":"fixture-model","input":[{"type":"compaction_trigger"}]}).to_string()).await["response"]["provider"],"old");
+    let compaction_trigger = json!({
+        "type":"response.create",
+        "model":"fixture-model",
+        "prompt_cache_key":"fixture-prompt-cache-key",
+        "input":[{"type":"compaction_trigger"}]
+    })
+    .to_string();
+    assert_eq!(
+        ws_turn(&mut peer, compaction_trigger.clone()).await["response"]["provider"],
+        "old"
+    );
     let mut window: Value = serde_json::from_slice(&input()).unwrap();
     window["type"] = "response.create".into();
+    window["prompt_cache_key"] = "fixture-prompt-cache-key".into();
     let serialized = window.to_string();
     assert_eq!(
         ws_turn(&mut peer, serialized.clone()).await["response"]["provider"],
         "new"
     );
     assert_eq!(old.lock().unwrap().len(), 3);
+    assert_eq!(old.lock().unwrap()[2], compaction_trigger.as_bytes());
     assert_eq!(new.lock().unwrap().len(), 1);
     assert_eq!(new.lock().unwrap()[0], serialized.as_bytes());
     drop(peer);
