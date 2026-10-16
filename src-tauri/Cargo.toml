@@ -48,7 +48,7 @@ mime = "0.3"
 multer = "3"
 flate2 = "1"
 brotli = "8"
-zstd = "0.13"
+zstd = "0.14"
 yawc = { version = "0.4.2", default-features = false, features = ["zlib", "rustls-ring"] }
 auto-launch = "0.5"
 sysinfo = "0.33"
