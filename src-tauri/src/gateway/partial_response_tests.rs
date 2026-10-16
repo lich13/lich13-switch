@@ -784,7 +784,16 @@ async fn websocket_control_ping_does_not_block_safe_response_create_retry() {
     assert_eq!(creates.load(Ordering::SeqCst), 2);
 }
 
-async fn reused_turn_ws_server(creates: Arc<AtomicUsize>) -> TestServer {
+#[derive(Clone, Copy)]
+enum ReusedTurnFault {
+    FirstByteTimeout,
+    ResetBeforeFirstByte,
+}
+
+async fn reused_turn_ws_server(
+    creates: Arc<AtomicUsize>,
+    second_turn_fault: ReusedTurnFault,
+) -> TestServer {
     let handshakes = Arc::new(AtomicUsize::new(0));
     tcp_server(move |stream| {
         let handshakes = handshakes.clone();
@@ -802,7 +811,13 @@ async fn reused_turn_ws_server(creates: Arc<AtomicUsize>) -> TestServer {
                     .send(WsMessage::Text(WS_COMPLETED.to_owned().into()))
                     .await;
                 if wait_for_create(&mut ws, &creates).await {
-                    wait_for_peer_close(&mut ws).await;
+                    match second_turn_fault {
+                        ReusedTurnFault::FirstByteTimeout => wait_for_peer_close(&mut ws).await,
+                        ReusedTurnFault::ResetBeforeFirstByte => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            reset_tcp(ws.get_mut());
+                        }
+                    }
                 }
             } else {
                 let _ = ws
@@ -817,34 +832,52 @@ async fn reused_turn_ws_server(creates: Arc<AtomicUsize>) -> TestServer {
 
 #[tokio::test]
 async fn websocket_reused_session_does_not_inherit_previous_turn_progress() {
-    let creates = Arc::new(AtomicUsize::new(0));
-    let upstream = reused_turn_ws_server(creates.clone()).await;
-    let fixture = Fixture::new(vec![format!("http://127.0.0.1:{}/v1", upstream.port)], true).await;
-    fixture.start().await;
-    let mut client = fixture.ws_client().await;
-    client
-        .send(yawc::Frame::text(WS_CREATE.to_owned()))
-        .await
-        .unwrap();
-    let first = next_client_frame(&mut client).await;
-    assert!(first.as_str().contains("response.completed"));
+    for second_turn_fault in [
+        ReusedTurnFault::FirstByteTimeout,
+        ReusedTurnFault::ResetBeforeFirstByte,
+    ] {
+        let creates = Arc::new(AtomicUsize::new(0));
+        let upstream = reused_turn_ws_server(creates.clone(), second_turn_fault).await;
+        let fixture =
+            Fixture::new(vec![format!("http://127.0.0.1:{}/v1", upstream.port)], true).await;
+        fixture.start().await;
+        let mut client = fixture.ws_client().await;
+        client
+            .send(yawc::Frame::text(WS_CREATE.to_owned()))
+            .await
+            .unwrap();
+        let first = next_client_frame(&mut client).await;
+        assert!(first.as_str().contains("response.completed"));
 
-    client
-        .send(yawc::Frame::text(WS_CREATE.to_owned()))
-        .await
-        .unwrap();
-    let second = next_client_frame(&mut client).await;
-    let second_completed =
-        second.opcode() == yawc::OpCode::Text && second.as_str().contains("response.completed");
-    client
-        .send(yawc::Frame::close(1000.into(), "fixture complete"))
-        .await
-        .ok();
-    fixture.stop().await;
+        client
+            .send(yawc::Frame::text(WS_CREATE.to_owned()))
+            .await
+            .unwrap();
+        let second = next_client_frame(&mut client).await;
+        client
+            .send(yawc::Frame::close(1000.into(), "fixture complete"))
+            .await
+            .ok();
+        fixture.stop().await;
 
-    assert!(
-        second_completed,
-        "the second turn should retry despite earlier turn output"
-    );
-    assert_eq!(creates.load(Ordering::SeqCst), 3);
+        match second_turn_fault {
+            ReusedTurnFault::FirstByteTimeout => {
+                assert_eq!(second.opcode(), yawc::OpCode::Close);
+                assert_eq!(second.close_code().map(u16::from), Some(1013));
+                assert_eq!(
+                    second.payload().get(2..).unwrap_or_default(),
+                    "FIRST_BYTE_TIMEOUT".as_bytes()
+                );
+                assert_eq!(creates.load(Ordering::SeqCst), 2);
+            }
+            ReusedTurnFault::ResetBeforeFirstByte => {
+                assert!(
+                    second.opcode() == yawc::OpCode::Text
+                        && second.as_str().contains("response.completed"),
+                    "a connection reset before second-turn data should allow a safe retry"
+                );
+                assert_eq!(creates.load(Ordering::SeqCst), 3);
+            }
+        }
+    }
 }
