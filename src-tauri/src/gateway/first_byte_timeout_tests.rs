@@ -693,11 +693,16 @@ async fn connection_failure_before_request_is_still_allowed_to_fail_over() {
         )
         .await;
     });
-    let (_dir, gateway) = fixture(vec![
+    let (dir, gateway) = fixture(vec![
         format!("http://127.0.0.1:{unavailable_port}/v1"),
         format!("http://127.0.0.1:{backup_port}/v1"),
     ])
     .await;
+    // Keep connection failure ahead of the first-byte deadline on Windows.
+    let mut settings = gateway.view().settings;
+    settings.connect_seconds = 1;
+    settings.first_byte_seconds = 5;
+    edit(&gateway, &dir, Edit::Settings { settings });
     let response = request_bytes(&gateway, "/v1/responses", REQUEST_BODY).await;
     assert_eq!(response_status(&response), Some(200));
     assert!(String::from_utf8_lossy(&response).contains("backup"));

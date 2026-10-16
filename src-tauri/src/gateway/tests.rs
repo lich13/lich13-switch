@@ -504,6 +504,18 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         "a dispatched request that times out before its first event must not be retried"
     );
 
+    // This next case is a connection failure; let its deadline win on Windows.
+    update(
+        &g,
+        &t,
+        Edit::Settings {
+            settings: Settings {
+                connect_seconds: 1,
+                first_byte_seconds: 5,
+                ..g.view().settings
+            },
+        },
+    );
     let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
