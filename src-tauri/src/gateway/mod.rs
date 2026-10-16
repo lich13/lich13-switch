@@ -36,6 +36,8 @@ pub(crate) mod exchange;
 #[cfg(test)]
 mod exchange_tests;
 pub(crate) mod failover;
+#[cfg(test)]
+mod first_byte_timeout_tests;
 mod forward;
 mod health_settlement;
 #[cfg(test)]

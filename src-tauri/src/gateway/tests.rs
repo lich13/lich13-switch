@@ -458,7 +458,7 @@ async fn queue_four_attempt_limit_terminal_errors_and_original_last_error() {
     g.stop().await.unwrap();
 }
 #[tokio::test]
-async fn streaming_first_byte_retry_no_splicing_and_cancel_releases_activity() {
+async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
     let hits = Arc::new(AtomicUsize::new(0));
     let hits2 = hits.clone();
     let slow=server(|_|async{Response::builder().header("content-type","text/event-stream").body(StreamBody::new(async_stream::try_stream!{
@@ -491,11 +491,43 @@ async fn streaming_first_byte_retry_no_splicing_and_cancel_releases_activity() {
         },
     );
     start(&g, &t).await;
+    let timeout_started = Instant::now();
     let response = request(&g, "/v1/responses", vec![], vec![]).await;
+    assert_eq!(response.status(), 200);
+    assert!(response.into_body().collect().await.is_err());
+    let timeout_elapsed = timeout_started.elapsed();
+    assert!(timeout_elapsed >= Duration::from_millis(800));
+    assert!(timeout_elapsed < Duration::from_secs(3));
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        0,
+        "a dispatched request that times out before its first event must not be retried"
+    );
+
+    let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let closed_port = closed_listener.local_addr().unwrap().port();
+    drop(closed_listener);
+    let first = g.view().providers[0].id.clone();
+    update(
+        &g,
+        &t,
+        Edit::SaveProvider {
+            id: Some(first.clone()),
+            base_url: format!("http://127.0.0.1:{closed_port}/v1"),
+            token: String::new(),
+            name: None,
+        },
+    );
+    let response = request(&g, "/v1/responses", vec![], vec![]).await;
+    assert_eq!(response.status(), 200);
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
         "data: {\"response\":{\"id\":\"resp_test\"}}\n\ndata: tail\n\n"
     );
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+
     let before = g.view().providers[0].health.requests;
     let response = request(
         &g,
@@ -510,7 +542,6 @@ async fn streaming_first_byte_retry_no_splicing_and_cancel_releases_activity() {
     let never=server(|_|async{Response::builder().header("content-type","text/event-stream").body(StreamBody::new(async_stream::try_stream!{
         yield Frame::data(Bytes::from_static(b"data: first\n\n"));tokio::time::sleep(Duration::from_secs(20)).await;yield Frame::data(Bytes::new());
     }).boxed_unsync()).unwrap()}).await;
-    let first = g.view().providers[0].id.clone();
     update(
         &g,
         &t,

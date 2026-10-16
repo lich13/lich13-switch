@@ -1016,14 +1016,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             Err(_) => {
                 failover.failure(super::failover::Failure::Transport);
-                last_category = code::FIRST_BYTE_TIMEOUT;
+                failover.finish(super::failover::Exit::ReplayUnsafe);
                 protocol.timeout("response_headers", settings.first_byte_seconds);
-                last_error = Some(admission.permits.report(
+                admission.permits.report(
                     &gateway,
                     &route,
                     model.as_deref(),
                     Reason::Network,
-                    Action::TryingNext,
+                    Action::Returned,
                     None,
                     attempted,
                     crate::events::Details {
@@ -1032,10 +1032,16 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         counted_failure: Some(true),
                         ..protocol.observation.error.clone()
                     },
-                ));
+                );
                 admission.permits.failure(&settings, None);
-                protocol.finish(None, last_category);
-                continue;
+                protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
+                // The HTTP client already owns the request. Not seeing headers
+                // cannot establish that its body never reached the provider.
+                return error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    code::FIRST_BYTE_TIMEOUT,
+                    "上游首字节超时，请求可能已开始处理，未自动重放",
+                );
             }
         };
         let status = response.status();
@@ -1415,6 +1421,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 prefix_bytes != 0,
                 protocol.transport_failure(),
             )
+            && (failure_kind != code::FIRST_BYTE_TIMEOUT
+                || super::replay_policy::first_byte_timeout_retry(true))
         {
             failover.failure(super::failover::Failure::Transport);
             last_error = Some(admission.permits.report(
@@ -1585,7 +1593,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             };
             continue;
         }
-        failover.finish(super::failover::Exit::Forwarded);
+        let replay_unsafe = failed && failure_kind == code::FIRST_BYTE_TIMEOUT;
+        if replay_unsafe {
+            failover.failure(super::failover::Failure::Transport);
+        }
+        failover.finish(if replay_unsafe {
+            super::failover::Exit::ReplayUnsafe
+        } else {
+            super::failover::Exit::Forwarded
+        });
         let Admission {
             mut permits, slot, ..
         } = admission;

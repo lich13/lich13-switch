@@ -101,7 +101,7 @@ export type FailoverEvidence = {
   eligibleCandidates: number;
   exclusions: Record<string, number>;
   wait: { kind: string; seconds: number } | null;
-  exit: string | null;
+  exit: "forwarded" | "no_eligible_provider" | "attempts_exhausted" | "permanent_rejection" | "cancelled" | "stopped" | "admission_rejected" | "replay_unsafe" | string | null;
 };
 export type UsageRecord = {
   failoverEvidence?: FailoverEvidence | null;

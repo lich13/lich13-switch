@@ -42,6 +42,7 @@ const failoverLabels: Record<string, string> = {
   no_eligible_provider: "没有合格替代",
   attempts_exhausted: "重试次数耗尽",
   permanent_rejection: "明确拒绝",
+  replay_unsafe: "请求可能已发送，未自动重放",
   cancelled: "转发已取消",
   stopped: "网关停止",
   admission_rejected: "准入受限",

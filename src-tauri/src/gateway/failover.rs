@@ -43,6 +43,7 @@ pub enum Exit {
     Cancelled,
     Stopped,
     AdmissionRejected,
+    ReplayUnsafe,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

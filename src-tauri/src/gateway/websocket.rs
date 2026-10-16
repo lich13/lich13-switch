@@ -882,7 +882,9 @@ fn disconnect_turn(
         route.client_id == super::ClientId::Codex
             && can_replay
             && ordinary_attempts <= cfg.max_retries
-            && transport,
+            && transport
+            && (category != code::FIRST_BYTE_TIMEOUT
+                || super::replay_policy::first_byte_timeout_retry(true)),
     );
     let mut details = observed
         .as_ref()
@@ -2528,6 +2530,10 @@ async fn session_once(
                     }
                 }
                 let body_started = received || partial_progress.is_some();
+                if !body_started {
+                    failover.failure(super::failover::Failure::Transport);
+                    failover.finish(super::failover::Exit::ReplayUnsafe);
+                }
                 if let Some(u) = &mut protocol {
                     let phase = if body_started { "ws_idle" } else { "ws_first_byte" };
                     let seconds = if body_started { cfg.idle_seconds } else { cfg.first_byte_seconds };
@@ -2542,7 +2548,7 @@ async fn session_once(
                 retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, body_started, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if body_started { code::STREAM_TIMEOUT } else { code::FIRST_BYTE_TIMEOUT });
                 upstream = Upstream::Disconnected;
                 if retry_pending { continue; }
-                return Err((1013, "upstream timeout"));
+                return Err((1013, if body_started { "upstream timeout" } else { code::FIRST_BYTE_TIMEOUT }));
             },
         }
     }
