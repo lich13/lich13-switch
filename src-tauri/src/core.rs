@@ -9,6 +9,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "account_identity.rs"]
+mod account_identity;
 #[path = "account_exchange.rs"]
 pub mod exchange;
 
@@ -49,6 +51,8 @@ struct Profile {
     updated_at: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     exchange: BTreeMap<String, exchange::Source>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +65,8 @@ struct Store {
     observed_auth_revisions: BTreeMap<String, String>,
     #[serde(default)]
     auth_sync_version: u32,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -185,12 +191,15 @@ pub struct Core {
     checked_auth: Option<(String, String)>,
     auth_cache: crate::auth_cache::Cache<PolledAuth>,
     exchange: exchange::Service,
+    normalization_revision: std::cell::RefCell<Option<String>>,
 }
 #[derive(Clone)]
 struct AuthInfo {
     identity: String,
     kind: String,
     email: Option<String>,
+    principal: Option<LoginPrincipal>,
+    workspace: String,
 }
 struct PolledAuth {
     bytes: Option<Vec<u8>>,
@@ -240,6 +249,8 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
             identity: storage::digest(format!("api:{key}").as_bytes()),
             kind: "apiKey".into(),
             email: None,
+            principal: None,
+            workspace: String::new(),
         });
     }
     if mode.is_some_and(|m| m != "chatgpt") {
@@ -277,19 +288,44 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
                 "无法识别 ChatGPT 账号身份，请重新登录或导入完整凭据",
             )
         })?;
-    let workspace = tokens
-        .get("account_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let principal = login_principal(raw)?;
+    let mut workspaces: Vec<_> = [
+        tokens.get("account_id"),
+        id["https://api.openai.com/auth"].get("chatgpt_account_id"),
+        access["https://api.openai.com/auth"].get("chatgpt_account_id"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .filter(|s| !s.is_empty())
+    .collect();
+    workspaces.sort_unstable();
+    workspaces.dedup();
+    if workspaces.len() > 1 {
+        return Err(AppError::new(
+            code::LOGIN_IDENTITY,
+            "凭据工作区不一致，未覆盖账号",
+        ));
+    }
+    let workspace = workspaces.first().copied().unwrap_or_default();
     let email = id.get("email").and_then(Value::as_str).map(str::to_owned);
     Ok(AuthInfo {
-        identity: storage::digest(format!("chatgpt:{subject}:{workspace}").as_bytes()),
+        identity: match &principal.user {
+            Some(user) => storage::digest(
+                serde_json::to_vec(&("chatgpt-user", user, workspace))
+                    .unwrap()
+                    .as_slice(),
+            ),
+            None => storage::digest(format!("chatgpt:{subject}:{workspace}").as_bytes()),
+        },
         kind: "chatgpt".into(),
         email,
+        principal: Some(principal),
+        workspace: workspace.into(),
     })
 }
 // A login refresh follows the person, not the workspace selected by OAuth.
-// Keep the vault's existing account identity format for normal import/switching.
+#[derive(Clone)]
 struct LoginPrincipal {
     user: Option<String>,
     subject: Option<String>,
@@ -309,9 +345,11 @@ fn login_principal(raw: &str) -> Result<LoginPrincipal> {
     };
     let mut users: Vec<_> = claims
         .iter()
-        .filter_map(|c| {
+        .flat_map(|c| {
             let auth = &c["https://api.openai.com/auth"];
-            text(&auth["chatgpt_user_id"]).or_else(|| text(&auth["user_id"]))
+            [text(&auth["chatgpt_user_id"]), text(&auth["user_id"])]
+                .into_iter()
+                .flatten()
         })
         .collect();
     let mut subjects: Vec<_> = claims.iter().filter_map(|c| text(&c["sub"])).collect();
@@ -319,7 +357,13 @@ fn login_principal(raw: &str) -> Result<LoginPrincipal> {
     users.dedup();
     subjects.sort();
     subjects.dedup();
-    if users.len() > 1 || (users.is_empty() && subjects.len() > 1) {
+    let every_token_has_user = claims.iter().all(|claim| {
+        let auth = &claim["https://api.openai.com/auth"];
+        text(&auth["chatgpt_user_id"])
+            .or_else(|| text(&auth["user_id"]))
+            .is_some()
+    });
+    if users.len() > 1 || (subjects.len() > 1 && (users.is_empty() || !every_token_has_user)) {
         return Err(AppError::new(
             code::LOGIN_IDENTITY,
             "登录凭据身份不一致，请重新登录",
@@ -499,7 +543,9 @@ impl Core {
     pub fn new(data_dir: PathBuf, default_home: PathBuf) -> Result<Self> {
         storage::private_dir(&data_dir)?;
         let path = data_dir.join("accounts.json");
-        let store = match storage::read_bounded(&path, exchange::VAULT_LIMIT)? {
+        let loaded = storage::read_bounded(&path, exchange::VAULT_LIMIT)?;
+        let normalization_revision = storage::revision(loaded.as_deref());
+        let store = match loaded {
             Some(bytes) => serde_json::from_slice::<Store>(&bytes)
                 .map_err(|_| AppError::new(code::STORE, "账号库无法读取，原文件已保留"))?,
             None => Store {
@@ -517,6 +563,7 @@ impl Core {
                 seen_roots: vec![],
                 observed_auth_revisions: BTreeMap::new(),
                 auth_sync_version: 1,
+                extensions: BTreeMap::new(),
             },
         };
         if store.schema != 1 {
@@ -532,6 +579,7 @@ impl Core {
             checked_auth: None,
             auth_cache: Default::default(),
             exchange: exchange::Service::default(),
+            normalization_revision: std::cell::RefCell::new(Some(normalization_revision)),
         };
         if core.store.auth_sync_version == 0 {
             core.store.observed_auth_revisions.clear();
@@ -550,7 +598,12 @@ impl Core {
             &bytes,
             None,
             exchange::VAULT_LIMIT,
-        )
+        )?;
+        if self.normalization_revision.borrow().is_some() {
+            self.normalization_revision
+                .replace(Some(storage::digest(&bytes)));
+        }
+        Ok(())
     }
     pub fn home(&self) -> PathBuf {
         PathBuf::from(&self.store.preferences.codex_home)
@@ -559,13 +612,22 @@ impl Core {
         self.store.preferences.clone()
     }
     pub fn import_raw(&mut self, raw: &str, name: Option<String>) -> Result<String> {
+        self.normalize_accounts()?;
         let info = auth_info(raw)?;
+        let matched = self.matching_profile(&info)?;
+        let replacement = matched
+            .map(|index| {
+                let mut profile = self.store.profiles[index].clone();
+                account_identity::replace_profile(&mut profile, raw)?;
+                Ok(profile)
+            })
+            .transpose()?;
         let old = self.store.clone();
         if let Ok(Some(bytes)) = storage::read_optional(&self.home().join("auth.json")) {
             if std::str::from_utf8(&bytes)
                 .ok()
                 .and_then(|raw| auth_info(raw).ok())
-                .is_some_and(|disk| disk.identity == info.identity)
+                .is_some_and(|disk| disk.matches(&info))
             {
                 if crate::gateway::manages_auth(&self.data_dir, &self.home()) {
                     return Err(AppError::new(code::MANAGED, "网关临时凭据不能保存为账号"));
@@ -576,16 +638,9 @@ impl Core {
                 );
             }
         }
-        let id = if let Some(p) = self
-            .store
-            .profiles
-            .iter_mut()
-            .find(|p| p.identity == info.identity)
-        {
-            p.auth = raw.into();
-            p.updated_at = now();
-            p.email = info.email;
-            p.id.clone()
+        let id = if let Some(index) = matched {
+            self.store.profiles[index] = replacement.expect("matched profile replacement");
+            self.store.profiles[index].id.clone()
         } else {
             let id = uuid::Uuid::new_v4().to_string();
             let label = name
@@ -608,6 +663,7 @@ impl Core {
                 auth: raw.into(),
                 updated_at: now(),
                 exchange: BTreeMap::new(),
+                extensions: BTreeMap::new(),
             });
             id
         };
@@ -634,7 +690,7 @@ impl Core {
             .as_deref()
             .and_then(|b| std::str::from_utf8(b).ok())
             .and_then(|raw| auth_info(raw).ok())
-            .is_some_and(|current| current.identity == info.identity);
+            .is_some_and(|current| current.matches(&info));
         let id = self.import_raw(raw, None)?;
         if active {
             if let Some(previous) = &previous {
@@ -681,7 +737,7 @@ impl Core {
             .as_deref()
             .and_then(|b| std::str::from_utf8(b).ok())
             .and_then(|raw| auth_info(raw).ok())
-            .is_some_and(|info| info.identity == profile.identity);
+            .is_some_and(|info| auth_info(&profile.auth).is_ok_and(|p| p.matches(&info)));
         Ok(LoginTarget {
             id: id.into(),
             credential_revision: revision,
@@ -719,22 +775,8 @@ impl Core {
                 "登录的不是指定账号，未替换凭据",
             ));
         }
-        let account_id = |auth: &str| {
-            serde_json::from_str::<Value>(auth).ok().and_then(|v| {
-                v["tokens"]["account_id"]
-                    .as_str()
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_owned)
-            })
-        };
-        let incoming_account = account_id(raw);
         if self.store.profiles.iter().any(|p| {
-            p.id != target.id
-                && p.kind == "chatgpt"
-                && (p.identity == info.identity
-                    || (incoming_account.is_some()
-                        && account_id(&p.auth) == incoming_account
-                        && login_principal(&p.auth).is_ok_and(|other| principal.matches(&other))))
+            p.id != target.id && auth_info(&p.auth).is_ok_and(|other| other.matches(&info))
         }) {
             return Err(AppError::new(
                 code::LOGIN_DUPLICATE,
@@ -749,38 +791,9 @@ impl Core {
                 "登录期间当前账号文件已变化，未覆盖",
             ));
         }
-        // Preserve extension fields while trusting credentials produced by this
-        // successful official login, regardless of legacy refresh timestamps.
-        fn merge(previous: &mut Value, next: Value) {
-            match (previous, next) {
-                (Value::Object(previous), Value::Object(next)) => {
-                    for (key, value) in next {
-                        merge(previous.entry(key).or_insert(Value::Null), value);
-                    }
-                }
-                (previous, next) => *previous = next,
-            }
-        }
-        let mut value: Value = serde_json::from_str(&self.store.profiles[index].auth)
-            .map_err(|_| AppError::new(code::AUTH, "已保存凭据格式无效"))?;
-        // Replace the complete authentication unit, including absent fields.
-        // In particular never pair new tokens with an old account_id/API key.
-        if let Some(root) = value.as_object_mut() {
-            for field in ["auth_mode", "OPENAI_API_KEY", "last_refresh"] {
-                root.remove(field);
-            }
-            if let Some(tokens) = root.get_mut("tokens").and_then(Value::as_object_mut) {
-                for field in ["id_token", "access_token", "refresh_token", "account_id"] {
-                    tokens.remove(field);
-                }
-            }
-        }
-        merge(
-            &mut value,
-            serde_json::from_str(raw).map_err(|_| AppError::new(code::AUTH, "新凭据格式无效"))?,
-        );
-        let merged = serde_json::to_string_pretty(&value)
-            .map_err(|_| AppError::new(code::AUTH, "无法保存新凭据"))?;
+        let mut replacement = self.store.profiles[index].clone();
+        account_identity::replace_profile(&mut replacement, raw)?;
+        let merged = replacement.auth.clone();
         let old = self.store.clone();
         if target.current {
             storage::atomic_write(&path, merged.as_bytes(), Some(&target.auth_revision))?;
@@ -789,11 +802,7 @@ impl Core {
                 storage::digest(merged.as_bytes()),
             );
         }
-        let profile = &mut self.store.profiles[index];
-        profile.auth = merged.clone();
-        profile.identity = info.identity;
-        profile.email = info.email;
-        profile.updated_at = now();
+        self.store.profiles[index] = replacement;
         if let Err(error) = self.persist() {
             self.store = old;
             if target.current {
@@ -860,7 +869,7 @@ impl Core {
                     .store
                     .profiles
                     .iter()
-                    .any(|p| p.id == id && p.identity == info.identity)
+                    .any(|p| p.id == id && auth_info(&p.auth).is_ok_and(|p| p.matches(&info)))
                 {
                     self.store.observed_auth_revisions.insert(
                         self.store.preferences.codex_home.clone(),
@@ -877,6 +886,7 @@ impl Core {
         Ok(())
     }
     pub fn state(&mut self) -> Result<ViewState> {
+        let normalization_error = self.normalize_accounts().err();
         let polled = self
             .auth_cache
             .read(&self.home().join("auth.json"), PolledAuth::parse)?;
@@ -884,6 +894,16 @@ impl Core {
         let config = storage::read_optional(&self.home().join("config.toml"))?;
         let managed = crate::gateway::manages_auth(&self.data_dir, &self.home());
         let info = if managed { None } else { polled.info.clone() };
+        let matched = match info
+            .as_ref()
+            .and_then(|i| i.as_ref().ok())
+            .map(|info| self.matching_profile(info))
+            .transpose()
+        {
+            Ok(index) => index.flatten(),
+            Err(_) if normalization_error.is_some() => None,
+            Err(error) => return Err(error),
+        };
         let identity = info
             .as_ref()
             .and_then(|i| i.as_ref().ok())
@@ -900,10 +920,11 @@ impl Core {
                 self.store
                     .profiles
                     .iter()
-                    .find(|p| Some(p.identity.as_str()) == identity)
+                    .enumerate().find(|(index, _)| Some(*index) == matched).map(|(_, p)| p)
                     .is_some_and(|p| matches!((incoming_times.1, credential_times(&p.auth).1), (Some(a), Some(b)) if a > b))
             });
-        let changed = !managed
+        let changed = normalization_error.is_none()
+            && !managed
             && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
                 || newer_token);
         let old = self.store.clone();
@@ -924,12 +945,8 @@ impl Core {
                 &info,
                 auth.as_deref().and_then(|b| std::str::from_utf8(b).ok()),
             ) {
-                let (kind, id, message) = if let Some(profile) = self
-                    .store
-                    .profiles
-                    .iter_mut()
-                    .find(|p| p.identity == info.identity)
-                {
+                let (kind, id, message) = if let Some(index) = matched {
+                    let profile = &mut self.store.profiles[index];
                     if older_times(incoming_times, credential_times(&profile.auth)) {
                         (
                             "older",
@@ -937,9 +954,7 @@ impl Core {
                             "检测到旧凭据，已保留已保存版本",
                         )
                     } else if raw != profile.auth {
-                        profile.auth = raw.into();
-                        profile.email = info.email.clone();
-                        profile.updated_at = now();
+                        account_identity::replace_profile(profile, raw)?;
                         ("updated", Some(profile.id.clone()), "账号凭据已更新")
                     } else {
                         ("synced", Some(profile.id.clone()), "")
@@ -962,6 +977,7 @@ impl Core {
                         auth: raw.into(),
                         updated_at: now(),
                         exchange: BTreeMap::new(),
+                        extensions: BTreeMap::new(),
                     });
                     ("added", Some(id), "新账号已自动加入切换列表")
                 };
@@ -1003,7 +1019,9 @@ impl Core {
                 .store
                 .profiles
                 .iter()
-                .find(|p| Some(p.identity.as_str()) == identity)
+                .enumerate()
+                .find(|(index, _)| Some(*index) == matched)
+                .map(|(_, p)| p)
             {
                 if auth
                     .as_deref()
@@ -1020,16 +1038,26 @@ impl Core {
                 }
             }
         }
+        let matched = if normalization_error.is_none() {
+            info.as_ref()
+                .and_then(|i| i.as_ref().ok())
+                .map(|info| self.matching_profile(info))
+                .transpose()?
+                .flatten()
+        } else {
+            matched
+        };
         let accounts: Vec<_> = self
             .store
             .profiles
             .iter()
-            .map(|p| Account {
+            .enumerate()
+            .map(|(index, p)| Account {
                 id: p.id.clone(),
                 name: p.name.clone(),
                 kind: p.kind.clone(),
                 email: p.email.clone(),
-                current: Some(p.identity.as_str()) == identity,
+                current: matched == Some(index),
                 updated_at: p.updated_at,
                 credential_revision: storage::digest(p.auth.as_bytes()),
                 subscription: (p.kind == "chatgpt")
@@ -1055,7 +1083,7 @@ impl Core {
             current_state: status.into(),
             auth_source: source(config.as_deref()),
             preferences: self.preferences(),
-            error: None,
+            error: normalization_error.map(|e| e.message),
             auth_sync: if managed {
                 None
             } else {

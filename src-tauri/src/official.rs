@@ -401,6 +401,47 @@ pub fn view(data: &Path, home: &Path) -> OfficialModeView {
     }
 }
 
+/// Both the old and retained IDs exist in the pre-migration vault. Updating
+/// this reference before the vault is therefore safe even across interruption.
+pub(crate) fn remap_account(
+    data: &Path,
+    aliases: &std::collections::BTreeMap<String, String>,
+) -> Result<Option<(Vec<u8>, String)>> {
+    if aliases.is_empty() {
+        return Ok(None);
+    }
+    let path = data.join(FILE);
+    let Some(before) = storage::read_optional(&path)? else {
+        return Ok(None);
+    };
+    let mut value: serde_json::Value = serde_json::from_slice(&before)
+        .map_err(|_| AppError::new(code::STORE, "官方账号记录无法读取，原文件已保留"))?;
+    let Some(next) = value["accountId"].as_str().and_then(|id| aliases.get(id)) else {
+        return Ok(None);
+    };
+    value["accountId"] = serde_json::Value::String(next.clone());
+    let bytes = serde_json::to_vec_pretty(&value)
+        .map_err(|_| AppError::new(code::STORE, "无法更新官方账号记录"))?;
+    let expected = storage::digest(&before);
+    let applied = storage::digest(&bytes);
+    if let Err(error) = storage::atomic_write(&path, &bytes, Some(&expected)) {
+        // A failed directory sync may follow a successful rename. Restore the
+        // old reference only while the file still contains our exact write.
+        let current = storage::read_optional(&path)?;
+        let revision = storage::revision(current.as_deref());
+        if revision == applied {
+            storage::atomic_write(&path, &before, Some(&applied))?;
+        } else if revision != expected {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "官方账号记录已被外部修改，未覆盖当前文件",
+            ));
+        }
+        return Err(error);
+    }
+    Ok(Some((before, applied)))
+}
+
 pub fn blocks_gateway(data: &Path, home: &Path) -> bool {
     let _ = home;
     match load(data) {

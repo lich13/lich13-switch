@@ -234,7 +234,7 @@ describe("user workflows", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "账号", level: 1 });
 
-    const knownRow = screen.getByText("个人账号").closest(".account-row");
+    const knownRow = screen.getByText("个人账号").closest<HTMLElement>(".account-row");
     expect(knownRow).not.toBeNull();
     expect(within(knownRow as HTMLElement).getByText("Pro")).toHaveClass(
       "account-plan",
@@ -251,6 +251,54 @@ describe("user workflows", () => {
     expect(
       within(apiRow as HTMLElement).queryByText("API Secret Plan"),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps an updated current account when the initial state read resolves late", async () => {
+    state.accounts = [
+      {
+        ...state.accounts[0],
+        subscription: { planType: "pro", label: "Pro", stale: false },
+      },
+    ];
+    const staleState = structuredClone(state);
+    const updatedState = structuredClone(state);
+    updatedState.accounts[0] = {
+      ...updatedState.accounts[0],
+      subscription: { planType: "plus", label: "Plus", stale: false },
+    };
+    let resolveInitialState!: (value: ViewState) => void;
+    const initialState = new Promise<ViewState>((resolve) => {
+      resolveInitialState = resolve;
+    });
+    const original = mocks.command.getMockImplementation()!;
+    mocks.command.mockImplementation(
+      (name: string, args: Record<string, unknown> = {}) =>
+        name === "get_state" ? initialState : original(name, args),
+    );
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "账号", level: 1 });
+    await waitFor(() =>
+      expect(mocks.listeners.get("switch-state")).toBeTypeOf("function"),
+    );
+    act(() => mocks.listeners.get("switch-state")?.(updatedState));
+
+    const expectCurrentPlus = () => {
+      const row = screen.getByText("个人账号").closest<HTMLElement>(".account-row");
+      expect(row).not.toBeNull();
+      if (!row) return;
+      expect(within(row).getByText("Plus")).toHaveClass("account-plan");
+      expect(within(row).queryByText("Pro")).not.toBeInTheDocument();
+      expect(within(row).getByText("当前文件")).toBeInTheDocument();
+      expect(document.querySelectorAll(".account-row")).toHaveLength(1);
+    };
+    expectCurrentPlus();
+
+    await act(async () => {
+      resolveInitialState(staleState);
+      await initialState;
+    });
+    await waitFor(expectCurrentPlus);
   });
 
   it("copies active device login values and keeps API-key accounts without a manual add option", async () => {

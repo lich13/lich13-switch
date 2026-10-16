@@ -162,6 +162,7 @@ export default function App() {
   }, []);
   useEffect(() => {
     let disposed = false;
+    let receivedAccountState = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
     void Promise.all([
       command("get_state"),
@@ -169,7 +170,7 @@ export default function App() {
     ])
       .then(([s, l]) => {
         if (!disposed) {
-          setState(s);
+          if (!receivedAccountState) setState(s);
           setLogin(l);
           void command("frontend_ready").catch((e) =>
             setError(errorOf(e).message),
@@ -177,7 +178,10 @@ export default function App() {
         }
       })
       .catch((e) => setError(errorOf(e).message));
-    events.watch("switch-state", setState);
+    events.watch("switch-state", (next) => {
+      receivedAccountState = true;
+      setState(next);
+    });
     events.watch("switch-notice", setMessage);
     events.watch("switch-error", (p) => setError(errorOf(p).message));
     events.watch(

@@ -29,10 +29,15 @@ fn jwt(value: Value) -> String {
 }
 
 fn native(subject: &str, generation: i64) -> Value {
-    let account = format!("fixture-workspace-{subject}");
+    let user = format!("fixture-user-{subject}");
+    let workspace = format!("fixture-workspace-{subject}");
+    native_for(subject, generation, &user, &workspace)
+}
+
+fn native_for(subject: &str, generation: i64, user: &str, workspace: &str) -> Value {
     let auth_claim = json!({
-        "chatgpt_account_id": account,
-        "chatgpt_user_id": format!("fixture-user-{subject}"),
+        "chatgpt_account_id": workspace,
+        "chatgpt_user_id": user,
         "organization_id": format!("fixture-org-{subject}"),
         "chatgpt_plan_type": "plus"
     });
@@ -42,7 +47,7 @@ fn native(subject: &str, generation: i64) -> Value {
             "id_token": jwt(json!({"sub": subject, "email": "synthetic@example.invalid", "iat": 1780000000_i64 + generation, AUTH_CLAIM: auth_claim})),
             "access_token": jwt(json!({"sub": subject, "client_id": CLIENT, "iat": 1780000000_i64 + generation, "exp": EXPIRES + generation, AUTH_CLAIM: auth_claim})),
             "refresh_token": format!("fixture-refresh-{subject}-{generation}-punctuation_+/="),
-            "account_id": account,
+            "account_id": workspace,
             "unknown_token": {"keep": [false, 0, "fixture"]}
         },
         "last_refresh": REFRESH,
@@ -51,13 +56,19 @@ fn native(subject: &str, generation: i64) -> Value {
 }
 
 fn sub2_account(subject: &str, generation: i64) -> Value {
-    let auth = native(subject, generation);
+    let user = format!("fixture-user-{subject}");
+    let workspace = format!("fixture-workspace-{subject}");
+    sub2_account_for(subject, generation, &user, &workspace)
+}
+
+fn sub2_account_for(subject: &str, generation: i64, user: &str, workspace: &str) -> Value {
+    let auth = native_for(subject, generation, user, workspace);
     json!({
         "name": format!("Fixture {subject}"), "platform": "openai", "type": "oauth",
         "credentials": {
             "id_token": auth["tokens"]["id_token"], "access_token": auth["tokens"]["access_token"],
-            "refresh_token": auth["tokens"]["refresh_token"], "chatgpt_account_id": auth["tokens"]["account_id"],
-            "chatgpt_user_id": format!("fixture-user-{subject}"), "organization_id": format!("fixture-org-{subject}"),
+            "refresh_token": auth["tokens"]["refresh_token"], "chatgpt_account_id": workspace,
+            "chatgpt_user_id": user, "organization_id": format!("fixture-org-{subject}"),
             "client_id": CLIENT, "expires_at": EXPIRES + generation,
             "email": "synthetic@example.invalid", "plan_type": "plus",
             "unknown_credential": {"owner": subject, "keep": [null, false, 0]},
@@ -85,16 +96,40 @@ fn sub2(accounts: Vec<Value>, wrapped: bool) -> Value {
 }
 
 fn cpa(subject: &str, generation: i64) -> Value {
-    let auth = native(subject, generation);
+    let user = format!("fixture-user-{subject}");
+    let workspace = format!("fixture-workspace-{subject}");
+    cpa_for(subject, generation, &user, &workspace)
+}
+
+fn cpa_for(subject: &str, generation: i64, user: &str, workspace: &str) -> Value {
+    let auth = native_for(subject, generation, user, workspace);
     json!({
         "type": "codex", "name": format!("Fixture {subject}"),
         "id_token": auth["tokens"]["id_token"], "access_token": auth["tokens"]["access_token"],
-        "refresh_token": auth["tokens"]["refresh_token"], "account_id": auth["tokens"]["account_id"],
+        "refresh_token": auth["tokens"]["refresh_token"], "account_id": workspace,
         "email": "synthetic@example.invalid", "plan_type": "plus",
         "expired": chrono::DateTime::from_timestamp(EXPIRES + generation, 0).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "last_refresh": REFRESH, "proxy_url": "http://proxy.example.invalid:8080", "disabled": true,
         "unknown_root": {"owner": subject, "keep": [null, false, 0]}
     })
+}
+
+fn stabilize_update_source_metadata(format: &str, document: &mut Value) {
+    match format {
+        "sub2api" => {
+            let account = &mut payload_mut(document)["accounts"][0];
+            account["name"] = json!("Fixture stable source name");
+            account["credentials"]["unknown_credential"]["owner"] =
+                json!("fixture-stable-source-owner");
+            account["extra"]["owner"] = json!("fixture-stable-source-owner");
+            account["unknown_account"]["owner"] = json!("fixture-stable-source-owner");
+        }
+        "cliproxyapi" => {
+            document["name"] = json!("Fixture stable source name");
+            document["unknown_root"]["owner"] = json!("fixture-stable-source-owner");
+        }
+        _ => {}
+    }
 }
 
 fn write(path: &Path, value: &Value) -> PathBuf {
@@ -371,6 +406,110 @@ fn v023_account_duplicates_require_explicit_update_and_keep_existing_id_and_name
         .as_deref()
         .is_some_and(|e| e.contains("早于账号库")));
     assert_auth_unchanged(&core);
+}
+
+#[test]
+fn v023_account_subject_rotation_in_all_three_formats_requires_explicit_update() {
+    let user = "fixture-rotating-user";
+    let workspace = "fixture-rotating-workspace";
+    for format in ["codex", "sub2api", "cliproxyapi"] {
+        let (temp, mut core) = setup();
+        let (mut original, mut incoming) = match format {
+            "codex" => (
+                native_for("fixture-subject-old", 0, user, workspace),
+                native_for("fixture-subject-new", 1, user, workspace),
+            ),
+            "sub2api" => (
+                sub2(
+                    vec![sub2_account_for("fixture-subject-old", 0, user, workspace)],
+                    true,
+                ),
+                sub2(
+                    vec![sub2_account_for("fixture-subject-new", 1, user, workspace)],
+                    true,
+                ),
+            ),
+            "cliproxyapi" => (
+                cpa_for("fixture-subject-old", 0, user, workspace),
+                cpa_for("fixture-subject-new", 1, user, workspace),
+            ),
+            _ => unreachable!(),
+        };
+        stabilize_update_source_metadata(format, &mut original);
+        stabilize_update_source_metadata(format, &mut incoming);
+        let ids = import(
+            &mut core,
+            write(&temp.path().join("original.json"), &original),
+        );
+        let id = ids[0].clone();
+        core.rename(&id, "Locally chosen name").unwrap();
+        let original_identity = core.store.profiles[0].identity.clone();
+        let preview = core
+            .exchange_preview(&[write(&temp.path().join("rotated.json"), &incoming)])
+            .unwrap();
+
+        assert_eq!(preview.rows.len(), 1, "{format}");
+        assert_eq!(preview.rows[0].format, format);
+        assert!(preview.rows[0].duplicate, "{format}");
+        assert!(preview.rows[0].error.is_none(), "{format}");
+        let before = fs::read(core.data_dir.join("accounts.json")).unwrap();
+        let skipped = core
+            .exchange_commit(&preview.token, &selected(&[0], false), &preview.revision)
+            .unwrap_err();
+        assert!(
+            skipped.message.contains("默认跳过"),
+            "{format}: {}",
+            skipped.message
+        );
+        assert_eq!(
+            fs::read(core.data_dir.join("accounts.json")).unwrap(),
+            before
+        );
+
+        assert_eq!(
+            core.exchange_commit(&preview.token, &selected(&[0], true), &preview.revision)
+                .unwrap(),
+            1,
+            "{format}"
+        );
+        assert_eq!(core.store.profiles.len(), 1, "{format}");
+        assert_eq!(core.store.profiles[0].id, id, "{format}");
+        assert_eq!(
+            core.store.profiles[0].name, "Locally chosen name",
+            "{format}"
+        );
+        assert_eq!(
+            core.store.profiles[0].identity, original_identity,
+            "{format}"
+        );
+        let saved: Value = serde_json::from_str(&core.store.profiles[0].auth).unwrap();
+        assert_eq!(
+            claims(saved["tokens"]["id_token"].as_str().unwrap()).unwrap()["sub"],
+            "fixture-subject-new",
+            "{format}"
+        );
+
+        match format {
+            "sub2api" => {
+                let output = temp.path().join("updated-sub2.json");
+                core.exchange_export(&[id], &core.exchange_revision(), "sub2api", &output)
+                    .unwrap();
+                let mut expected = incoming.clone();
+                payload_mut(&mut expected)["accounts"][0]["name"] = json!("Locally chosen name");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&fs::read(output).unwrap()).unwrap(),
+                    expected
+                );
+            }
+            "cliproxyapi" => assert_eq!(
+                export_cpa(&core, &[id], &temp.path().join("updated-cpa")),
+                vec![incoming.clone()]
+            ),
+            "codex" => {}
+            _ => unreachable!(),
+        }
+        assert_auth_unchanged(&core);
+    }
 }
 
 #[test]
@@ -711,27 +850,55 @@ fn v023_account_mixed_sub2_sources_keep_private_roots_only_for_their_own_round_t
 #[test]
 fn v023_account_cpa_and_sub2_metadata_for_one_identity_remain_independent() {
     let (temp, mut core) = setup();
-    let original_cpa = cpa("shared", 0);
+    let user = "fixture-shared-user";
+    let workspace = "fixture-shared-workspace";
+    let original_cpa = cpa_for("shared-old-subject", 0, user, workspace);
     let ids = import(
         &mut core,
         write(&temp.path().join("cpa.json"), &original_cpa),
     );
-    let original_sub2 = sub2(vec![sub2_account("shared", 0)], false);
+    let original_sub2 = sub2(
+        vec![sub2_account_for("shared-new-subject", 1, user, workspace)],
+        false,
+    );
     let preview = core
         .exchange_preview(&[write(&temp.path().join("sub2.json"), &original_sub2)])
         .unwrap();
+    assert!(preview.rows[0].duplicate);
+    assert!(preview.rows[0].error.is_none());
     core.exchange_commit(&preview.token, &selected(&[0], true), &preview.revision)
         .unwrap();
+    assert_eq!(core.store.profiles.len(), 1);
+    assert_eq!(core.store.profiles[0].id, ids[0]);
+    let exported_cpa = export_cpa(&core, &ids, &temp.path().join("cpa-output"));
+    assert_eq!(exported_cpa.len(), 1);
+    for field in ["name", "proxy_url", "disabled", "unknown_root"] {
+        assert_eq!(exported_cpa[0][field], original_cpa[field], "{field}");
+    }
     assert_eq!(
-        export_cpa(&core, &ids, &temp.path().join("cpa-output")),
-        vec![original_cpa]
+        exported_cpa[0]["id_token"],
+        original_sub2["accounts"][0]["credentials"]["id_token"]
+    );
+    assert_eq!(
+        exported_cpa[0]["access_token"],
+        original_sub2["accounts"][0]["credentials"]["access_token"]
+    );
+    assert_eq!(
+        exported_cpa[0]["refresh_token"],
+        original_sub2["accounts"][0]["credentials"]["refresh_token"]
+    );
+    assert_eq!(
+        claims(exported_cpa[0]["id_token"].as_str().unwrap()).unwrap()["sub"],
+        "shared-new-subject"
     );
     let output = temp.path().join("sub2-output.json");
     core.exchange_export(&ids, &core.exchange_revision(), "sub2api", &output)
         .unwrap();
+    let mut expected_sub2 = original_sub2.clone();
+    payload_mut(&mut expected_sub2)["accounts"][0]["name"] = original_cpa["name"].clone();
     assert_eq!(
         serde_json::from_slice::<Value>(&fs::read(output).unwrap()).unwrap(),
-        original_sub2
+        expected_sub2
     );
     assert_auth_unchanged(&core);
 }

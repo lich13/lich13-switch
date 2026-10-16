@@ -97,6 +97,59 @@ it("shows ChatGPT subscription labels in the quick account list and hides API-ke
   expect(within(api).queryByText("API Secret Plan")).not.toBeInTheDocument();
 });
 
+it("keeps an updated current account when the initial quick state read resolves late", async () => {
+  const user = userEvent.setup();
+  const staleState = structuredClone(demo);
+  staleState.accounts = [
+    {
+      ...staleState.accounts[0],
+      id: "fixture-shared-account",
+      current: true,
+      subscription: { planType: "pro", label: "Pro", stale: false },
+    },
+  ];
+  const updatedState = structuredClone(staleState);
+  updatedState.accounts[0] = {
+    ...updatedState.accounts[0],
+    subscription: { planType: "plus", label: "Plus", stale: false },
+  };
+  let resolveInitialState!: (value: typeof staleState) => void;
+  const initialState = new Promise<typeof staleState>((resolve) => {
+    resolveInitialState = resolve;
+  });
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation((name: string, args: Record<string, unknown> = {}) => {
+    if (name === "get_state") return initialState;
+    if (name === "get_quick")
+      return { pinned: false, tab: "accounts", visible: true };
+    return original(name, args);
+  });
+
+  render(<QuickPanel />);
+  await waitFor(() =>
+    expect(mock.listeners.get("switch-state")).toBeTypeOf("function"),
+  );
+  act(() => mock.listeners.get("switch-state")?.(updatedState));
+  await user.click(screen.getByRole("button", { name: "账号" }));
+  await screen.findByRole("button", { name: "切换到 日常开发" });
+
+  const expectCurrentPlus = () => {
+    const row = screen.getByRole("button", { name: "切换到 日常开发" });
+    expect(row).toBeDisabled();
+    expect(within(row).getByText("Plus")).toHaveClass("account-plan");
+    expect(within(row).queryByText("Pro")).not.toBeInTheDocument();
+    expect(within(row).getByText(/当前文件/)).toBeInTheDocument();
+    expect(document.querySelectorAll(".quick-account")).toHaveLength(1);
+  };
+  expectCurrentPlus();
+
+  await act(async () => {
+    resolveInitialState(staleState);
+    await initialState;
+  });
+  await waitFor(expectCurrentPlus);
+});
+
 it("uses current revisions for quick actions without initializing the main window", async () => {
   const user = userEvent.setup();
   render(<QuickPanel />);

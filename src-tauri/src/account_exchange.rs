@@ -23,6 +23,112 @@ pub struct Source {
     identity: String,
     account: Value,
     envelope: Option<Envelope>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+pub(super) fn rebind_sources(
+    sources: &mut BTreeMap<String, Source>,
+    old: &str,
+    next: &str,
+) -> Result<()> {
+    for (format, source) in sources.iter_mut() {
+        if source.identity != old
+            && source.identity != next
+            && !parse_account(&source.account, format, None)
+                .is_ok_and(|account| account.identity == next)
+        {
+            return Err(conflict());
+        }
+        source.identity = next.into();
+    }
+    Ok(())
+}
+
+fn source_extensions(source: &Source, format: &str) -> Value {
+    let mut value = source.account.clone();
+    let keys = if format == "sub2api" {
+        &[
+            "id_token",
+            "access_token",
+            "refresh_token",
+            "chatgpt_account_id",
+            "chatgpt_user_id",
+            "organization_id",
+            "email",
+            "plan_type",
+            "expires_at",
+        ][..]
+    } else {
+        &[
+            "id_token",
+            "access_token",
+            "refresh_token",
+            "account_id",
+            "email",
+            "plan_type",
+            "expired",
+            "last_refresh",
+        ][..]
+    };
+    let target = if format == "sub2api" {
+        &mut value["credentials"]
+    } else {
+        &mut value
+    };
+    if let Some(object) = target.as_object_mut() {
+        for key in keys {
+            object.remove(*key);
+        }
+    }
+    if format == "sub2api" {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("name");
+            object.remove("last_refresh");
+        }
+    }
+    value
+}
+
+pub(super) fn merge_sources(
+    target: &mut BTreeMap<String, Source>,
+    source: &BTreeMap<String, Source>,
+    prefer_source: bool,
+) -> Result<()> {
+    for (format, incoming) in source {
+        if let Some(previous) = target.get_mut(format) {
+            let mut extra = source_extensions(previous, format);
+            super::account_identity::merge_extensions(
+                &mut extra,
+                &source_extensions(incoming, format),
+            )?;
+            let mut merged = if prefer_source {
+                incoming.clone()
+            } else {
+                previous.clone()
+            };
+            super::account_identity::merge_extensions(&mut merged.account, &extra)?;
+            let mut extensions =
+                serde_json::to_value(&previous.extensions).map_err(|_| conflict())?;
+            super::account_identity::merge_extensions(
+                &mut extensions,
+                &serde_json::to_value(&incoming.extensions).map_err(|_| conflict())?,
+            )?;
+            merged.extensions = serde_json::from_value(extensions).map_err(|_| conflict())?;
+            match (&previous.envelope, &incoming.envelope) {
+                (Some(a), Some(b)) => {
+                    let mut envelope = (**a).clone();
+                    super::account_identity::merge_extensions(&mut envelope, b)?;
+                    merged.envelope = Some(Envelope(Arc::new(envelope)));
+                }
+                (Some(a), None) | (None, Some(a)) => merged.envelope = Some(a.clone()),
+                _ => {}
+            }
+            *previous = merged;
+        } else {
+            target.insert(format.clone(), incoming.clone());
+        }
+    }
+    Ok(())
 }
 #[derive(Clone)]
 struct Envelope(Arc<Value>);
@@ -179,10 +285,8 @@ fn token_claims(tokens: &Value) -> Result<(Value, Value)> {
         .ok_or_else(|| invalid("id_token 无法读取，需原始完整 Token"))?;
     let access = claims(tokens["access_token"].as_str().unwrap())
         .ok_or_else(|| invalid("access_token 无法读取"))?;
-    let subject = text(&id["sub"]).ok_or_else(|| invalid("id_token 缺少账号身份"))?;
-    if text(&access["sub"]).is_some_and(|s| s != subject) {
-        return Err(invalid("两个 Token 的账号身份不一致"));
-    }
+    text(&id["sub"]).ok_or_else(|| invalid("id_token 缺少账号身份"))?;
+    super::login_principal(&json!({"tokens": tokens}).to_string())?;
     if text(&access["client_id"]).is_some_and(|s| s != CLIENT_ID) {
         return Err(invalid("此 OAuth client_id 与 Codex 刷新流程不兼容"));
     }
@@ -257,6 +361,7 @@ fn parse_account(value: &Value, format: &str, envelope: Option<Envelope>) -> Res
                 identity: info.identity.clone(),
                 account: value.clone(),
                 envelope,
+                extensions: BTreeMap::new(),
             },
         )
     });
@@ -297,6 +402,7 @@ impl Core {
         self.exchange.templates.prune();
     }
     pub fn exchange_preview(&mut self, paths: &[PathBuf]) -> Result<Preview> {
+        self.normalize_accounts()?;
         self.exchange.pending.take();
         if paths.is_empty() || paths.len() > 1000 {
             return Err(invalid("请选择 1–1000 个 JSON 文件"));
@@ -338,12 +444,10 @@ impl Core {
                 if let Ok(candidate) = parsed.as_mut() {
                     if !seen.insert(candidate.identity.clone()) {
                         parsed = Err(invalid("本次选择中有重复账号，请保留一项"));
-                    } else if let Some(existing) = self
-                        .store
-                        .profiles
-                        .iter()
-                        .find(|p| p.identity == candidate.identity)
+                    } else if let Some(index) =
+                        self.matching_profile(&auth_info(&candidate.auth)?)?
                     {
+                        let existing = &self.store.profiles[index];
                         if older(&candidate.auth, &existing.auth) {
                             parsed = Err(invalid("导入凭据早于账号库版本，已阻止覆盖"));
                         } else {
@@ -437,19 +541,21 @@ impl Core {
                 let existing = next
                     .profiles
                     .iter_mut()
-                    .find(|p| p.id == *id && p.identity == c.identity)
+                    .find(|p| p.id == *id && auth_info(&p.auth).is_ok_and(|p| p.matches(&info)))
                     .ok_or_else(conflict)?;
                 if storage::digest(existing.auth.as_bytes()) != *revision
                     || older(&c.auth, &existing.auth)
                 {
                     return Err(conflict());
                 }
-                existing.auth = c.auth.clone();
-                existing.email = info.email;
-                existing.updated_at = now();
+                super::account_identity::replace_profile(existing, &c.auth)?;
                 existing
             } else {
-                if next.profiles.iter().any(|p| p.identity == c.identity) {
+                if next
+                    .profiles
+                    .iter()
+                    .any(|p| auth_info(&p.auth).is_ok_and(|p| p.matches(&info)))
+                {
                     return Err(conflict());
                 }
                 next.profiles.push(Profile {
@@ -461,11 +567,16 @@ impl Core {
                     auth: c.auth.clone(),
                     updated_at: now(),
                     exchange: BTreeMap::new(),
+                    extensions: BTreeMap::new(),
                 });
                 next.profiles.last_mut().unwrap()
             };
             if let Some((format, source)) = &c.source {
-                profile.exchange.insert(format.clone(), source.clone());
+                merge_sources(
+                    &mut profile.exchange,
+                    &BTreeMap::from([(format.clone(), source.clone())]),
+                    true,
+                )?;
             }
         }
         if let Some(bytes) = storage::read_optional(&self.home().join("auth.json"))? {
@@ -476,7 +587,7 @@ impl Core {
                     selected.iter().any(|s| {
                         pending.candidates[s.id]
                             .as_ref()
-                            .is_some_and(|c| c.identity == info.identity)
+                            .is_some_and(|c| auth_info(&c.auth).is_ok_and(|c| c.matches(&info)))
                     })
                 })
             {
@@ -702,6 +813,11 @@ fn export_account(profile: &Profile, format: &str, prototype: Option<&Value>) ->
         .or_else(|| prototype.cloned())
         .unwrap_or_else(|| json!({}));
     if format == "cliproxyapi" {
+        if let Some(object) = out.as_object_mut() {
+            for key in ["last_refresh", "email", "plan_type"] {
+                object.remove(key);
+            }
+        }
         out["type"] = json!("codex");
         for key in ["id_token", "access_token", "refresh_token"] {
             out[key] = tokens[key].clone();
@@ -721,6 +837,13 @@ fn export_account(profile: &Profile, format: &str, prototype: Option<&Value>) ->
         if original.is_none() && prototype.is_none() {
             return Err(invalid("新账号需要独立的 OAuth 模板"));
         }
+        if out.get("last_refresh").is_some() {
+            if let Some(value) = auth.get("last_refresh") {
+                out["last_refresh"] = refresh_time(value)?;
+            } else if let Some(object) = out.as_object_mut() {
+                object.remove("last_refresh");
+            }
+        }
         out["name"] = json!(profile.name);
         out["platform"] = json!("openai");
         out["type"] = json!("oauth");
@@ -728,6 +851,11 @@ fn export_account(profile: &Profile, format: &str, prototype: Option<&Value>) ->
             out["credentials"] = json!({});
         }
         let c = &mut out["credentials"];
+        if let Some(object) = c.as_object_mut() {
+            for key in ["chatgpt_user_id", "organization_id", "email", "plan_type"] {
+                object.remove(key);
+            }
+        }
         for key in ["id_token", "access_token", "refresh_token"] {
             c[key] = tokens[key].clone();
         }
@@ -742,7 +870,11 @@ fn export_account(profile: &Profile, format: &str, prototype: Option<&Value>) ->
             ("organization_id", "organization_id"),
             ("chatgpt_plan_type", "plan_type"),
         ] {
-            if let Some(value) = claim(from) {
+            if let Some(value) = claim(from).or_else(|| {
+                (from == "chatgpt_user_id")
+                    .then(|| claim("user_id"))
+                    .flatten()
+            }) {
                 c[to] = value;
             }
         }

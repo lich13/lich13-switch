@@ -393,6 +393,7 @@ fn same_chatgpt_user_can_refresh_into_a_different_workspace() {
     let id = core
         .import_raw(&original, Some("Target name".into()))
         .unwrap();
+    let previous_identity = profile(&core, &id).identity.clone();
     let after_id = core
         .import_raw(
             &oauth_user(
@@ -421,6 +422,8 @@ fn same_chatgpt_user_can_refresh_into_a_different_workspace() {
     .unwrap();
     incoming["future"] = json!({"nested": {"added": "new"}});
     let incoming = incoming.to_string();
+    let incoming_identity = super::auth_info(&incoming).unwrap().identity;
+    assert_ne!(previous_identity, incoming_identity);
 
     assert!(core.complete_target_login(&incoming, &target).unwrap());
 
@@ -436,10 +439,7 @@ fn same_chatgpt_user_can_refresh_into_a_different_workspace() {
     );
     assert_eq!(profile.name, "Target name");
     assert_eq!(saved["tokens"]["account_id"], "fixture-workspace-new");
-    assert_eq!(
-        profile.identity,
-        storage::digest(b"chatgpt:fixture-target-subject:fixture-workspace-new")
-    );
+    assert_eq!(profile.identity, incoming_identity);
     assert_eq!(saved["future"]["keep"], json!(["fixture", 7, true]));
     assert_eq!(
         saved["future"]["nested"],
@@ -500,6 +500,7 @@ fn same_user_id_allows_a_subject_change_and_user_id_is_the_fallback_identity_fie
             Some("Keep this name".into()),
         )
         .unwrap();
+    let previous_identity = profile(&core, &id).identity.clone();
     core.switch_account(&id, "missing").unwrap();
     let target = target_for(&mut core, &id);
     let incoming = oauth_user(
@@ -511,15 +512,14 @@ fn same_user_id_allows_a_subject_change_and_user_id_is_the_fallback_identity_fie
         "subject-rotated",
         at - 3600,
     );
+    let incoming_identity = super::auth_info(&incoming).unwrap().identity;
+    assert_ne!(previous_identity, incoming_identity);
 
     assert!(core.complete_target_login(&incoming, &target).unwrap());
 
     let profile = profile(&core, &id);
     assert_eq!(profile.name, "Keep this name");
-    assert_eq!(
-        profile.identity,
-        storage::digest(b"chatgpt:fixture-new-subject:fixture-workspace-new")
-    );
+    assert_eq!(profile.identity, incoming_identity);
     assert_eq!(
         serde_json::from_str::<Value>(&profile.auth).unwrap()["tokens"]["account_id"],
         "fixture-workspace-new"
