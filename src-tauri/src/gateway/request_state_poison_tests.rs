@@ -19,9 +19,11 @@ use tokio::{
     task::JoinHandle,
 };
 
+type SeenRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
 struct Upstream {
     port: u16,
-    seen: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    seen: SeenRequests,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }

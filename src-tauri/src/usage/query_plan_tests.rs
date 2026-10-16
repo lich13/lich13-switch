@@ -24,7 +24,7 @@ fn fixture_record(index: u64, source: &str, at: i64) -> Record {
         _ => Operation::Model,
     };
     let model = format!("fixture-model-{}", index % 8);
-    let status: Option<u16> = (source == "proxy").then(|| match index % 4 {
+    let status: Option<u16> = (source == "proxy").then_some(match index % 4 {
         0 => 200,
         1 => 201,
         2 => 429,
@@ -557,7 +557,9 @@ fn record_upsert_and_source_projection_grains_preserve_usage_once() {
         10,
         BASE,
     );
-    store.write_batch(&[first.clone()], None).unwrap();
+    store
+        .write_batch(std::slice::from_ref(&first), None)
+        .unwrap();
     let mut updated = first.clone();
     updated.attempts[0].tokens.input = Some(20);
     store.write_batch(&[updated.clone()], None).unwrap();
