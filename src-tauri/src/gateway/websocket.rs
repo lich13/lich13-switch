@@ -165,6 +165,10 @@ enum Upstream {
     Native(Peer),
     Disconnected,
 }
+fn response_data_started(upstream: &Upstream, received: bool, since: tokio::time::Instant) -> bool {
+    received
+        || matches!(upstream, Upstream::Native(peer) if peer.activity.read_at().is_some_and(|at| at >= since))
+}
 async fn next_upstream(upstream: &mut Upstream) -> Option<Result<Frame, Failure>> {
     match upstream {
         Upstream::Native(peer) => {
@@ -873,11 +877,13 @@ fn disconnect_turn(
     }
     let terminal = observed.as_ref().and_then(|u| u.terminal());
     let transport = observed.as_ref().is_none_or(|u| u.transport_failure());
-    let retry = route.client_id == super::ClientId::Codex
-        && !received
-        && can_replay
-        && ordinary_attempts <= cfg.max_retries
-        && transport;
+    let retry = super::replay_policy::transport_retry(
+        received,
+        route.client_id == super::ClientId::Codex
+            && can_replay
+            && ordinary_attempts <= cfg.max_retries
+            && transport,
+    );
     let mut details = observed
         .as_ref()
         .map(|u| u.observation.error.clone())
@@ -1568,7 +1574,9 @@ async fn session_once(
                 current_model.as_deref(),
                 &mut turn,
                 &mut protocol,
-                false,
+                peer.activity
+                    .read_at()
+                    .is_some_and(|at| at >= receive_started),
                 attempts,
                 ordinary_attempts,
                 !unknown_affinity,
@@ -1964,7 +1972,7 @@ async fn session_once(
                     current_model.as_deref(),
                     &mut turn,
                     &mut protocol,
-                    false,
+                    response_data_started(&upstream, false, receive_started),
                     attempts,
                     ordinary_attempts,
                     !unknown_affinity,
@@ -2296,7 +2304,7 @@ async fn session_once(
                             current_model.as_deref(),
                             &mut turn,
                             &mut protocol,
-                            false,
+                            response_data_started(&upstream, false, receive_started),
                             attempts,
                             ordinary_attempts,
                             !unknown_affinity,
@@ -2338,8 +2346,9 @@ async fn session_once(
                         continue;
                     }
                     let native = matches!(upstream, Upstream::Native(_));
-                    let unfinished_native_turn = native && turn.is_some() && !received && route.client_id == super::ClientId::Codex;
-                    retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, close, crate::events::Phase::WsReceive, code::STREAM_INTERRUPTED);
+                    let response_started = response_data_started(&upstream, received, receive_started);
+                    let unfinished_native_turn = native && turn.is_some() && !response_started && route.client_id == super::ClientId::Codex;
+                    retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, response_started, attempts, ordinary_attempts, native && !unknown_affinity, close, crate::events::Phase::WsReceive, code::STREAM_INTERRUPTED);
                     upstream = Upstream::Disconnected;
                     if retry_pending { continue; }
                     if unfinished_native_turn { return Err((1013, "websocket reconnect retries exhausted")); }
@@ -2448,7 +2457,7 @@ async fn session_once(
                 // upstream silence timer. Peer::send has its own progress limit.
                 deadline += sending.elapsed();
                 if let Some(u) = &mut protocol {
-                    u.delivery().handed(frame_bytes, u.terminal().is_some());
+                    u.delivery().handed(frame_bytes, u.terminal_observed());
                     u.output_handed(business);
                     if u.delivered_success() {
                         if let Some(admission) = &mut settled_turn {
@@ -2527,7 +2536,7 @@ async fn session_once(
                 }
 
                 let native = matches!(upstream, Upstream::Native(_));
-                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if body_started { code::STREAM_TIMEOUT } else { code::FIRST_BYTE_TIMEOUT });
+                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, body_started, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if body_started { code::STREAM_TIMEOUT } else { code::FIRST_BYTE_TIMEOUT });
                 upstream = Upstream::Disconnected;
                 if retry_pending { continue; }
                 return Err((1013, "upstream timeout"));

@@ -1391,7 +1391,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             protocol.finish(Some(status.as_u16()), failure_kind);
         }
-        if failed && protocol.transport_failure() {
+        if failed
+            && super::replay_policy::transport_retry(
+                prefix_bytes != 0,
+                protocol.transport_failure(),
+            )
+        {
             failover.failure(super::failover::Failure::Transport);
             last_error = Some(admission.permits.report(
                 &gateway,
@@ -1422,7 +1427,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     code::HTTP
                 },
             );
-            if protocol.terminal().is_some() {
+            if protocol.terminal_observed() {
                 if let Some((_, terminal, business)) = prefix.last_mut() {
                     *terminal = true;
                     *business = true;
@@ -1586,7 +1591,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             .cloned()
             .unwrap_or_default();
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<ForwardFrame>(2);
-        let empty = ended && prefix.is_empty();
+        let empty = ended && !failed && prefix.is_empty();
         if empty {
             output_delivery.body_complete();
         }
@@ -1618,11 +1623,19 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 tokio::select! {
                     biased;
                     _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); return; }
-                    result = send_frame(&sender, Ok(frame), terminal, ended && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
+                    result = send_frame(&sender, Ok(frame), terminal, ended && !failed && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; break; } }
                 }
                 protocol.output_handed(business);
             }
             if ended {
+                if failed && !disconnected {
+                    // Preserve the received prefix, then expose the transport failure.
+                    // A clean EOF here would hide an incomplete generation.
+                    tokio::select! {
+                        _ = stopping(&mut shutdown) => {}
+                        _ = send_frame(&sender, Err(std::io::Error::other("上游流中断").into()), false, false, &activity, cfg.idle_seconds) => {}
+                    }
+                }
                 drop(sender);
                 if disconnected {
                     protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
@@ -1690,7 +1703,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             tokio::select! {
                                 biased;
                                 _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
-                                result = send_frame(&sender, Ok(frame), protocol.terminal().is_some(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
+                                result = send_frame(&sender, Ok(frame), protocol.terminal_observed(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol, cfg.idle_seconds); disconnected = true; } }
                             }
                             if !disconnected {
                                 protocol.output_handed(protocol.business_observed());
@@ -1707,7 +1720,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         );
                         // EOF may finish a JSON value or an SSE event without a
                         // trailing newline. All preceding body frames were acknowledged.
-                        delivery.handed(0, protocol.terminal().is_some());
+                        delivery.handed(0, protocol.terminal_observed());
                         protocol.output_handed(protocol.business_observed());
                         break;
                     }

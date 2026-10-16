@@ -780,6 +780,9 @@ impl Protocol {
         }
         self.observation.terminal
     }
+    pub fn terminal_observed(&self) -> bool {
+        self.terminal_received
+    }
     pub fn succeeded(&self) -> bool {
         matches!(self.terminal(), Some(Terminal::Success | Terminal::Limited))
     }
