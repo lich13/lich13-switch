@@ -129,7 +129,7 @@ async fn exact_rules_filter_before_attempts_and_preserve_original_json_and_resou
     assert!(String::from_utf8(body(denied).await.to_vec())
         .unwrap()
         .contains("MODEL_NOT_ALLOWED"));
-    let unknown = request(&g, "/future", vec![0, 255], vec![]).await;
+    let unknown = request(&g, "/codex/future", vec![0, 255], vec![]).await;
     assert_eq!(unknown.status(), 400);
     assert!(String::from_utf8(body(unknown).await.to_vec())
         .unwrap()
@@ -403,7 +403,7 @@ async fn completed_http_response_keeps_model_affinity_and_health() {
     body(inherited).await;
     let unknown_ws = request(
         &g,
-        "/future/socket",
+        "/codex/future/socket",
         vec![],
         vec![
             ("upgrade", "websocket"),

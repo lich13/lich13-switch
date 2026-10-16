@@ -1221,23 +1221,13 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
     let claude_home = r.home(gateway::ClientId::Claude)?;
     storage::atomic_write(&claude_home.join("settings.json"), br#"{"env":{"ANTHROPIC_BASE_URL":"https://claude.example.invalid","ANTHROPIC_AUTH_TOKEN":"fixture-claude"},"model":"keep"}"#, Some("missing"))?;
     r.claude.import_initial(&claude_home)?;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(storage::io_error)?;
-    let claude_port = listener.local_addr().map_err(storage::io_error)?.port();
-    drop(listener);
-    r.claude.edit(
-        gateway::Edit::Settings {
-            settings: gateway::Settings {
-                port: claude_port,
-                ..Default::default()
-            },
-        },
-        &r.claude.view().revision,
-        &claude_home,
-    )?;
     r.gateway.start(&r.gateway.view().revision, &home).await?;
     r.claude
         .start(&r.claude.view().revision, &claude_home)
         .await?;
+    if r.gateway.view().settings.port != port || r.claude.view().settings.port != port {
+        return Err(AppError::new(code::SMOKE, "共享网关端口不一致"));
+    }
     let live = storage::read_optional(&home.join("config.toml"))?;
     r.gateway.edit(
         gateway::Edit::Select {

@@ -647,7 +647,7 @@ async fn claude_rate_limit_keeps_original_cooldown_and_no_capacity_retry() {
     g.start(&g.view().revision, &home).await.unwrap();
     let r = request(
         &g,
-        "/v1/messages",
+        "/claude/v1/messages",
         br#"{"model":"claude-test"}"#.to_vec(),
         vec![("content-type", "application/json")],
     )

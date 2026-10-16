@@ -62,12 +62,8 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
     let claude = codex.companion(data.join("claude")).unwrap();
     assert_eq!(codex.view().client_id, ClientId::Codex);
     assert_eq!(claude.view().client_id, ClientId::Claude);
-    let codex_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let claude_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    for (gateway, home, listener) in [
-        (&codex, &codex_home, &codex_listener),
-        (&claude, &claude_home, &claude_listener),
-    ] {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    for (gateway, home) in [(&codex, &codex_home), (&claude, &claude_home)] {
         edit_client(
             gateway,
             home,
@@ -249,7 +245,7 @@ async fn dual_hot_switch_preserves_live_config_hashes_and_stops_to_each_selected
 }
 
 #[tokio::test]
-async fn listeners_selection_queues_and_concurrency_stay_independent_in_both_directions() {
+async fn shared_listener_keeps_selection_queues_and_concurrency_independent_in_both_directions() {
     let upstream =
         server(|request| async move { Response::new(full(request.uri().path().to_owned())) }).await;
     let f = dual_fixture(
@@ -263,7 +259,7 @@ async fn listeners_selection_queues_and_concurrency_stay_independent_in_both_dir
         ],
     )
     .await;
-    assert_ne!(f.codex.view().settings.port, f.claude.view().settings.port);
+    assert_eq!(f.codex.view().settings.port, f.claude.view().settings.port);
     tokio::join!(
         start_client(&f.codex, &f.codex_home),
         start_client(&f.claude, &f.claude_home)
@@ -273,7 +269,7 @@ async fn listeners_selection_queues_and_concurrency_stay_independent_in_both_dir
         "/codex-a/v1/responses"
     );
     assert_eq!(
-        response_bytes(&f.claude, "/v1/messages").await,
+        response_bytes(&f.claude, "/claude/v1/messages").await,
         "/claude-a/v1/messages"
     );
     let codex_first = f.codex.view().providers[0].id.clone();
@@ -376,16 +372,14 @@ async fn listeners_selection_queues_and_concurrency_stay_independent_in_both_dir
     assert!(f.claude.view().running);
     assert_eq!(f.claude.view().waiting_requests, 1);
     assert!(!claude_waiter.is_finished());
-    let released_listener =
-        tokio::net::TcpListener::bind(("127.0.0.1", f.codex.view().settings.port))
-            .await
-            .unwrap();
+    let shared_port = f.codex.view().settings.port;
+    assert_eq!(shared_port, f.claude.view().settings.port);
     assert!(
-        tokio::net::TcpListener::bind(("127.0.0.1", f.claude.view().settings.port))
+        tokio::net::TcpListener::bind(("127.0.0.1", shared_port))
             .await
-            .is_err()
+            .is_err(),
+        "the shared listener must remain active while Claude is running"
     );
-    drop(released_listener);
     drop(held_codex);
     drop(held_claude);
     let admitted = tokio::time::timeout(Duration::from_secs(3), claude_waiter)
@@ -399,7 +393,7 @@ async fn listeners_selection_queues_and_concurrency_stay_independent_in_both_dir
     })
     .await;
     assert_eq!(
-        response_bytes(&f.claude, "/v1/messages").await,
+        response_bytes(&f.claude, "/claude/v1/messages").await,
         "/claude-a/v1/messages"
     );
     start_client(&f.codex, &f.codex_home).await;
@@ -410,6 +404,10 @@ async fn listeners_selection_queues_and_concurrency_stay_independent_in_both_dir
         "/codex-b/v1/responses"
     );
     f.codex.stop().await.unwrap();
+    let released_listener = tokio::net::TcpListener::bind(("127.0.0.1", shared_port))
+        .await
+        .unwrap();
+    drop(released_listener);
 }
 
 #[tokio::test]
@@ -446,7 +444,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
     let payload = br#"{ "model":"claude-fixture", "max_tokens":17, "messages":[{"role":"user","content":"unchanged"}], "metadata":{"fixture":true} }"#.to_vec();
     let response = request(
         &f.claude,
-        "/v1/messages?beta=true&tag=a%2Fb&tag=two",
+        "/claude/v1/messages?beta=true&tag=a%2Fb&tag=two",
         payload.clone(),
         vec![
             ("content-type", "application/json"),
@@ -518,7 +516,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     let fixture_body = || br#"{"model":"claude-fixture"}"#.to_vec();
     let complete_response = request(
         &f.claude,
-        "/v1/messages?case=complete",
+        "/claude/v1/messages?case=complete",
         fixture_body(),
         vec![("content-type", "application/json")],
     )
@@ -548,7 +546,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     assert_eq!(model_health(&f.claude).failures, 0);
     let eof_response = request(
         &f.claude,
-        "/v1/messages?case=eof",
+        "/claude/v1/messages?case=eof",
         fixture_body(),
         vec![("content-type", "application/json")],
     )
@@ -571,7 +569,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     assert_eq!(model_health(&f.claude).failures, 1);
     let mut interrupted = request(
         &f.claude,
-        "/v1/messages?case=abrupt",
+        "/claude/v1/messages?case=abrupt",
         fixture_body(),
         vec![("content-type", "application/json")],
     )

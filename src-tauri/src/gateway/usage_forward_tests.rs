@@ -417,7 +417,7 @@ async fn http_usage_preserves_request_and_response_bytes() {
 
 #[tokio::test]
 async fn http_search_routes_charge_each_success_once_without_token_surcharge() {
-    for path in ["/v1/alpha/search", "/alpha/search"] {
+    for path in ["/v1/alpha/search", "/codex/alpha/search"] {
         for with_tokens in [false, true] {
             search_usage_case(path, 200, with_tokens).await;
         }
@@ -426,7 +426,7 @@ async fn http_search_routes_charge_each_success_once_without_token_surcharge() {
 
 #[tokio::test]
 async fn http_search_routes_keep_failed_searches_unpriced_even_with_tokens() {
-    for path in ["/v1/alpha/search", "/alpha/search"] {
+    for path in ["/v1/alpha/search", "/codex/alpha/search"] {
         for with_tokens in [false, true] {
             search_usage_case(path, 400, with_tokens).await;
         }
@@ -557,7 +557,7 @@ async fn claude_sse_preserves_wire_bytes_and_normalizes_cache_usage() {
     .await;
     let fixture = Fixture::new(ClientId::Claude, &[upstream.url("/deployment")]).await;
     fixture.start().await;
-    let response = request(&fixture.gateway, "/v1/messages?beta=fixture", body).await;
+    let response = request(&fixture.gateway, "/claude/v1/messages?beta=fixture", body).await;
     assert_eq!(response.status(), 200);
     assert_eq!(
         response.headers()["content-type"],
