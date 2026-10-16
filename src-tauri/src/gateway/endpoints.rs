@@ -17,6 +17,7 @@ use std::{
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_PINS: usize = 8192;
 const PIN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+const PIN_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,15 +51,18 @@ struct Pin {
 struct Pins {
     entries: HashMap<String, Pin>,
     error: bool,
-    // A failed directory sync may leave the replacement on disk. Retry that
-    // exact candidate before selecting again, without publishing it in memory.
-    pending: Option<HashMap<String, Pin>>,
+    // A failed first bind retains only its own choice, including when rename
+    // succeeded but directory sync failed. Other keys never retry this write.
+    pending: HashMap<String, Pin>,
+    refresh_attempts: HashMap<String, Instant>,
 }
 pub struct Service {
     samples: Mutex<HashMap<String, Batch>>,
     flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     permits: tokio::sync::Semaphore,
     pins: Mutex<Pins>,
+    write: Mutex<()>,
+    diagnostics: Mutex<Option<(super::ClientId, crate::events::Service)>>,
     responses: Mutex<HashMap<String, Pin>>,
     path: PathBuf,
 }
@@ -120,6 +124,8 @@ impl Service {
             flights: Mutex::new(HashMap::new()),
             permits: tokio::sync::Semaphore::new(4),
             pins: Mutex::new(pins),
+            write: Mutex::new(()),
+            diagnostics: Mutex::new(None),
             responses: Mutex::new(HashMap::new()),
             path,
         }
@@ -163,6 +169,33 @@ impl Service {
         self.samples.lock().unwrap().retain(|id, _| contains(id));
         self.flights.lock().unwrap().retain(|id, _| contains(id));
     }
+    pub fn diagnostics(&self, client: super::ClientId, events: crate::events::Service) {
+        *self.diagnostics.lock().unwrap() = Some((client, events));
+    }
+    fn refresh_failed(&self, provider: &Provider) {
+        use crate::events::{Action, Details, ErrorCode, Level, Phase, Reason, Record};
+        if let Some((client, events)) = self.diagnostics.lock().unwrap().as_ref() {
+            let mut event = Record::new(
+                Some(*client),
+                Some(&provider.id),
+                None,
+                Reason::ConfigConflict,
+                Action::Stopped,
+                None,
+                None,
+            );
+            event.level = Level::Warning;
+            event.error_code = Some(ErrorCode::EndpointAffinity);
+            event.details = Details {
+                local_code: Some(code::ENDPOINT_AFFINITY.into()),
+                message: Some("端点归属刷新保存失败，已沿用原归属".into()),
+                phase: Some(Phase::Admission),
+                counted_failure: Some(false),
+                ..Default::default()
+            };
+            events.emit(event);
+        }
+    }
     // Called on a blocking worker only when choosing a connection, never per frame.
     fn select(
         &self,
@@ -194,47 +227,58 @@ impl Service {
         }
         if let Some(thread) = thread {
             let key = pin_key(provider, "thread", thread);
-            let mut pins = self.pins.lock().unwrap();
-            if pins.error {
-                return Err(AppError::new(
-                    code::ENDPOINT_AFFINITY,
-                    "端点归属记录无法读取，已停止自动切换",
-                ));
-            }
-            self.commit_pending(&mut pins)?;
-            if let Some(pin) = pins.entries.get(&key).cloned() {
+            let existing = {
+                let pins = self.pins.lock().unwrap();
+                if pins.error {
+                    return Err(AppError::new(
+                        code::ENDPOINT_AFFINITY,
+                        "端点归属记录无法读取，已停止自动切换",
+                    ));
+                }
+                pins.entries.get(&key).cloned()
+            };
+            if let Some(pin) = existing {
                 let url = resolve(&pin.endpoint)?;
-                // Refresh active ownership without writing on every request.
-                if now().saturating_sub(pin.updated) >= 60_000 {
-                    let mut candidate = pins.entries.clone();
-                    candidate.insert(
-                        key,
-                        Pin {
-                            updated: now(),
-                            ..pin
-                        },
-                    );
-                    pins.pending = Some(candidate);
-                    self.commit_pending(&mut pins)?;
+                if now().saturating_sub(pin.updated) >= PIN_REFRESH.as_millis() as u64 {
+                    self.refresh(&key, provider);
                 }
                 return Ok(url);
             }
-            let url = if previous.is_none() && fresh {
-                self.preferred(provider, urls)
-            } else {
-                provider.base_url.clone()
+            // Only writers serialize. Existing ownership reads do not wait for
+            // another key's fsync, and a failed write cannot poison their path.
+            let _writer = self.write.lock().unwrap();
+            let pin = {
+                let mut pins = self.pins.lock().unwrap();
+                if let Some(pin) = pins.entries.get(&key) {
+                    return resolve(&pin.endpoint);
+                }
+                let time = now();
+                pins.pending
+                    .retain(|_, pin| time.saturating_sub(pin.updated) < PIN_RETENTION_MS);
+                if let Some(pin) = pins.pending.get(&key) {
+                    pin.clone()
+                } else {
+                    if pins.pending.len() >= MAX_PINS {
+                        return Err(AppError::new(
+                            code::ENDPOINT_AFFINITY,
+                            "待保存端点归属已达上限，未发送请求",
+                        ));
+                    }
+                    let url = if previous.is_none() && fresh {
+                        self.preferred(provider, urls)
+                    } else {
+                        provider.base_url.clone()
+                    };
+                    let pin = Pin {
+                        endpoint: digest(&url),
+                        updated: time,
+                    };
+                    pins.pending.insert(key.clone(), pin.clone());
+                    pin
+                }
             };
-            let mut candidate = pins.entries.clone();
-            trim_pins(&mut candidate, PIN_RETENTION_MS);
-            candidate.insert(
-                key.clone(),
-                Pin {
-                    endpoint: digest(&url),
-                    updated: now(),
-                },
-            );
-            pins.pending = Some(candidate);
-            self.commit_pending(&mut pins)?;
+            let url = resolve(&pin.endpoint)?;
+            self.persist_pin(&key, pin, true)?;
             return Ok(url);
         }
         Ok(if previous.is_none() {
@@ -243,16 +287,82 @@ impl Service {
             provider.base_url.clone()
         })
     }
-    fn commit_pending(&self, pins: &mut Pins) -> Result<()> {
-        let Some(candidate) = &pins.pending else {
-            return Ok(());
+    fn refresh(&self, key: &str, provider: &Provider) {
+        let Ok(_writer) = self.write.try_lock() else {
+            return;
         };
-        let raw = serde_json::to_vec(candidate)
-            .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存"))?;
+        let pin = {
+            let mut pins = self.pins.lock().unwrap();
+            let Some(pin) = pins.entries.get(key).cloned() else {
+                return;
+            };
+            if now().saturating_sub(pin.updated) < PIN_REFRESH.as_millis() as u64
+                || pins
+                    .refresh_attempts
+                    .get(key)
+                    .is_some_and(|last| last.elapsed() < PIN_REFRESH)
+            {
+                return;
+            }
+            pins.refresh_attempts.insert(key.to_owned(), Instant::now());
+            Pin {
+                updated: now(),
+                ..pin
+            }
+        };
+        if self.persist_pin(key, pin, false).is_err() {
+            self.refresh_failed(provider);
+        }
+    }
+    /// Caller owns the writer lock. Serialize a borrowed view, release the state
+    /// lock for disk I/O, then publish only the successfully persisted changes.
+    fn persist_pin(&self, key: &str, pin: Pin, trim: bool) -> Result<()> {
+        let (raw, removed) = {
+            let pins = self.pins.lock().unwrap();
+            let mut candidate: HashMap<&str, &Pin> = pins
+                .entries
+                .iter()
+                .map(|(key, pin)| (key.as_str(), pin))
+                .collect();
+            if trim {
+                let time = now();
+                candidate.retain(|_, pin| {
+                    time.saturating_sub(pin.updated) < PIN_RETENTION_MS
+                        && pin.updated <= time.saturating_add(60_000)
+                });
+                while candidate.len() >= MAX_PINS {
+                    let oldest = candidate
+                        .iter()
+                        .min_by_key(|(_, pin)| pin.updated)
+                        .map(|(key, _)| *key);
+                    if let Some(oldest) = oldest {
+                        candidate.remove(oldest);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            candidate.insert(key, &pin);
+            let removed: Vec<_> = pins
+                .entries
+                .keys()
+                .filter(|key| !candidate.contains_key(key.as_str()))
+                .cloned()
+                .collect();
+            let raw = serde_json::to_vec(&candidate)
+                .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存"))?;
+            (raw, removed)
+        };
         storage::atomic_write(&self.path, &raw, None).map_err(|_| {
             AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求")
         })?;
-        pins.entries = pins.pending.take().expect("pending ownership persisted");
+        let mut pins = self.pins.lock().unwrap();
+        for removed in removed {
+            pins.entries.remove(&removed);
+            pins.refresh_attempts.remove(&removed);
+        }
+        pins.entries.insert(key.to_owned(), pin);
+        pins.pending.remove(key);
         Ok(())
     }
     pub fn remember(&self, provider: &Provider, response: &str) {

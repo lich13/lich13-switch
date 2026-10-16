@@ -305,6 +305,7 @@ impl Gateway {
         }
     }
     pub fn set_diagnostics(&self, events: crate::events::Service) {
+        self.0.endpoints.diagnostics(self.0.client, events.clone());
         self.0
             .compaction
             .notifications(self.0.client, events.clone());
