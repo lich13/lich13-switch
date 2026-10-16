@@ -83,6 +83,10 @@ pub fn register(c: &Connection) -> Result<()> {
         }),
     )
 }
+/// Identical expression for the index and its filters; aliases only qualify columns.
+fn operation_expression(body: &str, root: &str) -> String {
+    format!("CASE WHEN json_extract({body},'{root}.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract({body},'{root}.attempts[#-1].operation')='compaction' OR json_extract({body},'{root}.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END")
+}
 pub fn schema(c: &Connection) -> Result<()> {
     db(c.execute_batch("CREATE TABLE IF NOT EXISTS usage_metrics(
       kind INTEGER NOT NULL,owner TEXT NOT NULL,ordinal INTEGER NOT NULL,
@@ -98,12 +102,12 @@ pub fn schema(c: &Connection) -> Result<()> {
       CREATE INDEX IF NOT EXISTS usage_filter_provider ON records(provider,time DESC);
       CREATE INDEX IF NOT EXISTS usage_filter_model ON records(model,time DESC);
       CREATE INDEX IF NOT EXISTS usage_page ON records(effective,time DESC);
-      CREATE INDEX IF NOT EXISTS usage_filter_operation ON records(
-        CASE WHEN json_extract(body,'$.attempts[#-1].operation')='web_search' THEN 'web_search'
-        WHEN json_extract(body,'$.attempts[#-1].operation')='compaction' OR json_extract(body,'$.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END,
-        time DESC);
       CREATE INDEX IF NOT EXISTS usage_duplicate ON records(duplicate_of,source);
-      CREATE INDEX IF NOT EXISTS daily_time ON daily(day);"))
+      CREATE INDEX IF NOT EXISTS daily_time ON daily(day);"))?;
+    db(c.execute_batch(&format!(
+        "CREATE INDEX IF NOT EXISTS usage_filter_operation ON records({},time DESC);",
+        operation_expression("body", "$")
+    )))
 }
 
 /// The old secondary indexes repeated each 64-character record ID five times.
@@ -112,19 +116,25 @@ pub(super) fn compact_indexes(c: &Connection) -> rusqlite::Result<()> {
     let tx = c.unchecked_transaction()?;
     // VACUUM can defer while a reader is active. Do not rebuild these indexes
     // again on each retry once their redundant ID column has been removed.
+    let operation_columns = format!("{},time DESC", operation_expression("body", "$"));
     for (name, columns) in [
         ("usage_filter_client", "client,time DESC"),
         ("usage_filter_provider", "provider,time DESC"),
         ("usage_filter_model", "model,time DESC"),
         ("usage_page", "effective,time DESC"),
-        ("usage_filter_operation", "CASE WHEN json_extract(body,'$.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract(body,'$.attempts[#-1].operation')='compaction' OR json_extract(body,'$.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END,time DESC"),
+        ("usage_filter_operation", operation_columns.as_str()),
     ] {
         let redundant: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_index_xinfo(?1) WHERE name='id' AND key=1)",
-            [name], |row| row.get(0),
+            [name],
+            |row| row.get(0),
         )?;
-        if redundant { tx.execute_batch(&format!("DROP INDEX {name};"))?; }
-        tx.execute_batch(&format!("CREATE INDEX IF NOT EXISTS {name} ON records({columns});"))?;
+        if redundant {
+            tx.execute_batch(&format!("DROP INDEX {name};"))?;
+        }
+        tx.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS {name} ON records({columns});"
+        ))?;
     }
     let without_rowid: bool = tx.query_row(
         "SELECT wr FROM pragma_table_list WHERE schema='main' AND name='usage_metrics'",
@@ -304,7 +314,10 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
         }
     }
     if let Some(operation) = f.operation.as_deref().filter(|v| !v.is_empty()) {
-        terms.push(format!("CASE WHEN json_extract({alias}.body,'$.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract({alias}.body,'$.attempts[#-1].operation')='compaction' OR json_extract({alias}.body,'$.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END=?"));
+        terms.push(format!(
+            "{}=?",
+            operation_expression(&format!("{alias}.body"), "$")
+        ));
         args.push(Value::Text(operation.into()));
     }
     if status {
@@ -377,7 +390,7 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
         }
     }
     if let Some(operation) = f.operation.as_deref().filter(|v| !v.is_empty()) {
-        daily.push("CASE WHEN json_extract(d.body,'$.example.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract(d.body,'$.example.attempts[#-1].operation')='compaction' OR json_extract(d.body,'$.example.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END=?".into());
+        daily.push(format!("{}=?", operation_expression("d.body", "$.example")));
         args.push(Value::Text(operation.into()));
     }
     let eligible = eligible(f, "r", false);
