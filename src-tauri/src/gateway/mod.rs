@@ -407,13 +407,13 @@ impl Gateway {
             .err()
             .map(|e| e.message);
         let upgrade_pending = error.is_some();
-        let (mut store, revision) = Store::load(&data.join("gateway.json"))?;
-        if revision == "missing" {
-            store.settings.port = client.port();
-        }
+        let (store, revision) = Store::load(&data.join("gateway.json"))?;
         let registry = match shared {
             Some(n) => n,
-            None => Arc::new(registry::Registry::new(data.clone(), store.settings.port)?),
+            None => Arc::new(registry::Registry::new(
+                data.clone(),
+                (revision != "missing").then_some(store.settings.port),
+            )?),
         };
         let spool = storage::private_tempdir(&data, "gateway-spool-")?;
         let (events, _) = broadcast::channel(32);
@@ -581,6 +581,9 @@ impl Gateway {
             .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
     }
     fn view_revision(&self, s: &Inner) -> String {
+        self.view_revision_with_listener(s, &self.listener_view().revision)
+    }
+    fn view_revision_with_listener(&self, s: &Inner, listener_revision: &str) -> String {
         // File revisions also include resume checkpoints, which change after successful
         // auto-routing. Only configuration/lifecycle changes invalidate an editor.
         // Keep s.revision separate for the on-disk transaction checks below.
@@ -602,7 +605,7 @@ impl Gateway {
             // Hash the listener revision separately below (serde tuples are bounded).
         );
         storage::digest(
-            &serde_json::to_vec(&(editable, self.listener_view().revision))
+            &serde_json::to_vec(&(editable, listener_revision))
                 .expect("serializable gateway configuration"),
         )
     }
@@ -1277,7 +1280,7 @@ impl Gateway {
         }
         let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
-        let (port, token) = {
+        let token = {
             let s = self.0.inner.lock().unwrap();
             if expected != self.view_revision(&s) {
                 return Err(AppError::new(code::CONFLICT, "网关设置已变化，请重试"));
@@ -1298,16 +1301,17 @@ impl Gateway {
             if s.store.providers.is_empty() {
                 return Err(AppError::new(code::PROVIDER, "请先添加供应商"));
             }
-            (
-                self.0.registry.listener.view().port,
-                s.store.local_token.clone(),
-            )
+            s.store.local_token.clone()
         };
         let listener = self.0.registry.listener.prepare().await?;
+        self.0.registry.update_ports();
+        if listener.revision != listener.previous_revision {
+            self.0.registry.changed();
+        }
         self.0.registry.listener.check_revision()?;
         {
             let s = self.0.inner.lock().unwrap();
-            if self.view_revision(&s) != expected {
+            if self.view_revision_with_listener(&s, &listener.previous_revision) != expected {
                 return Err(AppError::new(
                     code::CONFLICT,
                     "绑定端口期间设置已变化，请重试",
@@ -1317,7 +1321,7 @@ impl Gateway {
         let (tx, _rx) = watch::channel(false);
         {
             let mut s = self.0.inner.lock().unwrap();
-            if self.view_revision(&s) != expected {
+            if self.view_revision_with_listener(&s, &listener.previous_revision) != expected {
                 return Err(AppError::new(code::CONFLICT, "设置已变化，请重试"));
             }
             let p = Self::exit_provider(&s.store, None)?;
@@ -1325,6 +1329,11 @@ impl Gateway {
             let (current, original_pair) =
                 takeover::read_connection(self.0.client, home, &s.store.connection)?;
             let mut next = s.store.clone();
+            for provider in &next.providers {
+                for url in Self::endpoint_urls(&next, provider) {
+                    model::base_url(&url, listener.port)?;
+                }
+            }
             if self.0.client == ClientId::Grok {
                 next.grok_resume = Some(grok_config::fingerprint(&grok_config::read(home)?.1)?);
             }
@@ -1347,7 +1356,7 @@ impl Gateway {
                 self.0.client,
                 &self.0.data,
                 home,
-                port,
+                listener.port,
                 &token,
                 exit,
                 config_revision.unwrap_or(&current),
@@ -1359,7 +1368,7 @@ impl Gateway {
             s.last_successful = None;
             s.running = true;
             s.shutdown = Some(tx);
-            s.error = None;
+            s.error = listener.notice;
             self.0.admission.configure(&s.store.providers, true);
             self.0
                 .admission
@@ -1369,7 +1378,7 @@ impl Gateway {
         self.0
             .registry
             .listener
-            .activate(self.0.client, listener, self.0.registry.clone());
+            .activate(self.0.client, listener.socket, self.0.registry.clone());
         self.0.registry.changed();
         Ok(self.view())
     }
@@ -1522,10 +1531,7 @@ impl Gateway {
                 return Err(e);
             }
             // Recovery may have completed a store/config transaction interrupted by an I/O failure.
-            let (mut store, revision) = Store::load(&self.0.data.join("gateway.json"))?;
-            if revision == "missing" {
-                store.settings.port = self.0.client.port();
-            }
+            let (store, revision) = Store::load(&self.0.data.join("gateway.json"))?;
             s.store = store;
             s.revision = revision;
             if let Some(tx) = s.shutdown.take() {

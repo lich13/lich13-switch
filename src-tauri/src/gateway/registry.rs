@@ -11,7 +11,7 @@ pub struct Registry {
     pub listener: Listener,
 }
 impl Registry {
-    pub fn new(data: PathBuf, port: u16) -> Result<Self> {
+    pub fn new(data: PathBuf, port: Option<u16>) -> Result<Self> {
         let listener = Listener::load(data.join("gateway-listener.json"), port)?;
         let port = listener.view().port;
         Ok(Self {

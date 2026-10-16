@@ -1,5 +1,5 @@
 //! One loopback listener; client state and cancellation remain in each Gateway.
-use super::{forward, registry::Registry, ClientId};
+use super::{client::DEFAULT_SHARED_PORT, forward, registry::Registry, ClientId};
 use crate::{
     errors::code,
     storage::{self, AppError, Result},
@@ -27,6 +27,7 @@ pub struct View {
 }
 
 struct State {
+    version: u32,
     port: u16,
     revision: String,
     clients: Vec<ClientId>,
@@ -37,18 +38,25 @@ pub struct Listener {
     path: PathBuf,
     state: Mutex<State>,
 }
+pub struct Prepared {
+    pub socket: Option<TcpListener>,
+    pub port: u16,
+    pub revision: String,
+    pub previous_revision: String,
+    pub notice: Option<String>,
+}
 impl Listener {
-    pub fn load(path: PathBuf, legacy_codex_port: u16) -> Result<Self> {
+    pub fn load(path: PathBuf, legacy_codex_port: Option<u16>) -> Result<Self> {
         let raw = storage::read_optional(&path)?;
         let config = match raw.as_deref() {
             Some(raw) => serde_json::from_slice::<Config>(raw)
                 .map_err(|_| AppError::new(code::SETTINGS, "共享网关配置损坏，已保留原文件"))?,
             None => Config {
-                version: 1,
-                port: legacy_codex_port,
+                version: 2,
+                port: legacy_codex_port.unwrap_or(DEFAULT_SHARED_PORT),
             },
         };
-        if config.version != 1 || config.port == 0 {
+        if !matches!(config.version, 1 | 2) || config.port == 0 {
             return Err(AppError::new(code::SETTINGS, "共享网关配置版本或端口无效"));
         }
         let revision = if raw.is_none() {
@@ -62,6 +70,7 @@ impl Listener {
         Ok(Self {
             path,
             state: Mutex::new(State {
+                version: config.version,
                 port: config.port,
                 revision,
                 clients: Vec::new(),
@@ -105,26 +114,73 @@ impl Listener {
         if port == 0 {
             return Err(AppError::new(code::SETTINGS, "本地端口必须为 1–65535"));
         }
-        let bytes = serde_json::to_vec_pretty(&Config { version: 1, port })
+        let bytes = serde_json::to_vec_pretty(&Config { version: 2, port })
             .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;
         storage::atomic_write(&self.path, &bytes, Some(&s.revision))?;
         s.port = port;
+        s.version = 2;
         s.revision = storage::digest(&bytes);
         Ok(())
     }
     /// Caller holds Registry::lifecycle until config commit and activation finish.
-    pub async fn prepare(&self) -> Result<Option<TcpListener>> {
+    pub async fn prepare(&self) -> Result<Prepared> {
+        self.prepare_at(DEFAULT_SHARED_PORT, ClientId::Codex.legacy_port())
+            .await
+    }
+    async fn prepare_at(&self, default_port: u16, legacy_default_port: u16) -> Result<Prepared> {
         self.check_revision()?;
         let view = self.view();
+        let version = self.state.lock().unwrap().version;
         if !view.running_clients.is_empty() {
-            return Ok(None);
+            return Ok(Prepared {
+                socket: None,
+                port: view.port,
+                revision: view.revision.clone(),
+                previous_revision: view.revision,
+                notice: None,
+            });
         }
-        TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, view.port))
-            .await
-            .map(Some)
-            .map_err(|_| {
-                AppError::new(code::PORT, "无法绑定共享本地端口，请检查端口占用或修改端口")
-            })
+        let migrate_default = version == 1 && view.port == legacy_default_port;
+        let target = if migrate_default {
+            default_port
+        } else {
+            view.port
+        };
+        let (socket, notice) =
+            match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, target)).await {
+                Ok(socket) => (socket, None),
+                Err(_) if migrate_default => (
+                    TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, view.port))
+                        .await
+                        .map_err(|_| Self::port_error())?,
+                    Some("新默认端口不可用，已保留原共享端口".to_owned()),
+                ),
+                Err(_) => return Err(Self::port_error()),
+            };
+        self.check_revision()?;
+        let port = socket.local_addr().map_err(storage::io_error)?.port();
+        let revision = if version == 1 {
+            let bytes = serde_json::to_vec_pretty(&Config { version: 2, port })
+                .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;
+            storage::atomic_write(&self.path, &bytes, Some(&view.revision))?;
+            let mut state = self.state.lock().unwrap();
+            state.port = port;
+            state.version = 2;
+            state.revision = storage::digest(&bytes);
+            state.revision.clone()
+        } else {
+            view.revision.clone()
+        };
+        Ok(Prepared {
+            socket: Some(socket),
+            port,
+            revision,
+            previous_revision: view.revision,
+            notice,
+        })
+    }
+    fn port_error() -> AppError {
+        AppError::new(code::PORT, "无法绑定共享本地端口，请检查端口占用或修改端口")
     }
     pub fn activate(
         &self,
@@ -160,6 +216,10 @@ impl Listener {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "listener_migration_tests.rs"]
+mod migration_tests;
 
 /// Match a complete path component, never infer the client from a model or token.
 pub fn route(uri: &hyper::Uri) -> Option<(ClientId, hyper::Uri)> {

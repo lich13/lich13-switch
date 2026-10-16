@@ -94,7 +94,7 @@ fn default_max_waiting() -> usize {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            port: 15722,
+            port: super::client::DEFAULT_SHARED_PORT,
             max_retries: DEFAULT_MAX_RETRIES,
             failure_threshold: DEFAULT_FAILURE_THRESHOLD,
             transient_failure_threshold: default_transient_failure_threshold(),

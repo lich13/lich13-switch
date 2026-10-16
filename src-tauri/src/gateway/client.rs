@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_SHARED_PORT: u16 = 43721;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ClientId {
@@ -17,7 +19,7 @@ impl ClientId {
             Self::Grok => "Grok Build",
         }
     }
-    pub fn port(self) -> u16 {
+    pub fn legacy_port(self) -> u16 {
         match self {
             Self::Codex => 15722,
             Self::Claude => 15723,

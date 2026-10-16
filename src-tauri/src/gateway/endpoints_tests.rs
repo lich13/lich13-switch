@@ -72,7 +72,7 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
         "ftp://secondary.example.invalid/v1",
         "https://user:pass@secondary.example.invalid/v1",
         "https://secondary.example.invalid/v1?fixture=1",
-        "http://localhost:15722/v1",
+        "http://localhost:43721/v1",
     ] {
         assert!(
             model::endpoint_urls(

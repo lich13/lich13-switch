@@ -202,7 +202,7 @@ fn listener_inherits_legacy_codex_port_and_persists_its_independent_revision() {
 
     let listener_file = fs::read(data.join("gateway-listener.json")).unwrap();
     let persisted: Value = serde_json::from_slice(&listener_file).unwrap();
-    assert_eq!(persisted["version"], 1);
+    assert_eq!(persisted["version"], 2);
     assert_eq!(persisted["port"], next_port);
     let saved_revision = updated.revision;
 

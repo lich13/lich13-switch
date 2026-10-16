@@ -10,8 +10,8 @@ export const gatewayDemo: GatewayState = {
   clientId: "codex",
   revision: "preview-gateway",
   running: false,
-  address: "http://127.0.0.1:15722/codex/v1",
-  listener: { port: 15722, revision: "preview-listener", runningClients: [] },
+  address: "http://127.0.0.1:43721/codex/v1",
+  listener: { port: 43721, revision: "preview-listener", runningClients: [] },
   mode: "manual",
   selected: "primary",
   lastSuccessful: null,
@@ -20,7 +20,7 @@ export const gatewayDemo: GatewayState = {
   configState: "provider",
   configError: null,
   settings: {
-    port: 15722,
+    port: 43721,
     maxRetries: 3,
     failureThreshold: 4,
     transientFailureThreshold: 6,
@@ -116,7 +116,7 @@ export const claudeGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo),
   clientId: "claude",
   revision: "preview-claude",
-  address: "http://127.0.0.1:15722/claude",
+  address: "http://127.0.0.1:43721/claude",
   settings: { ...gatewayDemo.settings },
   selected: "claude-primary",
   configProvider: "claude-primary",
@@ -155,7 +155,7 @@ if (densePreview) {
 }
 export const grokGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo), clientId: "grok", revision: "preview-grok",
-  address: "http://127.0.0.1:15722/grok/v1", settings: { ...gatewayDemo.settings },
+  address: "http://127.0.0.1:43721/grok/v1", settings: { ...gatewayDemo.settings },
   handoffWaiting: [], providers: gatewayDemo.providers.map(p => ({ ...structuredClone(p), protocol: "responses", handoffAfterCompaction: false, takeNewThreads: false, reservedThreads: 0 })),
 };
 function syncListener(port = gatewayDemo.settings.port, changed = false) {
