@@ -50,6 +50,9 @@ struct Pin {
 struct Pins {
     entries: HashMap<String, Pin>,
     error: bool,
+    // A failed directory sync may leave the replacement on disk. Retry that
+    // exact candidate before selecting again, without publishing it in memory.
+    pending: Option<HashMap<String, Pin>>,
 }
 pub struct Service {
     samples: Mutex<HashMap<String, Batch>>,
@@ -198,18 +201,21 @@ impl Service {
                     "端点归属记录无法读取，已停止自动切换",
                 ));
             }
+            self.commit_pending(&mut pins)?;
             if let Some(pin) = pins.entries.get(&key).cloned() {
                 let url = resolve(&pin.endpoint)?;
                 // Refresh active ownership without writing on every request.
                 if now().saturating_sub(pin.updated) >= 60_000 {
-                    pins.entries.insert(
+                    let mut candidate = pins.entries.clone();
+                    candidate.insert(
                         key,
                         Pin {
                             updated: now(),
                             ..pin
                         },
                     );
-                    self.persist(&mut pins)?;
+                    pins.pending = Some(candidate);
+                    self.commit_pending(&mut pins)?;
                 }
                 return Ok(url);
             }
@@ -218,18 +224,17 @@ impl Service {
             } else {
                 provider.base_url.clone()
             };
-            trim_pins(&mut pins.entries, PIN_RETENTION_MS);
-            pins.entries.insert(
+            let mut candidate = pins.entries.clone();
+            trim_pins(&mut candidate, PIN_RETENTION_MS);
+            candidate.insert(
                 key.clone(),
                 Pin {
                     endpoint: digest(&url),
                     updated: now(),
                 },
             );
-            if let Err(error) = self.persist(&mut pins) {
-                pins.entries.remove(&key);
-                return Err(error);
-            }
+            pins.pending = Some(candidate);
+            self.commit_pending(&mut pins)?;
             return Ok(url);
         }
         Ok(if previous.is_none() {
@@ -238,11 +243,17 @@ impl Service {
             provider.base_url.clone()
         })
     }
-    fn persist(&self, pins: &mut Pins) -> Result<()> {
-        let raw = serde_json::to_vec(&pins.entries)
+    fn commit_pending(&self, pins: &mut Pins) -> Result<()> {
+        let Some(candidate) = &pins.pending else {
+            return Ok(());
+        };
+        let raw = serde_json::to_vec(candidate)
             .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存"))?;
-        storage::atomic_write(&self.path, &raw, None)
-            .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求"))
+        storage::atomic_write(&self.path, &raw, None).map_err(|_| {
+            AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求")
+        })?;
+        pins.entries = pins.pending.take().expect("pending ownership persisted");
+        Ok(())
     }
     pub fn remember(&self, provider: &Provider, response: &str) {
         if response.is_empty() || response.len() > 1024 {
@@ -492,6 +503,9 @@ impl Gateway {
     }
 }
 
+#[cfg(test)]
+#[path = "endpoints_io_tests.rs"]
+mod io_tests;
 #[cfg(test)]
 #[path = "endpoints_tests.rs"]
 mod tests;

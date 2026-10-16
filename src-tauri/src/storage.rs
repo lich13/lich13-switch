@@ -285,7 +285,7 @@ mod tests;
 
 // Thread-local, single-use faults leave parallel tests and release builds alone.
 #[cfg(test)]
-mod faults {
+pub(crate) mod faults {
     use super::{io_error, AppError, Result};
     use std::cell::Cell;
     #[derive(Clone, Copy, PartialEq, Eq)]
