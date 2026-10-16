@@ -54,6 +54,8 @@ mod protocol;
 mod protocol_tests;
 mod quota;
 mod replay;
+#[cfg(test)]
+mod replay_boundary_tests;
 mod replay_policy;
 mod routing;
 mod thread_capacity;
