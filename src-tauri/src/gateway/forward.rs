@@ -899,6 +899,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         previous_provider = Some(admission.route.provider.id.clone());
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(stream_hint);
+        protocol.diagnostics(&gateway, &route.provider.id, model.as_deref());
         protocol.attach_ownership(ownership.clone(), &route.provider.id);
         protocol.attach_thread(wait_budget.thread.clone());
         protocol.request_headers(&parts.headers);

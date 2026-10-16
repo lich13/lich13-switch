@@ -21,6 +21,7 @@ export const ErrorCodes = {
   Cli: "CLI",
   Client: "CLIENT",
   ClientDisconnected: "CLIENT_DISCONNECTED",
+  RequestInterrupted: "REQUEST_INTERRUPTED",
   ClientError: "CLIENT_ERROR",
   Clipboard: "CLIPBOARD",
   CliMissing: "CLI_MISSING",

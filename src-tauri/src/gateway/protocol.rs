@@ -563,6 +563,13 @@ pub struct Protocol {
     ownership: Option<(std::sync::Arc<super::compaction::Lease>, String)>,
     stop: Option<tokio::sync::watch::Receiver<bool>>,
     downstream: Option<tokio::sync::watch::Receiver<bool>>,
+    diagnostics: Option<(
+        crate::events::Service,
+        super::ClientId,
+        String,
+        Option<String>,
+    )>,
+    end_reason: Option<String>,
 }
 impl Protocol {
     pub fn new(stream: bool) -> Self {
@@ -588,6 +595,8 @@ impl Protocol {
             ownership: None,
             stop: None,
             downstream: None,
+            diagnostics: None,
+            end_reason: None,
         }
     }
     pub fn attach_thread(
@@ -595,6 +604,33 @@ impl Protocol {
         thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
     ) {
         self.thread = thread;
+    }
+    pub fn diagnostics(&mut self, gateway: &super::Gateway, provider: &str, model: Option<&str>) {
+        self.diagnostics = gateway
+            .0
+            .diagnostics
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|service| {
+                (
+                    service,
+                    gateway.client_id(),
+                    provider.into(),
+                    model.map(str::to_owned),
+                )
+            });
+    }
+    pub fn downstream_closed(&mut self, activity: &super::wire_progress::Activity, writing: bool) {
+        let error = activity.error_code();
+        self.delivery.failed(if error != 0 {
+            error
+        } else if writing {
+            7
+        } else {
+            5
+        });
+        self.finish(None, code::CLIENT_DISCONNECTED);
     }
     pub fn request_received(&mut self, at: i64) {
         self.transfer.received_at = Some(at);
@@ -803,6 +839,14 @@ impl Protocol {
             return;
         }
         self.finished = true;
+        if self.transfer.last_progress_ms.is_none() && self.transfer.first_byte_at.is_some() {
+            self.transfer.last_progress_ms = Some(
+                self.last_progress
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+            );
+        }
         self.delivery.event(match reason {
             code::OK => "upstream_eof",
             code::STREAM_INTERRUPTED => "upstream_read_failed",
@@ -884,6 +928,12 @@ impl Protocol {
     }
     fn record_end(&mut self, reason: &str) {
         use crate::usage::model::{EndCause, EndMetadata};
+        if !matches!(
+            self.end_reason.as_deref(),
+            Some(code::CANCELLED | code::GATEWAY_STOPPED)
+        ) {
+            self.end_reason = Some(reason.into());
+        }
         let cause = match reason {
             _ if self.terminal_received => match self.observation.terminal {
                 Some(Terminal::Success | Terminal::Limited) => EndCause::Completed,
@@ -929,6 +979,14 @@ impl Protocol {
     }
     fn snapshot_delivery(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
+        if self.transfer.timeout_phase.is_none() && self.transfer.first_byte_at.is_some() {
+            self.transfer.last_progress_ms = Some(
+                self.last_progress
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+            );
+        }
         self.transfer.ended_at = crate::usage::model::now();
         self.transfer.downstream_bytes = self.delivery.bytes.load(Relaxed);
         self.transfer.terminal_handed_off = self.delivery.terminal.load(Relaxed);
@@ -959,6 +1017,111 @@ impl Protocol {
             _ => self.transfer.downstream_error.clone(),
         };
     }
+    fn emit_interruption(&self) {
+        use crate::events::{Action, Details, HealthScope, Level, Phase, Reason, Record};
+        let Some((service, client, provider, model)) = &self.diagnostics else {
+            return;
+        };
+        let (local, message, status_only) = match self.end_reason.as_deref() {
+            Some(code::GATEWAY_STOPPED) => (code::GATEWAY_STOPPED, "网关停止，已结束转发", true),
+            Some(code::CANCELLED) => (code::CANCELLED, "收到明确取消指令，已结束转发", true),
+            _ => match self.transfer.downstream_error.as_deref() {
+                Some("DOWNSTREAM_PEER_RESET") => (
+                    "DOWNSTREAM_PEER_RESET",
+                    "下游连接被重置，未确认客户端主动取消",
+                    false,
+                ),
+                Some("DOWNSTREAM_WRITE_FAILED") => {
+                    ("DOWNSTREAM_WRITE_FAILED", "向下游写入失败", false)
+                }
+                Some("DOWNSTREAM_PROTOCOL_ERROR") => {
+                    ("DOWNSTREAM_PROTOCOL_ERROR", "下游协议处理失败", false)
+                }
+                Some("DOWNSTREAM_WRITE_TIMEOUT") => (
+                    "DOWNSTREAM_WRITE_TIMEOUT",
+                    "下游持续未接收数据，写入超时",
+                    false,
+                ),
+                Some("DOWNSTREAM_CONNECTION_ERROR") => (
+                    "DOWNSTREAM_CONNECTION_ERROR",
+                    "下游连接异常，关闭原因未确认",
+                    false,
+                ),
+                Some("DOWNSTREAM_CANCELLED") => (
+                    "DOWNSTREAM_CANCELLED",
+                    "HTTP 传输被取消，未确认客户端主动取消",
+                    false,
+                ),
+                Some("DOWNSTREAM_CLOSED") => (
+                    "DOWNSTREAM_CLOSED",
+                    "下游连接关闭，未确认客户端主动取消",
+                    false,
+                ),
+                Some("RESPONSE_BODY_DROPPED") => (
+                    "RESPONSE_BODY_DROPPED",
+                    "响应体被释放，关闭原因未确认",
+                    false,
+                ),
+                Some(code::CLIENT_DISCONNECTED) => (
+                    code::CLIENT_DISCONNECTED,
+                    "下游响应消费者结束，关闭原因未确认",
+                    false,
+                ),
+                _ => return,
+            },
+        };
+        // Closing an idle, successfully delivered WebSocket turn is expected.
+        if self.status == Some(101)
+            && self.succeeded()
+            && self.transfer.terminal_handed_off
+            && matches!(local, "DOWNSTREAM_CLOSED" | code::CLIENT_DISCONNECTED)
+        {
+            return;
+        }
+        let mut record = Record::new(
+            Some(*client),
+            Some(provider),
+            model.as_deref(),
+            Reason::RequestInterrupted,
+            if self.transfer.downstream_bytes > 0 {
+                Action::NotRetried
+            } else {
+                Action::Returned
+            },
+            self.status,
+            None,
+        );
+        record.level = if status_only {
+            Level::Info
+        } else {
+            Level::Warning
+        };
+        record.details = Details {
+            health_scope: Some(HealthScope::Request),
+            local_code: Some(local.into()),
+            message: Some(message.into()),
+            phase: Some(if self.status == Some(101) {
+                Phase::WsSend
+            } else {
+                Phase::Stream
+            }),
+            counted_failure: Some(false),
+            delivery: Some(crate::events::DeliveryEvidence {
+                duration_ms: self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                upstream_bytes: self.transfer.upstream_bytes,
+                handed_bytes: self.transfer.downstream_bytes,
+                terminal_received: self.terminal_received,
+                terminal_handed_off: self.transfer.terminal_handed_off,
+                request_hash: self.transfer.client_request_hash.clone(),
+                response_hash: self.transfer.response_hash.clone(),
+            }),
+            timeout_phase: self.transfer.timeout_phase.clone(),
+            timeout_seconds: self.transfer.timeout_seconds,
+            last_progress_ms: self.transfer.last_progress_ms,
+            ..Default::default()
+        };
+        service.emit(record);
+    }
 }
 impl Drop for Protocol {
     fn drop(&mut self) {
@@ -973,6 +1136,7 @@ impl Drop for Protocol {
         };
         self.finish(None, reason);
         self.snapshot_delivery();
+        self.emit_interruption();
         if let Some(usage) = &mut self.usage {
             usage.transfer(self.transfer.clone());
         }

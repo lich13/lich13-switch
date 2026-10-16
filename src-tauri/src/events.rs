@@ -6,7 +6,7 @@ use crate::{
     gateway::ClientId,
     storage::{self, AppError, Result},
 };
-pub use details::{safe_message, CircuitEvidence, Details, HealthScope, Phase};
+pub use details::{safe_message, CircuitEvidence, DeliveryEvidence, Details, HealthScope, Phase};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
@@ -42,6 +42,7 @@ pub enum Reason {
     AccountSync,
     ProtocolError,
     ThreadHandoff,
+    RequestInterrupted,
 }
 impl Reason {
     pub fn notifiable(self, _action: Action) -> bool {
@@ -64,6 +65,7 @@ impl Reason {
             Self::AccountSync => "账号同步异常",
             Self::ProtocolError => "上游协议返回错误",
             Self::ThreadHandoff => "线程已接管",
+            Self::RequestInterrupted => "请求交付提前结束",
         }
     }
     pub fn code(self) -> ErrorCode {
@@ -83,6 +85,7 @@ impl Reason {
             Self::AccountSync => ErrorCode::AccountSyncError,
             Self::ProtocolError => ErrorCode::ProtocolError,
             Self::ThreadHandoff => ErrorCode::ThreadHandoff,
+            Self::RequestInterrupted => ErrorCode::RequestInterrupted,
         }
     }
 }
@@ -111,7 +114,7 @@ impl Action {
             Self::Recovered => "已恢复可用",
             Self::Reconnecting => "等待后重新连接",
             Self::RetryingSame => "原供应商等待重试",
-            Self::NotRetried => "已输出，未重试",
+            Self::NotRetried => "响应已开始，未重试",
         }
     }
 }
@@ -188,6 +191,13 @@ pub struct Record {
     pub details: Details,
 }
 impl Record {
+    fn merge_seconds(&self) -> u64 {
+        if self.reason == Reason::RequestInterrupted {
+            60
+        } else {
+            MERGE
+        }
+    }
     pub fn new(
         client_id: Option<ClientId>,
         provider_id: Option<&str>,
@@ -332,6 +342,8 @@ impl Record {
         let mut other_details = other.details.clone();
         details.last_progress_ms = None;
         other_details.last_progress_ms = None;
+        details.delivery = None;
+        other_details.delivery = None;
         self.client_id == other.client_id
             && self.provider_id == other.provider_id
             && self.model == other.model
@@ -429,7 +441,8 @@ fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
     } else if matches!(
         record.reason,
         Reason::Failover | Reason::Recovered | Reason::ThreadHandoff
-    ) {
+    ) || (record.reason == Reason::RequestInterrupted && record.level == Level::Info)
+    {
         Category::Status
     } else {
         Category::OrdinaryError
@@ -551,16 +564,18 @@ impl Service {
                             .map(|cause| cause.id.clone());
                     }
                     notify = r.reason.notifiable(r.action);
-                    if let Some(old) =
-                        journal.records.iter_mut().rev().find(|old| {
-                            old.same(&r) && r.last_at.saturating_sub(old.first_at) < MERGE
-                        })
-                    {
+                    if let Some(old) = journal.records.iter_mut().rev().find(|old| {
+                        old.same(&r) && r.last_at.saturating_sub(old.first_at) < r.merge_seconds()
+                    }) {
                         old.last_at = r.last_at;
                         old.count = old.count.saturating_add(1);
                         old.status = r.status;
                         old.action = r.action;
                         old.attempt = r.attempt;
+                        if r.reason == Reason::RequestInterrupted {
+                            old.details.delivery = r.details.delivery;
+                            old.details.last_progress_ms = r.details.last_progress_ms;
+                        }
                         changed = Some(old.clone());
                         let target = old.id.clone();
                         journal.aliases.push_back((r.id, target));

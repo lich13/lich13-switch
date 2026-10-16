@@ -1322,6 +1322,7 @@ async fn session_once(
             .is_some_and(|id| id != admission.route.provider.id);
         previous_provider = Some(admission.route.provider.id.clone());
         let mut attempt_protocol = super::protocol::Protocol::new(true);
+        attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
         attempt_protocol.attach_thread(budget.thread.clone());
         attempt_protocol.request_headers(&headers);
@@ -1806,6 +1807,7 @@ async fn session_once(
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
+            next.diagnostics(g, &route.provider.id, current_model.as_deref());
             next.attach_ownership(ownership.clone(), &route.provider.id);
             next.attach_thread(thread_request.clone());
             next.request_headers(&headers);
@@ -2151,6 +2153,7 @@ async fn session_once(
                 terminal_error = false;
                 replay_frame = frame.clone();
                 let mut next_protocol = super::protocol::Protocol::new(true);
+                next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
                 next_protocol.attach_thread(thread_request.clone());
                 next_protocol.request_headers(&headers);
@@ -2449,7 +2452,7 @@ async fn session_once(
                 if business { failover.finish(super::failover::Exit::Forwarded); }
                 let sending = tokio::time::Instant::now();
                 if let Err(error) = client.send(frame).await {
-                    if let Some(u) = &mut protocol { u.finish(None, code::CLIENT_DISCONNECTED); }
+                    if let Some(u) = &mut protocol { u.downstream_closed(&client.activity, true); }
 
                     return Err(error);
                 }
@@ -2471,7 +2474,7 @@ async fn session_once(
             frame = client.incoming.recv() => {
                 let Some(frame) = frame else {
                     if let Some(u) = &mut protocol {
-                        u.finish(None, code::CLIENT_DISCONNECTED);
+                        u.downstream_closed(&client.activity, false);
                     }
                     return Ok(());
                 };
@@ -2481,12 +2484,12 @@ async fn session_once(
                 } else if frame.opcode() == OpCode::Pong && !matches!(upstream, Upstream::Native(_)) {
                     continue;
                 } else if closing {
-                    if let Some(u) = &mut protocol { u.finish(None, code::CLIENT_DISCONNECTED); }
+                    if let Some(u) = &mut protocol { u.downstream_closed(&client.activity, false); }
                     if turn.is_none() { return Ok(()); }
                     if let Upstream::Native(peer) = &upstream { peer.send(frame.clone()).await?; }
                     if let Some(mut admission) = turn.take() {
                         if let Some(mut u) = protocol.take() {
-                            u.finish(None, code::CLIENT_DISCONNECTED);
+                            u.downstream_closed(&client.activity, false);
                             admission.permits.neutral(cfg);
                         }
                     }
@@ -2511,7 +2514,7 @@ async fn session_once(
             },
             _ = client.closed.changed() => {
                 if let Some(u) = &mut protocol {
-                    u.finish(None, code::CLIENT_DISCONNECTED);
+                    u.downstream_closed(&client.activity, false);
                 }
                 return Ok(());
             },

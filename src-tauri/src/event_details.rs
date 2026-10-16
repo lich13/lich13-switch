@@ -44,6 +44,20 @@ pub struct Details {
     pub timeout_phase: Option<String>,
     pub timeout_seconds: Option<u64>,
     pub last_progress_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryEvidence>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeliveryEvidence {
+    pub duration_ms: u64,
+    pub upstream_bytes: u64,
+    /// Bytes handed to the HTTP/WS layer, not proof of client receipt.
+    pub handed_bytes: u64,
+    pub terminal_received: bool,
+    pub terminal_handed_off: bool,
+    pub request_hash: Option<String>,
+    pub response_hash: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -192,6 +206,11 @@ pub fn safe_message(value: &str) -> Option<String> {
 }
 impl Details {
     pub fn sanitized(mut self) -> Self {
+        if let Some(evidence) = &mut self.delivery {
+            let digest = |v: &String| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit());
+            evidence.request_hash = evidence.request_hash.take().filter(digest);
+            evidence.response_hash = evidence.response_hash.take().filter(digest);
+        }
         self.handoff_scope = self
             .handoff_scope
             .filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()));

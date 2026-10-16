@@ -21,6 +21,7 @@ export const reasons = {
   startup_recovery: "启动恢复失败",
   account_sync: "账号同步异常",
   protocol_error: "返回了应用错误",
+  request_interrupted: "请求交付提前结束",
 } as const;
 
 export const errorCodes: Record<keyof typeof reasons, string> = {
@@ -39,6 +40,7 @@ export const errorCodes: Record<keyof typeof reasons, string> = {
   startup_recovery: "STARTUP_RECOVERY_FAILED",
   account_sync: "ACCOUNT_SYNC_ERROR",
   protocol_error: "PROTOCOL_ERROR",
+  request_interrupted: "REQUEST_INTERRUPTED",
 };
 
 const actions = {
@@ -50,7 +52,7 @@ const actions = {
   recovered: "已恢复可用",
   reconnecting: "等待后重新连接",
   retrying_same: "原供应商等待重试",
-  not_retried: "已输出，未重试",
+  not_retried: "响应已开始，未重试",
 } as const;
 
 const categories = {
@@ -89,6 +91,15 @@ export type EventRecord = {
     timeoutPhase?: string | null;
     timeoutSeconds?: number | null;
     lastProgressMs?: number | null;
+    delivery?: {
+      durationMs: number;
+      upstreamBytes: number;
+      handedBytes: number;
+      terminalReceived: boolean;
+      terminalHandedOff: boolean;
+      requestHash: string | null;
+      responseHash: string | null;
+    } | null;
     circuit?: {
       causeReason?: keyof typeof reasons | null;
       retryAt?: number | null;
@@ -187,6 +198,7 @@ function category(r: EventRecord): keyof typeof categories {
   // Older API responses have no classification. Only an actual open event is
   // sufficient evidence here; a counted failure alone never is.
   if (r.reason === "circuit_open") return "circuit_error";
+  if (r.reason === "request_interrupted" && r.level === "info") return "status";
   return ["failover", "thread_handoff", "recovered"].includes(r.reason)
     ? "status"
     : "ordinary_error";
@@ -802,7 +814,7 @@ function EventDetail({
               ? [["配置阈值", `${r.details.timeoutSeconds} 秒`]]
               : []),
             ...(r.details?.lastProgressMs != null
-              ? [["最后进展距超时", `${r.details.lastProgressMs} 毫秒`]]
+              ? [["最后上游进展距结束", `${r.details.lastProgressMs} 毫秒`]]
               : []),
             ...(r.details?.circuit
               ? [
@@ -824,6 +836,15 @@ function EventDetail({
               ? [["触发事件", r.details.causeId]] : []),
             ["模型", r.model || "未提供"],
             ["尝试次数", r.attempt ?? "—"],
+            ...(r.details?.delivery ? [
+              ["请求持续", `${r.details.delivery.durationMs} 毫秒`],
+              ["上游已读取", `${r.details.delivery.upstreamBytes} 字节`],
+              ["交给传输层", `${r.details.delivery.handedBytes} 字节（不代表客户端已收到）`],
+              ["已观察上游终态", r.details.delivery.terminalReceived ? "是" : "否"],
+              ["终态已交给传输层", r.details.delivery.terminalHandedOff ? "是" : "否"],
+              ["请求标识摘要", r.details.delivery.requestHash ?? "未记录"],
+              ["响应标识摘要", r.details.delivery.responseHash ?? "未记录"],
+            ] : []),
             ["首次发生", time(r.firstAt)],
             ["最近发生", time(r.lastAt)],
             ["合并次数", r.count],

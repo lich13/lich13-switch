@@ -43,6 +43,7 @@ local_codes! {
     Cli => CLI = "CLI",
     Client => CLIENT = "CLIENT",
     ClientDisconnected => CLIENT_DISCONNECTED = "CLIENT_DISCONNECTED",
+    RequestInterrupted => REQUEST_INTERRUPTED = "REQUEST_INTERRUPTED",
     ClientError => CLIENT_ERROR = "CLIENT_ERROR",
     Clipboard => CLIPBOARD = "CLIPBOARD",
     CliMissing => CLI_MISSING = "CLI_MISSING",

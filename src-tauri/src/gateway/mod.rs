@@ -38,14 +38,19 @@ mod forward;
 mod health_settlement;
 #[cfg(test)]
 mod health_settlement_tests;
+#[cfg(test)]
+mod interruption_tests;
 pub(crate) mod metadata;
 mod model;
 mod model_health;
+#[cfg(test)]
+mod partial_response_tests;
 mod protocol;
 #[cfg(test)]
 mod protocol_tests;
 mod quota;
 mod replay;
+mod replay_policy;
 mod routing;
 mod thread_capacity;
 #[cfg(test)]
@@ -61,9 +66,6 @@ mod v022_tests;
 mod v0233_tests;
 mod websocket;
 mod wire_progress;
-mod replay_policy;
-#[cfg(test)]
-mod partial_response_tests;
 pub use quota::QuotaView;
 mod takeover;
 pub(crate) use takeover::recover as recover_for_migration;
