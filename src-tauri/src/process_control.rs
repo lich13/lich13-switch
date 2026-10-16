@@ -1,10 +1,11 @@
-//! Process termination is deliberately tested with a fake inventory only.
+//! Bounded process shutdown. Native tests may target only their own child PIDs.
 use crate::errors::code;
 use crate::storage::{AppError, Result};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
 #[derive(Clone, Debug, PartialEq)]
@@ -16,15 +17,47 @@ struct Entry {
     user: String,
     official_app: bool,
 }
+const GRACE: Duration = Duration::from_secs(2);
+const EXIT_CONFIRMATION: Duration = Duration::from_secs(1);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Running,
+    Gone,
+    Changed,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Termination {
+    Graceful,
+    Force,
+}
+impl Entry {
+    fn same_process(&self, other: &Self) -> bool {
+        self.pid == other.pid
+            && self.started == other.started
+            && self.executable == other.executable
+            && self.user == other.user
+    }
+}
 trait Processes {
     fn inventory(&mut self) -> Vec<Entry>;
-    fn terminate_if_same(&mut self, entry: &Entry) -> bool;
+    fn state(&mut self, entry: &Entry) -> State;
+    fn terminate_if_same(&mut self, entry: &Entry, how: Termination);
+    fn wait_for_exit(&mut self, entries: &[&Entry], timeout: Duration);
+    fn prepare_terminals(&mut self, _entries: &[&Entry], _inventory: &[Entry]) {}
+    fn cleanup_terminals(&mut self) -> usize {
+        0
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Outcome {
     pub terminated: usize,
     pub failed: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub terminal_cleanup_failed: usize,
+}
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 fn root(entry: &Entry) -> bool {
     let filename = entry
@@ -83,19 +116,36 @@ fn run(backend: &mut dyn Processes, own_pid: u32) -> Result<Outcome> {
         n
     };
     targets.sort_by_key(|p| std::cmp::Reverse(depth(p)));
+    backend.prepare_terminals(&targets, &inventory);
+    let selected: HashSet<_> = targets.iter().map(|p| p.pid).collect();
+    // Let each root clean up its TUI and children before touching descendants.
+    for p in &targets {
+        if !p.parent.is_some_and(|id| selected.contains(&id)) {
+            backend.terminate_if_same(p, Termination::Graceful);
+        }
+    }
+    backend.wait_for_exit(&targets, GRACE);
+    for p in &targets {
+        if backend.state(p) == State::Running {
+            backend.terminate_if_same(p, Termination::Force);
+        }
+    }
+    backend.wait_for_exit(&targets, EXIT_CONFIRMATION);
     let mut result = Outcome {
         terminated: 0,
         failed: 0,
+        terminal_cleanup_failed: 0,
     };
     for p in targets {
-        if backend.terminate_if_same(p) {
-            result.terminated += 1;
-        } else {
-            result.failed += 1;
+        match backend.state(p) {
+            State::Gone => result.terminated += 1,
+            State::Running | State::Changed => result.failed += 1,
         }
     }
+    result.terminal_cleanup_failed = backend.cleanup_terminals();
     Ok(result)
 }
+
 fn official_app(path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -138,15 +188,30 @@ fn official_app(path: &Path) -> bool {
         false
     }
 }
-struct Native(System);
+#[cfg(target_os = "macos")]
+mod terminal;
+struct Native {
+    system: System,
+    #[cfg(target_os = "macos")]
+    terminals: Vec<terminal::Captured>,
+}
 impl Native {
     fn entry(&self, pid: Pid) -> Option<Entry> {
-        let p = self.0.process(pid)?;
+        let p = self.system.process(pid)?;
         let executable = p.exe()?.to_owned();
         Some(Entry {
             pid: pid.as_u32(),
             parent: p.parent().map(|p| p.as_u32()),
-            started: p.start_time(),
+            started: {
+                #[cfg(target_os = "macos")]
+                {
+                    terminal::started(pid.as_u32())?
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    p.start_time()
+                }
+            },
             official_app: official_app(&executable),
             executable,
             user: p.user_id().map(|u| format!("{u:?}")).unwrap_or_default(),
@@ -155,78 +220,82 @@ impl Native {
 }
 impl Processes for Native {
     fn inventory(&mut self) -> Vec<Entry> {
-        self.0.refresh_processes(ProcessesToUpdate::All, true);
-        self.0
+        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        self.system
             .processes()
             .keys()
             .filter_map(|p| self.entry(*p))
             .collect()
     }
-    fn terminate_if_same(&mut self, entry: &Entry) -> bool {
+    fn state(&mut self, entry: &Entry) -> State {
         let pid = Pid::from_u32(entry.pid);
-        self.0
+        self.system
             .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-        self.entry(pid).as_ref() == Some(entry)
-            && self
-                .0
-                .process(pid)
-                .is_some_and(|p| p.kill_with(Signal::Kill) == Some(true))
+        let Some(process) = self.system.process(pid) else {
+            return State::Gone;
+        };
+        if process.status() == sysinfo::ProcessStatus::Zombie {
+            #[cfg(target_os = "macos")]
+            let same = terminal::started(entry.pid) == Some(entry.started);
+            #[cfg(not(target_os = "macos"))]
+            let same = process.start_time() == entry.started;
+            return if same { State::Gone } else { State::Changed };
+        }
+        match self.entry(pid) {
+            Some(current) if entry.same_process(&current) => State::Running,
+            _ => State::Changed,
+        }
+    }
+    fn terminate_if_same(&mut self, entry: &Entry, how: Termination) {
+        if self.state(entry) != State::Running {
+            return;
+        }
+        if let Some(process) = self.system.process(Pid::from_u32(entry.pid)) {
+            let _ = process.kill_with(match how {
+                Termination::Graceful => Signal::Term,
+                Termination::Force => Signal::Kill,
+            });
+        }
+    }
+    fn wait_for_exit(&mut self, entries: &[&Entry], timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !entries.iter().any(|e| self.state(e) == State::Running) {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(25)));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    fn prepare_terminals(&mut self, entries: &[&Entry], inventory: &[Entry]) {
+        self.terminals = terminal::capture(entries, inventory);
+    }
+    #[cfg(target_os = "macos")]
+    fn cleanup_terminals(&mut self) -> usize {
+        let mut failures = 0;
+        let deadline = Instant::now() + EXIT_CONFIRMATION;
+        for captured in std::mem::take(&mut self.terminals) {
+            if !captured.cleanup_until(deadline) {
+                failures += 1;
+            }
+        }
+        failures
     }
 }
 pub fn force_quit() -> Result<Outcome> {
-    run(&mut Native(System::new()), std::process::id())
+    run(
+        &mut Native {
+            system: System::new(),
+            #[cfg(target_os = "macos")]
+            terminals: Vec::new(),
+        },
+        std::process::id(),
+    )
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    struct Fake {
-        items: Vec<Entry>,
-        calls: Vec<u32>,
-        changed: HashSet<u32>,
-    }
-    impl Processes for Fake {
-        fn inventory(&mut self) -> Vec<Entry> {
-            self.items.clone()
-        }
-        fn terminate_if_same(&mut self, e: &Entry) -> bool {
-            self.calls.push(e.pid);
-            !self.changed.contains(&e.pid)
-        }
-    }
-    fn e(pid: u32, parent: Option<u32>, name: &str, official: bool) -> Entry {
-        Entry {
-            pid,
-            parent,
-            started: 1,
-            executable: name.into(),
-            user: "user".into(),
-            official_app: official,
-        }
-    }
-    #[test]
-    fn matches_exact_identity_and_descendants_without_killing_any_real_process() {
-        let mut other = e(8, None, "/bin/codex", false);
-        other.user = "another".into();
-        let mut f = Fake {
-            items: vec![
-                e(1, None, "/app/lich13-switch", false),
-                e(2, None, "/Applications/ChatGPT.app/ChatGPT", true),
-                e(3, Some(2), "/node", false),
-                e(4, None, "/bin/codex", false),
-                e(5, None, "/app/codexhost", false),
-                e(6, Some(1), "/bin/codex", false),
-                e(7, None, "/extension/ChatGPT for Chrome", false),
-                other,
-            ],
-            calls: vec![],
-            changed: HashSet::from([4]),
-        };
-        let out = run(&mut f, 1).unwrap();
-        assert_eq!((out.terminated, out.failed), (2, 1));
-        assert_eq!(f.calls[0], 3);
-        assert_eq!(
-            f.calls.into_iter().collect::<HashSet<_>>(),
-            HashSet::from([2, 3, 4])
-        );
-    }
-}
+#[path = "process_control_tests.rs"]
+mod tests;

@@ -236,7 +236,7 @@ export type CommandMap = {
   set_clamshell_awake: Call<{ enabled: boolean } & Revision, PowerState>;
   install_power_helper: Call<None, PowerState>;
   remove_power_helper: Call<None, PowerState>;
-  force_quit_codex_clients: Call<None, { terminated: number; failed: number }>;
+  force_quit_codex_clients: Call<None, { terminated: number; failed: number; terminalCleanupFailed?: number }>;
   get_startup_error: Call<None, AppError | null>;
   cleanup_retired_data: Call<None, void>;
   get_app_events: Call<
