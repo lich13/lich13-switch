@@ -1,5 +1,5 @@
 use super::super::{ClientId, Gateway};
-use super::{route, RouteError};
+use super::{authorized, route, RouteError};
 use hyper::{
     header::{self, HeaderValue},
     HeaderMap, Uri,
@@ -64,6 +64,34 @@ fn headers(authorization: Option<&str>, api_key: Option<&str>) -> HeaderMap {
 
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
+}
+
+#[test]
+fn bearer_scheme_is_case_insensitive_with_one_or_more_ascii_spaces_and_exact_token() {
+    for scheme in ["Bearer", "bearer", "BEARER", "bEaReR"] {
+        for spaces in [" ", "  ", "   "] {
+            let authorization = format!("{scheme}{spaces}{CODEX_TOKEN}");
+            assert!(
+                authorized(&headers(Some(&authorization), None), CODEX_TOKEN),
+                "scheme={scheme:?}, separator={spaces:?}"
+            );
+        }
+    }
+
+    for authorization in [
+        format!("Bearer{CODEX_TOKEN}"),
+        format!("Bearer\t{CODEX_TOKEN}"),
+        format!("Bearer \t{CODEX_TOKEN}"),
+        format!("Bearer {CODEX_TOKEN} "),
+        format!("Bearer fixture-{CODEX_TOKEN}"),
+        format!("Bearer {CODEX_TOKEN}-suffix"),
+        format!("Basic {CODEX_TOKEN}"),
+    ] {
+        assert!(
+            !authorized(&headers(Some(&authorization), None), CODEX_TOKEN),
+            "authorization={authorization:?}"
+        );
+    }
 }
 
 fn route_with_headers(

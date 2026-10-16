@@ -248,10 +248,21 @@ pub fn authorized(headers: &hyper::HeaderMap, token: &str) -> bool {
         return false;
     }
     let bearer_matches = bearer.iter().next().is_none_or(|value| {
-        value
-            .as_bytes()
-            .strip_prefix(b"Bearer ")
-            .is_some_and(|value| token_matches(value, token.as_bytes()))
+        let bytes = value.as_bytes();
+        let Some(separator) = bytes.iter().position(|byte| *byte == b' ') else {
+            return false;
+        };
+        if !bytes[..separator].eq_ignore_ascii_case(b"Bearer") {
+            return false;
+        }
+        // RFC's auth scheme is case-insensitive; the credential is not. Only
+        // ASCII SP belongs to the separator, never trailing token whitespace.
+        let credential = &bytes[separator..];
+        let start = credential
+            .iter()
+            .position(|byte| *byte != b' ')
+            .unwrap_or(credential.len());
+        token_matches(&credential[start..], token.as_bytes())
     });
     let api_matches = api
         .iter()
