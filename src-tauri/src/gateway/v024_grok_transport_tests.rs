@@ -329,9 +329,9 @@ async fn gateway_request(gateway: &Gateway, path: &str, body: &[u8]) -> Response
     let port = gateway.listener_view().port;
     let request = Request::builder()
         .method("POST")
-        .uri(format!("http://127.0.0.1:{port}/grok{path}"))
+        .uri(format!("http://127.0.0.1:{port}{path}"))
         .header("authorization", format!("Bearer {token}"))
-        .header("x-api-key", "fixture-downstream-api-key")
+        .header("x-api-key", token)
         .header("content-type", "application/json")
         .body(replay::full(body.to_vec()))
         .unwrap();

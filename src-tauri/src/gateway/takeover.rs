@@ -20,6 +20,39 @@ pub struct Pair {
     pub token: Option<String>,
 }
 impl Pair {
+    pub fn is_gateway(&self, client: ClientId, token: &str, ports: &[u16]) -> bool {
+        let (Some(base), Some(actual_token)) = (&self.base_url, &self.token) else {
+            return false;
+        };
+        if !super::listener::token_matches(actual_token.as_bytes(), token.as_bytes())
+            || !super::client::loopback_address(base)
+        {
+            return false;
+        }
+        let Ok(url) = url::Url::parse(base) else {
+            return false;
+        };
+        if url.scheme() != "http"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return false;
+        }
+        ports
+            .iter()
+            .flat_map(|port| {
+                let mut addresses = client.legacy_addresses(*port);
+                addresses.push(client.address(*port));
+                addresses
+            })
+            .filter_map(|base| url::Url::parse(&base).ok())
+            .any(|expected| {
+                url.port_or_known_default() == expected.port_or_known_default()
+                    && url.path().trim_end_matches('/') == expected.path().trim_end_matches('/')
+            })
+    }
     pub fn fingerprint(&self) -> String {
         storage::digest(&serde_json::to_vec(self).expect("credential pair serializes"))
     }
@@ -355,7 +388,7 @@ pub fn import_for(client: ClientId, home: &Path) -> Result<(String, String)> {
         .token
         .filter(|s| !s.is_empty())
         .ok_or_else(|| AppError::new(code::IMPORT, "配置缺少供应商 Token"))?;
-    if token.starts_with("gs_") && base.contains("127.0.0.1") {
+    if token.starts_with("gs_") && super::client::loopback_address(&base) {
         return Err(AppError::new(code::MANAGED, "不能导入网关的本地凭据"));
     }
     Ok((base, token))

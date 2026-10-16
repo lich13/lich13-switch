@@ -221,21 +221,90 @@ impl Listener {
 #[path = "listener_migration_tests.rs"]
 mod migration_tests;
 
-/// Match a complete path component, never infer the client from a model or token.
-pub fn route(uri: &hyper::Uri) -> Option<(ClientId, hyper::Uri)> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum RouteError {
+    NotFound,
+    Unauthorized,
+}
+
+pub fn token_matches(actual: &[u8], expected: &[u8]) -> bool {
+    !expected.is_empty()
+        && actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
+/// Both headers, when present, must identify the same client. Repeated values
+/// are rejected before routing and again at the forwarding boundary.
+pub fn authorized(headers: &hyper::HeaderMap, token: &str) -> bool {
+    let bearer = headers.get_all(hyper::header::AUTHORIZATION);
+    let api = headers.get_all("x-api-key");
+    let bearer_count = bearer.iter().count();
+    let api_count = api.iter().count();
+    if bearer_count > 1 || api_count > 1 || bearer_count + api_count == 0 {
+        return false;
+    }
+    let bearer_matches = bearer.iter().next().is_none_or(|value| {
+        value
+            .as_bytes()
+            .strip_prefix(b"Bearer ")
+            .is_some_and(|value| token_matches(value, token.as_bytes()))
+    });
+    let api_matches = api
+        .iter()
+        .next()
+        .is_none_or(|value| token_matches(value.as_bytes(), token.as_bytes()));
+    bearer_matches && api_matches
+}
+
+/// Legacy prefixes are aliases; unprefixed routes use an exact local token.
+/// Models and protocol paths never infer a client (Grok also supports messages).
+pub fn route(
+    uri: &hyper::Uri,
+    headers: &hyper::HeaderMap,
+    registry: &Registry,
+) -> std::result::Result<(ClientId, hyper::Uri), RouteError> {
     let path = uri.path();
-    let (client, prefix) = if path == "/codex" || path.starts_with("/codex/") {
-        (ClientId::Codex, "/codex")
+    let (explicit, prefix) = if path == "/codex" || path.starts_with("/codex/") {
+        (Some(ClientId::Codex), "/codex")
     } else if path == "/claude" || path.starts_with("/claude/") {
-        (ClientId::Claude, "/claude")
+        (Some(ClientId::Claude), "/claude")
     } else if path == "/grok" || path.starts_with("/grok/") {
-        (ClientId::Grok, "/grok")
+        (Some(ClientId::Grok), "/grok")
     } else if path == "/v1" || path.starts_with("/v1/") {
-        (ClientId::Codex, "")
+        (None, "")
     } else {
-        return None;
+        return Err(RouteError::NotFound);
     };
-    let remaining = &uri.path_and_query()?.as_str()[prefix.len()..];
+    // Drop the registry lock before inspecting individual stores; edits can hold
+    // a client lock while checking peer configuration.
+    let gateways: Vec<_> = registry
+        .gateways
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    if explicit.is_some_and(|client| !gateways.iter().any(|gateway| gateway.client == client)) {
+        return Err(RouteError::NotFound);
+    }
+    let mut matched = None;
+    for gateway in gateways {
+        if explicit.is_some_and(|client| client != gateway.client) {
+            continue;
+        }
+        if authorized(headers, &gateway.inner.lock().unwrap().store.local_token) {
+            if matched.is_some() {
+                return Err(RouteError::Unauthorized);
+            }
+            matched = Some(gateway.client);
+        }
+    }
+    let client = matched.ok_or(RouteError::Unauthorized)?;
+    let remaining = &uri.path_and_query().ok_or(RouteError::NotFound)?.as_str()[prefix.len()..];
     let remaining = if remaining.is_empty() {
         "/".to_owned()
     } else if remaining.starts_with('?') {
@@ -244,6 +313,13 @@ pub fn route(uri: &hyper::Uri) -> Option<(ClientId, hyper::Uri)> {
         remaining.to_owned()
     };
     let mut parts = uri.clone().into_parts();
-    parts.path_and_query = Some(remaining.parse().ok()?);
-    Some((client, hyper::Uri::from_parts(parts).ok()?))
+    parts.path_and_query = Some(remaining.parse().map_err(|_| RouteError::NotFound)?);
+    Ok((
+        client,
+        hyper::Uri::from_parts(parts).map_err(|_| RouteError::NotFound)?,
+    ))
 }
+
+#[cfg(test)]
+#[path = "listener_token_tests.rs"]
+mod token_tests;

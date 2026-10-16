@@ -30,11 +30,36 @@ impl ClientId {
         format!(
             "http://127.0.0.1:{port}{}",
             match self {
-                Self::Codex => "/codex/v1",
-                Self::Claude => "/claude",
-                Self::Grok => "/grok/v1",
+                Self::Codex | Self::Grok => "/v1",
+                Self::Claude => "",
             }
         )
+    }
+    /// Identification only; old ports do not create additional listeners.
+    pub fn legacy_addresses(self, port: u16) -> Vec<String> {
+        let prefix = match self {
+            Self::Codex => "/codex/v1",
+            Self::Claude => "/claude",
+            Self::Grok => "/grok/v1",
+        };
+        let mut ports = vec![
+            port,
+            Self::Codex.legacy_port(),
+            Self::Claude.legacy_port(),
+            Self::Grok.legacy_port(),
+        ];
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+            .into_iter()
+            .flat_map(|port| {
+                let mut addresses = vec![format!("http://127.0.0.1:{port}{prefix}")];
+                if self == Self::Codex {
+                    addresses.push(format!("http://127.0.0.1:{port}/v1"));
+                }
+                addresses
+            })
+            .collect()
     }
     pub fn config(self, home: &Path) -> PathBuf {
         home.join(if self == Self::Claude {
@@ -43,6 +68,17 @@ impl ClientId {
             "config.toml"
         })
     }
+}
+
+pub fn loopback_address(base: &str) -> bool {
+    url::Url::parse(base)
+        .ok()
+        .is_some_and(|url| match url.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(host)) => host.is_loopback(),
+            Some(url::Host::Ipv6(host)) => host.is_loopback(),
+            None => false,
+        })
 }
 
 pub fn claude_home() -> String {

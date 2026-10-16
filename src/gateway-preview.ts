@@ -10,7 +10,7 @@ export const gatewayDemo: GatewayState = {
   clientId: "codex",
   revision: "preview-gateway",
   running: false,
-  address: "http://127.0.0.1:43721/codex/v1",
+  address: "http://127.0.0.1:43721/v1",
   listener: { port: 43721, revision: "preview-listener", runningClients: [] },
   mode: "manual",
   selected: "primary",
@@ -116,7 +116,7 @@ export const claudeGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo),
   clientId: "claude",
   revision: "preview-claude",
-  address: "http://127.0.0.1:43721/claude",
+  address: "http://127.0.0.1:43721",
   settings: { ...gatewayDemo.settings },
   selected: "claude-primary",
   configProvider: "claude-primary",
@@ -155,7 +155,7 @@ if (densePreview) {
 }
 export const grokGatewayDemo: GatewayState = {
   ...structuredClone(gatewayDemo), clientId: "grok", revision: "preview-grok",
-  address: "http://127.0.0.1:43721/grok/v1", settings: { ...gatewayDemo.settings },
+  address: "http://127.0.0.1:43721/v1", settings: { ...gatewayDemo.settings },
   handoffWaiting: [], providers: gatewayDemo.providers.map(p => ({ ...structuredClone(p), protocol: "responses", handoffAfterCompaction: false, takeNewThreads: false, reservedThreads: 0 })),
 };
 function syncListener(port = gatewayDemo.settings.port, changed = false) {
@@ -165,7 +165,7 @@ function syncListener(port = gatewayDemo.settings.port, changed = false) {
   for (const state of states) {
     state.settings.port = port;
     state.listener = { port, revision, runningClients };
-    state.address = `http://127.0.0.1:${port}/${state.clientId === "claude" ? "claude" : `${state.clientId}/v1`}`;
+    state.address = `http://127.0.0.1:${port}${state.clientId === "claude" ? "" : "/v1"}`;
   }
 }
 syncListener();

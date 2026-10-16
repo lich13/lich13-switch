@@ -541,7 +541,7 @@ impl Gateway {
                 .token
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| AppError::new(code::IMPORT, "auth.json 缺少 API Key"))?;
-            if token.starts_with("gs_") && base.contains("127.0.0.1") {
+            if token.starts_with("gs_") && client::loopback_address(&base) {
                 return Err(AppError::new(code::MANAGED, "不能导入网关的本地凭据"));
             }
             Ok((base, token))
@@ -672,9 +672,11 @@ impl Gateway {
         let mut config_provider = None;
         if let Some(Ok((_, pair))) = &config {
             config_state = "unsaved";
-            if pair
-                == &takeover::Pair::new(&self.0.client.address(listener.port), &s.store.local_token)
-            {
+            if pair.is_gateway(
+                self.0.client,
+                &s.store.local_token,
+                &[listener.port, s.store.settings.port],
+            ) {
                 config_state = "gateway";
             } else if let Some(p) = s
                 .store
@@ -1309,6 +1311,7 @@ impl Gateway {
             self.0.registry.changed();
         }
         self.0.registry.listener.check_revision()?;
+        let token = self.0.registry.unique_local_token(self.0.client, &token);
         {
             let s = self.0.inner.lock().unwrap();
             if self.view_revision_with_listener(&s, &listener.previous_revision) != expected {
@@ -1329,6 +1332,7 @@ impl Gateway {
             let (current, original_pair) =
                 takeover::read_connection(self.0.client, home, &s.store.connection)?;
             let mut next = s.store.clone();
+            next.local_token.clone_from(&token);
             for provider in &next.providers {
                 for url in Self::endpoint_urls(&next, provider) {
                     model::base_url(&url, listener.port)?;

@@ -40,15 +40,31 @@ fn different_free_port(other: u16) -> u16 {
 
 fn routed(uri: &str) -> Option<(ClientId, String)> {
     let uri: Uri = uri.parse().unwrap();
-    listener::route(&uri).map(|(client, uri)| {
-        (
-            client,
-            uri.path_and_query()
-                .expect("routed URI should retain its path")
-                .as_str()
-                .to_owned(),
-        )
-    })
+    let temp = tempfile::tempdir().unwrap();
+    let codex = Gateway::new(temp.path().join("data")).unwrap();
+    let _claude = codex.companion(temp.path().join("data/claude")).unwrap();
+    let _grok = codex.grok_companion(temp.path().join("data/grok")).unwrap();
+    let selected = if uri.path().starts_with("/claude") {
+        ClientId::Claude
+    } else if uri.path().starts_with("/grok") {
+        ClientId::Grok
+    } else {
+        ClientId::Codex
+    };
+    let token = local_token(&codex.0.registry.gateway(selected).unwrap());
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    listener::route(&uri, &headers, &codex.0.registry)
+        .ok()
+        .map(|(client, uri)| {
+            (
+                client,
+                uri.path_and_query()
+                    .expect("routed URI should retain its path")
+                    .as_str()
+                    .to_owned(),
+            )
+        })
 }
 
 #[test]
@@ -96,7 +112,7 @@ fn routes_match_client_prefix_boundaries_and_preserve_opaque_queries() {
 }
 
 #[test]
-fn only_the_legacy_v1_path_aliases_to_codex() {
+fn unprefixed_v1_keeps_its_path_with_codex_credentials() {
     for request in ["/v1", "/v1/", "/v1/responses?x=%2f&x=%2F"] {
         assert_eq!(
             routed(request),
@@ -218,6 +234,8 @@ fn listener_inherits_legacy_codex_port_and_persists_its_independent_revision() {
 struct SeenRequest {
     path: String,
     model: Option<String>,
+    authorization: Option<String>,
+    api_key: Option<String>,
 }
 
 struct Upstream {
@@ -248,13 +266,15 @@ impl Upstream {
                                     let path = request.uri().path_and_query()
                                         .map(|part| part.as_str().to_owned())
                                         .unwrap_or_default();
+                                    let authorization = request.headers().get("authorization").and_then(|h| h.to_str().ok()).map(str::to_owned);
+                                    let api_key = request.headers().get("x-api-key").and_then(|h| h.to_str().ok()).map(str::to_owned);
                                     let body = request.into_body().collect().await
                                         .expect("fixture request body should be readable")
                                         .to_bytes();
                                     let model = serde_json::from_slice::<Value>(&body).ok()
                                         .and_then(|value| value.get("model")
                                             .and_then(Value::as_str).map(str::to_owned));
-                                    seen.lock().unwrap().push(SeenRequest { path, model });
+                                    seen.lock().unwrap().push(SeenRequest { path, model, authorization, api_key });
                                     Ok::<_, Infallible>(Response::builder()
                                         .status(StatusCode::OK)
                                         .header("content-type", "application/json")
@@ -533,6 +553,30 @@ async fn shared_tcp_listener_isolates_three_clients_and_releases_after_last_stop
         .collect();
     paths.sort_unstable();
     assert_eq!(paths, ["/v1/messages", "/v1/responses", "/v1/responses"]);
+
+    for (index, path) in [
+        "/v1/responses?fixture=%2f",
+        "/v1/messages?fixture=%2F",
+        "/v1/responses?fixture=a+b",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(post(listener_port, path, &tokens[index], &body).await, 200);
+    }
+    let requests = upstream.seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 6);
+    for (index, request) in requests[3..].iter().enumerate() {
+        let client = ["codex", "claude", "grok"][index];
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(format!("Bearer fixture-{client}-upstream-token").as_str())
+        );
+        assert!(request.api_key.is_none());
+    }
+    assert_eq!(requests[3].path, "/v1/responses?fixture=%2f");
+    assert_eq!(requests[4].path, "/v1/messages?fixture=%2F");
+    assert_eq!(requests[5].path, "/v1/responses?fixture=a+b");
 
     claude.stop().await.unwrap();
     let running: HashSet<_> = codex.listener_view().running_clients.into_iter().collect();

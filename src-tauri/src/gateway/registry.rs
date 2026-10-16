@@ -31,6 +31,27 @@ impl Registry {
             .find(|g| g.client == client)
             .map(Gateway)
     }
+    /// Called under the shared lifecycle lock before an activation transaction.
+    /// Never rotate a peer's credential or publish this value outside that transaction.
+    pub fn unique_local_token(&self, client: ClientId, current: &str) -> String {
+        let peers: Vec<_> = self
+            .gateways
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|gateway| gateway.client != client)
+            .collect();
+        let tokens: Vec<_> = peers
+            .into_iter()
+            .map(|gateway| gateway.inner.lock().unwrap().store.local_token.clone())
+            .collect();
+        let mut candidate = current.to_owned();
+        while candidate.is_empty() || tokens.iter().any(|token| token == &candidate) {
+            candidate = super::model::new_local_token();
+        }
+        candidate
+    }
     pub fn changed(&self) {
         for gateway in self
             .gateways

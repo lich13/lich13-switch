@@ -38,9 +38,9 @@ pub async fn serve(
                     let socket = super::wire_progress::Tracked::new(socket, activity.clone());
                     let connection_activity = activity.clone();
                     let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
-                        let routed = super::listener::route(request.uri()).and_then(|(client, uri)| {
+                        let routed = super::listener::route(request.uri(), request.headers(), &registry).and_then(|(client, uri)| {
                             *request.uri_mut() = uri;
-                            registry.gateway(client)
+                            registry.gateway(client).ok_or(super::listener::RouteError::NotFound)
                         });
                         let delivery = std::sync::Arc::new(super::protocol::Delivery::default());
                         delivery.track(activity.clone());
@@ -48,7 +48,7 @@ pub async fn serve(
                         request.extensions_mut().insert(ReceivedAt(crate::usage::model::now()));
                         request.extensions_mut().insert(activity.clone());
                         async move{Ok::<_,Infallible>(match routed {
-                            Some(g) => {
+                            Ok(g) => {
                                 let mut client_stop = g.0.inner.lock().unwrap().shutdown.as_ref().map(watch::Sender::subscribe);
                                 tokio::select! {
                                     biased;
@@ -56,7 +56,8 @@ pub async fn serve(
                                     response = forward(g,request) => response,
                                 }
                             },
-                            None => error(StatusCode::NOT_FOUND, code::CLIENT, "客户端网关路径不存在"),
+                            Err(super::listener::RouteError::NotFound) => error(StatusCode::NOT_FOUND, code::CLIENT, "客户端网关路径不存在"),
+                            Err(super::listener::RouteError::Unauthorized) => error(StatusCode::UNAUTHORIZED, code::LOCAL_AUTH, "客户端网关凭据不匹配"),
                         })}
                     });
                     let connection=hyper::server::conn::http1::Builder::new().preserve_header_case(true).half_close(true)
@@ -223,20 +224,7 @@ pub(super) fn clean_headers(headers: &mut HeaderMap, upgrade: bool) {
     }
 }
 fn authorized(headers: &HeaderMap, token: &str) -> bool {
-    if headers.get_all(header::AUTHORIZATION).iter().count() != 1 {
-        return false;
-    }
-    let expected = format!("Bearer {token}");
-    let actual = headers
-        .get(header::AUTHORIZATION)
-        .map(|h| h.as_bytes())
-        .unwrap_or_default();
-    actual.len() == expected.len()
-        && actual
-            .iter()
-            .zip(expected.as_bytes())
-            .fold(0u8, |v, (a, b)| v | (a ^ b))
-            == 0
+    super::listener::authorized(headers, token)
 }
 pub(super) fn capacity_message(status: StatusCode, body: &[u8]) -> bool {
     if super::upstream_error::permanent_rejection(body) {

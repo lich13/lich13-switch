@@ -183,6 +183,13 @@ pub struct Resume {
     pub desired: bool,
     pub pair_hash: String,
 }
+pub(super) fn new_local_token() -> String {
+    format!(
+        "gs_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
 impl Default for Store {
     fn default() -> Self {
         Self {
@@ -200,11 +207,7 @@ impl Default for Store {
             mode: "manual".into(),
             selected: None,
             resume: None,
-            local_token: format!(
-                "gs_{}{}",
-                uuid::Uuid::new_v4().simple(),
-                uuid::Uuid::new_v4().simple()
-            ),
+            local_token: new_local_token(),
         }
     }
 }
