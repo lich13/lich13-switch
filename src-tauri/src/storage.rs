@@ -81,57 +81,10 @@ pub fn protect(path: &Path, directory: bool) -> Result<()> {
 }
 #[cfg(windows)]
 pub fn protect(path: &Path, _directory: bool) -> Result<()> {
-    use std::{os::windows::ffi::OsStrExt, ptr};
-    use windows_sys::Win32::{
-        Foundation::LocalFree,
-        Security::{
-            Authorization::{
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
-                SE_FILE_OBJECT,
-            },
-            GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION,
-        },
-    };
-    // OWNER RIGHTS resolves to the creator/owner of this private object. A protected
-    // DACL prevents broader permissions inherited from AppData or temp directories.
-    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)\0".encode_utf16().collect();
-    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    unsafe {
-        let mut descriptor = ptr::null_mut();
-        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            ptr::null_mut(),
-        ) == 0
-        {
-            return Err(AppError::new(code::PERMISSIONS, "无法限制文件访问权限"));
-        }
-        let mut present = 0;
-        let mut defaulted = 0;
-        let mut acl = ptr::null_mut();
-        let valid = GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted);
-        let code = if valid != 0 && present != 0 {
-            SetNamedSecurityInfoW(
-                name.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                acl,
-                ptr::null_mut(),
-            )
-        } else {
-            1
-        };
-        LocalFree(descriptor);
-        if code != 0 {
-            return Err(AppError::new(code::PERMISSIONS, "无法限制文件访问权限"));
-        }
-    }
-    Ok(())
+    private::windows::protect(path)
+        .map_err(|_| AppError::new(code::PERMISSIONS, "无法限制文件访问权限"))
 }
+
 pub fn atomic_write(path: &Path, bytes: &[u8], expected: Option<&str>) -> Result<()> {
     atomic_write_bounded(path, bytes, expected, 2 * 1024 * 1024)
 }

@@ -86,8 +86,11 @@ pub(super) mod windows {
         Security::{
             Authorization::{
                 ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
             },
-            GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+            EqualSid, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation,
+            TokenUser, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
         },
         Storage::FileSystem::{
             CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY, FILE_GENERIC_READ,
@@ -176,6 +179,64 @@ pub(super) mod windows {
     }
     fn name(path: &Path) -> Vec<u16> {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+    pub(in crate::storage) fn protect(path: &Path) -> io::Result<()> {
+        let desired = Descriptor::new()?;
+        let name = name(path);
+        unsafe {
+            let mut owner = ptr::null_mut();
+            let mut acl = ptr::null_mut();
+            let mut present = 0;
+            let mut defaulted = 0;
+            if GetSecurityDescriptorOwner(desired.0, &mut owner, &mut defaulted) == 0
+                || owner.is_null()
+                || GetSecurityDescriptorDacl(desired.0, &mut present, &mut acl, &mut defaulted) == 0
+                || present == 0
+                || acl.is_null()
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let mut previous_owner = ptr::null_mut();
+            let mut previous_descriptor = ptr::null_mut();
+            let result = GetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut previous_owner,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut previous_descriptor,
+            );
+            let _previous = Descriptor(previous_descriptor);
+            if result != 0 {
+                return Err(io::Error::from_raw_os_error(result as i32));
+            }
+            // Old objects may be owned by an elevated token's default group.
+            // OWNER RIGHTS alone would then grant that entire group access.
+            // Existing user-owned objects need only WRITE_DAC, as before.
+            let change_owner = previous_owner.is_null() || EqualSid(previous_owner, owner) == 0;
+            let information = DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION
+                | if change_owner {
+                    OWNER_SECURITY_INFORMATION
+                } else {
+                    0
+                };
+            let result = SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                information,
+                if change_owner { owner } else { ptr::null_mut() },
+                ptr::null_mut(),
+                acl,
+                ptr::null_mut(),
+            );
+            if result != 0 {
+                return Err(io::Error::from_raw_os_error(result as i32));
+            }
+        }
+        Ok(())
     }
     pub(super) fn create_directory(path: &Path) -> io::Result<()> {
         let descriptor = Descriptor::new()?;
