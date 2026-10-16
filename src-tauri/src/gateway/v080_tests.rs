@@ -441,6 +441,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
     )
     .await;
     start_client(&f.claude, &f.claude_home).await;
+    let claude_local_token = f.claude.0.inner.lock().unwrap().store.local_token.clone();
     let payload = br#"{ "model":"claude-fixture", "max_tokens":17, "messages":[{"role":"user","content":"unchanged"}], "metadata":{"fixture":true} }"#.to_vec();
     let response = request(
         &f.claude,
@@ -450,7 +451,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
             ("content-type", "application/json"),
             ("anthropic-version", "2023-06-01"),
             ("anthropic-beta", "fixture-beta"),
-            ("x-api-key", "local-fixture-key-must-not-leak"),
+            ("x-api-key", claude_local_token.as_str()),
             ("proxy-authorization", "Basic fixture-local-proxy"),
             ("x-extra", "preserved"),
         ],

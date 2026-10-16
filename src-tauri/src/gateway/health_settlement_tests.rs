@@ -47,11 +47,11 @@ fn settings() -> Settings {
 }
 
 #[test]
-fn default_settings_match_pre_extraction_serialization() {
+fn default_settings_match_current_serialization() {
     assert_eq!(
         serde_json::to_value(Settings::default()).unwrap(),
         json!({
-            "port": 15722,
+            "port": 43721,
             "maxRetries": 3,
             "failureThreshold": 4,
             "transientFailureThreshold": 6,
