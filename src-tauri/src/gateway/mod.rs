@@ -198,7 +198,7 @@ impl Route {
         &self,
         incoming: &hyper::Uri,
     ) -> std::result::Result<hyper::Uri, Box<dyn std::error::Error + Send + Sync>> {
-        let uri = forward::target_for(self.client_id, &self.provider.base_url, incoming)?;
+        let uri = forward::target(&self.provider.base_url, incoming)?;
         if let Some(c) = &self.grok {
             c.query_uri(uri).map_err(|e| e.message.into())
         } else {

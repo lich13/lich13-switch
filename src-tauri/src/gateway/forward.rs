@@ -163,14 +163,6 @@ pub(super) fn error(status: StatusCode, code: &str, message: &str) -> Response<W
     Response::builder().status(status).header(header::CONTENT_TYPE,"application/json")
         .body(replay::full(serde_json::to_vec(&serde_json::json!({"error":{"type":"gpt_switch_gateway","code":code,"message":message}})).unwrap())).unwrap()
 }
-pub(super) fn target_for(
-    client: super::ClientId,
-    base: &str,
-    incoming: &Uri,
-) -> Result<Uri, BoxError> {
-    let _ = client;
-    target(base, incoming)
-}
 pub(super) fn target(base: &str, incoming: &Uri) -> Result<Uri, BoxError> {
     let mut base = url::Url::parse(base)?;
     super::model::normalize_api_path(&mut base);

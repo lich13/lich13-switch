@@ -117,8 +117,7 @@ async fn fetch(
     let fail = |message: &str| (message.to_owned(), None);
     let claude = input.client_id == super::ClientId::Claude
         || connection.is_some_and(|c| c.protocol == super::grok_config::Protocol::Messages);
-    let target = super::forward::target_for(
-        input.client_id,
+    let target = super::forward::target(
         &input.base,
         &"/v1/models".parse().expect("static model path"),
     )

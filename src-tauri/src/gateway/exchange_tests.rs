@@ -2,7 +2,7 @@
 //!
 //! All URLs and credentials below are synthetic.  The tests exercise the
 //! Rust-facing exchange contract without reading any user-selected files.
-use super::{forward, model, ClientId, Edit, Gateway};
+use super::{forward, model, Edit, Gateway};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -346,9 +346,7 @@ fn forwarding_target_matrix_keeps_prefix_version_query_for_both_clients() {
     ];
     for (base, path, expected) in cases {
         let uri = path.parse().unwrap();
-        let codex = forward::target_for(ClientId::Codex, base, &uri).unwrap();
-        let claude = forward::target_for(ClientId::Claude, base, &uri).unwrap();
-        assert_eq!(codex.to_string(), expected);
-        assert_eq!(claude, codex);
+        let target = forward::target(base, &uri).unwrap();
+        assert_eq!(target.to_string(), expected);
     }
 }
