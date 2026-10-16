@@ -290,14 +290,11 @@ pub fn route(
     } else {
         return Err(RouteError::NotFound);
     };
-    // Drop the registry lock before inspecting individual stores; edits can hold
-    // a client lock while checking peer configuration.
-    let gateways: Vec<_> = registry
-        .gateways
-        .lock()
-        .unwrap()
+    // Authentication must not wait for any client's configuration transaction.
+    let snapshot = registry.tokens_snapshot();
+    let gateways: Vec<_> = snapshot
         .iter()
-        .filter_map(std::sync::Weak::upgrade)
+        .filter(|entry| entry.shared.strong_count() > 0)
         .collect();
     if explicit.is_some_and(|client| !gateways.iter().any(|gateway| gateway.client == client)) {
         return Err(RouteError::NotFound);
@@ -307,7 +304,7 @@ pub fn route(
         if explicit.is_some_and(|client| client != gateway.client) {
             continue;
         }
-        if authorized(headers, &gateway.inner.lock().unwrap().store.local_token) {
+        if authorized(headers, &gateway.token) {
             if matched.is_some() {
                 return Err(RouteError::Unauthorized);
             }

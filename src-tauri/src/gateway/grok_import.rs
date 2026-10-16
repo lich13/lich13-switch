@@ -675,7 +675,7 @@ impl Gateway {
             self.changed();
             return Err(e);
         }
-        s.store = next;
+        self.replace_store(&mut s, next);
         s.revision = storage::digest(after.as_bytes());
         s.home = Some(home.to_owned());
         self.0.admission.configure(&s.store.providers, false);

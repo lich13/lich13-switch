@@ -183,6 +183,11 @@ struct Shared {
     admission: admission::Scheduler,
     compaction: Arc<compaction::Registry>,
 }
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.registry.unregister(self);
+    }
+}
 #[derive(Clone)]
 pub struct Gateway(Arc<Shared>);
 #[derive(Clone)]
@@ -422,6 +427,7 @@ impl Gateway {
         let admission = admission::Scheduler::new(events.clone(), data.join("rpm-window.json"));
         admission.configure(&store.providers, false);
         admission.configure_retention(store.settings.thread_idle_release_seconds);
+        let local_token = store.local_token.clone();
         let gateway = Self(Arc::new(Shared {
             grok_import: grok_import::Service::default(),
             client,
@@ -455,8 +461,14 @@ impl Gateway {
             catalog: catalog::Service::new(),
             admission,
         }));
-        registry.register(&gateway.0);
+        registry.register(&gateway.0, &local_token);
         Ok(gateway)
+    }
+    fn replace_store(&self, state: &mut Inner, store: Store) {
+        state.store = store;
+        self.0
+            .registry
+            .publish_token(&self.0, &state.store.local_token);
     }
     pub fn import_initial(&self, home: &Path) -> Result<()> {
         let _guard = self.0.registry.mutation.lock().unwrap();
@@ -519,7 +531,7 @@ impl Gateway {
         }
         next.initialized = true;
         s.revision = next.persist(&self.0.data.join("gateway.json"), &s.revision)?;
-        s.store = next;
+        self.replace_store(&mut s, next);
         self.0.admission.configure(&s.store.providers, false);
         self.0
             .admission
@@ -636,15 +648,7 @@ impl Gateway {
             .try_lock()
             .map_err(|_| AppError::new(code::GATEWAY_ACTIVE, "网关正在启停，请稍后再试"))?;
         let _mutation = self.0.registry.mutation.lock().unwrap();
-        for peer in self
-            .0
-            .registry
-            .gateways
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(std::sync::Weak::upgrade)
-        {
+        for peer in self.0.registry.gateways() {
             let state = peer.inner.lock().unwrap();
             for provider in &state.store.providers {
                 for url in Self::endpoint_urls(&state.store, provider) {
@@ -1015,7 +1019,7 @@ impl Gateway {
                 after.clone(),
                 &revision,
             )?;
-            s.store = next;
+            self.replace_store(&mut s, next);
             s.revision = storage::digest(after.as_bytes());
             drop(s);
             self.changed();
@@ -1145,15 +1149,7 @@ impl Gateway {
         }
         // A port change must not turn another client's existing upstream into a loop.
         if next.settings.port != s.store.settings.port {
-            for peer in self
-                .0
-                .registry
-                .gateways
-                .lock()
-                .unwrap()
-                .iter()
-                .filter_map(std::sync::Weak::upgrade)
-            {
+            for peer in self.0.registry.gateways() {
                 if !Arc::ptr_eq(&peer, &self.0) {
                     let peer = peer.inner.lock().unwrap();
                     for p in &peer.store.providers {
@@ -1235,7 +1231,7 @@ impl Gateway {
         {
             s.last_successful = None;
         }
-        s.store = next;
+        self.replace_store(&mut s, next);
         let keys: std::collections::HashSet<_> = s.store.providers.iter().map(pkey).collect();
         s.circuits.retain(|key, _| keys.contains(key));
         s.model_circuits.retain(|key, _| keys.contains(key));
@@ -1380,7 +1376,7 @@ impl Gateway {
                 config_revision.unwrap_or(&current),
                 Some((before.map(|b| String::from_utf8(b).unwrap()), after.clone())),
             )?;
-            s.store = next;
+            self.replace_store(&mut s, next);
             s.revision = storage::digest(after.as_bytes());
             s.home = Some(home.to_owned());
             s.last_successful = None;
@@ -1550,7 +1546,7 @@ impl Gateway {
                         s.revision =
                             next.persist(&self.0.data.join("gateway.json"), &s.revision)?;
                     }
-                    s.store = next;
+                    self.replace_store(&mut s, next);
                 }
             }
             if let Err(e) = crate::migrations::gateway(&self.0.data)
@@ -1563,7 +1559,7 @@ impl Gateway {
             }
             // Recovery may have completed a store/config transaction interrupted by an I/O failure.
             let (store, revision) = Store::load(&self.0.data.join("gateway.json"))?;
-            s.store = store;
+            self.replace_store(&mut s, store);
             s.revision = revision;
             if let Some(tx) = s.shutdown.take() {
                 let _ = tx.send(true);
@@ -1644,7 +1640,7 @@ impl Gateway {
                     true,
                     None,
                 )?;
-                s.store = next;
+                self.replace_store(&mut s, next);
                 s.revision = storage::digest(after.as_bytes());
                 Ok(())
             })();
