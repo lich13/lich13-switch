@@ -422,6 +422,44 @@ pub fn api_profile(text: &str) -> Result<Profile> {
     }
     profile(&doc.to_string())
 }
+pub(super) fn missing_recovery(text: &str) -> AppError {
+    let profile = api_profile(text).ok();
+    let selected = profile
+        .as_ref()
+        .and_then(|p| crate::events::safe_model(&p.selected))
+        .map(|name| format!("模型 {name}"))
+        .unwrap_or_else(|| "受管 API 模型".into());
+    let address = match profile.as_ref().and_then(|p| p.address_source) {
+        Some("modelApi") => "api_base_url",
+        Some("environment") => "GROK_MODELS_BASE_URL 环境变量",
+        Some("global") => "endpoints.models_base_url",
+        Some("globalApi") => "GROK_XAI_API_BASE_URL 环境变量或 endpoints.xai_api_base_url",
+        _ => "base_url",
+    };
+    let credential = if profile
+        .as_ref()
+        .and_then(|p| p.table.get("api_key"))
+        .and_then(Item::as_str)
+        .is_some_and(|value| !value.is_empty())
+    {
+        "api_key"
+    } else if profile
+        .as_ref()
+        .is_some_and(|p| p.table.contains_key("env_key"))
+    {
+        "env_key 引用的环境变量"
+    } else {
+        "该模型使用的 API Key 环境变量"
+    };
+    // Refer to the configured directory without embedding a private path, URL
+    // or credential in the error. The selected model name uses the log sanitizer.
+    AppError::new(
+        code::RECOVERY,
+        &format!(
+            "缺少 Grok 原始连接的恢复依据，已保留当前配置。请打开设置中当前选择的 Grok 目录下的 config.toml，将{selected}使用的 {address} 和 {credential} 恢复为原供应商后重试"
+        ),
+    )
+}
 pub fn fingerprint(text: &str) -> Result<String> {
     let p = api_profile(text)?;
     Ok(storage::digest(

@@ -1336,10 +1336,7 @@ impl Gateway {
                     &[listener.port, s.store.settings.port],
                 )
             {
-                return Err(AppError::new(
-                    code::RECOVERY,
-                    "缺少 Grok 原始连接的恢复依据，已保留当前配置",
-                ));
+                return Err(grok_config::missing_recovery(&grok_config::read(home)?.1));
             }
             let mut next = s.store.clone();
             next.local_token.clone_from(&token);

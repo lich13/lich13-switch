@@ -146,7 +146,7 @@ impl Listener {
         } else {
             view.port
         };
-        let (socket, notice) =
+        let (socket, mut notice) =
             match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, target)).await {
                 Ok(socket) => (socket, None),
                 Err(_) if migrate_default => (
@@ -159,6 +159,11 @@ impl Listener {
             };
         self.check_revision()?;
         let port = socket.local_addr().map_err(storage::io_error)?.port();
+        if migrate_default && port != view.port && notice.is_none() {
+            notice = Some(format!(
+                "共享端口已迁移到 {port}，请重新打开已启动的 Codex / Claude Code / Grok"
+            ));
+        }
         let revision = if version == 1 {
             let bytes = serde_json::to_vec_pretty(&Config { version: 2, port })
                 .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;

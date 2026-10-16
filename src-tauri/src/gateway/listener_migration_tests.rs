@@ -81,6 +81,18 @@ async fn default_migration_keeps_v1_until_the_new_port_is_bound_then_persists_v2
         .unwrap();
 
     assert_eq!(prepared.port, new_default);
+    let notice = prepared
+        .notice
+        .as_deref()
+        .expect("successful default migration should explain the port change");
+    assert!(
+        notice.contains(&format!("共享端口已迁移到 {new_default}")),
+        "migration notice should include the selected port: {notice}"
+    );
+    assert!(
+        notice.contains("请重新打开已启动的 Codex / Claude Code / Grok"),
+        "migration notice should tell users to reopen clients: {notice}"
+    );
     assert_eq!(
         prepared
             .socket
@@ -108,6 +120,10 @@ async fn custom_v1_port_is_preserved_during_migration() {
         .unwrap();
 
     assert_eq!(prepared.port, custom_port);
+    assert!(
+        prepared.notice.is_none(),
+        "a custom v1 port should be preserved without a migration notice"
+    );
     assert_eq!(
         prepared
             .socket
@@ -147,7 +163,10 @@ async fn occupied_new_default_falls_back_to_legacy_default_with_notice() {
             .port(),
         legacy_default
     );
-    assert!(prepared.notice.is_some());
+    assert_eq!(
+        prepared.notice.as_deref(),
+        Some("新默认端口不可用，已保留原共享端口")
+    );
     assert_config(&path, 2, legacy_default);
 }
 
@@ -282,6 +301,7 @@ async fn v2_config_does_not_retry_default_migration() {
         .unwrap();
 
     assert_eq!(prepared.port, persisted_port);
+    assert!(prepared.notice.is_none(), "v2 ports are not being migrated");
     assert_eq!(
         prepared
             .socket
