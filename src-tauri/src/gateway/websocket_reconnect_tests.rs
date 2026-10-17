@@ -48,13 +48,26 @@ where
     (port, state)
 }
 
-async fn native_next<S>(ws: &mut S) -> Option<yawc::Frame>
+async fn native_next<S>(phase: &'static str, ws: &mut S) -> Option<yawc::Frame>
 where
     S: futures_util::Stream<Item = yawc::Frame> + Unpin,
 {
     tokio::time::timeout(Duration::from_secs(3), ws.next())
         .await
-        .expect("native WebSocket fixture timed out")
+        .unwrap_or_else(|_| panic!("{phase}: native WebSocket fixture timed out"))
+}
+
+async fn wait_for_websocket_retry(gateway: &Gateway, phase: &'static str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !gateway.0.admission.websocket_retries().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{phase}: native WebSocket retry was not registered"));
 }
 
 fn record_native_request(state: &NativeState, frame: &yawc::Frame) {
@@ -119,7 +132,9 @@ fn websocket_retry_interval_defaults_to_sixty_seconds_and_accepts_one() {
 #[tokio::test]
 async fn native_websocket_reconnects_and_replays_only_before_first_response_frame() {
     let (port, state) = native_server(|connection, mut ws, state| async move {
-        if let Some(frame) = native_next(&mut ws).await {
+        if let Some(frame) =
+            native_next("reconnect fixture waiting for response.create", &mut ws).await
+        {
             record_native_request(&state, &frame);
             if connection == 1 {
                 let _ = ws
@@ -150,9 +165,16 @@ async fn native_websocket_reconnects_and_replays_only_before_first_response_fram
         .await
         .unwrap();
 
-    let created = native_next(&mut client).await.unwrap();
+    let created = native_next("reconnect client waiting for response.created", &mut client)
+        .await
+        .unwrap();
     assert!(created.as_str().contains("response.created"));
-    let completed = native_next(&mut client).await.unwrap();
+    let completed = native_next(
+        "reconnect client waiting for response.completed",
+        &mut client,
+    )
+    .await
+    .unwrap();
     assert!(completed.as_str().contains("response.completed"));
     assert_eq!(state.connections.load(Ordering::SeqCst), 2);
     assert_eq!(
@@ -172,7 +194,8 @@ async fn native_websocket_reconnects_and_replays_only_before_first_response_fram
 #[tokio::test]
 async fn native_websocket_exhausts_retry_budget_without_switching_provider() {
     let (port, state) = native_server(|_connection, mut ws, state| async move {
-        if let Some(frame) = native_next(&mut ws).await {
+        if let Some(frame) = native_next("retry fixture waiting for response.create", &mut ws).await
+        {
             record_native_request(&state, &frame);
             let _ = ws
                 .send(yawc::Frame::close(1011.into(), "fixture disconnect"))
@@ -181,7 +204,9 @@ async fn native_websocket_exhausts_retry_budget_without_switching_provider() {
     })
     .await;
     let (backup, backup_state) = native_server(|_connection, mut ws, state| async move {
-        if let Some(frame) = native_next(&mut ws).await {
+        if let Some(frame) =
+            native_next("backup fixture waiting for response.create", &mut ws).await
+        {
             record_native_request(&state, &frame);
             let _ = ws
                 .send(yawc::Frame::text(NATIVE_COMPLETED.to_owned()))
@@ -202,7 +227,9 @@ async fn native_websocket_exhausts_retry_budget_without_switching_provider() {
         .await
         .unwrap();
 
-    let closed = native_next(&mut client).await.unwrap();
+    let closed = native_next("retry-budget client waiting for close", &mut client)
+        .await
+        .unwrap();
     assert_eq!(closed.opcode(), yawc::OpCode::Close);
     assert_eq!(closed.close_code().map(u16::from), Some(1013));
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -230,7 +257,12 @@ async fn native_websocket_exhausts_retry_budget_without_switching_provider() {
 #[tokio::test]
 async fn native_websocket_does_not_replay_after_response_created() {
     let (port, state) = native_server(|_connection, mut ws, state| async move {
-        if let Some(frame) = native_next(&mut ws).await {
+        if let Some(frame) = native_next(
+            "single-response fixture waiting for response.create",
+            &mut ws,
+        )
+        .await
+        {
             record_native_request(&state, &frame);
             ws.send(yawc::Frame::text(NATIVE_CREATED.to_owned()))
                 .await
@@ -250,9 +282,16 @@ async fn native_websocket_does_not_replay_after_response_created() {
         .await
         .unwrap();
 
-    let created = native_next(&mut client).await.unwrap();
+    let created = native_next(
+        "single-response client waiting for response.created",
+        &mut client,
+    )
+    .await
+    .unwrap();
     assert!(created.as_str().contains("response.created"));
-    let closed = native_next(&mut client).await.unwrap();
+    let closed = native_next("single-response client waiting for close", &mut client)
+        .await
+        .unwrap();
     assert_eq!(closed.opcode(), yawc::OpCode::Close);
     assert_eq!(state.connections.load(Ordering::SeqCst), 1);
     assert_eq!(state.requests.lock().unwrap().len(), 1);
@@ -266,7 +305,9 @@ async fn native_websocket_does_not_replay_after_response_created() {
 async fn native_websocket_cancel_and_gateway_stop_interrupt_retry_wait() {
     for stop_gateway in [false, true] {
         let (port, state) = native_server(|connection, mut ws, state| async move {
-            if let Some(frame) = native_next(&mut ws).await {
+            if let Some(frame) =
+                native_next("cancel/stop fixture waiting for response.create", &mut ws).await
+            {
                 record_native_request(&state, &frame);
                 if connection == 1 {
                     let _ = ws
@@ -297,7 +338,7 @@ async fn native_websocket_cancel_and_gateway_stop_interrupt_retry_wait() {
             .await
             .unwrap();
         wait_native_request(&state).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_websocket_retry(&g, "cancel/stop before interrupting retry wait").await;
 
         if stop_gateway {
             g.stop().await.unwrap();
@@ -326,16 +367,20 @@ async fn native_websocket_cancel_and_gateway_stop_interrupt_retry_wait() {
                 .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
                 .await
                 .unwrap();
-            assert!(native_next(&mut client)
-                .await
-                .unwrap()
-                .as_str()
-                .contains("response.created"));
-            assert!(native_next(&mut client)
-                .await
-                .unwrap()
-                .as_str()
-                .contains("response.completed"));
+            assert!(
+                native_next("cancel flow waiting for response.created", &mut client)
+                    .await
+                    .unwrap()
+                    .as_str()
+                    .contains("response.created")
+            );
+            assert!(
+                native_next("cancel flow waiting for response.completed", &mut client)
+                    .await
+                    .unwrap()
+                    .as_str()
+                    .contains("response.completed")
+            );
             assert_eq!(state.connections.load(Ordering::SeqCst), 2);
             assert_eq!(g.view().providers[0].rpm_used, 2);
             client
@@ -355,7 +400,9 @@ async fn native_websocket_cancel_and_gateway_stop_interrupt_retry_wait() {
 #[tokio::test]
 async fn native_websocket_reconnects_on_the_next_turn_after_idle_upstream_close() {
     let (port, state) = native_server(|connection, mut ws, state| async move {
-        if let Some(frame) = native_next(&mut ws).await {
+        if let Some(frame) =
+            native_next("idle-close fixture waiting for response.create", &mut ws).await
+        {
             record_native_request(&state, &frame);
             ws.send(yawc::Frame::text(NATIVE_CREATED.to_owned()))
                 .await
@@ -385,31 +432,43 @@ async fn native_websocket_reconnects_on_the_next_turn_after_idle_upstream_close(
         .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
         .await
         .unwrap();
-    assert!(native_next(&mut client)
-        .await
-        .unwrap()
-        .as_str()
-        .contains("response.created"));
-    assert!(native_next(&mut client)
-        .await
-        .unwrap()
-        .as_str()
-        .contains("response.completed"));
+    assert!(native_next(
+        "idle-close client waiting for first response.created",
+        &mut client
+    )
+    .await
+    .unwrap()
+    .as_str()
+    .contains("response.created"));
+    assert!(native_next(
+        "idle-close client waiting for first response.completed",
+        &mut client
+    )
+    .await
+    .unwrap()
+    .as_str()
+    .contains("response.completed"));
 
     client
         .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
         .await
         .unwrap();
-    assert!(native_next(&mut client)
-        .await
-        .unwrap()
-        .as_str()
-        .contains("response.created"));
-    assert!(native_next(&mut client)
-        .await
-        .unwrap()
-        .as_str()
-        .contains("response.completed"));
+    assert!(native_next(
+        "idle-close client waiting for second response.created",
+        &mut client
+    )
+    .await
+    .unwrap()
+    .as_str()
+    .contains("response.created"));
+    assert!(native_next(
+        "idle-close client waiting for second response.completed",
+        &mut client
+    )
+    .await
+    .unwrap()
+    .as_str()
+    .contains("response.completed"));
     assert_eq!(state.connections.load(Ordering::SeqCst), 2);
     assert_eq!(state.requests.lock().unwrap().len(), 2);
     assert_eq!(g.view().providers[0].rpm_used, 2);

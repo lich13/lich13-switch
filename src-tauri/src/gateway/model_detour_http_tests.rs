@@ -119,10 +119,23 @@ async fn v0255_wait_for_no_active_requests(gateway: &Gateway) {
     .await;
 }
 
+fn v0255_read_reservations(dir: &tempfile::TempDir) -> std::result::Result<Option<Value>, String> {
+    let bytes = match std::fs::read(dir.path().join("thread-reservations.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read error kind={:?}", error.kind())),
+    };
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        format!(
+            "invalid JSON at line {} column {}",
+            error.line(),
+            error.column()
+        )
+    })
+}
+
 fn v0255_reservations(dir: &tempfile::TempDir) -> Option<Value> {
-    std::fs::read(dir.path().join("thread-reservations.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    v0255_read_reservations(dir).ok().flatten()
 }
 
 fn v0255_reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Option<Value> {
@@ -135,23 +148,84 @@ fn v0255_reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Op
 
 async fn v0255_wait_for_owner_reservation(
     dir: &tempfile::TempDir,
+    gateway: &Gateway,
     thread: &str,
     provider: &str,
+    fixture_providers: &[String],
+    phase: &str,
 ) -> (Value, Value) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let mut last_snapshot = json!({"status": "not read"});
+    let mut last_read = String::from("not read");
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(snapshot) = v0255_reservations(dir) {
-                if let Some(entry) = v0255_reservation_entry(&snapshot, thread, provider) {
-                    if entry["busy"] == false {
-                        break (snapshot, entry);
+            match v0255_read_reservations(dir) {
+                Ok(Some(snapshot)) => {
+                    last_read = String::from("ok");
+                    last_snapshot =
+                        v0255_synthetic_reservation_snapshot(&snapshot, thread, fixture_providers);
+                    if let Some(entry) = v0255_reservation_entry(&snapshot, thread, provider) {
+                        if entry["busy"] == false {
+                            break (snapshot, entry);
+                        }
                     }
                 }
+                Ok(None) => last_read = String::from("not written yet"),
+                Err(error) => last_read = error,
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("fixture owner reservation was not persisted")
+    .await;
+
+    match result {
+        Ok(reservation) => reservation,
+        Err(_) => {
+            let (active, _) = gateway.0.admission.counts();
+            let in_memory = fixture_providers
+                .iter()
+                .enumerate()
+                .map(|(slot, id)| {
+                    json!({
+                        "provider_slot": slot,
+                        "active": active.get(id).copied().unwrap_or(0),
+                        "reserved": gateway.0.admission.reserved(id),
+                    })
+                })
+                .collect::<Vec<_>>();
+            panic!(
+                "fixture owner reservation timed out at phase={phase}; synthetic_snapshot={last_snapshot}; snapshot_read={last_read}; in_memory={in_memory:?}; retention_error={}",
+                gateway.0.admission.retention_error()
+            );
+        }
+    }
+}
+
+fn v0255_synthetic_reservation_snapshot(
+    snapshot: &Value,
+    thread: &str,
+    fixture_providers: &[String],
+) -> Value {
+    let Some(entries) = snapshot.as_array() else {
+        return json!({"shape": "not an array"});
+    };
+    let fixture_entries = entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.get("thread").and_then(Value::as_str) != Some(thread) {
+                return None;
+            }
+            let provider = entry.get("provider").and_then(Value::as_str);
+            let provider_slot = fixture_providers
+                .iter()
+                .position(|id| Some(id.as_str()) == provider);
+            Some(json!({
+                "provider_slot": provider_slot,
+                "busy": entry.get("busy").cloned().unwrap_or(Value::Null),
+                "idle_since": entry.get("idle_since").cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect::<Vec<_>>();
+    json!({"fixture_entries": fixture_entries})
 }
 
 fn v0255_usage_rows(usage: &crate::usage::Service) -> Vec<crate::usage::model::Record> {
@@ -300,8 +374,15 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
     );
-    let (initial_reservations, _) =
-        v0255_wait_for_owner_reservation(&dir, &thread_hash, &ids[0]).await;
+    let (initial_reservations, _) = v0255_wait_for_owner_reservation(
+        &dir,
+        &gateway,
+        &thread_hash,
+        &ids[0],
+        &ids,
+        "parallel side requests: initial owner reservation",
+    )
+    .await;
     assert_eq!(gateway.0.admission.reserved(&ids[0]), 1);
     assert_eq!(gateway.0.admission.reserved(&ids[1]), 0);
 
@@ -513,8 +594,15 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
     );
-    let (baseline, owner_reservation) =
-        v0255_wait_for_owner_reservation(&dir, &thread_hash, &ids[0]).await;
+    let (baseline, owner_reservation) = v0255_wait_for_owner_reservation(
+        &dir,
+        &gateway,
+        &thread_hash,
+        &ids[0],
+        &ids,
+        "failure retry cancellation: initial owner reservation",
+    )
+    .await;
     assert_eq!(owner_reservation["busy"], false);
     let baseline_idle_since = owner_reservation["idle_since"].clone();
     assert!(!baseline_idle_since.is_null());
@@ -536,8 +624,15 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
     );
     assert_eq!(gateway.0.admission.reserved(&ids[0]), 1);
     assert_eq!(gateway.0.admission.reserved(&ids[1]), 0);
-    let (after_failure, failure_owner) =
-        v0255_wait_for_owner_reservation(&dir, &thread_hash, &ids[0]).await;
+    let (after_failure, failure_owner) = v0255_wait_for_owner_reservation(
+        &dir,
+        &gateway,
+        &thread_hash,
+        &ids[0],
+        &ids,
+        "failure retry cancellation: after failed side request",
+    )
+    .await;
     assert_eq!(failure_owner["idle_since"], baseline_idle_since);
     assert!(v0255_reservation_entry(&after_failure, &thread_hash, &ids[1]).is_none());
 
@@ -556,8 +651,15 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
     );
     assert_eq!(gateway.0.admission.reserved(&ids[0]), 1);
     assert_eq!(gateway.0.admission.reserved(&ids[1]), 0);
-    let (after_retry, retry_owner) =
-        v0255_wait_for_owner_reservation(&dir, &thread_hash, &ids[0]).await;
+    let (after_retry, retry_owner) = v0255_wait_for_owner_reservation(
+        &dir,
+        &gateway,
+        &thread_hash,
+        &ids[0],
+        &ids,
+        "failure retry cancellation: after retry",
+    )
+    .await;
     assert_eq!(retry_owner["idle_since"], baseline_idle_since);
     assert!(v0255_reservation_entry(&after_retry, &thread_hash, &ids[1]).is_none());
 
@@ -594,8 +696,15 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
     );
     assert_eq!(gateway.0.admission.reserved(&ids[0]), 1);
     assert_eq!(gateway.0.admission.reserved(&ids[1]), 0);
-    let (after_cancel, cancel_owner) =
-        v0255_wait_for_owner_reservation(&dir, &thread_hash, &ids[0]).await;
+    let (after_cancel, cancel_owner) = v0255_wait_for_owner_reservation(
+        &dir,
+        &gateway,
+        &thread_hash,
+        &ids[0],
+        &ids,
+        "failure retry cancellation: after cancellation",
+    )
+    .await;
     assert_eq!(cancel_owner["idle_since"], baseline_idle_since);
     assert!(v0255_reservation_entry(&after_cancel, &thread_hash, &ids[1]).is_none());
 
@@ -680,8 +789,15 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
     );
-    let (baseline, owner_reservation) =
-        v0255_wait_for_owner_reservation(&dir, &thread_hash, &ids[0]).await;
+    let (baseline, owner_reservation) = v0255_wait_for_owner_reservation(
+        &dir,
+        &gateway,
+        &thread_hash,
+        &ids[0],
+        &ids,
+        "internal retry: initial owner reservation",
+    )
+    .await;
     assert_eq!(owner_reservation["busy"], false);
     let baseline_idle_since = owner_reservation["idle_since"].clone();
     assert!(!baseline_idle_since.is_null());
@@ -746,8 +862,15 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
     assert_eq!(gateway.0.admission.reserved(&ids[0]), 1);
     assert_eq!(gateway.0.admission.reserved(&ids[1]), 0);
     assert_eq!(gateway.0.admission.reserved(&ids[2]), 0);
-    let (after_retry, retry_owner) =
-        v0255_wait_for_owner_reservation(&dir, &thread_hash, &ids[0]).await;
+    let (after_retry, retry_owner) = v0255_wait_for_owner_reservation(
+        &dir,
+        &gateway,
+        &thread_hash,
+        &ids[0],
+        &ids,
+        "internal retry: after retry",
+    )
+    .await;
     assert_eq!(retry_owner["idle_since"], baseline_idle_since);
     assert!(v0255_reservation_entry(&after_retry, &thread_hash, &ids[1]).is_none());
     assert!(v0255_reservation_entry(&after_retry, &thread_hash, &ids[2]).is_none());
