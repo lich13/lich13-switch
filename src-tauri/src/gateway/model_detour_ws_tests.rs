@@ -552,10 +552,8 @@ async fn native_websocket_side_detour_followup_main_without_cursor_is_rejected_w
         before_reservation["idle_since"]
     );
 
-    side_peer
-        .send(yawc::Frame::close(1000.into(), "fixture done"))
-        .await
-        .unwrap();
+    // reject_turn already observed the server closing this connection.
+    // Sending another close can fail with WSAECONNABORTED on Windows.
     drop(side_peer);
     owner_peer
         .send(yawc::Frame::close(1000.into(), "fixture done"))
