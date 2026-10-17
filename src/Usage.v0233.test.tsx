@@ -234,3 +234,25 @@ it("leaves routing evidence absent on legacy records", async () => {
     ).not.toBeInTheDocument();
   }
 });
+
+it("distinguishes a model detour from a permanent thread handoff", async () => {
+  records = [
+    record({
+      attempts: [
+        attempt({
+          routingDecision: "model_detour_owner_preserved",
+          routingEvidence: {
+            input: "first_turn",
+            hasToolDeclarations: false,
+            restriction: "model_mismatch",
+          },
+        }),
+      ],
+    }),
+  ];
+
+  const dialog = await openFirstDetail();
+  expect(within(dialog).getByText("模型绕行，线程归属保持")).toBeInTheDocument();
+  expect(detailValue(dialog, "准入限制")).toHaveTextContent("模型白名单不匹配");
+  expect(within(dialog).queryByText("压缩后接管")).not.toBeInTheDocument();
+});

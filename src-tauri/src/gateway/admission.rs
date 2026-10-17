@@ -303,7 +303,7 @@ impl Budget {
         if self.thread.is_some() {
             return;
         }
-        if let Some(lease) = lease {
+        if let Some(lease) = lease.filter(|lease| !lease.request_only()) {
             self.handoff_owner = lease.handoff.then(|| lease.owner.clone()).flatten();
             let mut state = scheduler.0.state.lock().unwrap();
             state.retention.seconds = seconds;

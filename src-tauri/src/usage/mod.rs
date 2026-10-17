@@ -637,7 +637,7 @@ impl AttemptTrace {
     pub fn routing_evidence(&mut self, mut evidence: model::RoutingEvidence) {
         use model::{RoutingDecision as D, RoutingRestriction as R};
         evidence.restriction = match self.attempt.routing_decision {
-            Some(D::NewThreadModelDenied) => Some(R::ModelMismatch),
+            Some(D::NewThreadModelDenied | D::ModelDetourOwnerPreserved) => Some(R::ModelMismatch),
             Some(D::NewThreadModelCooling) => Some(R::ModelCooling),
             Some(D::NewThreadProviderUnavailable) => Some(R::ProviderUnavailable),
             Some(D::NewThreadCapacityFull | D::ReceiverCapacityFull) => Some(R::CapacityFull),

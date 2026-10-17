@@ -23,6 +23,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "model_detour_http_tests.rs"]
+mod model_detour_http_tests;
+
 const V022_WINDOW: &str = "fixture-v022-window";
 const V022_CAPACITY: &[u8] = b"data: {\"type\":\"error\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Selected model is at capacity\"}}\n\n";
 const V022_TEMPORARY_429: &[u8] =

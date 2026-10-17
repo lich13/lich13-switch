@@ -12,6 +12,10 @@ const MAX_THREADS: usize = 4096;
 const POISONED: &str = "线程归属状态不可用，已停止自动接管";
 const RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
+#[cfg(test)]
+#[path = "model_detour_policy_tests.rs"]
+mod model_detour_policy_tests;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) enum Intake {
     #[default]
@@ -38,6 +42,17 @@ pub fn unidentified_candidates(routes: Vec<super::Route>) -> Vec<super::Route> {
         .into_iter()
         .filter(|r| accepts(&r.provider, Intake::Ordinary))
         .collect()
+}
+
+pub fn queued(gateway: &super::Gateway) -> storage::Result<Vec<super::model::Provider>> {
+    Ok(gateway
+        .request_state()?
+        .store
+        .providers
+        .iter()
+        .filter(|provider| provider.queued)
+        .cloned()
+        .collect())
 }
 
 fn now() -> u64 {
@@ -225,6 +240,40 @@ struct Entry {
     #[serde(default)]
     claim: Option<u64>,
 }
+fn model_detour(
+    entry: &Entry,
+    queued: &[super::model::Provider],
+    requirement: &super::routing::Requirement,
+) -> bool {
+    !entry.establishing
+        && now().saturating_sub(entry.updated) < RETENTION_MS
+        && matches!(requirement, super::routing::Requirement::Model(_))
+        && queued.iter().any(|provider| {
+            provider.id == entry.provider
+                && provider.queued
+                && !requirement.allows(provider.allowed_models.as_deref())
+        })
+}
+struct RequestPolicy<'a> {
+    queued: &'a [super::model::Provider],
+    requirement: &'a super::routing::Requirement,
+    pinned: Option<&'a str>,
+}
+impl RequestPolicy<'_> {
+    fn request_only(&self, entry: &Entry) -> bool {
+        model_detour(entry, self.queued, self.requirement)
+            // A response cursor may outlive a model detour or a legal handoff.
+            // Its fixed provider can serve that continuation, but the cursor
+            // itself does not authorize moving the conversation back there.
+            || (!entry.establishing
+                && now().saturating_sub(entry.updated) < RETENTION_MS
+                && self.pinned.is_some_and(|id| id != entry.provider)
+                && self
+                    .queued
+                    .iter()
+                    .any(|p| p.queued && p.id == entry.provider))
+    }
+}
 #[derive(Default)]
 struct State {
     entries: HashMap<String, Entry>,
@@ -264,6 +313,9 @@ pub struct Lease {
     strict: bool,
     confirmed: bool,
     intake: Intake,
+    // Request-only authority is immutable, including after failures or a
+    // concurrent handoff. It must never be upgraded by successful delivery.
+    request_only: bool,
 }
 impl Registry {
     pub fn new(path: PathBuf) -> Arc<Self> {
@@ -429,6 +481,7 @@ impl Registry {
             can_handoff,
             eligible,
             super::replay::TurnEvidence::Unknown,
+            None,
         )
     }
     fn prepare_inner(
@@ -438,6 +491,7 @@ impl Registry {
         can_handoff: bool,
         eligible: &[String],
         turn: super::replay::TurnEvidence,
+        policy: Option<RequestPolicy<'_>>,
     ) -> Option<Arc<Lease>> {
         use super::replay::TurnEvidence;
         let first_turn = can_handoff && turn == TurnEvidence::First;
@@ -446,6 +500,32 @@ impl Registry {
         // A corrupt ledger must not silently guess a persisted conversation owner.
         if state.error.is_some() && state.entries.is_empty() {
             return None;
+        }
+        // Check the unfiltered queue under the ownership lock, before touching
+        // history, sequence, timestamps or the one-use compaction claim.
+        if let Some(entry) = state.entries.get(&session).filter(|entry| {
+            policy
+                .as_ref()
+                .is_some_and(|policy| policy.request_only(entry))
+        }) {
+            return Some(Arc::new(Lease {
+                registry: self.clone(),
+                session,
+                epoch: entry.epoch,
+                sequence: state.sequence,
+                owner: Some(entry.provider.clone()),
+                handoff: false,
+                completed_epoch: Mutex::new(None),
+                fresh: false,
+                preferred: vec![],
+                receivers: eligible.to_vec(),
+                ordinary_receivers: eligible.to_vec(),
+                initial_bound: std::sync::atomic::AtomicBool::new(true),
+                strict: true,
+                confirmed: true,
+                intake: Intake::Ordinary,
+                request_only: true,
+            }));
         }
         state
             .entries
@@ -529,8 +609,10 @@ impl Registry {
             } else {
                 Intake::Ordinary
             },
+            request_only: false,
         }))
     }
+    #[cfg(test)]
     pub fn prepare_policy(
         self: &Arc<Self>,
         session: String,
@@ -538,9 +620,32 @@ impl Registry {
         can_handoff: bool,
         eligible: &[super::model::Provider],
     ) -> Option<Arc<Lease>> {
+        self.prepare_request(
+            session,
+            hints,
+            can_handoff,
+            eligible,
+            &super::routing::Requirement::Resource,
+            None,
+        )
+    }
+    pub fn prepare_request(
+        self: &Arc<Self>,
+        session: String,
+        hints: Option<&super::replay::RequestHints>,
+        can_handoff: bool,
+        queued: &[super::model::Provider],
+        requirement: &super::routing::Requirement,
+        pinned: Option<&str>,
+    ) -> Option<Arc<Lease>> {
         if hints.is_some_and(|h| h.auxiliary) {
             return None;
         }
+        let eligible: Vec<_> = queued
+            .iter()
+            .filter(|p| requirement.allows(p.allowed_models.as_deref()))
+            .cloned()
+            .collect();
         let ids: Vec<_> = eligible.iter().map(|p| p.id.clone()).collect();
         let mut ordered = eligible.to_vec();
         if can_handoff && hints.is_some_and(|h| h.first_turn) {
@@ -552,6 +657,11 @@ impl Registry {
             can_handoff,
             &ordered.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             hints.map_or(super::replay::TurnEvidence::Unknown, |h| h.turn),
+            Some(RequestPolicy {
+                queued,
+                requirement,
+                pinned,
+            }),
         )?;
         let inner = Arc::get_mut(&mut lease)?;
         inner.strict = true;
@@ -646,6 +756,19 @@ impl Registry {
                 })
             })
     }
+    pub fn model_detour(
+        &self,
+        session: &str,
+        queued: &[super::model::Provider],
+        requirement: &super::routing::Requirement,
+    ) -> bool {
+        self.state.lock().ok().is_some_and(|state| {
+            state
+                .entries
+                .get(session)
+                .is_some_and(|entry| model_detour(entry, queued, requirement))
+        })
+    }
     pub fn owner(&self, session: &str) -> Option<String> {
         self.state
             .lock()
@@ -664,16 +787,20 @@ impl Registry {
 }
 
 impl Lease {
+    pub fn request_only(&self) -> bool {
+        self.request_only
+    }
     pub fn session_digest(&self) -> &str {
         &self.session
     }
     pub fn establishing(&self) -> bool {
-        self.registry.state.lock().ok().is_some_and(|state| {
-            state
-                .entries
-                .get(&self.session)
-                .is_some_and(|e| e.establishing)
-        })
+        !self.request_only
+            && self.registry.state.lock().ok().is_some_and(|state| {
+                state
+                    .entries
+                    .get(&self.session)
+                    .is_some_and(|e| e.establishing)
+            })
     }
     pub fn decision(
         &self,
@@ -681,6 +808,9 @@ impl Lease {
         provider: &str,
     ) -> crate::usage::model::RoutingDecision {
         use crate::usage::model::RoutingDecision as D;
+        if self.request_only {
+            return D::ModelDetourOwnerPreserved;
+        }
         if self.handoff {
             return if self.owner.as_deref() == Some(provider) {
                 D::NoEligibleReceiver
@@ -739,7 +869,8 @@ impl Lease {
         (intake, owner)
     }
     pub fn owns(&self, provider: &str) -> bool {
-        !self.handoff
+        !self.request_only
+            && !self.handoff
             && self.registry.state.lock().ok().is_some_and(|state| {
                 state
                     .entries
@@ -749,11 +880,72 @@ impl Lease {
     }
     /// The first actual admission, not the first successful response, establishes
     /// ownership. Competing first requests release their slot and recheck it.
+    #[cfg(test)]
     pub fn admitted(&self, provider: &str) -> bool {
-        use std::sync::atomic::Ordering;
         let Ok(mut state) = self.registry.state.lock() else {
             return false;
         };
+        self.admit_locked(&mut state, provider)
+    }
+    /// Recheck the live queue and identity while both snapshots are locked.
+    /// A changed model policy cannot turn a pending writable lease into an
+    /// implicit transfer. Reject that stale admission before sending any bytes;
+    /// a new request will prepare against the current owner and model policy.
+    pub fn admit_request(
+        &self,
+        gateway: &super::Gateway,
+        provider: &super::model::Provider,
+        requirement: &super::routing::Requirement,
+        pinned: bool,
+    ) -> storage::Result<bool> {
+        use crate::{errors::code, storage::AppError};
+        let config = gateway.request_state()?;
+        let current = config
+            .store
+            .providers
+            .iter()
+            .find(|p| p.id == provider.id && (p.queued || pinned))
+            .ok_or_else(|| AppError::new(code::NO_ELIGIBLE_PROVIDER, "供应商队列已变化，请重试"))?;
+        if current.version != provider.version {
+            return Err(AppError::new(code::PROVIDER, "供应商配置已变化，请重试"));
+        }
+        if !requirement.allows(current.allowed_models.as_deref()) {
+            return Err(AppError::new(requirement.code(), requirement.message()));
+        }
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .map_err(|_| AppError::new(code::CONVERSATION_OWNERSHIP, POISONED))?;
+        let entry = state.entries.get(&self.session);
+        if !self.request_only
+            && entry.is_some_and(|e| model_detour(e, &config.store.providers, requirement))
+        {
+            return Err(AppError::new(
+                code::NO_ELIGIBLE_PROVIDER,
+                "线程归属或模型白名单已变化，请重试本次请求",
+            ));
+        }
+        if self.request_only
+            && !pinned
+            && !entry.is_some_and(|e| !e.establishing && e.provider == provider.id)
+            && !accepts(current, Intake::Ordinary)
+        {
+            return Err(AppError::new(
+                code::NO_ELIGIBLE_PROVIDER,
+                "供应商不再接收普通请求",
+            ));
+        }
+        Ok(self.admit_locked(&mut state, &provider.id))
+    }
+    fn admit_locked(&self, state: &mut State, provider: &str) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.request_only {
+            // Expiration/removal must not upgrade the lease or cause an
+            // endless first-admission retry. Live receiver policy was checked
+            // above; this request can never recreate the missing owner.
+            return true;
+        }
         if !self.fresh || self.initial_bound.load(Ordering::Acquire) {
             return true;
         }
@@ -776,7 +968,7 @@ impl Lease {
         entry.establishing = !self.confirmed;
         self.initial_bound.store(true, Ordering::Release);
         if changed {
-            self.registry.save(&mut state, true);
+            self.registry.save(state, true);
         }
         state.error.is_none()
     }
@@ -874,6 +1066,9 @@ impl Lease {
     /// Close this one opportunity at the first output, including response.created.
     /// The in-flight winning claim remains valid solely to commit that same turn.
     pub fn output_started(&self, provider: &str) {
+        if self.request_only {
+            return;
+        }
         let Ok(mut state) = self.registry.state.lock() else {
             return;
         };
@@ -902,6 +1097,9 @@ impl Lease {
         }
     }
     pub fn complete(&self, provider: &str, boundary: Option<&str>) {
+        if self.request_only {
+            return;
+        }
         let Ok(mut completed) = self.completed_epoch.lock() else {
             return;
         };

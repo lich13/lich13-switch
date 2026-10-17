@@ -667,6 +667,7 @@ function routingReason(reason: string): string {
         thread_unidentified: "缺少可靠线程标识，按普通队列",
         new_thread: "识别为新线程",
         existing_thread: "维持原供应商",
+        model_detour_owner_preserved: "模型绕行，线程归属保持",
         awaiting_compaction: "压缩尚未完成",
         compaction_window_mismatch: "压缩窗口未匹配，维持原供应商",
         cursor_pinned: "响应游标固定原供应商",

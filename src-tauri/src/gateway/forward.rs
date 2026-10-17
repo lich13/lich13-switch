@@ -454,21 +454,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         && !unknown_affinity
         && !auxiliary
     {
-        let eligible: Vec<_> = ids
-            .iter()
-            .filter(|id| {
-                routes
-                    .get(*id)
-                    .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
-            })
-            .filter_map(|id| routes.get(id).map(|r| r.provider.clone()))
-            .collect();
-        if let Some(session) = thread.clone().filter(|_| !eligible.is_empty()) {
-            let lease = gateway.0.compaction.prepare_policy(
+        let queued = match super::compaction::queued(&gateway) {
+            Ok(queued) => queued,
+            Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, &e.code, &e.message),
+        };
+        if let Some(session) = thread.clone().filter(|_| {
+            queued
+                .iter()
+                .any(|p| requirement.allows(p.allowed_models.as_deref()))
+        }) {
+            let lease = gateway.0.compaction.prepare_request(
                 session,
                 hints.as_ref().ok(),
                 !continuation && operation == crate::usage::model::Operation::Model,
-                &eligible,
+                &queued,
+                &requirement,
+                pinned.as_deref(),
             );
             if lease.is_none() {
                 return error(
@@ -821,10 +822,17 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 );
             }
         };
-        if ownership
-            .as_ref()
-            .is_some_and(|lease| !lease.admitted(&route.provider.id))
-        {
+        let owner_admitted = ownership.as_ref().map_or(Ok(true), |lease| {
+            lease.admit_request(&gateway, &route.provider, &requirement, pinned.is_some())
+        });
+        let owner_admitted = match owner_admitted {
+            Ok(value) => value,
+            Err(e) => {
+                admission.permits.neutral(&settings);
+                return error(StatusCode::SERVICE_UNAVAILABLE, &e.code, &e.message);
+            }
+        };
+        if !owner_admitted {
             admission.permits.neutral(&settings);
             if gateway.0.compaction.error().is_some() {
                 return error(

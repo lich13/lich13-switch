@@ -31,6 +31,29 @@ const KEEPALIVE: Duration = Duration::from_secs(20);
 const USAGE_TAIL: Duration = Duration::from_secs(2);
 // Internal control result, consumed before writing a close frame.
 const TURN_CANCELLED: Failure = (0, "turn cancelled before output");
+fn admit_ownership(
+    gateway: &Gateway,
+    lease: Option<&super::compaction::Lease>,
+    route: &Route,
+    requirement: &Requirement,
+    pinned: bool,
+) -> Result<bool, Failure> {
+    lease
+        .map_or(Ok(true), |lease| {
+            lease.admit_request(gateway, &route.provider, requirement, pinned)
+        })
+        .map_err(|error| {
+            let reason = match error.code.as_str() {
+                code::STORE => code::STORE,
+                code::CONVERSATION_OWNERSHIP => code::CONVERSATION_OWNERSHIP,
+                code::MODEL_NOT_ALLOWED => code::MODEL_NOT_ALLOWED,
+                code::MODEL_UNDETERMINED => code::MODEL_UNDETERMINED,
+                code::PROVIDER => code::PROVIDER,
+                _ => code::NO_ELIGIBLE_PROVIDER,
+            };
+            (1013, reason)
+        })
+}
 fn options() -> Options {
     Options::default()
         .with_balanced_compression()
@@ -1029,25 +1052,23 @@ async fn session_once(
     }
     let mut ownership =
         if g.client_id() == super::ClientId::Codex && !manual && !unknown_affinity && !auxiliary {
-            let eligible: Vec<_> = ids
-                .iter()
-                .filter(|id| {
-                    routes
-                        .get(*id)
-                        .is_some_and(|r| requirement.allows(r.provider.allowed_models.as_deref()))
-                })
-                .filter_map(|id| routes.get(id).map(|r| r.provider.clone()))
-                .collect();
-            if let Some(session) = conversation.clone().filter(|_| !eligible.is_empty()) {
+            let queued = super::compaction::queued(g).map_err(|_| (1011, code::STORE))?;
+            if let Some(session) = conversation.clone().filter(|_| {
+                queued
+                    .iter()
+                    .any(|p| requirement.allows(p.allowed_models.as_deref()))
+            }) {
                 Some(
                     g.0.compaction
-                        .prepare_policy(
+                        .prepare_request(
                             session,
                             first_hints.as_ref(),
                             first_hints.as_ref().is_some_and(|h| {
                                 h.previous_response_id.is_none() && !h.compaction_trigger
                             }),
-                            &eligible,
+                            &queued,
+                            &requirement,
+                            pinned.as_deref(),
                         )
                         .ok_or((1013, code::CONVERSATION_OWNERSHIP))?,
                 )
@@ -1291,10 +1312,13 @@ async fn session_once(
                 return Err(error);
             }
         };
-        if ownership
-            .as_ref()
-            .is_some_and(|lease| !lease.admitted(&admission.route.provider.id))
-        {
+        if !admit_ownership(
+            g,
+            ownership.as_deref(),
+            &admission.route,
+            &requirement,
+            pinned.is_some(),
+        )? {
             admission.permits.neutral(cfg);
             if g.0.compaction.error().is_some() {
                 return Err((1013, code::CONVERSATION_OWNERSHIP));
@@ -1573,6 +1597,15 @@ async fn session_once(
     let mut received = false;
     let mut terminal_error = false;
     let mut receive_started = tokio::time::Instant::now();
+    if !admit_ownership(
+        g,
+        ownership.as_deref(),
+        &route,
+        &requirement,
+        pinned.is_some(),
+    )? {
+        return Err((1013, code::CONVERSATION_OWNERSHIP));
+    }
     if let Upstream::Native(peer) = &mut upstream {
         if let Err(e) = peer.send(first).await {
             retry_pending = disconnect_turn(
@@ -1782,10 +1815,13 @@ async fn session_once(
                 }
                 result => result?,
             };
-            if ownership
-                .as_ref()
-                .is_some_and(|lease| !lease.admitted(&admission.route.provider.id))
-            {
+            if !admit_ownership(
+                g,
+                ownership.as_deref(),
+                &admission.route,
+                &requirement,
+                !movable,
+            )? {
                 admission.permits.neutral(cfg);
                 continue;
             }
@@ -1972,6 +2008,9 @@ async fn session_once(
             retry_pending = false;
             retry_capacity = false;
             receive_started = tokio::time::Instant::now();
+            if !admit_ownership(g, ownership.as_deref(), &route, &requirement, !movable)? {
+                return Err((1013, code::CONVERSATION_OWNERSHIP));
+            }
             if let Err(error) = send_to_upstream(&mut upstream, replay_frame.clone()).await {
                 retry_pending = disconnect_turn(
                     g,
@@ -2021,6 +2060,7 @@ async fn session_once(
                     && enabled
                     && !hints.as_ref().is_some_and(|h| h.auxiliary)
                 {
+                    let queued = super::compaction::queued(g).map_err(|_| (1011, code::STORE))?;
                     let latest: Vec<_> = g
                         .routing_ids(None)
                         .into_iter()
@@ -2032,7 +2072,11 @@ async fn session_once(
                     let safe_window = hints
                         .as_ref()
                         .is_some_and(|h| h.previous_response_id.is_none() && !h.compaction_trigger);
+                    let owner_model_mismatch = conversation.as_deref().is_some_and(|session| {
+                        g.0.compaction.model_detour(session, &queued, &requirement)
+                    });
                     let boundary = safe_window
+                        && !owner_model_mismatch
                         && conversation.as_ref().is_some_and(|session| {
                             g.0.compaction.boundary_matches(
                                 session,
@@ -2048,13 +2092,23 @@ async fn session_once(
                         *next_turn = Some(frame);
                         return Err((1999, "compaction handoff"));
                     }
-                    let eligible: Vec<_> = latest.iter().map(|r| r.provider.clone()).collect();
                     ownership = if let Some(session) =
-                        conversation.clone().filter(|_| !eligible.is_empty())
+                        conversation.clone().filter(|_| !latest.is_empty())
                     {
                         Some(
                             g.0.compaction
-                                .prepare_policy(session, hints.as_ref(), safe_window, &eligible)
+                                .prepare_request(
+                                    session,
+                                    hints.as_ref(),
+                                    safe_window,
+                                    &queued,
+                                    &requirement,
+                                    hints.as_ref().and_then(|h| {
+                                        h.previous_response_id
+                                            .as_ref()
+                                            .map(|_| route.provider.id.as_str())
+                                    }),
+                                )
                                 .ok_or((1013, code::CONVERSATION_OWNERSHIP))?,
                         )
                     } else {
@@ -2071,6 +2125,22 @@ async fn session_once(
                     }) {
                         *next_turn = Some(frame);
                         return Err((1999, "compaction handoff"));
+                    }
+                    // A connection opened for a model detour is not permission
+                    // to keep unrelated turns on that provider. Respect a real
+                    // response cursor; otherwise reject before taking a thread
+                    // reservation or sending a generation on the wrong route.
+                    if !hints
+                        .as_ref()
+                        .is_some_and(|h| h.previous_response_id.is_some())
+                        && ownership.as_ref().is_some_and(|lease| {
+                            !lease
+                                .candidates_for(latest.clone(), &requirement)
+                                .iter()
+                                .any(|candidate| candidate.provider.id == route.provider.id)
+                        })
+                    {
+                        return Err((1013, code::NO_ELIGIBLE_PROVIDER));
                     }
                 } else {
                     ownership = None;
@@ -2127,10 +2197,15 @@ async fn session_once(
                 .await;
                 match acquired {
                     Ok(mut admission) => {
-                        if ownership
-                            .as_ref()
-                            .is_some_and(|lease| !lease.admitted(&admission.route.provider.id))
-                        {
+                        if !admit_ownership(
+                            g,
+                            ownership.as_deref(),
+                            &admission.route,
+                            &requirement,
+                            hints
+                                .as_ref()
+                                .is_some_and(|h| h.previous_response_id.is_some()),
+                        )? {
                             admission.permits.neutral(cfg);
                             *next_turn = Some(frame);
                             return Err((1999, "compaction handoff"));
@@ -2303,6 +2378,17 @@ async fn session_once(
                     }
                     if let (Some(u), Upstream::Native(peer)) = (&mut protocol, &upstream) {
                         u.response_headers(&peer.response_identifiers);
+                    }
+                    if !admit_ownership(
+                        g,
+                        ownership.as_deref(),
+                        &route,
+                        &requirement,
+                        hints
+                            .as_ref()
+                            .is_some_and(|h| h.previous_response_id.is_some()),
+                    )? {
+                        return Err((1013, code::CONVERSATION_OWNERSHIP));
                     }
                     if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                         retry_pending = disconnect_turn(

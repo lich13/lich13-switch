@@ -457,6 +457,7 @@ pub enum RoutingDecision {
     ThreadUnidentified,
     NewThread,
     ExistingThread,
+    ModelDetourOwnerPreserved,
     AwaitingCompaction,
     CompactionWindowMismatch,
     CursorPinned,

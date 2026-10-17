@@ -67,6 +67,10 @@ mod v0212_tests;
 #[path = "handoff_delivery_tests.rs"]
 mod v0212_delivery_tests;
 
+#[cfg(test)]
+#[path = "model_detour_ws_tests.rs"]
+mod model_detour_ws_tests;
+
 fn hints(value: Value) -> RequestHints {
     RequestHints::from_value(value, false).expect("fixture request metadata")
 }
