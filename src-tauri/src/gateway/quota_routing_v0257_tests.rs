@@ -397,9 +397,9 @@ async fn http_new_thread_temporary_429_changes_provider_but_established_owner_wa
             *count
         };
         async move {
-            if session == "fixture-temporary-new-thread" && attempt == 1 {
-                json_response(StatusCode::TOO_MANY_REQUESTS, TEMPORARY_429, Some("1"))
-            } else if session == "fixture-temporary-established-owner" && attempt == 2 {
+            if (session == "fixture-temporary-new-thread" && attempt == 1)
+                || (session == "fixture-temporary-established-owner" && attempt == 2)
+            {
                 json_response(StatusCode::TOO_MANY_REQUESTS, TEMPORARY_429, Some("1"))
             } else if session == "fixture-temporary-established-owner" && attempt >= 3 {
                 json_response(StatusCode::OK, r#"{"provider":"owner","attempt":3}"#, None)
@@ -476,7 +476,7 @@ async fn http_new_thread_temporary_429_changes_provider_but_established_owner_wa
         "owner waited only {waited:?}"
     );
     assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
-    let counts = primary_hits.lock().unwrap();
+    let counts = primary_hits.lock().unwrap().clone();
     assert_eq!(counts.get("fixture-temporary-new-thread"), Some(&1));
     assert_eq!(counts.get("fixture-temporary-established-owner"), Some(&3));
     gateway.stop().await.unwrap();
