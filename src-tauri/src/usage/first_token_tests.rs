@@ -468,7 +468,7 @@ fn downgrade_fixture_metrics_to_v5(database: &Connection) {
 #[test]
 fn v5_migration_backfills_details_but_never_invents_first_token_samples_for_old_daily_rows() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let mut final_attempt = record("fixture-migration-final", Some(40));
     let mut prior = final_attempt.attempts[0].clone();
     prior.id = "fixture-migration-prior".into();
@@ -551,7 +551,7 @@ fn v5_migration_backfills_details_but_never_invents_first_token_samples_for_old_
     let version: i64 = database
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     drop(database);
     let totals = Store::open(dir.path())
         .unwrap()

@@ -106,7 +106,15 @@ fn string(s: &str, out: &mut Vec<u8>) {
     out.extend_from_slice(s.as_bytes());
 }
 pub(super) fn encode(value: &Value) -> Vec<u8> {
-    fn write(v: &Value, out: &mut Vec<u8>) {
+    encode_version(value, false)
+}
+// v11 keeps its original byte representation. The v12 diagnostic codec also
+// stores canonical UUIDs losslessly as sixteen bytes.
+pub(super) fn encode_v12(value: &Value) -> Vec<u8> {
+    encode_version(value, true)
+}
+fn encode_version(value: &Value, compact_uuid: bool) -> Vec<u8> {
+    fn write(v: &Value, out: &mut Vec<u8>, compact_uuid: bool) {
         match v {
             Value::Null => out.push(0),
             Value::Bool(false) => out.push(1),
@@ -134,6 +142,14 @@ pub(super) fn encode(value: &Value) -> Vec<u8> {
                     out.push((nibble(pair[0]) << 4) | nibble(pair[1]));
                 }
             }
+            Value::String(s)
+                if compact_uuid
+                    && s.len() == 36
+                    && uuid::Uuid::parse_str(s).is_ok_and(|u| u.to_string() == *s) =>
+            {
+                out.push(10);
+                out.extend(uuid::Uuid::parse_str(s).expect("validated UUID").as_bytes());
+            }
             Value::String(s) => {
                 out.push(6);
                 string(s, out);
@@ -142,7 +158,7 @@ pub(super) fn encode(value: &Value) -> Vec<u8> {
                 out.push(8);
                 uint(values.len() as u64, out);
                 for v in values {
-                    write(v, out);
+                    write(v, out, compact_uuid);
                 }
             }
             Value::Object(fields) => {
@@ -155,13 +171,13 @@ pub(super) fn encode(value: &Value) -> Vec<u8> {
                         uint(0, out);
                         string(key, out);
                     }
-                    write(v, out);
+                    write(v, out, compact_uuid);
                 }
             }
         }
     }
     let mut out = Vec::new();
-    write(value, &mut out);
+    write(value, &mut out, compact_uuid);
     out
 }
 
@@ -253,6 +269,10 @@ impl Reader<'_> {
                 }
                 Value::Object(fields)
             }
+            10 => uuid::Uuid::from_slice(self.take(16)?)
+                .ok()?
+                .to_string()
+                .into(),
             _ => return None,
         })
     }

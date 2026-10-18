@@ -508,7 +508,7 @@ fn downgrade_to_v8(dir: &Path, inline_bases: bool, mode_none: bool) {
 #[test]
 fn compressed_body_round_trip_restores_lossless_record() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let basis = json!({
         "input_cost_per_token": "0.01",
         "output_cost_per_token": "0.02",
@@ -568,7 +568,7 @@ fn compressed_body_round_trip_restores_lossless_record() {
 #[test]
 fn compressed_body_checksum_corruption_is_rejected_and_retained() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let mut row = record(
         "fixture-compressed-corrupt",
         "proxy",
@@ -618,7 +618,7 @@ fn compressed_body_checksum_corruption_is_rejected_and_retained() {
 #[test]
 fn old_and_compressed_bodies_are_read_together() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let old = record(
         "fixture-old-body",
         "codex",
@@ -724,7 +724,7 @@ fn mixed_legacy_dictionary_and_plain_bodies_migrate_to_dictionary_codec() {
     );
     let rows = vec![legacy.clone(), dictionary.clone(), plain.clone()];
 
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     store.write_batch(&rows, None).unwrap();
     let before_details = rows
         .iter()
@@ -809,7 +809,7 @@ fn mixed_legacy_dictionary_and_plain_bodies_migrate_to_dictionary_codec() {
         .is_none());
     drop(database);
 
-    let mixed = Store::open(dir.path()).unwrap();
+    let mixed = Store::open_v11_fixture(dir.path()).unwrap();
     for row in &rows {
         assert_eq!(
             serde_json::to_value(mixed.detail(&row.id).unwrap()).unwrap(),
@@ -837,7 +837,7 @@ fn mixed_legacy_dictionary_and_plain_bodies_migrate_to_dictionary_codec() {
     drop(mixed);
 
     downgrade_to_v8(dir.path(), false, true);
-    let mut migrated = Store::open(dir.path()).unwrap();
+    let mut migrated = Store::open_v11_fixture(dir.path()).unwrap();
     complete_storage_migration(&mut migrated);
     for row in &rows {
         assert_eq!(
@@ -918,7 +918,7 @@ fn compressed_projection_keeps_operation_source_status_and_unpriced_filters_cons
     compaction.attempts[0].tokens.input = Some(12);
     compaction.attempts[0].status = None;
     compaction.attempts[0].transport = "fixture-projection-payload".repeat(300);
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     store
         .write_batch(&[model, search, compaction], None)
         .unwrap();
@@ -1035,7 +1035,7 @@ fn new_database_uses_incremental_vacuum_and_eight_mib_wal_limit() {
 #[test]
 fn repeated_price_bases_are_interned_without_merging_distinct_old_bases() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let basis_a = json!({"input_cost_per_token":"0.01","fixture":"basis-a"});
     let basis_b = json!({"input_cost_per_token":"0.01","fixture":"basis-b"});
     let rows = [
@@ -1089,7 +1089,7 @@ fn repeated_price_bases_are_interned_without_merging_distinct_old_bases() {
         );
     }
     drop(store);
-    let reopened = Store::open(dir.path()).unwrap();
+    let reopened = Store::open_v11_fixture(dir.path()).unwrap();
     assert_eq!(
         reopened.detail("fixture-basis-a-1").unwrap().attempts[0]
             .price
@@ -1134,7 +1134,7 @@ fn v8_price_basis_migration_resumes_after_restart_and_preserves_records_prices_a
         rows.push(row);
     }
 
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     store.write_batch(&rows, None).unwrap();
     let before_summary = summary(&store);
     assert_eq!(
@@ -1157,7 +1157,7 @@ fn v8_price_basis_migration_resumes_after_restart_and_preserves_records_prices_a
     assert_eq!(old_mode, 0);
     drop(database);
 
-    let mut migrated = Store::open(dir.path()).unwrap();
+    let mut migrated = Store::open_v11_fixture(dir.path()).unwrap();
     assert_eq!(summary(&migrated), before_summary);
     assert_eq!(
         serde_json::to_value(migrated.detail(&rows[0].id).unwrap()).unwrap(),
@@ -1170,7 +1170,7 @@ fn v8_price_basis_migration_resumes_after_restart_and_preserves_records_prices_a
     assert!(migrated.compact_storage_batch().unwrap());
     drop(migrated);
 
-    let mut resumed = Store::open(dir.path()).unwrap();
+    let mut resumed = Store::open_v11_fixture(dir.path()).unwrap();
     complete_storage_migration(&mut resumed);
     assert_eq!(summary(&resumed), before_summary);
     assert_eq!(
@@ -1197,7 +1197,7 @@ fn v8_price_basis_migration_resumes_after_restart_and_preserves_records_prices_a
     drop(database);
     drop(resumed);
 
-    let restarted = Store::open(dir.path()).unwrap();
+    let restarted = Store::open_v11_fixture(dir.path()).unwrap();
     assert_eq!(summary(&restarted), before_summary);
     assert_eq!(
         serde_json::to_value(restarted.detail(&rows[0].id).unwrap()).unwrap(),
@@ -1212,7 +1212,7 @@ fn v8_price_basis_migration_resumes_after_restart_and_preserves_records_prices_a
 #[test]
 fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     store
         .write_batch(
             &[
@@ -1296,7 +1296,7 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
         .unwrap();
     drop(database);
 
-    let mut migrated = Store::open(dir.path()).unwrap();
+    let mut migrated = Store::open_v11_fixture(dir.path()).unwrap();
     let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
     let first_before_batch: String = database
         .query_row(
@@ -1738,7 +1738,7 @@ fn v0212_storage_profile_2000_records() {
         "cache_write_cost_per_token": "0",
         "fixture": "v0212-storage-profile"
     });
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     for start in (0..TOTAL as usize).step_by(BATCH) {
         let end = (start + BATCH).min(TOTAL as usize);
         let rows = (start..end)
@@ -1756,6 +1756,7 @@ fn v0212_storage_profile_2000_records() {
     assert_eq!(overview.sources.get("proxy"), Some(&(TOTAL - CODEX)));
 
     let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
+    super::query::register(&database).unwrap();
     let pending: u64 = database
         .query_row(
             "SELECT count(*) FROM metadata WHERE key IN ('storage_records_after','storage_daily_after')",

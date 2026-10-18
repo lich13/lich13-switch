@@ -161,7 +161,7 @@ fn old_records_migrate_in_batches_and_keep_started_at_and_price_snapshot() {
         Some(12_000),
         Some(price("0.1234")),
     );
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     store
         .write_batch(std::slice::from_ref(&priced), None)
         .unwrap();
@@ -215,7 +215,7 @@ fn old_records_migrate_in_batches_and_keep_started_at_and_price_snapshot() {
 #[test]
 fn finish_time_repair_is_restartable_after_the_128_row_batch_boundary() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let rows = (0..130)
         .map(|index| {
             record(

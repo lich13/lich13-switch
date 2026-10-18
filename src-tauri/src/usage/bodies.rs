@@ -9,8 +9,7 @@ use std::io::{Read, Write};
 
 #[path = "body_compact.rs"]
 mod compact;
-#[path = "body_wire.rs"]
-mod wire;
+use super::body_wire as wire;
 
 const MAX_BODY: usize = 16 * 1024 * 1024;
 const CODEC: &str = "zstd-compact-v2";
@@ -86,6 +85,12 @@ fn projection(value: &Value) -> Value {
 }
 
 fn pack(connection: &Connection, value: &Value) -> Result<String> {
+    if value.get("example").is_some() && super::storage_v12::active(connection) {
+        let id = super::storage_v12::save_archive(connection, value)?;
+        let mut projected = projection(value);
+        projected["_usageArchive"] = id.into();
+        return serde_json::to_string(&projected).map_err(|_| failure("用量归档元数据无效"));
+    }
     let plain = serde_json::to_string(value).map_err(|_| failure("用量元数据无效"))?;
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -139,6 +144,12 @@ fn pack(connection: &Connection, value: &Value) -> Result<String> {
 
 pub(super) fn unpack(connection: &Connection, body: &str) -> Result<Value> {
     let value: Value = serde_json::from_str(body).map_err(|_| failure("用量元数据无效"))?;
+    if let Some(id) = value.get("_usageRow").and_then(Value::as_i64) {
+        return super::storage_v12::load(connection, id);
+    }
+    if let Some(id) = value.get("_usageArchive").and_then(Value::as_i64) {
+        return super::storage_v12::load_archive(connection, id);
+    }
     let Some(codec) = value.get("_usageCodec") else {
         return Ok(value);
     };

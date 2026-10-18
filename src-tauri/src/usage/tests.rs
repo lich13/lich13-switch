@@ -909,7 +909,14 @@ fn store_rebuild_rolls_back_after_insert_failure_and_does_not_cross_sources() {
         .write_batch(&originals, Some(("fixture-cursor", "old-cursor")))
         .unwrap();
     let connection = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    connection.execute_batch("CREATE TRIGGER fixture_reject BEFORE INSERT ON records WHEN NEW.id='fixture-reject' BEGIN SELECT RAISE(ABORT,'fixture rollback'); END;").unwrap();
+    super::query::register(&connection).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fixture_reject BEFORE INSERT ON v12_rows
+             WHEN NEW.key=usage_key('fixture-reject')
+             BEGIN SELECT RAISE(ABORT,'fixture rollback'); END;",
+        )
+        .unwrap();
     let replacement = record("fixture-reject", "codex", "codex", BASE + 20_000);
     assert!(store
         .rebuild(

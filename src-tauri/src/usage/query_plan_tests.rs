@@ -116,13 +116,20 @@ impl Drop for SqliteAllocation {
 
 fn plan_candidate(sql: &str) -> bool {
     let sql = sql.trim_start().to_ascii_lowercase();
-    let touches_usage = [" records", " daily", " usage_metrics", " receipts"]
-        .iter()
-        .any(|table| sql.contains(table));
+    let touches_usage = [
+        " records",
+        " daily",
+        " usage_metrics",
+        " receipts",
+        " v12_records",
+    ]
+    .iter()
+    .any(|table| sql.contains(table));
     touches_usage
         && (sql.starts_with("select ")
             || sql.starts_with("with ")
             || sql.starts_with("delete from records ")
+            || sql.starts_with("delete from v12_records ")
             || sql.starts_with("delete from usage_metrics ")
             || sql.starts_with("insert or ignore into receipts(")
             || sql.starts_with("insert or ignore into receipts "))
@@ -232,7 +239,8 @@ fn query_kind(sql: &str) -> &'static str {
         "prune-receipts"
     } else if sql.starts_with("delete from usage_metrics ") {
         "prune-metrics"
-    } else if sql.starts_with("delete from records ") {
+    } else if sql.starts_with("delete from records ") || sql.starts_with("delete from v12_records ")
+    {
         "prune-records"
     } else if sql.contains("from receipts") {
         "receipt-dedup"
@@ -485,7 +493,7 @@ fn sqlite_query_plans_cover_usage_reads_dedup_and_prune() {
         store.compact(BASE + 40 * DAY_MS).unwrap()
     });
     assert_sql_contains(&prune_capture, "insert or ignore into receipts", "prune");
-    assert_sql_contains(&prune_capture, "delete from records", "prune");
+    assert_sql_contains(&prune_capture, "delete from v12_records", "prune");
     observations.extend(explain_captured(&store.connection, "prune", prune_capture));
 
     let late_session = logical_record(
@@ -543,7 +551,7 @@ fn sqlite_query_plans_cover_usage_reads_dedup_and_prune() {
     assert!(observations.iter().any(|plan| plan.kind == "receipt-dedup"));
     assert!(observations
         .iter()
-        .any(|plan| plan.indexes.iter().any(|node| node.contains("usage_time"))));
+        .any(|plan| plan.indexes.iter().any(|node| node.contains("v12_time"))));
 }
 
 #[test]
@@ -593,17 +601,25 @@ fn record_upsert_and_source_projection_grains_preserve_usage_once() {
     let record_pk: i64 = store
         .connection
         .query_row(
-            "SELECT pk FROM pragma_table_info('records') WHERE name='id'",
+            "SELECT pk FROM pragma_table_info('v12_rows') WHERE name='rid'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(record_pk, 1, "record IDs are the table primary key");
+    assert_eq!(record_pk, 1, "record rows use rid as the primary key");
+    let upsert_owner: i64 = store
+        .connection
+        .query_row(
+            "SELECT rid FROM v12_records WHERE usage_text(key)=?1",
+            ["fixture-upsert-record"],
+            |row| row.get(0),
+        )
+        .unwrap();
     let (record_count, upsert_tokens): (u64, u64) = store
         .connection
         .query_row(
-            "SELECT count(*),(SELECT input FROM usage_metrics WHERE kind=0 AND owner='fixture-upsert-record' AND ordinal=0) FROM records",
-            [],
+            "SELECT count(*),(SELECT input FROM usage_metrics WHERE kind=0 AND owner=?1 AND ordinal=0) FROM records",
+            [upsert_owner],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();

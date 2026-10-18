@@ -169,7 +169,7 @@ fn availability_distinguishes_reported_missing_and_non_applicable_fields() {
 #[test]
 fn metadata_repair_processes_at_most_64_rows_and_clears_marker_after_restartable_batches() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let rows: Vec<_> = (0..65)
         .map(|i| {
             let mut row = record(

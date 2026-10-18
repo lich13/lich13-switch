@@ -2,12 +2,13 @@ use super::{
     bodies, dedup,
     model::*,
     pricing::{Pricing, Quote},
-    query,
+    query, storage_v12,
 };
 use crate::storage::{self, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex},
@@ -19,6 +20,7 @@ fn db<T>(r: rusqlite::Result<T>) -> Result<T> {
 pub struct Store {
     connection: Connection,
     overview_cache: OverviewCache,
+    maintenance_deferred: Cell<Option<&'static str>>,
 }
 pub type OverviewCache = Arc<Mutex<Option<(String, Dashboard)>>>;
 #[derive(Clone, Serialize)]
@@ -64,6 +66,13 @@ struct Daily {
 }
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
+        Self::open_layout(dir, false)
+    }
+    #[cfg(test)]
+    pub fn open_v11_fixture(dir: &Path) -> Result<Self> {
+        Self::open_layout(dir, true)
+    }
+    fn open_layout(dir: &Path, legacy: bool) -> Result<Self> {
         storage::private_dir(dir)?;
         let path = dir.join("usage.sqlite");
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -72,11 +81,19 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 11 {
+        if version > 12 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         super::maintenance::configure(&connection)?;
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
+        query::register(&connection)?;
+        if storage_v12::active(&connection) {
+            return Ok(Self {
+                connection,
+                overview_cache: Default::default(),
+                maintenance_deferred: Cell::default(),
+            });
+        }
         db(connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
           CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,model TEXT,status INTEGER,response TEXT,signature TEXT,effective INTEGER NOT NULL DEFAULT 1,duplicate_of TEXT,body TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS usage_time ON records(time,effective);
@@ -197,9 +214,17 @@ impl Store {
             db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR REPLACE INTO metadata(key,value) VALUES('storage_records_after',''),('storage_daily_after',''),('storage_repack','1'); PRAGMA user_version=11; COMMIT;"))?;
         }
         super::pending_prices::ensure(&connection)?;
+        if !legacy {
+            storage_v12::install(&connection)?;
+            if version == 0 {
+                db(connection.execute("DELETE FROM metadata WHERE key IN ('storage_records_after','storage_daily_after','repair_v020_after','finish_time_after')", []))?;
+                storage_v12::copy_batch(&mut connection)?;
+            }
+        }
         Ok(Self {
             connection,
             overview_cache: Default::default(),
+            maintenance_deferred: Cell::default(),
         })
     }
     pub fn reader(dir: &Path) -> Result<Self> {
@@ -212,10 +237,11 @@ impl Store {
         Ok(Self {
             connection,
             overview_cache: Default::default(),
+            maintenance_deferred: Cell::default(),
         })
     }
     pub fn reclaim_space(&self) -> Result<()> {
-        let pending: bool = db(self.connection.query_row(
+        let pending: bool = storage_v12::pending(&self.connection) || storage_v12::packing_pending(&self.connection)? || db(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM metadata WHERE key IN ('storage_records_after','storage_daily_after'))",
             [], |row| row.get(0),
         ))?;
@@ -224,16 +250,75 @@ impl Store {
             [],
             |row| row.get(0),
         ))?;
-        if super::maintenance::reclaim(&self.connection, !pending, repack)? && repack {
+        let result = super::maintenance::reclaim(&self.connection, !pending, repack)?;
+        self.maintenance_deferred.set(match result {
+            super::maintenance::Reclaim::Deferred(reason) => Some(reason),
+            super::maintenance::Reclaim::CheckpointPending => {
+                Some("用量记录已整理，空间回收等待查询结束")
+            }
+            _ => None,
+        });
+        if matches!(
+            result,
+            super::maintenance::Reclaim::Ready | super::maintenance::Reclaim::CheckpointPending
+        ) && repack
+        {
             db(self
                 .connection
                 .execute("DELETE FROM metadata WHERE key='storage_repack'", []))?;
         }
         Ok(())
     }
+    pub fn maintenance_status(&self) -> Option<String> {
+        if let Some(reason) = self.maintenance_deferred.get() {
+            return Some(reason.into());
+        }
+        if storage_v12::pending(&self.connection) {
+            let (done, total): (u64, u64) = self
+                .connection
+                .query_row(
+                    "SELECT (SELECT count(*) FROM v12_records),(SELECT count(*) FROM records)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok()?;
+            Some(format!("用量存储整理中：{done} / {total}"))
+        } else if self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+        {
+            Some("用量存储正在回收空间".into())
+        } else {
+            None
+        }
+    }
+    pub fn deferred_backfill(&self) -> bool {
+        !storage_v12::pending(&self.connection)
+            && self
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='backfill_after_storage')",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+    }
     /// Restartable storage-only conversion. Prices and associations remain exact;
     /// identical gateway/source metric projections share the same stored rows.
     pub fn compact_storage_batch(&mut self) -> Result<bool> {
+        if storage_v12::active(&self.connection) {
+            return storage_v12::compact_diagnostics(&self.connection);
+        }
+        if storage_v12::pending(&self.connection)
+            && (self.repair_metadata_batch()? || self.repair_finish_times()?)
+        {
+            return Ok(true);
+        }
         for (table, key) in [
             ("records", "storage_records_after"),
             ("daily", "storage_daily_after"),
@@ -284,7 +369,7 @@ impl Store {
             super::maintenance::reclaim(&self.connection, false, false)?;
             return Ok(true);
         }
-        Ok(false)
+        storage_v12::copy_batch(&mut self.connection)
     }
     pub fn repair_finish_times(&mut self) -> Result<bool> {
         let after: Option<String> = db(self
@@ -425,11 +510,19 @@ impl Store {
             .query_row("SELECT body FROM cursors WHERE id=?1", [id], |r| r.get(0))
             .optional())
     }
+    pub fn source_generation(&self, source: &str) -> Result<u64> {
+        db(self.connection.query_row(
+            "SELECT coalesce((SELECT cast(value AS INTEGER) FROM metadata WHERE key=?1),0)",
+            [format!("source_generation_{source}")],
+            |row| row.get(0),
+        ))
+    }
     pub fn write_batch(&mut self, records: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
         let tx = db(self.connection.transaction())?;
         for r in records {
             insert(&tx, r)?;
         }
+        storage_v12::flush(&tx)?;
         if let Some((id, body)) = cursor {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
         }
@@ -441,20 +534,20 @@ impl Store {
     pub fn detail(&self, id: &str) -> Result<Record> {
         // Keep the record and its immutable shared shape in one read snapshot,
         // including while background pruning removes unreferenced shapes.
-        let _snapshot = self
-            .connection
+        let _snapshot = self.read_snapshot()?;
+        storage_v12::record(&self.connection, id)?.ok_or_else(|| failure("用量记录不存在"))
+    }
+    fn read_snapshot(&self) -> Result<Option<rusqlite::Transaction<'_>>> {
+        self.connection
             .is_autocommit()
             .then(|| db(self.connection.unchecked_transaction()))
-            .transpose()?;
-        let body: String =
-            db(self
-                .connection
-                .query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
-        bodies::decode(&self.connection, &body)
+            .transpose()
     }
     fn records(&self, f: &Filter, with_status: bool) -> Result<Vec<Record>> {
+        let _snapshot = self.read_snapshot()?;
         let (condition, args) = query::conditions(f, "r", with_status);
-        let eligible = query::eligible(f, "r", false);
+        let condition = query::native_sql(&self.connection, condition);
+        let eligible = query::eligible(&self.connection, f, "r", false);
         let mut statement = db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {eligible} AND {condition} ORDER BY time DESC,local_sequence DESC,id DESC")))?;
         let rows = db(
             statement.query_map(rusqlite::params_from_iter(args.iter()), |r| {
@@ -481,9 +574,11 @@ impl Store {
         Ok(out)
     }
     pub fn logs(&self, f: &Filter) -> Result<Page> {
+        let _snapshot = self.read_snapshot()?;
         let (condition, args) = query::conditions(f, "r", true);
+        let condition = query::native_sql(&self.connection, condition);
         // Ambiguous records remain inspectable, but are excluded from aggregates.
-        let eligible = query::eligible(f, "r", true);
+        let eligible = query::eligible(&self.connection, f, "r", true);
         let where_sql = format!("{eligible} AND {condition}");
         let total: u64 = db(self.connection.query_row(
             &format!("SELECT count(*) FROM records r WHERE {where_sql}"),
@@ -516,6 +611,7 @@ impl Store {
         })
     }
     pub fn dashboard(&self, f: &Filter) -> Result<Dashboard> {
+        let _snapshot = self.read_snapshot()?;
         let key = query::overview_key(&self.connection, f)?;
         if let Some((saved, view)) = self.overview_cache.lock().unwrap().as_ref() {
             if saved == &key {
@@ -537,7 +633,14 @@ impl Store {
             .optional())?;
         Ok(value.and_then(|s| s.parse().ok()).unwrap_or(0))
     }
+    fn archive_details_batch(&mut self, at: i64) -> Result<bool> {
+        storage_v12::cold_batch(&mut self.connection, at)
+    }
     pub fn compact(&mut self, at: i64) -> Result<()> {
+        if storage_v12::pending(&self.connection) {
+            return Ok(());
+        }
+        self.archive_details_batch(at)?;
         let cutoff = query::bucket(at - 30 * DAY, DAY);
         if cutoff <= self.detail_since()?
             && !db(self.connection.query_row(
@@ -621,16 +724,27 @@ impl Store {
         }
         // Keep only irreversible correlation keys after detail expiry. They prevent
         // archived files, late imports and source rebuilds from duplicating daily totals.
-        db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
-        db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
-        db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
+        if storage_v12::active(&tx) {
+            storage_v12::archive(&tx, cutoff)?;
+        } else {
+            db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
+            db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
+            db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
+        }
         bodies::prune_shapes(&tx)?;
         query::changed(&tx)?;
         db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[cutoff.to_string()]))?;
         db(tx.commit())
     }
     pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {
-        let mut stmt = db(self.connection.prepare(super::pending_prices::SELECT))?;
+        if storage_v12::pending(&self.connection) {
+            db(self.connection.execute(
+                "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
+                [],
+            ))?;
+            return Ok(());
+        }
+        let mut stmt = db(self.connection.prepare(if storage_v12::active(&self.connection) { "SELECT r.body FROM records r WHERE EXISTS(SELECT 1 FROM usage_metrics m WHERE m.kind=0 AND m.owner=r.rid AND m.unpriced>0)" } else { super::pending_prices::SELECT }))?;
         let all = db(stmt.query_map([], |r| r.get::<_, String>(0)))?
             .collect::<rusqlite::Result<Vec<_>>>();
         let all = db(all)?;
@@ -649,10 +763,7 @@ impl Store {
             if changed {
                 any_changed = true;
                 query::project(&tx, 0, &r.id, &r, 1, None)?;
-                db(tx.execute(
-                    "UPDATE records SET body=?2 WHERE id=?1",
-                    params![r.id, bodies::encode(&tx, &r)?],
-                ))?;
+                storage_v12::update(&tx, &r)?;
             }
         }
         let mut stmt = db(
@@ -697,68 +808,132 @@ impl Store {
         if any_changed {
             query::changed(&tx)?;
         }
+        db(tx.execute(
+            "DELETE FROM metadata WHERE key='backfill_after_storage'",
+            [],
+        ))?;
         db(tx.commit())
     }
+    pub fn begin_rebuild(&mut self, source: &str) -> Result<()> {
+        if !matches!(source, "codex" | "claude" | "grok") {
+            return Err(failure("只可重建会话来源"));
+        }
+        if storage_v12::pending(&self.connection) {
+            return Err(failure("用量存储整理中，请稍后重建来源"));
+        }
+        let tx = db(self.connection.transaction())?;
+        db(tx.execute_batch("CREATE TABLE IF NOT EXISTS source_stage(source TEXT NOT NULL,id TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(source,id)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS source_stage_cursors(source TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(source,id)) WITHOUT ROWID;"))?;
+        db(tx.execute("DELETE FROM source_stage WHERE source=?1", [source]))?;
+        db(tx.execute("DELETE FROM source_stage_cursors WHERE source=?1", [source]))?;
+        db(tx.commit())
+    }
+    pub fn stage_rebuild(
+        &mut self,
+        source: &str,
+        records: &[Record],
+        cursor: Option<(&str, &str)>,
+    ) -> Result<()> {
+        let tx = db(self.connection.transaction())?;
+        for r in records {
+            if r.source != source {
+                return Err(failure("重建来源不一致"));
+            }
+            let mut r = preserve_existing(&tx, r)?;
+            let staged: Option<Vec<u8>> = db(tx
+                .query_row(
+                    "SELECT body FROM source_stage WHERE source=?1 AND id=?2",
+                    params![source, r.id],
+                    |row| row.get(0),
+                )
+                .optional())?;
+            if let Some(bytes) = staged {
+                r = preserve_record(&r, Some(storage_v12::decode_stage(&bytes)?))?;
+            }
+            db(tx.execute("INSERT INTO source_stage VALUES(?1,?2,?3) ON CONFLICT(source,id) DO UPDATE SET body=excluded.body", params![source,r.id,storage_v12::encode_stage(&r)?]))?;
+        }
+        if let Some((id, body)) = cursor {
+            db(tx.execute("INSERT INTO source_stage_cursors VALUES(?1,?2,?3) ON CONFLICT(source,id) DO UPDATE SET body=excluded.body",params![source,id,body]))?;
+        }
+        db(tx.commit())
+    }
+    pub fn finish_rebuild(&mut self, source: &str) -> Result<()> {
+        if storage_v12::pending(&self.connection) {
+            return Err(failure("用量存储整理中，请稍后重建来源"));
+        }
+        let tx = db(self.connection.transaction())?;
+        let archived: bool = db(tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipts WHERE source=?1)",
+            [source],
+            |r| r.get(0),
+        ))?;
+        let cutoff:i64=db(tx.query_row("SELECT coalesce((SELECT cast(value AS INTEGER) FROM metadata WHERE key='detail_since'),0)",[],|r|r.get(0)))?;
+        dedup::reset_source_supplements(&tx, source)?;
+        if storage_v12::active(&tx) {
+            storage_v12::remove_source(&tx, source)?;
+        } else {
+            db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE source=?1)",[source]))?;
+            db(tx.execute("DELETE FROM records WHERE source=?1", [source]))?;
+            db(tx.execute("UPDATE records SET effective=1,duplicate_of=NULL WHERE duplicate_of NOT IN (SELECT id FROM records UNION SELECT id FROM receipts)",[]))?;
+        }
+        let mut after = String::new();
+        loop {
+            let rows = {
+                let mut s=db(tx.prepare("SELECT id,body FROM source_stage WHERE source=?1 AND id>?2 ORDER BY id LIMIT 256"))?;
+                let it = db(s.query_map(params![source, after], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                }))?;
+                db(it.collect::<rusqlite::Result<Vec<_>>>())?
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for (_, body) in &rows {
+                let r = storage_v12::decode_stage(body)?;
+                if !archived || r.started_at >= cutoff {
+                    insert(&tx, &r)?;
+                }
+            }
+            after = rows.last().unwrap().0.clone();
+        }
+        // Older cursors have no source tag. The generation invalidates those
+        // safely if a missing file returns, without touching another source.
+        db(tx.execute(
+            "DELETE FROM cursors WHERE CASE WHEN json_valid(body) THEN json_extract(body,'$.source') END=?1",
+            [source],
+        ))?;
+        db(tx.execute("INSERT INTO cursors SELECT id,body FROM source_stage_cursors WHERE source=?1 ON CONFLICT(id) DO UPDATE SET body=excluded.body",[source]))?;
+        db(tx.execute("INSERT INTO metadata VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=cast(value AS INTEGER)+1",[format!("source_generation_{source}")]))?;
+        db(tx.execute("DELETE FROM source_stage WHERE source=?1", [source]))?;
+        db(tx.execute("DELETE FROM source_stage_cursors WHERE source=?1", [source]))?;
+        db(tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [format!("repair_{source}")],
+        ))?;
+        db(tx.execute(
+            "INSERT OR REPLACE INTO metadata VALUES(?1,?2)",
+            params![
+                format!("historical_{source}"),
+                if archived { cutoff } else { 0 }
+            ],
+        ))?;
+        query::changed(&tx)?;
+        db(tx.commit())
+    }
+    #[cfg(test)]
     pub fn rebuild(
         &mut self,
         source: &str,
         records: &[Record],
         cursors: &[(String, String)],
     ) -> Result<()> {
-        if !matches!(source, "codex" | "claude" | "grok") {
-            return Err(failure("只可重建会话来源"));
-        }
-        let tx = db(self.connection.transaction())?;
-        // Staging is validated in the same transaction; an error leaves all old rows intact.
-        db(tx.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS rebuilding(body TEXT); DELETE FROM rebuilding;",
-        ))?;
-        let archived: bool = db(tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM receipts WHERE source=?1)",
-            [source],
-            |r| r.get(0),
-        ))?;
-        let cutoff: i64 = db(tx.query_row("SELECT coalesce((SELECT cast(value as integer) FROM metadata WHERE key='detail_since'),0)",[],|r|r.get(0)))?;
-        // Old daily data no longer has per-message price snapshots. Preserve it
-        // verbatim rather than pretending that current prices recreate history.
-        let records = records
-            .iter()
-            .filter(|r| !archived || r.started_at >= cutoff)
-            .map(|r| preserve_existing(&tx, r))
-            .collect::<Result<Vec<_>>>()?;
-        db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES(?1,?2)",
-            params![
-                format!("historical_{source}"),
-                if archived { cutoff } else { 0 }
-            ],
-        ))?;
-        for r in &records {
-            if r.source != source {
-                return Err(failure("重建来源不一致"));
-            }
-            db(tx.execute(
-                "INSERT INTO rebuilding(body) VALUES(?1)",
-                [bodies::encode(&tx, r)?],
-            ))?;
-        }
-        dedup::reset_source_supplements(&tx, source)?;
-        db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE source=?1)",[source]))?;
-        db(tx.execute("DELETE FROM records WHERE source=?1", [source]))?;
-        db(tx.execute("UPDATE records SET effective=1,duplicate_of=NULL WHERE duplicate_of NOT IN (SELECT id FROM records UNION SELECT id FROM receipts)",[]))?;
-        for r in &records {
-            insert(&tx, r)?;
+        self.begin_rebuild(source)?;
+        for batch in records.chunks(2000) {
+            self.stage_rebuild(source, batch, None)?;
         }
         for (id, body) in cursors {
-            db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![id,body]))?;
+            self.stage_rebuild(source, &[], Some((id, body)))?;
         }
-        db(tx.execute_batch("DROP TABLE rebuilding;"))?;
-        db(tx.execute(
-            "DELETE FROM metadata WHERE key=?1",
-            [format!("repair_{source}")],
-        ))?;
-        query::changed(&tx)?;
-        db(tx.commit())
+        self.finish_rebuild(source)
     }
 }
 fn status_matches(status: Option<u16>, filter: Option<&str>) -> bool {
@@ -779,13 +954,7 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
     ))? {
         return Ok(());
     }
-    let previous: Option<String> = db(tx
-        .query_row(
-            "SELECT body FROM records WHERE id=?1",
-            [&incoming.id],
-            |r| r.get(0),
-        )
-        .optional())?;
+    let previous = storage_v12::record(tx, &incoming.id)?;
     let r = preserve_existing(tx, incoming)?;
     let mut r = r;
     r.finished_at = Some(r.event_time());
@@ -797,12 +966,21 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
     let provider = a.and_then(|v| v.provider.as_deref());
     let model = a.and_then(|v| v.grouping_model());
     let status = a.and_then(|v| v.status);
-    let body = bodies::encode(tx, r)?;
-    db(tx.execute("INSERT INTO metadata(key,value) VALUES('record_sequence','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1", []))?;
-    db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body,local_sequence) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT cast(value as integer) FROM metadata WHERE key='record_sequence')) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.event_time(),provider,model,status,response,signature,body]))?;
+    if storage_v12::active(tx) {
+        db(tx.execute("INSERT INTO metadata(key,value) VALUES('record_sequence','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1", []))?;
+        let sequence: i64 = db(tx.query_row(
+            "SELECT cast(value AS INTEGER) FROM metadata WHERE key='record_sequence'",
+            [],
+            |r| r.get(0),
+        ))?;
+        storage_v12::save(tx, r, 1, sequence)?;
+    } else {
+        let body = bodies::encode(tx, r)?;
+        db(tx.execute("INSERT INTO metadata(key,value) VALUES('record_sequence','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1", []))?;
+        db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body,local_sequence) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT cast(value as integer) FROM metadata WHERE key='record_sequence')) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.event_time(),provider,model,status,response,signature,body]))?;
+    }
     query::project(tx, 0, &r.id, r, 1, None)?;
-    if let Some(previous) = previous {
-        let old: Record = bodies::decode(tx, &previous)?;
+    if let Some(old) = previous {
         if old.signature() != r.signature() {
             dedup::reconcile(tx, &old)?;
         }
@@ -812,16 +990,12 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
 }
 
 fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<Record> {
-    let existing: Option<String> = db(tx
-        .query_row(
-            "SELECT body FROM records WHERE id=?1",
-            [&incoming.id],
-            |row| row.get(0),
-        )
-        .optional())?;
+    let existing = storage_v12::record(tx, &incoming.id)?;
+    preserve_record(incoming, existing)
+}
+fn preserve_record(incoming: &Record, existing: Option<Record>) -> Result<Record> {
     let mut r = incoming.clone();
-    if let Some(body) = existing {
-        let old: Record = bodies::decode(tx, &body)?;
+    if let Some(old) = existing {
         if r.source != "proxy" {
             if (old.completed && !r.completed)
                 || old.final_attempt().and_then(|a| a.tokens.output)

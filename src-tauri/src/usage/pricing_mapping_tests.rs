@@ -911,7 +911,7 @@ fn rebuilding_sessions_removes_only_their_supplement_and_preserves_gateway_snaps
 #[test]
 fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempts() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let (gateway, _) = merged_sources(&mut store);
     let snapshot = serde_json::to_value(
         store
@@ -944,7 +944,7 @@ fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempt
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 }
 
 #[test]

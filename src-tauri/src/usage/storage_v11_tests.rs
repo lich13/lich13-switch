@@ -89,7 +89,7 @@ fn row(index: u64, session: bool) -> Record {
 }
 
 fn legacy_database(dir: &Path, proxies: u64, duplicates: u64) {
-    drop(Store::open(dir).unwrap());
+    drop(Store::open_v11_fixture(dir).unwrap());
     let mut c = Connection::open(dir.join("usage.sqlite")).unwrap();
     let tx = c.transaction().unwrap();
     for i in 0..proxies {
@@ -172,7 +172,7 @@ fn v11_migration_resumes_and_preserves_all_source_views() {
     let old = Store::reader(dir.path()).unwrap();
     let before = totals(&old);
     drop(old);
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     assert!(store.compact_storage_batch().unwrap());
     let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
     let converted: u64 = c.query_row("SELECT count(*) FROM records WHERE json_extract(body,'$._usageCodec')='zstd-compact-v2'", [], |r| r.get(0)).unwrap();
@@ -180,7 +180,7 @@ fn v11_migration_resumes_and_preserves_all_source_views() {
     drop(c);
     assert_eq!(before, totals(&store));
     drop(store);
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     migrate(&mut store);
     assert_eq!(before, totals(&store));
     let state = size(dir.path());
@@ -198,7 +198,7 @@ fn v11_migration_resumes_and_preserves_all_source_views() {
 #[test]
 fn v11_body_delta_preserves_null_zero_and_gateway_original() {
     let dir = tempfile::tempdir().unwrap();
-    drop(Store::open(dir.path()).unwrap());
+    drop(Store::open_v11_fixture(dir.path()).unwrap());
     let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
     let mut r = row(0, false);
     let mut original = r.attempts[0].clone();
@@ -217,7 +217,7 @@ fn v11_body_delta_preserves_null_zero_and_gateway_original() {
 #[test]
 fn v11_shared_shapes_keep_reader_snapshot_and_reject_corruption() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let r = row(0, false);
     store.write_batch(std::slice::from_ref(&r), None).unwrap();
     let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
@@ -251,7 +251,7 @@ fn v11_shared_shapes_keep_reader_snapshot_and_reject_corruption() {
 #[test]
 fn v11_codec_waits_for_durable_database_version_guard() {
     let dir = tempfile::tempdir().unwrap();
-    drop(Store::open(dir.path()).unwrap());
+    drop(Store::open_v11_fixture(dir.path()).unwrap());
     let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
     c.pragma_update(None, "user_version", 10).unwrap();
     let body = bodies::encode(&c, &row(0, false)).unwrap();
@@ -271,7 +271,7 @@ fn v11_hundred_thousand_rows_shrink_at_least_thirty_percent() {
     let old = Store::reader(dir.path()).unwrap();
     let before = totals(&old);
     drop(old);
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     migrate(&mut store);
     let after_size = size(dir.path());
     assert_eq!(before, totals(&store));

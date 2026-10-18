@@ -676,6 +676,7 @@ fn reader_keeps_a_committed_snapshot_while_writer_transaction_is_open() {
     drop(store);
 
     let mut writer = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
+    super::query::register(&writer).unwrap();
     let reader = Store::reader(dir.path()).unwrap();
     reader
         .snapshot(|snapshot| {
@@ -691,17 +692,8 @@ fn reader_keeps_a_committed_snapshot_while_writer_transaction_is_open() {
                 Some(200),
             );
             let tx = writer.transaction().unwrap();
-            tx.execute(
-                "INSERT INTO records(id,client,source,time,body) VALUES(?1,?2,?3,?4,?5)",
-                rusqlite::params![
-                    second.id,
-                    second.client,
-                    second.source,
-                    second.started_at,
-                    serde_json::to_string(&second).unwrap()
-                ],
-            )
-            .unwrap();
+            super::storage_v12::save(&tx, &second, 1, 2).unwrap();
+            super::query::changed(&tx).unwrap();
             assert_eq!(snapshot.logs(&Filter::default()).unwrap().total, 1);
             tx.commit().unwrap();
             assert_eq!(snapshot.logs(&Filter::default()).unwrap().total, 1);
@@ -713,7 +705,8 @@ fn reader_keeps_a_committed_snapshot_while_writer_transaction_is_open() {
 
 #[test]
 fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
-    let (dir, mut store, _pricing) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     let mut gateway = record(
         "fixture-v2-gateway-record",
         "codex",
@@ -753,11 +746,13 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
     drop(database);
 
     let mut migrated = Store::open(dir.path()).unwrap();
+    while migrated.compact_storage_batch().unwrap() {}
+    migrated.reclaim_space().unwrap();
     let version: i64 = rusqlite::Connection::open(dir.path().join("usage.sqlite"))
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     assert_eq!(
         migrated.detail(&gateway.id).unwrap().attempts[0]
             .price

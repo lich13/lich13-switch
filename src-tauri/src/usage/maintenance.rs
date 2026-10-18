@@ -4,7 +4,10 @@ use crate::storage::Result;
 use rusqlite::{Connection, Error, ErrorCode};
 use std::time::{Duration, Instant};
 
-fn vacuum_has_room(connection: &Connection) -> rusqlite::Result<bool> {
+pub(super) fn has_room(connection: &Connection, copies: u64) -> Result<bool> {
+    vacuum_has_room(connection, copies).map_err(|_| super::model::failure("用量存储空间检查失败"))
+}
+fn vacuum_has_room(connection: &Connection, copies: u64) -> rusqlite::Result<bool> {
     let Some(path) = connection.path().filter(|path| !path.is_empty()) else {
         return Ok(true);
     };
@@ -14,8 +17,16 @@ fn vacuum_has_room(connection: &Connection) -> rusqlite::Result<bool> {
     // SQLite may need a temporary copy plus WAL pages while committing VACUUM.
     let required = pages
         .saturating_mul(page_size)
-        .saturating_mul(2)
+        .saturating_mul(copies)
         .saturating_add(WAL_LIMIT as u64);
+    #[cfg(test)]
+    if let Ok(available) = connection.query_row(
+        "SELECT cast(value AS INTEGER) FROM metadata WHERE key='fixture_available_bytes'",
+        [],
+        |r| r.get::<_, u64>(0),
+    ) {
+        return Ok(available >= required);
+    }
     let disks = sysinfo::Disks::new_with_refreshed_list();
     Ok(disks
         .iter()
@@ -25,7 +36,7 @@ fn vacuum_has_room(connection: &Connection) -> rusqlite::Result<bool> {
 }
 
 const WAL_LIMIT: i64 = 8 * 1024 * 1024;
-const STORAGE_TARGET: i64 = 200 * 1024 * 1024;
+const STORAGE_TARGET: i64 = 80 * 1024 * 1024;
 
 pub(super) fn configure(connection: &Connection) -> Result<()> {
     // Effective immediately for a new database. An existing database needs the
@@ -43,23 +54,38 @@ fn busy(error: &Error) -> bool {
     matches!(error, Error::SqliteFailure(code, _) if matches!(code.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
 }
 
+pub(super) enum Reclaim {
+    Ready,
+    CheckpointPending,
+    Pending,
+    Deferred(&'static str),
+}
+
 pub(super) fn reclaim(
     connection: &Connection,
     migration_ready: bool,
     repack: bool,
-) -> Result<bool> {
+) -> Result<Reclaim> {
     // A live read snapshot may pin WAL pages. Never wait for it or delete WAL;
     // leave SQLite in charge and retry during the next maintenance cycle.
     connection
         .busy_timeout(Duration::ZERO)
         .map_err(|_| super::model::failure("用量存储维护设置失败"))?;
-    let result = (|| -> rusqlite::Result<bool> {
+    let result = (|| -> rusqlite::Result<Reclaim> {
         let mode: i64 = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
-        let mut ready = migration_ready;
+        let mut ready = if migration_ready {
+            Reclaim::Ready
+        } else {
+            Reclaim::Pending
+        };
         if migration_ready && (mode == 0 || repack) {
-            if vacuum_has_room(connection)? {
+            if vacuum_has_room(connection, 2)? {
                 if repack {
-                    super::query::compact_indexes(connection)?;
+                    if super::storage_v12::active(connection) {
+                        super::storage_v12::prune(connection).map_err(|_| Error::InvalidQuery)?;
+                    } else {
+                        super::query::compact_indexes(connection)?;
+                    }
                     // This is a single statement, so concurrent readers retain
                     // the complete older shape table through their snapshots.
                     super::bodies::prune_shapes(connection).map_err(|_| Error::InvalidQuery)?;
@@ -69,7 +95,7 @@ pub(super) fn reclaim(
                 connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;")?;
             } else {
                 // Preserve the repack marker so a later maintenance cycle retries.
-                ready = false;
+                ready = Reclaim::Deferred("用量空间回收等待可用磁盘空间，记录已保留");
             }
         }
         let started = Instant::now();
@@ -96,10 +122,15 @@ pub(super) fn reclaim(
         if frames > 0 && frames == copied && frames.saturating_mul(page_size) >= WAL_LIMIT {
             // A new reader may start after PASSIVE. Zero busy timeout makes that
             // race harmless: SQLite leaves its live WAL intact instead of waiting.
-            let _: (i64, i64, i64) =
+            let (blocked, _, _): (i64, i64, i64) =
                 connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })?;
+            if blocked != 0 && matches!(ready, Reclaim::Ready) {
+                ready = Reclaim::CheckpointPending;
+            }
+        } else if frames > copied && matches!(ready, Reclaim::Ready) {
+            ready = Reclaim::CheckpointPending;
         }
         Ok(ready)
     })();
@@ -109,7 +140,9 @@ pub(super) fn reclaim(
     }
     match result {
         Ok(ready) => Ok(ready),
-        Err(error) if busy(&error) => Ok(false),
+        Err(error) if busy(&error) => {
+            Ok(Reclaim::Deferred("用量空间回收等待数据库空闲，记录已保留"))
+        }
         Err(_) => Err(super::model::failure(
             "用量存储空间整理失败，记录已保留；请检查可用磁盘空间",
         )),

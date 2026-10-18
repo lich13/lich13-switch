@@ -1,6 +1,6 @@
 //! One-to-one cross-source matching, based on CC Switch 5ae6ad38's ten-minute
 //! fingerprint window. Ambiguous sessions remain inspectable and never double bill.
-use super::{bodies, model::*, pricing::Quote, query};
+use super::{bodies, model::*, pricing::Quote, query, storage_v12};
 use crate::storage::Result;
 use rusqlite::{params, Connection};
 const WINDOW: i64 = 600_000;
@@ -44,6 +44,9 @@ fn fingerprint(a: &Record, b: &Record) -> bool {
         })
 }
 fn rows(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
+    if storage_v12::active(c) {
+        return storage_v12::candidates(c, seed);
+    }
     let mut stmt=db(c.prepare("SELECT body FROM records WHERE id=?6 UNION SELECT body FROM records WHERE ?2 IS NOT NULL AND client=?1 AND response=?2 UNION SELECT body FROM records WHERE ?3 IS NOT NULL AND client=?1 AND signature=?3 AND source<>'grok' AND source<>?7 AND (source='proxy' OR ?7='proxy') AND time BETWEEN ?4 AND ?5"))?;
     let rows = db(stmt.query_map(
         params![
@@ -71,6 +74,9 @@ fn state(
     r.duplicate_of = target.map(str::to_string);
     r.deduplication = rule.into();
     r.merged_sources = sources;
+    if storage_v12::active(c) {
+        return storage_v12::set_state(c, &r, effective);
+    }
     db(c.execute(
         "UPDATE records SET effective=?2,duplicate_of=?3,body=?4 WHERE id=?1",
         params![r.id, effective, target, bodies::encode(c, &r)?],
@@ -218,34 +224,29 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
 }
 
 fn save_projection(c: &Connection, r: &Record) -> Result<()> {
-    let body = bodies::encode(c, r)?;
-    db(c.execute(
-        "UPDATE records SET body=?2,signature=?3,model=?4 WHERE id=?1",
-        params![
-            r.id,
-            body,
-            r.signature(),
-            r.final_attempt().and_then(|a| a.grouping_model())
-        ],
-    ))?;
+    storage_v12::update(c, r)?;
     query::project(c, 0, &r.id, r, 1, None)
 }
 pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
-    let body: String = db(c.query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
-    let mut current: Record = bodies::decode(c, &body)?;
+    let mut current = storage_v12::record(c, id)?.ok_or_else(|| failure("用量关联记录缺失"))?;
+    let before = serde_json::to_value(&current).map_err(|_| failure("用量元数据无效"))?;
     let previous_price = current.final_attempt().and_then(|a| a.price.clone());
     if let Some(original) = current.gateway_reported.take() {
         if let Some(last) = current.attempts.last_mut() {
             *last = original;
         }
     }
-    let mut stmt = db(c.prepare(
-        "SELECT body FROM records WHERE duplicate_of=?1 AND source<>'proxy' ORDER BY id",
-    ))?;
-    let peers = db(stmt.query_map([id], |r| r.get::<_, String>(0)))?;
-    let peers = peers
-        .map(|r| bodies::decode::<Record>(c, &db(r)?))
-        .collect::<Result<Vec<_>>>()?;
+    let peers = if storage_v12::active(c) {
+        storage_v12::peers(c, id)?
+    } else {
+        let mut stmt = db(c.prepare(
+            "SELECT body FROM records WHERE duplicate_of=?1 AND source<>'proxy' ORDER BY id",
+        ))?;
+        let peers = db(stmt.query_map([id], |r| r.get::<_, String>(0)))?;
+        peers
+            .map(|r| bodies::decode::<Record>(c, &db(r)?))
+            .collect::<Result<Vec<_>>>()?
+    };
     current.merged_sources = peers.iter().map(|r| r.source.clone()).collect();
     if !peers.is_empty() {
         current.merged_sources.push("proxy".into());
@@ -294,7 +295,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
                     .saturating_add(last.tokens.cache_write.unwrap_or(0));
                 if cache <= inclusive {
                     let input = Some(inclusive - cache);
-                    if last.tokens.input != input && original.tokens.input != Some(0) {
+                    if last.tokens.input != input && original.tokens.input.is_none() {
                         last.tokens.input = input;
                         fields.push("input".into());
                     }
@@ -360,7 +361,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
             current.gateway_reported = Some(original);
         }
     }
-    if bodies::encode(c, &current)? != body {
+    if serde_json::to_value(&current).map_err(|_| failure("用量元数据无效"))? != before {
         save_projection(c, &current)?;
     }
     Ok(())

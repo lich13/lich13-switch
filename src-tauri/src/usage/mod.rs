@@ -1,4 +1,5 @@
 mod bodies;
+mod body_wire;
 pub mod commands;
 mod dedup;
 #[cfg(test)]
@@ -25,6 +26,11 @@ mod source_dedup_tests;
 mod storage_migration_tests;
 #[cfg(test)]
 mod storage_v11_tests;
+mod storage_v12;
+#[cfg(test)]
+mod storage_v12_capacity_tests;
+#[cfg(test)]
+mod storage_v12_tests;
 mod store;
 #[cfg(test)]
 mod token_dimensions_tests;
@@ -72,6 +78,8 @@ pub struct State {
     pub syncing: bool,
     pub reports: std::collections::BTreeMap<String, sessions::Report>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<String>,
 }
 impl Inner {
     fn persist_pending(&self, record: &Record) -> Result<()> {
@@ -267,7 +275,13 @@ impl Service {
                 // One bounded metadata batch per writer iteration, including idle periods.
                 let repair = inner.store.lock().unwrap().as_mut().map(|store| {
                     let changed = store.repair_metadata_batch()? | store.repair_finish_times()?;
-                    store.compact_storage_batch().map(|_| changed)
+                    let migrated = store.compact_storage_batch()?;
+                    if store.deferred_backfill() {
+                        if let Some(pricing) = &inner.prices {
+                            store.backfill(pricing)?;
+                        }
+                    }
+                    Ok::<_, storage::AppError>(changed || migrated)
                 });
                 let repair_failed = repair
                     .as_ref()
@@ -345,6 +359,7 @@ impl Service {
             .load(std::sync::atomic::Ordering::Relaxed);
         State {
             settings: self.settings(),
+            maintenance: self.0.store.try_lock().ok().and_then(|store| store.as_ref().and_then(store::Store::maintenance_status)),
             syncing: *self.0.syncing.lock().unwrap(),
             reports: self.0.report.lock().unwrap().clone(),
             error: (dropped != 0).then(|| format!("{dropped} 条用量因写入拥塞未保存；请检查磁盘与数据库，并同步本机会话补齐可恢复记录"))
@@ -497,22 +512,26 @@ impl sessions::Repository for SessionStore {
     fn cursor(&self, id: &str) -> Result<Option<String>> {
         self.reader.cursor(id)
     }
-    fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
-        for batch in rows.chunks(256) {
-            self.service.query(|db| db.write_batch(batch, None))?;
-        }
-        if cursor.is_some() {
-            self.service.query(|db| db.write_batch(&[], cursor))?;
-        }
-        Ok(())
+    fn generation(&self, source: &str) -> Result<u64> {
+        self.reader.source_generation(source)
     }
-    fn rebuild(
+    fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
+        self.service.query(|db| db.write_batch(rows, cursor))
+    }
+    fn begin_rebuild(&mut self, source: &str) -> Result<()> {
+        self.service.query(|db| db.begin_rebuild(source))
+    }
+    fn stage_rebuild(
         &mut self,
         source: &str,
         rows: &[Record],
-        cursors: &[(String, String)],
+        cursor: Option<(&str, &str)>,
     ) -> Result<()> {
-        self.service.query(|db| db.rebuild(source, rows, cursors))
+        self.service
+            .query(|db| db.stage_rebuild(source, rows, cursor))
+    }
+    fn finish_rebuild(&mut self, source: &str) -> Result<()> {
+        self.service.query(|db| db.finish_rebuild(source))
     }
     fn progress(&mut self, report: &sessions::Report) {
         self.service

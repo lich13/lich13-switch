@@ -815,6 +815,8 @@ impl Attempt {
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detail_archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failover_evidence: Option<crate::gateway::failover::Evidence>,
     pub id: String,

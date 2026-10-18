@@ -62,6 +62,8 @@ pub fn bucket(at: i64, step: i64) -> i64 {
     (at + offset).div_euclid(step) * step - offset
 }
 pub fn register(c: &Connection) -> Result<()> {
+    super::storage_v12::register(c)?;
+    super::storage_v12::register_values(c)?;
     db(c.create_aggregate_function(
         "decimal_sum",
         1,
@@ -168,11 +170,20 @@ pub fn project(
     count: u64,
     historical: Option<&Totals>,
 ) -> Result<()> {
+    let native = super::storage_v12::active(c);
+    if native && kind != 1 {
+        return Ok(());
+    }
+    let table = if native {
+        "usage_daily_metrics"
+    } else {
+        "usage_metrics"
+    };
     db(c.execute(
-        "DELETE FROM usage_metrics WHERE kind=?1 AND owner=?2",
+        &format!("DELETE FROM {table} WHERE kind=?1 AND owner=?2"),
         params![kind, owner],
     ))?;
-    let mut stmt=db(c.prepare_cached("INSERT INTO usage_metrics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)"))?;
+    let mut stmt=db(c.prepare_cached(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)")))?;
     for (i, a) in r.attempts.iter().enumerate() {
         let final_record = i + 1 == r.attempts.len();
         let known = final_record && a.status.is_some();
@@ -297,18 +308,22 @@ pub fn project(
 fn gateway_kind(alias: &str) -> String {
     format!("CASE WHEN EXISTS(SELECT 1 FROM usage_metrics original_kind WHERE original_kind.kind=2 AND original_kind.owner={alias}.id) THEN 2 ELSE 0 END")
 }
-pub fn eligible(f: &Filter, alias: &str, review: bool) -> String {
+pub fn eligible(c: &Connection, f: &Filter, alias: &str, review: bool) -> String {
     let effective = if review {
         format!("{alias}.effective IN (1,2)")
     } else {
         format!("{alias}.effective=1")
     };
-    match f.source.as_deref() {
+    if f.source.as_deref() == Some("sessions") && super::storage_v12::active(c) {
+        return format!("{alias}.source_code NOT IN (0,3) AND ({effective} OR ({alias}.effective=0 AND (({alias}.duplicate IS NOT NULL AND EXISTS(SELECT 1 FROM v12_rows target WHERE target.rid={alias}.duplicate AND target.source=0) AND NOT EXISTS(SELECT 1 FROM v12_rows peer WHERE peer.source<>0 AND peer.duplicate={alias}.duplicate AND (peer.time<{alias}.time OR (peer.time={alias}.time AND usage_text(peer.key)<{alias}.id)))) OR ({alias}.duplicate IS NULL AND {alias}.archived_duplicate IS NOT NULL AND EXISTS(SELECT 1 FROM receipts target WHERE target.id={alias}.archived_duplicate AND target.source='proxy') AND NOT EXISTS(SELECT 1 FROM v12_rows peer WHERE peer.source<>0 AND peer.archived_duplicate={alias}.archived_duplicate AND (peer.time<{alias}.time OR (peer.time={alias}.time AND usage_text(peer.key)<{alias}.id)))))))");
+    }
+    let sql = match f.source.as_deref() {
         Some("proxy") => format!("{effective} AND {alias}.source='proxy'"),
         Some("sessions") => format!("{alias}.source NOT IN ('proxy','grok') AND ({effective} OR ({alias}.effective=0 AND {alias}.duplicate_of IN (SELECT id FROM records WHERE source='proxy' UNION SELECT id FROM receipts WHERE source='proxy') AND NOT EXISTS(SELECT 1 FROM records peer WHERE peer.source<>'proxy' AND peer.duplicate_of={alias}.duplicate_of AND (peer.time<{alias}.time OR (peer.time={alias}.time AND peer.id<{alias}.id)))))"),
         Some("grok_sessions") => format!("{effective} AND {alias}.source='grok'"),
         _ => format!("{effective} AND {alias}.source<>'grok'"),
-    }
+    };
+    native_sql(c, sql)
 }
 pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>) {
     let mut terms = vec![format!("{alias}.time>=?"), format!("{alias}.time<=?")];
@@ -386,7 +401,7 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
         cache_input_eligible: row.get(i + 23)?,
     })
 }
-fn selection(f: &Filter) -> (String, Vec<Value>) {
+fn selection(c: &Connection, f: &Filter) -> (String, Vec<Value>) {
     let (condition, mut args) = conditions(f, "r", false);
     let mut daily = vec![
         "d.day>=?".to_string(),
@@ -412,7 +427,7 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
         daily.push(format!("{}=?", operation_expression("d.body", "$.example")));
         args.push(Value::Text(operation.into()));
     }
-    let eligible = eligible(f, "r", false);
+    let eligible = eligible(c, f, "r", false);
     let kind = if f.source.as_deref() == Some("proxy") {
         gateway_kind("r")
     } else {
@@ -446,7 +461,8 @@ fn grok_model_filter(f: &Filter) -> Option<&str> {
 pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
     let start = f.start.unwrap_or(0);
     let end = f.end.unwrap_or_else(now);
-    let (cte, args) = selection(f);
+    let (cte, args) = selection(c, f);
+    let cte = native_sql(c, cte);
     // Each aggregate reads the same narrow materialized projection, rather than
     // repeating the indexed record/attempt join for every panel.
     let cte = cte.replace("m AS (", "m AS MATERIALIZED (");
@@ -517,7 +533,8 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     providers.sort_by(order);
     models.sort_by(order);
     let (condition, review_args) = conditions(f, "r", false);
-    let eligible = eligible(f, "r", true);
+    let condition = native_sql(c, condition);
+    let eligible = eligible(c, f, "r", true);
     let review_count = db(c.query_row(
         &format!("SELECT count(*) FROM records r WHERE effective=2 AND {eligible} AND {condition}"),
         rusqlite::params_from_iter(review_args.iter()),
@@ -588,4 +605,24 @@ pub fn version(c: &Connection) -> Result<u64> {
 }
 pub fn changed(c: &Connection) -> Result<()> {
     db(c.execute("INSERT INTO metadata(key,value) VALUES('data_version','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1",[])).map(|_|())
+}
+
+/// Only metric owners change internally; public IDs and sort ties stay stable.
+pub(super) fn native_sql(c: &Connection, sql: String) -> String {
+    if !super::storage_v12::active(c) {
+        return sql;
+    }
+    sql.replace(&gateway_kind("r"), "CASE WHEN EXISTS(SELECT 1 FROM v12_original o WHERE o.owner=r.rid AND o.metrics_changed) THEN 2 ELSE 0 END")
+    .replace(
+        "id owner,time,source FROM records",
+        "rid owner,time,source FROM records",
+    )
+    .replace("original.owner=r.id", "original.owner=r.rid")
+    .replace("native.owner=r.id", "native.owner=r.rid")
+    .replace("original_kind.owner=r.id", "original_kind.owner=r.rid")
+    .replace("r.client=?", "r.client_code=usage_label(?)")
+    .replace("r.source='proxy'", "r.source_code=0")
+    .replace("r.source='grok'", "r.source_code=3")
+    .replace("r.source<>'grok'", "r.source_code<>3")
+    .replace("r.source NOT IN ('proxy','grok')", "r.source_code NOT IN (0,3)")
 }

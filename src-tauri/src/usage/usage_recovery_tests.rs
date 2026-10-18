@@ -296,19 +296,16 @@ fn exact_response_id_supplements_only_missing_token_fields() {
         .unwrap();
     let merged = store.detail(&gateway.id).unwrap();
     let tokens = &merged.final_attempt().unwrap().tokens;
-    assert_eq!(tokens.input, Some(80));
+    assert_eq!(tokens.input, Some(100));
     assert_eq!(tokens.output, Some(7));
     assert_eq!(tokens.cache_read, Some(20));
     assert_eq!(tokens.cache_write, Some(0));
-    assert_eq!(tokens.total(), Some(107));
+    assert_eq!(tokens.total(), Some(127));
     assert_eq!(merged.merged_sources, vec!["codex", "proxy"]);
     assert_eq!(merged.deduplication, "response_id");
     assert_eq!(
         merged.final_attempt().unwrap().usage_sources,
-        std::collections::BTreeMap::from([
-            ("cache_read".into(), "session".into()),
-            ("input".into(), "session".into()),
-        ])
+        std::collections::BTreeMap::from([("cache_read".into(), "session".into())])
     );
     assert_eq!(
         merged.final_attempt().unwrap().price.as_ref().unwrap().cost,

@@ -16,6 +16,8 @@ const MAX_LINE: u64 = 256 * 1024 * 1024;
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Cursor {
+    source: String,
+    generation: u64,
     offset: u64,
     identity: String,
     tail: String,
@@ -221,29 +223,41 @@ fn parent_prefix(path: &Path, cutoff: i64) -> Result<Vec<String>> {
 }
 pub trait Repository {
     fn cursor(&self, id: &str) -> Result<Option<String>>;
+    fn generation(&self, source: &str) -> Result<u64>;
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()>;
-    fn rebuild(
+    fn begin_rebuild(&mut self, source: &str) -> Result<()>;
+    fn stage_rebuild(
         &mut self,
         source: &str,
         rows: &[Record],
-        cursors: &[(String, String)],
+        cursor: Option<(&str, &str)>,
     ) -> Result<()>;
+    fn finish_rebuild(&mut self, source: &str) -> Result<()>;
     fn progress(&mut self, _report: &Report) {}
 }
 impl Repository for Store {
     fn cursor(&self, id: &str) -> Result<Option<String>> {
         Store::cursor(self, id)
     }
+    fn generation(&self, source: &str) -> Result<u64> {
+        Store::source_generation(self, source)
+    }
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
         Store::write_batch(self, rows, cursor)
     }
-    fn rebuild(
+    fn begin_rebuild(&mut self, source: &str) -> Result<()> {
+        Store::begin_rebuild(self, source)
+    }
+    fn stage_rebuild(
         &mut self,
         source: &str,
         rows: &[Record],
-        cursors: &[(String, String)],
+        cursor: Option<(&str, &str)>,
     ) -> Result<()> {
-        Store::rebuild(self, source, rows, cursors)
+        Store::stage_rebuild(self, source, rows, cursor)
+    }
+    fn finish_rebuild(&mut self, source: &str) -> Result<()> {
+        Store::finish_rebuild(self, source)
     }
 }
 pub fn sync(
@@ -254,6 +268,10 @@ pub fn sync(
     home: &Path,
     rebuild: bool,
 ) -> Result<Report> {
+    let generation = store.generation(client)?;
+    let next_generation = generation
+        .checked_add(u64::from(rebuild))
+        .ok_or_else(|| failure("会话重建代号超过安全范围"))?;
     let mut paths = Vec::new();
     if client == "codex" || client == "grok" {
         files(&home.join("sessions"), 0, &mut paths)?;
@@ -278,7 +296,8 @@ pub fn sync(
             let key = safe_id(&format!("{client}:{}", p.to_string_lossy()));
             let saved = store
                 .cursor(&key)?
-                .and_then(|s| serde_json::from_str::<Cursor>(&s).ok());
+                .and_then(|s| serde_json::from_str::<Cursor>(&s).ok())
+                .filter(|c| c.generation == generation);
             let mut file = File::open(p).map_err(storage::io_error)?;
             let id = identity(&file)?;
             let size = file.metadata().map_err(storage::io_error)?.len();
@@ -300,8 +319,9 @@ pub fn sync(
         }
     }
     let mut prefixes = BTreeMap::new();
-    let mut rebuilt = Vec::new();
-    let mut cursors = Vec::new();
+    if rebuild {
+        store.begin_rebuild(client)?;
+    }
     for path in paths {
         let key = safe_id(&format!("{client}:{}", path.to_string_lossy()));
         let result = (|| -> Result<(Vec<Record>, String)> {
@@ -313,6 +333,7 @@ pub fn sync(
                 store
                     .cursor(&key)?
                     .and_then(|s| serde_json::from_str::<Cursor>(&s).ok())
+                    .filter(|c| c.generation == generation)
                     .unwrap_or_default()
             };
             if c.identity != id
@@ -322,6 +343,8 @@ pub fn sync(
                 c = Cursor::default();
             }
             c.identity = id;
+            c.source = client.into();
+            c.generation = next_generation;
             let mut prefix = Vec::new();
             if client == "codex" && c.offset == 0 {
                 let (session, parent, at) = metadata.get(&key).cloned().unwrap_or_default();
@@ -362,6 +385,9 @@ pub fn sync(
                     c.offset = reader.stream_position().map_err(storage::io_error)?;
                 }
                 let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+                    if rebuild {
+                        return Err(failure("会话重建遇到无效完整行，已保留原数据"));
+                    }
                     report.skipped += 1;
                     continue;
                 };
@@ -387,7 +413,11 @@ pub fn sync(
                             })
                             .flatten();
                     }
-                    if rows.len() >= 100_000 {
+                    if rebuild && rows.len() >= 2000 {
+                        let batch: Vec<_> = std::mem::take(&mut rows).into_values().collect();
+                        store.stage_rebuild(client, &batch, None)?;
+                        report.imported += batch.len() as u64;
+                    } else if rows.len() >= 100_000 {
                         return Err(failure("单文件会话用量超过安全处理限制"));
                     }
                     rows.entry(r.id.clone())
@@ -420,11 +450,10 @@ pub fn sync(
                 report.files += 1;
                 report.imported += rows.len() as u64;
                 if rebuild {
-                    if rebuilt.len() + rows.len() > 100_000 {
-                        return Err(failure("会话重建超过单次安全限制，已保留原数据"));
+                    for batch in rows.chunks(2000) {
+                        store.stage_rebuild(client, batch, None)?;
                     }
-                    rebuilt.extend(rows);
-                    cursors.push((key, cursor));
+                    store.stage_rebuild(client, &[], Some((&key, &cursor)))?;
                 } else {
                     store.write_batch(&rows, Some((&key, &cursor)))?;
                 }
@@ -443,7 +472,7 @@ pub fn sync(
     if rebuild {
         report.phase = "rebuilding".into();
         store.progress(&report);
-        store.rebuild(client, &rebuilt, &cursors)?;
+        store.finish_rebuild(client)?;
     }
     report.phase = "complete".into();
     report.completed_at = Some(now());

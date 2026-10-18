@@ -274,7 +274,7 @@ fn compressed_record(id: &str, priced: bool) -> Record {
 #[test]
 fn store_inserted_compressed_json_keeps_an_indexable_price_projection() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
     store
         .write_batch(
             &[
