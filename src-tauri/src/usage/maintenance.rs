@@ -4,6 +4,26 @@ use crate::storage::Result;
 use rusqlite::{Connection, Error, ErrorCode};
 use std::time::{Duration, Instant};
 
+fn vacuum_has_room(connection: &Connection) -> rusqlite::Result<bool> {
+    let Some(path) = connection.path().filter(|path| !path.is_empty()) else {
+        return Ok(true);
+    };
+    let path = std::path::Path::new(path);
+    let pages: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    // SQLite may need a temporary copy plus WAL pages while committing VACUUM.
+    let required = pages
+        .saturating_mul(page_size)
+        .saturating_mul(2)
+        .saturating_add(WAL_LIMIT as u64);
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    Ok(disks
+        .iter()
+        .filter(|disk| path.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .is_some_and(|disk| disk.available_space() >= required))
+}
+
 const WAL_LIMIT: i64 = 8 * 1024 * 1024;
 const STORAGE_TARGET: i64 = 200 * 1024 * 1024;
 
@@ -33,15 +53,24 @@ pub(super) fn reclaim(
     connection
         .busy_timeout(Duration::ZERO)
         .map_err(|_| super::model::failure("用量存储维护设置失败"))?;
-    let result = (|| -> rusqlite::Result<()> {
+    let result = (|| -> rusqlite::Result<bool> {
         let mode: i64 = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+        let mut ready = migration_ready;
         if migration_ready && (mode == 0 || repack) {
-            if repack {
-                super::query::compact_indexes(connection)?;
+            if vacuum_has_room(connection)? {
+                if repack {
+                    super::query::compact_indexes(connection)?;
+                    // This is a single statement, so concurrent readers retain
+                    // the complete older shape table through their snapshots.
+                    super::bodies::prune_shapes(connection).map_err(|_| Error::InvalidQuery)?;
+                }
+                // VACUUM is atomic, including disk-full or interruption. It runs
+                // off the forwarding path and never replaces a live database file.
+                connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;")?;
+            } else {
+                // Preserve the repack marker so a later maintenance cycle retries.
+                ready = false;
             }
-            // VACUUM is atomic, including disk-full or interruption. It preserves
-            // every record and index, and runs off the gateway forwarding path.
-            connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;")?;
         }
         let started = Instant::now();
         let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
@@ -72,14 +101,14 @@ pub(super) fn reclaim(
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })?;
         }
-        Ok(())
+        Ok(ready)
     })();
     let restored = connection.busy_timeout(Duration::from_secs(3));
     if restored.is_err() {
         return Err(super::model::failure("用量存储维护设置失败"));
     }
     match result {
-        Ok(()) => Ok(migration_ready),
+        Ok(ready) => Ok(ready),
         Err(error) if busy(&error) => Ok(false),
         Err(_) => Err(super::model::failure(
             "用量存储空间整理失败，记录已保留；请检查可用磁盘空间",

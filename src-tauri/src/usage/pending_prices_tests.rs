@@ -301,7 +301,7 @@ fn store_inserted_compressed_json_keeps_an_indexable_price_projection() {
     for (_, stored) in &rows {
         assert_eq!(
             serde_json::from_str::<Value>(stored).unwrap()["_usageCodec"],
-            "zstd-dict-v1"
+            "zstd-compact-v2"
         );
     }
     assert_eq!(pending_ids_for_store(&connection), ["compressed-unpriced"]);

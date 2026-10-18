@@ -198,7 +198,7 @@ fn source_storage_profiles(database: &Connection) -> BTreeMap<String, SourceStor
     for row in rows {
         let (source, body) = row.unwrap();
         let stored: Value = serde_json::from_str(&body).unwrap();
-        let raw = super::bodies::unpack(&body).unwrap();
+        let raw = super::bodies::unpack(database, &body).unwrap();
         let raw_bytes = serde_json::to_vec(&raw).unwrap().len() as u64;
         let mut projection = stored.clone();
         let (base64_bytes, compressed_bytes) = if let Some(object) = projection.as_object_mut() {
@@ -403,9 +403,9 @@ fn dictionary_compression_profile() -> (u64, u64, u64) {
     )
 }
 
-fn legacy_zstd_wrapper(body: &str) -> String {
+fn legacy_zstd_wrapper(database: &Connection, body: &str) -> String {
     let mut wrapper: Value = serde_json::from_str(body).unwrap();
-    let raw = serde_json::to_vec(&super::bodies::unpack(body).unwrap()).unwrap();
+    let raw = serde_json::to_vec(&super::bodies::unpack(database, body).unwrap()).unwrap();
     let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 6).unwrap();
     encoder.include_checksum(true).unwrap();
     encoder.write_all(&raw).unwrap();
@@ -475,7 +475,7 @@ fn downgrade_to_v8(dir: &Path, inline_bases: bool, mode_none: bool) {
             rows
         };
         for (id, body) in rows {
-            let mut value = super::bodies::unpack(&body).unwrap();
+            let mut value = super::bodies::unpack(&database, &body).unwrap();
             restore_inline_basis(&mut value, &bases);
             database
                 .execute(
@@ -542,8 +542,8 @@ fn compressed_body_round_trip_restores_lossless_record() {
         )
         .unwrap();
     let encoded: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(encoded["_usageCodec"], "zstd-dict-v1");
-    let unpacked = super::bodies::unpack(&body).unwrap();
+    assert_eq!(encoded["_usageCodec"], "zstd-compact-v2");
+    let unpacked = super::bodies::unpack(&database, &body).unwrap();
     assert!(unpacked["attempts"][0]["price"]["basisRef"].is_string());
     assert!(unpacked["attempts"][0]["price"].get("basis").is_none());
     drop(database);
@@ -596,7 +596,7 @@ fn compressed_body_checksum_corruption_is_rejected_and_retained() {
     *last ^= 0x01;
     wrapper["_usageBody"] = Value::String(STANDARD.encode(packed));
     let damaged = serde_json::to_string(&wrapper).unwrap();
-    assert!(super::bodies::unpack(&damaged).is_err());
+    assert!(super::bodies::unpack(&database, &damaged).is_err());
     database
         .execute(
             "UPDATE records SET body=?2 WHERE id=?1",
@@ -665,7 +665,7 @@ fn old_and_compressed_bodies_are_read_together() {
         .is_none());
     assert_eq!(
         serde_json::from_str::<Value>(&stored_new).unwrap()["_usageCodec"],
-        "zstd-dict-v1"
+        "zstd-compact-v2"
     );
     drop(database);
 
@@ -761,8 +761,8 @@ fn mixed_legacy_dictionary_and_plain_bodies_migrate_to_dictionary_codec() {
         )
         .unwrap();
     let current_legacy: Value = serde_json::from_str(&legacy_body).unwrap();
-    assert_eq!(current_legacy["_usageCodec"], "zstd-dict-v1");
-    let legacy_body = legacy_zstd_wrapper(&legacy_body);
+    assert_eq!(current_legacy["_usageCodec"], "zstd-compact-v2");
+    let legacy_body = legacy_zstd_wrapper(&database, &legacy_body);
     database
         .execute(
             "UPDATE records SET body=?2 WHERE id=?1",
@@ -801,7 +801,7 @@ fn mixed_legacy_dictionary_and_plain_bodies_migrate_to_dictionary_codec() {
     );
     assert_eq!(
         serde_json::from_str::<Value>(&stored_dictionary).unwrap()["_usageCodec"],
-        "zstd-dict-v1"
+        "zstd-compact-v2"
     );
     assert!(serde_json::from_str::<Value>(&stored_plain)
         .unwrap()
@@ -875,7 +875,7 @@ fn mixed_legacy_dictionary_and_plain_bodies_migrate_to_dictionary_codec() {
         .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&migrated_body).unwrap()["_usageCodec"],
-        "zstd-dict-v1"
+        "zstd-compact-v2"
     );
 }
 
@@ -1072,7 +1072,7 @@ fn repeated_price_bases_are_interned_without_merging_distinct_old_bases() {
             |row| row.get(0),
         )
         .unwrap();
-    let stored = super::bodies::unpack(&stored).unwrap();
+    let stored = super::bodies::unpack(&database, &stored).unwrap();
     assert!(stored["attempts"][0]["price"].get("basisRef").is_some());
     assert!(stored["attempts"][0]["price"].get("basis").is_none());
     drop(database);
@@ -1242,8 +1242,8 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
             |row| row.get(0),
         )
         .unwrap();
-    let first_ref = super::bodies::unpack(&first_before).unwrap()["attempts"][0]["price"]
-        ["basisRef"]
+    let first_ref = super::bodies::unpack(&database, &first_before).unwrap()["attempts"][0]
+        ["price"]["basisRef"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -1255,7 +1255,7 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
         )
         .unwrap();
     let first_basis: Value = serde_json::from_str(&first_basis_body).unwrap();
-    let mut first_inline = super::bodies::unpack(&first_before).unwrap();
+    let mut first_inline = super::bodies::unpack(&database, &first_before).unwrap();
     let first_price = first_inline["attempts"][0]["price"]
         .as_object_mut()
         .unwrap();
@@ -1274,7 +1274,7 @@ fn damaged_basis_aborts_the_whole_compaction_batch_and_keeps_its_cursor() {
             |row| row.get(0),
         )
         .unwrap();
-    let second = super::bodies::unpack(&second_body).unwrap();
+    let second = super::bodies::unpack(&database, &second_body).unwrap();
     let second_ref = second["attempts"][0]["price"]["basisRef"]
         .as_str()
         .unwrap()
@@ -1539,7 +1539,7 @@ fn daily_archive_drops_transfer_metadata_and_keeps_cost_and_first_token_totals()
     let body: String = database
         .query_row("SELECT body FROM daily", [], |row| row.get(0))
         .unwrap();
-    let body = super::bodies::unpack(&body).unwrap();
+    let body = super::bodies::unpack(&database, &body).unwrap();
     assert!(body["example"]["attempts"][0].get("transfer").is_none());
     drop(database);
 

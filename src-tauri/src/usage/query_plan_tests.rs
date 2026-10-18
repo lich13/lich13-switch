@@ -649,7 +649,11 @@ fn record_upsert_and_source_projection_grains_preserve_usage_once() {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
     };
-    assert_eq!(kind_counts, vec![(0, 4, 4), (2, 1, 1)]);
+    assert_eq!(
+        kind_counts,
+        vec![(0, 4, 4)],
+        "identical gateway metrics share kind=0"
+    );
 
     let view_requests = |store: &Store, source: Option<&str>| {
         store

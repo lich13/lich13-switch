@@ -168,11 +168,6 @@ pub fn project(
     count: u64,
     historical: Option<&Totals>,
 ) -> Result<()> {
-    if kind == 0 && r.source == "proxy" {
-        let mut original = r.clone();
-        original.gateway_only();
-        project(c, 2, owner, &original, count, historical)?;
-    }
     db(c.execute(
         "DELETE FROM usage_metrics WHERE kind=?1 AND owner=?2",
         params![kind, owner],
@@ -276,7 +271,31 @@ pub fn project(
             cache_input
         ]))?;
     }
+    if kind == 0 && r.source == "proxy" {
+        if r.gateway_reported.is_some() {
+            let mut original = r.clone();
+            original.gateway_only();
+            project(c, 2, owner, &original, count, historical)?;
+            // Compare the actual query projection, rather than diagnostic fields
+            // on the attempts. A gateway-only view can share identical metrics.
+            let same: bool = db(c.query_row(
+                "SELECT NOT EXISTS(SELECT 0 AS kind,owner,ordinal,provider,model,requests,attempts,success,status_known,sessions,input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,cost,unpriced,duration_ms,measured_outputs,generation_ms,first_token_sum_ms,first_token_samples,cache_read_eligible,cache_input_eligible FROM usage_metrics WHERE kind=2 AND owner=?1 EXCEPT SELECT * FROM usage_metrics WHERE kind=0 AND owner=?1)",
+                [owner], |row| row.get(0),
+            ))?;
+            if !same {
+                return Ok(());
+            }
+        }
+        db(c.execute(
+            "DELETE FROM usage_metrics WHERE kind=2 AND owner=?1",
+            [owner],
+        ))?;
+    }
     Ok(())
+}
+
+fn gateway_kind(alias: &str) -> String {
+    format!("CASE WHEN EXISTS(SELECT 1 FROM usage_metrics original_kind WHERE original_kind.kind=2 AND original_kind.owner={alias}.id) THEN 2 ELSE 0 END")
 }
 pub fn eligible(f: &Filter, alias: &str, review: bool) -> String {
     let effective = if review {
@@ -304,7 +323,7 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
     ] {
         if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
             if column == "model" && f.source.as_deref() == Some("proxy") {
-                terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics original WHERE original.kind=2 AND original.owner={alias}.id AND original.requests>0 AND original.model=?)"));
+                terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics original WHERE original.kind=({}) AND original.owner={alias}.id AND original.requests>0 AND original.model=?)", gateway_kind(alias)));
             } else if column == "model" && grok_model_filter(f).is_some() {
                 terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics native WHERE native.kind=0 AND native.owner={alias}.id AND native.model=?)"));
             } else {
@@ -395,9 +414,9 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
     }
     let eligible = eligible(f, "r", false);
     let kind = if f.source.as_deref() == Some("proxy") {
-        2
+        gateway_kind("r")
     } else {
-        0
+        "0".into()
     };
     daily.push("coalesce(json_extract(d.body,'$.scope'),'all')=?".into());
     args.push(Value::Text(

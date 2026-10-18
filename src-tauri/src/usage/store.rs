@@ -72,7 +72,7 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 10 {
+        if version > 11 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         super::maintenance::configure(&connection)?;
@@ -86,6 +86,7 @@ impl Store {
           CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS body_shapes(id INTEGER PRIMARY KEY,hash TEXT UNIQUE NOT NULL,body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL);
           CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
           CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
@@ -192,6 +193,9 @@ impl Store {
         if version < 10 {
             db(connection.execute_batch("BEGIN IMMEDIATE; ALTER TABLE records ADD COLUMN local_sequence INTEGER NOT NULL DEFAULT 0; UPDATE records SET local_sequence=rowid; INSERT OR REPLACE INTO metadata(key,value) SELECT 'record_sequence',coalesce(max(local_sequence),0) FROM records; INSERT OR IGNORE INTO metadata(key,value) VALUES('finish_time_after',''); PRAGMA user_version=10; COMMIT;"))?;
         }
+        if version < 11 {
+            db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR REPLACE INTO metadata(key,value) VALUES('storage_records_after',''),('storage_daily_after',''),('storage_repack','1'); PRAGMA user_version=11; COMMIT;"))?;
+        }
         super::pending_prices::ensure(&connection)?;
         Ok(Self {
             connection,
@@ -227,8 +231,8 @@ impl Store {
         }
         Ok(())
     }
-    /// Restartable conversion of repeated pricing bases. No record, projection,
-    /// association, timestamp or price is recomputed during this storage change.
+    /// Restartable storage-only conversion. Prices and associations remain exact;
+    /// identical gateway/source metric projections share the same stored rows.
     pub fn compact_storage_batch(&mut self) -> Result<bool> {
         for (table, key) in [
             ("records", "storage_records_after"),
@@ -246,7 +250,7 @@ impl Store {
             let tx = db(self.connection.transaction())?;
             let rows = {
                 let mut statement = db(tx.prepare(&format!(
-                    "SELECT id,body FROM {table} WHERE id>?1 ORDER BY id LIMIT 256"
+                    "SELECT id,body FROM {table} WHERE id>?1 ORDER BY id LIMIT 2000"
                 )))?;
                 let rows = db(statement.query_map([after], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -258,7 +262,9 @@ impl Store {
             } else {
                 for (id, body) in &rows {
                     let compact = if table == "records" {
-                        bodies::encode(&tx, &bodies::decode::<Record>(&tx, body)?)?
+                        let record = bodies::decode::<Record>(&tx, body)?;
+                        query::project(&tx, 0, id, &record, 1, None)?;
+                        bodies::encode(&tx, &record)?
                     } else {
                         bodies::encode(&tx, &bodies::decode::<Daily>(&tx, body)?)?
                     };
@@ -275,6 +281,7 @@ impl Store {
                 ))?;
             }
             db(tx.commit())?;
+            super::maintenance::reclaim(&self.connection, false, false)?;
             return Ok(true);
         }
         Ok(false)
@@ -432,6 +439,13 @@ impl Store {
         db(tx.commit())
     }
     pub fn detail(&self, id: &str) -> Result<Record> {
+        // Keep the record and its immutable shared shape in one read snapshot,
+        // including while background pruning removes unreferenced shapes.
+        let _snapshot = self
+            .connection
+            .is_autocommit()
+            .then(|| db(self.connection.unchecked_transaction()))
+            .transpose()?;
         let body: String =
             db(self
                 .connection
@@ -610,6 +624,7 @@ impl Store {
         db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
         db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
         db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
+        bodies::prune_shapes(&tx)?;
         query::changed(&tx)?;
         db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[cutoff.to_string()]))?;
         db(tx.commit())
@@ -774,6 +789,7 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
     let r = preserve_existing(tx, incoming)?;
     let mut r = r;
     r.finished_at = Some(r.event_time());
+    dedup::prepare_session(tx, &mut r)?;
     let r = &r;
     let a = r.final_attempt();
     let response = a.and_then(|v| v.response_id.as_deref());

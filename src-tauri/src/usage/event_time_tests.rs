@@ -176,7 +176,7 @@ fn old_records_migrate_in_batches_and_keep_started_at_and_price_snapshot() {
             |row| row.get(0),
         )
         .unwrap();
-    let mut value = bodies::unpack(&body).unwrap();
+    let mut value = bodies::unpack(&connection, &body).unwrap();
     value.as_object_mut().unwrap().remove("finishedAt");
     connection
         .execute(
@@ -285,7 +285,7 @@ fn compact_merges_same_day_finished_times_without_changing_totals_or_price() {
         )
         .unwrap();
     assert_eq!(count, 1);
-    let daily = bodies::unpack(&body).unwrap();
+    let daily = bodies::unpack(&database, &body).unwrap();
     assert_eq!(daily["totals"]["requests"], 2);
     assert_eq!(daily["totals"]["cost"], "0.20");
     assert_eq!(daily["example"]["finishedAt"], serde_json::Value::Null);

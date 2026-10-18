@@ -77,6 +77,23 @@ fn state(
     ))?;
     Ok(())
 }
+
+pub(super) fn prepare_session(c: &Connection, record: &mut Record) -> Result<()> {
+    if matches!(record.source.as_str(), "proxy" | "grok") {
+        return Ok(());
+    }
+    // A known exact proxy lets the first INSERT use the compact donor body.
+    // reconcile below still determines the final state inside the same transaction.
+    if let Some(target) = rows(c, record)?
+        .into_iter()
+        .filter(|peer| peer.source == "proxy" && exact(record, peer))
+        .min_by(|a, b| a.id.cmp(&b.id))
+    {
+        record.duplicate_of = Some(target.id);
+        record.deduplication = "response_id".into();
+    }
+    Ok(())
+}
 pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
     if seed.source == "grok" {
         return Ok(());

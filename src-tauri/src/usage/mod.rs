@@ -23,6 +23,8 @@ mod sessions;
 mod source_dedup_tests;
 #[cfg(test)]
 mod storage_migration_tests;
+#[cfg(test)]
+mod storage_v11_tests;
 mod store;
 #[cfg(test)]
 mod token_dimensions_tests;
