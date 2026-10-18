@@ -1064,8 +1064,8 @@ fn v12_source_rebuild_invalidates_missing_file_cursor_without_touching_other_sou
     let (dir, mut store) = migrated_empty();
     let pricing = Pricing::new(dir.path()).unwrap();
     let home = dir.path().join("fixture-v12-cursor-home");
-    let codex_path = home.join("sessions/001-codex.jsonl");
-    let claude_path = home.join("projects/fixture/claude.jsonl");
+    let codex_path = home.join("sessions").join("001-codex.jsonl");
+    let claude_path = home.join("projects").join("fixture").join("claude.jsonl");
     fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
     fs::create_dir_all(claude_path.parent().unwrap()).unwrap();
     let write_jsonl = |path: &std::path::Path, rows: &[Value]| {
