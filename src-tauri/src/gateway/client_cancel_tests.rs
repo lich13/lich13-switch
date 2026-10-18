@@ -24,6 +24,9 @@ use tokio::{
 
 const REQUEST_BODY: &[u8] = br#"{"model":"fixture-model","input":"fixture","stream":true}"#;
 const WAIT: Duration = Duration::from_secs(4);
+const FAST_RELEASE: Duration = Duration::from_millis(300);
+const USAGE_TAIL: Duration = Duration::from_millis(1500);
+const USAGE_TAIL_TOLERANCE: Duration = Duration::from_millis(500);
 
 async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
     let dir = tempfile::tempdir().unwrap();
@@ -281,13 +284,13 @@ async fn rst_before_upstream_headers_closes_the_real_upstream_socket_promptly() 
     tokio::time::sleep(Duration::from_millis(100)).await;
     let cancelled_at = Instant::now();
     drop(client);
-    let closed_at = tokio::time::timeout(Duration::from_millis(300), closed_rx)
+    let closed_at = tokio::time::timeout(FAST_RELEASE, closed_rx)
         .await
         .expect("upstream TCP connection stayed open after client RST")
         .unwrap();
     let close_elapsed = closed_at.duration_since(cancelled_at);
     eprintln!("HTTP pre-header RST closed upstream after {close_elapsed:?}");
-    assert!(close_elapsed < Duration::from_millis(300));
+    assert!(close_elapsed < FAST_RELEASE);
     let primary = primary_task.await.unwrap();
     assert_no_retry(&primary, &backup, Duration::from_secs(2)).await;
     let record = wait_for_usage_record(&usage).await;
@@ -406,13 +409,13 @@ async fn rst_after_two_sse_events_closes_the_real_upstream_without_retry() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let cancelled_at = Instant::now();
     super::tests::reset_and_drop(task, sender, response).await;
-    let closed_at = tokio::time::timeout(Duration::from_millis(300), closed_rx)
+    let closed_at = tokio::time::timeout(USAGE_TAIL + USAGE_TAIL_TOLERANCE, closed_rx)
         .await
-        .expect("upstream TCP connection stayed open after streaming RST")
+        .expect("upstream TCP connection stayed open after streaming RST tail window")
         .unwrap();
     let close_elapsed = closed_at.duration_since(cancelled_at);
     eprintln!("HTTP two-event RST closed upstream after {close_elapsed:?}");
-    assert!(close_elapsed < Duration::from_millis(200));
+    assert!(close_elapsed <= USAGE_TAIL + USAGE_TAIL_TOLERANCE);
     let primary = primary_task.await.unwrap();
     assert_no_retry(&primary, &backup, Duration::from_secs(2)).await;
     let usage_record = wait_for_usage_record(&usage).await;
@@ -583,13 +586,18 @@ async fn assert_websocket_cancel_closes_upstream(explicit_close: bool, generatio
             .unwrap();
     }
     drop(client);
-    let closed_at = tokio::time::timeout(Duration::from_millis(300), closed_rx)
+    let close_window = if generation {
+        USAGE_TAIL + USAGE_TAIL_TOLERANCE
+    } else {
+        FAST_RELEASE
+    };
+    let closed_at = tokio::time::timeout(close_window, closed_rx)
         .await
         .expect("upstream WebSocket stayed open after downstream Close/EOF")
         .unwrap();
     let close_elapsed = closed_at.duration_since(cancelled_at);
     eprintln!("WebSocket cancellation closed upstream after {close_elapsed:?}");
-    assert!(close_elapsed < Duration::from_millis(300));
+    assert!(close_elapsed <= close_window);
     let primary = primary_task.await.unwrap();
     assert_no_retry(&primary, &backup, Duration::from_secs(2)).await;
     if generation {
@@ -634,3 +642,6 @@ async fn websocket_close_during_generation_closes_upstream_socket() {
 async fn websocket_eof_during_generation_closes_upstream_socket() {
     assert_websocket_cancel_closes_upstream(false, true).await;
 }
+
+#[path = "usage_tail_tests.rs"]
+mod usage_tail_tests;

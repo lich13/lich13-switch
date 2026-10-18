@@ -29,6 +29,52 @@ const KEEPALIVE: Duration = Duration::from_secs(20);
 // Only bounds late usage observation after a settled turn. It never closes
 // the upstream connection or limits forwarding / generation progress.
 const USAGE_TAIL: Duration = Duration::from_secs(2);
+
+async fn cancelled_usage_tail(
+    upstream: &mut Upstream,
+    protocol: &mut Option<super::protocol::Protocol>,
+    activity: &super::wire_progress::Activity,
+    writing: bool,
+) {
+    if let Some(protocol) = protocol {
+        protocol.downstream_closed(activity, writing);
+        protocol.begin_usage_tail(true);
+        let deadline = tokio::time::Instant::now() + super::model::USAGE_TAIL_DEADLINE;
+        let end = loop {
+            if protocol.usage_tail_complete() {
+                break "usage_tail_complete";
+            }
+            if !matches!(upstream, Upstream::Native(_)) {
+                break "response_consumer_closed";
+            }
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => break "usage_tail_deadline",
+                next = next_upstream(upstream) => match next {
+                    Some(Ok(frame)) if frame.opcode() != OpCode::Close => {
+                        if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
+                            protocol.websocket_progress(frame.payload().len());
+                            if let Some(value) = value(&frame) { protocol.value(&value); }
+                        }
+                    }
+                    Some(Ok(frame)) => {
+                        protocol.websocket_close(close_code(&frame));
+                        break "upstream_eof";
+                    }
+                    Some(Err(_)) => break "upstream_read_failed",
+                    None => break if matches!(upstream, Upstream::Native(peer) if peer.activity.error_code() != 0) {
+                        "upstream_read_failed"
+                    } else { "upstream_eof" },
+                }
+            }
+        };
+        // Drop the socket before persisting the final usage/diagnostic snapshot.
+        *upstream = Upstream::Disconnected;
+        protocol.finish_usage_tail(end);
+    } else {
+        *upstream = Upstream::Disconnected;
+    }
+}
 // Internal control result, consumed before writing a close frame.
 const TURN_CANCELLED: Failure = (0, "turn cancelled before output");
 fn admit_ownership(
@@ -1635,6 +1681,15 @@ async fn session_once(
     // the first frame has been handed to the upstream socket.
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
     loop {
+        // Do not let a queued create/retry or continuously ready upstream starve
+        // an already-observed downstream close. The tail never starts a turn.
+        if *client.closed.borrow() {
+            if let Some(mut admission) = turn.take() {
+                admission.permits.neutral(cfg);
+            }
+            cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
+            return Ok(());
+        }
         if retry_pending {
             let requirement = Requirement::model(current_model.as_deref());
             let hints = value(&replay_frame)
@@ -2419,6 +2474,11 @@ async fn session_once(
         }
         tokio::select! {
             biased;
+            _ = client.closed.changed() => {
+                if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
+                cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
+                return Ok(());
+            },
             _ = async { if let Some((_, at)) = &previous_usage { tokio::time::sleep_until(*at).await } else { std::future::pending::<()>().await } } => { previous_usage = None; },
             _ = async { if let Some(at) = tail_deadline { tokio::time::sleep_until(at).await } else { std::future::pending::<()>().await } }, if turn.is_none() => {
                 protocol = None;
@@ -2462,7 +2522,10 @@ async fn session_once(
                     if let Some((previous, _)) = previous_usage.as_mut().filter(|(previous, _)| belongs_to_previous && observed.response_id.is_some() && previous.observation.response_id == observed.response_id) {
                         previous.value(&v);
                         let sending = tokio::time::Instant::now();
-                        client.send(frame).await?;
+                        if let Err(error) = client.send(frame).await {
+                            cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, true).await;
+                            return Err(error);
+                        }
                         deadline += sending.elapsed();
                         continue;
                     }
@@ -2543,8 +2606,8 @@ async fn session_once(
                 if business { failover.finish(super::failover::Exit::Forwarded); }
                 let sending = tokio::time::Instant::now();
                 if let Err(error) = client.send(frame).await {
-                    if let Some(u) = &mut protocol { u.downstream_closed(&client.activity, true); }
-
+                    if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
+                    cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, true).await;
                     return Err(error);
                 }
                 // Do not charge time blocked by the downstream reader to the
@@ -2564,9 +2627,8 @@ async fn session_once(
             },
             frame = client.incoming.recv() => {
                 let Some(frame) = frame else {
-                    if let Some(u) = &mut protocol {
-                        u.downstream_closed(&client.activity, false);
-                    }
+                    if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
+                    cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
                     return Ok(());
                 };
                 let closing = frame.opcode() == OpCode::Close;
@@ -2575,15 +2637,8 @@ async fn session_once(
                 } else if frame.opcode() == OpCode::Pong && !matches!(upstream, Upstream::Native(_)) {
                     continue;
                 } else if closing {
-                    if let Some(u) = &mut protocol { u.downstream_closed(&client.activity, false); }
-                    if turn.is_none() { return Ok(()); }
-                    if let Upstream::Native(peer) = &upstream { peer.send(frame.clone()).await?; }
-                    if let Some(mut admission) = turn.take() {
-                        if let Some(mut u) = protocol.take() {
-                            u.downstream_closed(&client.activity, false);
-                            admission.permits.neutral(cfg);
-                        }
-                    }
+                    if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
+                    cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
                     return Ok(());
                 } else if creates(&frame) {
                     if pending.is_some() { return Err((1013, "too many pending turns")); }
@@ -2602,12 +2657,6 @@ async fn session_once(
                     }
                     return Err(e);
                 }
-            },
-            _ = client.closed.changed() => {
-                if let Some(u) = &mut protocol {
-                    u.downstream_closed(&client.activity, false);
-                }
-                return Ok(());
             },
             _ = tokio::time::sleep_until(deadline), if turn.is_some() => {
                 let mut partial_progress = None;

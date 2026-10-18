@@ -38,6 +38,7 @@ const DEFAULT_FIRST_BYTE_SECONDS: u64 = 600;
 const DEFAULT_IDLE_SECONDS: u64 = 600;
 const DEFAULT_TOTAL_SECONDS: u64 = 600;
 const DEFAULT_CONNECT_SECONDS: u64 = 15;
+pub(super) const USAGE_TAIL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

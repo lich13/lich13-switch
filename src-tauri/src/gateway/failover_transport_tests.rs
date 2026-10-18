@@ -2,17 +2,23 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 async fn settle(g: &Gateway) {
-    for _ in 0..100 {
-        let view = g.view();
-        if view.active_connections == 0
-            && view.waiting_requests == 0
-            && view.providers.iter().all(|p| p.active_requests == 0)
-        {
-            return;
+    settle_within(g, Duration::from_secs(1)).await;
+}
+async fn settle_within(g: &Gateway, timeout: Duration) {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let view = g.view();
+            if view.active_connections == 0
+                && view.waiting_requests == 0
+                && view.providers.iter().all(|p| p.active_requests == 0)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("fixture request did not finish");
+    })
+    .await
+    .expect("fixture request did not finish");
 }
 #[tokio::test]
 async fn incident_rate_limited_p1_waits_then_recovers_while_p2_is_open() {
@@ -324,7 +330,9 @@ async fn sse_completed_then_client_disconnect_is_success_and_in_band_error_is_ne
         let event: serde_json::Value = serde_json::from_slice(event).unwrap();
         assert_eq!(event["type"], terminal);
         super::tests::reset_and_drop(task, sender, r).await;
-        settle(&g).await;
+        // Neither terminal fixture reports usage or closes its body. Both
+        // cancellation paths may therefore use the full bounded usage tail.
+        settle_within(&g, Duration::from_millis(2000)).await;
         let view = g.view();
         assert_eq!(view.providers[0].active_requests, 0);
         assert_eq!(view.providers[0].health.requests, requests);

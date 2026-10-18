@@ -25,6 +25,8 @@ pub struct Observation {
     pub compaction_incompatible: bool,
     responses_seen: bool,
     pending_error_response: Option<String>,
+    usage_tail: bool,
+    strict_tail_identity: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terminal {
@@ -64,6 +66,16 @@ impl Observation {
                     | "response.cancelled"
                     | "response.canceled"
             ) || matches!(status, "completed" | "failed" | "incomplete" | "cancelled");
+        if self.usage_tail {
+            if let Some(current) = self.response_id.as_deref() {
+                if response_id.is_some_and(|id| id != current)
+                    || ((self.strict_tail_identity || self.responses_seen)
+                        && response_id != Some(current))
+                {
+                    return;
+                }
+            }
+        }
         if let Some(pending) = &self.pending_error_response {
             // Only the same response can resolve a provisional Responses error.
             // These checks affect observation, never the bytes sent downstream.
@@ -195,6 +207,11 @@ impl Observation {
         }
     }
     fn done(&mut self) {
+        // A Responses tail needs the current response's terminal envelope;
+        // an unscoped [DONE] cannot resolve it or attach another turn's usage.
+        if self.usage_tail && self.responses_seen {
+            return;
+        }
         self.finish_pending();
         if self.terminal.is_none() {
             self.terminal = Some(Terminal::Success);
@@ -623,7 +640,50 @@ impl Protocol {
             writing,
         }
         .record(&self.delivery(), self);
+    }
+    pub fn begin_usage_tail(&mut self, strict_identity: bool) {
+        // CC Switch settles events already seen on cancellation. Here the
+        // transport additionally permits a fixed, bounded usage-only tail.
+        self.observation.usage_tail = true;
+        self.observation.strict_tail_identity = strict_identity;
+        if let Some(observer) = &mut self.observer {
+            observer.sink().observation.usage_tail = true;
+            observer.sink().observation.strict_tail_identity = strict_identity;
+        }
+    }
+    pub fn usage_tail_complete(&self) -> bool {
+        let tokens = &self.observation.meter.tokens;
+        self.terminal_observed()
+            && [
+                tokens.inclusive_input,
+                tokens.input,
+                tokens.output,
+                tokens.cache_read,
+                tokens.cache_write,
+                tokens.cache_write_5m,
+                tokens.cache_write_1h,
+                tokens.image_input,
+                tokens.image_output,
+                tokens.audio_input,
+                tokens.audio_output,
+            ]
+            .iter()
+            .any(Option::is_some)
+    }
+    pub fn finish_usage_tail(&mut self, upstream_end: &str) {
         self.finish(None, code::CLIENT_DISCONNECTED);
+        self.delivery.event(upstream_end);
+        match upstream_end {
+            "upstream_eof" => {
+                self.transfer.upstream_eof = true;
+                self.transfer.upstream_end = Some("EOF".into());
+            }
+            "upstream_read_failed" => {
+                self.transfer.upstream_end = Some("DISCONNECTED".into());
+            }
+            _ => (),
+        }
+        self.record_end(code::CLIENT_DISCONNECTED);
     }
     pub fn request_received(&mut self, at: i64) {
         self.transfer.received_at = Some(at);
@@ -1114,9 +1174,15 @@ impl Protocol {
 }
 impl Drop for Protocol {
     fn drop(&mut self) {
-        // A dropped handler is not evidence of an explicit client cancellation.
-        // Flush only the bytes already observed; never continue the generation.
-        let reason = if self.stop.as_ref().is_some_and(|s| *s.borrow()) {
+        // Only the transport's live cancellation branch performs a bounded
+        // tail. Drop itself flushes observed bytes without starting any I/O.
+        let stopped = self.stop.as_ref().is_some_and(|s| *s.borrow());
+        let reason = if self.observation.usage_tail {
+            if stopped {
+                self.delivery.event("gateway_stopping");
+            }
+            code::CLIENT_DISCONNECTED
+        } else if stopped {
             code::GATEWAY_STOPPED
         } else if self.downstream.as_ref().is_some_and(|s| *s.borrow())
             || matches!(

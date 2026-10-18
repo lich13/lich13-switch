@@ -90,6 +90,30 @@ type ForwardFrame = (
     bool,
     tokio::sync::oneshot::Sender<()>,
 );
+async fn usage_tail(
+    body: &mut Incoming,
+    protocol: &mut super::protocol::Protocol,
+    shutdown: &mut Option<watch::Receiver<bool>>,
+) {
+    protocol.begin_usage_tail(false);
+    let deadline = tokio::time::Instant::now() + super::model::USAGE_TAIL_DEADLINE;
+    let end = loop {
+        if protocol.usage_tail_complete() {
+            break "usage_tail_complete";
+        }
+        tokio::select! {
+            biased;
+            _ = stopping(shutdown) => break "gateway_stopping",
+            _ = tokio::time::sleep_until(deadline) => break "usage_tail_deadline",
+            next = body.frame() => match next {
+                Some(Ok(frame)) => if let Some(data) = frame.data_ref() { protocol.feed(data); },
+                None => break "upstream_eof",
+                Some(Err(_)) => break "upstream_read_failed",
+            }
+        }
+    };
+    protocol.finish_usage_tail(end);
+}
 async fn finish_delivery(
     delivery: &super::protocol::Delivery,
     protocol: &mut super::protocol::Protocol,
@@ -1678,9 +1702,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             loop {
                 if disconnected || sender.is_closed() {
+                    disconnected = true;
+                    DownstreamEnd::Closed.record(&delivery, &mut protocol);
                     active.take();
-                    protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
                     permits.neutral(&cfg);
+                    usage_tail(&mut body, &mut protocol, &mut shutdown).await;
                     break;
                 }
                 // Backpressure is awaited separately. Only time spent polling the
@@ -1768,6 +1794,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             // Close the body channel before waiting: Hyper must see its end in
             // order to flush the final chunk/trailers. Socket completion is local
             // write evidence, never an acknowledgement by the client.
+            drop(body);
             drop(sender);
             if disconnected {
                 protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
@@ -1781,6 +1808,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     cfg.idle_seconds,
                 )
                 .await;
+            }
+            if disconnected {
+                return;
             }
             remember(&protocol, &g, &route, model.as_deref());
             observe_protocol(
