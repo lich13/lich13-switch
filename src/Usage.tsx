@@ -296,11 +296,11 @@ export default function Usage({
         <h1>用量</h1>
         <div className="usage-actions">
           <span className="usage-sync-status" aria-live="polite">
-            {state?.syncing
+            {state?.maintenance ?? (state?.syncing
               ? "同步中…"
               : Object.values(state?.reports ?? {}).some((r) => r.completedAt)
                 ? "已同步"
-                : ""}
+                : "")}
           </span>
           <select
             aria-label="用量刷新频率"

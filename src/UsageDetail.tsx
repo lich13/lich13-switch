@@ -94,6 +94,7 @@ export default function Detail({
         </b>
         <span>{outcomes[a.outcome] ?? "结果未确认"}</span>
         <span>{clientName(r.client)}</span>
+        {r.detailArchived && <span>细节已归档</span>}
       </div>
       <AttemptDetails
         a={a}

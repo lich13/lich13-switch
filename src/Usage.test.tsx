@@ -1352,7 +1352,7 @@ describe("usage navigation", () => {
     mock.confirm.mockResolvedValue(true);
     await user.click(within(navigation).getByRole("button", { name: "日志" }));
     await screen.findByRole("button", { name: "清空日志" });
-    expect(calls("get_app_events").length).toBeGreaterThan(0);
+    await waitFor(() => expect(calls("get_app_events").length).toBeGreaterThan(0));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     const confirmations = mock.confirm.mock.calls.length;
     await user.click(within(navigation).getByRole("button", { name: "用量" }));

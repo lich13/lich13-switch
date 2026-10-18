@@ -104,6 +104,7 @@ export type FailoverEvidence = {
   exit: "forwarded" | "no_eligible_provider" | "attempts_exhausted" | "permanent_rejection" | "cancelled" | "stopped" | "admission_rejected" | "replay_unsafe" | string | null;
 };
 export type UsageRecord = {
+  detailArchived?: boolean;
   failoverEvidence?: FailoverEvidence | null;
   finishedAt?: number | null;
   id: string;
@@ -175,6 +176,7 @@ export type UsageSettings = {
 export type UsageState = {
   settings: UsageSettings;
   syncing: boolean;
+  maintenance?: string;
   reports: Record<
     string,
     {
