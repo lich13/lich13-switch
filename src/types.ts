@@ -124,6 +124,7 @@ export type Health = {
   cause?: {
     eventId: string;
     code: string;
+    upstreamReason?: string | null;
     reason: string;
     status: number | null;
     wsCloseCode: number | null;
@@ -188,7 +189,7 @@ export type GatewayState = {
   settings: GatewaySettings;
   activeConnections: number;
   waitingRequests: number;
-  capacityRetries: { providerId: string; retryIn: number }[];
+  capacityRetries: { providerId: string; retryIn: number; existingOwner?: boolean }[];
   handoffWaiting?: {
     providerId: string;
     state: "awaiting_compaction" | "awaiting_request" | "capacity_full";

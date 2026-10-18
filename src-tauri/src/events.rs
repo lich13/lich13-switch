@@ -6,6 +6,7 @@ use crate::{
     gateway::ClientId,
     storage::{self, AppError, Result},
 };
+pub(crate) use details::safe_upstream_reason;
 pub use details::{safe_message, CircuitEvidence, DeliveryEvidence, Details, HealthScope, Phase};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -557,6 +558,7 @@ impl Service {
                                     && old.model == r.model
                                     && old.status == r.status
                                     && old.details.upstream_code == r.details.upstream_code
+                                    && old.details.upstream_reason == r.details.upstream_reason
                                     && old.details.local_code == r.details.local_code
                                     && old.details.message == r.details.message
                                     && old.details.phase == r.details.phase

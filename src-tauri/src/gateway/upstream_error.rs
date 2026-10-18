@@ -90,7 +90,12 @@ pub fn model_message(message: &str) -> bool {
 }
 // Explicit wrappers only: never recurse into arbitrary user content.
 fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
-    if depth > 5 {
+    if depth > 5
+        || v.get("success") == Some(&Value::Bool(true))
+        || v.get("status")
+            .is_some_and(|s| s == "completed" || s == "succeeded")
+        || v.get("type").is_some_and(|s| s == "response.completed")
+    {
         return None;
     }
     if let Some(error) = v
@@ -117,6 +122,7 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
             || [
                 "code",
                 "type",
+                "reason",
                 "message",
                 "detail",
                 "errorKey",
@@ -131,21 +137,123 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
     }
 }
 fn strings(error: &Value) -> impl Iterator<Item = &str> {
-    error.as_str().into_iter().chain(
-        [
-            "code",
-            "type",
-            "message",
-            "detail",
-            "errorKey",
-            "errorMessage",
-        ]
+    error
+        .as_str()
         .into_iter()
-        .filter_map(move |k| error.get(k).and_then(Value::as_str)),
-    )
+        .chain(
+            [
+                "code",
+                "type",
+                "reason",
+                "message",
+                "detail",
+                "errorKey",
+                "errorMessage",
+            ]
+            .into_iter()
+            .filter_map(move |k| error.get(k).and_then(Value::as_str)),
+        )
+        .filter(|s| s.len() <= LIMIT)
+}
+
+// Read only named error fields, before free-form message redaction removes quotes.
+fn text_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    if text.len() > LIMIT {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    for (at, _) in lower.match_indices(&name.to_ascii_lowercase()) {
+        if at > 0
+            && text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let rest = text[at + name.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':')) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+            return rest[1..].split_once(quote).map(|(value, _)| value);
+        }
+        return rest
+            .split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '}'))
+            .next();
+    }
+    None
+}
+fn known_reason(error: &Value) -> Option<String> {
+    let safe = crate::events::safe_upstream_reason;
+    error
+        .get("reason")
+        .and_then(Value::as_str)
+        .and_then(safe)
+        .or_else(|| error.get("errorKey").and_then(Value::as_str).and_then(safe))
+        .or_else(|| error.get("code").and_then(Value::as_str).and_then(safe))
+        .or_else(|| error.get("type").and_then(Value::as_str).and_then(safe))
+        .or_else(|| {
+            ["message", "detail", "errorMessage"]
+                .into_iter()
+                .filter_map(|key| error.get(key).and_then(Value::as_str))
+                .find_map(safe)
+        })
+        .or_else(|| {
+            let text = error.as_str()?.trim_start();
+            text.get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("error:"))
+                .then(|| {
+                    [
+                        "reason",
+                        "message",
+                        "detail",
+                        "errorMessage",
+                        "code",
+                        "type",
+                    ]
+                    .into_iter()
+                    .find_map(|field| text_field(text, field).and_then(safe))
+                })
+                .flatten()
+        })
+}
+pub(super) fn reason_from_body(body: &[u8]) -> Option<String> {
+    if body.len() > LIMIT {
+        return None;
+    }
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => envelope(&value, true, 0).and_then(known_reason),
+        Err(_) => std::str::from_utf8(body).ok().and_then(|text| {
+            let text = text.trim_start();
+            text.get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("error:"))
+                .then(|| {
+                    [
+                        "reason",
+                        "message",
+                        "detail",
+                        "errorMessage",
+                        "code",
+                        "type",
+                    ]
+                    .into_iter()
+                    .find_map(|field| {
+                        text_field(text, field).and_then(crate::events::safe_upstream_reason)
+                    })
+                })
+                .flatten()
+        }),
+    }
+}
+pub(super) fn is_permanent_reason(reason: Option<&str>) -> bool {
+    reason.is_some_and(|value| value.eq_ignore_ascii_case("DAILY_LIMIT_EXCEEDED"))
 }
 fn is_model(error: &Value) -> bool {
-    if strings(error).any(capacity_message) {
+    if is_permanent_reason(known_reason(error).as_deref())
+        || strings(error).any(|s| capacity_message(s) || global_fault(s))
+    {
         return false;
     }
     if error
@@ -166,7 +274,9 @@ pub fn model_error(value: &Value) -> bool {
 }
 pub fn temporary_capacity_event(value: &Value) -> bool {
     envelope(value, false, 0).is_some_and(|error| {
-        !strings(error).any(global_fault) && strings(error).any(capacity_message)
+        !is_permanent_reason(known_reason(error).as_deref())
+            && !strings(error).any(global_fault)
+            && strings(error).any(capacity_message)
     })
 }
 /// Explicit retry/reset fields from a bounded error envelope. Free-form text
@@ -218,9 +328,10 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
         return Details::default();
     };
     Details {
-        health_scope: strings(error)
-            .any(global_fault)
-            .then_some(crate::events::HealthScope::Provider),
+        upstream_reason: known_reason(error),
+        health_scope: (is_permanent_reason(known_reason(error).as_deref())
+            || strings(error).any(global_fault))
+        .then_some(crate::events::HealthScope::Provider),
         upstream_code: error
             .get("code")
             .or_else(|| error.get("errorKey"))
@@ -228,7 +339,8 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
                 Value::String(s) => Some(s.clone()),
                 Value::Number(n) if n.is_i64() || n.is_u64() => Some(n.to_string()),
                 _ => None,
-            }),
+            })
+            .or_else(|| strings(error).find_map(|s| text_field(s, "code").map(str::to_owned))),
         upstream_type: error.get("type").and_then(Value::as_str).map(str::to_owned),
         parameter: error
             .get("param")
@@ -250,22 +362,32 @@ pub fn details_http(bytes: &[u8]) -> Details {
     }
     match serde_json::from_slice::<Value>(bytes) {
         Ok(v) => details_value(&v, true),
-        Err(_) => Details {
-            health_scope: std::str::from_utf8(bytes)
-                .ok()
-                .filter(|s| global_fault(s))
-                .map(|_| crate::events::HealthScope::Provider),
-            message: std::str::from_utf8(bytes)
-                .ok()
-                .and_then(crate::events::safe_message),
-            ..Default::default()
-        },
+        Err(_) => std::str::from_utf8(bytes).map_or_else(
+            |_| Details::default(),
+            |text| details_value(&Value::String(text.into()), true),
+        ),
     }
 }
 /// Explicit billing/account denials cannot recover by retrying every minute.
 /// Status 429 alone is deliberately insufficient to classify a permanent denial.
 pub(super) fn permanent_rejection(body: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(&body[..body.len().min(128 * 1024)]).to_ascii_lowercase();
+    if body.len() > LIMIT {
+        return false;
+    }
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => envelope(&value, true, 0).is_some_and(|e| {
+            is_permanent_reason(known_reason(e).as_deref()) || strings(e).any(hard_message)
+        }),
+        Err(_) => std::str::from_utf8(body).is_ok_and(|text| {
+            is_permanent_reason(reason_from_body(body).as_deref()) || hard_message(text)
+        }),
+    }
+}
+fn hard_message(text: &str) -> bool {
+    if text.len() > LIMIT || crate::events::safe_message(text).is_none() {
+        return false;
+    }
+    let text = text.to_ascii_lowercase();
     [
         "insufficient_quota",
         "insufficient_balance",
@@ -320,7 +442,7 @@ fn global_fault(text: &str) -> bool {
         return false;
     }
     let lower = text.to_lowercase();
-    permanent_rejection(text.as_bytes())
+    hard_message(text)
         || [
             "invalid_api_key",
             "invalid api key",

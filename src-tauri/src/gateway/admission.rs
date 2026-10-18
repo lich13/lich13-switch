@@ -33,6 +33,7 @@ struct State {
     limits: HashMap<String, u32>,
     order: HashMap<String, usize>,
     queued: std::collections::HashSet<String>,
+    versions: HashMap<String, String>,
     rpm_limits: HashMap<String, u32>,
     models: HashMap<String, Option<Vec<String>>>,
     intake: HashMap<String, (bool, bool)>,
@@ -62,6 +63,7 @@ impl State {
             limits: HashMap::new(),
             order: HashMap::new(),
             queued: Default::default(),
+            versions: HashMap::new(),
             rpm_limits: HashMap::new(),
             models: HashMap::new(),
             intake: HashMap::new(),
@@ -137,6 +139,7 @@ pub struct CapacitySource {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WaitKind {
     Capacity,
+    ExistingCapacity,
     Websocket,
     Transient,
 }
@@ -145,6 +148,7 @@ enum WaitKind {
 pub struct CapacityRetry {
     pub provider_id: String,
     pub retry_in: u64,
+    pub existing_owner: bool,
 }
 pub struct Slot {
     scheduler: Scheduler,
@@ -407,6 +411,23 @@ impl Scheduler {
 
     pub fn configure(&self, providers: &[Provider], running: bool) {
         let mut s = self.0.state.lock().unwrap();
+        let changed: Vec<_> =
+            s.versions
+                .iter()
+                .filter(|(id, version)| {
+                    providers.iter().find(|p| &p.id == *id).is_none_or(|p| {
+                        p.version != **version || p.queued != s.queued.contains(*id)
+                    })
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+        for id in changed {
+            *s.resets.entry(id).or_default() += 1;
+        }
+        s.versions = providers
+            .iter()
+            .map(|p| (p.id.clone(), p.version.clone()))
+            .collect();
         if s.running != running {
             s.epoch += 1;
         }
@@ -552,7 +573,9 @@ impl Scheduler {
         Self::available(&state, id, budget.thread.as_ref().map(|t| t.ticket), manual)
     }
     pub fn capacity_retries(&self) -> Vec<CapacityRetry> {
-        self.retries(WaitKind::Capacity)
+        let mut retries = self.retries(WaitKind::Capacity);
+        retries.extend(self.retries(WaitKind::ExistingCapacity));
+        retries
     }
     pub fn websocket_retries(&self) -> Vec<CapacityRetry> {
         self.retries(WaitKind::Websocket)
@@ -568,6 +591,7 @@ impl Scheduler {
             .filter(|(_, _, wait)| *wait == kind)
             .map(|(id, until, _)| CapacityRetry {
                 provider_id: id.clone(),
+                existing_owner: kind == WaitKind::ExistingCapacity,
                 retry_in: until
                     .saturating_duration_since(Instant::now())
                     .as_millis()
@@ -588,6 +612,29 @@ impl Scheduler {
         max_waiting: usize,
     ) -> Result<(), Rejected> {
         self.wait_kind(sources, delay, max_waiting, WaitKind::Capacity)
+            .await
+    }
+    pub fn capacity_source(&self, id: &str) -> CapacitySource {
+        CapacitySource {
+            provider_id: id.into(),
+            reset_generation: self
+                .0
+                .state
+                .lock()
+                .unwrap()
+                .resets
+                .get(id)
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+    pub async fn wait_owner_capacity(
+        &self,
+        sources: &[CapacitySource],
+        delay: Duration,
+        max_waiting: usize,
+    ) -> Result<(), Rejected> {
+        self.wait_kind(sources, delay, max_waiting, WaitKind::ExistingCapacity)
             .await
     }
     pub async fn wait_transient(

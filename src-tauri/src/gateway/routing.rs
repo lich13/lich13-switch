@@ -1,5 +1,36 @@
 //! Model policy is independent of transport versions, health and capacity.
 use crate::errors::code;
+/// Capture before admission: admitting a first request must not retroactively
+/// turn its ordinary capacity fallback into an established-thread wait.
+pub(super) fn capacity_owner(
+    client: super::ClientId,
+    manual: bool,
+    lease: Option<&super::compaction::Lease>,
+) -> Option<String> {
+    if client != super::ClientId::Codex || manual {
+        return None;
+    }
+    lease
+        // A legal compaction handoff retains its own receiver/fallback policy;
+        // the existing-thread capacity wait applies only to an ordinary bound
+        // owner, never to a handoff turn that is already authorized to move.
+        .filter(|l| !l.request_only() && !l.handoff)
+        .and_then(|l| l.admission_policy().1)
+}
+pub(super) fn capacity_cooling(health: &super::circuit::Health) -> bool {
+    !health.available
+        && health.state == super::circuit::CircuitState::Closed
+        && matches!(
+            health.cooldown_reason.as_deref(),
+            Some("capacity_retry" | "rate_limit")
+        )
+        && health.cause.as_ref().is_some_and(|cause| {
+            matches!(
+                cause.reason,
+                crate::events::Reason::RateLimit | crate::events::Reason::Capacity
+            )
+        })
+}
 /// Give an established conversation two short, cancellable retries on its
 /// owner before ordinary failover. These still consume the normal retry budget.
 pub fn transient_delay(

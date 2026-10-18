@@ -1023,6 +1023,7 @@ impl Lease {
                     // conversation's owner has failed. New concurrent turns must wait
                     // for that owner too, instead of slipping through to another route.
                     health.available
+                        || (!self.fresh && super::routing::capacity_cooling(&health))
                         || (health.state == super::circuit::CircuitState::Closed
                             && health.cooldown_reason.as_deref() == Some("retry_after")
                             && health.cause.as_ref().is_some_and(|cause| {

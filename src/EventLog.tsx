@@ -79,6 +79,7 @@ export type EventRecord = {
   details?: {
     healthScope?: "provider" | "model" | "request" | null;
     upstreamCode?: string | null;
+    upstreamReason?: string | null;
     localCode?: string | null;
     upstreamType?: string | null;
     parameter?: string | null;
@@ -207,6 +208,7 @@ function circuitCause(r: EventRecord) {
   return [
     r.status != null ? statusText(r.status) : null,
     r.details?.upstreamCode ?? r.details?.localCode,
+    r.details?.upstreamReason,
     r.details?.message ||
       (r.details?.circuit?.causeReason
         ? reasons[r.details.circuit.causeReason]
@@ -238,6 +240,7 @@ function summary(r: EventRecord) {
     ].filter(Boolean).join(" · ");
   return [
     r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r),
+    r.details?.upstreamReason,
     r.details?.message || reasonText(r),
   ]
     .filter(Boolean)
@@ -765,6 +768,7 @@ function EventDetail({
                     : "历史未记录",
             ],
             ["上游错误码", r.details?.upstreamCode ?? "—"],
+            ["上游原因", r.details?.upstreamReason ?? "未提供"],
             ["本地分类", r.details?.localCode ?? "—"],
             ["上游错误类型", r.details?.upstreamType ?? "未提供"],
             ["错误摘要", r.details?.message ?? reasonText(r)],

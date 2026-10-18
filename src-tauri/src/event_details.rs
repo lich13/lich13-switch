@@ -30,6 +30,8 @@ pub struct Details {
     #[serde(default)]
     pub handoff_scope: Option<String>,
     pub upstream_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_reason: Option<String>,
     #[serde(default)]
     pub local_code: Option<String>,
     pub upstream_type: Option<String>,
@@ -88,6 +90,44 @@ fn code(value: Option<String>) -> Option<String> {
                 .windows(24)
                 .any(|w| w.iter().all(u8::is_ascii_hexdigit))
     })
+}
+
+/// Error reasons are a closed vocabulary, never arbitrary upstream text.
+pub(crate) fn safe_upstream_reason(value: &str) -> Option<String> {
+    [
+        "DAILY_LIMIT_EXCEEDED",
+        "USAGE_LIMIT_EXCEEDED",
+        "insufficient_quota",
+        "insufficient_balance",
+        "insufficient_account_balance",
+        "account_balance_insufficient",
+        "api_key_quota_exhausted",
+        "insufficient_user_quota",
+        "balance_exhausted",
+        "balance_not_enough",
+        "credits_exhausted",
+        "credit_limit_exceeded",
+        "credit_balance_too_low",
+        "billing_hard_limit_reached",
+        "account_disabled",
+        "account_deactivated",
+        "invalid_api_key",
+        "api_key_expired",
+        "api_key_revoked",
+        "api_key_disabled",
+        "authentication_error",
+        "account_suspended",
+        "rate_limit_exceeded",
+        "rate_limit_error",
+        "overloaded_error",
+        "model_capacity_exceeded",
+        "server_is_overloaded",
+        "slow_down",
+        "usage_limit_reached",
+    ]
+    .into_iter()
+    .find(|known| known.eq_ignore_ascii_case(value.trim()))
+    .map(str::to_owned)
 }
 
 /// Error-only text: discard content-bearing errors, then mask identifiers.
@@ -231,6 +271,10 @@ impl Details {
         self.timeout_seconds = self.timeout_seconds.filter(|v| (1..=86400).contains(v));
         self.last_progress_ms = self.last_progress_ms.map(|v| v.min(86_400_000));
         self.upstream_code = code(self.upstream_code);
+        self.upstream_reason = self
+            .upstream_reason
+            .as_deref()
+            .and_then(safe_upstream_reason);
         self.local_code = code(self.local_code);
         self.upstream_type = code(self.upstream_type);
         self.parameter = self.parameter.filter(|v| {

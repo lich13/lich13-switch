@@ -509,6 +509,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     } else {
         None
     };
+    let established_capacity_owner =
+        routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref());
     let usage_trace = if matches!(requirement, Requirement::Resource)
         && operation != crate::usage::model::Operation::WebSearch
     {
@@ -534,6 +536,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         wait_budget.pin_provider();
     }
     let mut capacity_pending = false;
+    let mut capacity_wait_owner: Option<String> = None;
     let mut hard_denied = std::collections::HashSet::new();
     let mut capacity_retry_after: Option<Duration> = None;
     let mut rpm_retry_after: Option<Duration> = None;
@@ -562,12 +565,20 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     delay.as_secs(),
                 );
                 let _waiting_since = Instant::now();
-                match gateway
-                    .0
-                    .admission
-                    .wait_capacity(&capacity_sources, delay, settings.max_waiting)
-                    .await
-                {
+                let waited = if capacity_wait_owner.is_some() {
+                    gateway
+                        .0
+                        .admission
+                        .wait_owner_capacity(&capacity_sources, delay, settings.max_waiting)
+                        .await
+                } else {
+                    gateway
+                        .0
+                        .admission
+                        .wait_capacity(&capacity_sources, delay, settings.max_waiting)
+                        .await
+                };
+                match waited {
                     Ok(()) => {}
                     Err(Rejected::Stopped) => {
                         failover.finish(super::failover::Exit::Stopped);
@@ -594,6 +605,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 if ids.is_empty() {
                     break;
                 }
+                retry_owner = capacity_wait_owner
+                    .take()
+                    .filter(|owner| ids.contains(owner));
                 capacity_pending = false;
                 capacity_retry_after = None;
                 capacity_sources.clear();
@@ -638,6 +652,52 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             && !auxiliary
         {
             candidates = super::compaction::unidentified_candidates(candidates);
+        }
+        // A second request entering during its owner's capacity cooldown must
+        // wait as well. Read the reset generation before the health snapshot.
+        if attempted == 0 && candidates.len() == 1 {
+            let owner = &candidates[0];
+            let source = gateway.0.admission.capacity_source(&owner.provider.id);
+            let health = owner.health_for(&requirement);
+            if established_capacity_owner.as_deref() == Some(&owner.provider.id)
+                && routing::capacity_cooling(&health)
+            {
+                wait_budget.protect_capacity();
+                failover.wait(super::failover::WaitKind::CapacityRetry, health.retry_in);
+                match gateway
+                    .0
+                    .admission
+                    .wait_owner_capacity(
+                        &[source],
+                        Duration::from_secs(health.retry_in),
+                        settings.max_waiting,
+                    )
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(Rejected::Stopped) => {
+                        return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
+                    }
+                    Err(_) => {
+                        return error(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            code::CAPACITY,
+                            "等待队列已满",
+                        )
+                    }
+                }
+                ids = gateway.routing_ids(pinned.as_deref());
+                routes = ids
+                    .iter()
+                    .filter_map(|id| {
+                        gateway
+                            .route(id)
+                            .filter(|r| r.accepts_protocol(parts.uri.path()))
+                            .map(|r| (id.clone(), r))
+                    })
+                    .collect();
+                continue;
+            }
         }
         let stage = if unknown_affinity {
             super::failover::Stage::UnknownOwner
@@ -1174,6 +1234,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 && !hard_rejection
                 && route.client_id != super::ClientId::Claude
                 && (protocol.observation.capacity_error || capacity_message(status, &decoded));
+            let wait_same =
+                capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
             if capacity && !websocket {
                 ordinary_attempts = ordinary_attempts.saturating_sub(1);
                 capacity_protected = true;
@@ -1238,13 +1300,17 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     && (status.as_u16() != 429 || hard_rejection)
                     && (retryable || hard_rejection),
             );
-            details.wait_seconds = retry_delay.map(|delay| delay.as_secs());
+            details.wait_seconds = if wait_same {
+                Some(capacity_delay(&settings, cooldown).as_secs())
+            } else {
+                retry_delay.map(|delay| delay.as_secs())
+            };
             last_error = Some(admission.permits.report(
                 &gateway,
                 &route,
                 model.as_deref(),
                 reason,
-                if retry_delay.is_some() {
+                if retry_delay.is_some() || wait_same {
                     Action::RetryingSame
                 } else if will_retry {
                     Action::TryingNext
@@ -1323,6 +1389,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
             }
             if capacity {
+                if wait_same {
+                    capacity_wait_owner = Some(route.provider.id.clone());
+                    ids.clear();
+                }
                 capacity_pending = true;
                 capacity_sources.push(CapacitySource {
                     provider_id: route.provider.id.clone(),
@@ -1499,6 +1569,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 ended && protocol.observation.capacity_error
             };
+        let wait_same =
+            initial_capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
         if initial_model_error
             || initial_capacity
             || initial_compact_error
@@ -1520,6 +1592,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .and_then(circuit::retry_after)
                 .max(protocol.observation.retry_after);
             if initial_capacity {
+                if wait_same {
+                    capacity_wait_owner = Some(route.provider.id.clone());
+                    ids.clear();
+                }
                 ordinary_attempts = ordinary_attempts.saturating_sub(1);
                 capacity_protected = true;
                 wait_budget.protect_capacity();
@@ -1537,6 +1613,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let mut details = protocol.observation.error.clone();
             details.phase = Some(crate::events::Phase::Response);
             details.counted_failure = Some(initial_hard_rejection);
+            if wait_same {
+                details.wait_seconds = Some(capacity_delay(&settings, cooldown).as_secs());
+            }
             last_error = Some(admission.permits.report(
                 &gateway,
                 &route,
@@ -1550,7 +1629,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 } else {
                     Reason::ModelUnavailable
                 },
-                if will_retry {
+                if wait_same {
+                    Action::RetryingSame
+                } else if will_retry {
                     Action::TryingNext
                 } else if initial_capacity {
                     Action::Waiting

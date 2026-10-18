@@ -59,6 +59,8 @@ mod protocol;
 #[cfg(test)]
 mod protocol_tests;
 mod quota;
+#[cfg(test)]
+mod quota_routing_v0257_tests;
 mod replay;
 #[cfg(test)]
 mod replay_boundary_tests;
@@ -68,6 +70,8 @@ mod thread_capacity;
 #[cfg(test)]
 mod token_reveal_tests;
 mod upstream_error;
+#[cfg(test)]
+mod upstream_reason_v0257_tests;
 #[cfg(test)]
 mod usage_stream_tests;
 mod websocket;

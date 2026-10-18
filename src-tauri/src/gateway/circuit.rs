@@ -46,6 +46,8 @@ pub struct Health {
 pub struct Cause {
     pub event_id: String,
     pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_reason: Option<String>,
     pub reason: crate::events::Reason,
     pub status: Option<u16>,
     pub ws_close_code: Option<u16>,
@@ -54,6 +56,7 @@ impl Cause {
     fn from_event(event: &crate::events::Record) -> Self {
         Self {
             event_id: event.id.clone(),
+            upstream_reason: event.details.upstream_reason.clone(),
             code: event
                 .details
                 .upstream_code
