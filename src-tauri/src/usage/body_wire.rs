@@ -106,20 +106,38 @@ fn string(s: &str, out: &mut Vec<u8>) {
     out.extend_from_slice(s.as_bytes());
 }
 pub(super) fn encode(value: &Value) -> Vec<u8> {
-    encode_version(value, false)
+    encode_version(value, false, false)
 }
 // v11 keeps its original byte representation. The v12 diagnostic codec also
 // stores canonical UUIDs losslessly as sixteen bytes.
+#[cfg(test)]
 pub(super) fn encode_v12(value: &Value) -> Vec<u8> {
-    encode_version(value, true)
+    encode_version(value, true, false)
 }
-fn encode_version(value: &Value, compact_uuid: bool) -> Vec<u8> {
-    fn write(v: &Value, out: &mut Vec<u8>, compact_uuid: bool) {
+// Keep the legacy encoders (including dictionary training bytes) immutable.
+// Tag 11 preserves arbitrary-precision JSON numbers without an f64 round trip.
+pub(super) fn encode_v13(value: &Value) -> Vec<u8> {
+    encode_version(value, true, true)
+}
+fn encode_version(value: &Value, compact_uuid: bool, exact_numbers: bool) -> Vec<u8> {
+    fn write(v: &Value, out: &mut Vec<u8>, compact_uuid: bool, exact_numbers: bool) {
         match v {
             Value::Null => out.push(0),
             Value::Bool(false) => out.push(1),
             Value::Bool(true) => out.push(2),
             Value::Number(n) => {
+                if exact_numbers {
+                    let text = n.to_string();
+                    let integer = n
+                        .as_u64()
+                        .map(|n| n.to_string())
+                        .or_else(|| n.as_i64().map(|n| n.to_string()));
+                    if integer.as_deref() != Some(text.as_str()) {
+                        out.push(11);
+                        string(&text, out);
+                        return;
+                    }
+                }
                 if let Some(n) = n.as_u64() {
                     out.push(3);
                     uint(n, out);
@@ -158,7 +176,7 @@ fn encode_version(value: &Value, compact_uuid: bool) -> Vec<u8> {
                 out.push(8);
                 uint(values.len() as u64, out);
                 for v in values {
-                    write(v, out, compact_uuid);
+                    write(v, out, compact_uuid, exact_numbers);
                 }
             }
             Value::Object(fields) => {
@@ -171,13 +189,13 @@ fn encode_version(value: &Value, compact_uuid: bool) -> Vec<u8> {
                         uint(0, out);
                         string(key, out);
                     }
-                    write(v, out, compact_uuid);
+                    write(v, out, compact_uuid, exact_numbers);
                 }
             }
         }
     }
     let mut out = Vec::new();
-    write(value, &mut out, compact_uuid);
+    write(value, &mut out, compact_uuid, exact_numbers);
     out
 }
 
@@ -273,6 +291,13 @@ impl Reader<'_> {
                 .ok()?
                 .to_string()
                 .into(),
+            11 => {
+                let text = self.string()?;
+                if text.is_empty() || text.bytes().any(|b| b.is_ascii_whitespace()) {
+                    return None;
+                }
+                Value::Number(serde_json::from_str::<Number>(&text).ok()?)
+            }
             _ => return None,
         })
     }

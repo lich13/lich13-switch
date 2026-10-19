@@ -150,7 +150,7 @@ pub(super) fn compact(c: &Connection) -> Result<bool> {
         };
         for (owner, ordinal, bytes) in rows {
             let value = json!([bytes.first().copied().unwrap_or(255), unpack(&bytes)?]);
-            let len = wire::encode_v12(&value).len();
+            let len = wire::encode_v13(&value).len();
             if !pending.is_empty() && (pending.len() == 256 || size + len > 1024 * 1024) {
                 write(&tx, &pending)?;
                 pending.clear();

@@ -1,6 +1,8 @@
 mod bodies;
 mod body_wire;
 pub mod commands;
+#[cfg(test)]
+mod decimal_v13_tests;
 mod dedup;
 #[cfg(test)]
 mod event_time_tests;

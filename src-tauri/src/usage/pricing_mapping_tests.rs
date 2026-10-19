@@ -944,7 +944,7 @@ fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempt
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 #[test]

@@ -81,13 +81,14 @@ impl Store {
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 12 {
+        if version > 13 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         super::maintenance::configure(&connection)?;
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
         query::register(&connection)?;
         if storage_v12::active(&connection) {
+            storage_v12::protect_encoding(&connection)?;
             return Ok(Self {
                 connection,
                 overview_cache: Default::default(),

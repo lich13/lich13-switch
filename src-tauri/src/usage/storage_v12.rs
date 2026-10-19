@@ -210,7 +210,7 @@ pub(super) fn register(c: &Connection) -> Result<()> {
     }))
 }
 fn pack(v: &Value) -> Result<Vec<u8>> {
-    let bytes = wire::encode_v12(v);
+    let bytes = wire::encode_v13(v);
     if v.as_object().is_some_and(|v| v.is_empty()) {
         return Ok(vec![0]);
     }
@@ -399,7 +399,7 @@ fn unpack_diagnostic(c: &Connection, body: rusqlite::types::Value, anchor: i64) 
     Ok(v)
 }
 fn intern(c: &Connection, v: &Value) -> Result<i64> {
-    let payload = wire::encode_v12(v);
+    let payload = wire::encode_v13(v);
     if payload.len() > LIMIT {
         return Err(failure("用量共享元数据超过安全上限"));
     }
@@ -444,7 +444,23 @@ fn intern_text(c: &Connection, v: Option<&str>) -> Result<Option<i64>> {
     v.map(|v| intern(c, &json!(v))).transpose()
 }
 
+pub(super) fn protect_encoding(c: &Connection) -> Result<()> {
+    // Commit the reader guard before any tag-11 payload can be written, even
+    // when resuming a pending copy or opening an already active v12 layout.
+    let version: i64 = db(c.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
+    if version > 13 {
+        return Err(failure("用量数据库来自更高版本，已保留原文件"));
+    }
+    if version == 13 {
+        return Ok(());
+    }
+    let tx = db(c.unchecked_transaction())?;
+    db(tx.execute_batch("PRAGMA user_version=13;"))?;
+    db(tx.commit())
+}
+
 pub(super) fn install(c: &Connection) -> Result<()> {
+    protect_encoding(c)?;
     if active(c) || pending(c) {
         return Ok(());
     }
@@ -471,7 +487,7 @@ pub(super) fn install(c: &Connection) -> Result<()> {
       CREATE TABLE v12_links(owner INTEGER PRIMARY KEY,target BLOB NOT NULL);
       CREATE TABLE v12_dirty(id TEXT PRIMARY KEY) WITHOUT ROWID;
       INSERT OR REPLACE INTO metadata VALUES('storage_v12','copy'),('storage_v12_after','');
-      PRAGMA user_version=12;"))?;
+      PRAGMA user_version=13;"))?;
     db(tx.execute_batch("CREATE TABLE v12_measures(id INTEGER PRIMARY KEY,hint INTEGER NOT NULL,
       inclusive_input INTEGER,input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
       cost TEXT,unpriced INTEGER NOT NULL,duration INTEGER NOT NULL,repeat_count INTEGER NOT NULL);
@@ -565,7 +581,7 @@ fn measure(c: &Connection, a: &Attempt, n: &[Option<i64>]) -> Result<i64> {
             i64::try_from(n).map_err(|_| failure("用量计量超过安全范围"))?,
         ));
     }
-    let fingerprint = hint(&wire::encode_v12(&json!([
+    let fingerprint = hint(&wire::encode_v13(&json!([
         n,
         a.price.as_ref().map(|p| &p.cost),
         a.unpriced_count(),

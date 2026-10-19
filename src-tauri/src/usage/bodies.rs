@@ -121,7 +121,12 @@ fn pack(connection: &Connection, value: &Value) -> Result<String> {
             row.get(0)
         })
         .map_err(|_| failure("用量共享元数据读取失败"))?;
-    let compact = wire::encode(&compact::compact(value, &shape));
+    let compact_value = compact::compact(value, &shape);
+    let compact = if version >= 13 {
+        wire::encode_v13(&compact_value)
+    } else {
+        wire::encode(&compact_value)
+    };
     if compact.len() > MAX_BODY {
         return Ok(plain);
     }
