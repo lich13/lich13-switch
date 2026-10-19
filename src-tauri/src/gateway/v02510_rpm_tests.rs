@@ -670,12 +670,29 @@ async fn unlimited_to_limited_revalidates_existing_start_and_enables_initializat
 async fn persistence_failure_fails_closed_for_limited_rpm() {
     tokio::time::pause();
     let dir = tempfile::tempdir().unwrap();
-    let parent_file = dir.path().join("parent-file");
-    fs::write(&parent_file, b"fixture").unwrap();
-    let path = parent_file.join("rpm.json");
+    let path = dir.path().join("rpm.json");
     let scheduler = scheduler(&path);
     let p = provider("v1", true, 1);
     scheduler.configure(std::slice::from_ref(&p), true);
+    assert!(!scheduler.rpm_status(PROVIDER, 1).3);
+    // Obstruct the destination after a successful load, so this exercises the
+    // pre-send save on every platform, not platform-specific ENOTDIR mapping.
+    fs::create_dir(&path).unwrap();
+    let mut budget = Budget::new(1);
+    let mut admission = scheduler
+        .acquire_for_immediate(
+            &[route(p.clone())],
+            false,
+            8,
+            &mut budget,
+            &Requirement::Resource,
+            true,
+        )
+        .await
+        .expect("reservation before the first write");
+    assert!(matches!(admission.commit_rpm(), Err(Rejected::RateLedger)));
+    drop(admission);
+    assert_eq!(scheduler.rpm_status(PROVIDER, 1).0, 0);
     let (_, _, _, error) = scheduler.rpm_status(PROVIDER, 1);
     assert!(error);
     let mut budget = Budget::new(1);

@@ -43,10 +43,13 @@ impl Fixture {
 }
 
 async fn next_record(receiver: &mut tokio::sync::broadcast::Receiver<Change>) -> EventRecord {
-    let change = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+    // This waits for a background filesystem commit, not a transport deadline.
+    // Windows ACL/fsync work may be delayed by parallel synthetic DB tests.
+    let change = tokio::time::timeout(Duration::from_secs(30), receiver.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("diagnostic persistence worker did not publish the record")
+        .expect("diagnostic event channel closed");
+    assert!(change.error.is_none(), "diagnostic persistence failed");
     assert!(!change.notify, "request interruptions must never notify");
     change.record.unwrap()
 }
