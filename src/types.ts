@@ -125,6 +125,7 @@ export type Health = {
     eventId: string;
     code: string;
     upstreamReason?: string | null;
+    errorBasis?: string | null;
     reason: string;
     status: number | null;
     wsCloseCode: number | null;
@@ -150,6 +151,8 @@ export type Provider = {
   modelHealth?: { model: string; health: Health }[];
   quotaVersion: string;
   quota: ProviderQuota | null;
+  quotaChecking?: boolean;
+  quotaCheck?: import("./limit-labels").QuotaCheck | null;
   maxConcurrency: number;
   maxRpm: number;
   activeRequests: number;
@@ -157,6 +160,7 @@ export type Provider = {
   rpmUsed: number;
   rpmRetryIn: number;
   rpmLimited: boolean;
+  rpmWaitReason?: string | null;
   rpmLedgerError?: boolean;
   allowedModels: string[] | null;
   handoffAfterCompaction?: boolean;

@@ -1,3 +1,4 @@
+import { limitLabel, rpmWaitLabel } from "./limit-labels";
 import type { Provider, GatewayState } from "./types";
 function pendingHealth(h: Provider["health"]) {
   return h.available === false || h.state !== "closed" || h.probeInFlight;
@@ -13,15 +14,17 @@ export function providerRuntimeStatus(
   state: GatewayState,
 ): string {
   const fault = providerFault(p);
+  const limit = limitLabel(fault);
   if (
-    fault?.upstreamReason === "DAILY_LIMIT_EXCEEDED" ||
-    fault?.code === "DAILY_LIMIT_EXCEEDED"
+    limit &&
+    (fault?.errorBasis === "quota_exhausted" || limit.endsWith("已用尽"))
   )
-    return "日额度已用尽";
+    return limit;
   const capacity = state.capacityRetries?.find(
     (w) => w.providerId === p.id && w.existingOwner,
   );
-  if (capacity) return `临时限流 · 原供应商等待${capacity.retryIn}秒`;
+  if (capacity)
+    return `${fault?.errorBasis === "rpm" ? "上游 RPM 限制" : "临时限流"} · 原供应商等待${capacity.retryIn}秒${p.quotaChecking ? " · 正在核验额度" : ""}`;
   if (
     p.health.state !== "closed" ||
     p.modelHealth?.some((m) => m.health.state !== "closed")
@@ -51,11 +54,8 @@ export function providerHandoffStatus(
 function causeText(p: Provider): string {
   const c = p.health.cause;
   if (!c) return "";
-  if (
-    c.upstreamReason === "DAILY_LIMIT_EXCEEDED" ||
-    c.code === "DAILY_LIMIT_EXCEEDED"
-  )
-    return "日额度已用尽";
+  const limit = limitLabel(c);
+  if (limit) return limit;
   const codes: Record<string, string> = {
     FIRST_BYTE_TIMEOUT: "首字超时",
     CONNECT_TIMEOUT: "连接超时",
@@ -93,7 +93,7 @@ export function providerStatus(p: Provider): string {
     }
   }
   const seconds = Math.max(0, h.retryIn);
-  if (reason === "日额度已用尽") return reason;
+  if (reason.endsWith("已用尽") || reason === "额度已耗尽") return reason;
   if (h.probeInFlight)
     return ["恢复探测中", reason].filter(Boolean).join(" · ");
   if (h.state === "open")
@@ -104,7 +104,7 @@ export function providerStatus(p: Provider): string {
     h.cooldownReason === "capacity_retry" ||
     h.cooldownReason === "rate_limit"
   )
-    return `${h.cause?.status === 429 || h.cooldownReason === "rate_limit" ? "限流 429" : "容量不足"} · 等待${seconds}秒`;
+    return `${h.cause?.errorBasis === "rpm" ? "上游 RPM 限制" : h.cause?.status === 429 || h.cooldownReason === "rate_limit" ? "限流 429" : "容量不足"} · 等待${seconds}秒`;
   if (
     h.cooldownReason === "single_provider_protected" ||
     h.cooldownReason === "retry_after"
@@ -113,7 +113,8 @@ export function providerStatus(p: Provider): string {
   if (h.state === "half_open")
     return ["待请求探测", reason].filter(Boolean).join(" · ");
   if (p.rpmLedgerError) return "RPM 记录不可用";
-  if (p.rpmLimited) return `RPM 已满 · 等待${Math.max(1, p.rpmRetryIn)}秒`;
+  if (p.rpmLimited)
+    return `${rpmWaitLabel(p.rpmWaitReason)} · 等待${Math.max(1, p.rpmRetryIn)}秒`;
   const occupied = p.activeRequests + (p.reservedThreads ?? 0);
   if (p.maxConcurrency > 0 && occupied >= p.maxConcurrency)
     return `并发已满 · ${occupied}/${p.maxConcurrency}`;

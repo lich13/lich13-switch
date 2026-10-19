@@ -348,7 +348,9 @@ fn record_failure(
         Reason::ModelUnavailable
     } else if failure.capacity {
         Reason::Capacity
-    } else if failure.hard_rejection() && failure.status == Some(429) {
+    } else if failure.details.error_basis == Some(crate::events::ErrorBasis::QuotaExhausted)
+        || (failure.hard_rejection() && failure.status == Some(429))
+    {
         Reason::UpstreamService
     } else if failure.status == Some(429) {
         Reason::RateLimit
@@ -362,6 +364,19 @@ fn record_failure(
         Reason::UpstreamService
     };
     let mut details = (*failure.details).clone();
+    if details.error_basis == Some(crate::events::ErrorBasis::Rpm) {
+        let delay = failure.retry.unwrap_or_else(|| {
+            Duration::from_secs(
+                g.0.inner
+                    .lock()
+                    .unwrap()
+                    .store
+                    .settings
+                    .capacity_retry_seconds,
+            )
+        });
+        g.0.admission.rpm_backoff(&route.provider.id, delay);
+    }
     details
         .phase
         .get_or_insert(crate::events::Phase::WsHandshake);
@@ -1225,20 +1240,30 @@ async fn session_once(
                 },
                 forward::capacity_delay(cfg, capacity_retry_after).as_secs(),
             );
-            while_connecting(client, async {
-                let delay = forward::capacity_delay(cfg, capacity_retry_after);
-                if capacity_wait_owner.is_some() {
-                    g.0.admission
-                        .wait_owner_capacity(&capacity_sources, delay, cfg.max_waiting)
-                        .await
-                } else {
-                    g.0.admission
-                        .wait_capacity(&capacity_sources, delay, cfg.max_waiting)
-                        .await
-                }
-            })
+            let owner_route = capacity_wait_owner
+                .as_deref()
+                .or_else(|| last_error.as_ref().and_then(|e| e.provider_id.as_deref()))
+                .and_then(|id| routes.get(id));
+            let exhausted = while_connecting(
+                client,
+                g.wait_capacity_checked(
+                    &capacity_sources,
+                    forward::capacity_delay(cfg, capacity_retry_after),
+                    cfg.max_waiting,
+                    capacity_wait_owner.is_some(),
+                    owner_route,
+                    last_error.as_ref(),
+                ),
+            )
             .await?
             .map_err(rejected)?;
+            if exhausted {
+                if let Some(route) = owner_route {
+                    hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
+                }
+                capacity_wait_owner = None;
+                failover.failure(super::failover::Failure::AccountRejected);
+            }
             ids = g.routing_ids(pinned.as_deref());
             ids.retain(|id| {
                 g.route(id).is_some_and(|route| {
@@ -1269,7 +1294,7 @@ async fn session_once(
             .filter_map(|id| routes.get(id).cloned())
             .filter(|r| r.accepts_protocol(uri.path()))
             .collect();
-        if attempts > 0 {
+        if attempts > 0 || !hard_denied.is_empty() {
             budget.handoff_owner = None;
         }
         let matches_model = candidates
@@ -1286,7 +1311,7 @@ async fn session_once(
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
-            candidates = if attempts > 0 {
+            candidates = if attempts > 0 || !hard_denied.is_empty() {
                 lease.candidates_after_failure(candidates, &requirement)
             } else {
                 lease.candidates_for(candidates, &requirement)
@@ -1307,17 +1332,30 @@ async fn session_once(
             {
                 budget.protect_capacity();
                 failover.wait(super::failover::WaitKind::CapacityRetry, health.retry_in);
-                while_connecting(
+                let cause = g.capacity_cause(&owner.provider.id, current_model.as_deref(), &health);
+                let exhausted = while_connecting(
                     client,
-                    g.0.admission.wait_owner_capacity(
+                    g.wait_capacity_checked(
                         &[source],
                         Duration::from_secs(health.retry_in),
                         cfg.max_waiting,
+                        true,
+                        Some(owner),
+                        cause.as_ref(),
                     ),
                 )
                 .await?
                 .map_err(rejected)?;
+                if exhausted {
+                    hard_denied.insert((owner.provider.id.clone(), owner.provider.version.clone()));
+                    failover.failure(super::failover::Failure::AccountRejected);
+                    last_error = cause;
+                }
                 ids = g.routing_ids(pinned.as_deref());
+                ids.retain(|id| {
+                    g.route(id)
+                        .is_some_and(|r| !hard_denied.contains(&(id.clone(), r.provider.version)))
+                });
                 routes = ids
                     .iter()
                     .filter_map(|id| {
@@ -1333,7 +1371,7 @@ async fn session_once(
             super::failover::Stage::UnknownOwner
         } else if pinned.is_some() {
             super::failover::Stage::CursorPinned
-        } else if attempts > 0 {
+        } else if attempts > 0 || !hard_denied.is_empty() {
             super::failover::Stage::FailureFallback
         } else if ownership.as_ref().is_some_and(|l| l.handoff) {
             super::failover::Stage::ProactiveHandoff
@@ -1453,6 +1491,7 @@ async fn session_once(
             .is_some_and(|id| id != admission.route.provider.id);
         previous_provider = Some(admission.route.provider.id.clone());
         let mut attempt_protocol = super::protocol::Protocol::new(true);
+        attempt_protocol.attach_rpm(admission.take_completion());
         attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
         attempt_protocol.attach_routing_log(failover.routing());
@@ -1851,17 +1890,30 @@ async fn session_once(
                 );
             }
             let waited = if alternative {
-                Ok(Ok(()))
+                Ok(Ok(false))
             } else {
                 while_connecting(client, async {
                     if let Some(source) = &owner_capacity_wait {
-                        g.0.admission
-                            .wait_owner_capacity(
-                                std::slice::from_ref(source),
-                                Duration::from_secs(delay),
-                                cfg.max_waiting,
-                            )
-                            .await
+                        g.wait_capacity_checked(
+                            std::slice::from_ref(source),
+                            Duration::from_secs(delay),
+                            cfg.max_waiting,
+                            true,
+                            Some(&route),
+                            last_error.as_ref(),
+                        )
+                        .await
+                    } else if retry_capacity || fallback_capacity {
+                        let source = g.0.admission.capacity_source(&route.provider.id);
+                        g.wait_capacity_checked(
+                            &[source],
+                            Duration::from_secs(delay),
+                            cfg.max_waiting,
+                            false,
+                            Some(&route),
+                            last_error.as_ref(),
+                        )
+                        .await
                     } else {
                         g.0.admission
                             .wait_websocket(
@@ -1870,11 +1922,12 @@ async fn session_once(
                                 cfg.max_waiting,
                             )
                             .await
+                            .map(|()| false)
                     }
                 })
                 .await
             };
-            match waited {
+            let exhausted = match waited {
                 Err(TURN_CANCELLED) => {
                     failover.finish(super::failover::Exit::Cancelled);
                     retry_pending = false;
@@ -1888,6 +1941,15 @@ async fn session_once(
                 }
                 Err(error) => return Err(error),
                 Ok(result) => result.map_err(rejected)?,
+            };
+            if exhausted {
+                hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
+                owner_capacity_wait = None;
+                retry_capacity = false;
+                retry_fallback = true;
+                retry_immediately = true;
+                failover.failure(super::failover::Failure::AccountRejected);
+                continue;
             }
             if owner_capacity_wait.is_some() {
                 retry_routes = g
@@ -2011,6 +2073,7 @@ async fn session_once(
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
+            next.attach_rpm(admission.take_completion());
             next.diagnostics(g, &route.provider.id, current_model.as_deref());
             next.attach_ownership(ownership.clone(), &route.provider.id);
             next.attach_routing_log(failover.routing());
@@ -2090,7 +2153,7 @@ async fn session_once(
                         failure.details.wait_seconds =
                             Some(forward::capacity_delay(cfg, failure.retry).as_secs());
                     }
-                    record_failure(
+                    last_error = Some(record_failure(
                         &mut admission.permits,
                         g,
                         &route,
@@ -2111,7 +2174,7 @@ async fn session_once(
                             crate::events::Action::Returned
                         },
                         attempts,
-                    );
+                    ));
                     if let Some(mut u) = protocol.take() {
                         u.finish(
                             failure.status,
@@ -2351,6 +2414,8 @@ async fn session_once(
                     super::routing::capacity_owner(g.client_id(), manual, ownership.as_deref());
                 // A new turn on a persistent socket observes the same cooldown
                 // as a separately connected request from the established thread.
+                let mut quota_denied = false;
+                let mut quota_cause = None;
                 loop {
                     let source = g.0.admission.capacity_source(&route.provider.id);
                     let health = route.health_for(&requirement);
@@ -2359,12 +2424,16 @@ async fn session_once(
                     {
                         break;
                     }
+                    let cause = g.capacity_cause(&route.provider.id, model.as_deref(), &health);
                     let waited = while_connecting(
                         client,
-                        g.0.admission.wait_owner_capacity(
+                        g.wait_capacity_checked(
                             &[source],
                             Duration::from_secs(health.retry_in.max(1)),
                             cfg.max_waiting,
+                            true,
+                            Some(&route),
+                            cause.as_ref(),
                         ),
                     )
                     .await;
@@ -2374,7 +2443,13 @@ async fn session_once(
                             continue 'turns;
                         }
                         Err(error) => return Err(error),
-                        Ok(result) => result.map_err(rejected)?,
+                        Ok(result) => {
+                            if result.map_err(rejected)? {
+                                quota_denied = true;
+                                quota_cause = cause;
+                                break;
+                            }
+                        }
                     }
                     let refreshed = g
                         .route(&route.provider.id)
@@ -2439,6 +2514,29 @@ async fn session_once(
                     &budget,
                     manual,
                 );
+                if quota_denied {
+                    failover.failure(super::failover::Failure::AccountRejected);
+                    current_model = model;
+                    attempts = 0;
+                    ordinary_attempts = 0;
+                    capacity_protected = false;
+                    retry_pending = true;
+                    retry_capacity = false;
+                    retry_fallback = true;
+                    retry_immediately = true;
+                    owner_capacity_wait = None;
+                    fallback_capacity = false;
+                    turn_failed.clear();
+                    hard_denied.clear();
+                    hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
+                    rejected_frame = None;
+                    terminal_error = false;
+                    replay_frame = frame.clone();
+                    last_error = quota_cause;
+                    protocol = None;
+                    upstream = Upstream::Disconnected;
+                    continue 'turns;
+                }
                 let acquired = take_slot(
                     g,
                     client,
@@ -2491,6 +2589,7 @@ async fn session_once(
                 terminal_error = false;
                 replay_frame = frame.clone();
                 let mut next_protocol = super::protocol::Protocol::new(true);
+                next_protocol.attach_rpm(turn.as_mut().and_then(|a| a.take_completion()));
                 next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
                 next_protocol.attach_routing_log(failover.routing());
@@ -2577,7 +2676,7 @@ async fn session_once(
                                     }
                                 }
                                 if let Some(mut admission) = turn.take() {
-                                    record_failure(
+                                    last_error = Some(record_failure(
                                         &mut admission.permits,
                                         g,
                                         &route,
@@ -2600,7 +2699,7 @@ async fn session_once(
                                             crate::events::Action::Returned
                                         },
                                         attempts,
-                                    );
+                                    ));
                                     if let Some(mut u) = protocol.take() {
                                         u.finish(
                                             failure.status,
@@ -2783,7 +2882,7 @@ async fn session_once(
                         turn_failed.insert(route.provider.id.clone());
                         if failure.hard_rejection() { hard_denied.insert((route.provider.id.clone(), route.provider.version.clone())); }
                         if let Some(mut admission) = turn.take() {
-                            record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, if wait_same { crate::events::Action::RetryingSame } else { crate::events::Action::TryingNext }, attempts);
+                            last_error = Some(record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, if wait_same { crate::events::Action::RetryingSame } else { crate::events::Action::TryingNext }, attempts));
                             if failure.capacity { admission.permits.capacity_limited(cfg, failure.retry); }
                             else if failure.model_unavailable { admission.permits.neutral(cfg); }
                             else { admission.permits.failure(cfg, failure.retry); }

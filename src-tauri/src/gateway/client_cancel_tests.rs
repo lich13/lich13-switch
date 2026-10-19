@@ -443,7 +443,7 @@ async fn rst_after_two_sse_events_closes_the_real_upstream_without_retry() {
     );
     let diagnostic = wait_for_interruption(&events).await;
     assert_eq!(diagnostic.reason, EventReason::RequestInterrupted);
-    assert_eq!(diagnostic.category, Category::OrdinaryError);
+    assert_eq!(diagnostic.category, Category::Status);
     assert_eq!(diagnostic.action, Action::NotRetried);
     assert_eq!(diagnostic.details.counted_failure, Some(false));
     assert!(
@@ -608,7 +608,7 @@ async fn assert_websocket_cancel_closes_upstream(explicit_close: bool, generatio
         assert!(!attempt.end.as_ref().unwrap().terminal_received);
         let diagnostic = wait_for_interruption(&events).await;
         assert_eq!(diagnostic.reason, EventReason::RequestInterrupted);
-        assert_eq!(diagnostic.category, Category::OrdinaryError);
+        assert_eq!(diagnostic.category, Category::Status);
         assert_eq!(diagnostic.details.counted_failure, Some(false));
         assert!(
             !diagnostic

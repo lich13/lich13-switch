@@ -80,10 +80,10 @@ async fn partial_response_close_keeps_unknown_terminal_and_cancel_evidence() {
         Some("下游连接关闭，未确认客户端主动取消")
     );
     assert_eq!(record.details.counted_failure, Some(false));
-    assert_eq!(record.level, Level::Warning);
+    assert_eq!(record.level, Level::Info);
     assert!(matches!(
         category_for(&fixture.events, &record.id),
-        Category::OrdinaryError
+        Category::Status
     ));
     assert!(!record.reason.notifiable(record.action));
 
@@ -149,7 +149,7 @@ async fn explicit_cancel_and_gateway_stop_are_statuses_without_fake_progress() {
 }
 
 #[tokio::test]
-async fn reset_and_write_failures_are_warning_records_not_client_cancellations() {
+async fn reset_and_broken_pipes_are_status_records_not_client_cancellations() {
     let fixture = Fixture::new();
     let mut receiver = fixture.events.subscribe();
 
@@ -172,10 +172,10 @@ async fn reset_and_write_failures_are_warning_records_not_client_cancellations()
         reset_record.details.message.as_deref(),
         Some("下游连接被重置，未确认客户端主动取消")
     );
-    assert_eq!(reset_record.level, Level::Warning);
+    assert_eq!(reset_record.level, Level::Info);
     assert!(matches!(
         category_for(&fixture.events, &reset_record.id),
-        Category::OrdinaryError
+        Category::Status
     ));
 
     let mut failed_write = fixture.protocol();
@@ -195,12 +195,12 @@ async fn reset_and_write_failures_are_warning_records_not_client_cancellations()
     );
     assert_eq!(
         write_record.details.message.as_deref(),
-        Some("向下游写入失败")
+        Some("下游管道已关闭，未确认客户端主动取消")
     );
-    assert_eq!(write_record.level, Level::Warning);
+    assert_eq!(write_record.level, Level::Info);
     assert!(matches!(
         category_for(&fixture.events, &write_record.id),
-        Category::OrdinaryError
+        Category::Status
     ));
 }
 
@@ -232,10 +232,10 @@ async fn observed_upstream_success_remains_distinct_from_a_failed_delivery() {
         record.details.local_code.as_deref(),
         Some("DOWNSTREAM_WRITE_FAILED")
     );
-    assert_eq!(record.level, Level::Warning);
+    assert_eq!(record.level, Level::Info);
     assert!(matches!(
         category_for(&fixture.events, &record.id),
-        Category::OrdinaryError
+        Category::Status
     ));
     let evidence = record.details.delivery.unwrap();
     assert!(evidence.terminal_received);

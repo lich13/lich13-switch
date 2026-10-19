@@ -1185,7 +1185,9 @@ async fn v0212_ws_reconnect_allows_slow_handshake_before_first_event_deadline() 
         &dir,
         Edit::RpmProvider {
             id: gateway.view().providers[0].id.clone(),
-            max_rpm: 10,
+            // Keep the assertion focused on the handshake deadline while
+            // still counting both turns under the paced RPM scheduler.
+            max_rpm: 600,
         },
     );
     super::start(&gateway, &dir).await;

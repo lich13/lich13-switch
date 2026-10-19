@@ -1,9 +1,12 @@
-//! Read-only provider quota queries. Never participate in business routing or circuit health.
+//! Read-only quota display and bounded error-triggered verification. Cached display amounts never authorize routing.
+#[path = "quota_probe.rs"]
+mod probe;
 use super::{circuit, connector, replay, HttpClient};
 use crate::errors::code;
 use crate::storage::{AppError, Result};
 use http_body_util::BodyExt;
 use hyper::{header, Request};
+use probe::ProbeStore;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -99,6 +102,7 @@ struct Entry {
 }
 struct Shared {
     entries: Mutex<HashMap<String, Entry>>,
+    probes: Mutex<ProbeStore>,
     interval: AtomicU64,
     permits: Semaphore,
     events: broadcast::Sender<QuotaView>,
@@ -118,6 +122,7 @@ impl Service {
         let (events, _) = broadcast::channel(64);
         Self(Arc::new(Shared {
             entries: Mutex::new(HashMap::new()),
+            probes: Mutex::new(ProbeStore::default()),
             interval: AtomicU64::new(60),
             permits: Semaphore::new(3),
             events,
@@ -162,6 +167,7 @@ impl Service {
             })
     }
     pub fn retain(&self, versions: &HashMap<String, String>) {
+        self.0.probes.lock().unwrap().retain(versions);
         self.0
             .entries
             .lock()
@@ -169,6 +175,7 @@ impl Service {
             .retain(|id, e| versions.get(id) == Some(&e.view.version));
     }
     pub async fn query(&self, input: Query, force: bool) -> Result<QuotaView> {
+        let retry_at = self.query_retry_at(&input);
         let mut rx = {
             let mut entries = self.0.entries.lock().unwrap();
             let e = entries.entry(input.id.clone()).or_insert_with(|| Entry {
@@ -184,6 +191,7 @@ impl Service {
             if let Some(rx) = &e.flight {
                 rx.clone()
             } else {
+                e.view.retry_at = e.view.retry_at.max(retry_at);
                 self.schedule(&mut e.view);
                 if e.view.retry_at.is_some_and(|t| t > now())
                     || (!force
@@ -205,7 +213,14 @@ impl Service {
                         .acquire()
                         .await
                         .expect("quota semaphore open");
-                    let result = fetch(&input).await;
+                    let result = if let Some(at) = service.query_retry_at(&input) {
+                        Err(Failure {
+                            message: "额度查询被限流".into(),
+                            retry_at: Some(at),
+                        })
+                    } else {
+                        fetch(&input).await
+                    };
                     let mut view = previous;
                     view.checked_at = Some(now());
                     view.retry_at = None;
@@ -309,7 +324,13 @@ async fn get(input: &Query, url: String, auth: bool) -> std::result::Result<Repl
                 .get(header::RETRY_AFTER)
                 .and_then(|h| h.to_str().ok())
                 .and_then(circuit::retry_after)
-                .map(|d| now() + d.as_secs().max(1));
+                .map(|d| {
+                    now().saturating_add(
+                        d.as_secs()
+                            .saturating_add(u64::from(d.subsec_nanos() > 0))
+                            .max(1),
+                    )
+                });
             return Err(Failure {
                 message: "额度查询被限流".into(),
                 retry_at: Some(retry.unwrap_or_else(|| now() + 60)),

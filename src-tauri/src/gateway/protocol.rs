@@ -561,6 +561,7 @@ impl Delivery {
     }
 }
 pub struct Protocol {
+    rpm_completion: Option<super::admission::Completion>,
     observer: Option<Observer>,
     thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
     transfer: crate::usage::model::TransferMetadata,
@@ -595,6 +596,7 @@ pub struct Protocol {
 impl Protocol {
     pub fn new(stream: bool) -> Self {
         Self {
+            rpm_completion: None,
             observer: None,
             thread: None,
             transfer: crate::usage::model::TransferMetadata {
@@ -623,6 +625,9 @@ impl Protocol {
             diagnostics: None,
             end_reason: None,
         }
+    }
+    pub(super) fn attach_rpm(&mut self, completion: Option<super::admission::Completion>) {
+        self.rpm_completion = completion;
     }
     pub fn attach_thread(
         &mut self,
@@ -861,6 +866,24 @@ impl Protocol {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
     fn record_usage(&mut self) {
+        // Count upstream completion at observation time, independently of a
+        // slow or closed downstream socket. The token can settle only once.
+        if self.terminal_received {
+            let result = match self.terminal() {
+                Some(Terminal::Success | Terminal::Limited) => {
+                    Some(super::rpm::Settlement::Success)
+                }
+                Some(Terminal::Failure | Terminal::Rejected | Terminal::ModelUnavailable) => {
+                    Some(super::rpm::Settlement::Failed)
+                }
+                _ => None,
+            };
+            if let Some(result) = result {
+                if let Some(mut completion) = self.rpm_completion.take() {
+                    completion.settle(result);
+                }
+            }
+        }
         if self.terminal_received {
             if self.transfer.terminal_at.is_none() {
                 self.delivery.event("upstream_terminal_observed");
@@ -1028,6 +1051,23 @@ impl Protocol {
                 _ => Terminal::Failure,
             });
         }
+        if let Some(mut completion) = self.rpm_completion.take() {
+            use super::rpm::Settlement;
+            let result = if self.succeeded() {
+                Settlement::Success
+            } else if self.status.is_some_and(|s| s >= 400)
+                || (self.terminal_received
+                    && matches!(
+                        self.terminal(),
+                        Some(Terminal::Failure | Terminal::Rejected | Terminal::ModelUnavailable)
+                    ))
+            {
+                Settlement::Failed
+            } else {
+                Settlement::Uncertain
+            };
+            completion.settle(result);
+        }
         self.record_usage();
         self.record_end(reason);
     }
@@ -1130,11 +1170,13 @@ impl Protocol {
                 Some("DOWNSTREAM_PEER_RESET") => (
                     "DOWNSTREAM_PEER_RESET",
                     "下游连接被重置，未确认客户端主动取消",
-                    false,
+                    true,
                 ),
-                Some("DOWNSTREAM_WRITE_FAILED") => {
-                    ("DOWNSTREAM_WRITE_FAILED", "向下游写入失败", false)
-                }
+                Some("DOWNSTREAM_WRITE_FAILED") => (
+                    "DOWNSTREAM_WRITE_FAILED",
+                    "下游管道已关闭，未确认客户端主动取消",
+                    true,
+                ),
                 Some("DOWNSTREAM_PROTOCOL_ERROR") => {
                     ("DOWNSTREAM_PROTOCOL_ERROR", "下游协议处理失败", false)
                 }
@@ -1151,12 +1193,12 @@ impl Protocol {
                 Some("DOWNSTREAM_CANCELLED") => (
                     "DOWNSTREAM_CANCELLED",
                     "HTTP 传输被取消，未确认客户端主动取消",
-                    false,
+                    true,
                 ),
                 Some("DOWNSTREAM_CLOSED") => (
                     "DOWNSTREAM_CLOSED",
                     "下游连接关闭，未确认客户端主动取消",
-                    false,
+                    true,
                 ),
                 Some("RESPONSE_BODY_DROPPED") => (
                     "RESPONSE_BODY_DROPPED",

@@ -105,6 +105,18 @@ impl Permits {
                 HealthScope::Request
             }
         });
+        if details.error_basis == Some(crate::events::ErrorBasis::Rpm) {
+            details.rpm_wait_reason = Some(crate::events::RpmWaitReason::UpstreamBackoff);
+            let delay = std::time::Duration::from_secs(details.wait_seconds.unwrap_or_else(|| {
+                g.0.inner
+                    .lock()
+                    .unwrap()
+                    .store
+                    .settings
+                    .capacity_retry_seconds
+            }));
+            g.0.admission.rpm_backoff(&route.provider.id, delay);
+        }
         details.health_scope = Some(self.scope);
         if self.scope == HealthScope::Request {
             details.counted_failure = Some(false);

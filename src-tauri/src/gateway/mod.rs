@@ -63,12 +63,14 @@ mod protocol_tests;
 mod quota;
 #[cfg(test)]
 mod quota_routing_v0257_tests;
+mod quota_wait;
 mod replay;
 #[cfg(test)]
 mod replay_boundary_tests;
 mod replay_policy;
 mod routing;
 mod routing_log;
+mod rpm;
 mod thread_capacity;
 #[cfg(test)]
 mod token_reveal_tests;
@@ -77,6 +79,12 @@ mod upstream_error;
 mod upstream_reason_v0257_tests;
 #[cfg(test)]
 mod usage_stream_tests;
+#[cfg(test)]
+mod v02510_delivery_tests;
+#[cfg(test)]
+mod v02510_error_tests;
+#[cfg(test)]
+mod v02510_quota_routing_tests;
 mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
@@ -120,6 +128,8 @@ pub struct ProviderView {
     model_health: Vec<model_health::ModelHealth>,
     quota_version: String,
     quota: Option<QuotaView>,
+    quota_checking: bool,
+    quota_check: Option<crate::events::QuotaCheck>,
     pub max_concurrency: u32,
     pub max_rpm: u32,
     pub active_requests: usize,
@@ -127,6 +137,7 @@ pub struct ProviderView {
     pub rpm_used: usize,
     pub rpm_retry_in: u64,
     pub rpm_limited: bool,
+    pub rpm_wait_reason: Option<crate::events::RpmWaitReason>,
     pub rpm_ledger_error: bool,
     pub allowed_models: Option<Vec<String>>,
     pub handoff_after_compaction: bool,
@@ -763,6 +774,7 @@ impl Gateway {
                 .map(|p| {
                     let (rpm_used, rpm_retry_in, rpm_limited, rpm_ledger_error) =
                         self.0.admission.rpm_status(&p.id, p.max_rpm);
+                    let (quota_checking, quota_check) = self.0.quota.probe_view(&p.id, &p.version);
                     ProviderView {
                         protocol: (self.0.client == ClientId::Grok).then(|| {
                             s.store
@@ -807,9 +819,12 @@ impl Gateway {
                         } else {
                             0
                         },
+                        quota_checking,
+                        quota_check,
                         rpm_used,
                         rpm_retry_in,
                         rpm_limited,
+                        rpm_wait_reason: self.0.admission.rpm_wait_reason(&p.id, p.max_rpm),
                         rpm_ledger_error,
                         quota: self
                             .0

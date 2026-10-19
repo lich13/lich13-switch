@@ -576,21 +576,32 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     delay.as_secs(),
                 );
                 let _waiting_since = Instant::now();
-                let waited = if capacity_wait_owner.is_some() {
-                    gateway
-                        .0
-                        .admission
-                        .wait_owner_capacity(&capacity_sources, delay, settings.max_waiting)
-                        .await
-                } else {
-                    gateway
-                        .0
-                        .admission
-                        .wait_capacity(&capacity_sources, delay, settings.max_waiting)
-                        .await
-                };
+                let owner_route = capacity_wait_owner
+                    .as_deref()
+                    .or_else(|| last_error.as_ref().and_then(|e| e.provider_id.as_deref()))
+                    .and_then(|id| routes.get(id));
+                let waited = gateway
+                    .wait_capacity_checked(
+                        &capacity_sources,
+                        delay,
+                        settings.max_waiting,
+                        capacity_wait_owner.is_some(),
+                        owner_route,
+                        last_error.as_ref(),
+                    )
+                    .await;
                 match waited {
-                    Ok(()) => {}
+                    Ok(true) => {
+                        if let Some(route) = owner_route {
+                            hard_denied.insert((
+                                route.provider.id.clone(),
+                                route.provider.version.clone(),
+                            ));
+                        }
+                        capacity_wait_owner = None;
+                        failover.failure(super::failover::Failure::AccountRejected);
+                    }
+                    Ok(false) => {}
                     Err(Rejected::Stopped) => {
                         failover.finish(super::failover::Exit::Stopped);
                         return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
@@ -652,7 +663,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
-            candidates = if attempted > 0 {
+            candidates = if attempted > 0 || !hard_denied.is_empty() {
                 lease.candidates_after_failure(candidates, &requirement)
             } else {
                 lease.candidates_for(candidates, &requirement)
@@ -675,17 +686,31 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             {
                 wait_budget.protect_capacity();
                 failover.wait(super::failover::WaitKind::CapacityRetry, health.retry_in);
+                let cause = gateway.capacity_cause(&owner.provider.id, model.as_deref(), &health);
                 match gateway
-                    .0
-                    .admission
-                    .wait_owner_capacity(
+                    .wait_capacity_checked(
                         &[source],
                         Duration::from_secs(health.retry_in),
                         settings.max_waiting,
+                        true,
+                        Some(owner),
+                        cause.as_ref(),
                     )
                     .await
                 {
-                    Ok(()) => {}
+                    Ok(true) => {
+                        hard_denied
+                            .insert((owner.provider.id.clone(), owner.provider.version.clone()));
+                        failover.failure(super::failover::Failure::AccountRejected);
+                        last = Some(error(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            code::HTTP,
+                            "本次额度查询确认耗尽，没有可用的替代供应商",
+                        ));
+                        last_category = code::HTTP;
+                        last_error = cause;
+                    }
+                    Ok(false) => {}
                     Err(Rejected::Stopped) => {
                         return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
                     }
@@ -698,6 +723,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                 }
                 ids = gateway.routing_ids(pinned.as_deref());
+                ids.retain(|id| {
+                    gateway
+                        .route(id)
+                        .is_some_and(|r| !hard_denied.contains(&(id.clone(), r.provider.version)))
+                });
                 routes = ids
                     .iter()
                     .filter_map(|id| {
@@ -714,7 +744,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             super::failover::Stage::UnknownOwner
         } else if pinned.is_some() {
             super::failover::Stage::CursorPinned
-        } else if attempted > 0 {
+        } else if attempted > 0 || !hard_denied.is_empty() {
             super::failover::Stage::FailureFallback
         } else if ownership.as_ref().is_some_and(|l| l.handoff) {
             super::failover::Stage::ProactiveHandoff
@@ -768,7 +798,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             wait_budget.set_intake(intake, owner);
         }
         let _admission_started = Instant::now();
-        if attempted > 0 {
+        if attempted > 0 || !hard_denied.is_empty() {
             // Admission rechecks policy atomically. Its proactive priority gate
             // must also yield to the failure queue, without dropping the claim.
             wait_budget.handoff_owner = None;
@@ -981,13 +1011,34 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         } else {
             upstream.headers_mut().remove(header::CONTENT_LENGTH);
         }
-        if admission.commit_rpm().is_err() {
+        if let Err(reason) = admission.commit_rpm() {
             admission.permits.neutral(&settings);
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                code::RPM_LEDGER,
-                "RPM 状态暂不可用，请稍后重试",
-            );
+            return match reason {
+                Rejected::RateLimited(seconds) => {
+                    let mut response = error(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        code::RPM_LIMIT,
+                        "RPM 发送保护生效，请稍后重试",
+                    );
+                    response
+                        .headers_mut()
+                        .insert(header::RETRY_AFTER, seconds.max(1).into());
+                    response
+                }
+                Rejected::Stopped => {
+                    error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
+                }
+                Rejected::Unavailable => error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code::STALE,
+                    "供应商配置已变化，请重试",
+                ),
+                _ => error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code::RPM_LEDGER,
+                    "RPM 状态暂不可用，请稍后重试",
+                ),
+            };
         }
         attempted = attempted.saturating_add(1);
         ordinary_attempts = ordinary_attempts.saturating_add(1);
@@ -997,6 +1048,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         previous_provider = Some(admission.route.provider.id.clone());
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(stream_hint);
+        protocol.attach_rpm(admission.take_completion());
         protocol.set_operation(operation);
         protocol.diagnostics(&gateway, &route.provider.id, model.as_deref());
         protocol.attach_ownership(ownership.clone(), &route.provider.id);
@@ -1239,6 +1291,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             if details == crate::events::Details::default() {
                 details = protocol.observation.error.clone();
             }
+            if details.error_basis == Some(crate::events::ErrorBasis::Rpm) {
+                gateway.0.admission.rpm_backoff(
+                    &route.provider.id,
+                    cooldown.unwrap_or(Duration::from_secs(settings.capacity_retry_seconds)),
+                );
+            }
             let hard_rejection = details.health_scope == Some(crate::events::HealthScope::Provider);
             if hard_rejection {
                 hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
@@ -1294,7 +1352,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Reason::ProtocolError
             } else if model_error {
                 Reason::ModelUnavailable
-            } else if hard_rejection && status == StatusCode::TOO_MANY_REQUESTS {
+            } else if details.error_basis == Some(crate::events::ErrorBasis::QuotaExhausted)
+                || (hard_rejection && status == StatusCode::TOO_MANY_REQUESTS)
+            {
                 Reason::UpstreamService
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 Reason::RateLimit
@@ -1604,6 +1664,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .and_then(|h| h.to_str().ok())
                 .and_then(circuit::retry_after)
                 .max(protocol.observation.retry_after);
+            if protocol.observation.error.error_basis == Some(crate::events::ErrorBasis::Rpm) {
+                gateway.0.admission.rpm_backoff(
+                    &route.provider.id,
+                    cooldown.unwrap_or(Duration::from_secs(settings.capacity_retry_seconds)),
+                );
+            }
             if initial_capacity {
                 if wait_same {
                     capacity_wait_owner = Some(route.provider.id.clone());

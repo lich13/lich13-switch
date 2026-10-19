@@ -1,3 +1,10 @@
+import {
+  limitLabel,
+  rpmWaitLabel,
+  quotaCheckLabel,
+  quotaBasisLabel,
+  type QuotaCheck,
+} from "./limit-labels";
 import type { RoutingDetails } from "./usage-types";
 import {
   routingReason,
@@ -90,6 +97,9 @@ export type EventRecord = {
   attempt: number | null;
   details?: {
     routing?: RoutingDetails | null;
+    errorBasis?: string | null;
+    quotaCheck?: QuotaCheck | null;
+    rpmWaitReason?: string | null;
     healthScope?: "provider" | "model" | "request" | null;
     upstreamCode?: string | null;
     upstreamReason?: string | null;
@@ -209,12 +219,21 @@ const timeoutPhases: Record<string, string> = {
   ws_handshake: "WebSocket 握手",
 };
 function reasonText(r: EventRecord) {
+  if (
+    r.details?.delivery?.terminalReceived &&
+    !r.details.delivery.terminalHandedOff &&
+    r.reason === "request_interrupted"
+  )
+    return "上游已结束，下游未完成交付";
+  const limit = limitLabel(r.details);
+  if (limit) return limit;
   if (r.reason !== "circuit_open") return reasons[r.reason];
   if (r.details?.healthScope === "model") return "模型熔断";
   return r.details?.healthScope === "provider" ? "供应商熔断" : "熔断";
 }
 function category(r: EventRecord): keyof typeof categories {
   if (r.category) return r.category;
+  if (r.details?.quotaCheck && r.level === "info") return "status";
   // Older API responses have no classification. Only an actual open event is
   // sufficient evidence here; a counted failure alone never is.
   if (r.reason === "circuit_open") return "circuit_error";
@@ -238,7 +257,10 @@ function circuitCause(r: EventRecord) {
           ? reasons[r.details.circuit.causeReason]
           : null),
     ]
-      .filter(Boolean)
+      .filter(
+        (value, index, values) =>
+          Boolean(value) && values.indexOf(value) === index,
+      )
       .join(" · ") || "原因未记录"
   );
 }
@@ -273,9 +295,17 @@ function summary(r: EventRecord) {
   return [
     r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r),
     r.details?.upstreamReason,
+    ...(r.details?.delivery?.terminalReceived &&
+    !r.details.delivery.terminalHandedOff
+      ? [reasonText(r)]
+      : []),
+    r.details?.quotaCheck ? quotaCheckLabel(r.details.quotaCheck) : null,
     r.details?.message || reasonText(r),
   ]
-    .filter(Boolean)
+    .filter(
+      (value, index, values) =>
+        Boolean(value) && values.indexOf(value) === index,
+    )
     .join(" · ");
 }
 function actionText(r: EventRecord) {
@@ -803,6 +833,28 @@ function EventDetail({
             ],
             ["上游错误码", r.details?.upstreamCode ?? "—"],
             ["上游原因", r.details?.upstreamReason ?? "未提供"],
+            ...(r.details?.errorBasis
+              ? [["分类依据", limitLabel(r.details) || "未识别分类"]]
+              : []),
+            ...(r.details?.rpmWaitReason
+              ? [["RPM 等待原因", rpmWaitLabel(r.details.rpmWaitReason)]]
+              : []),
+            ...(r.details?.quotaCheck
+              ? [
+                  ["额度核验", quotaCheckLabel(r.details.quotaCheck)],
+                  [
+                    "查询来源",
+                    (
+                      { sub2_api: "Sub2API", new_api: "new-api" } as Record<
+                        string,
+                        string
+                      >
+                    )[r.details.quotaCheck.source] ?? "未识别来源",
+                  ],
+                  ["查询依据", quotaBasisLabel(r.details.quotaCheck.basis)],
+                  ["检查时间", time(r.details.quotaCheck.checkedAt)],
+                ]
+              : []),
             ["本地分类", r.details?.localCode ?? "—"],
             ["上游错误类型", r.details?.upstreamType ?? "未提供"],
             ["错误摘要", r.details?.message ?? reasonText(r)],

@@ -8,8 +8,9 @@ use crate::{
 };
 pub(crate) use details::safe_upstream_reason;
 pub use details::{
-    safe_message, CircuitEvidence, DeliveryEvidence, Details, HealthScope, Phase, RoutingDetails,
-    RoutingOutcome,
+    safe_message, CircuitEvidence, DeliveryEvidence, Details, ErrorBasis, HealthScope, Phase,
+    QuotaBasis, QuotaCheck, QuotaSource, QuotaVerdict, RoutingDetails, RoutingOutcome,
+    RpmWaitReason,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -448,13 +449,15 @@ impl Journal {
 fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
     if record.reason == Reason::CircuitOpen || causes.contains(record.id.as_str()) {
         Category::CircuitError
-    } else if matches!(
-        record.reason,
-        Reason::Failover | Reason::Recovered | Reason::ThreadHandoff
-    ) || (matches!(
-        record.reason,
-        Reason::RequestInterrupted | Reason::ThreadRouting
-    ) && record.level == Level::Info)
+    } else if (record.details.quota_check.is_some() && record.level == Level::Info)
+        || matches!(
+            record.reason,
+            Reason::Failover | Reason::Recovered | Reason::ThreadHandoff
+        )
+        || (matches!(
+            record.reason,
+            Reason::RequestInterrupted | Reason::ThreadRouting
+        ) && record.level == Level::Info)
     {
         Category::Status
     } else {
@@ -571,6 +574,9 @@ impl Service {
                                     && old.status == r.status
                                     && old.details.upstream_code == r.details.upstream_code
                                     && old.details.upstream_reason == r.details.upstream_reason
+                                    && old.details.error_basis == r.details.error_basis
+                                    && old.details.quota_check == r.details.quota_check
+                                    && old.details.rpm_wait_reason == r.details.rpm_wait_reason
                                     && old.details.local_code == r.details.local_code
                                     && old.details.message == r.details.message
                                     && old.details.phase == r.details.phase

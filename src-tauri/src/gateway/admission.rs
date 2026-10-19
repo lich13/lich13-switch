@@ -1,18 +1,20 @@
 //! Request slots and bounded FIFO admission. Behavior informed by Sub2API
 //! a3eb7ef3 concurrency_service / account scheduler; independently implemented in Rust.
+use super::rpm::{Ledger, Settlement};
 use super::{
     circuit::Circuit, health_settlement::Permits, model::Provider, routing::Requirement, Route,
 };
-use crate::errors::code;
 use crate::storage;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, Notify};
+use tokio::{
+    sync::{broadcast, Notify},
+    time::Instant,
+};
 
 #[cfg(test)]
 #[path = "admission_persistence_tests.rs"]
@@ -42,7 +44,7 @@ struct State {
     // A failed write can be retried from the still-authoritative in-memory state.
     // Retention::error instead means the initial ledger could not be trusted.
     retention_write_error: bool,
-    rpm: HashMap<String, VecDeque<RateStamp>>,
+    rpm: Ledger,
     rpm_pending: HashMap<String, usize>,
     rpm_path: PathBuf,
     rpm_error: bool,
@@ -51,7 +53,7 @@ struct State {
     resets: HashMap<String, u64>,
 }
 impl State {
-    fn new(rpm_path: PathBuf, rpm: HashMap<String, VecDeque<RateStamp>>, rpm_error: bool) -> Self {
+    fn new(rpm_path: PathBuf, rpm: Ledger, rpm_error: bool) -> Self {
         Self {
             retention: super::thread_capacity::Retention::load(
                 &rpm_path.with_file_name("thread-reservations.json"),
@@ -78,58 +80,12 @@ impl State {
         }
     }
 }
-#[derive(Clone, Copy)]
-struct RateStamp {
-    at: Instant,
-    wall_ms: i64,
-}
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct PersistedRpm {
-    providers: HashMap<String, Vec<i64>>,
-}
-const RPM_WINDOW: Duration = Duration::from_secs(60);
 pub(super) fn now_wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
-}
-fn load_rpm(path: &Path) -> (HashMap<String, VecDeque<RateStamp>>, bool) {
-    let raw = match storage::read_optional(path) {
-        Ok(Some(raw)) => raw,
-        Ok(None) => return (HashMap::new(), false),
-        Err(_) => return (HashMap::new(), true),
-    };
-    let Ok(saved) = serde_json::from_slice::<PersistedRpm>(&raw) else {
-        return (HashMap::new(), true);
-    };
-    let now_ms = now_wall_ms();
-    let now = Instant::now();
-    let providers = saved
-        .providers
-        .into_iter()
-        .map(|(id, timestamps)| {
-            let values = timestamps
-                .into_iter()
-                .filter_map(|wall_ms| {
-                    let age = now_ms.saturating_sub(wall_ms).max(0) as u64;
-                    if age >= RPM_WINDOW.as_millis() as u64 {
-                        None
-                    } else {
-                        Some(RateStamp {
-                            at: now.checked_sub(Duration::from_millis(age)).unwrap_or(now),
-                            wall_ms,
-                        })
-                    }
-                })
-                .collect::<VecDeque<_>>();
-            (id, values)
-        })
-        .filter(|(_, values)| !values.is_empty())
-        .collect();
-    (providers, false)
 }
 #[derive(Clone)]
 pub struct CapacitySource {
@@ -182,7 +138,42 @@ struct RpmReservation {
     scheduler: Scheduler,
     id: String,
     committed: bool,
+    version: String,
+    require_queued: bool,
+    epoch: u64,
+    completion: Option<Completion>,
 }
+/// Moved from admission to the protocol observer after actual send commitment.
+/// Drop retains an uncertainty guard, never inventing an upstream success.
+pub(super) struct Completion {
+    scheduler: Scheduler,
+    id: String,
+    token: Option<String>,
+}
+impl Completion {
+    pub(super) fn settle(&mut self, result: Settlement) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let mut s = self.scheduler.0.state.lock().unwrap();
+        s.rpm.prune();
+        let mut next = s.rpm.clone();
+        next.settle(&self.id, &token, result);
+        if !s.rpm_error && next.save(&s.rpm_path).is_ok() {
+            s.rpm = next;
+        } else {
+            s.rpm_error = true;
+        }
+        drop(s);
+        self.scheduler.signal();
+    }
+}
+impl Drop for Completion {
+    fn drop(&mut self) {
+        self.settle(Settlement::Uncertain);
+    }
+}
+
 struct Waiting {
     scheduler: Scheduler,
     ticket: u64,
@@ -220,6 +211,9 @@ pub struct Budget {
     intake: Option<(super::compaction::Intake, Option<String>)>,
 }
 impl Admission {
+    pub(super) fn take_completion(&mut self) -> Option<Completion> {
+        self.rpm.as_mut().and_then(|r| r.completion.take())
+    }
     pub fn commit_rpm(&mut self) -> Result<(), Rejected> {
         if let Some(rpm) = self.rpm.as_mut() {
             rpm.commit()?;
@@ -233,24 +227,31 @@ impl RpmReservation {
             return Ok(());
         }
         let mut s = self.scheduler.0.state.lock().unwrap();
-        if s.rpm_error {
+        let limit = s.rpm_limits.get(&self.id).copied().unwrap_or(0);
+        s.rpm.prune();
+        let rejected = if !s.running || s.epoch != self.epoch {
+            Some(Rejected::Stopped)
+        } else if s.versions.get(&self.id) != Some(&self.version)
+            || (self.require_queued && !s.queued.contains(&self.id))
+        {
+            Some(Rejected::Unavailable)
+        } else if s.rpm_error && limit > 0 {
+            Some(Rejected::RateLedger)
+        } else {
+            s.rpm
+                .gate(&self.id, limit, 0)
+                .map(|(delay, _)| Rejected::RateLimited(delay.as_millis().div_ceil(1000) as u64))
+        };
+        if let Some(reason) = rejected {
             Self::release_pending(&mut s, &self.id);
             self.committed = true;
             drop(s);
             self.scheduler.signal();
-            return Err(Rejected::RateLedger);
+            return Err(reason);
         }
-        Scheduler::prune_rpm(&mut s, &self.id);
-        for values in s.rpm.values_mut() {
-            values.retain(|stamp| stamp.at.elapsed() < RPM_WINDOW);
-        }
-        let now = Instant::now();
-        let wall_ms = now_wall_ms();
         let mut next = s.rpm.clone();
-        next.entry(self.id.clone())
-            .or_default()
-            .push_back(RateStamp { at: now, wall_ms });
-        if persist_rpm(&s.rpm_path, &next).is_err() {
+        let token = next.commit(&self.id, limit);
+        if token.is_some() && (s.rpm_error || next.save(&s.rpm_path).is_err()) && limit > 0 {
             s.rpm_error = true;
             Self::release_pending(&mut s, &self.id);
             self.committed = true;
@@ -261,6 +262,11 @@ impl RpmReservation {
         s.rpm = next;
         Self::release_pending(&mut s, &self.id);
         self.committed = true;
+        self.completion = token.map(|token| Completion {
+            scheduler: self.scheduler.clone(),
+            id: self.id.clone(),
+            token: Some(token),
+        });
         drop(s);
         self.scheduler.signal();
         Ok(())
@@ -284,18 +290,6 @@ impl Drop for RpmReservation {
         drop(s);
         self.scheduler.signal();
     }
-}
-fn persist_rpm(path: &Path, rpm: &HashMap<String, VecDeque<RateStamp>>) -> storage::Result<()> {
-    let providers = rpm
-        .iter()
-        .filter_map(|(id, values)| {
-            let timestamps: Vec<_> = values.iter().map(|stamp| stamp.wall_ms).collect();
-            (!timestamps.is_empty()).then_some((id.clone(), timestamps))
-        })
-        .collect();
-    let bytes = serde_json::to_vec(&PersistedRpm { providers })
-        .map_err(|_| crate::storage::AppError::new(code::RPM_LEDGER, "无法保存 RPM 状态"))?;
-    storage::atomic_write(path, &bytes, None)
 }
 impl Budget {
     pub fn track(
@@ -345,7 +339,7 @@ impl Budget {
 }
 impl Scheduler {
     pub fn new(events: broadcast::Sender<()>, rpm_path: PathBuf) -> Self {
-        let (rpm, rpm_error) = load_rpm(&rpm_path);
+        let (rpm, rpm_error) = Ledger::load(&rpm_path);
         let (persist, updates) = std::sync::mpsc::sync_channel(1);
         let path = rpm_path.with_file_name("thread-reservations.json");
         let shared = Arc::new(Shared {
@@ -436,6 +430,16 @@ impl Scheduler {
             .iter()
             .map(|p| (p.id.clone(), p.max_concurrency))
             .collect();
+        let mut newly_limited = false;
+        for provider in providers {
+            if provider.max_rpm > 0 && s.rpm_limits.get(&provider.id) == Some(&0) {
+                s.rpm.enable(&provider.id);
+                newly_limited = true;
+            }
+        }
+        if newly_limited && !s.rpm_error && s.rpm.save(&s.rpm_path).is_err() {
+            s.rpm_error = true;
+        }
         s.rpm_limits = providers
             .iter()
             .map(|p| (p.id.clone(), p.max_rpm))
@@ -463,98 +467,81 @@ impl Scheduler {
             .filter(|p| p.queued)
             .map(|p| p.id.clone())
             .collect();
-        let ids: std::collections::HashSet<_> = providers.iter().map(|p| p.id.as_str()).collect();
-        let before = s.rpm.len();
-        s.rpm.retain(|id, _| ids.contains(id.as_str()));
-        s.rpm_pending.retain(|id, _| ids.contains(id.as_str()));
-        if before != s.rpm.len() && !s.rpm_error {
-            let snapshot = s.rpm.clone();
-            if persist_rpm(&s.rpm_path, &snapshot).is_err() {
-                s.rpm_error = true;
-            }
-        }
+        s.rpm.prune();
         drop(s);
         self.signal();
     }
     pub fn rpm_status(&self, id: &str, limit: u32) -> (usize, u64, bool, bool) {
         let mut s = self.0.state.lock().unwrap();
-        let before = s.rpm.get(id).map_or(0, VecDeque::len);
-        Self::prune_rpm(&mut s, id);
-        let expired = before != s.rpm.get(id).map_or(0, VecDeque::len);
-        let used = s.rpm.get(id).map_or(0, VecDeque::len)
-            + s.rpm_pending.get(id).copied().unwrap_or_default();
-        let retry_in = Self::rpm_retry_in(&s, id).unwrap_or({
-            if limit != 0 && used >= limit as usize {
-                1
-            } else {
-                0
-            }
-        });
-        let result = (
-            used,
-            retry_in,
-            limit != 0 && used >= limit as usize,
-            s.rpm_error && limit != 0,
+        s.rpm.prune();
+        let used = if limit == 0 { 0 } else { s.rpm.used(id) };
+        let gate = s.rpm.gate(
+            id,
+            limit,
+            s.rpm_pending.get(id).copied().unwrap_or_default(),
         );
+        (
+            used,
+            gate.map_or(0, |(d, _)| d.as_millis().div_ceil(1000) as u64),
+            gate.is_some(),
+            s.rpm_error && limit > 0,
+        )
+    }
+    pub(super) fn rpm_wait_reason(
+        &self,
+        id: &str,
+        limit: u32,
+    ) -> Option<crate::events::RpmWaitReason> {
+        let mut s = self.0.state.lock().unwrap();
+        s.rpm.prune();
+        s.rpm
+            .gate(
+                id,
+                limit,
+                s.rpm_pending.get(id).copied().unwrap_or_default(),
+            )
+            .map(|(_, reason)| reason)
+    }
+    pub(super) fn rpm_backoff(&self, id: &str, delay: Duration) {
+        let mut s = self.0.state.lock().unwrap();
+        s.rpm.prune();
+        s.rpm.backoff(id, delay);
+        if !s.rpm_error && s.rpm.save(&s.rpm_path).is_err() {
+            s.rpm_error = true;
+        }
         drop(s);
-        if expired {
-            self.signal();
-        }
-        result
-    }
-    fn prune_rpm(state: &mut State, id: &str) {
-        let Some(values) = state.rpm.get_mut(id) else {
-            return;
-        };
-        values.retain(|stamp| stamp.at.elapsed() < RPM_WINDOW);
-        if values.is_empty() {
-            state.rpm.remove(id);
-        }
-    }
-    fn rpm_retry_in(state: &State, id: &str) -> Option<u64> {
-        state
-            .rpm
-            .get(id)
-            .and_then(|values| values.front())
-            .map(|stamp| {
-                stamp
-                    .at
-                    .checked_add(RPM_WINDOW)
-                    .unwrap_or_else(Instant::now)
-                    .saturating_duration_since(Instant::now())
-                    .as_millis()
-                    .div_ceil(1000) as u64
-            })
+        self.signal();
     }
     fn reserve_rpm(
         &self,
         state: &mut State,
         id: &str,
         limit: u32,
+        require_queued: bool,
     ) -> Result<RpmReservation, Rejected> {
-        if limit == 0 {
-            return Ok(RpmReservation {
-                scheduler: self.clone(),
-                id: id.to_owned(),
-                committed: true,
-            });
-        }
-        Self::prune_rpm(state, id);
-        let used = state.rpm.get(id).map_or(0, VecDeque::len)
-            + state.rpm_pending.get(id).copied().unwrap_or_default();
-        if state.rpm_error {
+        state.rpm.prune();
+        if state.rpm_error && limit > 0 {
             return Err(Rejected::RateLedger);
         }
-        if used >= limit as usize {
+        if let Some((delay, _)) = state.rpm.gate(
+            id,
+            limit,
+            state.rpm_pending.get(id).copied().unwrap_or_default(),
+        ) {
             return Err(Rejected::RateLimited(
-                Self::rpm_retry_in(state, id).unwrap_or(1).max(1),
+                delay.as_millis().div_ceil(1000) as u64
             ));
         }
-        *state.rpm_pending.entry(id.to_owned()).or_default() += 1;
+        // Unlimited reservations still revalidate on commit, including 0 -> N edits.
+        *state.rpm_pending.entry(id.into()).or_default() += 1;
         Ok(RpmReservation {
             scheduler: self.clone(),
-            id: id.to_owned(),
+            id: id.into(),
             committed: false,
+            version: state.versions.get(id).cloned().unwrap_or_default(),
+            require_queued,
+            epoch: state.epoch,
+            completion: None,
         })
     }
     pub fn counts(&self) -> (HashMap<String, usize>, usize) {
@@ -726,9 +713,13 @@ impl Scheduler {
             }
             tokio::select! {
                 _ = notified => {},
-                _ = tokio::time::sleep_until(until.into()) => return Ok(()),
+                _ = tokio::time::sleep_until(until) => return Ok(()),
             }
         }
+    }
+    pub(super) fn capacity_current(&self, sources: &[CapacitySource]) -> bool {
+        let s = self.0.state.lock().unwrap();
+        s.running && !Self::was_reset(&s, sources)
     }
     fn was_reset(state: &State, sources: &[CapacitySource]) -> bool {
         sources.iter().any(|source| {
@@ -818,7 +809,10 @@ impl Scheduler {
                 }
                 let matching: Vec<_> = routes
                     .iter()
-                    .filter(|r| s.limits.contains_key(&r.provider.id))
+                    .filter(|r| {
+                        s.limits.contains_key(&r.provider.id)
+                            && s.versions.get(&r.provider.id) == Some(&r.provider.version)
+                    })
                     .filter(|r| {
                         budget.fixed_provider || manual || s.queued.contains(&r.provider.id)
                     })
@@ -959,20 +953,25 @@ impl Scheduler {
                             continue 'selection;
                         }
                         let rpm_limit = s.rpm_limits.get(id).copied().unwrap_or_default();
-                        if rpm_limit != 0 {
-                            Self::prune_rpm(&mut s, id);
-                            let used = s.rpm.get(id).map_or(0, VecDeque::len)
-                                + s.rpm_pending.get(id).copied().unwrap_or_default();
-                            if s.rpm_error {
-                                break 'selection;
-                            }
-                            if used >= rpm_limit as usize {
-                                rate_retry = Some(Self::rpm_retry_in(&s, id).unwrap_or(1).max(1));
-                                break 'selection;
-                            }
+                        s.rpm.prune();
+                        if s.rpm_error && rpm_limit > 0 {
+                            break 'selection;
+                        }
+                        if let Some((delay, _)) = s.rpm.gate(
+                            id,
+                            rpm_limit,
+                            s.rpm_pending.get(id).copied().unwrap_or_default(),
+                        ) {
+                            rate_retry = Some(delay.as_millis().div_ceil(1000).max(1) as u64);
+                            break 'selection;
                         }
                         if let Some(permits) = Permits::acquire_for(route, manual, requirement) {
-                            match self.reserve_rpm(&mut s, id, rpm_limit) {
+                            match self.reserve_rpm(
+                                &mut s,
+                                id,
+                                rpm_limit,
+                                !manual && !budget.fixed_provider,
+                            ) {
                                 Ok(rpm) => {
                                     let retain = budget
                                         .handoff_owner
@@ -1029,7 +1028,11 @@ impl Scheduler {
                 if let Some(admission) = accepted {
                     break Ok(admission);
                 }
-                if s.rpm_error {
+                if s.rpm_error
+                    && eligible
+                        .iter()
+                        .any(|r| s.rpm_limits.get(&r.provider.id).copied().unwrap_or(0) > 0)
+                {
                     if immediate || budget.protected_capacity {
                         break Err(Rejected::RateLedger);
                     }
@@ -1078,7 +1081,10 @@ impl Scheduler {
                         let _ = self.0.events.send(());
                     }
                 }
-                ledger_error = s.rpm_error;
+                ledger_error = s.rpm_error
+                    && eligible
+                        .iter()
+                        .any(|r| s.rpm_limits.get(&r.provider.id).copied().unwrap_or(0) > 0);
                 if immediate {
                     break Err(cooling.map_or(Rejected::Timeout, Rejected::Cooling));
                 }

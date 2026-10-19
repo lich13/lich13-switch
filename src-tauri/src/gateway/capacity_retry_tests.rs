@@ -41,7 +41,9 @@ fn configure(g: &Gateway, t: &tempfile::TempDir, retries: usize) {
             t,
             Edit::RpmProvider {
                 id: provider.id,
-                max_rpm: 20,
+                // Capacity recovery uses a one-second cadence. Dedicated RPM
+                // cases below override this limit to test local blocking.
+                max_rpm: 60,
             },
         );
     }
@@ -287,6 +289,16 @@ async fn capacity_protection_survives_a_later_cooldown_beyond_the_one_second_que
     .await;
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
     configure(&g, &t, 0);
+    // Both initial requests must reach the upstream barrier within the one-second
+    // admission budget; the cooldown itself, not pacing, is under test here.
+    update(
+        &g,
+        &t,
+        Edit::RpmProvider {
+            id: g.view().providers[0].id.clone(),
+            max_rpm: 600,
+        },
+    );
     start(&g, &t).await;
     let began = Instant::now();
     let tasks: Vec<_> = (0..2)

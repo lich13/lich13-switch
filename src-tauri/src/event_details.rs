@@ -22,9 +22,74 @@ pub enum HealthScope {
     Request,
 }
 
+/// Closed, non-sensitive evidence vocabulary shared by routing and diagnostics.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorBasis {
+    QuotaExhausted,
+    Rpm,
+    Capacity,
+    UsageLimit,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaVerdict {
+    Exhausted,
+    Available,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaSource {
+    Sub2Api,
+    NewApi,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaBasis {
+    Wallet,
+    Subscription,
+    KeyQuota,
+    SpendingWindow,
+    Unlimited,
+    Incomplete,
+    QueryFailed,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaCheck {
+    pub verdict: QuotaVerdict,
+    pub source: QuotaSource,
+    pub basis: QuotaBasis,
+    pub checked_at: u64,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RpmWaitReason {
+    Pacing,
+    SendWindow,
+    CompletionWindow,
+    UpstreamBackoff,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Details {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_basis: Option<ErrorBasis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_check: Option<QuotaCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm_wait_reason: Option<RpmWaitReason>,
     #[serde(default)]
     pub health_scope: Option<HealthScope>,
     #[serde(default)]
@@ -123,6 +188,13 @@ fn code(value: Option<String>) -> Option<String> {
 pub(crate) fn safe_upstream_reason(value: &str) -> Option<String> {
     [
         "DAILY_LIMIT_EXCEEDED",
+        "WEEKLY_LIMIT_EXCEEDED",
+        "MONTHLY_LIMIT_EXCEEDED",
+        "USER_PLATFORM_DAILY_QUOTA_EXHAUSTED",
+        "USER_PLATFORM_WEEKLY_QUOTA_EXHAUSTED",
+        "USER_PLATFORM_MONTHLY_QUOTA_EXHAUSTED",
+        "GROUP_RPM_EXCEEDED",
+        "USER_RPM_EXCEEDED",
         "USAGE_LIMIT_EXCEEDED",
         "insufficient_quota",
         "insufficient_balance",

@@ -235,7 +235,7 @@ impl Activity {
             std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
         ) {
             6
-        } else if write {
+        } else if write && error.kind() == std::io::ErrorKind::BrokenPipe {
             7
         } else {
             2

@@ -31,6 +31,8 @@ import type { EventRecord, EventPage } from "./EventLog";
 import type { PowerState } from "./PowerSettings";
 import type { PreparedTemplate } from "./TemplateChoice";
 
+export type { QuotaCheck, LimitEvidence } from "./limit-labels";
+
 export type QuickPreferences = {
   pinned: boolean;
   tab: "providers" | "accounts";
@@ -95,9 +97,14 @@ export type ProviderImportPreview = {
   }[];
 };
 export type GrokImportPreview = {
-  token: string | null; revision: string; models: GrokModel[]; selected: string;
-  environmentAvailable: boolean; environmentLoaded: boolean;
-  clearEnvironment: string[]; error: string | null;
+  token: string | null;
+  revision: string;
+  models: GrokModel[];
+  selected: string;
+  environmentAvailable: boolean;
+  environmentLoaded: boolean;
+  clearEnvironment: string[];
+  error: string | null;
 };
 export type GatewayEdit =
   | {
@@ -212,7 +219,10 @@ export type CommandMap = {
   get_gateway: Call<Client, GatewayState>;
   get_gateway_listener: Call<None, GatewayListener>;
   set_gateway_listener: Call<{ port: number } & Revision, GatewayListener>;
-  preview_grok_import: Call<{ selected?: string | null; useEnvironment: boolean }, GrokImportPreview>;
+  preview_grok_import: Call<
+    { selected?: string | null; useEnvironment: boolean },
+    GrokImportPreview
+  >;
   commit_grok_import: Call<{ token: string } & Revision, GatewayState>;
   cancel_grok_import: Call<{ token?: string | null }, void>;
   reveal_provider_token: Call<Provider & Revision, string>;
@@ -236,7 +246,10 @@ export type CommandMap = {
   set_clamshell_awake: Call<{ enabled: boolean } & Revision, PowerState>;
   install_power_helper: Call<None, PowerState>;
   remove_power_helper: Call<None, PowerState>;
-  force_quit_codex_clients: Call<None, { terminated: number; failed: number; terminalCleanupFailed?: number }>;
+  force_quit_codex_clients: Call<
+    None,
+    { terminated: number; failed: number; terminalCleanupFailed?: number }
+  >;
   get_startup_error: Call<None, AppError | null>;
   cleanup_retired_data: Call<None, void>;
   get_app_events: Call<

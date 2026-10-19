@@ -646,6 +646,9 @@ function AttemptDetails({
 
 function endReason(a: Attempt): string {
   if (!a.end) return "历史结束原因未记录";
+  if (a.end.terminalReceived && a.transfer?.terminalHandedOff === false) {
+    return "上游已结束，下游未完成交付";
+  }
   if (a.end.cause === "client_disconnected") {
     return a.end.terminalReceived && ["success", "limited"].includes(a.outcome)
       ? "上游已完成，客户端随后断开"

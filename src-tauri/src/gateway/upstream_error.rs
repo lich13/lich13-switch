@@ -1,8 +1,11 @@
 //! Inspect bounded error envelopes only; never scan successful output for keywords.
-use crate::events::Details;
+use crate::events::{Details, ErrorBasis};
 use serde_json::Value;
 const LIMIT: usize = 128 * 1024;
 pub fn capacity_message(message: &str) -> bool {
+    if rpm_message(message) {
+        return true;
+    }
     let s = message.to_lowercase();
     [
         "at capacity",
@@ -102,7 +105,7 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
         .get("error")
         .filter(|e| !e.is_null() && **e != Value::Bool(false))
     {
-        return envelope(error, true, depth + 1).or(Some(error));
+        return envelope(error, true, depth + 1);
     }
     for key in ["response", "data", "result"] {
         if let Some(inner) = v.get(key).filter(|x| x.is_object()) {
@@ -248,7 +251,18 @@ pub(super) fn reason_from_body(body: &[u8]) -> Option<String> {
     }
 }
 pub(super) fn is_permanent_reason(reason: Option<&str>) -> bool {
-    reason.is_some_and(|value| value.eq_ignore_ascii_case("DAILY_LIMIT_EXCEEDED"))
+    reason.is_some_and(|value| {
+        [
+            "DAILY_LIMIT_EXCEEDED",
+            "WEEKLY_LIMIT_EXCEEDED",
+            "MONTHLY_LIMIT_EXCEEDED",
+            "USER_PLATFORM_DAILY_QUOTA_EXHAUSTED",
+            "USER_PLATFORM_WEEKLY_QUOTA_EXHAUSTED",
+            "USER_PLATFORM_MONTHLY_QUOTA_EXHAUSTED",
+        ]
+        .iter()
+        .any(|known| value.eq_ignore_ascii_case(known))
+    })
 }
 fn is_model(error: &Value) -> bool {
     if is_permanent_reason(known_reason(error).as_deref())
@@ -288,7 +302,14 @@ fn retry_after_fields(error: &Value) -> Option<std::time::Duration> {
     let number = |v: &Value| v.as_u64().or_else(|| v.as_str()?.parse().ok());
     let relative = ["retry_after", "retry_after_seconds", "resets_in_seconds"]
         .into_iter()
-        .filter_map(|key| error.get(key).and_then(number))
+        .filter_map(|key| error.get(key))
+        .filter_map(|v| {
+            super::circuit::retry_seconds(
+                &v.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| v.to_string()),
+            )
+        })
         .max();
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let absolute = ["resets_at", "reset_at", "reset_at_unix"]
@@ -303,9 +324,7 @@ fn retry_after_fields(error: &Value) -> Option<std::time::Duration> {
         })
         .map(|at| at.saturating_sub(now))
         .max();
-    relative
-        .max(absolute)
-        .map(|seconds| std::time::Duration::from_secs(seconds.min(86_400)))
+    relative.max(absolute.map(|seconds| std::time::Duration::from_secs(seconds.min(86_400))))
 }
 pub(super) fn retry_after_http(bytes: &[u8]) -> Option<std::time::Duration> {
     if bytes.len() > LIMIT {
@@ -328,6 +347,7 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
         return Details::default();
     };
     Details {
+        error_basis: error_basis(error),
         upstream_reason: known_reason(error),
         health_scope: (is_permanent_reason(known_reason(error).as_deref())
             || strings(error).any(global_fault))
@@ -387,6 +407,9 @@ fn hard_message(text: &str) -> bool {
     if text.len() > LIMIT || crate::events::safe_message(text).is_none() {
         return false;
     }
+    if quota_message(text) {
+        return true;
+    }
     let text = text.to_ascii_lowercase();
     [
         "insufficient_quota",
@@ -434,6 +457,144 @@ fn hard_message(text: &str) -> bool {
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+fn quota_message(text: &str) -> bool {
+    if crate::events::safe_message(text).is_none() {
+        return false;
+    }
+    if is_permanent_reason(Some(text.trim())) {
+        return true;
+    }
+    if text
+        .trim_start()
+        .get(..6)
+        .is_some_and(|s| s.eq_ignore_ascii_case("error:"))
+        && ["code", "type", "reason"]
+            .iter()
+            .any(|field| is_permanent_reason(text_field(text, field)))
+    {
+        return true;
+    }
+    let text = text.to_lowercase();
+    if [
+        "documentation:",
+        "example:",
+        "describes the",
+        "not exceeded",
+        "not exhausted",
+        "not reached",
+        "not yet",
+        "未达到",
+        "未耗尽",
+        "尚未",
+        "没有超",
+        "未超",
+        "并未",
+    ]
+    .iter()
+    .any(|s| text.contains(s))
+    {
+        return false;
+    }
+    [
+        "daily usage limit exceeded",
+        "weekly usage limit exceeded",
+        "monthly usage limit exceeded",
+        "daily quota exhausted",
+        "weekly quota exhausted",
+        "monthly quota exhausted",
+        "daily quota exceeded",
+        "weekly quota exceeded",
+        "monthly quota exceeded",
+        "日额度已耗尽",
+        "日额度已用尽",
+        "日额度已用完",
+        "每日额度已耗尽",
+        "每日用量已达上限",
+        "日用量已达上限",
+        "每周额度已耗尽",
+        "每月额度已耗尽",
+        "周额度已耗尽",
+        "周额度已用尽",
+        "每周用量已达上限",
+        "月额度已耗尽",
+        "月额度已用尽",
+        "每月用量已达上限",
+    ]
+    .iter()
+    .any(|s| text.contains(s))
+}
+fn rpm_message(text: &str) -> bool {
+    if crate::events::safe_message(text).is_none() {
+        return false;
+    }
+    let s = text.to_ascii_lowercase();
+    if [
+        "not an rpm",
+        "not a requests",
+        "not exceeded",
+        "not reached",
+        "not been reached",
+        "not yet",
+        "documentation:",
+        "example:",
+        "未达到",
+        "尚未",
+        "没有超",
+        "未超",
+    ]
+    .iter()
+    .any(|negative| s.contains(negative))
+    {
+        return false;
+    }
+    [
+        "group_rpm_exceeded",
+        "user_rpm_exceeded",
+        "requests-per-minute limit exceeded",
+        "requests per minute limit exceeded",
+        "requests per minute limit reached",
+        "rpm limit exceeded",
+        "rpm_limit_exceeded",
+        "每分钟请求数超限",
+        "每分钟请求次数已达上限",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+}
+fn error_basis(error: &Value) -> Option<ErrorBasis> {
+    let reason = known_reason(error);
+    if is_permanent_reason(reason.as_deref()) || strings(error).any(quota_message) {
+        return Some(ErrorBasis::QuotaExhausted);
+    }
+    // Preserve existing balance/key denials without classifying authentication as quota.
+    if strings(error).any(|s| {
+        hard_message(s)
+            && ![
+                "account_disabled",
+                "account_deactivated",
+                "account has been disabled",
+                "账号已禁用",
+                "账户已禁用",
+            ]
+            .iter()
+            .any(|m| s.to_lowercase().contains(m))
+    }) {
+        return Some(ErrorBasis::QuotaExhausted);
+    }
+    if strings(error).any(rpm_message) {
+        return Some(ErrorBasis::Rpm);
+    }
+    if reason
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("USAGE_LIMIT_EXCEEDED"))
+    {
+        return Some(ErrorBasis::UsageLimit);
+    }
+    strings(error)
+        .any(capacity_message)
+        .then_some(ErrorBasis::Capacity)
 }
 
 // Only explicit account/key-wide evidence broadens health scope.

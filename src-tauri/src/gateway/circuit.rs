@@ -48,6 +48,7 @@ pub struct Cause {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_reason: Option<String>,
+    pub error_basis: Option<crate::events::ErrorBasis>,
     pub reason: crate::events::Reason,
     pub status: Option<u16>,
     pub ws_close_code: Option<u16>,
@@ -57,6 +58,7 @@ impl Cause {
         Self {
             event_id: event.id.clone(),
             upstream_reason: event.details.upstream_reason.clone(),
+            error_basis: event.details.error_basis,
             code: event
                 .details
                 .upstream_code
@@ -517,12 +519,36 @@ pub fn retryable(status: u16) -> bool {
 pub fn is_server_error(status: u16) -> bool {
     (500..=599).contains(&status)
 }
+/// Positive decimal seconds with nanosecond precision; never truncate a
+/// fractional server deadline to an earlier whole second.
+pub(super) fn retry_seconds(value: &str) -> Option<Duration> {
+    if value.is_empty() || value.len() > 64 {
+        return None;
+    }
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || (value.contains('.') && fraction.is_empty())
+    {
+        return None;
+    }
+    let seconds = whole.parse::<u64>().ok()?;
+    if seconds >= 86_400 {
+        return Some(Duration::from_secs(86_400));
+    }
+    let mut nanos = fraction
+        .bytes()
+        .take(9)
+        .fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+    nanos *= 10u32.pow(9 - fraction.len().min(9) as u32);
+    if fraction.bytes().skip(9).any(|b| b != b'0') {
+        nanos += 1;
+    }
+    Some(Duration::from_secs(seconds) + Duration::from_nanos(nanos as u64))
+}
 pub fn retry_after(value: &str) -> Option<Duration> {
-    value
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(Duration::from_secs)
+    retry_seconds(value.trim())
         .or_else(|| {
             Some(
                 httpdate::parse_http_date(value)

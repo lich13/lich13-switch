@@ -51,7 +51,7 @@ impl DownstreamEnd {
                 delivery.failed(if error != 0 {
                     error
                 } else if writing {
-                    7
+                    2
                 } else {
                     5
                 });
