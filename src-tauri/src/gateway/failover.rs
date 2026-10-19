@@ -13,7 +13,7 @@ pub enum Stage {
     CursorPinned,
     UnknownOwner,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Failure {
     RateLimit,
@@ -22,6 +22,8 @@ pub enum Failure {
     UpstreamService,
     Transport,
     Protocol,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,13 +74,21 @@ pub struct Evidence {
 pub(super) struct Tracker {
     trace: Option<crate::usage::Trace>,
     evidence: Evidence,
+    routing: Option<std::sync::Arc<super::routing_log::RoutingLog>>,
 }
 impl Tracker {
     pub(super) fn new(trace: Option<crate::usage::Trace>) -> Self {
         Self {
             trace,
             evidence: Evidence::default(),
+            routing: None,
         }
+    }
+    pub fn diagnostics(&mut self, gateway: &Gateway) {
+        self.routing = super::routing_log::RoutingLog::new(gateway);
+    }
+    pub fn routing(&self) -> Option<std::sync::Arc<super::routing_log::RoutingLog>> {
+        self.routing.clone()
     }
     fn publish(&self) {
         if let Some(trace) = &self.trace {
@@ -131,6 +141,9 @@ impl Tracker {
         self.publish();
     }
     pub fn failure(&mut self, failure: Failure) {
+        if let Some(routing) = &self.routing {
+            routing.failure(failure);
+        }
         self.evidence.failure = Some(failure);
         self.publish();
     }
@@ -139,6 +152,11 @@ impl Tracker {
         self.publish();
     }
     pub fn finish(&mut self, exit: Exit) {
+        if !matches!(exit, Exit::Forwarded | Exit::ReplayUnsafe) {
+            if let Some(log) = &self.routing {
+                log.finish(None, false);
+            }
+        }
         if matches!(
             exit,
             Exit::NoEligibleProvider | Exit::AttemptsExhausted | Exit::PermanentRejection
@@ -150,8 +168,12 @@ impl Tracker {
     }
     pub fn detach(&mut self) {
         self.trace = None;
+        self.routing = None;
     }
     pub fn rejected(&mut self, reason: &super::admission::Rejected) {
+        if let Some(log) = &self.routing {
+            log.finish(None, false);
+        }
         use super::admission::Rejected;
         let category = match reason {
             Rejected::Full | Rejected::Timeout => Some(Exclusion::Capacity),

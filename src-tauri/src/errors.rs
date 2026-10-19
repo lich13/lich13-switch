@@ -165,6 +165,7 @@ local_codes! {
     Symlink => SYMLINK = "SYMLINK",
     Theme => THEME = "THEME",
     ThreadHandoff => THREAD_HANDOFF = "THREAD_HANDOFF",
+    ThreadRouting => THREAD_ROUTING = "THREAD_ROUTING",
     Tls => TLS = "TLS",
     TlsHandshakeFailed => TLS_HANDSHAKE_FAILED = "TLS_HANDSHAKE_FAILED",
     Token => TOKEN = "TOKEN",

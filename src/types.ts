@@ -162,11 +162,20 @@ export type Provider = {
   handoffAfterCompaction?: boolean;
   takeNewThreads?: boolean;
 };
-export type GatewayListener = { port: number; revision: string; runningClients: ClientId[] };
+export type GatewayListener = {
+  port: number;
+  revision: string;
+  runningClients: ClientId[];
+};
 export type GrokModel = {
-  key: string; model: string; protocol: GrokProtocol | null;
-  address: string | null; addressSource: string | null;
-  credentialAvailable: boolean; missingEnvironment: string[]; error: string | null;
+  key: string;
+  model: string;
+  protocol: GrokProtocol | null;
+  address: string | null;
+  addressSource: string | null;
+  credentialAvailable: boolean;
+  missingEnvironment: string[];
+  error: string | null;
 };
 export type GatewayState = {
   listener?: GatewayListener;
@@ -189,10 +198,18 @@ export type GatewayState = {
   settings: GatewaySettings;
   activeConnections: number;
   waitingRequests: number;
-  capacityRetries: { providerId: string; retryIn: number; existingOwner?: boolean }[];
+  capacityRetries: {
+    providerId: string;
+    retryIn: number;
+    existingOwner?: boolean;
+  }[];
   handoffWaiting?: {
     providerId: string;
-    state: "awaiting_compaction" | "awaiting_request" | "capacity_full";
+    state:
+      | "awaiting_compaction"
+      | "awaiting_request"
+      | "capacity_full"
+      | "claim_in_flight";
   }[];
   websocketRetries?: { providerId: string; retryIn: number }[];
   transientRetries?: { providerId: string; retryIn: number }[];

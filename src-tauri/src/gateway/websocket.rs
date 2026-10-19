@@ -1161,6 +1161,17 @@ async fn session_once(
         },
     );
     let mut failover = super::failover::Tracker::new(usage_trace.clone());
+    if !manual && g.client_id() == super::ClientId::Codex {
+        failover.diagnostics(g);
+        if let Some(log) = failover.routing() {
+            log.pending(
+                &headers,
+                first_hints.as_ref(),
+                ownership.as_deref(),
+                pinned.is_some() || unknown_affinity,
+            );
+        }
+    }
     let (mut upstream, admission, initial_protocol) = loop {
         if ordinary_attempts > cfg.max_retries
             || (unknown_affinity && !capacity_protected && attempts > 0)
@@ -1444,6 +1455,7 @@ async fn session_once(
         let mut attempt_protocol = super::protocol::Protocol::new(true);
         attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
+        attempt_protocol.attach_routing_log(failover.routing());
         attempt_protocol.attach_thread(budget.thread.clone());
         attempt_protocol.request_headers(&headers);
         attempt_protocol.request_received(turn_received_at);
@@ -1677,6 +1689,9 @@ async fn session_once(
         }
     };
     let mut route = admission.route.clone();
+    // A connection established only for a model/cursor detour does not gain
+    // authority to reopen arbitrary subsequent turns on a different provider.
+    let connection_request_only = ownership.as_ref().is_some_and(|lease| lease.request_only());
     let mut thread_request = budget.thread.take();
     let mut turn = Some(admission);
     let mut replay_frame = first.clone();
@@ -1866,6 +1881,7 @@ async fn session_once(
                     thread_request = None;
                     protocol = None;
                     usage_trace = None;
+                    ownership = None;
                     failover.detach();
                     cancellation(client).await?;
                     continue;
@@ -1953,6 +1969,7 @@ async fn session_once(
                     thread_request = None;
                     protocol = None;
                     usage_trace = None;
+                    ownership = None;
                     failover.detach();
                     cancellation(client).await?;
                     continue;
@@ -1996,6 +2013,7 @@ async fn session_once(
             let mut next = super::protocol::Protocol::new(true);
             next.diagnostics(g, &route.provider.id, current_model.as_deref());
             next.attach_ownership(ownership.clone(), &route.provider.id);
+            next.attach_routing_log(failover.routing());
             next.attach_thread(thread_request.clone());
             next.request_headers(&headers);
             next.request_received(turn_received_at);
@@ -2044,6 +2062,7 @@ async fn session_once(
                     }
                     protocol = None;
                     usage_trace = None;
+                    ownership = None;
                     failover.detach();
                     retry_pending = false;
                     cancellation(client).await?;
@@ -2248,10 +2267,15 @@ async fn session_once(
                                 hints.as_ref().and_then(|h| h.compacted_window.as_deref()),
                             )
                         });
+                    let current_owner = conversation
+                        .as_deref()
+                        .and_then(|session| g.0.compaction.owner(session));
                     if boundary
                         && latest
                             .iter()
-                            .take_while(|r| r.provider.id != route.provider.id)
+                            .take_while(|r| {
+                                current_owner.as_deref() != Some(r.provider.id.as_str())
+                            })
                             .any(|r| r.provider.handoff_after_compaction)
                     {
                         *next_turn = Some(frame);
@@ -2293,8 +2317,9 @@ async fn session_once(
                     }
                     // A connection opened for a model detour is not permission
                     // to keep unrelated turns on that provider. Respect a real
-                    // response cursor; otherwise reject before taking a thread
-                    // reservation or sending a generation on the wrong route.
+                    // response cursor. A new, parsed round without a cursor can
+                    // reopen upstream at the ledger's current owner before it
+                    // has sent any bytes; an uninspectable turn stays rejected.
                     if !hints
                         .as_ref()
                         .is_some_and(|h| h.previous_response_id.is_some())
@@ -2305,6 +2330,18 @@ async fn session_once(
                                 .any(|candidate| candidate.provider.id == route.provider.id)
                         })
                     {
+                        if !connection_request_only
+                            && hints.is_some()
+                            && current_owner
+                                .as_deref()
+                                .is_some_and(|owner| owner != route.provider.id)
+                            && ownership
+                                .as_ref()
+                                .is_some_and(|lease| !lease.request_only())
+                        {
+                            *next_turn = Some(frame);
+                            return Err((1999, "compaction handoff"));
+                        }
                         return Err((1013, code::NO_ELIGIBLE_PROVIDER));
                     }
                 } else {
@@ -2372,6 +2409,19 @@ async fn session_once(
                     },
                 );
                 failover = super::failover::Tracker::new(usage_trace.clone());
+                if !manual && g.client_id() == super::ClientId::Codex {
+                    failover.diagnostics(g);
+                    if let Some(log) = failover.routing() {
+                        log.pending(
+                            &headers,
+                            hints.as_ref(),
+                            ownership.as_deref(),
+                            hints
+                                .as_ref()
+                                .is_some_and(|h| h.previous_response_id.is_some()),
+                        );
+                    }
+                }
                 failover.candidates(
                     g,
                     if hints
@@ -2443,6 +2493,7 @@ async fn session_once(
                 let mut next_protocol = super::protocol::Protocol::new(true);
                 next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
+                next_protocol.attach_routing_log(failover.routing());
                 next_protocol.attach_thread(thread_request.clone());
                 next_protocol.request_headers(&headers);
                 next_protocol.request_received(turn_received_at);
@@ -2653,7 +2704,7 @@ async fn session_once(
             _ = async { if let Some((_, at)) = &previous_usage { tokio::time::sleep_until(*at).await } else { std::future::pending::<()>().await } } => { previous_usage = None; },
             _ = async { if let Some(at) = tail_deadline { tokio::time::sleep_until(at).await } else { std::future::pending::<()>().await } }, if turn.is_none() => {
                 protocol = None;
-                usage_trace = None; failover.detach();
+                usage_trace = None; ownership = None; failover.detach();
                 tail_deadline = None;
             },
             event = next_upstream(&mut upstream), if turn.is_some() || protocol.is_some() || matches!(upstream, Upstream::Native(_)) => {
@@ -2666,7 +2717,7 @@ async fn session_once(
                     if turn.is_none() && !terminal_error && route.client_id == super::ClientId::Codex {
                         upstream = Upstream::Disconnected;
                         protocol = None;
-                        usage_trace = None; failover.detach();
+                        usage_trace = None; ownership = None; failover.detach();
                         tail_deadline = None;
                         continue;
                     }

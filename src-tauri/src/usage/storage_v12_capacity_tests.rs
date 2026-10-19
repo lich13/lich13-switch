@@ -337,6 +337,7 @@ fn attempt(
             input: RoutingInput::FirstTurn,
             has_tool_declarations: payload % 2 == 0,
             restriction: Some(RoutingRestriction::QueueWaiting),
+            ..Default::default()
         });
     }
     value.annotate_availability(source);

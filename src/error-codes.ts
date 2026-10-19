@@ -143,6 +143,7 @@ export const ErrorCodes = {
   Symlink: "SYMLINK",
   Theme: "THEME",
   ThreadHandoff: "THREAD_HANDOFF",
+  ThreadRouting: "THREAD_ROUTING",
   Tls: "TLS",
   TlsHandshakeFailed: "TLS_HANDSHAKE_FAILED",
   Token: "TOKEN",

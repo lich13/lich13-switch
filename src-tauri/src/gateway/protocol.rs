@@ -578,6 +578,10 @@ pub struct Protocol {
     started: std::time::Instant,
     first_usage_ms: Option<u64>,
     ownership: Option<(std::sync::Arc<super::compaction::Lease>, String)>,
+    compaction_operation: bool,
+    routing_log: Option<std::sync::Arc<super::routing_log::RoutingLog>>,
+    routing_decision: Option<crate::usage::model::RoutingDecision>,
+    identity: Option<crate::usage::model::ThreadIdentity>,
     stop: Option<tokio::sync::watch::Receiver<bool>>,
     downstream: Option<tokio::sync::watch::Receiver<bool>>,
     diagnostics: Option<(
@@ -610,6 +614,10 @@ impl Protocol {
             started: std::time::Instant::now(),
             first_usage_ms: None,
             ownership: None,
+            compaction_operation: false,
+            routing_log: None,
+            routing_decision: None,
+            identity: None,
             stop: None,
             downstream: None,
             diagnostics: None,
@@ -698,6 +706,7 @@ impl Protocol {
         self.delivery = delivery;
     }
     pub fn request_headers(&mut self, headers: &hyper::HeaderMap) {
+        self.identity = Some(super::compaction::identity(headers).1);
         self.transfer.client_request_hash = ["x-request-id", "request-id", "x-client-request-id"]
             .iter()
             .find_map(|key| headers.get(*key))
@@ -737,6 +746,7 @@ impl Protocol {
         thread: Option<String>,
         decision: Option<crate::usage::model::RoutingDecision>,
     ) {
+        self.routing_decision = decision;
         if let Some(usage) = &mut self.usage {
             usage.context(thread, decision);
         }
@@ -751,13 +761,49 @@ impl Protocol {
         }
     }
     pub fn routing_evidence(&mut self, hints: Option<&super::replay::RequestHints>) {
-        if let Some(usage) = &mut self.usage {
-            usage.routing_evidence(
-                hints
-                    .map(|h| h.routing_evidence.clone())
-                    .unwrap_or_default(),
+        self.compaction_operation |= hints.is_some_and(|h| h.compaction_trigger);
+        let mut evidence = hints
+            .map(|h| h.routing_evidence.clone())
+            .unwrap_or_default();
+        if self.compaction_operation {
+            evidence.input = crate::usage::model::RoutingInput::Compaction;
+        }
+        evidence.identity = self.identity;
+        evidence.boundary = self.ownership.as_ref().map(|(lease, _)| {
+            lease.boundary_state(hints.and_then(|h| h.compacted_window.as_deref()))
+        });
+        use crate::usage::model::{RoutingDecision as D, RoutingRestriction as R};
+        evidence.restriction = match self.routing_decision {
+            Some(D::NewThreadModelDenied | D::ModelDetourOwnerPreserved) => Some(R::ModelMismatch),
+            Some(D::NewThreadModelCooling) => Some(R::ModelCooling),
+            Some(D::NewThreadProviderUnavailable) => Some(R::ProviderUnavailable),
+            Some(D::NewThreadCapacityFull | D::ReceiverCapacityFull) => Some(R::CapacityFull),
+            Some(D::NewThreadQueueWaiting) => Some(R::QueueWaiting),
+            _ => None,
+        };
+        if let (Some(log), Some(decision), Some((_, _, provider, model))) =
+            (&self.routing_log, self.routing_decision, &self.diagnostics)
+        {
+            log.context(
+                provider,
+                model.as_deref(),
+                decision,
+                evidence.clone(),
+                self.usage.as_ref().map(|usage| usage.id()),
             );
         }
+        if let Some(usage) = &mut self.usage {
+            usage.routing_evidence(evidence);
+        }
+    }
+    pub fn attach_routing_log(
+        &mut self,
+        log: Option<std::sync::Arc<super::routing_log::RoutingLog>>,
+    ) {
+        if let (Some(log), Some((lease, _))) = (&log, &self.ownership) {
+            lease.attach_routing_log(log.clone());
+        }
+        self.routing_log = log;
     }
     pub fn watch_lifecycle(
         &mut self,
@@ -780,8 +826,11 @@ impl Protocol {
             || self.terminal_received
             || self.observation.incomplete
     }
+    pub fn set_operation(&mut self, operation: crate::usage::model::Operation) {
+        self.compaction_operation = operation == crate::usage::model::Operation::Compaction;
+    }
     pub fn output_handed(&self, business: bool) {
-        if business {
+        if business && !self.compaction_operation {
             if let Some((lease, provider)) = &self.ownership {
                 lease.output_started(provider);
             }
@@ -796,6 +845,9 @@ impl Protocol {
                     .terminal
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
+                    if let Some(log) = &self.routing_log {
+                        log.finish(self.status, true);
+                    }
                     lease.complete(provider, self.observation.compaction_fingerprint.as_deref());
                 }
             }
@@ -1202,6 +1254,9 @@ impl Drop for Protocol {
         self.finish(None, reason);
         self.snapshot_delivery();
         self.emit_interruption();
+        if let Some(log) = &self.routing_log {
+            log.finish(self.status, self.delivered_success());
+        }
         if let Some(usage) = &mut self.usage {
             usage.transfer(self.transfer.clone());
         }

@@ -188,6 +188,7 @@ impl RequestHints {
                     })
                 }),
             restriction: None,
+            ..Default::default()
         };
         Ok(hints)
     }

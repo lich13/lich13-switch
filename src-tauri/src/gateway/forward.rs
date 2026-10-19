@@ -519,6 +519,17 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         gateway.usage_operation(model.as_deref(), operation)
     };
     let mut failover = super::failover::Tracker::new(usage_trace.clone());
+    if gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses {
+        failover.diagnostics(&gateway);
+        if let Some(log) = failover.routing() {
+            log.pending(
+                &parts.headers,
+                hints.as_ref().ok(),
+                ownership.as_deref(),
+                continuation,
+            );
+        }
+    }
     let mut last = None;
     let mut last_error: Option<crate::events::Record> = None;
     let mut attempted = 0usize;
@@ -986,8 +997,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         previous_provider = Some(admission.route.provider.id.clone());
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(stream_hint);
+        protocol.set_operation(operation);
         protocol.diagnostics(&gateway, &route.provider.id, model.as_deref());
         protocol.attach_ownership(ownership.clone(), &route.provider.id);
+        protocol.attach_routing_log(failover.routing());
         protocol.attach_thread(wait_budget.thread.clone());
         protocol.request_headers(&parts.headers);
         if let Some(at) = parts.extensions.get::<ReceivedAt>() {

@@ -7,7 +7,10 @@ use crate::{
     storage::{self, AppError, Result},
 };
 pub(crate) use details::safe_upstream_reason;
-pub use details::{safe_message, CircuitEvidence, DeliveryEvidence, Details, HealthScope, Phase};
+pub use details::{
+    safe_message, CircuitEvidence, DeliveryEvidence, Details, HealthScope, Phase, RoutingDetails,
+    RoutingOutcome,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
@@ -43,6 +46,7 @@ pub enum Reason {
     AccountSync,
     ProtocolError,
     ThreadHandoff,
+    ThreadRouting,
     RequestInterrupted,
 }
 impl Reason {
@@ -66,6 +70,7 @@ impl Reason {
             Self::AccountSync => "账号同步异常",
             Self::ProtocolError => "上游协议返回错误",
             Self::ThreadHandoff => "线程已接管",
+            Self::ThreadRouting => "线程路由结果",
             Self::RequestInterrupted => "请求交付提前结束",
         }
     }
@@ -86,6 +91,7 @@ impl Reason {
             Self::AccountSync => ErrorCode::AccountSyncError,
             Self::ProtocolError => ErrorCode::ProtocolError,
             Self::ThreadHandoff => ErrorCode::ThreadHandoff,
+            Self::ThreadRouting => ErrorCode::ThreadRouting,
             Self::RequestInterrupted => ErrorCode::RequestInterrupted,
         }
     }
@@ -223,7 +229,10 @@ impl Record {
             action,
             level: if matches!(
                 reason,
-                Reason::Recovered | Reason::Failover | Reason::ThreadHandoff
+                Reason::Recovered
+                    | Reason::Failover
+                    | Reason::ThreadHandoff
+                    | Reason::ThreadRouting
             ) {
                 Level::Info
             } else if matches!(
@@ -442,7 +451,10 @@ fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
     } else if matches!(
         record.reason,
         Reason::Failover | Reason::Recovered | Reason::ThreadHandoff
-    ) || (record.reason == Reason::RequestInterrupted && record.level == Level::Info)
+    ) || (matches!(
+        record.reason,
+        Reason::RequestInterrupted | Reason::ThreadRouting
+    ) && record.level == Level::Info)
     {
         Category::Status
     } else {

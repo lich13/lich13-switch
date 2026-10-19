@@ -13,8 +13,14 @@ export function providerRuntimeStatus(
   state: GatewayState,
 ): string {
   const fault = providerFault(p);
-  if (fault?.upstreamReason === "DAILY_LIMIT_EXCEEDED" || fault?.code === "DAILY_LIMIT_EXCEEDED") return "日额度已用尽";
-  const capacity = state.capacityRetries?.find((w) => w.providerId === p.id && w.existingOwner);
+  if (
+    fault?.upstreamReason === "DAILY_LIMIT_EXCEEDED" ||
+    fault?.code === "DAILY_LIMIT_EXCEEDED"
+  )
+    return "日额度已用尽";
+  const capacity = state.capacityRetries?.find(
+    (w) => w.providerId === p.id && w.existingOwner,
+  );
   if (capacity) return `临时限流 · 原供应商等待${capacity.retryIn}秒`;
   if (
     p.health.state !== "closed" ||
@@ -38,13 +44,18 @@ export function providerHandoffStatus(
         awaiting_compaction: "待压缩后接管",
         awaiting_request: "待下一请求接管",
         capacity_full: "接管名额已满",
+        claim_in_flight: "正在尝试接管",
       }[waiting.state]
     : "";
 }
 function causeText(p: Provider): string {
   const c = p.health.cause;
   if (!c) return "";
-  if (c.upstreamReason === "DAILY_LIMIT_EXCEEDED" || c.code === "DAILY_LIMIT_EXCEEDED") return "日额度已用尽";
+  if (
+    c.upstreamReason === "DAILY_LIMIT_EXCEEDED" ||
+    c.code === "DAILY_LIMIT_EXCEEDED"
+  )
+    return "日额度已用尽";
   const codes: Record<string, string> = {
     FIRST_BYTE_TIMEOUT: "首字超时",
     CONNECT_TIMEOUT: "连接超时",
@@ -83,7 +94,8 @@ export function providerStatus(p: Provider): string {
   }
   const seconds = Math.max(0, h.retryIn);
   if (reason === "日额度已用尽") return reason;
-  if (h.probeInFlight) return ["恢复探测中", reason].filter(Boolean).join(" · ");
+  if (h.probeInFlight)
+    return ["恢复探测中", reason].filter(Boolean).join(" · ");
   if (h.state === "open")
     return ["熔断", reason, seconds ? `等待${seconds}秒` : "待请求探测"]
       .filter(Boolean)

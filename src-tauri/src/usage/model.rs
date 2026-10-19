@@ -465,6 +465,8 @@ pub enum RoutingDecision {
     ReceiverCapacityFull,
     BoundaryInFlight,
     CompactionWindowMissing,
+    BoundaryNotObserved,
+    BoundaryConsumed,
     CompactionHandoff,
     Auxiliary,
     OrdinaryQueue,
@@ -474,6 +476,8 @@ pub enum RoutingDecision {
     NewThreadModelCooling,
     NewThreadProviderUnavailable,
     NewThreadQueueWaiting,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -486,6 +490,7 @@ pub enum RoutingInput {
     MissingInput,
     UnknownStructure,
     #[default]
+    #[serde(other)]
     MetadataUnavailable,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -496,6 +501,29 @@ pub enum RoutingRestriction {
     ProviderUnavailable,
     CapacityFull,
     QueueWaiting,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadIdentity {
+    Reliable,
+    LegacySession,
+    Missing,
+    Conflict,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundaryState {
+    NotObserved,
+    Fresh,
+    Claimed,
+    Consumed,
+    Mismatch,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -504,6 +532,10 @@ pub struct RoutingEvidence {
     pub has_tool_declarations: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restriction: Option<RoutingRestriction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ThreadIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<BoundaryState>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

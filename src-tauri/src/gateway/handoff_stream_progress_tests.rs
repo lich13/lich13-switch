@@ -230,7 +230,7 @@ fn v0212_failed_same_boundary_handoff_does_not_let_the_original_provider_consume
 }
 
 #[test]
-fn v0212_successful_handoff_continuation_is_existing_thread_not_window_mismatch() {
+fn v0259_successful_handoff_continuation_reports_consumed_window_without_rerouting() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let old = policy_provider("fixture-old", true, false);
@@ -260,7 +260,7 @@ fn v0212_successful_handoff_continuation_is_existing_thread_not_window_mismatch(
     assert_eq!(continuation.owner.as_deref(), Some(new.id.as_str()));
     assert_eq!(
         continuation.decision(Some(&compacted), &new.id),
-        crate::usage::model::RoutingDecision::ExistingThread
+        crate::usage::model::RoutingDecision::BoundaryConsumed
     );
 }
 

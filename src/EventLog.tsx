@@ -1,3 +1,13 @@
+import type { RoutingDetails } from "./usage-types";
+import {
+  routingReason,
+  routingInput,
+  routingIdentity,
+  routingBoundary,
+  routingRestriction,
+  routingOutcome,
+  routingFailure,
+} from "./routing-labels";
 import { subscriptions } from "./subscriptions";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
@@ -17,6 +27,7 @@ export const reasons = {
   circuit_open: "供应商熔断",
   recovered: "供应商恢复",
   thread_handoff: "线程已接管",
+  thread_routing: "线程路由结果",
   config_conflict: "配置冲突",
   startup_recovery: "启动恢复失败",
   account_sync: "账号同步异常",
@@ -36,6 +47,7 @@ export const errorCodes: Record<keyof typeof reasons, string> = {
   circuit_open: "CIRCUIT_OPEN",
   recovered: "RECOVERED",
   thread_handoff: "THREAD_HANDOFF",
+  thread_routing: "THREAD_ROUTING",
   config_conflict: "CONFIG_CONFLICT",
   startup_recovery: "STARTUP_RECOVERY_FAILED",
   account_sync: "ACCOUNT_SYNC_ERROR",
@@ -77,6 +89,7 @@ export type EventRecord = {
   status: number | null;
   attempt: number | null;
   details?: {
+    routing?: RoutingDetails | null;
     healthScope?: "provider" | "model" | "request" | null;
     upstreamCode?: string | null;
     upstreamReason?: string | null;
@@ -130,7 +143,13 @@ type StatusGroup =
   | "no_status";
 
 const client = (id: ClientId | null) =>
-  id === "codex" ? "Codex" : id === "claude" ? "Claude Code" : id === "grok" ? "Grok Build" : "应用";
+  id === "codex"
+    ? "Codex"
+    : id === "claude"
+      ? "Claude Code"
+      : id === "grok"
+        ? "Grok Build"
+        : "应用";
 
 const time = (seconds: number) =>
   new Date(seconds * 1000).toLocaleString("zh-CN", {
@@ -199,21 +218,29 @@ function category(r: EventRecord): keyof typeof categories {
   // Older API responses have no classification. Only an actual open event is
   // sufficient evidence here; a counted failure alone never is.
   if (r.reason === "circuit_open") return "circuit_error";
-  if (r.reason === "request_interrupted" && r.level === "info") return "status";
+  if (
+    ["request_interrupted", "thread_routing"].includes(r.reason) &&
+    r.level === "info"
+  )
+    return "status";
   return ["failover", "thread_handoff", "recovered"].includes(r.reason)
     ? "status"
     : "ordinary_error";
 }
 function circuitCause(r: EventRecord) {
-  return [
-    r.status != null ? statusText(r.status) : null,
-    r.details?.upstreamCode ?? r.details?.localCode,
-    r.details?.upstreamReason,
-    r.details?.message ||
-      (r.details?.circuit?.causeReason
-        ? reasons[r.details.circuit.causeReason]
-        : null),
-  ].filter(Boolean).join(" · ") || "原因未记录";
+  return (
+    [
+      r.status != null ? statusText(r.status) : null,
+      r.details?.upstreamCode ?? r.details?.localCode,
+      r.details?.upstreamReason,
+      r.details?.message ||
+        (r.details?.circuit?.causeReason
+          ? reasons[r.details.circuit.causeReason]
+          : null),
+    ]
+      .filter(Boolean)
+      .join(" · ") || "原因未记录"
+  );
 }
 function circuitTrigger(r: EventRecord) {
   const c = r.details?.circuit;
@@ -223,7 +250,7 @@ function circuitTrigger(r: EventRecord) {
     case "consecutive_failures":
       return `连续失败 ${c.failures}/${c.failureThreshold}`;
     case "error_rate":
-      return `错误率 ${(c.failedRequests / Math.max(1, c.requests) * 100).toFixed(0)}% ≥ ${(c.errorRate * 100).toFixed(0)}%（${c.failedRequests}/${c.requests}，至少 ${c.minRequests} 次）`;
+      return `错误率 ${((c.failedRequests / Math.max(1, c.requests)) * 100).toFixed(0)}% ≥ ${(c.errorRate * 100).toFixed(0)}%（${c.failedRequests}/${c.requests}，至少 ${c.minRequests} 次）`;
     case "probe_failed":
       return "恢复探测失败";
     default:
@@ -231,13 +258,18 @@ function circuitTrigger(r: EventRecord) {
   }
 }
 function summary(r: EventRecord) {
+  if (r.reason === "thread_routing" && r.details?.routing) {
+    return `${routingReason(r.details.routing.decision)} · ${routingOutcome(r.details.routing.outcome)}`;
+  }
   if (r.reason === "circuit_open")
     return [
       reasonText(r),
       r.details?.healthScope === "model" ? r.model : null,
       circuitCause(r),
       circuitTrigger(r),
-    ].filter(Boolean).join(" · ");
+    ]
+      .filter(Boolean)
+      .join(" · ");
   return [
     r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r),
     r.details?.upstreamReason,
@@ -556,7 +588,9 @@ export default function EventLog({
         >
           <option value="">全部类别</option>
           {Object.entries(categories).map(([key, label]) => (
-            <option key={key} value={key}>{label}</option>
+            <option key={key} value={key}>
+              {label}
+            </option>
           ))}
         </select>
         <select
@@ -792,7 +826,8 @@ function EventDetail({
                   ["触发条件", circuitTrigger(r)],
                   [
                     "发生时等待",
-                    r.details?.circuit?.retryAt != null && r.details.waitSeconds != null
+                    r.details?.circuit?.retryAt != null &&
+                    r.details.waitSeconds != null
                       ? `${r.details.waitSeconds} 秒`
                       : "未记录",
                   ],
@@ -837,18 +872,74 @@ function EventDetail({
                 ]
               : []),
             ...(r.reason !== "circuit_open" && r.details?.causeId
-              ? [["触发事件", r.details.causeId]] : []),
+              ? [["触发事件", r.details.causeId]]
+              : []),
             ["模型", r.model || "未提供"],
             ["尝试次数", r.attempt ?? "—"],
-            ...(r.details?.delivery ? [
-              ["请求持续", `${r.details.delivery.durationMs} 毫秒`],
-              ["上游已读取", `${r.details.delivery.upstreamBytes} 字节`],
-              ["交给传输层", `${r.details.delivery.handedBytes} 字节（不代表客户端已收到）`],
-              ["已观察上游终态", r.details.delivery.terminalReceived ? "是" : "否"],
-              ["终态已交给传输层", r.details.delivery.terminalHandedOff ? "是" : "否"],
-              ["请求标识摘要", r.details.delivery.requestHash ?? "未记录"],
-              ["响应标识摘要", r.details.delivery.responseHash ?? "未记录"],
-            ] : []),
+            ...(r.details?.routing
+              ? [
+                  ["线程调度", routingReason(r.details.routing.decision)],
+                  ["路由结果", routingOutcome(r.details.routing.outcome)],
+                  ["输入证据", routingInput(r.details.routing.evidence.input)],
+                  ...(r.details.routing.evidence.identity
+                    ? [
+                        [
+                          "线程身份",
+                          routingIdentity(r.details.routing.evidence.identity),
+                        ],
+                      ]
+                    : []),
+                  ...(r.details.routing.evidence.boundary
+                    ? [
+                        [
+                          "边界状态",
+                          routingBoundary(r.details.routing.evidence.boundary),
+                        ],
+                      ]
+                    : []),
+                  ...(r.details.routing.evidence.restriction
+                    ? [
+                        [
+                          "准入限制",
+                          routingRestriction(
+                            r.details.routing.evidence.restriction,
+                          ),
+                        ],
+                      ]
+                    : []),
+                  ...(r.details.routing.failure
+                    ? [
+                        [
+                          "故障转移依据",
+                          routingFailure(r.details.routing.failure),
+                        ],
+                      ]
+                    : []),
+                  ...(r.details.routing.attemptId
+                    ? [["关联尝试", r.details.routing.attemptId]]
+                    : []),
+                ]
+              : []),
+            ...(r.details?.delivery
+              ? [
+                  ["请求持续", `${r.details.delivery.durationMs} 毫秒`],
+                  ["上游已读取", `${r.details.delivery.upstreamBytes} 字节`],
+                  [
+                    "交给传输层",
+                    `${r.details.delivery.handedBytes} 字节（不代表客户端已收到）`,
+                  ],
+                  [
+                    "已观察上游终态",
+                    r.details.delivery.terminalReceived ? "是" : "否",
+                  ],
+                  [
+                    "终态已交给传输层",
+                    r.details.delivery.terminalHandedOff ? "是" : "否",
+                  ],
+                  ["请求标识摘要", r.details.delivery.requestHash ?? "未记录"],
+                  ["响应标识摘要", r.details.delivery.responseHash ?? "未记录"],
+                ]
+              : []),
             ["首次发生", time(r.firstAt)],
             ["最近发生", time(r.lastAt)],
             ["合并次数", r.count],

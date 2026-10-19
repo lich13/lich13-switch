@@ -41,6 +41,8 @@ mod first_byte_timeout_tests;
 #[cfg(test)]
 mod first_turn_structure_tests;
 mod forward;
+#[cfg(test)]
+mod handoff_v0259_tests;
 mod health_settlement;
 #[cfg(test)]
 mod health_settlement_tests;
@@ -66,6 +68,7 @@ mod replay;
 mod replay_boundary_tests;
 mod replay_policy;
 mod routing;
+mod routing_log;
 mod thread_capacity;
 #[cfg(test)]
 mod token_reveal_tests;

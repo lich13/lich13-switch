@@ -48,6 +48,33 @@ pub struct Details {
     pub last_progress_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<DeliveryEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingDetails>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingOutcome {
+    Attempted,
+    OwnerPreserved,
+    WindowConsumed,
+    WindowReleased,
+    BoundaryRegistered,
+    OwnershipSaved,
+    SaveFailed,
+    Failed,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingDetails {
+    pub decision: crate::usage::model::RoutingDecision,
+    pub evidence: crate::usage::model::RoutingEvidence,
+    pub outcome: RoutingOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<crate::gateway::failover::Failure>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -246,6 +273,12 @@ pub fn safe_message(value: &str) -> Option<String> {
 }
 impl Details {
     pub fn sanitized(mut self) -> Self {
+        if let Some(routing) = &mut self.routing {
+            routing.attempt_id = routing
+                .attempt_id
+                .take()
+                .and_then(|v| uuid::Uuid::parse_str(&v).ok().map(|id| id.to_string()));
+        }
         if let Some(evidence) = &mut self.delivery {
             let digest = |v: &String| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit());
             evidence.request_hash = evidence.request_hash.take().filter(digest);

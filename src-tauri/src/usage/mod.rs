@@ -646,6 +646,9 @@ impl Trace {
     }
 }
 impl AttemptTrace {
+    pub fn id(&self) -> &str {
+        &self.attempt.id
+    }
     pub fn transfer(&mut self, value: model::TransferMetadata) {
         self.attempt.transfer = Some(value);
     }

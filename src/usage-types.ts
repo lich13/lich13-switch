@@ -25,6 +25,20 @@ export type PriceSnapshot = {
     cost_per_request?: string;
   };
 };
+export type RoutingEvidence = {
+  input: string;
+  hasToolDeclarations: boolean;
+  restriction?: string | null;
+  identity?: string | null;
+  boundary?: string | null;
+};
+export type RoutingDetails = {
+  decision: string;
+  evidence: RoutingEvidence;
+  outcome: string;
+  attemptId?: string | null;
+  failure?: string | null;
+};
 export type Attempt = {
   transfer?: {
     receivedAt?: number | null;
@@ -64,11 +78,7 @@ export type Attempt = {
   threadHash?: string | null;
   upstreamRequestHash?: string | null;
   routingDecision?: string | null;
-  routingEvidence?: {
-    input: string;
-    hasToolDeclarations: boolean;
-    restriction?: string | null;
-  } | null;
+  routingEvidence?: RoutingEvidence | null;
   pricingBasis?: string | null;
   mappingRevision?: string | null;
   repeatCount?: number;
@@ -96,12 +106,35 @@ export type Attempt = {
   price: PriceSnapshot | null;
 };
 export type FailoverEvidence = {
-  stage: "initial" | "proactive_handoff" | "failure_fallback" | "cursor_pinned" | "unknown_owner";
-  failure: "rate_limit" | "account_rejected" | "model_unavailable" | "upstream_service" | "transport" | "protocol" | null;
+  stage:
+    | "initial"
+    | "proactive_handoff"
+    | "failure_fallback"
+    | "cursor_pinned"
+    | "unknown_owner";
+  failure:
+    | "rate_limit"
+    | "account_rejected"
+    | "model_unavailable"
+    | "upstream_service"
+    | "transport"
+    | "protocol"
+    | "unknown"
+    | null;
   eligibleCandidates: number;
   exclusions: Record<string, number>;
   wait: { kind: string; seconds: number } | null;
-  exit: "forwarded" | "no_eligible_provider" | "attempts_exhausted" | "permanent_rejection" | "cancelled" | "stopped" | "admission_rejected" | "replay_unsafe" | string | null;
+  exit:
+    | "forwarded"
+    | "no_eligible_provider"
+    | "attempts_exhausted"
+    | "permanent_rejection"
+    | "cancelled"
+    | "stopped"
+    | "admission_rejected"
+    | "replay_unsafe"
+    | string
+    | null;
 };
 export type UsageRecord = {
   detailArchived?: boolean;
@@ -245,7 +278,13 @@ export const tokenTotal = (t: Tokens) =>
         0,
       );
 export const clientName = (c: string) =>
-  c === "codex" ? "Codex" : c === "claude" ? "Claude Code" : c === "grok" ? "Grok Build" : c;
+  c === "codex"
+    ? "Codex"
+    : c === "claude"
+      ? "Claude Code"
+      : c === "grok"
+        ? "Grok Build"
+        : c;
 export function speed(a: Attempt, estimated: boolean) {
   const ms = estimated
     ? a.durationMs
