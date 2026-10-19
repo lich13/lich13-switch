@@ -38,6 +38,11 @@ Provider slot accounting, bounded waiting and Responses WebSocket turn lifecycle
 
 https://github.com/Wei-Shaw/sub2api/tree/a3eb7ef302961cba716dc78b39b93b60c467db0e/backend/internal
 
+The v0.25.10 RPM scheduler and quota verification were independently implemented with behavioral references to Sub2API at `b0a02a3304a0a78cdd003ddda1dd23ba02c03084` (LGPL-3.0), `billing_cache_service.go` user/group RPM accounting, and new-api at `058c8231b68c51ee02abee15befcd720fee9f4a2` (AGPL-3.0), `middleware/model-rate-limit.go` total-request and successful-completion limits. No Go implementation or tests are copied. Local pacing, completion reservations, restart protection and bounded quota evidence use the existing Rust scheduler and private files; Redis is not introduced. These reference versions do not imply that a configured provider runs either project.
+
+https://github.com/Wei-Shaw/sub2api/blob/b0a02a3304a0a78cdd003ddda1dd23ba02c03084/backend/internal/service/billing_cache_service.go
+https://github.com/QuantumNous/new-api/blob/058c8231b68c51ee02abee15befcd720fee9f4a2/middleware/model-rate-limit.go
+
 ## Codex Responses WebSocket compatibility
 
 The native Responses WebSocket scheduling boundary follows the lifecycle described by Wei-Shaw/sub2api at the reference above. The HTTP/SSE compatibility adapter was removed in v0.21. Native WebSocket forwarding, per-turn admission, capacity waiting and safe pre-output reconnect remain; no request protocol conversion is performed.
