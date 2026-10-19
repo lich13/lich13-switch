@@ -35,7 +35,8 @@ fn retry_settings(gateway: &Gateway, dir: &tempfile::TempDir) {
         dir,
         Edit::RpmProvider {
             id: gateway.view().providers[0].id.clone(),
-            max_rpm: 20,
+            // 本组验证重试归属与计数；发送间隔由独立 RPM 测试覆盖。
+            max_rpm: 600,
         },
     );
 }

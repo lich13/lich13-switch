@@ -82,13 +82,13 @@ it("keeps the upstream code and shows the daily quota reason in summary and deta
   const user = userEvent.setup();
   render(<EventLog />);
 
-  const summary = await screen.findByRole("button", { name: /上游限流/ });
+  const summary = await screen.findByRole("button", { name: /日额度已用尽/ });
   expect(summary).toHaveTextContent(
     "429 · DAILY_LIMIT_EXCEEDED · 日额度已用尽",
   );
   await user.click(summary);
 
-  const dialog = await screen.findByRole("dialog", { name: "上游限流" });
+  const dialog = await screen.findByRole("dialog", { name: "日额度已用尽" });
   expect(
     within(dialog).getByText("上游错误码").nextElementSibling,
   ).toHaveTextContent("429");

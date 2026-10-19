@@ -157,7 +157,8 @@ async fn native_websocket_reconnects_and_replays_only_before_first_response_fram
     })
     .await;
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
-    native_retry_settings(&g, &t, 1, 2);
+    // 本组使用短截止验证重连；600 RPM 仍逐次计数且不掩盖重放。
+    native_retry_settings(&g, &t, 1, 600);
     start(&g, &t).await;
     let mut client = concurrency::responses_client(&g).await;
     client
@@ -219,7 +220,7 @@ async fn native_websocket_exhausts_retry_budget_without_switching_provider() {
         format!("http://127.0.0.1:{backup}"),
     ])
     .await;
-    native_retry_settings(&g, &t, 1, 10);
+    native_retry_settings(&g, &t, 1, 600);
     start(&g, &t).await;
     let mut client = concurrency::responses_client(&g).await;
     client
@@ -330,7 +331,7 @@ async fn native_websocket_cancel_and_gateway_stop_interrupt_retry_wait() {
         })
         .await;
         let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
-        native_retry_settings(&g, &t, 1, 2);
+        native_retry_settings(&g, &t, 1, 600);
         start(&g, &t).await;
         let mut client = concurrency::responses_client(&g).await;
         client
@@ -425,7 +426,7 @@ async fn native_websocket_reconnects_on_the_next_turn_after_idle_upstream_close(
     })
     .await;
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
-    native_retry_settings(&g, &t, 1, 2);
+    native_retry_settings(&g, &t, 1, 600);
     start(&g, &t).await;
     let mut client = concurrency::responses_client(&g).await;
     client
