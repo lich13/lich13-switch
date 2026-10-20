@@ -43,6 +43,12 @@ The v0.25.10 RPM scheduler and quota verification were independently implemented
 https://github.com/Wei-Shaw/sub2api/blob/b0a02a3304a0a78cdd003ddda1dd23ba02c03084/backend/internal/service/billing_cache_service.go
 https://github.com/QuantumNous/new-api/blob/058c8231b68c51ee02abee15befcd720fee9f4a2/middleware/model-rate-limit.go
 
+The v0.25.11 rolling-minute budget replaces fixed send spacing. Behavioral references were rechecked at Sub2API `8f2cbb53d9d1c40e1865b07ac460571f7d4c48de` (minute counters) and new-api `32e587406c6ebe891f18ab9aeb2f4a1f6b7b9e14` (total-request and successful-completion limits, in-flight reservations, and explicit limit error messages). The local Rust implementation retains atomic reservations, completion protection and restart history; no Go or Lua implementation or upstream tests are copied. The configured provider's actual limits remain authoritative.
+
+https://github.com/Wei-Shaw/sub2api/blob/8f2cbb53d9d1c40e1865b07ac460571f7d4c48de/backend/internal/repository/user_rpm_cache.go
+https://github.com/QuantumNous/new-api/blob/32e587406c6ebe891f18ab9aeb2f4a1f6b7b9e14/middleware/model-rate-limit.go
+https://github.com/QuantumNous/new-api/blob/32e587406c6ebe891f18ab9aeb2f4a1f6b7b9e14/common/rate-limit.go
+
 ## Codex Responses WebSocket compatibility
 
 The native Responses WebSocket scheduling boundary follows the lifecycle described by Wei-Shaw/sub2api at the reference above. The HTTP/SSE compatibility adapter was removed in v0.21. Native WebSocket forwarding, per-turn admission, capacity waiting and safe pre-output reconnect remain; no request protocol conversion is performed.
