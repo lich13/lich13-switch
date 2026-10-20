@@ -531,7 +531,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
     }
     let mut last = None;
-    let mut last_error: Option<crate::events::Record> = None;
+    let mut last_error: Option<super::health_settlement::Reported> = None;
     let mut attempted = 0usize;
     let mut ordinary_attempts = 0usize;
     let mut capacity_protected = false;
@@ -587,7 +587,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         settings.max_waiting,
                         capacity_wait_owner.is_some(),
                         owner_route,
-                        last_error.as_ref(),
+                        last_error.as_deref(),
                     )
                     .await;
                 match waited {
@@ -708,7 +708,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             "本次额度查询确认耗尽，没有可用的替代供应商",
                         ));
                         last_category = code::HTTP;
-                        last_error = cause;
+                        last_error = cause.map(Into::into);
                     }
                     Ok(false) => {}
                     Err(Rejected::Stopped) => {
@@ -1122,46 +1122,65 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Some(connector::ConnectError::Tls) => code::TLS,
                     _ => code::NETWORK,
                 };
-                last_error = Some(admission.permits.report(
-                    &gateway,
-                    &route,
-                    model.as_deref(),
-                    Reason::Network,
-                    Action::TryingNext,
-                    None,
-                    attempted,
-                    crate::events::Details {
-                        phase: Some(crate::events::Phase::Connect),
-                        local_code: Some(connector::diagnostic_code(&e).into()),
-                        counted_failure: Some(true),
-                        ..Default::default()
-                    },
-                ));
-                admission.permits.failure(&settings, None);
                 protocol.finish(None, last_category);
+                last_error = Some(failover.report_failure(Some(&protocol), || {
+                    admission.permits.report(
+                        &gateway,
+                        &route,
+                        model.as_deref(),
+                        Reason::Network,
+                        routing::fallback_action(
+                            &gateway,
+                            &route.provider.id,
+                            ids.iter()
+                                .filter_map(|id| routes.get(id).cloned())
+                                .collect(),
+                            &requirement,
+                            parts.uri.path(),
+                            ownership.as_deref(),
+                            gateway.client_id() == super::ClientId::Codex && !auxiliary,
+                            &wait_budget,
+                            mode != "manual"
+                                && pinned.is_none()
+                                && !unknown_affinity
+                                && ordinary_attempts <= settings.max_retries,
+                        ),
+                        None,
+                        attempted,
+                        crate::events::Details {
+                            phase: Some(crate::events::Phase::Connect),
+                            local_code: Some(connector::diagnostic_code(&e).into()),
+                            counted_failure: Some(true),
+                            ..Default::default()
+                        },
+                    )
+                }));
+                admission.permits.failure(&settings, None);
                 continue;
             }
             Err(_) => {
                 failover.failure(super::failover::Failure::Transport);
                 failover.finish(super::failover::Exit::ReplayUnsafe);
                 protocol.timeout("response_headers", settings.first_byte_seconds);
-                admission.permits.report(
-                    &gateway,
-                    &route,
-                    model.as_deref(),
-                    Reason::Network,
-                    Action::Returned,
-                    None,
-                    attempted,
-                    crate::events::Details {
-                        phase: Some(crate::events::Phase::Headers),
-                        local_code: Some(code::FIRST_BYTE_TIMEOUT.into()),
-                        counted_failure: Some(true),
-                        ..protocol.observation.error.clone()
-                    },
-                );
-                admission.permits.failure(&settings, None);
                 protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
+                failover.report_failure(Some(&protocol), || {
+                    admission.permits.report(
+                        &gateway,
+                        &route,
+                        model.as_deref(),
+                        Reason::Network,
+                        Action::Returned,
+                        None,
+                        attempted,
+                        crate::events::Details {
+                            phase: Some(crate::events::Phase::Headers),
+                            local_code: Some(code::FIRST_BYTE_TIMEOUT.into()),
+                            counted_failure: Some(true),
+                            ..protocol.observation.error.clone()
+                        },
+                    )
+                });
+                admission.permits.failure(&settings, None);
                 // The HTTP client already owns the request. Not seeing headers
                 // cannot establish that its body never reached the provider.
                 return error(
@@ -1345,9 +1364,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 super::failover::Failure::UpstreamService
             });
             let will_retry = retryable
-                && !ids.is_empty()
-                && ordinary_attempts <= settings.max_retries
-                && !unknown_affinity;
+                && routing::fallback_action(
+                    &gateway,
+                    &route.provider.id,
+                    ids.iter()
+                        .filter_map(|id| routes.get(id).cloned())
+                        .collect(),
+                    &requirement,
+                    parts.uri.path(),
+                    ownership.as_deref(),
+                    gateway.client_id() == super::ClientId::Codex && !auxiliary,
+                    &wait_budget,
+                    mode != "manual"
+                        && pinned.is_none()
+                        && !unknown_affinity
+                        && ordinary_attempts <= settings.max_retries,
+                ) == Action::TryingNext;
             let reason = if compact_error {
                 Reason::ProtocolError
             } else if model_error {
@@ -1378,24 +1410,34 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 retry_delay.map(|delay| delay.as_secs())
             };
-            last_error = Some(admission.permits.report(
-                &gateway,
-                &route,
-                model.as_deref(),
-                reason,
-                if retry_delay.is_some() || wait_same {
-                    Action::RetryingSame
-                } else if will_retry {
-                    Action::TryingNext
-                } else if capacity {
-                    Action::Waiting
-                } else {
-                    Action::Returned
-                },
+            protocol.finish(
                 Some(status.as_u16()),
-                attempted,
-                details,
-            ));
+                if captured.is_ok() {
+                    code::HTTP
+                } else {
+                    code::STREAM_INTERRUPTED
+                },
+            );
+            last_error = Some(failover.report_failure(Some(&protocol), || {
+                admission.permits.report(
+                    &gateway,
+                    &route,
+                    model.as_deref(),
+                    reason,
+                    if retry_delay.is_some() || wait_same {
+                        Action::RetryingSame
+                    } else if will_retry {
+                        Action::TryingNext
+                    } else if capacity {
+                        Action::Waiting
+                    } else {
+                        Action::Returned
+                    },
+                    Some(status.as_u16()),
+                    attempted,
+                    details,
+                )
+            }));
             if model_error || compact_error {
                 admission.permits.neutral(&settings);
             } else if capacity {
@@ -1410,10 +1452,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 admission.permits.neutral(&settings);
             }
             if let Ok(body) = captured {
-                protocol.finish(Some(status.as_u16()), code::HTTP);
                 last = Some(Response::from_parts(response_parts, body.body()));
-            } else {
-                protocol.finish(Some(status.as_u16()), code::STREAM_INTERRUPTED);
             }
             last_category = code::HTTP;
             if !retryable {
@@ -1569,21 +1608,38 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             )
         {
             failover.failure(super::failover::Failure::Transport);
-            last_error = Some(admission.permits.report(
-                &gateway,
-                &route,
-                model.as_deref(),
-                Reason::Network,
-                Action::TryingNext,
-                Some(status.as_u16()),
-                attempted,
-                crate::events::Details {
-                    phase: Some(crate::events::Phase::Response),
-                    local_code: Some(failure_kind.into()),
-                    counted_failure: Some(true),
-                    ..protocol.observation.error.clone()
-                },
-            ));
+            last_error = Some(failover.report_failure(Some(&protocol), || {
+                admission.permits.report(
+                    &gateway,
+                    &route,
+                    model.as_deref(),
+                    Reason::Network,
+                    routing::fallback_action(
+                        &gateway,
+                        &route.provider.id,
+                        ids.iter()
+                            .filter_map(|id| routes.get(id).cloned())
+                            .collect(),
+                        &requirement,
+                        parts.uri.path(),
+                        ownership.as_deref(),
+                        gateway.client_id() == super::ClientId::Codex && !auxiliary,
+                        &wait_budget,
+                        mode != "manual"
+                            && pinned.is_none()
+                            && !unknown_affinity
+                            && ordinary_attempts <= settings.max_retries,
+                    ),
+                    Some(status.as_u16()),
+                    attempted,
+                    crate::events::Details {
+                        phase: Some(crate::events::Phase::Response),
+                        local_code: Some(failure_kind.into()),
+                        counted_failure: Some(true),
+                        ..protocol.observation.error.clone()
+                    },
+                )
+            }));
             admission.permits.failure(&settings, None);
             last_category = failure_kind;
             continue;
@@ -1687,40 +1743,56 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 capacity_retry_after = capacity_retry_after.max(cooldown);
             }
             protocol.finish(Some(status.as_u16()), code::HTTP);
-            let will_retry =
-                !ids.is_empty() && ordinary_attempts <= settings.max_retries && !unknown_affinity;
+            let will_retry = routing::fallback_action(
+                &gateway,
+                &route.provider.id,
+                ids.iter()
+                    .filter_map(|id| routes.get(id).cloned())
+                    .collect(),
+                &requirement,
+                parts.uri.path(),
+                ownership.as_deref(),
+                gateway.client_id() == super::ClientId::Codex && !auxiliary,
+                &wait_budget,
+                mode != "manual"
+                    && pinned.is_none()
+                    && !unknown_affinity
+                    && ordinary_attempts <= settings.max_retries,
+            ) == Action::TryingNext;
             let mut details = protocol.observation.error.clone();
             details.phase = Some(crate::events::Phase::Response);
             details.counted_failure = Some(initial_hard_rejection);
             if wait_same {
                 details.wait_seconds = Some(capacity_delay(&settings, cooldown).as_secs());
             }
-            last_error = Some(admission.permits.report(
-                &gateway,
-                &route,
-                model.as_deref(),
-                if initial_compact_error {
-                    Reason::ProtocolError
-                } else if initial_hard_rejection {
-                    Reason::UpstreamService
-                } else if initial_capacity {
-                    Reason::Capacity
-                } else {
-                    Reason::ModelUnavailable
-                },
-                if wait_same {
-                    Action::RetryingSame
-                } else if will_retry {
-                    Action::TryingNext
-                } else if initial_capacity {
-                    Action::Waiting
-                } else {
-                    Action::Returned
-                },
-                Some(status.as_u16()),
-                attempted,
-                details,
-            ));
+            last_error = Some(failover.report_failure(Some(&protocol), || {
+                admission.permits.report(
+                    &gateway,
+                    &route,
+                    model.as_deref(),
+                    if initial_compact_error {
+                        Reason::ProtocolError
+                    } else if initial_hard_rejection {
+                        Reason::UpstreamService
+                    } else if initial_capacity {
+                        Reason::Capacity
+                    } else {
+                        Reason::ModelUnavailable
+                    },
+                    if wait_same {
+                        Action::RetryingSame
+                    } else if will_retry {
+                        Action::TryingNext
+                    } else if initial_capacity {
+                        Action::Waiting
+                    } else {
+                        Action::Returned
+                    },
+                    Some(status.as_u16()),
+                    attempted,
+                    details,
+                )
+            }));
             if initial_capacity {
                 admission.permits.capacity_limited(&settings, cooldown);
             } else if initial_hard_rejection {
@@ -1757,6 +1829,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let replay_unsafe = failed && failure_kind == code::FIRST_BYTE_TIMEOUT;
         if replay_unsafe {
             failover.failure(super::failover::Failure::Transport);
+            protocol.associate_failure(failover.failure_generation());
         }
         failover.finish(if replay_unsafe {
             super::failover::Exit::ReplayUnsafe
@@ -2026,6 +2099,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     });
     gateway.record_final(
         last_error.as_ref(),
+        failover.failure_reported(),
         previous_provider.as_deref(),
         model.as_deref(),
         last.as_ref().map(|r| r.status().as_u16()),

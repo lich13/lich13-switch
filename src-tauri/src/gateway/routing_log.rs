@@ -3,12 +3,17 @@
 #[path = "routing_log_v02511_tests.rs"]
 mod v02511_tests;
 #[cfg(test)]
+#[path = "routing_log_v02512_tests.rs"]
+mod v02512_tests;
+#[cfg(test)]
 #[path = "routing_log_v0259_tests.rs"]
 mod v0259_tests;
 
+#[cfg(test)]
+use crate::usage::model::BoundaryState;
 use crate::{
     events,
-    usage::model::{BoundaryState, RoutingDecision, RoutingEvidence},
+    usage::model::{RoutingDecision, RoutingEvidence},
 };
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +24,10 @@ struct State {
     handled: bool,
     attempts: u32,
     keep: bool,
-    downstream_closed_only: bool,
+    settled: Option<super::protocol::RoutingSettlement>,
+    failure_generation: u64,
+    reported_generation: u64,
+    unreported: bool,
 }
 pub(super) struct RoutingLog {
     service: events::Service,
@@ -50,30 +58,21 @@ impl RoutingLog {
             return;
         }
         state.attempts = state.attempts.saturating_add(1);
-        // Ordinary unchanged continuation is not a journal event. A fresh
-        // window, first-turn decision or actual fallback supplies new evidence.
-        if decision == RoutingDecision::ExistingThread
-            && state.failure.is_none()
-            && evidence.input != crate::usage::model::RoutingInput::Compaction
-            && !matches!(
-                evidence.boundary,
-                Some(BoundaryState::Fresh | BoundaryState::Claimed)
-            )
-        {
-            return;
-        }
-        // Keep earlier routing work even when a later attempt replaces its
-        // context with an ordinary continuation on a consumed window.
-        state.keep |= decision != RoutingDecision::BoundaryConsumed
-            || evidence.restriction.is_some()
+        // Keep real policy restrictions and actions, not the ordinary decision
+        // itself. A successful model detour intentionally preserves ownership.
+        state.keep |= !ordinary(decision)
             || matches!(
-                evidence.boundary,
-                Some(BoundaryState::Fresh | BoundaryState::Claimed)
+                evidence.identity,
+                Some(
+                    crate::usage::model::ThreadIdentity::Conflict
+                        | crate::usage::model::ThreadIdentity::Unknown
+                )
             )
-            || state
-                .record
-                .as_ref()
-                .is_some_and(|record| record.provider_id.as_deref() != Some(provider));
+            || (evidence.restriction.is_some()
+                && !(decision == RoutingDecision::ModelDetourOwnerPreserved
+                    && evidence.restriction
+                        == Some(crate::usage::model::RoutingRestriction::ModelMismatch)));
+        state.settled = None;
         let mut record = events::Record::new(
             Some(self.client),
             Some(provider),
@@ -136,10 +135,12 @@ impl RoutingLog {
             }
         }
     }
-    pub fn failure(&self, failure: super::failover::Failure) {
+    pub fn failure(&self, failure: super::failover::Failure) -> u64 {
         let Ok(mut state) = self.state.lock() else {
-            return;
+            return 0;
         };
+        state.unreported |= state.failure_generation != state.reported_generation;
+        state.failure_generation = state.failure_generation.saturating_add(1);
         state.failure = Some(failure);
         if let Some(routing) = state
             .record
@@ -148,6 +149,21 @@ impl RoutingLog {
         {
             routing.failure = Some(failure);
         }
+        state.failure_generation
+    }
+    pub fn reported(&self, generation: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if generation != 0 && generation == state.failure_generation {
+                state.reported_generation = generation;
+            }
+        }
+    }
+    pub fn failure_reported(&self) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.failure_generation != 0
+                && state.failure_generation == state.reported_generation
+                && !state.unreported
+        })
     }
     pub fn outcome(&self, outcome: events::RoutingOutcome) {
         let Ok(mut state) = self.state.lock() else {
@@ -175,7 +191,12 @@ impl RoutingLog {
         };
         // Non-protocol callers use false for admission, cancellation or an
         // unknown failure. A later downstream close cannot erase that fact.
-        state.keep |= !success;
+        state.unreported |= !success;
+        state.settled = Some(if success {
+            super::protocol::RoutingSettlement::Delivered
+        } else {
+            super::protocol::RoutingSettlement::Failed
+        });
         if let Some(record) = &mut state.record {
             record.status = status;
             if let Some(routing) = &mut record.details.routing {
@@ -194,8 +215,8 @@ impl RoutingLog {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        state.keep |= result == RoutingSettlement::Failed;
-        state.downstream_closed_only = result == RoutingSettlement::DownstreamClosed;
+        state.unreported |= result == RoutingSettlement::Failed;
+        state.settled = Some(result);
         if let Some(record) = &mut state.record {
             record.status = status.or(record.status);
             if let Some(routing) = &mut record.details.routing {
@@ -234,14 +255,26 @@ impl Drop for RoutingLog {
         if !state.handled {
             if let Some(record) = state.record.take() {
                 let quiet = !state.keep
-                    && state.failure.is_none()
-                    && record.status.is_none_or(|status| status < 400)
+                    && !state.unreported
+                    && state.failure_generation == state.reported_generation
                     && record.details.routing.as_ref().is_some_and(|routing| {
-                        routing.decision == RoutingDecision::BoundaryConsumed
-                            && routing.failure.is_none()
-                            && (routing.outcome == events::RoutingOutcome::OwnerPreserved
-                                || (routing.outcome == events::RoutingOutcome::Failed
-                                    && state.downstream_closed_only))
+                        ordinary(routing.decision)
+                            && (routing.decision != RoutingDecision::ThreadUnidentified
+                                || state.settled
+                                    == Some(super::protocol::RoutingSettlement::Delivered))
+                            && matches!(
+                                routing.outcome,
+                                events::RoutingOutcome::OwnerPreserved
+                                    | events::RoutingOutcome::Failed
+                            )
+                            && matches!(
+                                state.settled,
+                                Some(
+                                    super::protocol::RoutingSettlement::Delivered
+                                        | super::protocol::RoutingSettlement::DownstreamClosed
+                                        | super::protocol::RoutingSettlement::ReportedFailure
+                                )
+                            )
                     });
                 if !quiet {
                     self.service.emit(record);
@@ -249,4 +282,18 @@ impl Drop for RoutingLog {
             }
         }
     }
+}
+
+fn ordinary(decision: RoutingDecision) -> bool {
+    matches!(
+        decision,
+        RoutingDecision::ExistingThread
+            | RoutingDecision::BoundaryConsumed
+            | RoutingDecision::NewThread
+            | RoutingDecision::FirstTurnUnconfirmed
+            | RoutingDecision::OrdinaryQueue
+            | RoutingDecision::Auxiliary
+            | RoutingDecision::ModelDetourOwnerPreserved
+            | RoutingDecision::ThreadUnidentified
+    )
 }

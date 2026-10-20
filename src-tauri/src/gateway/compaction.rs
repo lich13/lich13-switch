@@ -1079,8 +1079,16 @@ impl Lease {
     }
     pub fn candidates_for(
         &self,
+        routes: Vec<super::Route>,
+        requirement: &super::routing::Requirement,
+    ) -> Vec<super::Route> {
+        self.candidates_for_observed(routes, requirement, true)
+    }
+    fn candidates_for_observed(
+        &self,
         mut routes: Vec<super::Route>,
         requirement: &super::routing::Requirement,
+        observe: bool,
     ) -> Vec<super::Route> {
         if self.registry.state.is_poisoned() {
             return vec![];
@@ -1107,7 +1115,7 @@ impl Lease {
             });
             return routes;
         }
-        if bound.is_some() {
+        if bound.is_some() && observe {
             self.initial_bound
                 .store(true, std::sync::atomic::Ordering::Release);
         }
@@ -1149,16 +1157,33 @@ impl Lease {
     /// its priority-limited receivers apply only to proactive handoff.
     pub fn candidates_after_failure(
         &self,
-        mut routes: Vec<super::Route>,
+        routes: Vec<super::Route>,
         requirement: &super::routing::Requirement,
     ) -> Vec<super::Route> {
         self.failure_fallback
             .store(true, std::sync::atomic::Ordering::Release);
+        self.failure_candidates(routes, requirement, true)
+    }
+    /// The log's preview must never claim a boundary, bind an owner, or grant
+    /// failure-fallback authority before the scheduler actually takes that path.
+    pub(super) fn preview_after_failure(
+        &self,
+        routes: Vec<super::Route>,
+        requirement: &super::routing::Requirement,
+    ) -> Vec<super::Route> {
+        self.failure_candidates(routes, requirement, false)
+    }
+    fn failure_candidates(
+        &self,
+        mut routes: Vec<super::Route>,
+        requirement: &super::routing::Requirement,
+        observe: bool,
+    ) -> Vec<super::Route> {
         if self.registry.state.is_poisoned() {
             return vec![];
         }
         if !self.handoff {
-            return self.candidates_for(routes, requirement);
+            return self.candidates_for_observed(routes, requirement, observe);
         }
         routes.retain(|route| {
             self.owner.as_deref() == Some(&route.provider.id)

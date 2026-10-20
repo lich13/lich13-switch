@@ -27,6 +27,7 @@ pub struct Observation {
     pending_error_response: Option<String>,
     usage_tail: bool,
     strict_tail_identity: bool,
+    fault_sequence: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terminal {
@@ -42,7 +43,54 @@ pub enum Terminal {
 pub(super) enum RoutingSettlement {
     Delivered,
     DownstreamClosed,
+    ReportedFailure,
     Failed,
+}
+#[derive(Clone, PartialEq)]
+struct RoutingFault {
+    protocol_sequence: u64,
+    error: crate::events::Details,
+    status: Option<u16>,
+    incomplete: bool,
+    transport: bool,
+    unspecified: bool,
+    tail_failure: bool,
+}
+#[derive(Default)]
+struct FaultReports {
+    observed: Option<RoutingFault>,
+    generation: u64,
+    reported: u64,
+    unreported_before: bool,
+}
+impl FaultReports {
+    fn observe(&mut self, fault: RoutingFault) {
+        if self.observed.as_ref() == Some(&fault) {
+            return;
+        }
+        if self.observed.as_ref().is_some_and(|old| {
+            self.generation != self.reported
+                && old.status.is_some()
+                && old.status == fault.status
+                && old.error == crate::events::Details::default()
+                && old.protocol_sequence == 0
+                && !old.incomplete
+                && !old.transport
+                && !old.tail_failure
+                && !fault.incomplete
+                && !fault.transport
+                && !fault.tail_failure
+        }) {
+            self.observed = Some(fault);
+            return;
+        }
+        self.unreported_before |= self.generation != self.reported;
+        self.generation = self.generation.saturating_add(1);
+        self.observed = Some(fault);
+    }
+    fn covered(&self) -> bool {
+        self.generation != 0 && self.generation == self.reported && !self.unreported_before
+    }
 }
 #[derive(Clone, Copy)]
 enum DownstreamClose {
@@ -111,6 +159,9 @@ impl Observation {
         }
         let details = super::upstream_error::details_value(outer, false);
         let has_error = details != crate::events::Details::default();
+        if has_error || matches!(event, "error" | "response.failed") || status == "failed" {
+            self.fault_sequence = self.fault_sequence.saturating_add(1);
+        }
         if has_error {
             self.error = details;
             self.retry_after = self
@@ -606,6 +657,9 @@ pub struct Protocol {
     )>,
     end_reason: Option<String>,
     routing_fault: bool,
+    routing_tail_failure: bool,
+    fault_reports: std::sync::Mutex<FaultReports>,
+    failover_generation: std::sync::atomic::AtomicU64,
 }
 impl Protocol {
     pub fn new(stream: bool) -> Self {
@@ -639,6 +693,9 @@ impl Protocol {
             diagnostics: None,
             end_reason: None,
             routing_fault: false,
+            routing_tail_failure: false,
+            fault_reports: std::sync::Mutex::default(),
+            failover_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
     pub(super) fn attach_rpm(&mut self, completion: Option<super::admission::Completion>) {
@@ -699,7 +756,8 @@ impl Protocol {
             .any(Option::is_some)
     }
     pub fn finish_usage_tail(&mut self, upstream_end: &str) {
-        self.routing_fault |= matches!(upstream_end, "upstream_read_failed" | "gateway_stopping");
+        self.routing_tail_failure |=
+            matches!(upstream_end, "upstream_read_failed" | "gateway_stopping");
         self.finish(None, code::CLIENT_DISCONNECTED);
         self.delivery.event(upstream_end);
         match upstream_end {
@@ -878,6 +936,83 @@ impl Protocol {
             }
         }
     }
+    fn observe_routing_fault(&self) {
+        let mut error = self.observation.error.clone();
+        // Progress is not another cause. All retained fields here describe the
+        // bounded protocol error, never the forwarded body or an old attempt.
+        error.last_progress_ms = None;
+        let has_error = error.upstream_code.is_some()
+            || error.upstream_reason.is_some()
+            || error.upstream_type.is_some()
+            || error.local_code.is_some()
+            || error.message.is_some()
+            || error.timeout_phase.is_some();
+        let status = self.status.filter(|status| *status >= 400);
+        let unspecified = ((self.terminal_received
+            && matches!(
+                self.terminal(),
+                Some(
+                    Terminal::Failure
+                        | Terminal::Rejected
+                        | Terminal::ModelUnavailable
+                        | Terminal::Unknown
+                )
+            ))
+            || (self.routing_fault
+                && !self.succeeded()
+                && self.terminal() != Some(Terminal::Cancelled)))
+            && !has_error
+            && status.is_none()
+            && !self.observation.incomplete
+            && !self.transport_failure;
+        if has_error
+            || status.is_some()
+            || self.observation.incomplete
+            || self.transport_failure
+            || unspecified
+            || self.routing_tail_failure
+        {
+            if let Ok(mut reports) = self.fault_reports.lock() {
+                reports.observe(RoutingFault {
+                    protocol_sequence: self.observation.fault_sequence,
+                    error,
+                    status,
+                    incomplete: self.observation.incomplete,
+                    transport: self.transport_failure,
+                    unspecified,
+                    tail_failure: self.routing_tail_failure,
+                });
+            }
+        }
+    }
+    pub(super) fn associate_failure(&self, generation: u64) {
+        self.failover_generation
+            .store(generation, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Synchronously bind a newly emitted diagnostic to the fault observed by
+    /// this Protocol instance. A subsequent fault gets a new generation.
+    pub(super) fn report_failure(
+        &self,
+        emit: impl FnOnce() -> super::health_settlement::Reported,
+    ) -> super::health_settlement::Reported {
+        self.observe_routing_fault();
+        let generation = self.fault_reports.lock().ok().map(|state| state.generation);
+        let report = emit();
+        if report.queued {
+            if let Ok(mut state) = self.fault_reports.lock() {
+                if generation == Some(state.generation) {
+                    state.reported = state.generation;
+                }
+            }
+            if let Some(log) = &self.routing_log {
+                log.reported(
+                    self.failover_generation
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
+            }
+        }
+        report
+    }
     pub fn delivered_success(&self) -> bool {
         self.terminal() == Some(Terminal::Success)
             && self
@@ -897,6 +1032,7 @@ impl Protocol {
             || error.message.is_some()
             || (self.terminal_received
                 && !matches!(self.terminal(), Some(Terminal::Success | Terminal::Limited)));
+        self.observe_routing_fault();
         // Count upstream completion at observation time, independently of a
         // slow or closed downstream socket. The token can settle only once.
         if self.terminal_received {
@@ -1190,13 +1326,13 @@ impl Protocol {
             _ => self.transfer.downstream_error.clone(),
         };
     }
-    fn emit_interruption(&self) {
+    fn emit_interruption(&self) -> bool {
         use crate::events::{Action, Details, HealthScope, Level, Phase, Reason, Record};
         if self.downstream_close().is_some() {
-            return;
+            return false;
         }
         let Some((service, client, provider, model)) = &self.diagnostics else {
-            return;
+            return false;
         };
         let (local, message, status_only) = match self.end_reason.as_deref() {
             Some(code::GATEWAY_STOPPED) => (code::GATEWAY_STOPPED, "网关停止，已结束转发", true),
@@ -1225,7 +1361,7 @@ impl Protocol {
                     "下游响应消费者结束，关闭原因未确认",
                     false,
                 ),
-                _ => return,
+                _ => return false,
             },
         };
         // Closing an idle, successfully delivered WebSocket turn is expected.
@@ -1234,7 +1370,7 @@ impl Protocol {
             && self.transfer.terminal_handed_off
             && matches!(local, "DOWNSTREAM_CLOSED" | code::CLIENT_DISCONNECTED)
         {
-            return;
+            return false;
         }
         let mut record = Record::new(
             Some(*client),
@@ -1278,7 +1414,7 @@ impl Protocol {
             last_progress_ms: self.transfer.last_progress_ms,
             ..Default::default()
         };
-        service.emit(record);
+        service.emit_checked(record)
     }
     fn downstream_close(&self) -> Option<DownstreamClose> {
         if matches!(
@@ -1295,13 +1431,23 @@ impl Protocol {
             _ => None,
         }
     }
-    fn routing_settlement(&self) -> RoutingSettlement {
-        if self.routing_fault
-            || self.transport_failure
-            || self.status.is_some_and(|status| status >= 400)
-            || (self.transfer.downstream_error.is_some() && self.downstream_close().is_none())
-        {
-            RoutingSettlement::Failed
+    fn routing_settlement(&self, interruption_reported: bool) -> RoutingSettlement {
+        let Ok(reports) = self.fault_reports.lock() else {
+            return RoutingSettlement::Failed;
+        };
+        let upstream_fault = reports.observed.is_some();
+        let interruption = (self.transfer.downstream_error.is_some()
+            && self.downstream_close().is_none())
+            || matches!(
+                self.end_reason.as_deref(),
+                Some(code::CANCELLED | code::GATEWAY_STOPPED)
+            );
+        if upstream_fault || interruption {
+            if (!upstream_fault || reports.covered()) && (!interruption || interruption_reported) {
+                RoutingSettlement::ReportedFailure
+            } else {
+                RoutingSettlement::Failed
+            }
         } else if self.delivered_success() {
             RoutingSettlement::Delivered
         } else if self.downstream_close().is_some() {
@@ -1340,9 +1486,10 @@ impl Drop for Protocol {
         };
         self.finish(None, reason);
         self.snapshot_delivery();
-        self.emit_interruption();
+        self.observe_routing_fault();
+        let interruption_reported = self.emit_interruption();
         if let Some(log) = &self.routing_log {
-            log.settle(self.status, self.routing_settlement());
+            log.settle(self.status, self.routing_settlement(interruption_reported));
         }
         if let Some(usage) = &mut self.usage {
             usage.transfer(self.transfer.clone());

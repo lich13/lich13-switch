@@ -160,10 +160,7 @@ async fn delivered_terminal_does_not_hide_unknown_downstream_faults() {
             ..Default::default()
         });
         assert_eq!(page.error, None);
-        assert_eq!(
-            page.total, 1,
-            "downstream error {error} must retain routing evidence"
-        );
+        assert_eq!(page.total, 0, "独立 Warning 已保留，省去重复路由");
         let warnings = service.query(events::Filter {
             reason: Some(Reason::RequestInterrupted),
             ..Default::default()

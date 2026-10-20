@@ -8,6 +8,27 @@ use super::{
 use crate::events::{Action, Reason};
 use std::time::Duration;
 
+/// An ephemeral receipt bound to this emitted event. Cached health causes are
+/// deliberately unconfirmed; their presence cannot suppress a new failure.
+pub(super) struct Reported {
+    pub record: crate::events::Record,
+    pub queued: bool,
+}
+impl std::ops::Deref for Reported {
+    type Target = crate::events::Record;
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
+}
+impl From<crate::events::Record> for Reported {
+    fn from(record: crate::events::Record) -> Self {
+        Self {
+            record,
+            queued: false,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn observe_protocol(
     protocol: &super::protocol::Protocol,
@@ -41,16 +62,18 @@ pub(super) fn observe_protocol(
             details.phase = Some(crate::events::Phase::Stream);
             details.counted_failure =
                 Some(reason == Reason::Network || reason == Reason::UpstreamService);
-            permits.report(
-                g,
-                route,
-                model,
-                reason,
-                Action::Returned,
-                status,
-                attempt,
-                details,
-            );
+            protocol.report_failure(|| {
+                permits.report(
+                    g,
+                    route,
+                    model,
+                    reason,
+                    Action::Returned,
+                    status,
+                    attempt,
+                    details,
+                )
+            });
         }
     }
     settle_protocol(protocol, permits, cfg, status);
@@ -91,7 +114,7 @@ impl Permits {
         status: Option<u16>,
         attempt: usize,
         mut details: crate::events::Details,
-    ) -> crate::events::Record {
+    ) -> Reported {
         use crate::events::{HealthScope, Phase};
         self.scope = details.health_scope.unwrap_or_else(|| {
             if reason == Reason::Network
@@ -143,10 +166,13 @@ impl Permits {
         if let Some(p) = target {
             p.set_failure_event(event.clone());
         }
-        if let Some(service) = super::locks::published(&g.0.diagnostics).as_ref() {
-            service.emit(event.clone());
+        let queued = super::locks::published(&g.0.diagnostics)
+            .as_ref()
+            .is_some_and(|service| service.emit_checked(event.clone()));
+        Reported {
+            record: event,
+            queued,
         }
-        event
     }
 
     fn settle(&mut self, cfg: &Settings, outcome: Outcome) {

@@ -75,6 +75,9 @@ pub(super) struct Tracker {
     trace: Option<crate::usage::Trace>,
     evidence: Evidence,
     routing: Option<std::sync::Arc<super::routing_log::RoutingLog>>,
+    failure_generation: u64,
+    reported_generation: std::cell::Cell<u64>,
+    unreported: bool,
 }
 impl Tracker {
     pub(super) fn new(trace: Option<crate::usage::Trace>) -> Self {
@@ -82,6 +85,9 @@ impl Tracker {
             trace,
             evidence: Evidence::default(),
             routing: None,
+            failure_generation: 0,
+            reported_generation: std::cell::Cell::new(0),
+            unreported: false,
         }
     }
     pub fn diagnostics(&mut self, gateway: &Gateway) {
@@ -141,11 +147,39 @@ impl Tracker {
         self.publish();
     }
     pub fn failure(&mut self, failure: Failure) {
+        self.unreported |= self.failure_generation != self.reported_generation.get();
+        self.failure_generation = self.failure_generation.saturating_add(1);
         if let Some(routing) = &self.routing {
             routing.failure(failure);
         }
         self.evidence.failure = Some(failure);
         self.publish();
+    }
+    pub fn report_failure(
+        &self,
+        protocol: Option<&super::protocol::Protocol>,
+        emit: impl FnOnce() -> super::health_settlement::Reported,
+    ) -> super::health_settlement::Reported {
+        let report = if let Some(protocol) = protocol {
+            protocol.report_failure(emit)
+        } else {
+            emit()
+        };
+        if report.queued {
+            self.reported_generation.set(self.failure_generation);
+            if let Some(log) = &self.routing {
+                log.reported(self.failure_generation);
+            }
+        }
+        report
+    }
+    pub fn failure_generation(&self) -> u64 {
+        self.failure_generation
+    }
+    pub fn failure_reported(&self) -> bool {
+        self.failure_generation != 0
+            && self.failure_generation == self.reported_generation.get()
+            && !self.unreported
     }
     pub fn wait(&mut self, kind: WaitKind, seconds: u64) {
         self.evidence.wait = Some(Wait { kind, seconds });
@@ -154,7 +188,15 @@ impl Tracker {
     pub fn finish(&mut self, exit: Exit) {
         if !matches!(exit, Exit::Forwarded | Exit::ReplayUnsafe) {
             if let Some(log) = &self.routing {
-                log.finish(None, false);
+                if matches!(
+                    exit,
+                    Exit::NoEligibleProvider | Exit::AttemptsExhausted | Exit::PermanentRejection
+                ) && log.failure_reported()
+                {
+                    log.settle(None, super::protocol::RoutingSettlement::ReportedFailure);
+                } else {
+                    log.finish(None, false);
+                }
             }
         }
         if matches!(

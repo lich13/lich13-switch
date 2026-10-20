@@ -196,8 +196,11 @@ fn unchanged_continuation_does_not_create_a_second_routing_event() {
 
     let rows = wait_for(&events, |rows| rows.len() == 1);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].record.attempt, Some(1));
+    assert_eq!(rows[0].record.attempt, Some(2));
     assert_eq!(rows[0].record.count, 1);
+    let routing = rows[0].record.details.routing.as_ref().unwrap();
+    assert_eq!(routing.attempt_id.as_deref(), Some(ATTEMPT_TWO));
+    assert_eq!(routing.decision, RoutingDecision::ExistingThread);
 }
 
 #[test]

@@ -29,7 +29,7 @@ export const reasons = {
   network: "连接失败",
   rate_limit: "上游限流",
   capacity: "容量不足",
-  failover_exhausted: "换商失败",
+  failover_exhausted: "请求未完成",
   failover: "自动换商",
   circuit_open: "供应商熔断",
   recovered: "供应商恢复",

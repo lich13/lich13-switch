@@ -664,6 +664,7 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
         }
         let primary = g.view().providers[0].id.clone();
         let service = Service::new(t.path());
+        let mut notifications = service.subscribe();
         g.set_diagnostics(service.clone());
         start(&g, &t).await;
         let mut client = concurrency::responses_client(&g).await;
@@ -679,24 +680,38 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
         drop(client);
         until(|| {
             service
-                .query(Filter::default())
+                .query(Filter {
+                    reason: Some(Reason::UpstreamService),
+                    ..Filter::default()
+                })
                 .items
                 .iter()
-                .any(|event| event.reason == Reason::FailoverExhausted)
+                .any(|event| event.record.reason == Reason::UpstreamService)
         })
         .await;
         let events = service.query(Filter::default());
         assert!(events.error.is_none());
-        let terminal = events
+        let upstream: Vec<_> = events
             .items
             .iter()
-            .find(|event| event.reason == Reason::FailoverExhausted)
-            .unwrap();
+            .map(|event| &event.record)
+            .filter(|event| {
+                event.reason == Reason::UpstreamService
+                    && event.provider_id.as_deref() == Some(primary.as_str())
+            })
+            .collect();
+        assert_eq!(upstream.len(), 1, "the real handshake error stays visible");
+        let terminal = upstream[0].clone();
         assert_eq!(terminal.client_id, Some(ClientId::Codex));
         assert_eq!(terminal.provider_id.as_deref(), Some(primary.as_str()));
         assert_eq!(terminal.model.as_deref(), Some("fixture-model"));
         assert_eq!(terminal.action, Action::Returned);
+        assert_eq!(terminal.status, Some(502));
         assert_eq!(terminal.attempt, Some(1));
+        assert_eq!(
+            terminal.details.phase,
+            Some(crate::events::Phase::WsHandshake)
+        );
         if provider_count == 2 {
             g.report_diagnostics();
             until(|| {
@@ -704,7 +719,7 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
                     .query(Filter::default())
                     .items
                     .iter()
-                    .any(|event| event.reason == Reason::CircuitOpen)
+                    .any(|event| event.record.reason == Reason::CircuitOpen)
             })
             .await;
             let events = service.query(Filter::default());
@@ -712,11 +727,11 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
             let circuit = events
                 .items
                 .iter()
-                .find(|event| event.reason == Reason::CircuitOpen)
+                .find(|event| event.record.reason == Reason::CircuitOpen)
                 .unwrap();
-            assert_eq!(circuit.client_id, terminal.client_id);
-            assert_eq!(circuit.provider_id, terminal.provider_id);
-            assert_eq!(circuit.model, terminal.model);
+            assert_eq!(circuit.record.client_id, terminal.client_id);
+            assert_eq!(circuit.record.provider_id, terminal.provider_id);
+            assert_eq!(circuit.record.model, terminal.model);
         }
         until(|| {
             let view = g.view();
@@ -739,6 +754,49 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
             .iter()
             .skip(1)
             .all(|provider| provider.rpm_used == 0));
+
+        g.0.compaction.flush();
+        let marker = crate::events::Record::new(
+            Some(ClientId::Codex),
+            Some("fixture-v017-event-barrier"),
+            Some("fixture-v017-barrier-model"),
+            Reason::ProtocolError,
+            Action::Returned,
+            Some(599),
+            None,
+        );
+        let marker_id = marker.id.clone();
+        service.emit(marker);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let change = notifications
+                    .recv()
+                    .await
+                    .expect("diagnostic writer closed before event barrier");
+                assert!(change.error.is_none(), "diagnostic persistence failed");
+                if change
+                    .record
+                    .as_ref()
+                    .is_some_and(|record| record.id == marker_id)
+                {
+                    assert!(!change.notify, "synthetic barrier must not notify");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("diagnostic event queue did not settle");
+        let events = service.query(Filter::default());
+        assert!(events.error.is_none());
+        assert_eq!(
+            events
+                .items
+                .iter()
+                .filter(|event| event.record.reason == Reason::FailoverExhausted)
+                .count(),
+            0,
+            "queued upstream failure must not also emit an aggregate"
+        );
         g.stop().await.unwrap();
     }
 }

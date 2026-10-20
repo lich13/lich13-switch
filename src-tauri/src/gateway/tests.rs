@@ -1,4 +1,6 @@
 // End-to-end transport and configuration tests live here; all credentials are fixtures.
+#[path = "v02512_failover_tests.rs"]
+mod v02512_failover_tests;
 use super::*;
 #[test]
 fn codex_capacity_messages_are_detected_without_matching_normal_errors() {

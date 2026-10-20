@@ -375,13 +375,17 @@ impl Gateway {
 
     fn record_final(
         &self,
-        cause: Option<&crate::events::Record>,
+        cause: Option<&health_settlement::Reported>,
+        reported: bool,
         provider: Option<&str>,
         model: Option<&str>,
         status: Option<u16>,
         attempt: usize,
     ) {
         use crate::events::{Action, Reason};
+        if reported && cause.is_some_and(|cause| cause.queued) {
+            return;
+        }
         let mut event = crate::events::Record::new(
             Some(self.0.client),
             provider,
@@ -394,6 +398,10 @@ impl Gateway {
         if let Some(cause) = cause {
             event.details = cause.details.clone();
             event.details.cause_id = Some(cause.id.clone());
+        }
+        if cause.is_none() {
+            event.details.local_code = Some(code::NO_ELIGIBLE_PROVIDER.into());
+            event.details.message = Some("没有符合当前路由条件的可用供应商".into());
         }
         if let Some(service) = locks::published(&self.0.diagnostics).as_ref() {
             service.emit(event);

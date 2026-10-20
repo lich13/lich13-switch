@@ -62,7 +62,7 @@ impl Reason {
             Self::Network => "上游连接失败",
             Self::RateLimit => "上游限流",
             Self::Capacity => "模型容量不足",
-            Self::FailoverExhausted => "没有可用的替代供应商",
+            Self::FailoverExhausted => "请求未完成",
             Self::Failover => "自动换商",
             Self::CircuitOpen => "供应商已熔断",
             Self::Recovered => "供应商已恢复",
@@ -648,9 +648,14 @@ impl Service {
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
         self.events.subscribe()
     }
-    pub fn emit(&self, mut r: Record) {
+    pub fn emit(&self, r: Record) {
+        self.emit_checked(r);
+    }
+    /// Queue acceptance, not a durability acknowledgment. Gateway diagnostics
+    /// use this receipt only to avoid a second description of the same fault.
+    pub(crate) fn emit_checked(&self, mut r: Record) -> bool {
         if r.reason == Reason::Recovered {
-            return;
+            return false;
         }
         r.details = r.details.sanitized();
         if self.sender.try_send(Job::Append(Box::new(r))).is_err() {
@@ -661,7 +666,9 @@ impl Service {
                 error: j.error.clone(),
                 notify: false,
             });
+            return false;
         }
+        true
     }
     pub fn notification_accepted(&self, id: String) {
         // Failure to persist acknowledgment never blocks gateway delivery.
@@ -803,3 +810,6 @@ mod v016_tests {
         assert_eq!(loaded.records[0].details, Details::default());
     }
 }
+#[cfg(test)]
+#[path = "events_v02512_tests.rs"]
+mod v02512_tests;
