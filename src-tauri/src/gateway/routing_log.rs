@@ -1,5 +1,8 @@
 //! One bounded routing result per logical HTTP request or WebSocket round.
 #[cfg(test)]
+#[path = "routing_log_v02511_tests.rs"]
+mod v02511_tests;
+#[cfg(test)]
 #[path = "routing_log_v0259_tests.rs"]
 mod v0259_tests;
 
@@ -15,6 +18,8 @@ struct State {
     failure: Option<super::failover::Failure>,
     handled: bool,
     attempts: u32,
+    keep: bool,
+    downstream_closed_only: bool,
 }
 pub(super) struct RoutingLog {
     service: events::Service,
@@ -57,6 +62,18 @@ impl RoutingLog {
         {
             return;
         }
+        // Keep earlier routing work even when a later attempt replaces its
+        // context with an ordinary continuation on a consumed window.
+        state.keep |= decision != RoutingDecision::BoundaryConsumed
+            || evidence.restriction.is_some()
+            || matches!(
+                evidence.boundary,
+                Some(BoundaryState::Fresh | BoundaryState::Claimed)
+            )
+            || state
+                .record
+                .as_ref()
+                .is_some_and(|record| record.provider_id.as_deref() != Some(provider));
         let mut record = events::Record::new(
             Some(self.client),
             Some(provider),
@@ -136,6 +153,9 @@ impl RoutingLog {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        // Explicit outcomes describe work or an unsettled/unknown result;
+        // they must not be mistaken for the final protocol's quiet close.
+        state.keep = true;
         if let Some(routing) = state
             .record
             .as_mut()
@@ -144,15 +164,43 @@ impl RoutingLog {
             routing.outcome = outcome;
         }
     }
+    pub fn compaction_operation(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.keep = true;
+        }
+    }
     pub fn finish(&self, status: Option<u16>, success: bool) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        // Non-protocol callers use false for admission, cancellation or an
+        // unknown failure. A later downstream close cannot erase that fact.
+        state.keep |= !success;
         if let Some(record) = &mut state.record {
             record.status = status;
             if let Some(routing) = &mut record.details.routing {
                 if routing.outcome == events::RoutingOutcome::Attempted {
                     routing.outcome = if success {
+                        events::RoutingOutcome::OwnerPreserved
+                    } else {
+                        events::RoutingOutcome::Failed
+                    };
+                }
+            }
+        }
+    }
+    pub fn settle(&self, status: Option<u16>, result: super::protocol::RoutingSettlement) {
+        use super::protocol::RoutingSettlement;
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.keep |= result == RoutingSettlement::Failed;
+        state.downstream_closed_only = result == RoutingSettlement::DownstreamClosed;
+        if let Some(record) = &mut state.record {
+            record.status = status.or(record.status);
+            if let Some(routing) = &mut record.details.routing {
+                if routing.outcome == events::RoutingOutcome::Attempted {
+                    routing.outcome = if result == RoutingSettlement::Delivered {
                         events::RoutingOutcome::OwnerPreserved
                     } else {
                         events::RoutingOutcome::Failed
@@ -185,7 +233,19 @@ impl Drop for RoutingLog {
         };
         if !state.handled {
             if let Some(record) = state.record.take() {
-                self.service.emit(record);
+                let quiet = !state.keep
+                    && state.failure.is_none()
+                    && record.status.is_none_or(|status| status < 400)
+                    && record.details.routing.as_ref().is_some_and(|routing| {
+                        routing.decision == RoutingDecision::BoundaryConsumed
+                            && routing.failure.is_none()
+                            && (routing.outcome == events::RoutingOutcome::OwnerPreserved
+                                || (routing.outcome == events::RoutingOutcome::Failed
+                                    && state.downstream_closed_only))
+                    });
+                if !quiet {
+                    self.service.emit(record);
+                }
             }
         }
     }

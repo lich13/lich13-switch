@@ -144,53 +144,110 @@ fn assert_tail_usage(record: &UsageRecord) {
     assert!(!transfer.terminal_handed_off);
 }
 
-async fn assert_tail_interruption(events: &EventService) {
-    let record = wait_for_interruption(events).await;
-    assert_eq!(record.reason, EventReason::RequestInterrupted);
-    assert_eq!(record.action, Action::NotRetried);
-    assert_eq!(record.details.counted_failure, Some(false));
-    let delivery = record
-        .details
-        .delivery
-        .as_ref()
-        .expect("interruption should preserve delivery evidence");
-    assert!(delivery.terminal_received);
-    assert!(!delivery.terminal_handed_off);
+async fn assert_tail_interruption(
+    events: &EventService,
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::events::Change>,
+    events_dir: &std::path::Path,
+    usage: &UsageRecord,
+) {
+    let attempt = usage.final_attempt().expect("tail usage attempt");
+    let transfer = attempt.transfer.as_ref().expect("tail delivery evidence");
+    assert!(transfer.downstream_error.is_some());
+    let diagnostic = super::assert_downstream_diagnostic_policy(
+        events,
+        receiver,
+        events_dir,
+        transfer.downstream_error.as_deref(),
+    )
+    .await;
+    if let Some(record) = diagnostic {
+        assert_eq!(record.reason, EventReason::RequestInterrupted);
+        assert_eq!(record.action, Action::NotRetried);
+        assert_eq!(record.details.counted_failure, Some(false));
+        let delivery = record
+            .details
+            .delivery
+            .as_ref()
+            .expect("warning should preserve delivery evidence");
+        assert!(delivery.terminal_received);
+        assert!(!delivery.terminal_handed_off);
+    }
 }
 
-async fn assert_interruption_without_terminal(events: &EventService) {
-    let record = wait_for_interruption(events).await;
-    assert_eq!(record.reason, EventReason::RequestInterrupted);
-    assert_eq!(record.action, Action::NotRetried);
-    assert_eq!(record.details.counted_failure, Some(false));
-    let delivery = record
-        .details
-        .delivery
+async fn assert_interruption_without_terminal(
+    events: &EventService,
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::events::Change>,
+    events_dir: &std::path::Path,
+    usage: &UsageRecord,
+) {
+    let attempt = usage.final_attempt().expect("canceled usage attempt");
+    let end = attempt.end.as_ref().expect("canceled usage end metadata");
+    assert!(!end.terminal_received);
+    let transfer = attempt
+        .transfer
         .as_ref()
-        .expect("interruption should preserve delivery evidence");
-    assert!(!delivery.terminal_received);
-    assert!(!delivery.terminal_handed_off);
+        .expect("canceled usage transfer evidence");
+    assert!(transfer.downstream_error.is_some());
+    assert!(transfer.downstream_bytes > 0);
+    assert!(!transfer.terminal_handed_off);
+    let diagnostic = super::assert_downstream_diagnostic_policy(
+        events,
+        receiver,
+        events_dir,
+        transfer.downstream_error.as_deref(),
+    )
+    .await;
+    if let Some(record) = diagnostic {
+        assert_eq!(record.reason, EventReason::RequestInterrupted);
+        assert_eq!(record.action, Action::NotRetried);
+        assert_eq!(record.details.counted_failure, Some(false));
+        let delivery = record
+            .details
+            .delivery
+            .as_ref()
+            .expect("warning should preserve delivery evidence");
+        assert!(!delivery.terminal_received);
+        assert!(!delivery.terminal_handed_off);
+    }
 }
 
-async fn assert_gateway_stop_interruption(events: &EventService) {
-    let record = wait_for_interruption(events).await;
-    assert_eq!(record.reason, EventReason::RequestInterrupted);
-    assert!(matches!(
-        record.details.local_code.as_deref(),
-        Some(
-            "CLIENT_DISCONNECTED"
-                | "DOWNSTREAM_PEER_RESET"
-                | "DOWNSTREAM_CLOSED"
-                | "GATEWAY_STOPPED"
-        )
-    ));
-    assert_eq!(record.details.counted_failure, Some(false));
-    let delivery = record
-        .details
-        .delivery
+async fn assert_gateway_stop_usage(
+    events: &EventService,
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::events::Change>,
+    events_dir: &std::path::Path,
+    usage: &UsageRecord,
+) {
+    let attempt = usage.final_attempt().expect("gateway-stop usage attempt");
+    let end = attempt.end.as_ref().expect("gateway-stop end metadata");
+    assert_eq!(end.cause, EndCause::ClientDisconnected);
+    assert!(!end.terminal_received);
+    let transfer = attempt
+        .transfer
         .as_ref()
-        .expect("gateway stop should preserve delivery evidence");
-    assert!(!delivery.terminal_received);
+        .expect("gateway-stop transfer evidence");
+    assert!(transfer.downstream_error.is_some());
+    // A settled WebSocket tail can omit its optional connection snapshot. The
+    // caller verifies the real upstream socket closure within FAST_RELEASE.
+    assert!(!transfer.terminal_handed_off);
+    let diagnostic = super::assert_downstream_diagnostic_policy(
+        events,
+        receiver,
+        events_dir,
+        transfer.downstream_error.as_deref(),
+    )
+    .await;
+    if let Some(record) = diagnostic {
+        assert_eq!(record.reason, EventReason::RequestInterrupted);
+        assert_eq!(record.details.counted_failure, Some(false));
+        assert!(
+            !record
+                .details
+                .delivery
+                .as_ref()
+                .expect("warning should preserve delivery evidence")
+                .terminal_received
+        );
+    }
 }
 
 #[tokio::test]
@@ -226,6 +283,7 @@ async fn http_cancel_tail_keeps_matching_terminal_usage_and_rejects_wrong_respon
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let (mut response, sender, task) = super::super::tests::request_with_reset(
         &gateway,
         "/v1/responses",
@@ -260,8 +318,14 @@ async fn http_cancel_tail_keeps_matching_terminal_usage_and_rejects_wrong_respon
     upstream_task.await.unwrap();
     let record = wait_for_usage_record(&usage).await;
     assert_tail_usage(&record);
-    assert_tail_interruption(&events).await;
     assert_neutral_health(&gateway).await;
+    assert_tail_interruption(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -334,6 +398,7 @@ async fn websocket_cancel_tail_keeps_matching_terminal_usage_and_releases_upstre
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let mut client = downstream_websocket(&gateway).await;
     client
         .send(yawc::Frame::text(CREATE.to_owned()))
@@ -373,8 +438,14 @@ async fn websocket_cancel_tail_keeps_matching_terminal_usage_and_releases_upstre
     upstream_task.await.unwrap();
     let record = wait_for_usage_record(&usage).await;
     assert_tail_usage(&record);
-    assert_tail_interruption(&events).await;
     assert_neutral_health(&gateway).await;
+    assert_tail_interruption(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -425,6 +496,7 @@ async fn http_cancel_tail_with_continuous_heartbeat_still_closes_within_two_seco
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let (mut response, sender, task) = super::super::tests::request_with_reset(
         &gateway,
         "/v1/responses",
@@ -459,7 +531,14 @@ async fn http_cancel_tail_with_continuous_heartbeat_still_closes_within_two_seco
         attempt.end.as_ref().map(|end| end.cause),
         Some(EndCause::Completed)
     );
-    assert_interruption_without_terminal(&events).await;
+    assert_neutral_health(&gateway).await;
+    assert_interruption_without_terminal(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -536,6 +615,7 @@ async fn websocket_cancel_tail_with_continuous_content_and_heartbeat_closes_with
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let mut client = downstream_websocket(&gateway).await;
     client
         .send(yawc::Frame::text(CREATE.to_owned()))
@@ -576,7 +656,14 @@ async fn websocket_cancel_tail_with_continuous_content_and_heartbeat_closes_with
         attempt.end.as_ref().map(|end| end.cause),
         Some(EndCause::Completed)
     );
-    assert_interruption_without_terminal(&events).await;
+    assert_neutral_health(&gateway).await;
+    assert_interruption_without_terminal(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -607,6 +694,7 @@ async fn http_cancel_tail_upstream_read_error_keeps_disconnected_evidence() {
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let (mut response, sender, task) = super::super::tests::request_with_reset(
         &gateway,
         "/v1/responses",
@@ -640,7 +728,14 @@ async fn http_cancel_tail_upstream_read_error_keeps_disconnected_evidence() {
     let transfer = attempt.transfer.as_ref().unwrap();
     assert_eq!(transfer.upstream_end.as_deref(), Some("DISCONNECTED"));
     assert!(!transfer.upstream_eof);
-    assert_interruption_without_terminal(&events).await;
+    assert_neutral_health(&gateway).await;
+    assert_interruption_without_terminal(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -682,6 +777,7 @@ async fn websocket_cancel_tail_upstream_read_error_keeps_disconnected_evidence()
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let mut client = downstream_websocket(&gateway).await;
     client
         .send(yawc::Frame::text(CREATE.to_owned()))
@@ -724,7 +820,14 @@ async fn websocket_cancel_tail_upstream_read_error_keeps_disconnected_evidence()
     let transfer = attempt.transfer.as_ref().unwrap();
     assert_eq!(transfer.upstream_end.as_deref(), Some("DISCONNECTED"));
     assert!(!transfer.upstream_eof);
-    assert_interruption_without_terminal(&events).await;
+    assert_neutral_health(&gateway).await;
+    assert_interruption_without_terminal(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -751,6 +854,7 @@ async fn http_gateway_stop_ends_tail_preserves_client_disconnect() {
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let (mut response, sender, task) = super::super::tests::request_with_reset(
         &gateway,
         "/v1/responses",
@@ -780,7 +884,14 @@ async fn http_gateway_stop_ends_tail_preserves_client_disconnect() {
         attempt.end.as_ref().map(|end| end.cause),
         Some(EndCause::ClientDisconnected)
     );
-    assert_gateway_stop_interruption(&events).await;
+    assert_neutral_health(&gateway).await;
+    assert_gateway_stop_usage(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -823,6 +934,7 @@ async fn websocket_gateway_stop_ends_tail_preserves_client_disconnect() {
 
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{upstream_port}/v1")]).await;
     let (usage, events) = attach_observers(&dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let mut client = downstream_websocket(&gateway).await;
     client
         .send(yawc::Frame::text(CREATE.to_owned()))
@@ -857,5 +969,12 @@ async fn websocket_gateway_stop_ends_tail_preserves_client_disconnect() {
         attempt.end.as_ref().map(|end| end.cause),
         Some(EndCause::ClientDisconnected)
     );
-    assert_gateway_stop_interruption(&events).await;
+    assert_neutral_health(&gateway).await;
+    assert_gateway_stop_usage(
+        &events,
+        &mut diagnostic_events,
+        &dir.path().join("events"),
+        &record,
+    )
+    .await;
 }

@@ -608,8 +608,9 @@ fn legacy_ledger_preserves_starts_and_adds_a_61_second_initialization_guard() {
     let init = ledger.legacy_until.expect("legacy initialization guard");
     assert!(init.at > tokio::time::Instant::now());
     assert!(init.at.duration_since(tokio::time::Instant::now()) <= WINDOW);
+    // One send does not fill a two-RPM send window, isolating the initialization guard.
     assert_eq!(
-        ledger.gate(PROVIDER, 1, 0).unwrap().1,
+        ledger.gate(PROVIDER, 2, 0).unwrap().1,
         crate::events::RpmWaitReason::CompletionWindow
     );
 }

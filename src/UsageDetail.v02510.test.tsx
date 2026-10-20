@@ -5,7 +5,9 @@ import type { UsageRecord } from "./usage-types";
 
 function record(): UsageRecord {
   return {
-    id: "fixture-delivery",
+    // Historical usage rows retain delivery evidence even when new expected
+    // downstream-close diagnostics are silent in v0.25.11.
+    id: "fixture-v02510-legacy-delivery",
     client: "codex",
     source: "proxy",
     startedAt: 1000,
@@ -58,7 +60,7 @@ function record(): UsageRecord {
   };
 }
 
-it("keeps the real terminal and failed delivery as independent facts", () => {
+it("keeps historical v0.25.10 terminal and failed delivery facts independent", () => {
   render(
     <Detail record={record()} name={(id) => id ?? ""} onClose={vi.fn()} />,
   );
@@ -67,7 +69,7 @@ it("keeps the real terminal and failed delivery as independent facts", () => {
   expect(screen.getByText("HTTP 200")).toBeInTheDocument();
 });
 
-it("does not invent failed delivery when a legacy record has no transfer evidence", () => {
+it("does not invent failed delivery when a historical record has no transfer evidence", () => {
   const value = record();
   delete value.attempts[0].transfer;
   render(<Detail record={value} name={(id) => id ?? ""} onClose={vi.fn()} />);

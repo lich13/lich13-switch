@@ -6,12 +6,17 @@
 use super::{
     protocol::{Protocol, Terminal},
     wire_progress::Activity,
-    Gateway,
+    ClientId, Gateway,
 };
 use crate::events::{
-    Category, Change, Filter, Level, Reason, Record as EventRecord, Service as EventService,
+    Action, Category, Change, DeliveryEvidence, Filter, Level, Reason, Record as EventRecord,
+    Service as EventService,
 };
-use std::{io::ErrorKind, time::Duration};
+use crate::usage::{
+    model::{EndCause, Filter as UsageFilter, Record as UsageRecord},
+    Service as UsageService,
+};
+use std::{io::ErrorKind, sync::atomic::Ordering, time::Duration};
 
 const PROVIDER_ID: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -58,35 +63,45 @@ fn category_for(events: &EventService, id: &str) -> Category {
     events.detail(id).unwrap().category
 }
 
-fn assert_status_record(fixture: &Fixture, record: &EventRecord, local_code: &str) {
-    assert_eq!(record.reason, Reason::RequestInterrupted);
-    assert_eq!(record.level, Level::Info, "{local_code}");
-    assert_eq!(category_for(&fixture.events, &record.id), Category::Status);
-    assert_eq!(record.status, Some(200));
-    assert_eq!(record.details.local_code.as_deref(), Some(local_code));
-    assert_eq!(record.details.counted_failure, Some(false));
-    let message = record.details.message.as_deref().unwrap_or_default();
-    assert!(!message.contains("客户端已取消"), "{message}");
-    assert!(
-        !message.is_empty(),
-        "{local_code} should keep a safe message"
-    );
+async fn next_usage_record(
+    service: &UsageService,
+    receiver: &mut tokio::sync::broadcast::Receiver<()>,
+) -> UsageRecord {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let page = service
+                .query(|store| store.logs(&UsageFilter::default()))
+                .expect("usage database query should succeed");
+            if let Some(record) = page.rows.into_iter().next() {
+                assert_eq!(page.total, 1);
+                assert!(service.state().error.is_none());
+                return record;
+            }
+            receiver
+                .recv()
+                .await
+                .expect("usage writer notification channel closed");
+        }
+    })
+    .await
+    .expect("synthetic usage record did not settle")
 }
 
 #[tokio::test]
-async fn expected_downstream_ends_are_info_statuses_without_claiming_active_cancel() {
+async fn explicit_downstream_ends_keep_delivery_bytes_without_new_diagnostics() {
     let fixture = Fixture::new();
     let mut receiver = fixture.events.subscribe();
 
     let cases = [
-        ("DOWNSTREAM_CLOSED", "closed"),
-        ("DOWNSTREAM_PEER_RESET", "reset"),
-        ("DOWNSTREAM_WRITE_FAILED", "broken_pipe"),
-        ("DOWNSTREAM_CANCELLED", "transport_cancel"),
+        ("DOWNSTREAM_CLOSED", "closed", 5),
+        ("DOWNSTREAM_PEER_RESET", "reset", 6),
+        ("DOWNSTREAM_WRITE_FAILED", "broken_pipe", 7),
+        ("DOWNSTREAM_CANCELLED", "transport_cancel", 4),
     ];
-    for (local_code, kind) in cases {
+    for (expected_code, kind, expected_error) in cases {
         let mut protocol = fixture.protocol();
         protocol.delivery().handed(11, false);
+        let delivery = protocol.delivery();
         match kind {
             "closed" => protocol.downstream_closed(&Activity::default(), false),
             "reset" => {
@@ -109,14 +124,29 @@ async fn expected_downstream_ends_are_info_statuses_without_claiming_active_canc
             _ => unreachable!(),
         }
         drop(protocol);
-
-        let record = next_record(&mut receiver).await;
-        assert_status_record(&fixture, &record, local_code);
-        let evidence = record.details.delivery.expect("delivery evidence");
-        assert_eq!(evidence.handed_bytes, 11, "{local_code}");
-        assert!(!evidence.terminal_received, "{local_code}");
-        assert!(!evidence.terminal_handed_off, "{local_code}");
+        assert_eq!(delivery.bytes.load(Ordering::Acquire), 11, "{kind}");
+        assert_eq!(
+            delivery.error.load(Ordering::Acquire),
+            expected_error,
+            "{kind}"
+        );
+        assert!(!delivery.terminal.load(Ordering::Acquire), "{kind}");
+        let actual_code = match delivery.error.load(Ordering::Acquire) {
+            4 => "DOWNSTREAM_CANCELLED",
+            5 => "DOWNSTREAM_CLOSED",
+            6 => "DOWNSTREAM_PEER_RESET",
+            7 => "DOWNSTREAM_WRITE_FAILED",
+            other => panic!("unexpected downstream code {other} for {kind}"),
+        };
+        assert_eq!(actual_code, expected_code, "{kind}");
     }
+
+    super::diagnostic_test_support::assert_no_interruptions_after_barrier(
+        &fixture.events,
+        &mut receiver,
+        &fixture._dir.path().join("events"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -159,40 +189,59 @@ async fn timeout_protocol_and_unknown_io_remain_warning_records() {
 }
 
 #[tokio::test]
-async fn observed_terminal_without_handoff_keeps_distinct_delivery_reason_and_evidence() {
+async fn observed_terminal_without_handoff_keeps_usage_evidence_without_new_diagnostic() {
     let fixture = Fixture::new();
     let mut receiver = fixture.events.subscribe();
+    let usage = UsageService::new(&fixture._dir.path().join("usage"));
+    let mut usage_receiver = usage.subscribe();
     let terminal =
-        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-response\"}}\n\n";
+        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-response\",\"model\":\"fixture-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":42,\"output_tokens\":17}}}\n\n";
 
+    let trace = usage.begin("codex", Some("fixture-model"));
     let mut protocol = fixture.protocol();
+    protocol.attach_usage(trace.attempt(PROVIDER_ID, true, "http"));
     protocol.feed(terminal);
     assert_eq!(protocol.terminal(), Some(Terminal::Success));
     assert!(protocol.succeeded());
-    protocol.delivery().handed(17, false);
+    let delivery = protocol.delivery();
+    delivery.handed(17, false);
     let activity = Activity::default();
     activity.failed(
         &std::io::Error::new(ErrorKind::BrokenPipe, "fixture broken pipe"),
         true,
     );
     protocol.downstream_closed(&activity, true);
+    assert_eq!(delivery.error.load(Ordering::Acquire), 7);
     drop(protocol);
+    drop(trace);
 
-    let record = next_record(&mut receiver).await;
-    assert_status_record(&fixture, &record, "DOWNSTREAM_WRITE_FAILED");
+    assert_eq!(delivery.bytes.load(Ordering::Acquire), 17);
+    assert!(!delivery.terminal.load(Ordering::Acquire));
+    let usage_record = next_usage_record(&usage, &mut usage_receiver).await;
+    let attempt = usage_record.final_attempt().expect("one fixture attempt");
     assert_eq!(
-        record.details.message.as_deref(),
-        Some("下游管道已关闭，未确认客户端主动取消")
+        attempt.end.as_ref().map(|end| end.cause),
+        Some(EndCause::Completed)
     );
-    let evidence = record.details.delivery.expect("delivery evidence");
-    assert_eq!(evidence.upstream_bytes, terminal.len() as u64);
-    assert_eq!(evidence.handed_bytes, 17);
-    assert!(evidence.terminal_received);
-    assert!(!evidence.terminal_handed_off);
+    assert!(attempt.end.as_ref().unwrap().terminal_received);
+    let transfer = attempt.transfer.as_ref().expect("usage transfer evidence");
+    assert_eq!(transfer.upstream_bytes, terminal.len() as u64);
+    assert_eq!(transfer.downstream_bytes, 17);
+    assert!(!transfer.terminal_handed_off);
+    assert_eq!(
+        transfer.downstream_error.as_deref(),
+        Some("DOWNSTREAM_WRITE_FAILED")
+    );
+    super::diagnostic_test_support::assert_no_interruptions_after_barrier(
+        &fixture.events,
+        &mut receiver,
+        &fixture._dir.path().join("events"),
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn interruption_records_merge_only_same_delivery_code_and_keep_latest_evidence() {
+async fn direct_event_service_still_merges_historical_delivery_evidence() {
     let fixture = Fixture::new();
     let mut receiver = fixture.events.subscribe();
 
@@ -201,19 +250,28 @@ async fn interruption_records_merge_only_same_delivery_code_and_keep_latest_evid
         ("DOWNSTREAM_CLOSED", 7),
         ("DOWNSTREAM_PEER_RESET", 11),
     ] {
-        let mut protocol = fixture.protocol();
-        protocol.delivery().handed(handed, false);
-        if code == "DOWNSTREAM_CLOSED" {
-            protocol.downstream_closed(&Activity::default(), false);
-        } else {
-            let activity = Activity::default();
-            activity.failed(
-                &std::io::Error::new(ErrorKind::ConnectionReset, "fixture reset"),
-                false,
-            );
-            protocol.downstream_closed(&activity, false);
-        }
-        drop(protocol);
+        let mut record = EventRecord::new(
+            Some(ClientId::Codex),
+            Some(PROVIDER_ID),
+            Some("fixture-model"),
+            Reason::RequestInterrupted,
+            Action::NotRetried,
+            Some(200),
+            None,
+        );
+        record.level = Level::Info;
+        record.details.local_code = Some(code.into());
+        record.details.counted_failure = Some(false);
+        record.details.delivery = Some(DeliveryEvidence {
+            duration_ms: 10,
+            upstream_bytes: 20,
+            handed_bytes: handed,
+            terminal_received: false,
+            terminal_handed_off: false,
+            request_hash: None,
+            response_hash: None,
+        });
+        fixture.events.emit(record);
         let _ = next_record(&mut receiver).await;
     }
 
@@ -226,7 +284,14 @@ async fn interruption_records_merge_only_same_delivery_code_and_keep_latest_evid
         .items
         .iter()
         .find(|item| item.details.local_code.as_deref() == Some("DOWNSTREAM_CLOSED"))
-        .expect("merged closed record");
+        .expect("merged historical close record");
     assert_eq!(closed.count, 2);
     assert_eq!(closed.details.delivery.as_ref().unwrap().handed_bytes, 7);
+    let reset = page
+        .items
+        .iter()
+        .find(|item| item.details.local_code.as_deref() == Some("DOWNSTREAM_PEER_RESET"))
+        .expect("distinct historical reset record");
+    assert_eq!(reset.count, 1);
+    assert_eq!(reset.details.delivery.as_ref().unwrap().handed_bytes, 11);
 }

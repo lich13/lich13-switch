@@ -38,6 +38,19 @@ pub enum Terminal {
     Cancelled,
     Unknown,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RoutingSettlement {
+    Delivered,
+    DownstreamClosed,
+    Failed,
+}
+#[derive(Clone, Copy)]
+enum DownstreamClose {
+    Closed,
+    Reset,
+    BrokenPipe,
+    Cancelled,
+}
 pub fn identifier(v: Option<&Value>) -> Option<String> {
     v.and_then(Value::as_str)
         .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
@@ -592,6 +605,7 @@ pub struct Protocol {
         Option<String>,
     )>,
     end_reason: Option<String>,
+    routing_fault: bool,
 }
 impl Protocol {
     pub fn new(stream: bool) -> Self {
@@ -624,6 +638,7 @@ impl Protocol {
             downstream: None,
             diagnostics: None,
             end_reason: None,
+            routing_fault: false,
         }
     }
     pub(super) fn attach_rpm(&mut self, completion: Option<super::admission::Completion>) {
@@ -684,6 +699,7 @@ impl Protocol {
             .any(Option::is_some)
     }
     pub fn finish_usage_tail(&mut self, upstream_end: &str) {
+        self.routing_fault |= matches!(upstream_end, "upstream_read_failed" | "gateway_stopping");
         self.finish(None, code::CLIENT_DISCONNECTED);
         self.delivery.event(upstream_end);
         match upstream_end {
@@ -722,6 +738,7 @@ impl Protocol {
         self.timeout_after(phase, seconds, self.last_progress.elapsed());
     }
     pub fn timeout_after(&mut self, phase: &str, seconds: u64, silent: std::time::Duration) {
+        self.routing_fault = true;
         self.transfer.timeout_phase = Some(phase.into());
         self.transfer.timeout_seconds = Some(seconds);
         self.transfer.last_progress_ms = Some(silent.as_millis().min(u64::MAX as u128) as u64);
@@ -789,6 +806,9 @@ impl Protocol {
         if let (Some(log), Some(decision), Some((_, _, provider, model))) =
             (&self.routing_log, self.routing_decision, &self.diagnostics)
         {
+            if self.compaction_operation {
+                log.compaction_operation();
+            }
             log.context(
                 provider,
                 model.as_deref(),
@@ -866,6 +886,17 @@ impl Protocol {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
     fn record_usage(&mut self) {
+        // Diagnostic retention is sticky across observations. A later success
+        // or downstream close must not hide an earlier upstream/parse fault.
+        let error = &self.observation.error;
+        self.routing_fault |= self.observation.incomplete
+            || error.upstream_code.is_some()
+            || error.upstream_reason.is_some()
+            || error.upstream_type.is_some()
+            || error.local_code.is_some()
+            || error.message.is_some()
+            || (self.terminal_received
+                && !matches!(self.terminal(), Some(Terminal::Success | Terminal::Limited)));
         // Count upstream completion at observation time, independently of a
         // slow or closed downstream socket. The token can settle only once.
         if self.terminal_received {
@@ -957,6 +988,7 @@ impl Protocol {
         self.transport_failure
     }
     pub fn finish(&mut self, status: Option<u16>, reason: &str) {
+        self.routing_fault |= !matches!(reason, code::OK | code::CLIENT_DISCONNECTED | "UNSETTLED");
         if self.finished {
             if matches!(
                 reason,
@@ -1160,6 +1192,9 @@ impl Protocol {
     }
     fn emit_interruption(&self) {
         use crate::events::{Action, Details, HealthScope, Level, Phase, Reason, Record};
+        if self.downstream_close().is_some() {
+            return;
+        }
         let Some((service, client, provider, model)) = &self.diagnostics else {
             return;
         };
@@ -1167,16 +1202,6 @@ impl Protocol {
             Some(code::GATEWAY_STOPPED) => (code::GATEWAY_STOPPED, "网关停止，已结束转发", true),
             Some(code::CANCELLED) => (code::CANCELLED, "收到明确取消指令，已结束转发", true),
             _ => match self.transfer.downstream_error.as_deref() {
-                Some("DOWNSTREAM_PEER_RESET") => (
-                    "DOWNSTREAM_PEER_RESET",
-                    "下游连接被重置，未确认客户端主动取消",
-                    true,
-                ),
-                Some("DOWNSTREAM_WRITE_FAILED") => (
-                    "DOWNSTREAM_WRITE_FAILED",
-                    "下游管道已关闭，未确认客户端主动取消",
-                    true,
-                ),
                 Some("DOWNSTREAM_PROTOCOL_ERROR") => {
                     ("DOWNSTREAM_PROTOCOL_ERROR", "下游协议处理失败", false)
                 }
@@ -1189,16 +1214,6 @@ impl Protocol {
                     "DOWNSTREAM_CONNECTION_ERROR",
                     "下游连接异常，关闭原因未确认",
                     false,
-                ),
-                Some("DOWNSTREAM_CANCELLED") => (
-                    "DOWNSTREAM_CANCELLED",
-                    "HTTP 传输被取消，未确认客户端主动取消",
-                    true,
-                ),
-                Some("DOWNSTREAM_CLOSED") => (
-                    "DOWNSTREAM_CLOSED",
-                    "下游连接关闭，未确认客户端主动取消",
-                    true,
                 ),
                 Some("RESPONSE_BODY_DROPPED") => (
                     "RESPONSE_BODY_DROPPED",
@@ -1265,6 +1280,36 @@ impl Protocol {
         };
         service.emit(record);
     }
+    fn downstream_close(&self) -> Option<DownstreamClose> {
+        if matches!(
+            self.end_reason.as_deref(),
+            Some(code::CANCELLED | code::GATEWAY_STOPPED)
+        ) {
+            return None;
+        }
+        match self.transfer.downstream_error.as_deref() {
+            Some("DOWNSTREAM_CLOSED") => Some(DownstreamClose::Closed),
+            Some("DOWNSTREAM_PEER_RESET") => Some(DownstreamClose::Reset),
+            Some("DOWNSTREAM_WRITE_FAILED") => Some(DownstreamClose::BrokenPipe),
+            Some("DOWNSTREAM_CANCELLED") => Some(DownstreamClose::Cancelled),
+            _ => None,
+        }
+    }
+    fn routing_settlement(&self) -> RoutingSettlement {
+        if self.routing_fault
+            || self.transport_failure
+            || self.status.is_some_and(|status| status >= 400)
+            || (self.transfer.downstream_error.is_some() && self.downstream_close().is_none())
+        {
+            RoutingSettlement::Failed
+        } else if self.delivered_success() {
+            RoutingSettlement::Delivered
+        } else if self.downstream_close().is_some() {
+            RoutingSettlement::DownstreamClosed
+        } else {
+            RoutingSettlement::Failed
+        }
+    }
 }
 impl Drop for Protocol {
     fn drop(&mut self) {
@@ -1297,7 +1342,7 @@ impl Drop for Protocol {
         self.snapshot_delivery();
         self.emit_interruption();
         if let Some(log) = &self.routing_log {
-            log.finish(self.status, self.delivered_success());
+            log.settle(self.status, self.routing_settlement());
         }
         if let Some(usage) = &mut self.usage {
             usage.transfer(self.transfer.clone());

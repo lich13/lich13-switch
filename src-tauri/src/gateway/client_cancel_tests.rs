@@ -2,7 +2,7 @@
 use super::{Edit, Gateway};
 use crate::{
     events::{
-        Action, Category, ClassifiedRecord, Filter as EventFilter, Reason as EventReason,
+        Action, Category, ClassifiedRecord, Filter as EventFilter, Level, Reason as EventReason,
         Service as EventService,
     },
     usage::{
@@ -152,6 +152,46 @@ async fn wait_for_interruption(service: &EventService) -> ClassifiedRecord {
     .expect("downstream interruption diagnostic was not written")
 }
 
+async fn assert_downstream_diagnostic_policy(
+    service: &EventService,
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::events::Change>,
+    events_dir: &std::path::Path,
+    downstream_error: Option<&str>,
+) -> Option<ClassifiedRecord> {
+    match downstream_error {
+        Some(
+            "DOWNSTREAM_CLOSED"
+            | "DOWNSTREAM_PEER_RESET"
+            | "DOWNSTREAM_WRITE_FAILED"
+            | "DOWNSTREAM_CANCELLED",
+        )
+        | None => {
+            super::diagnostic_test_support::assert_no_interruptions_after_barrier(
+                service, receiver, events_dir,
+            )
+            .await;
+            None
+        }
+        Some(
+            "CLIENT_DISCONNECTED"
+            | "RESPONSE_BODY_DROPPED"
+            | "DOWNSTREAM_CONNECTION_ERROR"
+            | "DOWNSTREAM_PROTOCOL_ERROR"
+            | "DOWNSTREAM_WRITE_TIMEOUT",
+        ) => {
+            let record = wait_for_interruption(service).await;
+            assert_eq!(record.reason, EventReason::RequestInterrupted);
+            assert_eq!(record.level, Level::Warning);
+            assert_eq!(record.category, Category::OrdinaryError);
+            assert_eq!(record.details.local_code.as_deref(), downstream_error);
+            assert_eq!(record.details.counted_failure, Some(false));
+            assert!(!record.reason.notifiable(record.action));
+            Some(record)
+        }
+        Some(code) => panic!("unclassified fixture downstream error: {code}"),
+    }
+}
+
 async fn assert_neutral_health(gateway: &Gateway) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while gateway
@@ -276,6 +316,7 @@ async fn rst_before_upstream_headers_closes_the_real_upstream_socket_promptly() 
     ])
     .await;
     let (usage, events) = attach_observers(&_dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let client = downstream_http(&gateway, REQUEST_BODY).await;
     tokio::time::timeout(WAIT, seen_rx)
         .await
@@ -310,21 +351,14 @@ async fn rst_before_upstream_headers_closes_the_real_upstream_socket_promptly() 
         transfer.map_or(0, |transfer| transfer.downstream_bytes),
         transfer.and_then(|transfer| transfer.downstream_error.as_deref())
     );
-    let interruptions = interruption_records(&events);
-    eprintln!(
-        "HTTP pre-header RST interruption diagnostic: {:?}",
-        interruptions.first().map(|record| (
-            record.reason,
-            record.action,
-            record.details.local_code.as_deref(),
-            record.details.counted_failure,
-            record.category
-        ))
-    );
-    assert!(interruptions
-        .iter()
-        .all(|record| record.details.counted_failure == Some(false)));
     assert_neutral_health(&gateway).await;
+    let _ = assert_downstream_diagnostic_policy(
+        &events,
+        &mut diagnostic_events,
+        &_dir.path().join("events"),
+        transfer.and_then(|transfer| transfer.downstream_error.as_deref()),
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -365,6 +399,7 @@ async fn rst_after_two_sse_events_closes_the_real_upstream_without_retry() {
     ])
     .await;
     let (usage, events) = attach_observers(&_dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let (mut response, sender, task) = super::tests::request_with_reset(
         &gateway,
         "/v1/responses",
@@ -441,20 +476,14 @@ async fn rst_after_two_sse_events_closes_the_real_upstream_without_retry() {
         transfer.downstream_bytes,
         transfer.downstream_error
     );
-    let diagnostic = wait_for_interruption(&events).await;
-    assert_eq!(diagnostic.reason, EventReason::RequestInterrupted);
-    assert_eq!(diagnostic.category, Category::Status);
-    assert_eq!(diagnostic.action, Action::NotRetried);
-    assert_eq!(diagnostic.details.counted_failure, Some(false));
-    assert!(
-        !diagnostic
-            .details
-            .delivery
-            .as_ref()
-            .unwrap()
-            .terminal_received
-    );
     assert_neutral_health(&gateway).await;
+    let _ = assert_downstream_diagnostic_policy(
+        &events,
+        &mut diagnostic_events,
+        &_dir.path().join("events"),
+        transfer.downstream_error.as_deref(),
+    )
+    .await;
     gateway.stop().await.unwrap();
 }
 
@@ -562,6 +591,7 @@ async fn assert_websocket_cancel_closes_upstream(explicit_close: bool, generatio
     ])
     .await;
     let (usage, events) = attach_observers(&_dir, &gateway);
+    let mut diagnostic_events = events.subscribe();
     let mut client = downstream_websocket(&gateway).await;
     client
         .send(yawc::Frame::text(CREATE.to_owned()))
@@ -606,19 +636,17 @@ async fn assert_websocket_cancel_closes_upstream(explicit_close: bool, generatio
         let attempt = usage_record.final_attempt().unwrap();
         assert_eq!(attempt.status, Some(101));
         assert!(!attempt.end.as_ref().unwrap().terminal_received);
-        let diagnostic = wait_for_interruption(&events).await;
-        assert_eq!(diagnostic.reason, EventReason::RequestInterrupted);
-        assert_eq!(diagnostic.category, Category::Status);
-        assert_eq!(diagnostic.details.counted_failure, Some(false));
-        assert!(
-            !diagnostic
-                .details
-                .delivery
-                .as_ref()
-                .unwrap()
-                .terminal_received
-        );
         assert_neutral_health(&gateway).await;
+        let _ = assert_downstream_diagnostic_policy(
+            &events,
+            &mut diagnostic_events,
+            &_dir.path().join("events"),
+            attempt
+                .transfer
+                .as_ref()
+                .and_then(|transfer| transfer.downstream_error.as_deref()),
+        )
+        .await;
     }
     gateway.stop().await.unwrap();
 }

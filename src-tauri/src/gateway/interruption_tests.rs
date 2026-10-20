@@ -10,7 +10,7 @@ use crate::{
     },
     gateway::ClientId,
 };
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 
 const PROVIDER_ID: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -38,6 +38,10 @@ impl Fixture {
         protocol.diagnostics(&self.gateway, PROVIDER_ID, Some("fixture-model"));
         protocol
     }
+
+    fn events_dir(&self) -> PathBuf {
+        self._dir.path().join("events")
+    }
 }
 
 async fn next_change(receiver: &mut tokio::sync::broadcast::Receiver<Change>) -> Change {
@@ -58,41 +62,25 @@ fn category_for(events: &EventService, id: &str) -> Category {
 }
 
 #[tokio::test]
-async fn partial_response_close_keeps_unknown_terminal_and_cancel_evidence() {
+async fn partial_response_close_keeps_delivery_progress_without_new_diagnostic() {
     let fixture = Fixture::new();
     let mut receiver = fixture.events.subscribe();
     let mut protocol = fixture.protocol();
     protocol.response(200, true, "identity");
     // The payload announces a terminal, but the event has not ended and is not observed.
     protocol.feed(b"data: {\"type\":\"response.completed\"");
-    protocol.delivery().handed(9, false);
+    let delivery = protocol.delivery();
+    delivery.handed(9, false);
     protocol.downstream_closed(&Activity::default(), false);
     drop(protocol);
-
-    let record = next_record(&mut receiver).await;
-    assert_eq!(record.reason, Reason::RequestInterrupted);
-    assert_eq!(
-        record.details.local_code.as_deref(),
-        Some("DOWNSTREAM_CLOSED")
-    );
-    assert_eq!(
-        record.details.message.as_deref(),
-        Some("下游连接关闭，未确认客户端主动取消")
-    );
-    assert_eq!(record.details.counted_failure, Some(false));
-    assert_eq!(record.level, Level::Info);
-    assert!(matches!(
-        category_for(&fixture.events, &record.id),
-        Category::Status
-    ));
-    assert!(!record.reason.notifiable(record.action));
-
-    let delivery = record.details.delivery.unwrap();
-    assert!(delivery.upstream_bytes > 0);
-    assert_eq!(delivery.handed_bytes, 9);
-    assert!(!delivery.terminal_received);
-    assert!(!delivery.terminal_handed_off);
-    assert!(record.details.last_progress_ms.is_some());
+    assert_eq!(delivery.bytes.load(Ordering::Acquire), 9);
+    assert_eq!(delivery.error.load(Ordering::Acquire), 5);
+    super::diagnostic_test_support::assert_no_interruptions_after_barrier(
+        &fixture.events,
+        &mut receiver,
+        &fixture.events_dir(),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -149,12 +137,13 @@ async fn explicit_cancel_and_gateway_stop_are_statuses_without_fake_progress() {
 }
 
 #[tokio::test]
-async fn reset_and_broken_pipes_are_status_records_not_client_cancellations() {
+async fn reset_and_broken_pipes_keep_delivery_without_new_diagnostics() {
     let fixture = Fixture::new();
     let mut receiver = fixture.events.subscribe();
 
     let mut reset = fixture.protocol();
     reset.response(200, true, "identity");
+    let reset_delivery = reset.delivery();
     let reset_activity = Activity::default();
     reset_activity.failed(
         &std::io::Error::new(std::io::ErrorKind::ConnectionReset, "fixture reset"),
@@ -162,24 +151,11 @@ async fn reset_and_broken_pipes_are_status_records_not_client_cancellations() {
     );
     reset.downstream_closed(&reset_activity, false);
     drop(reset);
-
-    let reset_record = next_record(&mut receiver).await;
-    assert_eq!(
-        reset_record.details.local_code.as_deref(),
-        Some("DOWNSTREAM_PEER_RESET")
-    );
-    assert_eq!(
-        reset_record.details.message.as_deref(),
-        Some("下游连接被重置，未确认客户端主动取消")
-    );
-    assert_eq!(reset_record.level, Level::Info);
-    assert!(matches!(
-        category_for(&fixture.events, &reset_record.id),
-        Category::Status
-    ));
+    assert_eq!(reset_delivery.error.load(Ordering::Acquire), 6);
 
     let mut failed_write = fixture.protocol();
     failed_write.response(200, true, "identity");
+    let failed_write_delivery = failed_write.delivery();
     let write_activity = Activity::default();
     write_activity.failed(
         &std::io::Error::new(std::io::ErrorKind::BrokenPipe, "fixture write failure"),
@@ -187,25 +163,17 @@ async fn reset_and_broken_pipes_are_status_records_not_client_cancellations() {
     );
     failed_write.downstream_closed(&write_activity, true);
     drop(failed_write);
-
-    let write_record = next_record(&mut receiver).await;
-    assert_eq!(
-        write_record.details.local_code.as_deref(),
-        Some("DOWNSTREAM_WRITE_FAILED")
-    );
-    assert_eq!(
-        write_record.details.message.as_deref(),
-        Some("下游管道已关闭，未确认客户端主动取消")
-    );
-    assert_eq!(write_record.level, Level::Info);
-    assert!(matches!(
-        category_for(&fixture.events, &write_record.id),
-        Category::Status
-    ));
+    assert_eq!(failed_write_delivery.error.load(Ordering::Acquire), 7);
+    super::diagnostic_test_support::assert_no_interruptions_after_barrier(
+        &fixture.events,
+        &mut receiver,
+        &fixture.events_dir(),
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn observed_upstream_success_remains_distinct_from_a_failed_delivery() {
+async fn observed_upstream_success_remains_distinct_without_new_diagnostic() {
     let fixture = Fixture::new();
     let mut receiver = fixture.events.subscribe();
     let mut protocol = fixture.protocol();
@@ -225,27 +193,21 @@ async fn observed_upstream_success_remains_distinct_from_a_failed_delivery() {
     );
     protocol.downstream_closed(&write_activity, true);
     assert!(protocol.succeeded());
+    assert_eq!(delivery.error.load(Ordering::Acquire), 7);
     drop(protocol);
 
-    let record = next_record(&mut receiver).await;
-    assert_eq!(
-        record.details.local_code.as_deref(),
-        Some("DOWNSTREAM_WRITE_FAILED")
-    );
-    assert_eq!(record.level, Level::Info);
-    assert!(matches!(
-        category_for(&fixture.events, &record.id),
-        Category::Status
-    ));
-    let evidence = record.details.delivery.unwrap();
-    assert!(evidence.terminal_received);
-    assert!(!evidence.terminal_handed_off);
-    assert_eq!(evidence.handed_bytes, 17);
     assert_eq!(delivery.bytes.load(Ordering::Relaxed), 17);
+    assert!(!delivery.terminal.load(Ordering::Relaxed));
+    super::diagnostic_test_support::assert_no_interruptions_after_barrier(
+        &fixture.events,
+        &mut receiver,
+        &fixture.events_dir(),
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn diagnostics_without_subscribers_do_not_block_delivery_or_interruption_recording() {
+async fn diagnostics_without_subscribers_do_not_block_delivery_or_expected_close_silence() {
     let fixture = Fixture::new();
     // Intentionally do not subscribe to the diagnostics broadcast channel.
     let mut protocol = fixture.protocol();
@@ -261,24 +223,15 @@ async fn diagnostics_without_subscribers_do_not_block_delivery_or_interruption_r
     protocol.downstream_closed(&write_activity, true);
     drop(protocol);
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while fixture.events.query(Filter::default()).total == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    let mut receiver = fixture.events.subscribe();
+    super::diagnostic_test_support::assert_no_interruptions_after_barrier(
+        &fixture.events,
+        &mut receiver,
+        &fixture.events_dir(),
+    )
+    .await;
     assert_eq!(delivery.bytes.load(Ordering::Relaxed), 11);
     assert_eq!(delivery.error.load(Ordering::Relaxed), 7);
-    let page = fixture.events.query(Filter {
-        reason: Some(Reason::RequestInterrupted),
-        ..Filter::default()
-    });
-    assert_eq!(page.total, 1);
-    assert_eq!(
-        page.items[0].details.local_code.as_deref(),
-        Some("DOWNSTREAM_WRITE_FAILED")
-    );
 }
 
 #[tokio::test]

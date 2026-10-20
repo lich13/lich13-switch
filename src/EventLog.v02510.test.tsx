@@ -19,7 +19,9 @@ vi.mock("./bridge", () => ({
 import EventLog from "./EventLog";
 
 const baseRecord: EventRecord = {
-  id: "fixture-v02510-delivery",
+  // v0.25.10 persisted expected-close status records remain readable after
+  // v0.25.11 stops creating new records for those transport outcomes.
+  id: "fixture-v02510-legacy-delivery",
   firstAt: 1_760_000_000,
   lastAt: 1_760_000_001,
   count: 1,
@@ -83,7 +85,7 @@ beforeEach(() => {
   });
 });
 
-it("renders expected downstream status records with HTTP and byte evidence", async () => {
+it("renders historical v0.25.10 downstream status records with HTTP and byte evidence", async () => {
   const user = userEvent.setup();
   render(<EventLog />);
 

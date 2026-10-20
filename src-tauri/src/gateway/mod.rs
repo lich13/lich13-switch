@@ -31,6 +31,8 @@ pub mod catalog;
 mod circuit;
 mod compaction;
 mod connector;
+#[cfg(test)]
+mod diagnostic_test_support;
 mod endpoints;
 pub(crate) mod exchange;
 #[cfg(test)]
@@ -85,6 +87,8 @@ mod v02510_delivery_tests;
 mod v02510_error_tests;
 #[cfg(test)]
 mod v02510_quota_routing_tests;
+#[cfg(test)]
+mod v02511_event_policy_tests;
 mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
