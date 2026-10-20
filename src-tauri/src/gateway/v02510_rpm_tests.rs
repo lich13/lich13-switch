@@ -85,6 +85,30 @@ fn scheduler(path: &Path) -> Scheduler {
     Scheduler::new(events, path.to_path_buf())
 }
 
+async fn fill_failed_rpm_requests(scheduler: &Scheduler, route: &Route, limit: u32) {
+    for attempt in 0..limit {
+        let mut budget = Budget::new(30);
+        let mut admission = scheduler
+            .acquire(std::slice::from_ref(route), false, 8, &mut budget)
+            .await
+            .unwrap_or_else(|error| panic!("RPM request {attempt} should fit: {error:?}"));
+        admission.commit_rpm().expect("persisted RPM start");
+        let mut completion = admission.take_completion().expect("request completion");
+        completion.settle(Settlement::Failed);
+        drop(admission);
+    }
+}
+
+async fn wait_for_waiter_count(scheduler: &Scheduler, expected: usize) {
+    for _ in 0..128 {
+        if scheduler.counts().1 == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(scheduler.counts().1, expected);
+}
+
 fn gate_delay(ledger: &Ledger, limit: u32) -> (Duration, crate::events::RpmWaitReason) {
     ledger
         .gate(PROVIDER, limit, 0)
@@ -459,26 +483,312 @@ async fn gateway_ws_next(ws: &mut yawc::TcpWebSocket) -> yawc::Frame {
 }
 
 #[tokio::test]
-async fn pacing_is_immediate_then_ceil_60_seconds_over_n_and_does_not_burst_after_idle() {
+async fn rolling_budget_refills_only_after_the_oldest_start_expires() {
     tokio::time::pause();
     let mut ledger = Ledger::default();
-    assert_eq!(ledger.gate(PROVIDER, 7, 0), None);
-    let token = ledger.commit(PROVIDER, 7).expect("first start");
-    ledger.settle(PROVIDER, &token, Settlement::Success);
+    for attempt in 0..7 {
+        assert_eq!(
+            ledger.gate(PROVIDER, 7, 0),
+            None,
+            "available rolling-window budget should admit attempt {attempt}"
+        );
+        let token = ledger.commit(PROVIDER, 7).expect("start");
+        ledger.settle(PROVIDER, &token, Settlement::Failed);
+    }
 
-    let expected = Duration::from_millis(60_000_u64.div_ceil(7));
     let (delay, reason) = gate_delay(&ledger, 7);
-    assert_eq!(reason, crate::events::RpmWaitReason::Pacing);
-    assert_eq!(delay, expected);
-
-    tokio::time::advance(WINDOW + Duration::from_millis(1)).await;
+    assert_eq!(reason, crate::events::RpmWaitReason::SendWindow);
+    assert_eq!(delay, WINDOW);
+    tokio::time::advance(WINDOW - Duration::from_millis(1)).await;
+    let (delay, reason) = gate_delay(&ledger, 7);
+    assert_eq!(reason, crate::events::RpmWaitReason::SendWindow);
+    assert_eq!(delay, Duration::from_millis(1));
+    tokio::time::advance(Duration::from_millis(1)).await;
     ledger.prune();
     assert_eq!(ledger.gate(PROVIDER, 7, 0), None);
-    let second = ledger.commit(PROVIDER, 7).expect("post-window start");
-    ledger.settle(PROVIDER, &second, Settlement::Success);
-    let (delay, reason) = gate_delay(&ledger, 7);
-    assert_eq!(reason, crate::events::RpmWaitReason::Pacing);
-    assert_eq!(delay, expected);
+}
+
+#[tokio::test]
+async fn ten_rpm_rolling_budget_allows_immediate_starts_then_waits_for_61_seconds() {
+    tokio::time::pause();
+    let mut ledger = Ledger::default();
+
+    for attempt in 0..10 {
+        assert_eq!(
+            ledger.gate(PROVIDER, 10, 0),
+            None,
+            "available rolling-window budget should admit attempt {attempt} immediately"
+        );
+        let token = ledger.commit(PROVIDER, 10).expect("reserved start");
+        ledger.settle(PROVIDER, &token, Settlement::Failed);
+    }
+
+    let (delay, reason) = gate_delay(&ledger, 10);
+    assert_eq!(reason, crate::events::RpmWaitReason::SendWindow);
+    assert_eq!(delay, WINDOW);
+}
+
+#[tokio::test]
+async fn pending_reservations_consume_only_the_remaining_rolling_budget() {
+    tokio::time::pause();
+    let mut ledger = Ledger::default();
+
+    assert_eq!(ledger.gate(PROVIDER, 10, 9), None);
+    let (delay, reason) = gate_delay_with_pending(&ledger, 10, 10);
+    assert_eq!(reason, crate::events::RpmWaitReason::SendWindow);
+    assert!(!delay.is_zero());
+    assert!(delay <= Duration::from_secs(1));
+
+    let first = ledger.commit(PROVIDER, 10).expect("committed start");
+    ledger.settle(PROVIDER, &first, Settlement::Failed);
+    assert_eq!(ledger.gate(PROVIDER, 10, 8), None);
+    assert!(ledger.gate(PROVIDER, 10, 9).is_some());
+}
+
+fn gate_delay_with_pending(
+    ledger: &Ledger,
+    limit: u32,
+    pending: usize,
+) -> (Duration, crate::events::RpmWaitReason) {
+    ledger
+        .gate(PROVIDER, limit, pending)
+        .expect("pending reservations should fill the budget")
+}
+
+#[tokio::test]
+async fn canceled_pending_rpm_reservations_release_capacity_without_serializing_the_rest() {
+    tokio::time::pause();
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = scheduler(&dir.path().join("rpm.json"));
+    let p = provider("v1", true, 10);
+    scheduler.configure(std::slice::from_ref(&p), true);
+    let r = route(p);
+    let mut held = Vec::new();
+
+    for attempt in 0..10 {
+        let mut budget = Budget::new(1);
+        let admission = scheduler
+            .acquire_for_immediate(
+                std::slice::from_ref(&r),
+                false,
+                8,
+                &mut budget,
+                &Requirement::Resource,
+                true,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("reservation {attempt} should fit: {error:?}"));
+        held.push(admission);
+    }
+
+    assert_eq!(scheduler.rpm_status(PROVIDER, 10).0, 0);
+    assert!(scheduler.rpm_status(PROVIDER, 10).2);
+    let mut blocked_budget = Budget::new(1);
+    let blocked = scheduler
+        .acquire_for_immediate(
+            std::slice::from_ref(&r),
+            false,
+            8,
+            &mut blocked_budget,
+            &Requirement::Resource,
+            true,
+        )
+        .await;
+    assert!(matches!(blocked, Err(Rejected::RateLimited(_))));
+
+    drop(held.pop().expect("one pending reservation"));
+    assert!(!scheduler.rpm_status(PROVIDER, 10).2);
+    let mut replacement_budget = Budget::new(1);
+    let replacement = scheduler
+        .acquire_for_immediate(
+            std::slice::from_ref(&r),
+            false,
+            8,
+            &mut replacement_budget,
+            &Requirement::Resource,
+            true,
+        )
+        .await
+        .expect("canceled reservation should free exactly one slot");
+    held.push(replacement);
+
+    drop(held);
+    assert_eq!(scheduler.rpm_status(PROVIDER, 10), (0, 0, false, false));
+}
+
+#[tokio::test(start_paused = true)]
+async fn rpm_wait_outlives_thirty_seconds_and_resumes_two_waiters_fifo_after_61_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = scheduler(&dir.path().join("rpm.json"));
+    let p = provider("v1", true, 10);
+    scheduler.configure(std::slice::from_ref(&p), true);
+    let r = route(p);
+    fill_failed_rpm_requests(&scheduler, &r, 10).await;
+    assert_eq!(scheduler.rpm_status(PROVIDER, 10).0, 10);
+
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let first_scheduler = scheduler.clone();
+    let first_route = r.clone();
+    let first_order = order.clone();
+    let first = tokio::spawn(async move {
+        let mut budget = Budget::new(30);
+        let result = first_scheduler
+            .acquire(std::slice::from_ref(&first_route), false, 8, &mut budget)
+            .await;
+        if result.is_ok() {
+            first_order.lock().unwrap().push(1);
+        }
+        result
+    });
+    wait_for_waiter_count(&scheduler, 1).await;
+
+    let second_scheduler = scheduler.clone();
+    let second_route = r.clone();
+    let second_order = order.clone();
+    let second = tokio::spawn(async move {
+        let mut budget = Budget::new(30);
+        let result = second_scheduler
+            .acquire(std::slice::from_ref(&second_route), false, 8, &mut budget)
+            .await;
+        if result.is_ok() {
+            second_order.lock().unwrap().push(2);
+        }
+        result
+    });
+    wait_for_waiter_count(&scheduler, 2).await;
+
+    tokio::time::advance(Duration::from_secs(31)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !first.is_finished(),
+        "RPM wait must outlive the normal queue budget"
+    );
+    assert!(
+        !second.is_finished(),
+        "both RPM waiters should remain cancellable"
+    );
+    assert_eq!(scheduler.counts().1, 2);
+
+    tokio::time::advance(WINDOW - Duration::from_secs(31)).await;
+    tokio::time::advance(Duration::from_millis(250)).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        first.is_finished(),
+        "first waiter should resume when the window clears"
+    );
+    assert!(
+        second.is_finished(),
+        "second waiter should resume without another RPM interval"
+    );
+    assert_eq!(*order.lock().unwrap(), [1, 2]);
+    let mut first = first.await.unwrap().expect("FIFO first admission");
+    let mut second = second.await.unwrap().expect("FIFO second admission");
+    first
+        .commit_rpm()
+        .expect("first resumed request should start");
+    let mut first_completion = first.take_completion().expect("first request completion");
+    first_completion.settle(Settlement::Failed);
+    second
+        .commit_rpm()
+        .expect("second resumed request should start");
+    let mut second_completion = second.take_completion().expect("second request completion");
+    second_completion.settle(Settlement::Failed);
+    drop((first, second));
+    assert_eq!(scheduler.rpm_status(PROVIDER, 10).0, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn rpm_waiters_can_be_canceled_or_stopped_without_consuming_another_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = scheduler(&dir.path().join("rpm.json"));
+    let p = provider("v1", true, 10);
+    scheduler.configure(std::slice::from_ref(&p), true);
+    let r = route(p.clone());
+    fill_failed_rpm_requests(&scheduler, &r, 10).await;
+
+    let cancel_scheduler = scheduler.clone();
+    let cancel_route = r.clone();
+    let canceled = tokio::spawn(async move {
+        cancel_scheduler
+            .acquire(
+                std::slice::from_ref(&cancel_route),
+                false,
+                8,
+                &mut Budget::new(30),
+            )
+            .await
+    });
+    wait_for_waiter_count(&scheduler, 1).await;
+    canceled.abort();
+    assert!(canceled.await.is_err());
+    assert_eq!(scheduler.counts().1, 0);
+
+    let stop_scheduler = scheduler.clone();
+    let stop_route = r.clone();
+    let stopped = tokio::spawn(async move {
+        stop_scheduler
+            .acquire(
+                std::slice::from_ref(&stop_route),
+                false,
+                8,
+                &mut Budget::new(30),
+            )
+            .await
+    });
+    wait_for_waiter_count(&scheduler, 1).await;
+    scheduler.configure(std::slice::from_ref(&p), false);
+    assert!(matches!(stopped.await.unwrap(), Err(Rejected::Stopped)));
+    assert_eq!(scheduler.counts().1, 0);
+    assert_eq!(scheduler.rpm_status(PROVIDER, 10).0, 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_concurrency_wait_still_times_out_after_thirty_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = scheduler(&dir.path().join("rpm.json"));
+    let mut p = provider("v1", true, 0);
+    p.max_concurrency = 1;
+    scheduler.configure(std::slice::from_ref(&p), true);
+    let r = route(p);
+
+    let mut held_budget = Budget::new(30);
+    let held = scheduler
+        .acquire(std::slice::from_ref(&r), false, 8, &mut held_budget)
+        .await
+        .expect("first request occupies the only concurrency slot");
+
+    let wait_scheduler = scheduler.clone();
+    let wait_route = r.clone();
+    let waiting = tokio::spawn(async move {
+        wait_scheduler
+            .acquire(
+                std::slice::from_ref(&wait_route),
+                false,
+                8,
+                &mut Budget::new(30),
+            )
+            .await
+    });
+    wait_for_waiter_count(&scheduler, 1).await;
+
+    tokio::time::advance(Duration::from_secs(29)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!waiting.is_finished());
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(waiting.is_finished());
+    assert!(matches!(waiting.await.unwrap(), Err(Rejected::Timeout)));
+    assert_eq!(scheduler.counts().1, 0);
+    drop(held);
 }
 
 #[tokio::test]
@@ -548,6 +858,39 @@ async fn unknown_end_is_protected_for_61_seconds_then_pruned() {
 }
 
 #[tokio::test]
+async fn long_inflight_stream_keeps_a_completion_slot_until_terminal_then_for_61_seconds() {
+    tokio::time::pause();
+    let mut ledger = Ledger::default();
+    let token = ledger.commit(PROVIDER, 1).expect("long stream start");
+
+    tokio::time::advance(WINDOW).await;
+    ledger.prune();
+
+    let (delay, reason) = gate_delay(&ledger, 1);
+    assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
+    assert_eq!(delay, Duration::from_millis(200));
+
+    tokio::time::advance(WINDOW + Duration::from_secs(1)).await;
+    ledger.prune();
+    let (delay, reason) = gate_delay(&ledger, 1);
+    assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
+    assert_eq!(delay, Duration::from_millis(200));
+
+    ledger.settle(PROVIDER, &token, Settlement::Success);
+    let (delay, reason) = gate_delay(&ledger, 1);
+    assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
+    assert_eq!(delay, WINDOW);
+
+    tokio::time::advance(WINDOW - Duration::from_millis(1)).await;
+    let (delay, reason) = gate_delay(&ledger, 1);
+    assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
+    assert_eq!(delay, Duration::from_millis(1));
+    tokio::time::advance(Duration::from_millis(1)).await;
+    ledger.prune();
+    assert_eq!(ledger.gate(PROVIDER, 1, 0), None);
+}
+
+#[tokio::test]
 async fn out_of_order_long_stream_settlement_is_token_scoped_and_leak_free() {
     tokio::time::pause();
     let mut ledger = Ledger::default();
@@ -586,6 +929,62 @@ async fn backoff_keeps_the_longest_deadline_and_is_shared_by_provider_models() {
     let (delay, reason) = gate_delay(&ledger, 0);
     assert_eq!(reason, crate::events::RpmWaitReason::UpstreamBackoff);
     assert_eq!(delay, Duration::from_secs(86_400));
+}
+
+#[test]
+fn localized_platform_rpm_limits_are_classified_only_in_error_envelopes() {
+    let messages = [
+        "You have reached the request limit: maximum 10 requests in 1 minutes",
+        "You have reached the total request limit: maximum 10 requests in 1 minutes, including failed attempts. Please check that your requests are correct",
+        "您已达到请求数限制：1分钟内最多请求10次",
+        "您已达到总请求数限制：1分钟内最多请求10次，包括失败次数，请检查您的请求是否正确",
+        "您已達到請求數限制：1分鐘內最多請求10次",
+        "您已達到總請求數限制：1分鐘內最多請求10次，包括失敗次數，請檢查您的請求是否正確",
+    ];
+    for message in messages {
+        let error = json!({"error": {"message": message}});
+        let details = super::super::upstream_error::details_value(&error, true);
+        assert_eq!(
+            details.error_basis,
+            Some(crate::events::ErrorBasis::Rpm),
+            "{message}"
+        );
+    }
+
+    for code in ["GROUP_RPM_EXCEEDED", "USER_RPM_EXCEEDED"] {
+        let error = json!({"error": {"code": code}});
+        let details = super::super::upstream_error::details_value(&error, true);
+        assert_eq!(
+            details.error_basis,
+            Some(crate::events::ErrorBasis::Rpm),
+            "{code}"
+        );
+    }
+
+    for message in [
+        "The upstream is temporarily unavailable.",
+        "You have not reached the request limit: maximum 10 requests in 1 minutes",
+        "Documentation: You have reached the request limit: maximum 10 requests in 1 minutes",
+        "You have reached the request limit: maximum 10 requests in one minute",
+        "You have reached the request limit: maximum 0 requests in 1 minutes",
+        "You have reached the request limit: maximum 10 requests in 0 minutes",
+        "You have reached the request limit: maximum ten requests in 1 minutes",
+        "You have reached the request limit: maximum 10 requests in many minutes",
+        "You have reached the request limit: maximum 4294967296 requests in 1 minutes",
+        "You have reached the request limit: maximum 10 requests in 4294967296 minutes",
+    ] {
+        let error = json!({"error": {"message": message}});
+        let details = super::super::upstream_error::details_value(&error, true);
+        assert_ne!(
+            details.error_basis,
+            Some(crate::events::ErrorBasis::Rpm),
+            "{message}"
+        );
+    }
+
+    let success = json!({"success": true, "message": messages[0]});
+    let details = super::super::upstream_error::details_value(&success, true);
+    assert_ne!(details.error_basis, Some(crate::events::ErrorBasis::Rpm));
 }
 
 #[test]
@@ -850,10 +1249,11 @@ async fn queued_waiter_cancellation_releases_fifo_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_concurrent_and_retry_attempts_are_paced_and_preserve_request_bytes() {
+async fn http_retry_and_concurrent_requests_use_available_rolling_budget() {
     let upstream = http_loopback(true).await;
-    let (dir, gateway) = started_http_gateway(upstream.port, 600, 1).await;
+    let (dir, gateway) = started_http_gateway(upstream.port, 10, 1).await;
     let body = br#"{"model":"fixture-model","input":["fixture"],"future":{"keep":true}}"#.to_vec();
+    let started = StdInstant::now();
     let first = gateway_http_request(&gateway, body.clone());
     let second = gateway_http_request(&gateway, body.clone());
     let (first, second) = tokio::join!(first, second);
@@ -867,13 +1267,11 @@ async fn http_concurrent_and_retry_attempts_are_paced_and_preserve_request_bytes
     assert!(seen.iter().all(|(_, bytes)| bytes == &body));
     let mut times: Vec<_> = seen.iter().map(|(at, _)| *at).collect();
     times.sort();
-    for pair in times.windows(2) {
-        assert!(
-            pair[1].duration_since(pair[0]) >= Duration::from_millis(70),
-            "RPM 600 should pace attempts near 100ms: {:?}",
-            pair[1].duration_since(pair[0])
-        );
-    }
+    assert!(
+        times.last().unwrap().duration_since(times[0]) < Duration::from_secs(5),
+        "10 RPM should not impose a six-second delay while budget remains: {:?}",
+        started.elapsed()
+    );
     assert_eq!(gateway.view().providers[0].rpm_used, 3);
     gateway.stop().await.unwrap();
     drop(dir);
@@ -958,7 +1356,7 @@ data: {"type":"response.created","response":{"id":"fixture"}}
 #[tokio::test]
 async fn native_websocket_two_rounds_reuse_one_handshake_and_preserve_request_bytes() {
     let upstream = native_ws_loopback().await;
-    let (dir, gateway) = started_native_gateway(upstream.port, 600).await;
+    let (dir, gateway) = started_native_gateway(upstream.port, 10).await;
     let mut client = gateway_ws_client(&gateway).await;
 
     for _ in 0..2 {
@@ -982,7 +1380,10 @@ async fn native_websocket_two_rounds_reuse_one_handshake_and_preserve_request_by
     assert!(seen
         .iter()
         .all(|(_, payload)| payload == NATIVE_CREATE.as_bytes()));
-    assert!(seen[1].0.duration_since(seen[0].0) >= Duration::from_millis(70));
+    assert!(
+        seen[1].0.duration_since(seen[0].0) < Duration::from_secs(5),
+        "10 RPM should not impose a six-second delay between turns"
+    );
     assert_eq!(gateway.view().providers[0].rpm_used, 2);
 
     client

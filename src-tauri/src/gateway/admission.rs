@@ -789,7 +789,8 @@ impl Scheduler {
             state.epoch
         };
         let mut waiting: Option<Waiting> = None;
-        let deadline = tokio::time::Instant::now() + budget.remaining;
+        let mut deadline = tokio::time::Instant::now() + budget.remaining;
+        let mut rpm_waited = Duration::ZERO;
         let mut cooling;
         let mut rate_retry;
         let mut ledger_error;
@@ -928,6 +929,18 @@ impl Scheduler {
                             .take_while(|(id, _)| Some(*id) != ticket)
                             .any(|(_, ids)| ids.contains(id))
                         {
+                            // A FIFO follower also waits for this provider's RPM
+                            // budget. It must not time out before the head waiter
+                            // gets a chance to send when the minute rolls forward.
+                            s.rpm.prune();
+                            if !s.rpm_error {
+                                let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
+                                let pending = s.rpm_pending.get(id).copied().unwrap_or_default();
+                                if let Some((delay, _)) = s.rpm.gate(id, limit, pending) {
+                                    let retry = delay.as_millis().div_ceil(1000).max(1) as u64;
+                                    rate_retry = Some(rate_retry.unwrap_or(0).max(retry));
+                                }
+                            }
                             if first_turn && route.provider.take_new_threads {
                                 intake_skip = Some(
                                     crate::usage::model::RoutingDecision::NewThreadQueueWaiting,
@@ -1109,15 +1122,24 @@ impl Scheduler {
                     let _ = self.0.events.send(());
                 }
             }
+            let wait_started = Instant::now();
+            let waiting_for_rpm = rate_retry.is_some() && !ledger_error;
             tokio::select! {
                 _ = notified => {},
-                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else if ledger_error { Rejected::RateLedger } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
+                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else if ledger_error { Rejected::RateLedger } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
                 // Circuit cooldowns may expire without a separate request or UI event.
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {},
             }
+            if waiting_for_rpm {
+                let elapsed = wait_started.elapsed();
+                deadline += elapsed;
+                rpm_waited += elapsed;
+            }
         };
         if waiting.is_some() {
-            budget.remaining = budget.remaining.saturating_sub(started.elapsed());
+            budget.remaining = budget
+                .remaining
+                .saturating_sub(started.elapsed().saturating_sub(rpm_waited));
         }
         drop(waiting);
         self.signal();

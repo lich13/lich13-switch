@@ -562,6 +562,48 @@ fn rpm_message(text: &str) -> bool {
     ]
     .iter()
     .any(|m| s.contains(m))
+        || minute_limit_message(s.trim())
+}
+
+// Explicit new-api total/success request-limit messages. Require the whole
+// envelope message and positive numeric limits, not generic quota prose.
+fn minute_limit_message(text: &str) -> bool {
+    let count = |value: &str| {
+        !value.is_empty()
+            && value.bytes().all(|c| c.is_ascii_digit())
+            && value.parse::<u32>().is_ok_and(|n| n > 0)
+    };
+    [
+        (
+            "you have reached the request limit: maximum ",
+            " requests in ",
+            " minutes",
+        ),
+        (
+            "you have reached the total request limit: maximum ",
+            " requests in ",
+            " minutes, including failed attempts. please check that your requests are correct",
+        ),
+        ("您已达到请求数限制：", "分钟内最多请求", "次"),
+        (
+            "您已达到总请求数限制：",
+            "分钟内最多请求",
+            "次，包括失败次数，请检查您的请求是否正确",
+        ),
+        ("您已達到請求數限制：", "分鐘內最多請求", "次"),
+        (
+            "您已達到總請求數限制：",
+            "分鐘內最多請求",
+            "次，包括失敗次數，請檢查您的請求是否正確",
+        ),
+    ]
+    .iter()
+    .any(|(prefix, separator, suffix)| {
+        text.strip_prefix(prefix)
+            .and_then(|s| s.strip_suffix(suffix))
+            .and_then(|s| s.split_once(separator))
+            .is_some_and(|(a, b)| count(a) && count(b))
+    })
 }
 fn error_basis(error: &Value) -> Option<ErrorBasis> {
     let reason = known_reason(error);

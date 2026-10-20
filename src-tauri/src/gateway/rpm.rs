@@ -1,4 +1,4 @@
-//! Local request accounting: paced starts and independently reserved completions.
+//! Rolling minute budgets for starts and independently reserved completions.
 //! All transitions are made under the admission lock. Wall times are only for
 //! restart recovery; live deadlines use a monotonic clock.
 use crate::{events::RpmWaitReason, storage};
@@ -17,6 +17,7 @@ mod v02510_rpm_tests;
 #[path = "v02510_rpm_window_tests.rs"]
 mod v02510_rpm_window_tests;
 
+// Keep the existing one-second margin for upstream second-granularity windows.
 pub(super) const WINDOW: Duration = Duration::from_secs(61);
 #[derive(Clone, Copy)]
 struct Stamp {
@@ -59,6 +60,7 @@ struct Provider {
     completed: VecDeque<Stamp>,
     // None means still observing. Some means an uncertain end, protected to a deadline.
     inflight: HashMap<String, Option<Stamp>>,
+    // Retained for v2 ledger compatibility, not used to pace sends.
     last: Option<Stamp>,
     backoff: Option<Stamp>,
     initialize: Option<Stamp>,
@@ -240,28 +242,27 @@ impl Ledger {
             }
         }
         if limit > 0 {
+            let limit = limit as usize;
             if let Some(init) = self.legacy_until {
                 add(init.at, RpmWaitReason::CompletionWindow);
             }
-            if pending > 0 {
-                add(now + Duration::from_millis(1), RpmWaitReason::Pacing);
+            let provider = self.providers.get(id);
+            let starts = provider.map_or(0, |p| p.starts.len());
+            if starts.saturating_add(pending) >= limit {
+                // Pending reservations occupy budget without imposing spacing.
+                // They may be released before any send; scheduler notifications
+                // recheck promptly, including when no ledger entry exists yet.
+                let needed = starts.saturating_add(pending).saturating_sub(limit);
+                let until = provider
+                    .and_then(|p| p.starts.get(needed))
+                    .map_or(now + Duration::from_millis(200), |s| s.at + WINDOW);
+                add(until, RpmWaitReason::SendWindow);
             }
-            if let Some(p) = self.providers.get(id) {
-                if let Some(last) = p.last {
-                    add(
-                        last.at + Duration::from_millis(60_000_u64.div_ceil(limit as u64)),
-                        RpmWaitReason::Pacing,
-                    );
-                }
+            if let Some(p) = provider {
                 if let Some(init) = p.initialize {
                     add(init.at, RpmWaitReason::CompletionWindow);
                 }
-                if p.starts.len() + pending >= limit as usize {
-                    if let Some(at) = p.starts.get(p.starts.len().saturating_sub(limit as usize)) {
-                        add(at.at + WINDOW, RpmWaitReason::SendWindow);
-                    }
-                }
-                if p.completed.len() + p.inflight.len() + pending >= limit as usize {
+                if p.completed.len() + p.inflight.len() + pending >= limit {
                     let mut releases: Vec<_> = p
                         .completed
                         .iter()
@@ -273,10 +274,7 @@ impl Ledger {
                         )
                         .collect();
                     releases.sort();
-                    let needed = releases
-                        .len()
-                        .saturating_add(pending)
-                        .saturating_sub(limit as usize);
+                    let needed = releases.len().saturating_add(pending).saturating_sub(limit);
                     add(
                         releases
                             .get(needed)

@@ -149,7 +149,14 @@ async fn rpm_window_counts_upstream_attempts_without_touching_circuit_health() {
     let mut budget = Budget::new(0);
     let result =
         g.0.admission
-            .acquire_for(&routes, false, 100, &mut budget, &Requirement::Resource)
+            .acquire_for_immediate(
+                &routes,
+                false,
+                100,
+                &mut budget,
+                &Requirement::Resource,
+                true,
+            )
             .await;
     assert!(matches!(result, Err(Rejected::RateLimited(seconds)) if seconds > 0));
     let provider = &g.view().providers[0];
@@ -204,22 +211,20 @@ async fn http_rpm_limit_waits_in_place_instead_of_spilling_to_the_next_provider(
         first.into_body().collect().await.unwrap().to_bytes(),
         "primary"
     );
-    let second = request(&g, "/v1/responses", vec![], vec![]).await;
-    assert_eq!(second.status(), 429);
-    assert!(String::from_utf8(
-        second
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .to_vec()
-    )
-    .unwrap()
-    .contains("RPM_LIMIT"));
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(g.view().providers[0].health.failures, 0);
-    assert_eq!(g.view().providers[1].active_requests, 0);
+    {
+        let second = request(&g, "/v1/responses", vec![], vec![]);
+        tokio::pin!(second);
+        // The ordinary queue timeout must not end an RPM budget wait.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1_200), second.as_mut())
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(g.view().providers[0].health.failures, 0);
+        assert_eq!(g.view().waiting_requests, 1);
+        assert_eq!(g.view().providers[1].active_requests, 0);
+    }
     g.stop().await.unwrap();
 }
 

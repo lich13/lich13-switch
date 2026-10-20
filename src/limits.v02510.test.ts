@@ -5,7 +5,7 @@ import { limitLabel, quotaCheckLabel } from "./limit-labels";
 
 it.each([
   ["pacing", "RPM 均匀发送"],
-  ["send_window", "RPM 发送窗口已满"],
+  ["send_window", "RPM 分钟额度已满"],
   ["completion_window", "RPM 完成窗口保护"],
   ["upstream_backoff", "上游 RPM 退避"],
 ])("shows %s separately from the sent request counter", (reason, label) => {

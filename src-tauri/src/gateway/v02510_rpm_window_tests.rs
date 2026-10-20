@@ -96,7 +96,5 @@ async fn local_scheduler_obeys_fixed_minutes_token_buckets_and_out_of_order_succ
         assert_eq!(successes.len(), 72);
         assert_upstream_limits(&starts, limit);
         assert_upstream_limits(&successes, limit);
-        let pacing = Duration::from_millis(60_000_u64.div_ceil(u64::from(limit)));
-        assert!(starts.windows(2).all(|pair| pair[1] - pair[0] >= pacing));
     }
 }
