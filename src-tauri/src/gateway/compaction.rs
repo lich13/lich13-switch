@@ -700,12 +700,12 @@ impl Registry {
                     })
             })
             .unwrap_or_default();
-        let handoff = can_handoff
-            && !receivers.is_empty()
+        let compacted = can_handoff
             && entry.claim.is_none()
             && entry.boundary_fresh
             && input.is_some()
             && entry.boundary.as_deref() == input;
+        let handoff = compacted && !receivers.is_empty();
         if handoff {
             entry.claim = Some(sequence);
         }
@@ -749,6 +749,10 @@ impl Registry {
             confirmed: true,
             intake: if entry_establishing && first_turn {
                 Intake::NewThread
+            } else if compacted {
+                // A matching fresh window still permits compacted fallback
+                // after a real failure, even without a proactive claim.
+                Intake::Compacted
             } else {
                 Intake::Ordinary
             },

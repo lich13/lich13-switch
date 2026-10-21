@@ -324,7 +324,7 @@ fn v0212_cursor_pinning_and_no_receiver_are_distinct_third_thread_decisions() {
             &[neutral, owner.clone()],
         )
         .unwrap();
-    assert!(no_receiver_lease.handoff);
+    assert!(!no_receiver_lease.handoff);
     assert_eq!(
         compaction::decision(
             Some(&no_receiver_session),
@@ -333,7 +333,7 @@ fn v0212_cursor_pinning_and_no_receiver_are_distinct_third_thread_decisions() {
             Some(&no_receiver_lease),
             &owner.id,
         ),
-        crate::usage::model::RoutingDecision::NoEligibleReceiver
+        crate::usage::model::RoutingDecision::ExistingThread
     );
 }
 

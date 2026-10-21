@@ -20,7 +20,10 @@ use serde_json::{json, Value};
 use std::{
     convert::Infallible,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -301,6 +304,7 @@ async fn v024_wait_settled(gateway: &Gateway) {
 #[derive(Clone, Copy)]
 enum V024NextResponse {
     HttpRejection(&'static [u8]),
+    HttpTemporaryThenSuccess(&'static [u8]),
     IdleFailureAfterOutput,
 }
 
@@ -338,8 +342,11 @@ async fn v024_seeded_http(
 ) -> V024SeededHttp {
     let owner_seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let owner_capture = owner_seen.clone();
+    let temporary_attempts = Arc::new(AtomicUsize::new(0));
+    let temporary_capture = temporary_attempts.clone();
     let owner_port = v024_server(move |request| {
         let owner_capture = owner_capture.clone();
+        let temporary_capture = temporary_capture.clone();
         async move {
             let path = request.uri().path().to_owned();
             let method = request.method().clone();
@@ -375,6 +382,17 @@ async fn v024_seeded_http(
                 match next_response {
                     V024NextResponse::HttpRejection(body) => {
                         v024_json_response(StatusCode::TOO_MANY_REQUESTS, body)
+                    }
+                    V024NextResponse::HttpTemporaryThenSuccess(body) => {
+                        if temporary_capture.fetch_add(1, Ordering::SeqCst) == 0 {
+                            v024_json_response(StatusCode::TOO_MANY_REQUESTS, body)
+                        } else {
+                            v024_completed_response(
+                                "owner",
+                                "fixture-v024-temporary-recovery-response",
+                                json!([]),
+                            )
+                        }
                     }
                     V024NextResponse::IdleFailureAfterOutput => {
                         v024_delayed_stream_failure_response()
@@ -528,9 +546,29 @@ async fn v024_ws_endpoint(
     error_status: Option<u16>,
     error_code: &'static str,
 ) -> u16 {
+    v024_ws_endpoint_with_recovery(provider, owner, seen, error_status, error_code, false).await
+}
+
+async fn v024_ws_endpoint_with_recovery(
+    provider: &'static str,
+    owner: bool,
+    seen: Arc<Mutex<Vec<Vec<u8>>>>,
+    error_status: Option<u16>,
+    error_code: &'static str,
+    temporary_then_success: bool,
+) -> u16 {
+    let compacted_attempts = Arc::new(AtomicUsize::new(0));
     v024_server(move |mut request| {
         let seen = seen.clone();
+        let compacted_attempts = compacted_attempts.clone();
         async move {
+            if request.headers().get("upgrade").is_none() {
+                let _ = request.into_body().collect().await;
+                return v024_json_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    r#"{"error":{"code":"UNSUPPORTED_HTTP","message":"fixture websocket endpoint requires an upgrade"}}"#,
+                );
+            }
             let (handshake, upgrade) = yawc::WebSocket::upgrade(&mut request).unwrap();
             tokio::spawn(async move {
                 let Ok(mut peer) = upgrade.await else {
@@ -556,12 +594,20 @@ async fn v024_ws_endpoint(
                     });
                     let compacted = input
                         .is_some_and(|items| items.iter().any(|item| item["type"] == "compaction"));
-                    let response = if owner && compacted {
+                    let response = if owner
+                        && compacted
+                        && (!temporary_then_success
+                            || compacted_attempts.fetch_add(1, Ordering::SeqCst) == 0)
+                    {
                         let mut error = json!({
                             "type":"error",
                             "error":{
                                 "code":error_code,
-                                "message":if error_code == "USAGE_LIMIT_EXCEEDED" { "fixture usage limit" } else { "fixture rate limit" }
+                                "message":match error_code {
+                                    "USAGE_LIMIT_EXCEEDED" => "fixture usage limit",
+                                    "insufficient_quota" | "INSUFFICIENT_BALANCE" => "fixture balance exhausted",
+                                    _ => "fixture rate limit",
+                                }
                             }
                         });
                         if let Some(status) = error_status {
@@ -727,8 +773,137 @@ async fn v024_compacted_websocket_fails_over(
     );
 }
 
+async fn v024_compacted_websocket_temporary_waits_on_owner(
+    error_status: Option<u16>,
+    error_code: &'static str,
+) {
+    let owner_seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let owner_port = v024_ws_endpoint_with_recovery(
+        "owner",
+        true,
+        owner_seen.clone(),
+        error_status,
+        error_code,
+        true,
+    )
+    .await;
+    let receiver_seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let receiver_port = v024_ws_endpoint("ordinary", false, receiver_seen.clone(), None, "").await;
+    let (dir, gateway) = v024_fixture(vec![
+        format!("http://127.0.0.1:{owner_port}/v1"),
+        format!("http://127.0.0.1:{receiver_port}/v1"),
+    ])
+    .await;
+    let mut settings = gateway.view().settings;
+    settings.max_retries = 3;
+    settings.total_seconds = 15;
+    settings.queue_seconds = 3;
+    settings.first_byte_seconds = 3;
+    settings.idle_seconds = 3;
+    settings.websocket_retry_seconds = 1;
+    settings.capacity_retry_seconds = 1;
+    settings.rate_limit_seconds = 1;
+    v024_update(&gateway, &dir, Edit::Settings { settings });
+    let providers = gateway.view().providers;
+    assert_eq!(providers.len(), 2);
+    let owner_id = providers[0].id.clone();
+    assert!(!providers[1].handoff_after_compaction);
+    assert!(!providers[1].take_new_threads);
+    v024_start(&gateway, &dir).await;
+
+    let thread = "fixture-v024-ws-temporary-owner-thread";
+    let session = crate::storage::digest(thread.as_bytes());
+    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let mut peer = yawc::WebSocket::connect(
+        format!(
+            "ws://127.0.0.1:{}/v1/responses",
+            gateway.view().settings.port
+        )
+        .parse()
+        .unwrap(),
+    )
+    .with_request(
+        yawc::HttpRequest::builder()
+            .header("authorization", format!("Bearer {token}"))
+            .header("thread-id", thread),
+    )
+    .await
+    .unwrap();
+
+    let initial = json!({
+        "type":"response.create",
+        "model":"fixture-model",
+        "input":[{"role":"user","content":"fixture-v024-ws-initial"}]
+    })
+    .to_string();
+    assert_eq!(
+        v024_ws_turn(&mut peer, initial).await["response"]["provider"],
+        "owner"
+    );
+    let compact = json!({
+        "type":"response.create",
+        "model":"fixture-model",
+        "input":[{"type":"compaction_trigger"}]
+    })
+    .to_string();
+    assert_eq!(
+        v024_ws_turn(&mut peer, compact).await["response"]["provider"],
+        "owner"
+    );
+    v024_wait_settled(&gateway).await;
+    let boundary = crate::storage::digest(V024_WINDOW.as_bytes());
+    assert!(gateway
+        .0
+        .compaction
+        .boundary_matches(&session, Some(&boundary)));
+
+    let compacted = json!({
+        "type":"response.create",
+        "model":"fixture-model",
+        "input":[
+            {"type":"compaction","encrypted_content":V024_WINDOW},
+            {"role":"user","content":"fixture-v024-ws-followup"}
+        ],
+        "future":{"unchanged":true}
+    })
+    .to_string();
+    let started = std::time::Instant::now();
+    let response = v024_ws_turn(&mut peer, compacted).await;
+    let waited = started.elapsed();
+    v024_wait_settled(&gateway).await;
+    let owner_after = gateway.0.compaction.owner(&session);
+    let boundary_fresh = gateway
+        .0
+        .compaction
+        .boundary_matches(&session, Some(&boundary));
+    let owner_frames = owner_seen.lock().unwrap().len();
+    let receiver_frames = receiver_seen.lock().unwrap().clone();
+    peer.send(yawc::Frame::close(1000.into(), "fixture done"))
+        .await
+        .unwrap();
+    drop(peer);
+    gateway.stop().await.unwrap();
+
+    assert_eq!(response["response"]["provider"], "owner");
+    assert!(
+        waited >= Duration::from_millis(900),
+        "owner waited only {waited:?}"
+    );
+    assert_eq!(
+        owner_frames, 4,
+        "owner must retry the temporary compacted turn"
+    );
+    assert_eq!(
+        receiver_frames.len(),
+        0,
+        "temporary failure must not use backup"
+    );
+    assert_eq!(owner_after.as_deref(), Some(owner_id.as_str()));
+    assert!(!boundary_fresh);
+}
+
 #[tokio::test]
-async fn v024_compacted_http_usage_limit_429_fails_over_to_lower_priority_ordinary_provider() {
+async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordinary_provider() {
     let old_seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let old_capture = old_seen.clone();
     let old_port = v024_server(move |request| {
@@ -765,7 +940,7 @@ async fn v024_compacted_http_usage_limit_429_fails_over_to_lower_priority_ordina
                 .windows(V024_WINDOW.len())
                 .any(|window| window == V024_WINDOW.as_bytes())
             {
-                v024_json_response(StatusCode::TOO_MANY_REQUESTS, V024_USAGE_LIMIT_429)
+                v024_json_response(StatusCode::TOO_MANY_REQUESTS, V024_BALANCE_429)
             } else {
                 v024_completed_response("owner", "fixture-v024-initial-response", json!([]))
             }
@@ -890,12 +1065,12 @@ async fn v024_compacted_http_usage_limit_429_fails_over_to_lower_priority_ordina
         "the handed-off window must be consumed"
     );
     assert!(!final_body
-        .windows(V024_USAGE_LIMIT_429.len())
-        .any(|part| part == V024_USAGE_LIMIT_429));
+        .windows(V024_BALANCE_429.len())
+        .any(|part| part == V024_BALANCE_429));
     v024_assert_failover_evidence(
         &failover_record,
         "failure_fallback",
-        "rate_limit",
+        "account_rejected",
         "forwarded",
     );
 }
@@ -1082,7 +1257,7 @@ async fn v024_compacted_http_can_use_a_lower_priority_compaction_receiver() {
     let fixture = v024_seeded_http(
         "fixture-v024-lower-receiver-thread",
         1,
-        V024NextResponse::HttpRejection(V024_USAGE_LIMIT_429),
+        V024NextResponse::HttpRejection(V024_BALANCE_429),
     )
     .await;
     let receiver_id = fixture.receiver_ids[0].clone();
@@ -1109,11 +1284,62 @@ async fn v024_compacted_http_can_use_a_lower_priority_compaction_receiver() {
 }
 
 #[tokio::test]
-async fn v024_compacted_http_history_never_fails_over_to_a_new_thread_only_provider() {
+async fn v024_compacted_http_temporary_usage_limit_waits_on_owner_and_recovers_without_backup() {
+    let fixture = v024_seeded_http(
+        "fixture-v024-temporary-owner-thread",
+        1,
+        V024NextResponse::HttpTemporaryThenSuccess(V024_USAGE_LIMIT_429),
+    )
+    .await;
+    let mut settings = fixture.gateway.view().settings;
+    settings.rate_limit_seconds = 1;
+    settings.capacity_retry_seconds = 1;
+    settings.total_seconds = 10;
+    v024_update(&fixture.gateway, &fixture.dir, Edit::Settings { settings });
+
+    let started = std::time::Instant::now();
+    let (status, body) = v024_send_compacted_http(&fixture).await;
+    let waited = started.elapsed();
+    v024_wait_settled(&fixture.gateway).await;
+    let owner_requests = fixture.owner_seen.lock().unwrap().clone();
+    let backup_requests = fixture.receivers_seen[0].lock().unwrap().clone();
+    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
+    let boundary_fresh = fixture
+        .gateway
+        .0
+        .compaction
+        .boundary_matches(&fixture.session, Some(&fixture.boundary));
+    fixture.gateway.stop().await.unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        waited >= Duration::from_millis(900),
+        "owner waited only {waited:?}"
+    );
+    assert_eq!(
+        backup_requests.len(),
+        0,
+        "temporary usage limit must not use backup"
+    );
+    assert_eq!(
+        owner_requests.len(),
+        4,
+        "owner must retry after its cooldown"
+    );
+    assert_eq!(owner_requests[2].1, V024_COMPACTED_REQUEST);
+    assert_eq!(owner_requests[3].1, V024_COMPACTED_REQUEST);
+    let response: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["provider"], "owner");
+    assert_eq!(owner.as_deref(), Some(fixture.owner_id.as_str()));
+    assert!(!boundary_fresh);
+}
+
+#[tokio::test]
+async fn v024_compacted_http_account_rejection_never_fails_over_to_a_new_thread_only_provider() {
     let fixture = v024_seeded_http(
         "fixture-v024-history-protection-thread",
         2,
-        V024NextResponse::HttpRejection(V024_USAGE_LIMIT_429),
+        V024NextResponse::HttpRejection(V024_BALANCE_429),
     )
     .await;
     let new_only_id = fixture.receiver_ids[0].clone();
@@ -1207,16 +1433,16 @@ async fn v024_compacted_http_idle_failure_after_output_does_not_replay_to_backup
 }
 
 #[tokio::test]
-async fn v024_compacted_websocket_usage_limit_429_fails_over_to_ordinary_provider() {
-    v024_compacted_websocket_fails_over(Some(429), "USAGE_LIMIT_EXCEEDED", "rate_limit").await;
+async fn v024_compacted_websocket_account_rejection_fails_over_to_ordinary_provider() {
+    v024_compacted_websocket_fails_over(Some(429), "insufficient_quota", "account_rejected").await;
 }
 
 #[tokio::test]
-async fn v024_compacted_websocket_usage_limit_without_status_fails_over_to_ordinary_provider() {
-    v024_compacted_websocket_fails_over(None, "USAGE_LIMIT_EXCEEDED", "rate_limit").await;
+async fn v024_compacted_websocket_usage_limit_waits_on_owner_and_recovers_without_backup() {
+    v024_compacted_websocket_temporary_waits_on_owner(None, "USAGE_LIMIT_EXCEEDED").await;
 }
 
 #[tokio::test]
-async fn v024_compacted_websocket_rate_limit_429_fails_over_with_bounded_evidence() {
-    v024_compacted_websocket_fails_over(Some(429), "rate_limit_exceeded", "rate_limit").await;
+async fn v024_compacted_websocket_rate_limit_waits_on_owner_and_recovers_without_backup() {
+    v024_compacted_websocket_temporary_waits_on_owner(Some(429), "rate_limit_exceeded").await;
 }

@@ -312,7 +312,7 @@ fn receiver_flag_closed_keeps_compacted_thread_on_its_owner() {
     let lease = registry
         .prepare_policy(session, Some(&compacted), true, &[new, old])
         .unwrap();
-    assert!(lease.handoff);
+    assert!(!lease.handoff);
     assert_eq!(lease.owner.as_deref(), Some("old"));
 }
 
