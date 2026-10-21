@@ -1,5 +1,21 @@
 # 账号与客户端配置
 
+## DeepSeek Harness
+
+主窗口的 DeepSeek Harness 视图与 Codex、Claude Code、Grok Build 使用同一个本地监听，但拥有独立供应商、健康状态、调度、凭据和模型目录。接入入口只显示 DSH profile 的脱敏信息；旧版仅有 `config.yaml` 时提示升级，不自动迁移。
+
+每个 profile 选择一种路由协议。`openai-completions` 和 `openai-responses` 使用 `/v1`，`anthropic-messages` 使用根基址。模型列表只来自支持所选协议的在队供应商并集；列表为空时可手填明确模型 ID。勾选“设为默认”后才管理 `agent-default-model`，只影响新会话。
+
+接入会保留 DSH YAML 注释、未知字段、其他 provider 和外部配置修改。供应商 Token 留在本应用 Rust 凭据存储；DSH 文件只引用本地网关 token。停止和恢复仅处理受管行，不整文件回滚；遇到外部修改会保留现场。
+
+## Claude 模型发现
+
+Claude 网关只自动管理地址和令牌两个字段。模型发现由用户手动开启 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`；客户端会过滤、排序和合并网关返回的模型选项，因此界面不保证逐一展示网关返回的全部 ID。
+
+## Grok Build 配置来源
+
+Grok 导入预览按系统 managed、用户 managed、用户配置、用户 requirements、系统 requirements 的顺序读取。预览会标出模型、地址、协议、凭据可用性、缺失环境变量和无法由 GUI 确认的 `GROK_HOME`、CLI 临时模型、`/model` 选择及远端 campaign 状态。写入只修改用户文件中已确认的受管字段；requirements 或明确环境覆盖阻止接管时显示具体原因。
+
 ## Codex 账号
 
 启动及每 2 秒检查当前 `auth.json`，文件身份和时间等元数据未变时复用内存结果，变化或元数据不可靠时稳定读取：已有身份的更新版本同步入库，新身份自动加入列表。ChatGPT 优先按一致的 `chatgpt_user_id`／`user_id` 与工作区区分，缺失稳定用户 ID 时回退到 `sub` 与工作区；API Key 按指纹区分。邮箱与套餐不参与唯一身份判断，矛盾的身份字段拒绝覆盖。优先比较有效 Token 签发时间，没有可比较时间时再使用有效 `last_refresh`（兼容秒、毫秒和 RFC3339），保留已保存的较新凭据并提供“使用已保存版本”；单个账号的日常同步在无法可靠排序时采用最近检测到的稳定内容。监控不回写 auth 或配置，无效／缺失文件不会删除账号。删除账号后，同一文件版本在重启后也不会重新入库，出现新版本才重新收录。

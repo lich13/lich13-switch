@@ -1,5 +1,19 @@
 # 客户端网关与调度
 
+## 模型目录与本地列表
+
+供应商保存成功后会获取一次模型目录并写入应用数据目录的 `provider-models.json`。面板打开只读缓存；“刷新模型”才访问供应商。查询失败保留上次成功结果，地址、凭据或协议变化后的结果只作为过期参考。缓存损坏时提示可手动刷新，业务转发继续工作。
+
+客户端认证和运行状态检查完成后，`GET /v1/models` 与 `GET /models` 可返回当前队列供应商的精确模型 ID 并集。白名单优先，未设置白名单时使用有效缓存；按完整 ID 去重并保留队列顺序。Claude 返回 Anthropic 列表并支持 `limit`、`after_id`、`before_id` 分页。Codex、带 `client_version` 的请求、模型详情子路径和空并集继续透传；本地列表不进入业务并发、RPM 或用量。
+
+Claude Code 的模型发现需要用户手动设置 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 后重新打开模型选择。Claude Code 会自行过滤和合并选项，网关返回的每个 ID 不保证在客户端界面逐项出现。
+
+## DeepSeek Harness
+
+网关工具栏的 DSH 接入面板只读取现有 profile。每个 profile 选择一种协议：`openai-completions`、`openai-responses` 或 `anthropic-messages`，默认是 `openai-completions`。接入前可预览可用模型；没有模型时可以填写明确的模型 ID。路由使用共享监听和本地 token，OpenAI 协议使用 `/v1` 基址，Anthropic 协议使用根基址，业务请求和响应字节保持原样。
+
+DSH 修改 profile 的 YAML 时保留注释、未知字段、其他 provider 和标签，不执行动态脚本。供应商 token 不写入客户端；本地 token 只写入 DSH 的私有 `.env` 和版本正确的 `.credentials.yaml` 引用。停用或恢复按受管字段提交，外部修改会保留现场并提示。
+
 主面板与快捷面板分别记住 Codex／Claude Code／Grok Build 选择，切换视图不改变实际连接。供应商、队列、并发、熔断、模型限制、额度缓存及启动恢复按客户端隔离，供应商请求统一直连。三个网关可同时运行。
 
 ## 共享监听
