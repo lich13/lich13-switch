@@ -128,7 +128,9 @@ beforeEach(() => {
     async (name: string, args: Record<string, unknown> = {}) => {
       switch (name) {
         case "get_gateway":
-          return { providers: [{ id: "fixture-provider", name: "Fixture Provider" }] };
+          return {
+            providers: [{ id: "fixture-provider", name: "Fixture Provider" }],
+          };
         case "get_usage_state":
           return structuredClone(usageState);
         case "get_usage_dashboard":
@@ -136,8 +138,16 @@ beforeEach(() => {
         case "get_usage_logs": {
           const filter = args.filter as UsageFilter;
           const page = filter.page ?? 1;
-          const rows: UsagePage["rows"] = records.slice((page - 1) * 20, page * 20);
-          return { rows: structuredClone(rows), total: records.length, page, detailSince: 0 };
+          const rows: UsagePage["rows"] = records.slice(
+            (page - 1) * 20,
+            page * 20,
+          );
+          return {
+            rows: structuredClone(rows),
+            total: records.length,
+            page,
+            detailSince: 0,
+          };
         }
         case "get_usage_detail":
           return structuredClone(records.find((item) => item.id === args.id));
@@ -148,7 +158,7 @@ beforeEach(() => {
   );
 });
 
-it("renders null table quantities as dashes while keeping decimal K/M/B compact values", async () => {
+it("renders null table quantities as dashes while keeping K/M compact values", async () => {
   records = [
     record({
       id: "fixture-null-table",
@@ -156,7 +166,12 @@ it("renders null table quantities as dashes while keeping decimal K/M/B compact 
         attempt({
           requestedModel: null,
           responseModel: null,
-          tokens: { input: null, output: null, cacheRead: null, cacheWrite: null },
+          tokens: {
+            input: null,
+            output: null,
+            cacheRead: null,
+            cacheWrite: null,
+          },
         }),
       ],
     }),
@@ -164,17 +179,22 @@ it("renders null table quantities as dashes while keeping decimal K/M/B compact 
       id: "fixture-compact-table",
       attempts: [
         attempt({
-          tokens: { input: 1234, output: 1234567, cacheRead: 1234567890, cacheWrite: null },
+          tokens: {
+            input: 1234,
+            output: 1234567,
+            cacheRead: 1234567890,
+            cacheWrite: null,
+          },
         }),
       ],
     }),
   ];
   render(<Usage />);
 
-  const compactRow = (await screen.findByText("1.23M")).closest("tr")!;
-  expect(within(compactRow).getByText("1.23M")).toBeInTheDocument();
-  expect(within(compactRow).getByText("1.23B")).toBeInTheDocument();
-  expect(within(compactRow).getByText("1.23K")).toBeInTheDocument();
+  const compactRow = (await screen.findByText("1.2M")).closest("tr")!;
+  expect(within(compactRow).getByText("1.2M")).toBeInTheDocument();
+  expect(within(compactRow).getByText("1234.6M")).toBeInTheDocument();
+  expect(within(compactRow).getByText("1,234")).toBeInTheDocument();
   const missingRow = within(screen.getByRole("table")).getAllByRole("row")[1];
   expect(missingRow.querySelectorAll("td")[2]).toHaveTextContent("—");
   expect(missingRow.querySelectorAll("td")[3]).toHaveTextContent("—");
@@ -186,7 +206,12 @@ it("shows reasoned missing token fields and preserves a real zero duration", asy
       id: "fixture-missing-detail",
       attempts: [
         attempt({
-          tokens: { input: null, output: null, cacheRead: null, cacheWrite: null },
+          tokens: {
+            input: null,
+            output: null,
+            cacheRead: null,
+            cacheWrite: null,
+          },
           durationMs: 0,
           firstTokenMs: null,
           stream: false,
@@ -204,13 +229,17 @@ it("shows reasoned missing token fields and preserves a real zero duration", asy
   const user = userEvent.setup();
   render(<Usage />);
 
-  await user.click((await screen.findByText("fixture-response")).closest("tr")!);
+  await user.click(
+    (await screen.findByText("fixture-response")).closest("tr")!,
+  );
   const drawer = await screen.findByRole("dialog", { name: "请求详情" });
   expect(within(drawer).getAllByLabelText("— · 上游未报告")).toHaveLength(1);
   expect(within(drawer).getAllByLabelText("— · 提前结束")).toHaveLength(1);
   expect(within(drawer).getAllByLabelText("— · 解析不完整")).toHaveLength(1);
-  expect(within(drawer).getAllByLabelText("— · 历史缺失")).toHaveLength(1);
-  for (const label of within(drawer).getAllByText("总耗时", { selector: "dt" })) {
+  expect(within(drawer).getAllByLabelText("— · 历史缺失")).toHaveLength(2);
+  for (const label of within(drawer).getAllByText("总耗时", {
+    selector: "dt",
+  })) {
     expect(label.nextElementSibling).toHaveTextContent("0.000s");
   }
   for (const label of within(drawer).getAllByText("首字", { selector: "dt" })) {
@@ -237,7 +266,9 @@ it("marks a session first-token value as not applicable", async () => {
   const user = userEvent.setup();
   render(<Usage />);
 
-  await user.click((await screen.findByText("fixture-session-model")).closest("tr")!);
+  await user.click(
+    (await screen.findByText("fixture-session-model")).closest("tr")!,
+  );
   const drawer = await screen.findByRole("dialog", { name: "请求详情" });
   for (const label of within(drawer).getAllByText("首字", { selector: "dt" })) {
     const firstToken = label.nextElementSibling!;

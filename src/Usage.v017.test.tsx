@@ -197,15 +197,18 @@ describe("decimal compact quantities", () => {
   );
 });
 
-it("renders compact token cells, exposes their full values on focus, and has no speed column", async () => {
+it("renders compact token cells with exact titles and independent speed column", async () => {
   render(<Usage />);
   const row = (await screen.findByText("fixture-model-all")).closest("tr")!;
-  expect(within(row).getByText("1.23K")).toHaveAttribute("title", "1,234");
-  expect(within(row).getByText("1.23M")).toHaveAttribute(
+  expect(within(row).getByText("1,234")).toHaveAttribute(
+    "title",
+    "1,234 · 原始输入 — · 口径未知",
+  );
+  expect(within(row).getByText("1.2M")).toHaveAttribute(
     "aria-label",
     "1,234,567",
   );
-  expect(within(row).getByText("1.23B")).toHaveAttribute(
+  expect(within(row).getByText("1234.6M")).toHaveAttribute(
     "title",
     "1,234,567,890",
   );
@@ -213,18 +216,20 @@ it("renders compact token cells, exposes their full values on focus, and has no 
     screen.getAllByRole("columnheader").map((header) => header.textContent),
   ).toEqual([
     "结束时间",
-    "供应商",
+    "供应商·客户端",
     "模型",
     "输入",
     "输出",
-    "缓存",
+    "缓存读",
     "费用",
+    "首字",
+    "tok/s",
   ]);
-  const quantity = within(row).getByText("1.23K");
+  const quantity = within(row).getByText("1,234");
   fireEvent.focus(quantity);
   expect(quantity).toHaveTextContent("1,234");
   fireEvent.blur(quantity);
-  expect(quantity).toHaveTextContent("1.23K");
+  expect(quantity).toHaveTextContent("1,234");
 });
 
 it.each(["Escape", "blur"] as const)(
@@ -408,7 +413,7 @@ it("marks provider mappings as estimates and reports compacted attempts with unk
     within(drawer).getByText("实际尝试").nextElementSibling,
   ).toHaveTextContent("1,001");
   expect(within(drawer).getByText(/合并 1K 次/)).toBeInTheDocument();
-  expect(within(drawer).queryByText(/速度|Token\/s/)).not.toBeInTheDocument();
+  expect(within(drawer).getAllByText("请求速度").length).toBeGreaterThan(0);
 });
 
 it("keeps the historical source limitation inside the data-sources drawer", async () => {

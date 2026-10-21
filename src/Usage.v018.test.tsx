@@ -317,7 +317,9 @@ describe("v0.19 usage overview", () => {
     expect(
       within(metric("估算费用")).getByText("$12.3457"),
     ).toBeInTheDocument();
-    expect(within(metric("已报告 Token")).getByText("1.55K")).toBeInTheDocument();
+    expect(
+      within(metric("已报告 Token")).getByText("1.55K"),
+    ).toBeInTheDocument();
     expect(within(metric("缓存命中率")).getByText("50.0%")).toBeInTheDocument();
     const average = within(metric("平均首字")).getByText("1.60s");
     expect(average).toHaveAttribute("title", "1.600s · 5 个有效样本");
@@ -366,7 +368,9 @@ describe("v0.19 usage overview", () => {
 
   it("does not render a more-metrics control and leaves unknown cache samples unavailable", async () => {
     await renderUsage();
-    expect(screen.queryByRole("button", { name: "更多指标" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "更多指标" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("HTTP 成功率")).not.toBeInTheDocument();
     expect(within(metric("缓存命中率")).getByText("—")).toHaveAttribute(
       "title",
@@ -555,18 +559,26 @@ describe("v0.18 time ranges", () => {
 
   it("does not render trend or heatmap content and never queries historical heatmaps", async () => {
     await renderUsage();
-    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: /年度用量热力图/ }),
+    ).not.toBeInTheDocument();
     expect(calls("get_usage_heatmap")).toHaveLength(0);
     await chooseRange("all");
-    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: /年度用量热力图/ }),
+    ).not.toBeInTheDocument();
     expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 });
 
 describe("v0.18 rankings", () => {
-  it("keeps seven request columns and separate twenty-row ranking pages when switching tabs", async () => {
+  it("keeps nine request columns and separate twenty-row ranking pages when switching tabs", async () => {
     const user = userEvent.setup();
     dashboard.providers = groups("provider");
     dashboard.models = groups("model");
@@ -575,12 +587,14 @@ describe("v0.18 rankings", () => {
       screen.getAllByRole("columnheader").map((header) => header.textContent),
     ).toEqual([
       "结束时间",
-      "供应商",
+      "供应商·客户端",
       "模型",
       "输入",
       "输出",
-      "缓存",
+      "缓存读",
       "费用",
+      "首字",
+      "tok/s",
     ]);
     await user.click(screen.getByRole("tab", { name: "供应商" }));
     expect(

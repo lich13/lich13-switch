@@ -9,6 +9,11 @@ import {
 import { Drawer } from "./UsageDrawer";
 import { preciseDate, promptTokens, missingReason } from "./usage-format";
 import {
+  interruption,
+  interruptionLabel,
+  unpricedReason,
+} from "./usage-log-columns";
+import {
   clientName,
   compact,
   money,
@@ -244,8 +249,9 @@ function rateLabel(key: string) {
     flex: "弹性",
     priority: "优先",
     ultrafast: "极速",
+    fast: "fast",
   };
-  const tier = key.match(/_(batches|flex|priority|ultrafast)$/)?.[1];
+  const tier = key.match(/_(batches|flex|priority|ultrafast|fast)$/)?.[1];
   const base = tier ? key.slice(0, -tier.length - 1) : key;
   const threshold = base.match(/_above_(100|200|272)k_tokens$/)?.[1];
   const name = threshold
@@ -506,12 +512,76 @@ function AttemptDetails({
             : []),
           ["请求模型", a.requestedModel],
           ["收到的响应模型", a.responseModel],
+          ["中断状态", interruptionLabel(a) || null],
+          [
+            "请求速度",
+            a.requestedSpeed === "fast" && !a.responseSpeed
+              ? "fast（仅观察到请求）"
+              : a.requestedSpeed,
+          ],
+          ["响应速度", a.responseSpeed],
+          ["服务层级", a.serviceTier],
           ...metadata,
         ]}
       />
       <h3>Token</h3>
+      {interruption(a) === "partial" && (
+        <p className="form-error">
+          上游可能在断开后继续生成并计费，本地不估算。
+        </p>
+      )}
       <DetailFields
         items={[
+          [
+            "原始输入",
+            a.rawInputTokens == null ? "—" : numeric(a.rawInputTokens),
+          ],
+          [
+            "输入口径",
+            a.inputBasis === "exclusive"
+              ? "不含缓存"
+              : a.inputBasis === "inclusive"
+                ? "含缓存"
+                : "未知",
+          ],
+          [
+            "推理（输出子集）",
+            <TokenField
+              a={a}
+              field="reasoning"
+              value={a.tokens.reasoning ?? null}
+              source={source}
+            />,
+          ],
+          [
+            "缓存写入 · 5m",
+            a.tokens.cacheWrite5m == null
+              ? "—"
+              : numeric(a.tokens.cacheWrite5m),
+          ],
+          [
+            "缓存写入 · 1h",
+            a.tokens.cacheWrite1h == null
+              ? "—"
+              : numeric(a.tokens.cacheWrite1h),
+          ],
+          [
+            "解析依据",
+            a.parseReasons
+              ?.map(
+                (reason) =>
+                  (
+                    ({
+                      cache_write_total_below_ttl_details:
+                        "缓存写总数小于 TTL 明细合计",
+                      prompt_cache_total_mismatch:
+                        "缓存命中与未命中之和不等于原始输入",
+                      reasoning_exceeds_output: "推理 token 超过输出 token",
+                    }) as Record<string, string>
+                  )[reason] ?? reason,
+              )
+              .join("；"),
+          ],
           [
             "输入",
             <TokenField
@@ -560,6 +630,7 @@ function AttemptDetails({
                             inclusive_input: "完整输入",
                             input: "输入",
                             output: "输出",
+                            reasoning: "推理",
                             cache_read: "缓存读取",
                             cache_write: "缓存写入",
                             cache_write_5m: "短时缓存写入",
@@ -596,6 +667,22 @@ function AttemptDetails({
                     : "收到的响应模型（估算）",
           ],
           ["价格版本", a.price?.version],
+          ["价格来源", a.price?.source],
+          [
+            "价格匹配",
+            a.price?.basis?.models_dev_match
+              ? `${a.price.basis.models_dev_match.providers.join("、")} / ${a.price.basis.models_dev_match.model} · ${a.price.basis.models_dev_match.matchedBy}`
+              : a.price?.basis?.price_match
+                ? `${a.price.basis.price_match.model} · ${a.price.basis.price_match.matchedBy}`
+                : null,
+          ],
+          [
+            "上下文阶梯",
+            a.price?.basis?.models_dev_context_threshold == null
+              ? null
+              : `>${a.price.basis.models_dev_context_threshold} token`,
+          ],
+          ["未定价原因", a.price ? null : unpricedReason(a)],
           ...(a.mappingRevision
             ? [["映射版本", a.mappingRevision] as [string, string]]
             : []),

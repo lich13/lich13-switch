@@ -19,6 +19,9 @@ import type {
 } from "./types";
 import type {
   Dashboard,
+  ModelsDevState,
+  InterruptionSummary,
+  PriceComparison,
   PricingConfig,
   PricingView,
   UsageFilter,
@@ -96,7 +99,27 @@ export type ProviderImportPreview = {
     error: string | null;
   }[];
 };
+export type DshOptions = {
+  profile: string;
+  protocol: GrokProtocol;
+  model: string | null;
+  makeDefault: boolean;
+};
+export type DshPreview = {
+  profiles: string[];
+  profile: string | null;
+  revision: string;
+  models: string[];
+  attached: boolean;
+  protocol: GrokProtocol;
+  model: string | null;
+  makeDefault: boolean;
+  warning: string | null;
+};
 export type GrokImportPreview = {
+  layers?: string[];
+  modelSource?: string | null;
+  unknown?: string[];
   token: string | null;
   revision: string;
   models: GrokModel[];
@@ -115,7 +138,7 @@ export type GatewayEdit =
       name?: string | null;
     }
   | {
-      op: "saveGrokProvider";
+      op: "saveGrokProvider" | "saveDshProvider";
       id?: string | null;
       baseUrl: string;
       token: string;
@@ -219,6 +242,14 @@ export type CommandMap = {
   get_gateway: Call<Client, GatewayState>;
   get_gateway_listener: Call<None, GatewayListener>;
   set_gateway_listener: Call<{ port: number } & Revision, GatewayListener>;
+  preview_dsh_profile: Call<
+    { profile?: string | null; protocol: GrokProtocol },
+    DshPreview
+  >;
+  attach_dsh_profile: Call<
+    { options: DshOptions; previewRevision: string } & Revision,
+    GatewayState
+  >;
   preview_grok_import: Call<
     { selected?: string | null; useEnvironment: boolean },
     GrokImportPreview
@@ -327,6 +358,13 @@ export type CommandMap = {
   set_usage_settings: Call<{ settings: UsageSettings }, UsageState>;
   sync_usage: Call<{ rebuild?: string }, UsageState>;
   get_pricing: Call<None, PricingView>;
+  get_models_dev: Call<None, ModelsDevState>;
+  get_usage_interruptions: Call<{ filter: UsageFilter }, InterruptionSummary>;
+  update_models_dev: Call<None, ModelsDevState>;
+  compare_model_prices: Call<
+    { model: string; context: number },
+    PriceComparison
+  >;
   configure_pricing: Call<Revision & { config: PricingConfig }, PricingView>;
   update_pricing: Call<None, PricingView>;
   reload_pricing: Call<None, PricingView>;

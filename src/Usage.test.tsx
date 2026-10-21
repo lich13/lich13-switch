@@ -234,6 +234,26 @@ beforeEach(() => {
           };
         case "get_usage_dashboard":
           return structuredClone(dashboard);
+        case "get_usage_interruptions":
+          return {
+            start: timestamp - 1000,
+            end: timestamp + 1000,
+            detailSince: 0,
+            historyMissing: false,
+            requests: 3,
+            reported: 1,
+            partial: 1,
+            unknown: 1,
+            groups: [
+              {
+                client: "claude",
+                provider: "provider-final",
+                reported: 1,
+                partial: 1,
+                unknown: 1,
+              },
+            ],
+          };
         case "get_usage_logs": {
           const filter = args.filter as UsageFilter;
           return {
@@ -328,6 +348,27 @@ async function chooseRange(value: string) {
 }
 
 describe("usage records", () => {
+  it("counts interruptions only on request using the current filters", async () => {
+    await renderUsage();
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "用量客户端" }),
+      "claude",
+    );
+    await chooseRange("all");
+    expect(calls("get_usage_interruptions")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "统计中断" }));
+    await screen.findByText("中断统计 · 本网关");
+    expect(calls("get_usage_interruptions")).toHaveLength(1);
+    expect(calls("get_usage_interruptions")[0][1].filter).toMatchObject({
+      client: "claude",
+    });
+    expect(screen.getByText(/读取 3 个逻辑请求/)).toHaveTextContent(
+      "证据不足 1",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "刷新用量" }));
+    expect(calls("get_usage_interruptions")).toHaveLength(1);
+  });
+
   it("loads the overview while the request log is still pending", async () => {
     let resolveLogs!: (value: {
       rows: UsageRecord[];
@@ -368,18 +409,28 @@ describe("usage records", () => {
       }),
     );
     expect(
-      await within(screen.getByRole("table")).findByText("Fixture Provider"),
+      await within(screen.getByRole("table")).findByText(
+        "Fixture Provider · Codex",
+      ),
     ).toBeInTheDocument();
   });
 
   it("does not render a trend or heatmap and never queries historical data", async () => {
     await renderUsage();
-    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: /年度用量热力图/ }),
+    ).not.toBeInTheDocument();
     expect(calls("get_usage_heatmap")).toHaveLength(0);
     await chooseRange("all");
-    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: /年度用量热力图/ }),
+    ).not.toBeInTheDocument();
     expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 
@@ -395,7 +446,7 @@ describe("usage records", () => {
 
     expect(reportedTokenMetric()).toHaveTextContent("420");
     expect(
-      within(screen.getByRole("table")).getByText("Fixture Provider"),
+      within(screen.getByRole("table")).getByText("Fixture Provider · Codex"),
     ).toBeInTheDocument();
     await act(async () =>
       resolveDashboard({
@@ -408,7 +459,7 @@ describe("usage records", () => {
     );
     await waitFor(() => expect(reportedTokenMetric()).toHaveTextContent("920"));
     expect(
-      within(screen.getByRole("table")).getByText("Fixture Provider"),
+      within(screen.getByRole("table")).getByText("Fixture Provider · Codex"),
     ).toBeInTheDocument();
   });
 
@@ -429,7 +480,9 @@ describe("usage records", () => {
       },
     };
     await chooseRange("7");
-    await waitFor(() => expect(reportedTokenMetric()).toHaveTextContent("7.02K"));
+    await waitFor(() =>
+      expect(reportedTokenMetric()).toHaveTextContent("7.02K"),
+    );
 
     await act(async () =>
       resolveStale({
@@ -469,8 +522,8 @@ describe("usage records", () => {
       expect(unavailable[index]).toHaveTextContent(/^—$/);
       expect(zero[index]).toHaveTextContent(/^0$/);
     }
-    expect(unavailable[6]).toHaveTextContent(/^未定价$/);
-    expect(zero[6]).toHaveTextContent(/^\$0\.0000$/);
+    expect(unavailable[6]).toHaveTextContent(/^—$/);
+    expect(zero[6]).toHaveTextContent(/^\$0$/);
     const tokenMetric = screen.getByText("已报告 Token").parentElement!;
     expect(within(tokenMetric).getByText("—")).toBeInTheDocument();
 
@@ -481,7 +534,7 @@ describe("usage records", () => {
     );
   });
 
-  it("shows seven columns from the final attempt and preserves all attempts in detail", async () => {
+  it("shows nine columns from the final attempt and preserves all attempts in detail", async () => {
     const first = attempt({
       id: "fixture-first-attempt",
       provider: "provider-first",
@@ -501,23 +554,25 @@ describe("usage records", () => {
         .map((cell) => cell.textContent),
     ).toEqual([
       "结束时间",
-      "供应商",
+      "供应商·客户端",
       "模型",
       "输入",
       "输出",
-      "缓存",
+      "缓存读",
       "费用",
+      "首字",
+      "tok/s",
     ]);
     const row = within(table).getAllByRole("row")[1];
     const cells = within(row).getAllByRole("cell");
-    expect(cells).toHaveLength(7);
+    expect(cells).toHaveLength(9);
     expect(cells[1]).toHaveTextContent(/^Fixture Provider/);
     expect(cells[1]).toHaveTextContent(/Codex/);
     expect(cells[2]).toHaveTextContent(/^fixture-response-model/);
     expect(cells[3]).toHaveTextContent(/^0$/);
     expect(cells[4]).toHaveTextContent(/^400$/);
     expect(cells[5]).toHaveTextContent(/^20$/);
-    expect(cells[6]).toHaveTextContent("$0.0046×1.5");
+    expect(cells[6]).toHaveTextContent("$0.004568×1.5");
     expect(cells[6]).toHaveAttribute("title", "0.0045678");
     expect(within(row).queryByText("First Provider")).not.toBeInTheDocument();
     expect(within(row).queryByTitle("HTTP 503")).not.toBeInTheDocument();
@@ -586,7 +641,8 @@ describe("usage records", () => {
       }),
     ];
     await renderUsage();
-    const modelCell = within(screen.getByRole("table")).getAllByRole("row")[1]
+    const modelCell = within(screen.getByRole("table"))
+      .getAllByRole("row")[1]
       .querySelectorAll("td")[2];
     expect(within(modelCell).getByText("流式")).toBeInTheDocument();
     expect(within(modelCell).getByText("压缩")).toBeInTheDocument();
@@ -672,7 +728,7 @@ describe("usage records", () => {
     ]);
   });
 
-  it("omits speed from request rows and details while retaining first-token timing", async () => {
+  it("shows request speed only when complete and retains first-token timing", async () => {
     records = [
       record({
         id: "fixture-session",
@@ -697,12 +753,14 @@ describe("usage records", () => {
         .map((cell) => cell.textContent),
     ).toEqual([
       "结束时间",
-      "供应商",
+      "供应商·客户端",
       "模型",
       "输入",
       "输出",
-      "缓存",
+      "缓存读",
       "费用",
+      "首字",
+      "tok/s",
     ]);
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows).toHaveLength(1);
@@ -813,8 +871,12 @@ describe("usage records", () => {
 
   it("does not expose trend dragging or issue chart queries", async () => {
     await renderUsage();
-    expect(screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /年度用量热力图/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("img", { name: /年度用量热力图/ }),
+    ).not.toBeInTheDocument();
     expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 
@@ -1352,7 +1414,9 @@ describe("usage navigation", () => {
     mock.confirm.mockResolvedValue(true);
     await user.click(within(navigation).getByRole("button", { name: "日志" }));
     await screen.findByRole("button", { name: "清空日志" });
-    await waitFor(() => expect(calls("get_app_events").length).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(calls("get_app_events").length).toBeGreaterThan(0),
+    );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     const confirmations = mock.confirm.mock.calls.length;
     await user.click(within(navigation).getByRole("button", { name: "用量" }));

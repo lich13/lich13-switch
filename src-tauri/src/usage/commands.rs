@@ -22,6 +22,16 @@ pub async fn get_usage_logs(r: R<'_>, filter: Filter) -> Result<store::Page> {
         .map_err(|_| failure("日志查询中断"))?
 }
 #[tauri::command]
+pub async fn get_usage_interruptions(
+    r: R<'_>,
+    filter: Filter,
+) -> Result<super::interruptions::Summary> {
+    let service = r.usage.clone();
+    tokio::task::spawn_blocking(move || service.read(|store| store.interruptions(&filter)))
+        .await
+        .map_err(|_| failure("中断统计已停止"))?
+}
+#[tauri::command]
 pub async fn get_usage_detail(r: R<'_>, id: String, source: Option<String>) -> Result<Record> {
     let s = r.usage.clone();
     tokio::task::spawn_blocking(move || {
@@ -61,6 +71,27 @@ pub async fn sync_usage(r: R<'_>, rebuild: Option<String>) -> Result<State> {
 #[tauri::command]
 pub fn get_pricing(r: R<'_>) -> Result<pricing::View> {
     Ok(r.usage.prices()?.view())
+}
+#[tauri::command]
+pub fn get_models_dev(r: R<'_>) -> Result<crate::models_dev::View> {
+    Ok(r.usage.prices()?.models_dev.view())
+}
+#[tauri::command]
+pub async fn update_models_dev(r: R<'_>, app: tauri::AppHandle) -> Result<crate::models_dev::View> {
+    let view = r.usage.prices()?.models_dev.refresh(true).await?;
+    let _ = app.emit("pricing-state", ());
+    Ok(view)
+}
+#[tauri::command]
+pub fn compare_model_prices(
+    r: R<'_>,
+    model: String,
+    context: u64,
+) -> Result<pricing::PriceComparison> {
+    if model_id(Some(&model)).is_none() || context > 1_000_000_000_000 {
+        return Err(failure("价格核对参数无效"));
+    }
+    Ok(r.usage.prices()?.compare(&model, context))
 }
 #[tauri::command]
 pub async fn configure_pricing(

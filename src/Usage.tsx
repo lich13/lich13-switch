@@ -1,9 +1,15 @@
 import Detail from "./UsageDetail";
 import Sources from "./UsageSources";
-import { date, preciseDate, promptTokens, missingReason } from "./usage-format";
+import { date } from "./usage-format";
+import UsageLogTable from "./UsageLogTable";
+import { Drawer as UsageDrawer } from "./UsageDrawer";
 export { Drawer } from "./UsageDrawer";
 import { subscriptions } from "./subscriptions";
-import type { CommandName, CommandParams, CommandResult } from "./bridge-contracts";
+import type {
+  CommandName,
+  CommandParams,
+  CommandResult,
+} from "./bridge-contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
@@ -29,8 +35,8 @@ import {
   money,
   numeric,
   tokenTotal,
-  type Attempt,
   type Dashboard,
+  type InterruptionSummary,
   type Group,
   type UsageFilter,
   type UsagePage,
@@ -69,12 +75,17 @@ export default function Usage({
     [live, setLive] = useState(true);
   const [client, setClient] = useState(""),
     [provider, setProvider] = useState(""),
-    [source, setSource] = useState<"" | "proxy" | "sessions" | "grok_sessions">(""),
+    [source, setSource] = useState<"" | "proxy" | "sessions" | "grok_sessions">(
+      "",
+    ),
     [model, setModel] = useState(""),
     [operation, setOperation] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
+  const [interruptions, setInterruptions] =
+      useState<InterruptionSummary | null>(null),
+    [countingInterruptions, setCountingInterruptions] = useState(false);
   const [data, setData] = useState<Dashboard | null>(null),
     [logs, setLogs] = useState<UsagePage>(empty),
     [state, setState] = useState<UsageState | null>(null);
@@ -125,7 +136,10 @@ export default function Usage({
     stateSequence = useRef(0);
   const pending = useRef(new Map<string, Promise<unknown>>());
   const request = useCallback(
-    <K extends CommandName,>(name: K, ...params: CommandParams<K>): Promise<CommandResult<K>> => {
+    <K extends CommandName>(
+      name: K,
+      ...params: CommandParams<K>
+    ): Promise<CommandResult<K>> => {
       const args = params[0] ?? {};
       const key = name + JSON.stringify(args);
       let promise = pending.current.get(key);
@@ -227,7 +241,10 @@ export default function Usage({
     void loadState();
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("usage-state", loadState);
-    return () => { stateSequence.current++; events.dispose(); };
+    return () => {
+      stateSequence.current++;
+      events.dispose();
+    };
   }, [loadState]);
   useEffect(() => {
     let gone = false;
@@ -235,6 +252,7 @@ export default function Usage({
       command("get_gateway", { clientId: "codex" }),
       command("get_gateway", { clientId: "claude" }),
       command("get_gateway", { clientId: "grok" }),
+      command("get_gateway", { clientId: "dsh" }),
     ])
       .then((g) => {
         if (!gone)
@@ -296,11 +314,12 @@ export default function Usage({
         <h1>用量</h1>
         <div className="usage-actions">
           <span className="usage-sync-status" aria-live="polite">
-            {state?.maintenance ?? (state?.syncing
-              ? "同步中…"
-              : Object.values(state?.reports ?? {}).some((r) => r.completedAt)
-                ? "已同步"
-                : "")}
+            {state?.maintenance ??
+              (state?.syncing
+                ? "同步中…"
+                : Object.values(state?.reports ?? {}).some((r) => r.completedAt)
+                  ? "已同步"
+                  : "")}
           </span>
           <select
             aria-label="用量刷新频率"
@@ -345,7 +364,11 @@ export default function Usage({
         </div>
       </header>
       <div className="usage-metrics">
-        <Metric label="估算费用" value={source === "grok_sessions" ? "—" : money(t?.cost)} title={source === "grok_sessions" ? "轮次汇总不估算费用" : t?.cost} />
+        <Metric
+          label="估算费用"
+          value={source === "grok_sessions" ? "—" : money(t?.cost)}
+          title={source === "grok_sessions" ? "轮次汇总不估算费用" : t?.cost}
+        />
         <Metric
           label="已报告 Token"
           value={t ? compact(tokenTotal(t.tokens)) : "—"}
@@ -366,7 +389,32 @@ export default function Usage({
           title={firstTokenTitle(t)}
         />
       </div>
-      {source === "grok_sessions" && <p className="muted">Grok 会话按用户轮次汇总，一轮可包含多次模型调用；此来源独立统计，不与网关请求相加。</p>}
+      {source === "grok_sessions" && (
+        <p className="muted">
+          Grok
+          会话按用户轮次汇总，一轮可包含多次模型调用；此来源独立统计，不与网关请求相加。
+        </p>
+      )}
+      <button
+        disabled={countingInterruptions}
+        onClick={async () => {
+          setCountingInterruptions(true);
+          setError("");
+          try {
+            setInterruptions(
+              await command("get_usage_interruptions", {
+                filter: { ...query(), status: status || undefined },
+              }),
+            );
+          } catch (e) {
+            setError(errorOf(e).message);
+          } finally {
+            setCountingInterruptions(false);
+          }
+        }}
+      >
+        {countingInterruptions ? "正在统计中断…" : "统计中断"}
+      </button>
       <div className="usage-filters">
         <select
           aria-label="用量客户端"
@@ -380,6 +428,7 @@ export default function Usage({
           <option value="codex">Codex</option>
           <option value="claude">Claude Code</option>
           <option value="grok">Grok Build</option>
+          <option value="dsh">DeepSeek Harness</option>
         </select>
         <select
           aria-label="用量供应商"
@@ -495,108 +544,18 @@ export default function Usage({
       </div>
       {tab === "requests" ? (
         <>
-          <div className="usage-table-scroll">
-            <table className="usage-table" aria-busy={rowsBusy}>
-              <thead>
-                <tr>
-                  {[
-                    "结束时间",
-                    "供应商",
-                    "模型",
-                    "输入",
-                    "输出",
-                    "缓存",
-                    "费用",
-                  ].map((v) => (
-                    <th key={v}>{v}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {logs.rows.map((r) => {
-                  const a = r.attempts.at(-1);
-                  if (!a) return null;
-                  const tokens = r.source === "grok" ? promptTokens(r.attempts) : a.tokens;
-                  return (
-                    <tr
-                      key={r.id}
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.currentTarget.focus();
-                        void open(r);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void open(r);
-                      }}
-                      aria-label={`${date(r.finishedAt ?? r.startedAt)} ${name(a.provider)} ${r.source === "grok" ? "轮次详情" : "请求详情"}`}
-                    >
-                      <td title={preciseDate(r.finishedAt ?? r.startedAt)}>
-                        {a.status != null && a.status >= 400 && (
-                          <span
-                            className="usage-error-dot"
-                            title={`HTTP ${a.status}`}
-                          />
-                        )}
-                        <time>{date(r.finishedAt ?? r.startedAt)}</time>
-                      </td>
-                      <td
-                        className="usage-name"
-                        title={`${clientName(r.client)} · ${name(a.provider)}`}
-                      >
-                        <span className="usage-provider-name">
-                          {name(a.provider)}
-                        </span>
-                        <span className="usage-client-tag">
-                          {clientName(r.client)}
-                        </span>
-                      </td>
-                      <td
-                        className="usage-model"
-                        title={
-                          a.requestedModel &&
-                          a.responseModel &&
-                          a.requestedModel !== a.responseModel
-                            ? `${a.requestedModel} → ${a.responseModel}`
-                            : (a.responseModel ?? a.requestedModel ?? "—")
-                        }
-                      >
-                        {r.source === "grok" && r.attempts.length > 1 ? `多个模型（${r.attempts.length}）` : <Model a={a} />}
-                      </td>
-                      <td>
-                        <NumberValue
-                          value={tokens.input}
-                          missing={missingReason(a, "input", r.source)}
-                        />
-                      </td>
-                      <td>
-                        <NumberValue
-                          value={tokens.output}
-                          missing={missingReason(a, "output", r.source)}
-                        />
-                      </td>
-                      <td>
-                        <NumberValue
-                          value={tokens.cacheRead}
-                          missing={missingReason(a, "cache_read", r.source)}
-                        />
-                      </td>
-                      <td title={a.price?.cost}>
-                        {money(a.price?.cost)}
-                        {a.price && Number(a.price.multiplier) !== 1 && (
-                          <span className="usage-multiplier">
-                            ×{a.price.multiplier}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {logs.rows.length === 0 && (
-              <div className="usage-empty">{source === "grok_sessions" ? "暂无轮次" : "暂无请求"}</div>
-            )}
-          </div>
+          <UsageLogTable
+            rows={logs.rows}
+            busy={rowsBusy}
+            settings={state?.settings}
+            name={name}
+            open={(r) => void open(r)}
+            save={(settings) => {
+              void command("set_usage_settings", { settings })
+                .then(setState)
+                .catch((e) => setError(errorOf(e).message));
+            }}
+          />
           <Pagination page={logs.page} total={logs.total} onChange={setPage} />
         </>
       ) : tab === "pricing" ? (
@@ -639,6 +598,53 @@ export default function Usage({
             void load();
           }}
         />
+      )}
+      {interruptions && (
+        <UsageDrawer
+          title="中断统计 · 本网关"
+          onClose={() => setInterruptions(null)}
+        >
+          <p>
+            {interruptions.start ? date(interruptions.start) : "全部历史"} —{" "}
+            {date(interruptions.end)}
+          </p>
+          <p>
+            读取 {interruptions.requests.toLocaleString()} 个逻辑请求 · 已获用量{" "}
+            {interruptions.reported} · 用量不全 {interruptions.partial} ·
+            证据不足 {interruptions.unknown}
+          </p>
+          {interruptions.historyMissing && (
+            <p className="form-error">
+              明细保留起点：{date(interruptions.detailSince)}
+              。更早的历史缺少明细，未计为零。
+            </p>
+          )}
+          <table className="usage-table">
+            <thead>
+              <tr>
+                <th>客户端 · 供应商</th>
+                <th>已获用量</th>
+                <th>用量不全</th>
+                <th>证据不足</th>
+              </tr>
+            </thead>
+            <tbody>
+              {interruptions.groups.map((g) => (
+                <tr key={`${g.client}:${g.provider}`}>
+                  <td>
+                    {clientName(g.client)} · {name(g.provider)}
+                  </td>
+                  <td>{g.reported}</td>
+                  <td>{g.partial}</td>
+                  <td>{g.unknown}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted">
+            已获用量不表示与上游账单一致。用量不全时，上游可能在断开后继续生成并计费，本地不估算。
+          </p>
+        </UsageDrawer>
       )}
     </section>
   );
@@ -698,26 +704,6 @@ function NumberValue({
     >
       {value == null ? "—" : focused ? numeric(value) : compact(value)}
     </span>
-  );
-}
-function Model({ a }: { a: Attempt }) {
-  return (
-    <>
-      <span className="usage-model-name">
-        {a.operation === "web_search"
-          ? "网络搜索"
-          : (a.responseModel ?? a.requestedModel ?? "—")}
-      </span>
-      <span className="usage-badges">
-        {a.stream && <span className="usage-badge stream">流式</span>}
-        {(a.operation === "compaction" || a.compactionKind) && (
-          <span className="usage-badge compaction">压缩</span>
-        )}
-        {a.operation === "web_search" && (
-          <span className="usage-badge search">搜索</span>
-        )}
-      </span>
-    </>
   );
 }
 function TimeRange({
@@ -937,12 +923,16 @@ function Ranking({
   const sorted = [...groups].sort((a, b) => {
     const value = (g: Group) =>
       view.sort === "cost"
-        ? (nativeSummary ? null : Number(g.totals.cost))
+        ? nativeSummary
+          ? null
+          : Number(g.totals.cost)
         : view.sort === "tokens"
           ? tokenTotal(g.totals.tokens)
           : view.sort === "firstToken"
             ? averageFirstToken(g.totals)
-            : nativeSummary ? g.totals.attempts : g.totals.requests;
+            : nativeSummary
+              ? g.totals.attempts
+              : g.totals.requests;
     const av = value(a),
       bv = value(b);
     if (av == null || bv == null)
@@ -1013,12 +1003,16 @@ function Ranking({
                 <tr key={id}>
                   <td title={name(id)}>{name(id)}</td>
                   <td>
-                    <NumberValue value={nativeSummary ? t.attempts : t.requests} />
+                    <NumberValue
+                      value={nativeSummary ? t.attempts : t.requests}
+                    />
                   </td>
                   <td>
                     <NumberValue value={tokenTotal(t.tokens)} />
                   </td>
-                  <td title={nativeSummary ? "轮次汇总不估算费用" : t.cost}>{nativeSummary ? "—" : money(t.cost)}</td>
+                  <td title={nativeSummary ? "轮次汇总不估算费用" : t.cost}>
+                    {nativeSummary ? "—" : money(t.cost)}
+                  </td>
                   <td>
                     {t.statusKnown
                       ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
