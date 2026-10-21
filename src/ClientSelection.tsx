@@ -3,13 +3,23 @@ import type { ClientId } from "./types";
 import { confirmAction } from "./confirmation";
 
 export const clientName = (client: ClientId) =>
-  client === "claude" ? "Claude Code" : client === "grok" ? "Grok Build" : "Codex";
+  client === "dsh"
+    ? "DSH"
+    : client === "claude"
+      ? "Claude Code"
+      : client === "grok"
+        ? "Grok Build"
+        : "Codex";
 export function useClientSelection(surface: "main" | "quick" | "config") {
   const key = `lich13-switch.${surface}.client`;
   const [client, setClient] = useState<ClientId>(() => {
     try {
       const stored = localStorage.getItem(key);
-      return stored === "claude" || stored === "grok" ? stored : "codex";
+      return stored === "claude" ||
+        stored === "grok" ||
+        (stored === "dsh" && surface !== "config")
+        ? stored
+        : "codex";
     } catch {
       return "codex";
     }
@@ -38,14 +48,23 @@ export default function ClientSelection({
   client,
   select,
   disabled = false,
+  includeDsh = true,
 }: {
   client: ClientId;
   select: (id: ClientId) => void;
   disabled?: boolean;
+  includeDsh?: boolean;
 }) {
   return (
     <nav className="segmented client-selection" aria-label="客户端">
-      {(["codex", "claude", "grok"] as const).map((id) => (
+      {(
+        [
+          "codex",
+          "claude",
+          "grok",
+          ...(includeDsh ? ["dsh" as const] : []),
+        ] as const
+      ).map((id) => (
         <button
           key={id}
           data-client-switch

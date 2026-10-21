@@ -31,7 +31,8 @@ export default function GatewayDialog({
     [baseUrl, setBaseUrl] = useState(dialog.item?.baseUrl ?? ""),
     [token, setToken] = useState("");
   const [protocol, setProtocol] = useState(
-    dialog.item?.protocol ?? "responses",
+    dialog.item?.protocol ??
+      (clientId === "dsh" ? "chat_completions" : "responses"),
   );
   const [showToken, setShowToken] = useState(false);
   const [revealed, setRevealed] = useState<{
@@ -121,8 +122,13 @@ export default function GatewayDialog({
             ...(!dialog.item ? { name } : {}),
           };
           const payload: GatewayEdit =
-            clientId === "grok"
-              ? { op: "saveGrokProvider", ...draft, protocol }
+            clientId === "grok" || clientId === "dsh"
+              ? {
+                  op:
+                    clientId === "dsh" ? "saveDshProvider" : "saveGrokProvider",
+                  ...draft,
+                  protocol,
+                }
               : { op: "saveProvider", ...draft };
           void save(payload, baseline.current)
             .catch((e) => {
@@ -145,7 +151,7 @@ export default function GatewayDialog({
               />
             </label>
           )}
-          {clientId === "grok" && (
+          {(clientId === "grok" || clientId === "dsh") && (
             <label>
               API 协议
               <select
@@ -176,7 +182,7 @@ export default function GatewayDialog({
           <label>
             {clientId === "claude"
               ? "ANTHROPIC_AUTH_TOKEN"
-              : clientId === "grok"
+              : clientId === "grok" || clientId === "dsh"
                 ? "api_key"
                 : connectionMode === "apiKey"
                   ? "OPENAI_API_KEY"

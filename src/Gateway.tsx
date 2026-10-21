@@ -1,4 +1,5 @@
 import Advanced from "./GatewayAdvanced";
+import DshProfile from "./DshProfile";
 import GrokImport from "./GrokImport";
 import GatewayDialog from "./GatewayProviderDialog";
 import { subscriptions } from "./subscriptions";
@@ -50,6 +51,7 @@ import {
 type Edit = GatewayEdit;
 type Dialog =
   | { kind: "grokImport" }
+  | { kind: "dsh" }
   | { kind: "exchange"; mode: "import" | "export" }
   | { kind: "provider"; item?: Provider }
   | { kind: "settings"; item: Provider }
@@ -204,7 +206,16 @@ function GatewayContent({
         {error || "正在读取网关…"}
       </div>
     );
-  const toggle = () =>
+  const toggle = () => {
+    if (
+      clientId === "dsh" &&
+      !state.running &&
+      !state.recoveryPending &&
+      !state.dshProfile
+    ) {
+      setDialog({ kind: "dsh" });
+      return;
+    }
     run(async () => {
       setState(
         await command(
@@ -220,13 +231,16 @@ function GatewayContent({
       );
       notify(`配置已切换，请重新打开 ${clientName(clientId)}`);
     });
+  };
   const choose = (p: Provider) =>
     run(async () => {
       await edit({ op: "select", id: p.id });
       notify(
         state.running
           ? "已切换供应商，新请求立即生效"
-          : `文件已切换，请重新打开 ${clientName(clientId)}`,
+          : clientId === "dsh"
+            ? "已选择供应商，可在接入面板启用路由"
+            : `文件已切换，请重新打开 ${clientName(clientId)}`,
       );
     });
   const resetProvider = (p: Provider) =>
@@ -245,10 +259,34 @@ function GatewayContent({
       {clientId === "claude" && (
         <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
       )}
-      {clientId === "grok" && <div className="gateway-toolbar">
-        <button disabled={busy || state.running} onClick={() => setDialog({ kind: "grokImport" })}>导入当前配置</button>
-        {state.grokNativeAvailable && <button disabled={busy || state.running} onClick={() => run(() => edit({ op: "grokNative" }))}>恢复原生配置</button>}
-      </div>}
+      {clientId === "grok" && (
+        <div className="gateway-toolbar">
+          <button
+            disabled={busy || state.running}
+            onClick={() => setDialog({ kind: "grokImport" })}
+          >
+            导入当前配置
+          </button>
+          {state.grokNativeAvailable && (
+            <button
+              disabled={busy || state.running}
+              onClick={() => run(() => edit({ op: "grokNative" }))}
+            >
+              恢复原生配置
+            </button>
+          )}
+        </div>
+      )}
+      {clientId === "dsh" && (
+        <div className="gateway-toolbar">
+          <button disabled={busy} onClick={() => setDialog({ kind: "dsh" })}>
+            {state.running ? "同步模型列表" : "接入 profile"}
+          </button>
+          {state.dshProfile && (
+            <span className="muted">{state.dshProfile.profile}</span>
+          )}
+        </div>
+      )}
       <div className="page-heading gateway-heading">
         <ClientSelection
           client={clientId}
@@ -298,7 +336,10 @@ function GatewayContent({
             添加
           </button>
           <button
-            disabled={busy}
+            disabled={busy || clientId === "dsh"}
+            title={
+              clientId === "dsh" ? "请添加供应商并明确选择协议" : undefined
+            }
             onClick={() => setDialog({ kind: "exchange", mode: "import" })}
           >
             <Download size={15} />
@@ -585,7 +626,21 @@ function GatewayContent({
           onDirtyChange={markDialog}
         />
       )}
-      {dialog?.kind === "grokImport" && <GrokImport close={() => setDialog(null)} update={setState} notify={notify} />}
+      {dialog?.kind === "dsh" && (
+        <DshProfile
+          state={state}
+          close={() => setDialog(null)}
+          update={setState}
+          notify={notify}
+        />
+      )}
+      {dialog?.kind === "grokImport" && (
+        <GrokImport
+          close={() => setDialog(null)}
+          update={setState}
+          notify={notify}
+        />
+      )}
       {dialog?.kind === "settings" && (
         <ProviderSettings
           key={`${dialog.item.id}:${dialogVersion}`}

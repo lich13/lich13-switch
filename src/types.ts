@@ -1,9 +1,10 @@
 import { ErrorCodes } from "./error-codes";
-export type ClientId = "codex" | "claude" | "grok";
+export type ClientId = "codex" | "claude" | "grok" | "dsh";
 export type Preferences = {
   codexHome: string;
   claudeHome?: string;
   grokHome?: string;
+  dshHome?: string;
   cliPath: string;
   theme: "system" | "dark" | "light";
   quotaRefreshSeconds?: number;
@@ -185,6 +186,12 @@ export type GatewayState = {
   listener?: GatewayListener;
   grokModels?: GrokModel[];
   grokNativeAvailable?: boolean;
+  dshProfile?: {
+    profile: string;
+    protocol: GrokProtocol;
+    model: string | null;
+    makeDefault: boolean;
+  } | null;
   clientId: ClientId;
   revision: string;
   running: boolean;
@@ -266,6 +273,7 @@ export type ProviderQuota = {
 };
 
 export type ModelCatalog = {
+  metadata?: Record<string, ModelMetadata>;
   providerId: string;
   version: string;
   models: string[];
@@ -273,4 +281,14 @@ export type ModelCatalog = {
   stale: boolean;
   error: string | null;
   retryAt: number | null;
+};
+export type ModelMetadata = {
+  sources: string[];
+  model: string;
+  matchedBy: string;
+  name: string | null;
+  reasoning: boolean | null;
+  context: number | null;
+  output: number | null;
+  reasoningEfforts: Record<string, string | null> | null;
 };

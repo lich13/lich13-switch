@@ -154,14 +154,40 @@ if (densePreview) {
   ];
 }
 export const grokGatewayDemo: GatewayState = {
-  ...structuredClone(gatewayDemo), clientId: "grok", revision: "preview-grok",
-  address: "http://127.0.0.1:43721/v1", settings: { ...gatewayDemo.settings },
-  handoffWaiting: [], providers: gatewayDemo.providers.map(p => ({ ...structuredClone(p), protocol: "responses", handoffAfterCompaction: false, takeNewThreads: false, reservedThreads: 0 })),
+  ...structuredClone(gatewayDemo),
+  clientId: "grok",
+  revision: "preview-grok",
+  address: "http://127.0.0.1:43721/v1",
+  settings: { ...gatewayDemo.settings },
+  handoffWaiting: [],
+  providers: gatewayDemo.providers.map((p) => ({
+    ...structuredClone(p),
+    protocol: "responses",
+    handoffAfterCompaction: false,
+    takeNewThreads: false,
+    reservedThreads: 0,
+  })),
+};
+export const dshGatewayDemo: GatewayState = {
+  ...structuredClone(grokGatewayDemo),
+  clientId: "dsh",
+  revision: "preview-dsh",
+  providers: [],
+  running: false,
 };
 function syncListener(port = gatewayDemo.settings.port, changed = false) {
-  const states = [gatewayDemo, claudeGatewayDemo, grokGatewayDemo];
-  const revision = changed ? crypto.randomUUID() : gatewayDemo.listener!.revision;
-  const runningClients = states.filter(state => state.running).map(state => state.clientId);
+  const states = [
+    gatewayDemo,
+    claudeGatewayDemo,
+    grokGatewayDemo,
+    dshGatewayDemo,
+  ];
+  const revision = changed
+    ? crypto.randomUUID()
+    : gatewayDemo.listener!.revision;
+  const runningClients = states
+    .filter((state) => state.running)
+    .map((state) => state.clientId);
   for (const state of states) {
     state.settings.port = port;
     state.listener = { port, revision, runningClients };
@@ -170,21 +196,63 @@ function syncListener(port = gatewayDemo.settings.port, changed = false) {
 }
 syncListener();
 export function gatewayPreview(name: string, args: Record<string, unknown>) {
-  const s = args.clientId === "claude" ? claudeGatewayDemo : args.clientId === "grok" ? grokGatewayDemo : gatewayDemo;
+  const s =
+    args.clientId === "dsh"
+      ? dshGatewayDemo
+      : args.clientId === "claude"
+        ? claudeGatewayDemo
+        : args.clientId === "grok"
+          ? grokGatewayDemo
+          : gatewayDemo;
+  if (name === "preview_dsh_profile")
+    return {
+      profiles: ["default"],
+      profile: args.profile ?? null,
+      revision: "preview-dsh-profile",
+      models: [],
+      attached: dshGatewayDemo.running,
+      protocol: args.protocol,
+      model: null,
+      makeDefault: false,
+      warning: "预览使用合成 profile",
+    };
+  if (name === "attach_dsh_profile") {
+    dshGatewayDemo.running = true;
+    dshGatewayDemo.dshProfile = args.options as GatewayState["dshProfile"];
+    syncListener();
+    return structuredClone(dshGatewayDemo);
+  }
   if (name === "get_gateway_listener") return gatewayDemo.listener;
   if (name === "cancel_grok_import") return null;
-  if (name === "preview_grok_import") return {
-    token: args.useEnvironment ? "preview-grok-import" : null,
-    revision: grokGatewayDemo.revision, selected: "fixture-model",
-    models: [{ key: "fixture-model", model: "fixture-model", protocol: "responses", address: "https://example.invalid/v1", addressSource: "global", credentialAvailable: !!args.useEnvironment, missingEnvironment: args.useEnvironment ? [] : ["XAI_API_KEY"], error: null }],
-    environmentAvailable: true, environmentLoaded: !!args.useEnvironment,
-    clearEnvironment: ["GROK_MODELS_BASE_URL", "XAI_API_KEY"],
-    error: args.useEnvironment ? null : "未读取到 API 凭据；可确认读取 endpoint.env",
-  };
+  if (name === "preview_grok_import")
+    return {
+      token: args.useEnvironment ? "preview-grok-import" : null,
+      revision: grokGatewayDemo.revision,
+      selected: "fixture-model",
+      models: [
+        {
+          key: "fixture-model",
+          model: "fixture-model",
+          protocol: "responses",
+          address: "https://example.invalid/v1",
+          addressSource: "global",
+          credentialAvailable: !!args.useEnvironment,
+          missingEnvironment: args.useEnvironment ? [] : ["XAI_API_KEY"],
+          error: null,
+        },
+      ],
+      environmentAvailable: true,
+      environmentLoaded: !!args.useEnvironment,
+      clearEnvironment: ["GROK_MODELS_BASE_URL", "XAI_API_KEY"],
+      error: args.useEnvironment
+        ? null
+        : "未读取到 API 凭据；可确认读取 endpoint.env",
+    };
   if (name === "commit_grok_import") return structuredClone(grokGatewayDemo);
   if (name === "set_gateway_listener") {
     const port = Number(args.port);
-    if (gatewayDemo.listener!.runningClients.length) throw new Error("请先停用全部客户端网关，再修改共享端口");
+    if (gatewayDemo.listener!.runningClients.length)
+      throw new Error("请先停用全部客户端网关，再修改共享端口");
     syncListener(port, true);
     return gatewayDemo.listener;
   }
@@ -193,9 +261,14 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       token: "preview-sub2api",
       revision: s.revision,
       unsupportedProxies: 1,
-      template: { ready: false, token: "preview-import-template", rows: [
-        { id: 0, name: "标准并发模板" }, { id: 1, name: "自定义模型映射模板" },
-      ] },
+      template: {
+        ready: false,
+        token: "preview-import-template",
+        rows: [
+          { id: 0, name: "标准并发模板" },
+          { id: 1, name: "自定义模型映射模板" },
+        ],
+      },
       rows: [
         {
           id: 0,
@@ -214,9 +287,14 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       ],
     };
   if (name === "prepare_sub2api_export")
-    return { ready: !args.replaceTemplate, token: args.replaceTemplate ? "preview-template" : null, rows: [
-      { id: 0, name: "标准并发模板" }, { id: 1, name: "自定义模型映射模板" },
-    ] };
+    return {
+      ready: !args.replaceTemplate,
+      token: args.replaceTemplate ? "preview-template" : null,
+      rows: [
+        { id: 0, name: "标准并发模板" },
+        { id: 1, name: "自定义模型映射模板" },
+      ],
+    };
   if (name === "export_sub2api_providers" || name === "select_sub2api_template")
     return true;
   if (name === "cancel_sub2api_import") return null;
@@ -477,7 +555,8 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     if (e.op === "settings") {
       const settings = e.settings as GatewaySettings;
       if (settings.port !== s.settings.port) {
-        if (gatewayDemo.listener!.runningClients.length) throw new Error("请先停用全部客户端网关，再修改共享端口");
+        if (gatewayDemo.listener!.runningClients.length)
+          throw new Error("请先停用全部客户端网关，再修改共享端口");
         syncListener(settings.port, true);
       }
       s.settings = settings;

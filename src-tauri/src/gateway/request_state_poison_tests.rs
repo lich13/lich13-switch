@@ -261,12 +261,9 @@ async fn poisoned_client_gets_503_while_peer_and_token_routing_remain_scoped() {
     assert_eq!(get(port, "/codex/v1/models", &codex_token).await, 503);
     assert_eq!(get(port, "/claude/v1/models", &claude_token).await, 200);
     assert!(codex_upstream.requests().is_empty());
-    assert_eq!(
-        claude_upstream.requests(),
-        vec![(
-            "/v1/models".to_owned(),
-            Some("Bearer fixture-claude-upstream-token".to_owned())
-        )]
+    assert!(
+        claude_upstream.requests().is_empty(),
+        "nonempty Claude union is served locally after token authentication"
     );
 
     codex.0.inner.clear_poison();

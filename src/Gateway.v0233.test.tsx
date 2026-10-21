@@ -30,7 +30,11 @@ vi.mock("./bridge", () => ({
 }));
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirmAction }));
 import Gateway from "./Gateway";
-import { claudeGatewayDemo, gatewayDemo, grokGatewayDemo } from "./gateway-preview";
+import {
+  claudeGatewayDemo,
+  gatewayDemo,
+  grokGatewayDemo,
+} from "./gateway-preview";
 
 type CommandArgs = {
   clientId?: ClientId;
@@ -91,29 +95,28 @@ beforeEach(() => {
     codex: structuredClone(gatewayDemo),
     claude: structuredClone(claudeGatewayDemo),
     grok: structuredClone(grokGatewayDemo),
+    dsh: { ...structuredClone(grokGatewayDemo), clientId: "dsh" },
   };
   revealToken = async (clientId) => `fixture-stored-${clientId}-token`;
   nextUpdateError = null;
   mock.command.mockReset();
   mock.listeners.clear();
   mock.confirmAction.mockReset().mockResolvedValue(true);
-  mock.command.mockImplementation(
-    async (name: string, args?: CommandArgs) => {
-      const clientId = args?.clientId ?? "codex";
-      const current = gateways[clientId];
-      if (name === "get_gateway") return structuredClone(current);
-      if (name === "reveal_provider_token") return revealToken(clientId);
-      if (name === "update_gateway") {
-        if (nextUpdateError) {
-          const error = nextUpdateError;
-          nextUpdateError = null;
-          current.revision = "fixture-fresh-revision";
-          throw error;
-        }
-        return structuredClone(current);
+  mock.command.mockImplementation(async (name: string, args?: CommandArgs) => {
+    const clientId = args?.clientId ?? "codex";
+    const current = gateways[clientId];
+    if (name === "get_gateway") return structuredClone(current);
+    if (name === "reveal_provider_token") return revealToken(clientId);
+    if (name === "update_gateway") {
+      if (nextUpdateError) {
+        const error = nextUpdateError;
+        nextUpdateError = null;
+        current.revision = "fixture-fresh-revision";
+        throw error;
       }
-    },
-  );
+      return structuredClone(current);
+    }
+  });
 });
 
 afterEach(() => {
@@ -144,7 +147,9 @@ describe("gateway provider token visibility", () => {
       await user.type(token, `fixture-user-${clientId}-token`);
       expect(token).toHaveValue(`fixture-user-${clientId}-token`);
       expect(
-        mock.command.mock.calls.some(([name]) => name === "reveal_provider_token"),
+        mock.command.mock.calls.some(
+          ([name]) => name === "reveal_provider_token",
+        ),
       ).toBe(false);
 
       const hide = screen.getByRole("button", { name: "隐藏 Token" });

@@ -120,6 +120,7 @@ impl Fixture {
         std::fs::create_dir(&home).unwrap();
         let data = dir.path().join("gateway-data");
         let gateway = match client {
+            ClientId::Dsh => panic!("DSH profile path is covered separately"),
             ClientId::Grok => {
                 let config = format!("[models]\ndefault='fixture'\n[model.fixture]\nmodel='fixture-model'\napi_backend='responses'\nbase_url={}\napi_key={}\n", serde_json::to_string(&urls[0]).unwrap(), serde_json::to_string(FIXTURE_KEY).unwrap());
                 std::fs::write(home.join("config.toml"), config).unwrap();

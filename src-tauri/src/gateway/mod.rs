@@ -3,8 +3,11 @@ use crate::errors::code;
 mod api_login_tests;
 mod claude_config;
 mod codex_api;
+pub(crate) mod dsh;
 pub(crate) mod grok_config;
 mod grok_import;
+mod grok_layers;
+mod provider_protocol;
 pub use grok_import::Preview as GrokImportPreview;
 #[cfg(test)]
 mod grok_config_tests;
@@ -23,7 +26,7 @@ mod locks;
 mod registry;
 pub use listener::View as ListenerView;
 mod retired;
-pub use client::{claude_home, grok_home, ClientId};
+pub use client::{claude_home, dsh_home, grok_home, ClientId};
 pub(crate) use retired::migrate as retire_legacy_proxy;
 mod admission;
 mod attempt;
@@ -153,6 +156,7 @@ pub struct View {
     pub listener: ListenerView,
     pub grok_models: Vec<grok_import::ModelView>,
     pub grok_native_available: bool,
+    pub dsh_profile: Option<dsh::Options>,
     pub client_id: ClientId,
     pub revision: String,
     pub running: bool,
@@ -191,6 +195,10 @@ struct Inner {
     home: Option<PathBuf>,
 }
 struct Shared {
+    // Scripted routing fixtures have no discovery endpoint. Catalog tests opt in
+    // explicitly so automatic metadata requests cannot consume business scripts.
+    #[cfg(test)]
+    discover_new_providers: std::sync::atomic::AtomicBool,
     grok_import: grok_import::Service,
     client: ClientId,
     diagnostics: Mutex<Option<crate::events::Service>>,
@@ -288,6 +296,7 @@ impl Gateway {
                     ClientId::Codex => "codex",
                     ClientId::Claude => "claude",
                     ClientId::Grok => "grok",
+                    ClientId::Dsh => "dsh",
                 },
                 model,
                 operation,
@@ -441,6 +450,9 @@ impl Gateway {
     pub fn grok_companion(&self, data: PathBuf) -> Result<Self> {
         Self::new_client(data, ClientId::Grok, Some(self.0.registry.clone()))
     }
+    pub fn dsh_companion(&self, data: PathBuf) -> Result<Self> {
+        Self::new_client(data, ClientId::Dsh, Some(self.0.registry.clone()))
+    }
     fn new_client(
         data: PathBuf,
         client: ClientId,
@@ -449,6 +461,7 @@ impl Gateway {
         storage::private_dir(&data)?;
         let error = crate::migrations::gateway(&data)
             .and_then(|()| grok_import::recover(&data))
+            .and_then(|()| dsh::recover(&data))
             .err()
             .map(|e| e.message);
         let upgrade_pending = error.is_some();
@@ -467,6 +480,8 @@ impl Gateway {
         admission.configure_retention(store.settings.thread_idle_release_seconds);
         let local_token = store.local_token.clone();
         let gateway = Self(Arc::new(Shared {
+            #[cfg(test)]
+            discover_new_providers: std::sync::atomic::AtomicBool::new(false),
             grok_import: grok_import::Service::default(),
             client,
             diagnostics: Mutex::new(None),
@@ -491,29 +506,73 @@ impl Gateway {
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
             exchange: exchange::Service::default(),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
+            catalog: catalog::Service::new(data.join("provider-models.json")),
             data,
             spool,
             active: AtomicUsize::new(0),
             events,
             quota: quota::Service::new(),
-            catalog: catalog::Service::new(),
             admission,
         }));
         registry.register(&gateway.0, &local_token)?;
         Ok(gateway)
     }
     fn replace_store(&self, state: &mut Inner, store: Store) {
+        let added: Vec<_> = store
+            .providers
+            .iter()
+            .filter(|p| !state.store.providers.iter().any(|old| old.id == p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        let removed: Vec<_> = state
+            .store
+            .providers
+            .iter()
+            .filter(|p| !store.providers.iter().any(|new| new.id == p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        if let Err(e) = self.0.catalog.remove(&removed) {
+            state.error = Some(e.message);
+        }
         state.store = store;
         self.0
             .registry
             .publish_token(&self.0, &state.store.local_token);
+        #[cfg(test)]
+        if !self.0.discover_new_providers.load(Ordering::Relaxed) {
+            return;
+        }
+        for id in added {
+            let gateway = self.clone();
+            tauri::async_runtime::spawn(async move {
+                let usage = gateway.0.usage.lock().unwrap().clone();
+                tokio::join!(
+                    async {
+                        if gateway
+                            .list_models(&id, false)
+                            .await
+                            .is_ok_and(|v| v.checked_at.is_none())
+                        {
+                            let _ = gateway.list_models(&id, true).await;
+                        }
+                    },
+                    async {
+                        if let Some(usage) = usage {
+                            if let Ok(prices) = usage.prices() {
+                                let _ = prices.models_dev.refresh(false).await;
+                            }
+                        }
+                    }
+                );
+            });
+        }
     }
     pub fn import_initial(&self, home: &Path) -> Result<()> {
         let _guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
         s.home = Some(home.to_owned());
         // Grok discovery is read-only. Its explicit import preview owns migration.
-        if self.0.client == ClientId::Grok {
+        if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             return Ok(());
         }
         if s.upgrade_pending {
@@ -715,12 +774,18 @@ impl Gateway {
         let config = s
             .home
             .as_ref()
+            .filter(|_| self.0.client != ClientId::Dsh)
             .map(|h| takeover::read_connection(self.0.client, h, &s.store.connection));
         let config_revision = config
             .as_ref()
             .and_then(|r| r.as_ref().ok())
             .map(|(r, _)| r.clone());
-        let mut config_state = "unknown";
+        let mut config_state =
+            if self.0.client == ClientId::Dsh && s.store.dsh.as_ref().is_some_and(|d| d.active) {
+                "gateway"
+            } else {
+                "unknown"
+            };
         let mut config_provider = None;
         if let Some(Ok((_, pair))) = &config {
             config_state = "unsaved";
@@ -753,6 +818,7 @@ impl Gateway {
             } else {
                 Vec::new()
             },
+            dsh_profile: s.store.dsh.as_ref().map(|d| d.options.clone()),
             client_id: self.0.client,
             grok_native_available: s.store.grok_native.is_some(),
             config_revision,
@@ -772,7 +838,16 @@ impl Gateway {
             last_successful: s.last_successful.clone(),
             revision: self.view_revision(&s)?,
             running: s.running,
-            address: self.0.client.address(listener.port),
+            address: if self.0.client == ClientId::Dsh
+                && s.store
+                    .dsh
+                    .as_ref()
+                    .is_some_and(|d| d.options.protocol == grok_config::Protocol::Messages)
+            {
+                format!("http://127.0.0.1:{}", listener.port)
+            } else {
+                self.0.client.address(listener.port)
+            },
             mode: s.store.mode.clone(),
             selected: s.store.selected.clone(),
             settings: Settings {
@@ -788,13 +863,15 @@ impl Gateway {
                         self.0.admission.rpm_status(&p.id, p.max_rpm);
                     let (quota_checking, quota_check) = self.0.quota.probe_view(&p.id, &p.version);
                     ProviderView {
-                        protocol: (self.0.client == ClientId::Grok).then(|| {
-                            s.store
-                                .grok_connections
-                                .get(&p.id)
-                                .map(|c| c.protocol)
-                                .unwrap_or_default()
-                        }),
+                        protocol: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(
+                            || {
+                                s.store
+                                    .grok_connections
+                                    .get(&p.id)
+                                    .map(|c| c.protocol)
+                                    .unwrap_or_default()
+                            },
+                        ),
                         id: p.id.clone(),
                         name: p.name.clone(),
                         base_url: p.base_url.clone(),
@@ -875,7 +952,8 @@ impl Gateway {
                 }),
             recovery_pending: s.upgrade_pending
                 || self.0.data.join("gateway-recovery.json").exists()
-                || self.0.data.join("grok-import.json").exists(),
+                || self.0.data.join("grok-import.json").exists()
+                || self.0.data.join("dsh-recovery.json").exists(),
         })
     }
     pub fn observe_home(&self, home: &Path) {
@@ -883,6 +961,9 @@ impl Gateway {
     }
     pub fn read_config(&self, home: &Path) -> Result<crate::configuration::Document> {
         let s = self.0.inner.lock().unwrap();
+        if self.0.client == ClientId::Dsh {
+            return Err(AppError::new(code::CONFIG, "请在 DSH 接入面板选择 profile"));
+        }
         crate::configuration::read(
             self.0.client,
             home,
@@ -890,6 +971,7 @@ impl Gateway {
             s.running
                 || self.0.data.join("gateway-recovery.json").exists()
                 || self.0.data.join("grok-import.json").exists()
+                || self.0.data.join("dsh-recovery.json").exists()
                 || self.claude_official(),
         )
     }
@@ -908,6 +990,9 @@ impl Gateway {
                 code::RECOVERY,
                 "请先处理未完成的 Grok 导入事务",
             ));
+        }
+        if self.0.client == ClientId::Dsh {
+            return Err(AppError::new(code::CONFIG, "请使用 DSH 接入面板"));
         }
         crate::configuration::validate(self.0.client, text)?;
         if self.0.client == ClientId::Claude {
@@ -968,6 +1053,7 @@ impl Gateway {
             || self.request_state().is_ok_and(|state| state.running)
             || self.0.data.join("gateway-recovery.json").exists()
             || self.0.data.join("grok-import.json").exists()
+            || self.0.data.join("dsh-recovery.json").exists()
     }
     pub fn edit(&self, edit: Edit, expected: &str, home: &Path) -> Result<View> {
         self.edit_checked(edit, expected, home, None)
@@ -1033,6 +1119,23 @@ impl Gateway {
         {
             return Err(AppError::new(code::CLIENT, "此操作仅适用于 Grok Build"));
         }
+        if self.0.client != ClientId::Dsh && matches!(&edit, Edit::SaveDshProvider { .. }) {
+            return Err(AppError::new(code::CLIENT, "此操作仅适用于 DSH"));
+        }
+        if self.0.client == ClientId::Dsh
+            && matches!(
+                &edit,
+                Edit::SaveProvider { .. }
+                    | Edit::Import
+                    | Edit::ImportProviders { .. }
+                    | Edit::ImportLink { .. }
+            )
+        {
+            return Err(AppError::new(
+                code::CLIENT,
+                "请在 DSH 供应商表单明确选择协议",
+            ));
+        }
         if matches!(&edit, Edit::GrokNative) {
             if s.running {
                 return Err(AppError::new(code::GATEWAY_ACTIVE, "请先停用 Grok 网关"));
@@ -1051,6 +1154,7 @@ impl Gateway {
             }
             let mut next = s.store.clone();
             next.grok_native = None;
+            next.grok_api_model = None;
             next.grok_resume = None;
             next.resume = None;
             let path = self.0.data.join("gateway.json");
@@ -1217,7 +1321,7 @@ impl Gateway {
                 .listener
                 .set_port(port, &self.try_listener_view()?.revision)?;
         }
-        let revision = if s.running || direct_select {
+        let revision = if self.0.client != ClientId::Dsh && (s.running || direct_select) {
             let p = Self::exit_provider(&next, s.last_successful.as_deref())?;
             let target = takeover::Pair::new(&p.base_url, &p.token);
             if self.0.client == ClientId::Grok && direct_select {
@@ -1240,9 +1344,7 @@ impl Gateway {
                 if let Some(original) = &next.grok_native {
                     snapshot.retain_original(original);
                 }
-                if next.grok_api_model.is_none() {
-                    next.grok_native = Some(snapshot);
-                }
+                next.grok_native = Some(snapshot);
             }
             let resume_target = if self.0.client == ClientId::Grok && s.running {
                 takeover::exit_pair(&self.0.data)?
@@ -1317,6 +1419,19 @@ impl Gateway {
         home: &Path,
         config_revision: Option<&str>,
     ) -> Result<View> {
+        if self.0.client == ClientId::Dsh {
+            let options = self
+                .0
+                .inner
+                .lock()
+                .unwrap()
+                .store
+                .dsh
+                .as_ref()
+                .map(|s| s.options.clone())
+                .ok_or_else(|| AppError::new(code::CONFIG, "请先在 DSH 接入面板选择 profile"))?;
+            return self.attach_dsh(home, options, expected, None).await;
+        }
         if self.0.client == ClientId::Codex && crate::official::blocks_gateway(&self.0.data, home) {
             return Err(AppError::new(
                 code::OFFICIAL_MODE,
@@ -1475,6 +1590,15 @@ impl Gateway {
         let Some(intent) = intent.filter(|i| i.desired) else {
             return Ok(());
         };
+        if self.0.client == ClientId::Dsh {
+            if intent.home != home {
+                return Err(AppError::new(
+                    code::RESUME_CONFLICT,
+                    "DSH 目录已变化，自动恢复已停止",
+                ));
+            }
+            return self.start(&revision, home).await.map(|_| ());
+        }
         let result = async {
             if intent.home != home {
                 return Err(AppError::new(
@@ -1530,6 +1654,9 @@ impl Gateway {
         expected_config: Option<&str>,
         preserve_intent: bool,
     ) -> Result<View> {
+        if self.0.client == ClientId::Dsh {
+            return self.stop_dsh(preserve_intent).await;
+        }
         let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
         if let Err(error) = self.0.registry.listener.view() {
@@ -1671,7 +1798,7 @@ impl Gateway {
         {
             return;
         }
-        if s.store.mode == "auto" && self.0.client != ClientId::Grok {
+        if s.store.mode == "auto" && !matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             // Routes may use an auxiliary URL. Client configuration and recovery
             // always restore the canonical primary URL saved by the user.
             let canonical = s
@@ -1766,13 +1893,14 @@ impl Gateway {
                 .iter()
                 .find(|p| p.id == id)
                 .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
-            let connection = (self.client_id() == ClientId::Grok).then(|| {
-                s.store
-                    .grok_connections
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_default()
-            });
+            let connection =
+                (matches!(self.client_id(), ClientId::Grok | ClientId::Dsh)).then(|| {
+                    s.store
+                        .grok_connections
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_default()
+                });
             let query = quota::Query {
                 client_id: self.0.client,
                 id: p.id.clone(),
@@ -1792,7 +1920,7 @@ impl Gateway {
     pub async fn list_models(&self, id: &str, force: bool) -> Result<catalog::View> {
         let (input, connection) = self.query_snapshot(id)?;
         let version = input.version.clone();
-        let result = self
+        let mut result = self
             .0
             .catalog
             .query_with_connection(input, force, connection.as_ref())
@@ -1808,6 +1936,51 @@ impl Gateway {
                 code::STALE,
                 "供应商配置已变化，已丢弃旧模型列表",
             ));
+        }
+        if force {
+            self.0.catalog.commit(&result)?;
+        }
+        if let Some(usage) = self.0.usage.lock().unwrap().as_ref() {
+            if let Ok(prices) = usage.prices() {
+                result.metadata = result
+                    .models
+                    .iter()
+                    .filter_map(|id| prices.models_dev.metadata(id).map(|m| (id.clone(), m)))
+                    .collect();
+            }
+        }
+        Ok(result)
+    }
+    pub(crate) fn model_union(
+        &self,
+        protocol: Option<grok_config::Protocol>,
+    ) -> Result<Vec<String>> {
+        let state = self.request_state()?;
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for provider in state.store.providers.iter().filter(|p| p.queued) {
+            if protocol.is_some_and(|protocol| {
+                state
+                    .store
+                    .grok_connections
+                    .get(&provider.id)
+                    .is_none_or(|c| c.protocol != protocol)
+            }) {
+                continue;
+            }
+            let cached = self
+                .0
+                .catalog
+                .cached(&provider.id, &Self::quota_version(&state.store, provider));
+            let models = provider
+                .allowed_models
+                .as_ref()
+                .or_else(|| (!cached.stale).then_some(&cached.models));
+            for id in models.into_iter().flatten() {
+                if seen.insert(id.clone()) {
+                    result.push(id.clone());
+                }
+            }
         }
         Ok(result)
     }
@@ -1893,7 +2066,7 @@ impl Gateway {
             })
             .clone();
         Some(Route {
-            grok: (self.0.client == ClientId::Grok).then(|| {
+            grok: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(|| {
                 s.store
                     .grok_connections
                     .get(&provider.id)

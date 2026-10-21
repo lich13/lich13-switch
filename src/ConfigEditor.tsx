@@ -31,7 +31,10 @@ import {
   type AppError,
   type ClientId,
 } from "./types";
-import ClientSelection, { clientName, useClientSelection } from "./ClientSelection";
+import ClientSelection, {
+  clientName,
+  useClientSelection,
+} from "./ClientSelection";
 import ClaudeSettings from "./ClaudeSettings";
 import { changes, get, sensitive } from "./claude-settings";
 import Modal from "./Modal";
@@ -95,7 +98,12 @@ export default function ConfigEditor(props: Props) {
     },
     [props.onDirty],
   );
-  const home = clientId === "claude" ? props.claudeHome : clientId === "grok" ? (props.grokHome ?? "~/.grok") : props.home;
+  const home =
+    clientId === "claude"
+      ? props.claudeHome
+      : clientId === "grok"
+        ? (props.grokHome ?? "~/.grok")
+        : props.home;
   return (
     <EditorContent
       key={`${clientId}:${home}`}
@@ -164,17 +172,14 @@ function EditorContent({
   }, [load, home]);
   useEffect(() => {
     const events = subscriptions((e) => setError(errorOf(e)));
-    events.watch(
-      "config-state",
-      (s) => {
-        if (s.clientId !== clientId) return;
-        setDoc((d) => (d ? { ...d, guarded: s.guarded } : d));
-        if (docRef.current && s.revision !== docRef.current.revision) {
-          if (textRef.current !== docRef.current.text) setConflict(true);
-          else void load();
-        }
-      },
-    );
+    events.watch("config-state", (s) => {
+      if (s.clientId !== clientId) return;
+      setDoc((d) => (d ? { ...d, guarded: s.guarded } : d));
+      if (docRef.current && s.revision !== docRef.current.revision) {
+        if (textRef.current !== docRef.current.text) setConflict(true);
+        else void load();
+      }
+    });
     return () => {
       events.dispose();
     };
@@ -335,9 +340,23 @@ function EditorContent({
     }
   return (
     <section className="config-page">
-      {clientId==="claude"&&<ClaudeProfile disabled={busy} beforeChange={async()=>!dirty||await confirmAction("切换配置会丢弃未保存的修改。")} onChanged={()=>void load()} notify={onMessage}/>}
+      {clientId === "claude" && (
+        <ClaudeProfile
+          disabled={busy}
+          beforeChange={async () =>
+            !dirty || (await confirmAction("切换配置会丢弃未保存的修改。"))
+          }
+          onChanged={() => void load()}
+          notify={onMessage}
+        />
+      )}
       <div className="config-heading">
-        <ClientSelection client={clientId} select={select} disabled={busy} />
+        <ClientSelection
+          includeDsh={false}
+          client={clientId}
+          select={select}
+          disabled={busy}
+        />
         <div className="inline">
           {clientId === "claude" && (
             <div className="segmented" aria-label="编辑方式">

@@ -136,8 +136,11 @@ impl Listener {
     }
     /// Caller holds Registry::lifecycle until config commit and activation finish.
     pub async fn prepare(&self) -> Result<Prepared> {
-        self.prepare_at(DEFAULT_SHARED_PORT, ClientId::Codex.legacy_port())
-            .await
+        self.prepare_at(
+            DEFAULT_SHARED_PORT,
+            ClientId::Codex.legacy_port().expect("Codex legacy port"),
+        )
+        .await
     }
     async fn prepare_at(&self, default_port: u16, legacy_default_port: u16) -> Result<Prepared> {
         self.check_revision()?;

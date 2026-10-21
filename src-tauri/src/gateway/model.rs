@@ -170,6 +170,8 @@ pub struct Store {
     pub grok_resume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_api_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsh: Option<super::dsh::Snapshot>,
     pub settings: Settings,
     pub mode: String,
     pub selected: Option<String>,
@@ -204,6 +206,7 @@ impl Default for Store {
             grok_native: None,
             grok_resume: None,
             grok_api_model: None,
+            dsh: None,
             settings: Settings::default(),
             mode: "manual".into(),
             selected: None,
@@ -233,6 +236,14 @@ pub enum Edit {
         name: Option<String>,
     },
     SaveGrokProvider {
+        id: Option<String>,
+        base_url: String,
+        token: String,
+        #[serde(default)]
+        name: Option<String>,
+        protocol: super::grok_config::Protocol,
+    },
+    SaveDshProvider {
         id: Option<String>,
         base_url: String,
         token: String,
@@ -419,6 +430,13 @@ impl Store {
     pub fn edit(&mut self, edit: Edit, running: bool) -> Result<()> {
         match edit {
             Edit::SaveGrokProvider {
+                id,
+                base_url,
+                token,
+                name,
+                protocol,
+            }
+            | Edit::SaveDshProvider {
                 id,
                 base_url,
                 token,

@@ -79,9 +79,13 @@ const emptyLogin: LoginState = {
   callbackReady: false,
 };
 export default function App() {
-  const [exchangeMode, setExchangeMode] = useState<"import" | "export" | null>(null);
+  const [exchangeMode, setExchangeMode] = useState<"import" | "export" | null>(
+    null,
+  );
   const [state, setState] = useState<ViewState | null>(null),
-    [page, setPage] = useState<"accounts" | "config" | "gateway" | "logs" | "usage">("accounts"),
+    [page, setPage] = useState<
+      "accounts" | "config" | "gateway" | "logs" | "usage"
+    >("accounts"),
     [search, setSearch] = useState(""),
     [dialog, setDialog] = useState<Dialog>(null),
     [error, setError] = useState(""),
@@ -99,8 +103,15 @@ export default function App() {
     pageRef = useRef(page);
   const gatewayDirty = useRef(false);
   const usageDirty = useRef(false);
-  const usageDraftChanged = useCallback((value: boolean) => { usageDirty.current = value; }, []);
-  const [focusEvent, setFocusEvent] = useState<{ id: string; clientId: ClientId; providerId: string | null; sequence: number } | null>(null);
+  const usageDraftChanged = useCallback((value: boolean) => {
+    usageDirty.current = value;
+  }, []);
+  const [focusEvent, setFocusEvent] = useState<{
+    id: string;
+    clientId: ClientId;
+    providerId: string | null;
+    sequence: number;
+  } | null>(null);
   const [focusProvider, setFocusProvider] = useState<{
     id: string;
     clientId?: ClientId;
@@ -164,10 +175,7 @@ export default function App() {
     let disposed = false;
     let receivedAccountState = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
-    void Promise.all([
-      command("get_state"),
-      command("get_login"),
-    ])
+    void Promise.all([command("get_state"), command("get_login")])
       .then(([s, l]) => {
         if (!disposed) {
           if (!receivedAccountState) setState(s);
@@ -184,48 +192,50 @@ export default function App() {
     });
     events.watch("switch-notice", setMessage);
     events.watch("switch-error", (p) => setError(errorOf(p).message));
-    events.watch(
-        "navigate",
-        (p) =>
-          p === "settings"
-            ? (async () => {
-                if (
-                  (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
-                  !(await confirmAction("打开设置会丢弃未保存的草稿。"))
-                )
-                  return;
-                if (disposed) return;
-                setPage("accounts");
-                setDirty(false);
-                setThemePreview(null);
-                setDialog("settings");
-              })()
-            : navigate(p === "config" || p === "gateway" || p === "logs" ? p : "accounts"),
+    events.watch("navigate", (p) =>
+      p === "settings"
+        ? (async () => {
+            if (
+              (gatewayDirty.current ||
+                usageDirty.current ||
+                dirtyRef.current) &&
+              !(await confirmAction("打开设置会丢弃未保存的草稿。"))
+            )
+              return;
+            if (disposed) return;
+            setPage("accounts");
+            setDirty(false);
+            setThemePreview(null);
+            setDialog("settings");
+          })()
+        : navigate(
+            p === "config" || p === "gateway" || p === "logs" ? p : "accounts",
+          ),
     );
-    events.watch(
-        "provider-settings",
-        async (p) => {
-          if (
-            (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
-            !(await confirmAction("打开白名单会丢弃未保存的草稿。"))
-          )
-            return;
-          if (disposed) return;
-          setPage("gateway");
-          setDirty(false);
-          setFocusProvider({
-            ...(typeof p === "string"
-              ? { id: p, clientId: "codex" as const }
-              : p),
-            sequence: Date.now(),
-          });
-        },
-    );
+    events.watch("provider-settings", async (p) => {
+      if (
+        (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
+        !(await confirmAction("打开白名单会丢弃未保存的草稿。"))
+      )
+        return;
+      if (disposed) return;
+      setPage("gateway");
+      setDirty(false);
+      setFocusProvider({
+        ...(typeof p === "string" ? { id: p, clientId: "codex" as const } : p),
+        sequence: Date.now(),
+      });
+    });
     events.watch("event-log", async (p) => {
-        if ((gatewayDirty.current || usageDirty.current || dirtyRef.current) && !(await confirmAction("查看日志会丢弃未保存的草稿。"))) return;
-        if (disposed) return;
-        setPage("logs"); setDirty(false);
-        setFocusEvent({ ...p, sequence: Date.now() });
+      if (
+        (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
+        !(await confirmAction("查看日志会丢弃未保存的草稿。"))
+      )
+        return;
+      if (disposed) return;
+      setPage("logs");
+      setDirty(false);
+      setFocusEvent({ ...p, sequence: Date.now() });
     });
     events.watch("login-state", setLogin);
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -296,11 +306,11 @@ export default function App() {
       notify("官方连接已关闭，配置已恢复");
     });
   const accounts =
-      state?.accounts.filter((a) =>
-        (a.name + " " + (a.email ?? ""))
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-      ) ?? [];
+    state?.accounts.filter((a) =>
+      (a.name + " " + (a.email ?? ""))
+        .toLowerCase()
+        .includes(search.toLowerCase()),
+    ) ?? [];
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -332,9 +342,19 @@ export default function App() {
             <Network size={17} />
             网关
           </button>
-          <button className={page === "usage" ? "nav-item active" : "nav-item"} onClick={() => navigate("usage")}><ChartNoAxesCombined size={18} />用量</button>
-          <button className={page === "logs" ? "nav-item active" : "nav-item"} onClick={() => navigate("logs")}>
-            <ScrollText size={17} />日志
+          <button
+            className={page === "usage" ? "nav-item active" : "nav-item"}
+            onClick={() => navigate("usage")}
+          >
+            <ChartNoAxesCombined size={18} />
+            用量
+          </button>
+          <button
+            className={page === "logs" ? "nav-item active" : "nav-item"}
+            onClick={() => navigate("logs")}
+          >
+            <ScrollText size={17} />
+            日志
           </button>
         </nav>
         <div className="sidebar-bottom">
@@ -364,23 +384,43 @@ export default function App() {
             </button>
           </div>
         )}
-        {page === "usage" ? (<Suspense fallback={null}><Usage onDirtyChange={usageDraftChanged} /></Suspense>) : page === "logs" ? (<Suspense fallback={null}><EventLog focus={focusEvent} consumed={() => setFocusEvent(null)} /></Suspense>) : page === "accounts" ? (
+        {page === "usage" ? (
+          <Suspense fallback={null}>
+            <Usage onDirtyChange={usageDraftChanged} />
+          </Suspense>
+        ) : page === "logs" ? (
+          <Suspense fallback={null}>
+            <EventLog focus={focusEvent} consumed={() => setFocusEvent(null)} />
+          </Suspense>
+        ) : page === "accounts" ? (
           <section className="accounts-page">
             <div className="page-heading">
               <div>
                 <h1>账号</h1>
               </div>
               <div className="account-actions">
-              <button disabled={!state} onClick={() => setExchangeMode("import")}><Upload size={16} />导入</button>
-              <button disabled={!state?.accounts.length} onClick={() => setExchangeMode("export")}><Download size={16} />导出</button>
-              <button
-                className="primary"
-                onClick={() => setDialog("add")}
-                disabled={!state}
-              >
-                <Plus size={16} />
-                添加账号
-              </button>
+                <button
+                  disabled={!state}
+                  onClick={() => setExchangeMode("import")}
+                >
+                  <Upload size={16} />
+                  导入
+                </button>
+                <button
+                  disabled={!state?.accounts.length}
+                  onClick={() => setExchangeMode("export")}
+                >
+                  <Download size={16} />
+                  导出
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => setDialog("add")}
+                  disabled={!state}
+                >
+                  <Plus size={16} />
+                  添加账号
+                </button>
               </div>
             </div>
             {(state?.currentState === "unsaved" ||
@@ -423,8 +463,13 @@ export default function App() {
               <div className="banner error" role="alert">
                 <AlertTriangle size={16} />
                 <span>{state.officialMode.error}</span>
-                {(state.officialMode.enabled || state.officialMode.accountId) && (
-                  <button className="text-button" onClick={disableOfficial} disabled={busy}>
+                {(state.officialMode.enabled ||
+                  state.officialMode.accountId) && (
+                  <button
+                    className="text-button"
+                    onClick={disableOfficial}
+                    disabled={busy}
+                  >
                     关闭官方连接
                   </button>
                 )}
@@ -433,7 +478,11 @@ export default function App() {
               <div className="banner">
                 <Shield size={16} />
                 <span>官方账号已启用</span>
-                <button className="text-button" onClick={disableOfficial} disabled={busy}>
+                <button
+                  className="text-button"
+                  onClick={disableOfficial}
+                  disabled={busy}
+                >
                   关闭官方连接
                 </button>
               </div>
@@ -494,7 +543,10 @@ export default function App() {
                       )}
                     </div>
                     <div className="account-copy">
-                      <div className="account-title"><strong title={a.name}>{a.name}</strong><AccountPlan account={a} /></div>
+                      <div className="account-title">
+                        <strong title={a.name}>{a.name}</strong>
+                        <AccountPlan account={a} />
+                      </div>
                       <div>
                         <span>
                           {a.kind === "chatgpt" ? "ChatGPT" : "API Key"}
@@ -519,8 +571,8 @@ export default function App() {
                           <ArrowLeftRight size={13} />
                         </button>
                       )}
-                      {a.kind === "chatgpt" && (
-                        state?.officialMode?.enabled &&
+                      {a.kind === "chatgpt" &&
+                        (state?.officialMode?.enabled &&
                         state.officialMode.accountId === a.id ? (
                           <button
                             className="text-button"
@@ -532,17 +584,31 @@ export default function App() {
                         ) : (
                           <button
                             className="text-button"
-                            disabled={busy || Boolean(state?.officialMode?.enabled)}
+                            disabled={
+                              busy || Boolean(state?.officialMode?.enabled)
+                            }
                             onClick={() => useOfficial(a)}
                           >
                             使用官方账号
                           </button>
-                        )
+                        ))}
+                      {a.kind === "chatgpt" && (
+                        <button
+                          className="text-button"
+                          disabled={
+                            busy ||
+                            ["starting", "waiting", "cancelling"].includes(
+                              login.phase,
+                            )
+                          }
+                          onClick={() =>
+                            setDialog({ action: "refresh", account: a })
+                          }
+                        >
+                          <RefreshCw size={14} />
+                          设备码刷新
+                        </button>
                       )}
-                      {a.kind === "chatgpt" && <button className="text-button" disabled={busy || ["starting", "waiting", "cancelling"].includes(login.phase)}
-                        onClick={() => setDialog({ action: "refresh", account: a })}>
-                        <RefreshCw size={14} />设备码刷新
-                      </button>}
                       <details className="account-menu">
                         <summary aria-label={"管理 " + a.name}>
                           <MoreHorizontal size={18} />
@@ -626,20 +692,32 @@ export default function App() {
               ? "添加账号"
               : dialog === "settings"
                 ? "设置"
-                : dialog.action === "refresh" ? "刷新账号凭据" : dialog.action === "rename"
-                  ? "重命名账号"
-                  : "删除账号"
+                : dialog.action === "refresh"
+                  ? "刷新账号凭据"
+                  : dialog.action === "rename"
+                    ? "重命名账号"
+                    : "删除账号"
           }
           onClose={() => {
             if (dialog === "settings") setThemePreview(null);
-            if (typeof dialog === "object" && dialog?.action === "refresh" && ["starting", "waiting"].includes(login.phase))
-              void command("cancel_login").catch((e) => setError(errorOf(e).message));
+            if (
+              typeof dialog === "object" &&
+              dialog?.action === "refresh" &&
+              ["starting", "waiting"].includes(login.phase)
+            )
+              void command("cancel_login").catch((e) =>
+                setError(errorOf(e).message),
+              );
             setDialog(null);
           }}
         >
-          {dialog === "add" || (typeof dialog === "object" && dialog.action === "refresh") ? (
+          {dialog === "add" ||
+          (typeof dialog === "object" && dialog.action === "refresh") ? (
             <AddAccount
-              onImport={() => { setDialog(null); setExchangeMode("import"); }}
+              onImport={() => {
+                setDialog(null);
+                setExchangeMode("import");
+              }}
               target={typeof dialog === "object" ? dialog.account : undefined}
               login={login}
               setLogin={setLogin}
@@ -669,7 +747,14 @@ export default function App() {
           )}
         </Modal>
       )}
-      {exchangeMode && <AccountExchange mode={exchangeMode} close={() => setExchangeMode(null)} update={setState} notify={notify} />}
+      {exchangeMode && (
+        <AccountExchange
+          mode={exchangeMode}
+          close={() => setExchangeMode(null)}
+          update={setState}
+          notify={notify}
+        />
+      )}
     </div>
   );
 }
@@ -731,14 +816,25 @@ function AddAccount({
     [busy, setBusy] = useState(false);
   const running = ["starting", "waiting", "cancelling"].includes(login.phase);
   const started = useRef(false);
-  const startDevice = async () => setLogin(await command("start_login", {
-    mode: "device", ...(target ? { targetAccountId: target.id, expectedCredentialRevision: target.credentialRevision } : {}),
-  }));
+  const startDevice = async () =>
+    setLogin(
+      await command("start_login", {
+        mode: "device",
+        ...(target
+          ? {
+              targetAccountId: target.id,
+              expectedCredentialRevision: target.credentialRevision,
+            }
+          : {}),
+      }),
+    );
   useEffect(() => {
     if (!target || started.current) return;
     started.current = true;
     setBusy(true);
-    void startDevice().catch((e) => setError(errorOf(e).message)).finally(() => setBusy(false));
+    void startDevice()
+      .catch((e) => setError(errorOf(e).message))
+      .finally(() => setBusy(false));
   }, []);
   const [copied, setCopied] = useState<"url" | "code" | null>(null);
   const [callbackDraft, setCallbackDraft] = useState("");
@@ -751,7 +847,8 @@ function AddAccount({
     )
       setCallbackDraft("");
   }, [login.mode, login.phase, login.callbackReady]);
-  const canCopy = login.mode === "device" && ["starting", "waiting"].includes(login.phase);
+  const canCopy =
+    login.mode === "device" && ["starting", "waiting"].includes(login.phase);
   const perform = async (fn: () => Promise<void>) => {
     setBusy(true);
     setError("");
@@ -765,17 +862,19 @@ function AddAccount({
   };
   return (
     <div className="modal-content">
-      {!target && <div className="segments">
-        {(["login", "import"] as const).map((t) => (
-          <button
-            key={t}
-            className={tab === t ? "active" : ""}
-            onClick={() => setTab(t)}
-          >
-            {t === "login" ? "ChatGPT 登录" : "导入凭据"}
-          </button>
-        ))}
-      </div>}
+      {!target && (
+        <div className="segments">
+          {(["login", "import"] as const).map((t) => (
+            <button
+              key={t}
+              className={tab === t ? "active" : ""}
+              onClick={() => setTab(t)}
+            >
+              {t === "login" ? "ChatGPT 登录" : "导入凭据"}
+            </button>
+          ))}
+        </div>
+      )}
       {tab === "login" ? (
         <>
           <div className="login-illustration">
@@ -785,7 +884,9 @@ function AddAccount({
               <UserRound size={24} />
             </div>
           </div>
-          <h3 className="center">{target ? target.name : "连接你的 ChatGPT 账号"}</h3>
+          <h3 className="center">
+            {target ? target.name : "连接你的 ChatGPT 账号"}
+          </h3>
           {login.message && login.phase !== "idle" && (
             <div
               className={"banner " + (login.phase === "error" ? "error" : "")}
@@ -826,7 +927,10 @@ function AddAccount({
                   disabled={busy}
                 />
               </label>
-              <button className="secondary" disabled={busy || !callbackDraft.trim()}>
+              <button
+                className="secondary"
+                disabled={busy || !callbackDraft.trim()}
+              >
                 完成登录
               </button>
             </form>
@@ -861,14 +965,24 @@ function AddAccount({
                         className="secondary"
                         aria-label={kind === "url" ? "复制链接" : "复制设备码"}
                         disabled={busy || !canCopy || !login[kind]}
-                        onClick={() => void perform(async () => {
-                          setCopied(null);
-                          await command("copy_login_value", { kind });
-                          setCopied(kind);
-                        })}
+                        onClick={() =>
+                          void perform(async () => {
+                            setCopied(null);
+                            await command("copy_login_value", { kind });
+                            setCopied(kind);
+                          })
+                        }
                       >
-                        {copied === kind ? <Check size={15} /> : <Copy size={15} />}
-                        {copied === kind ? "已复制" : kind === "url" ? "复制链接" : "复制设备码"}
+                        {copied === kind ? (
+                          <Check size={15} />
+                        ) : (
+                          <Copy size={15} />
+                        )}
+                        {copied === kind
+                          ? "已复制"
+                          : kind === "url"
+                            ? "复制链接"
+                            : "复制设备码"}
                       </button>
                     ))}
                   </div>
@@ -887,7 +1001,9 @@ function AddAccount({
                       try {
                         await command("cancel_login");
                       } catch (error) {
-                        setLogin((current) => current === cancelling ? login : current);
+                        setLogin((current) =>
+                          current === cancelling ? login : current,
+                        );
                         throw error;
                       }
                     })
@@ -898,16 +1014,26 @@ function AddAccount({
               </>
             ) : (
               <>
-                {!target && <button className="primary" disabled={busy} onClick={() => void perform(async () =>
-                  setLogin(await command("start_login", { mode: "browser" })))}>
-                  <LogIn size={16} />使用浏览器登录
-                </button>}
+                {!target && (
+                  <button
+                    className="primary"
+                    disabled={busy}
+                    onClick={() =>
+                      void perform(async () =>
+                        setLogin(
+                          await command("start_login", { mode: "browser" }),
+                        ),
+                      )
+                    }
+                  >
+                    <LogIn size={16} />
+                    使用浏览器登录
+                  </button>
+                )}
                 <button
                   className="text-button"
                   disabled={busy}
-                  onClick={() =>
-                    void perform(startDevice)
-                  }
+                  onClick={() => void perform(startDevice)}
                 >
                   使用设备码
                   <ChevronRight size={15} />
@@ -922,11 +1048,7 @@ function AddAccount({
             <Upload size={26} />
             <h3>导入 Codex、Sub2API 或 CLIProxyAPI</h3>
 
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={onImport}
-            >
+            <button className="primary" disabled={busy} onClick={onImport}>
               <FolderOpen size={16} />
               选择凭据文件
             </button>
@@ -1020,9 +1142,26 @@ function SettingsForm({
         ))}
       </div>
       <div className="preference-rows">
-        <label className="setting-row"><span>系统提醒</span><input type="checkbox" checked={prefs.systemNotifications ?? true} onChange={(e) => setPrefs({...prefs, systemNotifications:e.target.checked})} /></label>
+        <label className="setting-row">
+          <span>系统提醒</span>
+          <input
+            type="checkbox"
+            checked={prefs.systemNotifications ?? true}
+            onChange={(e) =>
+              setPrefs({ ...prefs, systemNotifications: e.target.checked })
+            }
+          />
+        </label>
         <NotificationPermission />
       </div>
+      <label>
+        DeepSeek Harness 目录
+        <input
+          value={prefs.dshHome ?? ""}
+          onChange={(e) => setPrefs({ ...prefs, dshHome: e.target.value })}
+          placeholder="DSH_HOME 的绝对路径"
+        />
+      </label>
       <StartupSettings />
       <PowerSettings />
       <LinkSettings />
@@ -1033,7 +1172,10 @@ function SettingsForm({
           disabled={checking}
           onClick={checkForUpdates}
         >
-          <RefreshCw size={15} className={checking ? "quota-spin" : undefined} />
+          <RefreshCw
+            size={15}
+            className={checking ? "quota-spin" : undefined}
+          />
           检查更新
         </button>
         <button type="button" className="secondary" onClick={openGitHub}>

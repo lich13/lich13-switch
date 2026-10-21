@@ -10,6 +10,7 @@ pub enum ClientId {
     Codex,
     Claude,
     Grok,
+    Dsh,
 }
 impl ClientId {
     pub fn name(self) -> &'static str {
@@ -17,20 +18,22 @@ impl ClientId {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
             Self::Grok => "Grok Build",
+            Self::Dsh => "DeepSeek Harness",
         }
     }
-    pub fn legacy_port(self) -> u16 {
+    pub fn legacy_port(self) -> Option<u16> {
         match self {
-            Self::Codex => 15722,
-            Self::Claude => 15723,
-            Self::Grok => 15724,
+            Self::Codex => Some(15722),
+            Self::Claude => Some(15723),
+            Self::Grok => Some(15724),
+            Self::Dsh => None,
         }
     }
     pub fn address(self, port: u16) -> String {
         format!(
             "http://127.0.0.1:{port}{}",
             match self {
-                Self::Codex | Self::Grok => "/v1",
+                Self::Codex | Self::Grok | Self::Dsh => "/v1",
                 Self::Claude => "",
             }
         )
@@ -41,13 +44,17 @@ impl ClientId {
             Self::Codex => "/codex/v1",
             Self::Claude => "/claude",
             Self::Grok => "/grok/v1",
+            Self::Dsh => return vec![],
         };
         let mut ports = vec![
-            port,
+            Some(port),
             Self::Codex.legacy_port(),
             Self::Claude.legacy_port(),
             Self::Grok.legacy_port(),
-        ];
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         ports.sort_unstable();
         ports.dedup();
         ports
@@ -62,6 +69,9 @@ impl ClientId {
             .collect()
     }
     pub fn config(self, home: &Path) -> PathBuf {
+        if self == Self::Dsh {
+            return home.join("profiles");
+        }
         home.join(if self == Self::Claude {
             "settings.json"
         } else {
@@ -93,6 +103,13 @@ pub fn grok_home() -> String {
     std::env::var_os("GROK_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".grok"))
+        .to_string_lossy()
+        .into_owned()
+}
+pub fn dsh_home() -> String {
+    std::env::var_os("DSH_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".dsh"))
         .to_string_lossy()
         .into_owned()
 }

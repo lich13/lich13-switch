@@ -55,6 +55,7 @@ sysinfo = "0.33"
 plist = "1"
 rusqlite = { version = "0.37", features = ["bundled", "functions"] }
 rust_decimal = { version = "1", features = ["serde-str"] }
+yaml-edit = "0.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
