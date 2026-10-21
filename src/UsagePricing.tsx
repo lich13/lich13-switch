@@ -15,7 +15,13 @@ import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import ProviderPriceMappings from "./ProviderPriceMappings";
 import { Drawer } from "./UsageDrawer";
-import type { PricingConfig, PricingView, UsageState } from "./usage-types";
+import type {
+  ModelsDevState,
+  PriceComparison,
+  PricingConfig,
+  PricingView,
+  UsageState,
+} from "./usage-types";
 const fields = [
   ["input_cost_per_token", "输入"],
   ["output_cost_per_token", "输出"],
@@ -33,6 +39,8 @@ export default function Pricing({
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [view, setView] = useState<PricingView | null>(null),
+    [catalog, setCatalog] = useState<ModelsDevState | null>(null),
+    [comparison, setComparison] = useState<string | null>(null),
     [search, setSearch] = useState(""),
     [editor, setEditor] = useState<string | null>(null),
     [sync, setSync] = useState(false),
@@ -44,12 +52,16 @@ export default function Pricing({
   useEffect(() => {
     let disposed = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
-    const read = () =>
+    const read = () => {
+      void command("get_models_dev")
+        .then((v) => !disposed && setCatalog(v))
+        .catch((e) => !disposed && setError(errorOf(e).message));
       void command("get_pricing")
         .then((s) => {
           if (!disposed) setView(s);
         })
         .catch((e) => !disposed && setError(errorOf(e).message));
+    };
     read();
     events.watch("pricing-state", read);
     return () => {
@@ -82,7 +94,9 @@ export default function Pricing({
       setBusy(false);
     }
   };
-  const action = async (name: "update_pricing" | "reload_pricing" | "open_pricing_directory") => {
+  const action = async (
+    name: "update_pricing" | "reload_pricing" | "open_pricing_directory",
+  ) => {
     setBusy(true);
     setError("");
     try {
@@ -160,29 +174,26 @@ export default function Pricing({
         >
           计费设置
         </button>
-            <button
-              onClick={() => void action("update_pricing")}
-              disabled={busy}
-            >
-              <Download size={14} />
-              立即更新
-            </button>
+        <button onClick={() => void action("update_pricing")} disabled={busy}>
+          <Download size={14} />
+          立即更新
+        </button>
         <details className="usage-more">
           <summary aria-label="定价高级操作">•••</summary>
           <div>
-        <label className="usage-import" tabIndex={0}>
-          <Upload size={15} />
-          导入
-          <input
-            aria-label="导入价格 JSON"
-            type="file"
-            accept="application/json,.json"
-            onChange={(e) => {
-              void importFile(e.target.files?.[0]);
-              e.target.value = "";
-            }}
-          />
-        </label>
+            <label className="usage-import" tabIndex={0}>
+              <Upload size={15} />
+              导入
+              <input
+                aria-label="导入价格 JSON"
+                type="file"
+                accept="application/json,.json"
+                onChange={(e) => {
+                  void importFile(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+            </label>
             <button onClick={() => void action("open_pricing_directory")}>
               <FolderOpen size={14} />
               打开定价目录
@@ -191,10 +202,38 @@ export default function Pricing({
               <RefreshCw size={14} />
               重新载入
             </button>
-
           </div>
         </details>
       </div>
+      <div className="usage-pricing-toolbar">
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError("");
+            try {
+              setCatalog(await command("update_models_dev"));
+            } catch (e) {
+              setError(errorOf(e).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <RefreshCw size={14} />
+          刷新 models.dev
+        </button>
+        <span className="muted">
+          {catalog?.updatedAt
+            ? `models.dev · ${new Date(catalog.updatedAt).toLocaleString("zh-CN")} · ${catalog.models.toLocaleString()} 个模型`
+            : "models.dev · 尚无缓存"}
+        </span>
+      </div>
+      {catalog?.error && (
+        <p role="alert" className="form-error">
+          {catalog.error}
+        </p>
+      )}
       {(error || view?.error) && (
         <p role="alert" className="form-error">
           {error || view?.error}
@@ -240,6 +279,13 @@ export default function Pricing({
                         : "Sub2API"}
                   </td>
                   <td>
+                    <button
+                      disabled={busy}
+                      aria-label={`核对价格 ${id}`}
+                      onClick={() => setComparison(id)}
+                    >
+                      核对
+                    </button>
                     <button
                       className="icon-button"
                       aria-label={`删除价格 ${id}`}
@@ -300,6 +346,12 @@ export default function Pricing({
           onClose={() => setEditor(null)}
         />
       )}
+      {comparison && (
+        <PriceReference
+          model={comparison}
+          onClose={() => setComparison(null)}
+        />
+      )}
       {billing && (
         <BillingSettings
           onClose={() => setBilling(false)}
@@ -324,6 +376,100 @@ export default function Pricing({
         />
       )}
     </section>
+  );
+}
+function PriceReference({
+  model,
+  onClose,
+}: {
+  model: string;
+  onClose: () => void;
+}) {
+  const [context, setContext] = useState("0"),
+    [view, setView] = useState<PriceComparison | null>(null),
+    [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    const count = Number(context);
+    if (!Number.isSafeInteger(count) || count < 0) {
+      setError("请输入有效上下文 token 数");
+      return;
+    }
+    void command("compare_model_prices", { model, context: count })
+      .then((v) => {
+        if (active) {
+          setView(v);
+          setError("");
+        }
+      })
+      .catch((e) => active && setError(errorOf(e).message));
+    return () => {
+      active = false;
+    };
+  }, [model, context]);
+  const labels: Record<string, string> = {
+      input: "输入",
+      output: "输出",
+      cache_read: "缓存读",
+      cache_write: "缓存写",
+    },
+    levels: Record<string, string> = {
+      equal: "一致",
+      close: "低于 25%",
+      deviation: "偏差",
+      severe: "严重",
+      zero_conflict: "零价冲突",
+    };
+  return (
+    <Drawer title="价格核对 · 当前参考" onClose={onClose}>
+      <p>{model}</p>
+      <label>
+        完整输入 token{" "}
+        <input
+          type="number"
+          min="0"
+          value={context}
+          onChange={(e) => setContext(e.target.value)}
+        />
+      </label>
+      {error && (
+        <p role="alert" className="form-error">
+          {error}
+        </p>
+      )}
+      {view?.reason && <p>{view.reason}</p>}
+      {view?.referenceAt && (
+        <p className="muted">
+          目录更新：{new Date(view.referenceAt).toLocaleString("zh-CN")}
+        </p>
+      )}
+      <table className="usage-table">
+        <thead>
+          <tr>
+            <th>项目</th>
+            <th>Wei-Shaw / 百万</th>
+            <th>models.dev / 百万</th>
+            <th>偏差</th>
+          </tr>
+        </thead>
+        <tbody>
+          {view?.fields.map((f) => (
+            <tr key={f.field}>
+              <td>{labels[f.field]}</td>
+              <td>{millions(f.weiShaw)}</td>
+              <td>{millions(f.modelsDev)}</td>
+              <td>
+                {levels[f.level]}
+                {f.deviationPercent != null && f.level !== "equal"
+                  ? ` · ${Number(f.deviationPercent).toLocaleString("zh-CN", { maximumFractionDigits: 2 })}%`
+                  : ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="muted">仅比较当前可比价格，不修改生效价格或历史快照。</p>
+    </Drawer>
   );
 }
 function PriceEditor({

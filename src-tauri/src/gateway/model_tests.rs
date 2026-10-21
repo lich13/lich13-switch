@@ -303,6 +303,12 @@ async fn catalog_is_cached_singleflight_bounded_and_has_no_business_side_effects
     let id = g.view().providers[0].id.clone();
     let auth = std::fs::read(t.path().join("auth.json")).unwrap();
     let config = std::fs::read(t.path().join("config.toml")).unwrap();
+    assert!(g.list_models(&id, false).await.unwrap().models.is_empty());
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        0,
+        "opening a panel only reads cache"
+    );
     let (a, b) = tokio::join!(g.list_models(&id, true), g.list_models(&id, true));
     assert_eq!(a.unwrap().models, vec!["a", "b"]);
     assert_eq!(b.unwrap().models, vec!["a", "b"]);
@@ -312,6 +318,105 @@ async fn catalog_is_cached_singleflight_bounded_and_has_no_business_side_effects
     assert_eq!(g.view().active_connections, 0);
     assert_eq!(std::fs::read(t.path().join("auth.json")).unwrap(), auth);
     assert_eq!(std::fs::read(t.path().join("config.toml")).unwrap(), config);
+}
+
+#[tokio::test]
+async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted_result_is_discarded(
+) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failed = fail.clone();
+    let port = server(move |_| {
+        let count = count.clone();
+        let failed = failed.clone();
+        async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            if failed.load(Ordering::SeqCst) {
+                Response::builder()
+                    .status(500)
+                    .body(full("fixture error"))
+                    .unwrap()
+            } else {
+                Response::new(full(r#"{"data":[{"id":"fixture-model"}]}"#))
+            }
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![]).await;
+    g.0.discover_new_providers.store(true, Ordering::Relaxed);
+    update(
+        &g,
+        &t,
+        Edit::SaveProvider {
+            id: None,
+            base_url: format!("http://127.0.0.1:{port}"),
+            token: "fixture-local".into(),
+            name: None,
+        },
+    );
+    let id = g.view().providers[0].id.clone();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if g.list_models(&id, false)
+                .await
+                .unwrap()
+                .checked_at
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            g.list_models(&id, false).await.unwrap().models,
+            vec!["fixture-model"]
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    fail.store(true, Ordering::SeqCst);
+    let old = g.list_models(&id, true).await.unwrap();
+    assert!(old.error.is_some());
+    assert_eq!(old.models, vec!["fixture-model"]);
+    assert!(!old.stale);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let gate2 = gate.clone();
+    let entered2 = entered.clone();
+    let blocked = server(move |_| {
+        let gate = gate2.clone();
+        let entered = entered2.clone();
+        async move {
+            entered.notify_one();
+            let _permit = gate.acquire().await.unwrap();
+            Response::new(full(r#"{"data":[{"id":"late"}]}"#))
+        }
+    })
+    .await;
+    update(
+        &g,
+        &t,
+        Edit::SaveProvider {
+            id: Some(id.clone()),
+            base_url: format!("http://127.0.0.1:{blocked}"),
+            token: "fixture-new".into(),
+            name: None,
+        },
+    );
+    assert!(g.list_models(&id, false).await.unwrap().stale);
+    let next = g.clone();
+    let queried = id.clone();
+    let task = tokio::spawn(async move { next.list_models(&queried, true).await });
+    entered.notified().await;
+    update(&g, &t, Edit::DeleteProvider { id: id.clone() });
+    gate.add_permits(1);
+    assert_eq!(task.await.unwrap().unwrap_err().code, "STALE");
+    let cache = super::super::catalog::Service::new(t.path().join("provider-models.json"));
+    assert!(cache.cached(&id, "fixture").models.is_empty());
 }
 
 #[tokio::test]
@@ -422,7 +527,7 @@ async fn completed_http_response_keeps_model_affinity_and_health() {
 
 #[tokio::test]
 async fn catalog_limits_response_size_and_request_duration() {
-    let port = server(|_| async { Response::new(full(vec![b'x'; 2_000_001])) }).await;
+    let port = server(|_| async { Response::new(full(vec![b'x'; 2 * 1024 * 1024 + 1])) }).await;
     let (_t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
     let id = g.view().providers[0].id.clone();
     assert!(g

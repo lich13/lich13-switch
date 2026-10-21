@@ -78,6 +78,59 @@ pub struct Quote {
     pub source: String,
     pub multiplier: String,
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceComparison {
+    pub model: String,
+    pub context: u64,
+    pub reference_at: Option<i64>,
+    pub source_model: Option<String>,
+    pub fields: Vec<PriceDifference>,
+    pub reason: Option<String>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceDifference {
+    pub field: String,
+    pub wei_shaw: String,
+    pub models_dev: String,
+    pub deviation_percent: Option<String>,
+    pub level: String,
+    pub context_threshold: Option<u64>,
+}
+fn difference(
+    field: &str,
+    wei: Decimal,
+    reference: Decimal,
+    threshold: Option<u64>,
+) -> PriceDifference {
+    let ratio = (wei != Decimal::ZERO)
+        .then(|| (reference - wei).abs().checked_div(wei))
+        .flatten();
+    let level = if wei == reference {
+        "equal"
+    } else if wei == Decimal::ZERO || reference == Decimal::ZERO {
+        "zero_conflict"
+    } else if ratio.is_some_and(|n| n >= Decimal::ONE) {
+        "severe"
+    } else if ratio.is_some_and(|n| n >= Decimal::new(25, 2)) {
+        "deviation"
+    } else {
+        "close"
+    };
+    PriceDifference {
+        field: field.into(),
+        wei_shaw: wei.normalize().to_string(),
+        models_dev: reference.normalize().to_string(),
+        deviation_percent: (level != "zero_conflict")
+            .then(|| ratio.unwrap_or_default().checked_mul(Decimal::from(100)))
+            .flatten()
+            .map(|n| n.normalize().to_string()),
+        level: level.into(),
+        context_threshold: threshold,
+    }
+}
+
 #[derive(Clone)]
 struct Inner {
     cache: Cache,
@@ -89,6 +142,7 @@ struct Inner {
 }
 #[derive(Clone)]
 pub struct Pricing {
+    pub models_dev: crate::models_dev::Catalog,
     path: PathBuf,
     cache_path: PathBuf,
     state: Arc<RwLock<Arc<Inner>>>,
@@ -132,7 +186,10 @@ fn price_basis(data: &Value) -> Value {
             .into_iter()
             .flatten()
             .filter(|(key, value)| {
-                (key.contains("cost") || key.contains("threshold") || key.as_str() == "mode")
+                matches!(
+                    key.as_str(),
+                    "models_dev_cost" | "models_dev_fast_cost" | "models_dev_match" | "price_match"
+                ) || (key.contains("cost") || key.contains("threshold") || key.as_str() == "mode")
                     && (value.is_number() || value.is_string() || value.is_boolean())
             })
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -148,7 +205,7 @@ fn valid_config(c: &Config) -> Result<()> {
     let mut keys = BTreeSet::new();
     if c.provider_mappings.len() > 4096
         || c.provider_mappings.iter().any(|rule| {
-            !matches!(rule.client.as_str(), "codex" | "claude" | "grok")
+            !matches!(rule.client.as_str(), "codex" | "claude" | "grok" | "dsh")
                 || rule.provider.is_empty()
                 || rule.provider.len() > 128
                 || !rule
@@ -224,6 +281,7 @@ impl Pricing {
             ..Cache::default()
         });
         Ok(Self {
+            models_dev: crate::models_dev::Catalog::new(dir),
             path,
             cache_path,
             state: Arc::new(RwLock::new(Arc::new(Inner {
@@ -242,6 +300,7 @@ impl Pricing {
     }
     pub fn frozen(&self) -> Self {
         Self {
+            models_dev: self.models_dev.frozen(),
             path: self.path.clone(),
             cache_path: self.cache_path.clone(),
             state: Arc::new(RwLock::new(self.state.read().unwrap().clone())),
@@ -295,7 +354,7 @@ impl Pricing {
     pub fn quote(&self, model: Option<&str>, multiplier: &str) -> Quote {
         let s = self.state.read().unwrap();
         let original = model.unwrap_or("");
-        let canonical =
+        let mut canonical =
             if s.config.fixed.contains_key(original) || s.cache.catalog.contains_key(original) {
                 original
             } else {
@@ -305,15 +364,54 @@ impl Pricing {
                     .map(String::as_str)
                     .unwrap_or(original)
             };
+        let mut matched_by = "exact";
+        if !s.config.fixed.contains_key(canonical) && !s.cache.catalog.contains_key(canonical) {
+            let names = crate::models_dev::names(canonical, true);
+            let matches: Vec<_> = s
+                .cache
+                .catalog
+                .keys()
+                .filter(|key| names.contains(&key.to_ascii_lowercase()))
+                .collect();
+            if matches.len() == 1 {
+                canonical = matches[0];
+                matched_by = "normalized";
+            }
+        }
         let fixed = s.config.fixed.get(canonical);
-        let allowed = !s.config.excluded.contains(canonical)
+        let allowed = !s.config.excluded.contains(original)
+            && !s.config.excluded.contains(canonical)
             && s.config
                 .selected
                 .as_ref()
                 .is_none_or(|v| v.contains(canonical));
-        let data = fixed
+        let mut data = fixed
             .or_else(|| allowed.then(|| s.cache.catalog.get(canonical)).flatten())
             .cloned();
+        if allowed && fixed.is_none() && !s.cache.catalog.contains_key(canonical) {
+            if let Some((data, version)) = self.models_dev.price(canonical) {
+                if !data["models_dev_match"]["model"]
+                    .as_str()
+                    .is_some_and(|model| s.config.excluded.contains(model))
+                {
+                    return Quote {
+                        model: canonical.into(),
+                        data: Some(data),
+                        version,
+                        source: "models.dev".into(),
+                        multiplier: multiplier.into(),
+                    };
+                }
+            }
+        }
+        if matched_by == "normalized" {
+            if let Some(data) = data.as_mut().and_then(Value::as_object_mut) {
+                data.insert(
+                    "price_match".into(),
+                    serde_json::json!({"matchedBy":matched_by,"model":canonical}),
+                );
+            }
+        }
         Quote {
             model: canonical.into(),
             version: if let Some(v) = fixed {
@@ -325,6 +423,58 @@ impl Pricing {
             data,
             multiplier: multiplier.into(),
         }
+    }
+    pub fn compare(&self, model: &str, context: u64) -> PriceComparison {
+        let mut result = PriceComparison {
+            model: model.into(),
+            context,
+            reference_at: self.models_dev.view().updated_at,
+            source_model: None,
+            fields: vec![],
+            reason: Some("当前参考：来源、模型或价格阶梯缺少可比依据".into()),
+        };
+        let state = self.state.read().unwrap();
+        let Some(wei) = state.cache.catalog.get(model) else {
+            return result;
+        };
+        let Some(provider) = wei["litellm_provider"].as_str() else {
+            return result;
+        };
+        let Some((data, _)) = self.models_dev.price(&format!("{provider}/{model}")) else {
+            return result;
+        };
+        if data["models_dev_match"]["providers"] != serde_json::json!([provider]) {
+            return result;
+        }
+        result.source_model = data["models_dev_match"]["model"]
+            .as_str()
+            .map(str::to_owned);
+        let Some((rates, threshold)) = crate::models_dev::rates(&data, context, false) else {
+            return result;
+        };
+        for (field, key) in [
+            ("input", "input_cost_per_token"),
+            ("output", "output_cost_per_token"),
+            ("cache_read", "cache_read_input_token_cost"),
+            ("cache_write", "cache_creation_input_token_cost"),
+        ] {
+            let Some((_, price, wei_threshold)) = unit_rate(wei, key, context, "") else {
+                continue;
+            };
+            let Some(reference) = rates.get(key).and_then(|v| decimal(&number_text(v))) else {
+                continue;
+            };
+            if threshold != wei_threshold {
+                continue;
+            }
+            result
+                .fields
+                .push(difference(field, price, reference, threshold));
+        }
+        if !result.fields.is_empty() {
+            result.reason = None;
+        }
+        result
     }
     pub fn resolve(
         &self,
@@ -525,17 +675,28 @@ async fn fetch(
 }
 impl Quote {
     pub fn calculate(&self, t: &Tokens, tier: Option<&str>) -> Option<PriceSnapshot> {
-        let data = self.data.as_ref()?;
+        let original = self.data.as_ref()?;
         let context = t
             .input?
             .saturating_add(t.cache_read.unwrap_or(0))
             .saturating_add(t.cache_write.unwrap_or(0));
+        let converted = if self.source == "models.dev" {
+            Some(crate::models_dev::rates(
+                original,
+                context,
+                tier == Some("fast"),
+            )?)
+        } else {
+            None
+        };
+        let data = converted.as_ref().map(|(data, _)| data).unwrap_or(original);
         let suffix = match tier.unwrap_or("default") {
             "default" | "standard" => "",
             "batch" => "_batches",
             "flex" => "_flex",
             "priority" => "_priority",
             "ultrafast" => "_ultrafast",
+            "fast" => "_fast",
             _ => return None,
         };
         let mut rates = BTreeMap::new();
@@ -544,39 +705,7 @@ impl Quote {
             if count == 0 {
                 return Some(());
             }
-            let mut key = format!("{name}{suffix}");
-            for threshold in [100_000, 200_000, 272_000] {
-                let candidate = format!("{name}_above_{}k_tokens{suffix}", threshold / 1000);
-                if context > threshold && data.get(&candidate).is_some() {
-                    key = candidate;
-                }
-            }
-            let mut rate = decimal(&number_text(data.get(&key)?))?;
-            if let Some(threshold) = data["long_context_input_token_threshold"].as_u64() {
-                let reached = if data["long_context_threshold_inclusive"]
-                    .as_bool()
-                    .unwrap_or(false)
-                {
-                    context >= threshold
-                } else {
-                    context > threshold
-                };
-                if reached {
-                    let multiplier = match name {
-                        "input_cost_per_token" => Some("long_context_input_cost_multiplier"),
-                        "output_cost_per_token" => Some("long_context_output_cost_multiplier"),
-                        "cache_read_input_token_cost" => {
-                            Some("long_context_cache_read_cost_multiplier")
-                        }
-                        _ => None,
-                    };
-                    if let Some(k) = multiplier {
-                        if let Some(v) = data.get(k) {
-                            rate = rate.checked_mul(decimal(&number_text(v))?)?;
-                        }
-                    }
-                }
-            }
+            let (key, rate, _) = unit_rate(data, name, context, suffix)?;
             rates.insert(key, rate.to_string());
             cost = cost.checked_add(rate.checked_mul(Decimal::from(count))?)?;
             Some(())
@@ -623,7 +752,128 @@ impl Quote {
             multiplier: self.multiplier.clone(),
             rates,
             cost: cost.normalize().to_string(),
-            basis: Some(price_basis(data)),
+            basis: Some({
+                let mut basis = price_basis(original);
+                if let Some((_, threshold)) = &converted {
+                    basis["models_dev_context_threshold"] = serde_json::json!(threshold);
+                }
+                basis
+            }),
         })
+    }
+}
+
+fn unit_rate(
+    data: &Value,
+    name: &str,
+    context: u64,
+    suffix: &str,
+) -> Option<(String, Decimal, Option<u64>)> {
+    let mut key = format!("{name}{suffix}");
+    let mut band = None;
+    for threshold in [100_000, 200_000, 272_000] {
+        let candidate = format!("{name}_above_{}k_tokens{suffix}", threshold / 1000);
+        if context > threshold && data.get(&candidate).is_some() {
+            key = candidate;
+            band = Some(threshold);
+        }
+    }
+    let mut rate = decimal(&number_text(data.get(&key)?))?;
+    if let Some(threshold) = data["long_context_input_token_threshold"].as_u64() {
+        let reached = if data["long_context_threshold_inclusive"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            context >= threshold
+        } else {
+            context > threshold
+        };
+        if reached {
+            let multiplier = match name {
+                "input_cost_per_token" => Some("long_context_input_cost_multiplier"),
+                "output_cost_per_token" => Some("long_context_output_cost_multiplier"),
+                "cache_read_input_token_cost" => Some("long_context_cache_read_cost_multiplier"),
+                _ => None,
+            };
+            if let Some(v) = multiplier.and_then(|k| data.get(k)) {
+                rate = rate.checked_mul(decimal(&number_text(v))?)?;
+                band = Some(threshold);
+            }
+        }
+    }
+    Some((key, rate, band))
+}
+
+#[cfg(test)]
+mod v02514_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn deviations_include_boundaries_and_zero_conflicts() {
+        for (a, b, level, percent) in [
+            (4, 5, "deviation", Some("25")),
+            (4, 8, "severe", Some("100")),
+            (0, 0, "equal", Some("0")),
+            (0, 1, "zero_conflict", None),
+            (1, 0, "zero_conflict", None),
+        ] {
+            let difference = difference("input", Decimal::from(a), Decimal::from(b), None);
+            assert_eq!(difference.level, level);
+            assert_eq!(difference.deviation_percent.as_deref(), percent);
+        }
+    }
+    #[test]
+    fn fallback_respects_exclusions_partial_primary_tariffs_ttl_and_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let public = json!({"schema":1,"updated_at":1,"providers":{"fixture":{"name":"Fixture","models":{"model":{"cost":{"input":1,"output":2,"cache_write":3}},"primary":{"cost":{"input":1,"output":2}},"unpriced":{"cost":{"input":1,"output":2}}}}}});
+        std::fs::write(dir.path().join("models-dev-index.json"), public.to_string()).unwrap();
+        let p = Pricing::new(dir.path()).unwrap();
+        let tokens = Tokens {
+            input: Some(10),
+            output: Some(20),
+            reasoning: Some(15),
+            ..Tokens::default()
+        };
+        let quote = p.quote(Some("model"), "1");
+        assert_eq!(quote.source, "models.dev");
+        let price = quote.calculate(&tokens, None).unwrap();
+        assert_eq!(price.cost, "0.00005");
+        assert!(quote.calculate(&tokens, Some("fast")).is_none());
+        assert!(quote
+            .calculate(
+                &Tokens {
+                    cache_write: Some(2),
+                    cache_write_1h: Some(2),
+                    ..tokens.clone()
+                },
+                None
+            )
+            .is_none());
+        {
+            let mut state = p.state.write().unwrap();
+            let s = Arc::make_mut(&mut state);
+            s.config.excluded.insert("model".into());
+            s.cache
+                .catalog
+                .insert("primary".into(), json!({"input_cost_per_token":"0.1"}));
+            s.cache.catalog.insert(
+                "claude-opus-4-6".into(),
+                json!({"input_cost_per_token":"0.1","output_cost_per_token":"0.2"}),
+            );
+        }
+        assert!(p.quote(Some("model"), "1").data.is_none());
+        assert!(p.quote(Some("fixture/model"), "1").data.is_none());
+        assert!(p
+            .quote(Some("primary"), "1")
+            .calculate(&tokens, None)
+            .is_none());
+        assert_eq!(
+            p.quote(Some("relay-claude-opus-4-6(high)"), "1").model,
+            "claude-opus-4-6"
+        );
+        assert!(p
+            .quote(Some("relay-claude-opus-4-6:free"), "1")
+            .data
+            .is_none());
     }
 }

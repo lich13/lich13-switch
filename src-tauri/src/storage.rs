@@ -229,6 +229,27 @@ pub fn atomic_write_bounded(
     Ok(())
 }
 
+/// A successfully refreshed public cache may replace an oversized old cache
+/// without reading that old file into memory. Other writes retain normal CAS.
+pub fn replace_cache_bounded(path: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+    match read_bounded(path, limit) {
+        Err(error) if error.code == code::FILE_TYPE => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| AppError::new(code::PATH, "缓存路径无效"))?;
+            let staged = stage_write(parent, bytes, limit)?;
+            let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+            if !metadata.file_type().is_file() {
+                return Err(AppError::new(code::PATH, "缓存必须是普通文件"));
+            }
+            staged.persist(path).map_err(|e| io_error(e.error))?;
+            sync_parent(path)
+        }
+        Err(error) => Err(error),
+        Ok(_) => atomic_write_bounded(path, bytes, None, limit),
+    }
+}
+
 #[cfg(test)]
 #[path = "storage_fault_tests.rs"]
 mod fault_tests;
