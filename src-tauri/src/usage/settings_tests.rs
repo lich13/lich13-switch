@@ -102,6 +102,8 @@ fn successful_configure_clears_only_settings_error() {
     *service.0.settings_error.lock().unwrap() = Some("stale settings error".into());
     *service.0.error.lock().unwrap() = Some("unrelated service error".into());
     let settings = Settings {
+        log_columns: Default::default(),
+        log_number_mode: "compact".into(),
         recording: false,
         auto_sync: false,
         refresh_seconds: 5,

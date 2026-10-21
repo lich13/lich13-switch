@@ -185,6 +185,9 @@ fn raw(v: &Value) -> Tokens {
         inclusive_input: v["input_tokens"].as_u64(),
         input: v["input_tokens"].as_u64(),
         output: v["output_tokens"].as_u64(),
+        reasoning: v["reasoning_output_tokens"]
+            .as_u64()
+            .or(v["reasoning_tokens"].as_u64()),
         cache_read: v["cached_input_tokens"]
             .as_u64()
             .or(v["cache_read_input_tokens"].as_u64()),
@@ -409,7 +412,7 @@ pub fn sync(
                             .then(|| {
                                 pricing
                                     .quote(a.pricing_model.as_deref(), &settings.multiplier)
-                                    .calculate(&a.tokens, a.service_tier.as_deref())
+                                    .calculate(&a.tokens, a.price_tier())
                             })
                             .flatten();
                     }

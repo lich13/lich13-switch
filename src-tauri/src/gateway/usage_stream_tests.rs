@@ -61,6 +61,69 @@ fn feed_fragmented(protocol: &mut Protocol, bytes: &[u8], size: usize) {
 }
 
 #[tokio::test]
+async fn v02514_projected_usage_survives_json_compressed_sse_and_websocket() {
+    let usage = json!({"prompt_tokens":100,"completion_tokens":40,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40,
+        "prompt_tokens_details":{"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":30},"speed":"standard"});
+    for encoding in ["identity", "gzip", "deflate", "br", "zstd", "json", "ws"] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let trace = service.begin("dsh", Some("fixture-model"));
+        let mut protocol = Protocol::new(true);
+        protocol.request_speed(Some("fast".into()));
+        protocol.attach_usage(trace.attempt(
+            "fixture-provider",
+            true,
+            if encoding == "ws" {
+                "websocket"
+            } else {
+                "http"
+            },
+        ));
+        let value =
+            json!({"type":"response.completed","response":{"id":"fixture-response","usage":usage}});
+        if encoding == "ws" {
+            protocol.value(&value);
+        } else {
+            let stream = encoding != "json";
+            protocol.response(200, stream, if stream { encoding } else { "identity" });
+            let payload = if stream {
+                format!("data: {value}\n\n")
+            } else {
+                value.to_string()
+            };
+            let encoded = encode(
+                payload.as_bytes(),
+                if stream { encoding } else { "identity" },
+            );
+            feed_fragmented(&mut protocol, &encoded, 3);
+        }
+        protocol.finish(Some(200), "OK");
+        let m = &protocol.observation.meter;
+        assert_eq!(
+            (
+                m.tokens.input,
+                m.tokens.output,
+                m.tokens.cache_read,
+                m.tokens.cache_write,
+                m.tokens.reasoning
+            ),
+            (Some(30), Some(40), Some(60), Some(10), Some(30)),
+            "{encoding}"
+        );
+        assert_eq!(m.tokens.total(), Some(140));
+        assert_eq!(m.response_speed.as_deref(), Some("standard"));
+        drop(protocol);
+        drop(trace);
+        let record = one_record(&service).await;
+        assert_eq!(
+            record.final_attempt().unwrap().tokens.reasoning,
+            Some(30),
+            "{encoding}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn event_only_sse_fields_drive_meter_terminal_and_usage_without_final_newline() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());

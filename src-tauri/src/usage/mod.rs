@@ -12,6 +12,7 @@ mod event_time_tests;
 mod first_token_tests;
 #[cfg(test)]
 mod grok_usage_tests;
+pub mod interruptions;
 mod maintenance;
 pub mod model;
 mod pending_prices;
@@ -754,12 +755,18 @@ impl AttemptTrace {
     pub fn anthropic(&self) -> Option<bool> {
         match self.trace.0.client.as_str() {
             "claude" => Some(true),
-            "grok" => None,
+            "grok" | "dsh" => None,
             _ => Some(false),
         }
     }
     pub fn update(&mut self, m: &Meter, status: Option<u16>, outcome: Option<&str>) {
         self.attempt.tokens.merge(&m.tokens);
+        self.attempt.requested_speed = m.requested_speed.clone();
+        self.attempt.response_speed = m.response_speed.clone();
+        self.attempt.raw_input_tokens = m.raw_input_tokens;
+        self.attempt.input_basis = m.input_basis.clone();
+        self.attempt.output_reported = m.output_reported;
+        self.attempt.parse_reasons = m.parse_reasons.clone();
         if m.inclusive_input.is_some() {
             self.attempt.inclusive_input_tokens = m.inclusive_input;
         }
@@ -849,7 +856,7 @@ impl AttemptTrace {
         self.attempt.price = self
             .quote
             .as_ref()
-            .and_then(|q| q.calculate(&self.attempt.tokens, self.attempt.service_tier.as_deref()));
+            .and_then(|q| q.calculate(&self.attempt.tokens, self.attempt.price_tier()));
     }
 }
 impl Drop for AttemptTrace {
@@ -898,5 +905,7 @@ mod pricing_tests;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod metering_v02514_tests;
 #[cfg(test)]
 mod settings_tests;

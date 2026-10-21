@@ -14,11 +14,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 const DAY: i64 = 86_400_000;
-fn db<T>(r: rusqlite::Result<T>) -> Result<T> {
+pub(super) fn db<T>(r: rusqlite::Result<T>) -> Result<T> {
     r.map_err(|_| failure("用量数据库操作失败"))
 }
 pub struct Store {
-    connection: Connection,
+    pub(super) connection: Connection,
     overview_cache: OverviewCache,
     maintenance_deferred: Cell<Option<&'static str>>,
 }
@@ -1020,7 +1020,7 @@ fn preserve_record(incoming: &Record, existing: Option<Record>) -> Result<Record
                             source: price.source.clone(),
                             multiplier: price.multiplier.clone(),
                         }
-                        .calculate(&a.tokens, a.service_tier.as_deref())
+                        .calculate(&a.tokens, a.price_tier())
                     } else {
                         Some(price.clone())
                     };

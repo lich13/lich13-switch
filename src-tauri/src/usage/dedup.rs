@@ -277,6 +277,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
                 inclusive_input,
                 input,
                 output,
+                reasoning,
                 cache_read,
                 cache_write,
                 cache_write_5m,
@@ -355,7 +356,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
                             source: p.source.clone(),
                             multiplier: last.cost_multiplier.clone(),
                         }
-                        .calculate(&last.tokens, last.service_tier.as_deref())
+                        .calculate(&last.tokens, last.price_tier())
                     });
             }
             current.gateway_reported = Some(original);

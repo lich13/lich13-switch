@@ -2,6 +2,7 @@ export type Tokens = {
   inclusiveInput?: number | null;
   input: number | null;
   output: number | null;
+  reasoning?: number | null;
   cacheRead: number | null;
   cacheWrite: number | null;
   cacheWrite5m?: number | null;
@@ -19,11 +20,40 @@ export type PriceSnapshot = {
   rates: Record<string, string>;
   cost: string;
   basis?: {
+    models_dev_context_threshold?: number | null;
+    models_dev_match?: {
+      providers: string[];
+      model: string;
+      matchedBy: string;
+    };
+    price_match?: { model: string; matchedBy: string };
     operation?: string;
     unit?: string;
     quantity?: number;
     cost_per_request?: string;
   };
+};
+export type ModelsDevState = {
+  updatedAt: number | null;
+  version: string | null;
+  providers: number;
+  models: number;
+  error: string | null;
+};
+export type PriceComparison = {
+  model: string;
+  context: number;
+  referenceAt: number | null;
+  sourceModel: string | null;
+  reason: string | null;
+  fields: {
+    field: string;
+    weiShaw: string;
+    modelsDev: string;
+    deviationPercent: string | null;
+    level: "equal" | "close" | "deviation" | "severe" | "zero_conflict";
+    contextThreshold: number | null;
+  }[];
 };
 export type RoutingEvidence = {
   input: string;
@@ -40,6 +70,13 @@ export type RoutingDetails = {
   failure?: string | null;
 };
 export type Attempt = {
+  requestedSpeed?: "fast" | "standard" | null;
+  responseSpeed?: "fast" | "standard" | null;
+  rawInputTokens?: number | null;
+  inclusiveInputTokens?: number | null;
+  inputBasis?: "inclusive" | "exclusive" | null;
+  outputReported?: boolean | null;
+  parseReasons?: string[];
   transfer?: {
     receivedAt?: number | null;
     sentAt: number;
@@ -201,11 +238,30 @@ export type UsagePage = {
   detailSince: number;
 };
 export type UsageSettings = {
+  logColumns?: Record<string, boolean>;
+  logNumberMode?: "compact" | "exact";
   recording: boolean;
   autoSync: boolean;
   refreshSeconds: number;
   multiplier: string;
   pricingModel: "response" | "request";
+};
+export type InterruptionSummary = {
+  start: number;
+  end: number;
+  detailSince: number;
+  historyMissing: boolean;
+  requests: number;
+  reported: number;
+  partial: number;
+  unknown: number;
+  groups: {
+    client: string;
+    provider: string | null;
+    reported: number;
+    partial: number;
+    unknown: number;
+  }[];
 };
 export type UsageState = {
   settings: UsageSettings;
@@ -229,7 +285,7 @@ export type UsageState = {
   error: string | null;
 };
 export type ProviderPriceMapping = {
-  client: "codex" | "claude" | "grok";
+  client: "codex" | "claude" | "grok" | "dsh";
   provider: string;
   enabled: boolean;
   matchOn: "request" | "response";
@@ -279,13 +335,15 @@ export const tokenTotal = (t: Tokens) =>
         0,
       );
 export const clientName = (c: string) =>
-  c === "codex"
-    ? "Codex"
-    : c === "claude"
-      ? "Claude Code"
-      : c === "grok"
-        ? "Grok Build"
-        : c;
+  c === "dsh"
+    ? "DSH"
+    : c === "codex"
+      ? "Codex"
+      : c === "claude"
+        ? "Claude Code"
+        : c === "grok"
+          ? "Grok Build"
+          : c;
 export function speed(a: Attempt, estimated: boolean) {
   const ms = estimated
     ? a.durationMs

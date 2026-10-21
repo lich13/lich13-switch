@@ -1506,6 +1506,8 @@ async fn session_once(
         attempt_protocol.attach_thread(budget.thread.clone());
         attempt_protocol.request_headers(&headers);
         attempt_protocol.request_received(turn_received_at);
+        attempt_protocol
+            .request_speed(value(&first).and_then(|v| crate::usage::model::speed(&v["speed"])));
         if let Some(trace) = &usage_trace {
             attempt_protocol.attach_usage(trace.attempt(
                 &admission.route.provider.id,
@@ -2159,6 +2161,9 @@ async fn session_once(
             next.attach_thread(thread_request.clone());
             next.request_headers(&headers);
             next.request_received(turn_received_at);
+            next.request_speed(
+                value(&replay_frame).and_then(|v| crate::usage::model::speed(&v["speed"])),
+            );
             if let Some(trace) = &usage_trace {
                 next.attach_usage(trace.attempt(&route.provider.id, true, "websocket"));
             }
@@ -2677,6 +2682,7 @@ async fn session_once(
                 next_protocol.attach_thread(thread_request.clone());
                 next_protocol.request_headers(&headers);
                 next_protocol.request_received(turn_received_at);
+                next_protocol.request_speed(hints.as_ref().and_then(|h| h.speed.clone()));
                 if let Some(trace) = &usage_trace {
                     next_protocol.attach_usage(trace.attempt(
                         &route.provider.id,

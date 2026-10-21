@@ -1055,6 +1055,7 @@ fn rebuilding_compacted_source_replaces_its_daily_history_without_deleting_other
 #[test]
 fn zero_prices_are_known_but_missing_required_rates_remain_unpriced() {
     let tokens = Tokens {
+        reasoning: None,
         input: Some(10),
         output: Some(5),
         cache_read: Some(3),
@@ -1190,6 +1191,7 @@ fn service_tier_prices_and_multiplier_use_exact_decimal_arithmetic() {
 #[test]
 fn cache_durations_and_media_subsets_are_charged_once() {
     let tokens = Tokens {
+        reasoning: None,
         inclusive_input: None,
         input: Some(100),
         output: Some(20),

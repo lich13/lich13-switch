@@ -811,6 +811,9 @@ impl Protocol {
         }
         self.usage = Some(usage);
     }
+    pub fn request_speed(&mut self, speed: Option<String>) {
+        self.observation.meter.requested_speed = speed;
+    }
     pub fn context(
         &mut self,
         thread: Option<String>,
@@ -1079,6 +1082,8 @@ impl Protocol {
         self.stream = stream;
         let mut observer = Observer::new(stream, encoding);
         observer.sink().observation.meter.anthropic = self.observation.meter.anthropic;
+        observer.sink().observation.meter.requested_speed =
+            self.observation.meter.requested_speed.clone();
         self.observer = Some(observer);
     }
     pub fn feed(&mut self, bytes: &[u8]) {

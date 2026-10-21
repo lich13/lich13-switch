@@ -62,6 +62,7 @@ pub enum TurnEvidence {
 pub struct RequestHints {
     pub previous_response_id: Option<String>,
     pub model: Option<String>,
+    pub speed: Option<String>,
     #[serde(default)]
     pub stream: bool,
     #[serde(skip)]
@@ -83,6 +84,7 @@ impl RequestHints {
             return Err(io::Error::other("invalid request metadata").into());
         }
         let mut hints = Self {
+            speed: crate::usage::model::speed(&value["speed"]),
             previous_response_id: value
                 .get("previous_response_id")
                 .filter(|v| !v.is_null())

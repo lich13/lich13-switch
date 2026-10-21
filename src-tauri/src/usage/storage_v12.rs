@@ -629,6 +629,11 @@ fn save_attempt(
         price.remove("cost");
     }
     let mut diagnostic = serde_json::Map::new();
+    // Optional counters belong to the extensible diagnostic body. Do not extend
+    // the v13 SQL measures or the fixed wire dictionaries.
+    if let Some(reasoning) = a.tokens.reasoning {
+        diagnostic.insert("reasoningTokens".into(), json!(reasoning));
+    }
     for field in [
         "transfer",
         "end",
@@ -878,6 +883,9 @@ fn load_attempt(c: &Connection, table: &str, owner: i64, ordinal: i64, r: &Value
     obj.entry("responseId")
         .or_insert_with(|| r["responseId"].clone());
     let mut tokens = serde_json::Map::new();
+    if let Some(reasoning) = obj.remove("reasoningTokens") {
+        tokens.insert("reasoning".into(), reasoning);
+    }
     for (i, k) in TOKENS.iter().enumerate() {
         tokens.insert((*k).into(), json!(db(row.get::<_, Option<u64>>(4 + i))?));
     }

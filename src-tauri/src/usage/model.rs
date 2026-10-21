@@ -34,6 +34,9 @@ pub struct Tokens {
     pub inclusive_input: Option<u64>,
     pub input: Option<u64>,
     pub output: Option<u64>,
+    /// Reported subset of output, never added to total consumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
     pub cache_write_5m: Option<u64>,
@@ -56,6 +59,7 @@ impl Tokens {
             inclusive_input,
             input,
             output,
+            reasoning,
             cache_read,
             cache_write,
             cache_write_5m,
@@ -73,6 +77,7 @@ impl Tokens {
             inclusive_input,
             input,
             output,
+            reasoning,
             cache_read,
             cache_write,
             cache_write_5m,
@@ -101,6 +106,7 @@ impl Tokens {
             inclusive_input,
             input,
             output,
+            reasoning,
             cache_read,
             cache_write,
             cache_write_5m,
@@ -118,6 +124,7 @@ impl Tokens {
             inclusive_input,
             input,
             output,
+            reasoning,
             cache_read,
             cache_write,
             cache_write_5m,
@@ -139,42 +146,110 @@ fn count(v: &Value, names: &[&str]) -> Option<u64> {
 
 /// Adapted from CC Switch's OpenAI-inclusive / Anthropic-exclusive cache rules.
 pub fn parse_tokens(usage: &Value, claude: bool) -> Tokens {
+    parse_usage(usage, claude, None).0
+}
+
+fn parse_usage(
+    usage: &Value,
+    claude: bool,
+    previous_raw: Option<u64>,
+) -> (Tokens, bool, Vec<String>) {
     let details = usage
         .get("input_tokens_details")
         .or_else(|| usage.get("prompt_tokens_details"))
         .unwrap_or(&Value::Null);
-    let cache = count(usage, &["cache_read_input_tokens", "cached_input_tokens"])
-        .or_else(|| count(details, &["cached_tokens"]));
-    let write = count(
+    let cache = count(
+        usage,
+        &[
+            "cache_read_input_tokens",
+            "cached_input_tokens",
+            "prompt_cache_hit_tokens",
+            "cached_tokens",
+        ],
+    )
+    .or_else(|| count(details, &["cached_tokens"]));
+    let reported_write = count(
         usage,
         &["cache_creation_input_tokens", "cache_creation_tokens"],
-    );
+    )
+    .or_else(|| count(details, &["cache_write_tokens"]));
     let raw = count(usage, &["input_tokens", "prompt_tokens"]);
     let create = &usage["cache_creation"];
-    Tokens {
-        inclusive_input: (!claude).then_some(raw).flatten(),
-        input: raw.map(|v| {
-            if claude {
-                v
-            } else {
-                v.saturating_sub(cache.unwrap_or(0))
-                    .saturating_sub(write.unwrap_or(0))
-            }
-        }),
-        output: count(usage, &["output_tokens", "completion_tokens"]),
-        cache_read: cache,
-        cache_write: write,
-        cache_write_5m: count(create, &["ephemeral_5m_input_tokens"]),
-        cache_write_1h: count(create, &["ephemeral_1h_input_tokens"]),
-        image_input: count(details, &["image_tokens"]),
-        image_output: count(&usage["output_tokens_details"], &["image_tokens"]),
-        audio_input: count(details, &["audio_tokens"]),
-        audio_output: count(&usage["output_tokens_details"], &["audio_tokens"]),
+    let short = count(create, &["ephemeral_5m_input_tokens"]);
+    let long = count(create, &["ephemeral_1h_input_tokens"]);
+    let subtotal = short
+        .or(long)
+        .map(|_| short.unwrap_or(0) + long.unwrap_or(0));
+    let write = match (reported_write, subtotal) {
+        (Some(total), Some(parts)) => Some(total.max(parts)),
+        (total, parts) => total.or(parts),
+    };
+    let mut reasons = Vec::new();
+    if reported_write
+        .zip(subtotal)
+        .is_some_and(|(total, parts)| total < parts)
+    {
+        reasons.push("cache_write_total_below_ttl_details".into());
     }
+    if let (Some(hit), Some(miss), Some(prompt)) = (
+        count(usage, &["prompt_cache_hit_tokens"]),
+        count(usage, &["prompt_cache_miss_tokens"]),
+        count(usage, &["prompt_tokens"]),
+    ) {
+        if hit.checked_add(miss) != Some(prompt) {
+            reasons.push("prompt_cache_total_mismatch".into());
+        }
+    }
+    let anthropic_cache = usage.get("cache_read_input_tokens").is_some()
+        || usage.get("cache_creation_input_tokens").is_some()
+        || usage.get("cache_creation").is_some();
+    let exclusive = claude
+        || (anthropic_cache
+            && raw
+                .or(previous_raw)
+                .is_some_and(|n| n < cache.unwrap_or(0) + write.unwrap_or(0)));
+    let output_details = usage
+        .get("output_tokens_details")
+        .or_else(|| usage.get("completion_tokens_details"))
+        .unwrap_or(&Value::Null);
+    let output = count(usage, &["output_tokens", "completion_tokens"]);
+    let reasoning = count(usage, &["reasoning_tokens"])
+        .or_else(|| count(output_details, &["reasoning_tokens"]));
+    if reasoning
+        .zip(output)
+        .is_some_and(|(reasoning, output)| reasoning > output)
+    {
+        reasons.push("reasoning_exceeds_output".into());
+    }
+    (
+        Tokens {
+            inclusive_input: (!exclusive).then_some(raw).flatten(),
+            input: raw.map(|v| {
+                if exclusive {
+                    v
+                } else {
+                    v.saturating_sub(cache.unwrap_or(0))
+                        .saturating_sub(write.unwrap_or(0))
+                }
+            }),
+            output,
+            reasoning,
+            cache_read: cache,
+            cache_write: write,
+            cache_write_5m: short,
+            cache_write_1h: long,
+            image_input: count(details, &["image_tokens"]),
+            image_output: count(output_details, &["image_tokens"]),
+            audio_input: count(details, &["audio_tokens"]),
+            audio_output: count(output_details, &["audio_tokens"]),
+        },
+        exclusive,
+        reasons,
+    )
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Meter {
     pub tokens: Tokens,
     #[serde(skip)]
@@ -189,6 +264,21 @@ pub struct Meter {
     pub first_token_ms: Option<u64>,
     pub parse_incomplete: bool,
     pub compaction_kind: Option<String>,
+    pub requested_speed: Option<String>,
+    pub response_speed: Option<String>,
+    pub raw_input_tokens: Option<u64>,
+    pub input_basis: Option<String>,
+    pub output_reported: Option<bool>,
+    pub parse_reasons: Vec<String>,
+    #[serde(skip)]
+    pub(crate) reported_cache_write: Option<u64>,
+}
+
+pub fn speed(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| matches!(*s, "fast" | "standard"))
+        .map(str::to_owned)
 }
 /// Only protocol envelopes can supply response identity; output/tool IDs cannot.
 pub fn response_id(value: &Value) -> Option<&str> {
@@ -229,6 +319,15 @@ pub fn response_id(value: &Value) -> Option<&str> {
 }
 impl Meter {
     pub fn observe(&mut self, outer: &Value, elapsed: u64) {
+        if let Some(id) = response_id(outer).map(safe_id) {
+            if self.response_id.as_ref().is_some_and(|old| *old != id) {
+                *self = Self {
+                    anthropic: self.anthropic,
+                    requested_speed: self.requested_speed.clone(),
+                    ..Self::default()
+                };
+            }
+        }
         let event = outer["type"].as_str().unwrap_or("");
         let terminal = matches!(
             event,
@@ -251,8 +350,9 @@ impl Meter {
                 self.anthropic = Some(false);
             }
             let claude = self.anthropic.unwrap_or_else(|| {
-                v["usage"].get("cache_creation_input_tokens").is_some()
-                    || v["usage"].get("cache_read_input_tokens").is_some()
+                v["usage"].get("prompt_tokens").is_none()
+                    && (v["usage"].get("cache_creation_input_tokens").is_some()
+                        || v["usage"].get("cache_read_input_tokens").is_some())
             });
             if let Some(u) = v.get("usage").filter(|u| u.is_object()).or_else(|| {
                 matches!(
@@ -261,56 +361,100 @@ impl Meter {
                 )
                 .then_some(v)
             }) {
-                let mut parsed = parse_tokens(u, claude);
-                let zero_input_placeholder = terminal
-                    && count(u, &["input_tokens", "prompt_tokens"]) == Some(0)
-                    && self.tokens.input.is_some_and(|v| v > 0);
-                if !claude {
-                    if let Some(raw) = count(u, &["input_tokens", "prompt_tokens"]) {
-                        if !zero_input_placeholder
-                            && (!terminal
-                                || raw != 0
-                                || self.inclusive_input.is_none_or(|v| v == 0))
-                        {
-                            self.inclusive_input = Some(raw);
-                        }
+                let (mut parsed, exclusive, reasons) =
+                    parse_usage(u, claude, self.raw_input_tokens);
+                for reason in reasons {
+                    if !self.parse_reasons.contains(&reason) {
+                        self.parse_reasons.push(reason);
                     }
                 }
-                if terminal {
-                    // Terminal envelopes sometimes contain zero placeholders for
-                    // counters already reported by earlier cumulative events.
-                    macro_rules! preserve { ($($field:ident),*) => {$(
-                        if parsed.$field == Some(0) && self.tokens.$field.is_some_and(|v| v > 0) {
-                            parsed.$field = None;
-                        }
-                    )*}; }
-                    if zero_input_placeholder {
-                        parsed.input = None;
-                        parsed.inclusive_input = None;
-                    }
-                    preserve!(
-                        inclusive_input,
-                        output,
-                        cache_read,
-                        cache_write,
-                        cache_write_5m,
-                        cache_write_1h,
-                        image_input,
-                        image_output,
-                        audio_input,
-                        audio_output
+                self.parse_incomplete |= !self.parse_reasons.is_empty();
+                let raw = count(u, &["input_tokens", "prompt_tokens"]);
+                let reported_write =
+                    count(u, &["cache_creation_input_tokens", "cache_creation_tokens"])
+                        .or_else(|| count(&u["input_tokens_details"], &["cache_write_tokens"]))
+                        .or_else(|| count(&u["prompt_tokens_details"], &["cache_write_tokens"]));
+                if reported_write.is_some_and(|n| n > 0) || self.reported_cache_write.is_none() {
+                    self.reported_cache_write = reported_write;
+                }
+                let zero_input_placeholder =
+                    raw == Some(0) && self.raw_input_tokens.is_some_and(|v| v > 0);
+                if !zero_input_placeholder && raw.is_some() {
+                    self.raw_input_tokens = raw;
+                }
+                // A later relay cache event can establish an exclusive input
+                // basis. Keep that basis for the rest of this response.
+                let exclusive = exclusive || self.input_basis.as_deref() == Some("exclusive");
+                self.input_basis = Some(if exclusive { "exclusive" } else { "inclusive" }.into());
+                self.inclusive_input = (!exclusive).then_some(self.raw_input_tokens).flatten();
+                if exclusive {
+                    parsed.inclusive_input = None;
+                    self.tokens.inclusive_input = None;
+                }
+                if zero_input_placeholder {
+                    parsed.input = None;
+                    parsed.inclusive_input = None;
+                }
+                // All usage envelopes are cumulative within this response.
+                // Preserve reported positives against subsequent placeholder zeroes.
+                macro_rules! preserve { ($($field:ident),*) => {$(
+                    if parsed.$field == Some(0) && self.tokens.$field.is_some_and(|v| v > 0) { parsed.$field = None; }
+                )*}; }
+                preserve!(
+                    inclusive_input,
+                    input,
+                    output,
+                    reasoning,
+                    cache_read,
+                    cache_write,
+                    cache_write_5m,
+                    cache_write_1h,
+                    image_input,
+                    image_output,
+                    audio_input,
+                    audio_output
+                );
+                if parsed.output.is_some() {
+                    self.output_reported = Some(
+                        self.output_reported == Some(true)
+                            || event != "message_start"
+                            || parsed.output != Some(0),
                     );
                 }
+                if let Some(speed) = speed(&u["speed"]) {
+                    self.response_speed = Some(speed);
+                }
                 self.tokens.merge(&parsed);
+                if self.tokens.cache_write_5m.is_some() || self.tokens.cache_write_1h.is_some() {
+                    let parts = self
+                        .tokens
+                        .cache_write_5m
+                        .unwrap_or(0)
+                        .saturating_add(self.tokens.cache_write_1h.unwrap_or(0));
+                    if self.reported_cache_write.is_some_and(|n| n < parts) {
+                        self.parse_incomplete = true;
+                        if !self
+                            .parse_reasons
+                            .iter()
+                            .any(|r| r == "cache_write_total_below_ttl_details")
+                        {
+                            self.parse_reasons
+                                .push("cache_write_total_below_ttl_details".into());
+                        }
+                    }
+                    self.tokens.cache_write = Some(self.tokens.cache_write.unwrap_or(0).max(parts));
+                }
                 // Some providers report cache details after the inclusive input
                 // counter. Normalize against that same counter after merging.
-                if !claude {
+                if !exclusive {
                     if let Some(raw) = self.inclusive_input {
                         self.tokens.input = Some(
                             raw.saturating_sub(self.tokens.cache_read.unwrap_or(0))
                                 .saturating_sub(self.tokens.cache_write.unwrap_or(0)),
                         );
                     }
+                } else if self.raw_input_tokens.is_some() {
+                    self.tokens.input = self.raw_input_tokens;
                 }
             }
             if let Some(model) = model_id(v["model"].as_str()) {
@@ -346,6 +490,9 @@ impl Meter {
                     envelopes.push(inner);
                 }
             }
+        }
+        if terminal && self.tokens.output.is_some() {
+            self.output_reported = Some(true);
         }
         if let Some(id) = response_id(outer) {
             self.response_id = Some(safe_id(id));
@@ -590,6 +737,18 @@ pub struct TransportEvent {
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_speed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_speed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_basis: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_reported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer: Option<TransferMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<EndMetadata>,
@@ -659,6 +818,7 @@ impl Attempt {
         for (key, value) in [
             ("input", self.tokens.input),
             ("output", self.tokens.output),
+            ("reasoning", self.tokens.reasoning),
             ("cache_read", self.tokens.cache_read),
             ("cache_write", self.tokens.cache_write),
         ] {
@@ -696,6 +856,8 @@ impl Attempt {
             && self.mapping_revision == other.mapping_revision
             && self.cost_multiplier == other.cost_multiplier
             && self.service_tier == other.service_tier
+            && self.requested_speed == other.requested_speed
+            && self.response_speed == other.response_speed
             && match (&self.price, &other.price) {
                 (None, None) => true,
                 (Some(a), Some(b)) => {
@@ -772,6 +934,12 @@ impl Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            requested_speed: None,
+            response_speed: None,
+            raw_input_tokens: None,
+            input_basis: None,
+            output_reported: None,
+            parse_reasons: Vec::new(),
             transfer: None,
             end: None,
             thread_hash: None,
@@ -810,6 +978,50 @@ impl Default for Attempt {
     }
 }
 impl Attempt {
+    pub fn price_tier(&self) -> Option<&str> {
+        if self
+            .response_speed
+            .as_deref()
+            .or(self.requested_speed.as_deref())
+            == Some("fast")
+        {
+            Some("fast")
+        } else {
+            self.service_tier.as_deref()
+        }
+    }
+    /// None means no interruption evidence; only actual gateway endings qualify.
+    pub fn interruption(&self) -> Option<&'static str> {
+        let end = self.end.as_ref()?;
+        if !matches!(
+            end.cause,
+            EndCause::ClientCancelled
+                | EndCause::ClientDisconnected
+                | EndCause::DownstreamWriteTimeout
+                | EndCause::DownstreamTransportError
+                | EndCause::GatewayStopped
+                | EndCause::UpstreamDisconnected
+                | EndCause::StreamTimeout
+                | EndCause::FirstByteTimeout
+        ) {
+            return None;
+        }
+        let output = self
+            .output_reported
+            .unwrap_or(end.terminal_received || self.tokens.output.is_some_and(|n| n > 0));
+        Some(
+            if self.tokens.input.is_some()
+                && self.tokens.output.is_some()
+                && output
+                && self.usage_status != "parse_incomplete"
+                && self.parse_reasons.is_empty()
+            {
+                "reported"
+            } else {
+                "partial"
+            },
+        )
+    }
     pub fn grouping_model(&self) -> Option<&str> {
         if self.operation == Operation::WebSearch {
             Some("web_search")
@@ -846,7 +1058,7 @@ impl Attempt {
         } else {
             pricing
                 .quote(self.pricing_model.as_deref(), &self.cost_multiplier)
-                .calculate(&self.tokens, self.service_tier.as_deref())
+                .calculate(&self.tokens, self.price_tier())
         }
     }
 }
@@ -960,6 +1172,8 @@ impl Record {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    pub log_columns: std::collections::BTreeMap<String, bool>,
+    pub log_number_mode: String,
     pub recording: bool,
     pub auto_sync: bool,
     pub refresh_seconds: u32,
@@ -969,6 +1183,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            log_columns: Default::default(),
+            log_number_mode: "compact".into(),
             recording: true,
             auto_sync: true,
             refresh_seconds: 30,
@@ -980,6 +1196,25 @@ impl Default for Settings {
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         if ![0, 5, 10, 30, 60].contains(&self.refresh_seconds)
+            || !matches!(self.log_number_mode.as_str(), "compact" | "exact")
+            || self.log_columns.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "provider"
+                        | "model"
+                        | "input"
+                        | "output"
+                        | "cacheRead"
+                        | "cacheWrite"
+                        | "reasoning"
+                        | "hitRate"
+                        | "cost"
+                        | "firstToken"
+                        | "duration"
+                        | "speed"
+                        | "status"
+                )
+            })
             || !matches!(self.pricing_model.as_str(), "request" | "response")
             || decimal(&self.multiplier).is_none_or(|v| v > Decimal::from(10000))
         {

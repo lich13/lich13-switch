@@ -291,6 +291,7 @@ fn attempt(
         stream: is_proxy && operation == Operation::Model,
         transport: if is_proxy { "http" } else { "session" }.into(),
         tokens: Tokens {
+            reasoning: None,
             inclusive_input: Some(input.unwrap_or_default().saturating_add(payload % 9)),
             input,
             output,

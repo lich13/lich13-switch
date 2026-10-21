@@ -25,6 +25,7 @@ export function promptTokens(attempts: Attempt[]): Tokens {
     "inclusiveInput",
     "input",
     "output",
+    "reasoning",
     "cacheRead",
     "cacheWrite",
     "cacheWrite5m",
@@ -46,7 +47,11 @@ export function promptTokens(attempts: Attempt[]): Tokens {
     }),
   ) as Tokens;
 }
-export function missingReason(a: Attempt, field: string, source: string): string {
+export function missingReason(
+  a: Attempt,
+  field: string,
+  source: string,
+): string {
   if (
     field === "first_token" &&
     (source !== "proxy" || !a.stream || (a.operation ?? "model") !== "model")

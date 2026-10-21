@@ -316,6 +316,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             "本地网关认证失败",
         );
     }
+    if request.method() == hyper::Method::GET {
+        if let Some(response) =
+            super::catalog::local_list(&gateway, request.uri(), request.headers())
+        {
+            return response;
+        }
+    }
     // Capture all route versions before receiving the request body: edits only affect new requests.
     let provider_ids: Vec<_> = match gateway.request_state() {
         Ok(state) => state,
@@ -1074,6 +1081,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         protocol.attach_routing_log(failover.routing());
         protocol.attach_thread(wait_budget.thread.clone());
         protocol.request_headers(&parts.headers);
+        protocol.request_speed(hints.as_ref().ok().and_then(|h| h.speed.clone()));
         protocol.thread_identity(thread_identity);
         if let Some(at) = parts.extensions.get::<ReceivedAt>() {
             protocol.request_received(at.0);
