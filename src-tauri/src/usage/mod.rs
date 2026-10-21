@@ -21,6 +21,8 @@ mod pricing_mapping_tests;
 mod query;
 #[cfg(test)]
 mod response_pricing_tests;
+#[cfg(test)]
+mod routing_outcome_v02513_tests;
 mod sessions;
 #[cfg(test)]
 mod source_dedup_tests;
@@ -611,6 +613,62 @@ pub struct AttemptTrace {
     settings: Settings,
     quote: Option<Quote>,
     done: bool,
+    routing: Option<RoutingCompletion>,
+}
+/// Keeps the single logical record alive until an ownership save has settled.
+/// Only routing metadata may change after the attempt's normal accounting point.
+#[derive(Clone)]
+pub(crate) struct RoutingCompletion(Arc<RoutingCompletionInner>);
+struct RoutingCompletionInner {
+    trace: Trace,
+    id: String,
+    state: Mutex<RoutingCompletionState>,
+}
+#[derive(Default)]
+struct RoutingCompletionState {
+    outcome: Option<crate::events::RoutingOutcome>,
+    generation: u64,
+}
+impl RoutingCompletion {
+    pub(crate) fn id(&self) -> &str {
+        &self.0.id
+    }
+    pub(crate) fn begin_save(&self) -> u64 {
+        let mut state = self.0.state.lock().unwrap();
+        state.generation = state.generation.saturating_add(1);
+        state.generation
+    }
+    pub(crate) fn saved(&self, generation: u64, outcome: crate::events::RoutingOutcome) {
+        let mut state = self.0.state.lock().unwrap();
+        if generation == state.generation || outcome == crate::events::RoutingOutcome::SaveFailed {
+            self.update(&mut state, outcome);
+        }
+    }
+    pub(crate) fn outcome(&self, outcome: crate::events::RoutingOutcome) {
+        self.update(&mut self.0.state.lock().unwrap(), outcome);
+    }
+    pub(crate) fn finish(&self, outcome: crate::events::RoutingOutcome) {
+        let mut state = self.0.state.lock().unwrap();
+        if state.outcome.is_none() && state.generation == 0 {
+            self.update(&mut state, outcome);
+        }
+    }
+    fn update(&self, state: &mut RoutingCompletionState, outcome: crate::events::RoutingOutcome) {
+        // A later success cannot hide a failed ownership write.
+        if state.outcome == Some(crate::events::RoutingOutcome::SaveFailed) {
+            return;
+        }
+        state.outcome = Some(outcome);
+        let mut attempts = self.0.trace.0.attempts.lock().unwrap();
+        if let Some(attempt) = attempts.iter_mut().find(|a| a.id == self.0.id) {
+            // A bounded retry summary no longer describes one routing action.
+            attempt.routing_outcome = Some(if attempt.repeat_count == 1 {
+                outcome
+            } else {
+                crate::events::RoutingOutcome::Unknown
+            });
+        }
+    }
 }
 impl Trace {
     pub fn failover(&self, evidence: crate::gateway::failover::Evidence) {
@@ -642,10 +700,22 @@ impl Trace {
             settings,
             quote,
             done: false,
+            routing: None,
         }
     }
 }
 impl AttemptTrace {
+    pub(crate) fn routing_completion(&mut self) -> RoutingCompletion {
+        self.routing
+            .get_or_insert_with(|| {
+                RoutingCompletion(Arc::new(RoutingCompletionInner {
+                    trace: self.trace.clone(),
+                    id: self.attempt.id.clone(),
+                    state: Mutex::default(),
+                }))
+            })
+            .clone()
+    }
     pub fn id(&self) -> &str {
         &self.attempt.id
     }
@@ -799,6 +869,12 @@ impl Drop for AttemptTrace {
         self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
         self.price();
         self.attempt.annotate_availability("proxy");
+        // Use the same lock order as save receipts. A receipt may arrive on
+        // either side of this insertion without losing its outcome.
+        let routing = self.routing.as_ref().map(|r| r.0.state.lock().unwrap());
+        if let Some(routing) = &routing {
+            self.attempt.routing_outcome = routing.outcome;
+        }
         let mut attempts = self.trace.0.attempts.lock().unwrap();
         if attempts.len() >= 128 {
             let pair = (1..attempts.len())

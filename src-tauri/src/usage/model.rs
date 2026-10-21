@@ -602,6 +602,8 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_evidence: Option<RoutingEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_outcome: Option<crate::events::RoutingOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inclusive_input_tokens: Option<u64>,
     #[serde(default)]
     pub compaction_kind: Option<String>,
@@ -739,6 +741,9 @@ impl Attempt {
         // A compressed history entry has no single transport ending or request ID.
         self.end = None;
         self.upstream_request_hash = None;
+        if self.routing_outcome != next.routing_outcome {
+            self.routing_outcome = Some(crate::events::RoutingOutcome::Unknown);
+        }
         if same {
             if let Some(price) = &mut self.price {
                 price.cost = cost.to_string();
@@ -773,6 +778,7 @@ impl Default for Attempt {
             upstream_request_hash: None,
             routing_decision: None,
             routing_evidence: None,
+            routing_outcome: None,
             compaction_kind: None,
             usage_status: String::new(),
             availability: Default::default(),

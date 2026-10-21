@@ -855,15 +855,8 @@ async fn conflicts_unknowns_explicit_outcomes_and_policy_restrictions_remain_obs
             None,
         ),
     );
-    log.compaction_operation();
     log.finish(Some(200), true);
     drop(log);
-    expected.push((
-        RoutingDecision::BoundaryConsumed,
-        Some(ThreadIdentity::Reliable),
-        None,
-        RoutingOutcome::OwnerPreserved,
-    ));
 
     for outcome in [
         RoutingOutcome::WindowConsumed,

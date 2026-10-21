@@ -78,6 +78,7 @@ export type Attempt = {
   threadHash?: string | null;
   upstreamRequestHash?: string | null;
   routingDecision?: string | null;
+  routingOutcome?: string | null;
   routingEvidence?: RoutingEvidence | null;
   pricingBasis?: string | null;
   mappingRevision?: string | null;

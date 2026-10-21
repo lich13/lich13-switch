@@ -4,6 +4,7 @@ import {
   routingRestriction,
   routingIdentity,
   routingBoundary,
+  routingOutcome,
 } from "./routing-labels";
 import { Drawer } from "./UsageDrawer";
 import { preciseDate, promptTokens, missingReason } from "./usage-format";
@@ -386,6 +387,14 @@ function AttemptDetails({
                     ]
                   : []),
               ] as [string, string][])
+            : []),
+          ...(a.routingOutcome
+            ? [
+                ["最终路由结果", routingOutcome(a.routingOutcome)] as [
+                  string,
+                  string,
+                ],
+              ]
             : []),
           ...(a.transfer
             ? ([

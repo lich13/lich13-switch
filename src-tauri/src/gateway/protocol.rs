@@ -817,8 +817,11 @@ impl Protocol {
     pub fn websocket_progress(&mut self, bytes: usize) {
         self.progress(bytes);
     }
-    pub fn attach_usage(&mut self, usage: crate::usage::AttemptTrace) {
+    pub fn attach_usage(&mut self, mut usage: crate::usage::AttemptTrace) {
         self.observation.meter.anthropic = usage.anthropic();
+        if let Some((lease, _)) = &self.ownership {
+            lease.attach_usage(usage.routing_completion());
+        }
         self.usage = Some(usage);
     }
     pub fn context(
@@ -864,9 +867,6 @@ impl Protocol {
         if let (Some(log), Some(decision), Some((_, _, provider, model))) =
             (&self.routing_log, self.routing_decision, &self.diagnostics)
         {
-            if self.compaction_operation {
-                log.compaction_operation();
-            }
             log.context(
                 provider,
                 model.as_deref(),
@@ -902,6 +902,9 @@ impl Protocol {
         provider: &str,
     ) {
         self.ownership = lease.map(|lease| (lease, provider.into()));
+        if let (Some((lease, _)), Some(usage)) = (&self.ownership, &mut self.usage) {
+            lease.attach_usage(usage.routing_completion());
+        }
     }
     pub fn business_observed(&self) -> bool {
         !self.stream
@@ -1488,11 +1491,27 @@ impl Drop for Protocol {
         self.snapshot_delivery();
         self.observe_routing_fault();
         let interruption_reported = self.emit_interruption();
+        let settlement = self.routing_settlement(interruption_reported);
         if let Some(log) = &self.routing_log {
-            log.settle(self.status, self.routing_settlement(interruption_reported));
+            log.settle(self.status, settlement);
         }
         if let Some(usage) = &mut self.usage {
             usage.transfer(self.transfer.clone());
+            if self.routing_decision.is_some() {
+                usage
+                    .routing_completion()
+                    .finish(if settlement == RoutingSettlement::Delivered {
+                        crate::events::RoutingOutcome::OwnerPreserved
+                    } else {
+                        crate::events::RoutingOutcome::Failed
+                    });
+            }
+        }
+        if let Some((lease, _)) = &self.ownership {
+            lease.finish_round(
+                self.usage.as_ref().map(|usage| usage.id()),
+                self.routing_log.as_ref(),
+            );
         }
     }
 }

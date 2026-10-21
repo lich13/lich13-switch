@@ -636,6 +636,7 @@ fn save_attempt(
         "upstreamRequestHash",
         "routingDecision",
         "routingEvidence",
+        "routingOutcome",
         "id",
         "startedAt",
         "responseId",
@@ -1456,7 +1457,17 @@ pub(super) fn cold_batch(c: &mut Connection, at: i64) -> Result<bool> {
                             .is_none_or(|code| matches!(code, 1000 | 1001))
                 })
         };
-        if !r.completed
+        if r.attempts.iter().chain(r.gateway_reported.iter()).any(|a| {
+            matches!(
+                a.routing_outcome,
+                Some(
+                    crate::events::RoutingOutcome::SaveFailed
+                        | crate::events::RoutingOutcome::Failed
+                        | crate::events::RoutingOutcome::Attempted
+                        | crate::events::RoutingOutcome::Unknown
+                )
+            )
+        }) || !r.completed
             || !r.attempts.iter().all(clean)
             || r.gateway_reported.as_ref().is_some_and(|a| !clean(a))
             || r.failover_evidence

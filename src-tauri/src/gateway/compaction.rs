@@ -18,6 +18,9 @@ mod lifecycle_v0259_tests;
 #[cfg(test)]
 #[path = "model_detour_policy_tests.rs"]
 mod model_detour_policy_tests;
+#[cfg(test)]
+#[path = "compaction_v02513_tests.rs"]
+mod v02513_tests;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) enum Intake {
@@ -269,6 +272,15 @@ struct RequestPolicy<'a> {
     pinned: Option<&'a str>,
 }
 impl RequestPolicy<'_> {
+    fn receivers(&self, owner: &str) -> Vec<String> {
+        self.queued
+            .iter()
+            .filter(|p| p.queued && self.requirement.allows(p.allowed_models.as_deref()))
+            .take_while(|p| p.id != owner)
+            .filter(|p| p.handoff_after_compaction)
+            .map(|p| p.id.clone())
+            .collect()
+    }
     fn request_only(&self, entry: &Entry) -> bool {
         model_detour(entry, self.queued, self.requirement)
             // A response cursor may outlive a model detour or a legal handoff.
@@ -282,8 +294,58 @@ impl RequestPolicy<'_> {
 #[derive(Clone)]
 struct PendingReport {
     version: u64,
-    record: crate::events::Record,
+    routing: Option<(Arc<super::routing_log::RoutingLog>, u64)>,
+    record: Option<crate::events::Record>,
+    usage: Option<(crate::usage::RoutingCompletion, u64)>,
+    outcome: crate::events::RoutingOutcome,
+    scope: String,
     handoff: Option<(String, String)>,
+}
+impl PendingReport {
+    fn settle(self, registry: &Registry, saved: bool) {
+        let outcome = if saved {
+            self.outcome
+        } else {
+            crate::events::RoutingOutcome::SaveFailed
+        };
+        if let Some((usage, generation)) = self.usage {
+            usage.saved(generation, outcome);
+        }
+        let notification = self.handoff.as_ref().filter(|_| saved).map(|(from, to)| {
+            let names = super::locks::published(&registry.names);
+            let label = |id: &String| {
+                names
+                    .get(id)
+                    .and_then(|n| crate::events::safe_message(n))
+                    .unwrap_or_else(|| "供应商".into())
+            };
+            format!("线程已接管：{} → {}", label(from), label(to))
+        });
+        if let Some((log, generation)) = self.routing {
+            // The log stays alive through both request settlement and this
+            // receipt; neither side can hide a fault observed by the other.
+            log.saved(
+                generation,
+                outcome,
+                &self.scope,
+                self.handoff.is_some(),
+                notification,
+            );
+        } else if let Some(mut record) = self.record {
+            if !saved {
+                record.reason = crate::events::Reason::ThreadRouting;
+                record.error_code = Some(crate::errors::ErrorCode::ConversationOwnership);
+                record.level = crate::events::Level::Error;
+                record.action = crate::events::Action::Stopped;
+                record.details.message = Some("线程归属记录保存失败".into());
+            } else {
+                record.notification_message = notification;
+            }
+            if let Some((_, events)) = super::locks::published(&registry.notifications).as_ref() {
+                events.emit(record);
+            }
+        }
+    }
 }
 #[derive(Default)]
 struct State {
@@ -292,7 +354,7 @@ struct State {
     error: Option<String>,
     last_saved: u64,
     save_version: u64,
-    persisted_version: u64,
+    settled_version: u64,
     notifications: Vec<PendingReport>,
 }
 #[derive(Clone, Serialize)]
@@ -330,6 +392,7 @@ pub struct Lease {
     // concurrent handoff. It must never be upgraded by successful delivery.
     request_only: bool,
     routing_log: Mutex<Option<Arc<super::routing_log::RoutingLog>>>,
+    usage: Mutex<Option<crate::usage::RoutingCompletion>>,
 }
 impl Registry {
     pub fn new(path: PathBuf) -> Arc<Self> {
@@ -404,7 +467,6 @@ impl Registry {
                     };
                     state.error = (!saved).then(|| "线程归属记录保存失败".into());
                     if saved {
-                        state.persisted_version = version;
                         state.last_saved = now();
                     }
                     let ready: Vec<_> = state
@@ -418,34 +480,12 @@ impl Registry {
                         .retain(|report| report.version > version);
                     ready
                 };
-                for mut report in notifications {
-                    if let Some((_, events)) =
-                        super::locks::published(&registry.notifications).as_ref()
-                    {
-                        if !saved {
-                            report.record.reason = crate::events::Reason::ThreadRouting;
-                            report.record.error_code =
-                                Some(crate::errors::ErrorCode::ConversationOwnership);
-                            report.record.level = crate::events::Level::Error;
-                            report.record.action = crate::events::Action::Stopped;
-                            report.record.details.message = Some("线程归属记录保存失败".into());
-                            if let Some(routing) = &mut report.record.details.routing {
-                                routing.outcome = crate::events::RoutingOutcome::SaveFailed;
-                            }
-                        } else if let Some((from, to)) = report.handoff {
-                            let names = super::locks::published(&registry.names);
-                            let label = |id: &String| {
-                                names
-                                    .get(id)
-                                    .and_then(|n| crate::events::safe_message(n))
-                                    .unwrap_or_else(|| "供应商".into())
-                            };
-                            report.record.notification_message =
-                                Some(format!("线程已接管：{} → {}", label(&from), label(&to)));
-                        }
-                        events.emit(report.record);
-                    }
+                for report in notifications {
+                    report.settle(&registry, saved);
                 }
+                if let Ok(mut state) = registry.state.lock() {
+                    state.settled_version = version;
+                };
             }
         });
         registry
@@ -464,7 +504,16 @@ impl Registry {
             return;
         }
         state.save_version = state.save_version.saturating_add(1);
-        let _ = self.persist.try_send(());
+        if matches!(
+            self.persist.try_send(()),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_))
+        ) {
+            state.error = Some("线程归属记录保存失败".into());
+            for report in std::mem::take(&mut state.notifications) {
+                report.settle(self, false);
+            }
+            state.settled_version = state.save_version;
+        }
     }
     #[cfg(test)]
     pub fn flush(&self) {
@@ -472,7 +521,7 @@ impl Registry {
         loop {
             {
                 let Ok(state) = self.state.lock() else { return };
-                if state.persisted_version == state.save_version || state.error.is_some() {
+                if state.settled_version == state.save_version {
                     return;
                 }
             }
@@ -544,6 +593,7 @@ impl Registry {
                 intake: Intake::Ordinary,
                 request_only: true,
                 routing_log: Mutex::new(None),
+                usage: Mutex::new(None),
             }));
         }
         state
@@ -584,14 +634,35 @@ impl Registry {
         // A removed owner may still authorize a matching compaction handoff.
         let owner = (!entry.establishing || eligible.contains(&entry.provider))
             .then(|| entry.provider.clone());
+        // Compute once under the owner lock, before claiming. The exact same
+        // static receiver set is used later for candidate ordering. Dynamic
+        // health, concurrency and RPM checks remain in ordinary admission.
+        let mut receivers = owner
+            .as_ref()
+            .map(|owner| {
+                policy
+                    .as_ref()
+                    .map(|policy| policy.receivers(owner))
+                    .unwrap_or_else(|| {
+                        eligible
+                            .iter()
+                            .take_while(|id| *id != owner)
+                            .cloned()
+                            .collect()
+                    })
+            })
+            .unwrap_or_default();
         let handoff = can_handoff
-            && owner.is_some()
+            && !receivers.is_empty()
             && entry.claim.is_none()
             && entry.boundary_fresh
             && input.is_some()
             && entry.boundary.as_deref() == input;
         if handoff {
             entry.claim = Some(sequence);
+        }
+        if let Some(owner) = &owner {
+            receivers.push(owner.clone());
         }
         entry.updated = now();
         let epoch = entry.epoch;
@@ -622,7 +693,7 @@ impl Registry {
             completed_epoch: Mutex::new(None),
             fresh: fresh || entry_establishing,
             preferred: vec![],
-            receivers: eligible.to_vec(),
+            receivers,
             ordinary_receivers: eligible.to_vec(),
             initial_bound: std::sync::atomic::AtomicBool::new(false),
             failure_fallback: std::sync::atomic::AtomicBool::new(false),
@@ -635,6 +706,7 @@ impl Registry {
             },
             request_only: false,
             routing_log: Mutex::new(None),
+            usage: Mutex::new(None),
         }))
     }
     #[cfg(test)]
@@ -668,10 +740,9 @@ impl Registry {
         }
         let eligible: Vec<_> = queued
             .iter()
-            .filter(|p| requirement.allows(p.allowed_models.as_deref()))
+            .filter(|p| p.queued && requirement.allows(p.allowed_models.as_deref()))
             .cloned()
             .collect();
-        let ids: Vec<_> = eligible.iter().map(|p| p.id.clone()).collect();
         let mut ordered = eligible.to_vec();
         if can_handoff && hints.is_some_and(|h| h.first_turn) {
             ordered.sort_by_key(|p| !p.take_new_threads);
@@ -702,20 +773,6 @@ impl Registry {
             .filter(|p| accepts(p, Intake::Ordinary))
             .map(|p| p.id.clone())
             .collect();
-        let owner_position = inner
-            .owner
-            .as_ref()
-            .and_then(|id| ids.iter().position(|p| p == id))
-            .unwrap_or(ids.len());
-        inner.receivers = eligible
-            .iter()
-            .take(owner_position)
-            .filter(|p| p.handoff_after_compaction)
-            .map(|p| p.id.clone())
-            .collect();
-        if let Some(owner) = &inner.owner {
-            inner.receivers.push(owner.clone());
-        }
         Some(lease)
     }
     pub fn waiting_policy(
@@ -818,6 +875,19 @@ impl Registry {
     }
 }
 
+impl Drop for Registry {
+    fn drop(&mut self) {
+        let reports = self
+            .state
+            .get_mut()
+            .map(|state| std::mem::take(&mut state.notifications))
+            .unwrap_or_default();
+        for report in reports {
+            report.settle(self, false);
+        }
+    }
+}
+
 impl Lease {
     pub fn request_only(&self) -> bool {
         self.request_only
@@ -896,6 +966,89 @@ impl Lease {
     pub fn attach_routing_log(&self, log: Arc<super::routing_log::RoutingLog>) {
         if let Ok(mut current) = self.routing_log.lock() {
             *current = Some(log);
+        }
+    }
+    pub fn attach_usage(&self, completion: crate::usage::RoutingCompletion) {
+        if let Ok(mut usage) = self.usage.lock() {
+            *usage = Some(completion);
+        }
+    }
+    pub fn finish_round(
+        &self,
+        id: Option<&str>,
+        log: Option<&Arc<super::routing_log::RoutingLog>>,
+    ) {
+        let Ok(state) = self.registry.state.lock() else {
+            return;
+        };
+        // An uncommitted claim still has a cancellation release to persist.
+        let releasing = state
+            .entries
+            .get(&self.session)
+            .is_some_and(|entry| self.handoff && self.current(entry) && entry.boundary_fresh);
+        if !releasing {
+            if let Ok(mut usage) = self.usage.lock() {
+                if usage.as_ref().is_some_and(|usage| Some(usage.id()) == id) {
+                    usage.take();
+                }
+            }
+            if let Ok(mut current) = self.routing_log.lock() {
+                if current
+                    .as_ref()
+                    .zip(log)
+                    .is_some_and(|(current, log)| Arc::ptr_eq(current, log))
+                {
+                    current.take();
+                }
+            }
+        }
+    }
+    fn report(
+        &self,
+        state: &mut State,
+        outcome: crate::events::RoutingOutcome,
+        handoff: Option<(String, String)>,
+    ) {
+        let routing = self
+            .routing_log
+            .lock()
+            .ok()
+            .and_then(|log| log.as_ref().map(|log| (log.clone(), log.begin_save())));
+        let usage = self.usage.lock().ok().and_then(|usage| {
+            usage
+                .as_ref()
+                .map(|usage| (usage.clone(), usage.begin_save()))
+        });
+        let scope = storage::digest(format!("{}:{}", self.session, self.sequence).as_bytes());
+        let record = handoff
+            .as_ref()
+            .filter(|_| routing.is_none())
+            .map(|(_, to)| {
+                let client = super::locks::published(&self.registry.notifications)
+                    .as_ref()
+                    .map(|(client, _)| *client);
+                let mut record = crate::events::Record::new(
+                    client,
+                    Some(to),
+                    None,
+                    crate::events::Reason::ThreadHandoff,
+                    crate::events::Action::Routed,
+                    None,
+                    None,
+                );
+                record.details.handoff_scope = Some(scope.clone());
+                record
+            });
+        if routing.is_some() || usage.is_some() || record.is_some() {
+            state.notifications.push(PendingReport {
+                version: state.save_version.saturating_add(1),
+                routing,
+                record,
+                usage,
+                outcome,
+                scope,
+                handoff,
+            });
         }
     }
     pub fn boundary_state(&self, input: Option<&str>) -> crate::usage::model::BoundaryState {
@@ -1223,7 +1376,12 @@ impl Lease {
             entry.boundary_fresh = false;
             if let Ok(log) = self.routing_log.lock() {
                 if let Some(log) = log.as_ref() {
-                    log.outcome(crate::events::RoutingOutcome::WindowConsumed);
+                    log.window_consumed(
+                        !self
+                            .receivers
+                            .iter()
+                            .any(|id| self.owner.as_ref() != Some(id)),
+                    );
                 }
             }
             // Another turn delivered real output on this generation. Its old
@@ -1232,6 +1390,16 @@ impl Lease {
                 entry.claim = None;
             }
             changed = true;
+            if let Ok(usage) = self.usage.lock() {
+                if let Some(usage) = usage.as_ref() {
+                    usage.outcome(crate::events::RoutingOutcome::WindowConsumed);
+                }
+            }
+            self.report(
+                &mut state,
+                crate::events::RoutingOutcome::WindowConsumed,
+                None,
+            );
         }
         if changed {
             self.registry.save(&mut state, true);
@@ -1297,47 +1465,15 @@ impl Lease {
         *completed = Some(entry.epoch);
         entry.updated = now();
         if moved || registered {
-            let mut record = self.routing_log.lock().ok().and_then(|log| {
-                log.as_ref().and_then(|log| {
-                    log.take(if moved {
-                        crate::events::RoutingOutcome::OwnershipSaved
-                    } else {
-                        crate::events::RoutingOutcome::BoundaryRegistered
-                    })
-                })
-            });
-            if moved && self.handoff && record.is_none() {
-                let client = super::locks::published(&self.registry.notifications)
-                    .as_ref()
-                    .map(|(client, _)| *client);
-                record = Some(crate::events::Record::new(
-                    client,
-                    Some(provider),
-                    None,
-                    crate::events::Reason::ThreadHandoff,
-                    crate::events::Action::Routed,
-                    None,
-                    None,
-                ));
-            }
-            if let Some(mut record) = record {
-                record.details.handoff_scope = Some(storage::digest(
-                    format!("{}:{}", self.session, self.sequence).as_bytes(),
-                ));
-                if moved && self.handoff {
-                    record.reason = crate::events::Reason::ThreadHandoff;
-                    record.error_code = Some(crate::errors::ErrorCode::ThreadHandoff);
-                }
+            self.report(
+                &mut state,
                 if moved {
-                    record.action = crate::events::Action::Routed;
-                }
-                let version = state.save_version.saturating_add(1);
-                state.notifications.push(PendingReport {
-                    version,
-                    record,
-                    handoff: (moved && self.handoff).then(|| (previous, provider.into())),
-                });
-            }
+                    crate::events::RoutingOutcome::OwnershipSaved
+                } else {
+                    crate::events::RoutingOutcome::BoundaryRegistered
+                },
+                (moved && self.handoff).then(|| (previous, provider.into())),
+            );
         }
         self.registry.save(&mut state, changed);
     }
@@ -1357,17 +1493,11 @@ impl Drop for Lease {
                 let released = entry.boundary_fresh;
                 entry.claim = None;
                 if released {
-                    if let Some(record) = self.routing_log.lock().ok().and_then(|log| {
-                        log.as_ref()
-                            .and_then(|log| log.take(crate::events::RoutingOutcome::WindowReleased))
-                    }) {
-                        let version = state.save_version.saturating_add(1);
-                        state.notifications.push(PendingReport {
-                            version,
-                            record,
-                            handoff: None,
-                        });
-                    }
+                    self.report(
+                        &mut state,
+                        crate::events::RoutingOutcome::WindowReleased,
+                        None,
+                    );
                 }
                 self.registry.save(&mut state, true);
             }

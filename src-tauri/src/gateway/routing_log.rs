@@ -6,6 +6,9 @@ mod v02511_tests;
 #[path = "routing_log_v02512_tests.rs"]
 mod v02512_tests;
 #[cfg(test)]
+#[path = "routing_log_v02513_tests.rs"]
+mod v02513_tests;
+#[cfg(test)]
 #[path = "routing_log_v0259_tests.rs"]
 mod v0259_tests;
 
@@ -28,6 +31,8 @@ struct State {
     failure_generation: u64,
     reported_generation: u64,
     unreported: bool,
+    save_generation: u64,
+    save_failed: bool,
 }
 pub(super) struct RoutingLog {
     service: events::Service,
@@ -54,7 +59,7 @@ impl RoutingLog {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if state.handled {
+        if state.handled || state.save_generation != 0 {
             return;
         }
         state.attempts = state.attempts.saturating_add(1);
@@ -180,9 +185,68 @@ impl RoutingLog {
             routing.outcome = outcome;
         }
     }
-    pub fn compaction_operation(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.keep = true;
+    pub fn window_consumed(&self, no_receiver: bool) {
+        if !no_receiver {
+            self.outcome(events::RoutingOutcome::WindowConsumed);
+        } else if let Ok(mut state) = self.state.lock() {
+            if let Some(routing) = state
+                .record
+                .as_mut()
+                .and_then(|r| r.details.routing.as_mut())
+            {
+                routing.outcome = events::RoutingOutcome::WindowConsumed;
+            }
+        }
+    }
+    pub fn begin_save(&self) -> u64 {
+        let Ok(mut state) = self.state.lock() else {
+            return 0;
+        };
+        state.save_generation = state.save_generation.saturating_add(1);
+        state.save_generation
+    }
+    pub fn saved(
+        &self,
+        generation: u64,
+        outcome: events::RoutingOutcome,
+        scope: &str,
+        handoff: bool,
+        notification: Option<String>,
+    ) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let failed = outcome == events::RoutingOutcome::SaveFailed;
+        if state.save_failed || (generation != state.save_generation && !failed) {
+            return;
+        }
+        state.save_failed |= failed;
+        state.keep |= matches!(
+            outcome,
+            events::RoutingOutcome::OwnershipSaved
+                | events::RoutingOutcome::WindowReleased
+                | events::RoutingOutcome::SaveFailed
+        );
+        if let Some(record) = &mut state.record {
+            record.details.handoff_scope = Some(scope.into());
+            if let Some(routing) = &mut record.details.routing {
+                routing.outcome = outcome;
+            }
+            if failed {
+                record.reason = events::Reason::ThreadRouting;
+                record.error_code = Some(crate::errors::ErrorCode::ConversationOwnership);
+                record.level = events::Level::Error;
+                record.action = events::Action::Stopped;
+                record.details.message = Some("线程归属记录保存失败".into());
+                record.notification_message = None;
+            } else if outcome == events::RoutingOutcome::OwnershipSaved {
+                record.action = events::Action::Routed;
+                if handoff {
+                    record.reason = events::Reason::ThreadHandoff;
+                    record.error_code = Some(crate::errors::ErrorCode::ThreadHandoff);
+                    record.notification_message = notification;
+                }
+            }
         }
     }
     pub fn finish(&self, status: Option<u16>, success: bool) {
@@ -230,8 +294,9 @@ impl RoutingLog {
             }
         }
     }
-    /// Transfer emission to the ownership saver. Only its successful write may
-    /// report committed ownership or a durably released claim.
+    /// Build historical records for compatibility tests. Live save receipts
+    /// keep the log alive and pass through the final settlement filter instead.
+    #[cfg(test)]
     pub fn take(&self, outcome: events::RoutingOutcome) -> Option<events::Record> {
         let Ok(mut state) = self.state.lock() else {
             return None;
@@ -266,6 +331,8 @@ impl Drop for RoutingLog {
                                 routing.outcome,
                                 events::RoutingOutcome::OwnerPreserved
                                     | events::RoutingOutcome::Failed
+                                    | events::RoutingOutcome::WindowConsumed
+                                    | events::RoutingOutcome::BoundaryRegistered
                             )
                             && matches!(
                                 state.settled,
@@ -289,6 +356,7 @@ fn ordinary(decision: RoutingDecision) -> bool {
         decision,
         RoutingDecision::ExistingThread
             | RoutingDecision::BoundaryConsumed
+            | RoutingDecision::BoundaryNotObserved
             | RoutingDecision::NewThread
             | RoutingDecision::FirstTurnUnconfirmed
             | RoutingDecision::OrdinaryQueue

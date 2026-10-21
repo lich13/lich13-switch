@@ -219,11 +219,13 @@ fn successful_handoff_emits_exactly_one_saved_result() {
         evidence(Some(ThreadIdentity::Reliable), Some(BoundaryState::Claimed)),
         Some(ATTEMPT_TWO),
     );
+    log.finish(Some(200), true);
     let lease = registry
         .prepare(session, Some(&boundary), true, &ids(&[NEW, OLD]))
         .expect("fixture handoff lease");
     lease.attach_routing_log(log);
     lease.complete(NEW, None);
+    drop(lease);
     registry.flush();
 
     let rows = wait_for(&events, |rows| {
@@ -270,11 +272,13 @@ fn failed_ownership_save_emits_routing_error_without_thread_handoff() {
         evidence(Some(ThreadIdentity::Reliable), Some(BoundaryState::Claimed)),
         Some(ATTEMPT_TWO),
     );
+    log.finish(Some(200), true);
     let lease = registry
         .prepare(session, Some(&boundary), true, &ids(&[NEW, OLD]))
         .expect("fixture handoff lease");
     lease.attach_routing_log(log);
     lease.complete(NEW, None);
+    drop(lease);
     registry.flush();
 
     let rows = wait_for(&events, |rows| {
