@@ -24,6 +24,8 @@ const JOURNAL_LIMIT: u64 = 80 * 1024 * 1024;
 #[derive(Default)]
 pub struct Service(Mutex<Option<Pending>>);
 struct Pending {
+    layers: Vec<(PathBuf, String)>,
+    overlays: BTreeMap<String, Option<String>>,
     token: String,
     revision: String,
     home: PathBuf,
@@ -48,6 +50,9 @@ pub struct ModelView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preview {
+    pub layers: Vec<String>,
+    pub model_source: Option<String>,
+    pub unknown: Vec<String>,
     pub token: Option<String>,
     pub revision: String,
     pub models: Vec<ModelView>,
@@ -317,6 +322,10 @@ fn migrate(text: &str, p: &Profile, known_managed: bool) -> Result<String> {
     }
     doc["model"][MANAGED] = Item::Table(table);
     set_selected(&mut doc, MANAGED);
+    if !doc.contains_key("features") {
+        doc["features"] = Item::Table(Table::new());
+    }
+    doc["features"]["campaigns"] = value(false);
     Ok(doc.to_string())
 }
 
@@ -436,8 +445,16 @@ impl Gateway {
             .map(environment)
             .transpose()?
             .unwrap_or_default();
-        let resolve = |name: &str| vars.get(name).cloned().or_else(|| inherited(name));
-        let mut doc = document(&config)?;
+        let environment = |name: &str| vars.get(name).cloned().or_else(|| inherited(name));
+        let effective = super::grok_layers::read(home, &environment)?;
+        let resolve = |name: &str| {
+            if effective.blocked_env.contains(&name) {
+                None
+            } else {
+                environment(name)
+            }
+        };
+        let mut doc = document(&effective.text)?;
         if let Some(selected) = selected {
             if doc.get("model").and_then(|v| v.get(selected)).is_none()
                 && doc
@@ -451,9 +468,16 @@ impl Gateway {
             set_selected(&mut doc, selected);
         }
         let mut preview = Preview {
+            layers: effective.layers.clone(),
+            model_source: if selected.is_some() {
+                Some("手动选择".into())
+            } else {
+                effective.model_source.clone()
+            },
+            unknown: effective.unknown.clone(),
             token: None,
             revision: self.view_revision(&s)?,
-            models: discover(&config, &resolve)?,
+            models: discover(&effective.text, &resolve)?,
             selected: doc
                 .get("models")
                 .and_then(|v| v.get("default"))
@@ -466,6 +490,12 @@ impl Gateway {
             error: None,
         };
         let prepared = (|| -> Result<Pending> {
+            if let Some(message) = &effective.block {
+                return Err(error(message));
+            }
+            if preview.selected.is_empty() {
+                return Err(error("默认模型未确定，请选择要导入的模型"));
+            }
             let p = grok_config::profile_with_env(&doc.to_string(), &resolve)?;
             if p.pair
                 .token
@@ -503,6 +533,8 @@ impl Gateway {
             }
             preview.clear_environment = clear.iter().cloned().collect();
             Ok(Pending {
+                layers: effective.files.clone(),
+                overlays: super::grok_layers::environment_snapshot(inherited),
                 token: uuid::Uuid::new_v4().to_string(),
                 revision: preview.revision.clone(),
                 home: home.to_owned(),
@@ -559,6 +591,9 @@ impl Gateway {
             ));
         }
         if grok_config::read(home)?.1 != p.config
+            || !super::grok_layers::unchanged(&p.layers)?
+            || super::grok_layers::environment_snapshot(&|name| std::env::var(name).ok())
+                != p.overlays
             || (p.environment.is_some()
                 && storage::read_optional(&home.join(ENV_FILE))?.as_deref()
                     != p.environment.as_deref().map(str::as_bytes))
@@ -624,7 +659,11 @@ impl Gateway {
             .insert(id.clone(), p.profile.connection.clone());
         next.selected = Some(id);
         next.grok_api_model = Some(MANAGED.into());
-        next.grok_native = None;
+        let mut snapshot = grok_config::Snapshot::imported(&p.config, &p.after_config);
+        if let Some(original) = &next.grok_native {
+            snapshot.retain_original(original);
+        }
+        next.grok_native = Some(snapshot);
         next.grok_resume = None;
         next.resume = None;
         next.initialized = true;

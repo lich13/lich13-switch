@@ -8,87 +8,7 @@ use toml_edit::{value, DocumentMut, Item, Table};
 
 pub const MANAGED: &str = "lich13-switch";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Protocol {
-    #[default]
-    Responses,
-    ChatCompletions,
-    Messages,
-}
-impl Protocol {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Responses => "responses",
-            Self::ChatCompletions => "chat_completions",
-            Self::Messages => "messages",
-        }
-    }
-    pub fn accepts(self, path: &str) -> bool {
-        let path = path.strip_prefix("/v1").unwrap_or(path);
-        (match self {
-            Self::Responses => path == "/responses" || path.starts_with("/responses/"),
-            Self::ChatCompletions => path == "/chat/completions",
-            Self::Messages => path == "/messages" || path == "/messages/count_tokens",
-        }) || path == "/models"
-            || path.starts_with("/models/")
-    }
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Connection {
-    pub protocol: Protocol,
-    pub headers: BTreeMap<String, String>,
-    pub query: BTreeMap<String, String>,
-}
-impl Connection {
-    pub fn authenticate(&self, headers: &mut hyper::HeaderMap, token: &str) -> Result<()> {
-        headers.remove("authorization");
-        headers.remove("x-api-key");
-        let (name, token) = if self.protocol == Protocol::Messages {
-            if !headers.contains_key("anthropic-version") {
-                headers.insert(
-                    "anthropic-version",
-                    hyper::header::HeaderValue::from_static("2023-06-01"),
-                );
-            }
-            ("x-api-key", token.to_owned())
-        } else {
-            ("authorization", format!("Bearer {token}"))
-        };
-        headers.insert(
-            hyper::header::HeaderName::from_static(name),
-            hyper::header::HeaderValue::from_str(&token)
-                .map_err(|_| error("Grok Token 格式无效"))?,
-        );
-        for (name, value) in &self.headers {
-            headers.insert(
-                hyper::header::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|_| error("Grok 请求头无效"))?,
-                hyper::header::HeaderValue::from_str(value)
-                    .map_err(|_| error("Grok 请求头无效"))?,
-            );
-        }
-        Ok(())
-    }
-    pub fn query_uri(&self, uri: hyper::Uri) -> Result<hyper::Uri> {
-        if self.query.is_empty() {
-            return Ok(uri);
-        }
-        let mut url = url::Url::parse(&uri.to_string()).map_err(|_| error("Grok 接口地址无效"))?;
-        let pairs: Vec<_> = url
-            .query_pairs()
-            .filter(|(k, _)| !self.query.contains_key(k.as_ref()))
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        url.query_pairs_mut()
-            .clear()
-            .extend_pairs(pairs)
-            .extend_pairs(&self.query);
-        url.as_str().parse().map_err(|_| error("Grok 接口地址无效"))
-    }
-}
+pub use super::provider_protocol::{Connection, Protocol};
 
 pub struct Profile {
     pub pair: Pair,
@@ -482,8 +402,18 @@ pub struct Snapshot {
     applied: String,
     #[serde(default)]
     independent: bool,
+    #[serde(default)]
+    campaigns: bool,
 }
 impl Snapshot {
+    pub fn imported(before: &str, applied: &str) -> Self {
+        Self {
+            before: before.into(),
+            applied: applied.into(),
+            independent: false,
+            campaigns: true,
+        }
+    }
     pub fn new(text: &str, target: &Pair) -> Result<Self> {
         Self::with_protocol(text, target, None)
     }
@@ -604,9 +534,10 @@ impl Snapshot {
             before: text.into(),
             applied: doc.to_string(),
             independent,
+            campaigns: false,
         })
     }
-    fn owned(&self, text: &str) -> Result<(Option<String>, Option<String>)> {
+    fn owned(&self, text: &str) -> Result<(Option<String>, Option<String>, Option<String>)> {
         let doc = parse(text)?;
         Ok((
             (!self.independent)
@@ -619,6 +550,13 @@ impl Snapshot {
             doc.get("model")
                 .and_then(|v| v.get(MANAGED))
                 .map(ToString::to_string),
+            self.campaigns
+                .then(|| {
+                    doc.get("features")
+                        .and_then(|v| v.get("campaigns"))
+                        .map(ToString::to_string)
+                })
+                .flatten(),
         ))
     }
     pub fn apply(&self, path: &Path, expected: Option<&str>) -> Result<()> {
@@ -700,8 +638,15 @@ impl Snapshot {
         } else {
             let desired = parse(target)?;
             let mut doc = parse(current)?;
-            for (section, key) in [("models", "default"), ("model", MANAGED)] {
+            for (section, key) in [
+                ("models", "default"),
+                ("model", MANAGED),
+                ("features", "campaigns"),
+            ] {
                 if self.independent && section == "models" {
+                    continue;
+                }
+                if section == "features" && !self.campaigns {
                     continue;
                 }
                 if let Some(next) = desired.get(section).and_then(|v| v.get(key)) {
@@ -725,6 +670,8 @@ impl Snapshot {
     }
     pub fn retain_original(&mut self, original: &Self) {
         self.before.clone_from(&original.before);
+        self.independent = original.independent;
+        self.campaigns = original.campaigns;
     }
     pub fn original_pair(&self) -> Result<Pair> {
         pair(&self.before)

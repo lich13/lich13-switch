@@ -90,7 +90,7 @@ export default function GrokImport({
                 void load(event.target.value, preview?.environmentLoaded)
               }
             >
-              {!preview?.models.length && <option value="">未识别模型</option>}
+              {!preview?.selected && <option value="">请选择模型</option>}
               {preview?.models.map((model) => (
                 <option key={model.key} value={model.key}>
                   {model.key}
@@ -98,6 +98,12 @@ export default function GrokImport({
               ))}
             </select>
           </label>
+          <dl className="import-summary">
+            <dt>读取层</dt>
+            <dd>{preview?.layers?.join(" → ") || "用户配置"}</dd>
+            <dt>模型来源</dt>
+            <dd>{preview?.modelSource || "未知"}</dd>
+          </dl>
           {model && (
             <dl className="import-summary">
               <dt>模型 ID</dt>
@@ -129,9 +135,14 @@ export default function GrokImport({
               读取 endpoint.env 中的简单赋值
             </label>
           )}
+          {preview?.unknown?.map((message) => (
+            <p className="muted" key={message}>
+              {message}
+            </p>
+          ))}
           <p>
-            确认后将当前 API 连接迁入独立模型，默认继续使用
-            API，并恢复官方模型独立登录。其他设置保留。
+            确认后将当前 API 连接迁入独立模型，默认继续使用 API，并关闭 campaign
+            覆盖；撤销受管默认选择时恢复原值。
           </p>
         </>
       )}

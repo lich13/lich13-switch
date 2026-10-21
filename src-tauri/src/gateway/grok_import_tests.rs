@@ -587,6 +587,48 @@ fn commit_rejects_provider_store_revision_conflict_without_partial_writes() {
 }
 
 #[test]
+fn imported_campaign_and_default_ownership_survive_gateway_reconfiguration() {
+    for original_campaign in [None, Some(false), Some(true)] {
+        let mut before = "# user document\n[models]\ndefault='native'\n[model.native]\nmodel='grok-fixture'\napi_backend='responses'\nbase_url='https://fixture.example.invalid/v1'\napi_key='fixture-key'\n[features]\nother=true\n".parse::<toml_edit::DocumentMut>().unwrap();
+        if let Some(enabled) = original_campaign {
+            before["features"]["campaigns"] = value(enabled);
+        }
+        let mut imported = before.clone();
+        imported["models"]["default"] = value(grok_config::MANAGED);
+        imported["model"][grok_config::MANAGED] = imported["model"]["native"].clone();
+        imported["features"]["campaigns"] = value(false);
+        let original = grok_config::Snapshot::imported(&before.to_string(), &imported.to_string());
+        let mut gateway = grok_config::Snapshot::api(
+            &imported.to_string(),
+            &Pair::new("http://127.0.0.1:43721/v1", "fixture-local-key"),
+            &Connection::default(),
+            false,
+        )
+        .unwrap();
+        gateway.retain_original(&original);
+        let mut current = gateway.applied().parse::<toml_edit::DocumentMut>().unwrap();
+        current["features"]["external"] = value(true);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, current.to_string()).unwrap();
+        gateway.restore(&path).unwrap();
+        let restored = fs::read_to_string(&path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(restored["models"]["default"].as_str(), Some("native"));
+        assert_eq!(
+            restored["features"]
+                .get("campaigns")
+                .and_then(toml_edit::Item::as_bool),
+            original_campaign
+        );
+        assert_eq!(restored["features"]["external"].as_bool(), Some(true));
+        assert!(restored["model"].get(grok_config::MANAGED).is_none());
+    }
+}
+
+#[test]
 fn api_snapshot_preserves_native_selection_and_unowned_edits_on_restore() {
     let original = r#"
 operator_setting = "fixture-original"
