@@ -39,16 +39,15 @@ async fn cancelled_usage_tail(
     if let Some(protocol) = protocol {
         protocol.downstream_closed(activity, writing);
         protocol.begin_usage_tail(true);
+        let mut stop = protocol.stop_signal();
         let deadline = tokio::time::Instant::now() + super::model::USAGE_TAIL_DEADLINE;
         let end = loop {
-            if protocol.usage_tail_complete() {
-                break "usage_tail_complete";
-            }
             if !matches!(upstream, Upstream::Native(_)) {
                 break "response_consumer_closed";
             }
             tokio::select! {
                 biased;
+                _ = super::forward::stopping(&mut stop) => break "gateway_stopping",
                 _ = tokio::time::sleep_until(deadline) => break "usage_tail_deadline",
                 next = next_upstream(upstream) => match next {
                     Some(Ok(frame)) if frame.opcode() != OpCode::Close => {

@@ -736,24 +736,8 @@ impl Protocol {
             observer.sink().observation.strict_tail_identity = strict_identity;
         }
     }
-    pub fn usage_tail_complete(&self) -> bool {
-        let tokens = &self.observation.meter.tokens;
-        self.terminal_observed()
-            && [
-                tokens.inclusive_input,
-                tokens.input,
-                tokens.output,
-                tokens.cache_read,
-                tokens.cache_write,
-                tokens.cache_write_5m,
-                tokens.cache_write_1h,
-                tokens.image_input,
-                tokens.image_output,
-                tokens.audio_input,
-                tokens.audio_output,
-            ]
-            .iter()
-            .any(Option::is_some)
+    pub(super) fn stop_signal(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.stop.clone()
     }
     pub fn finish_usage_tail(&mut self, upstream_end: &str) {
         self.routing_tail_failure |=

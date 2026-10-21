@@ -14,15 +14,15 @@ fn cancellation_tail_keeps_decoder_open_and_accepts_reported_zero() {
     protocol.feed(b"data: {\"type\":\"response.completed\",\"response\":");
     protocol.downstream_closed(&Default::default(), false);
     protocol.begin_usage_tail(false);
-    assert!(!protocol.usage_tail_complete());
+    assert!(!protocol.terminal_observed());
     protocol.feed(
         b"{\"id\":\"fixture-current\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
     );
-    assert!(protocol.usage_tail_complete());
-    protocol.finish_usage_tail("usage_tail_complete");
-    assert_eq!(protocol.terminal(), Some(Terminal::Success));
+    assert!(protocol.terminal_observed());
     assert_eq!(protocol.observation.meter.tokens.input, Some(0));
     assert_eq!(protocol.observation.meter.tokens.output, Some(0));
+    protocol.finish_usage_tail("upstream_eof");
+    assert_eq!(protocol.terminal(), Some(Terminal::Success));
     assert!(!protocol.delivered_success());
 }
 
@@ -38,9 +38,9 @@ fn cancellation_tail_waits_for_terminal_and_usage_of_the_current_response() {
         assert!(!protocol.terminal_observed());
         assert_eq!(protocol.observation.meter.tokens.total(), None);
         protocol.value(&json!({"type":"response.usage","response_id":"fixture-current","usage":{"input_tokens":0}}));
-        assert!(!protocol.usage_tail_complete());
+        assert!(!protocol.terminal_observed());
         protocol.value(&json!({"type":"response.completed","response":{"id":"fixture-current"}}));
-        assert!(protocol.usage_tail_complete());
+        assert!(protocol.terminal_observed());
         assert_eq!(protocol.observation.meter.tokens.input, Some(0));
     }
 }
@@ -52,7 +52,6 @@ fn responses_tail_does_not_accept_an_unscoped_done_marker() {
     protocol.feed(b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-current\",\"usage\":{\"input_tokens\":0}}}\n\n");
     protocol.begin_usage_tail(false);
     protocol.feed(b"data: [DONE]\n\n");
-    assert!(!protocol.usage_tail_complete());
     assert!(!protocol.terminal_observed());
 }
 

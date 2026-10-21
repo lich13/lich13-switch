@@ -11,19 +11,19 @@ use tokio::{
     sync::oneshot,
 };
 
-const TAIL_RESPONSE_ID: &str = "fixture-tail-response";
-const TAIL_MODEL: &str = "fixture-tail-model";
-const TAIL_INCLUSIVE_INPUT: u64 = 42;
-const TAIL_INPUT: u64 = 34;
-const TAIL_OUTPUT: u64 = 17;
-const TAIL_CACHE_READ: u64 = 5;
-const TAIL_CACHE_WRITE: u64 = 3;
-const TAIL_AUDIO_OUTPUT: u64 = 0;
-const CANCEL_DELAY: Duration = Duration::from_millis(200);
-const TAIL_WINDOW: Duration = Duration::from_millis(1500);
-const TAIL_TOLERANCE: Duration = Duration::from_millis(500);
+pub(super) const TAIL_RESPONSE_ID: &str = "fixture-tail-response";
+pub(super) const TAIL_MODEL: &str = "fixture-tail-model";
+pub(super) const TAIL_INCLUSIVE_INPUT: u64 = 42;
+pub(super) const TAIL_INPUT: u64 = 34;
+pub(super) const TAIL_OUTPUT: u64 = 17;
+pub(super) const TAIL_CACHE_READ: u64 = 5;
+pub(super) const TAIL_CACHE_WRITE: u64 = 3;
+pub(super) const TAIL_AUDIO_OUTPUT: u64 = 0;
+pub(super) const CANCEL_DELAY: Duration = Duration::from_millis(200);
+pub(super) const TAIL_WINDOW: Duration = Duration::from_millis(1500);
+pub(super) const TAIL_TOLERANCE: Duration = Duration::from_millis(500);
 
-const HTTP_FIRST: &[u8] = br#"data: {"type":"response.created","response":{"id":"fixture-tail-response","model":"fixture-tail-model"}}
+pub(super) const HTTP_FIRST: &[u8] = br#"data: {"type":"response.created","response":{"id":"fixture-tail-response","model":"fixture-tail-model"}}
 
 "#;
 const HTTP_PROGRESS: &[u8] = br#"data: {"type":"response.output_text.delta","response_id":"fixture-tail-response","delta":"fixture-progress"}
@@ -95,7 +95,11 @@ async fn wait_for_tail(gateway: &Gateway, usage: &UsageService, websocket: bool)
     .expect("cancellation tail did not start before the bounded deadline");
 }
 
-fn assert_tail_usage(record: &UsageRecord) {
+pub(super) fn assert_tail_usage(record: &UsageRecord) {
+    assert_tail_usage_with_handoff(record, false);
+}
+
+pub(super) fn assert_tail_usage_with_handoff(record: &UsageRecord, terminal_handed_off: bool) {
     assert_eq!(
         record.attempts.len(),
         1,
@@ -141,10 +145,10 @@ fn assert_tail_usage(record: &UsageRecord) {
     );
     assert!(transfer.upstream_bytes > 0);
     assert!(transfer.downstream_bytes > 0);
-    assert!(!transfer.terminal_handed_off);
+    assert_eq!(transfer.terminal_handed_off, terminal_handed_off);
 }
 
-async fn assert_tail_interruption(
+pub(super) async fn assert_tail_interruption(
     events: &EventService,
     receiver: &mut tokio::sync::broadcast::Receiver<crate::events::Change>,
     events_dir: &std::path::Path,
@@ -251,7 +255,7 @@ async fn assert_gateway_stop_usage(
 }
 
 #[tokio::test]
-async fn http_cancel_tail_keeps_matching_terminal_usage_and_rejects_wrong_response_id() {
+async fn http_cancel_tail_keeps_matching_terminal_usage_until_the_fixed_deadline() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_port = upstream.local_addr().unwrap().port();
     let (ready_tx, ready_rx) = oneshot::channel();
@@ -311,8 +315,12 @@ async fn http_cancel_tail_keeps_matching_terminal_usage_and_rejects_wrong_respon
         .unwrap();
     let elapsed = closed_at.duration_since(cancelled_at);
     assert!(
-        elapsed < TAIL_WINDOW,
-        "matching terminal usage should release upstream before the 1500ms deadline: {elapsed:?}"
+        elapsed >= TAIL_WINDOW.saturating_sub(Duration::from_millis(150)),
+        "matching terminal usage must not release upstream early: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= TAIL_WINDOW + TAIL_TOLERANCE,
+        "matching terminal usage exceeded the fixed tail window: {elapsed:?}"
     );
 
     upstream_task.await.unwrap();
@@ -330,7 +338,7 @@ async fn http_cancel_tail_keeps_matching_terminal_usage_and_rejects_wrong_respon
 }
 
 #[tokio::test]
-async fn websocket_cancel_tail_keeps_matching_terminal_usage_and_releases_upstream_early() {
+async fn websocket_cancel_tail_keeps_matching_terminal_usage_until_the_fixed_deadline() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_port = upstream.local_addr().unwrap().port();
     let (ready_tx, ready_rx) = oneshot::channel();
@@ -431,8 +439,12 @@ async fn websocket_cancel_tail_keeps_matching_terminal_usage_and_releases_upstre
         .unwrap();
     let elapsed = closed_at.duration_since(cancelled_at);
     assert!(
-        elapsed < TAIL_WINDOW,
-        "matching terminal usage should release upstream before the 1500ms deadline: {elapsed:?}"
+        elapsed >= TAIL_WINDOW.saturating_sub(Duration::from_millis(150)),
+        "matching terminal usage must not release upstream early: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= TAIL_WINDOW + TAIL_TOLERANCE,
+        "matching terminal usage exceeded the fixed tail window: {elapsed:?}"
     );
 
     upstream_task.await.unwrap();

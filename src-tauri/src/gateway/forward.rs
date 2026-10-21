@@ -98,9 +98,6 @@ async fn usage_tail(
     protocol.begin_usage_tail(false);
     let deadline = tokio::time::Instant::now() + super::model::USAGE_TAIL_DEADLINE;
     let end = loop {
-        if protocol.usage_tail_complete() {
-            break "usage_tail_complete";
-        }
         tokio::select! {
             biased;
             _ = stopping(shutdown) => break "gateway_stopping",
@@ -2138,7 +2135,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
     })
 }
-async fn stopping(stop: &mut Option<watch::Receiver<bool>>) {
+pub(super) async fn stopping(stop: &mut Option<watch::Receiver<bool>>) {
     if let Some(stop) = stop {
         if !*stop.borrow() {
             let _ = stop.changed().await;

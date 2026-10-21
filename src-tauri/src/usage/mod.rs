@@ -5,6 +5,8 @@ pub mod commands;
 mod decimal_v13_tests;
 mod dedup;
 #[cfg(test)]
+mod disconnect_v02513_tests;
+#[cfg(test)]
 mod event_time_tests;
 #[cfg(test)]
 mod first_token_tests;
