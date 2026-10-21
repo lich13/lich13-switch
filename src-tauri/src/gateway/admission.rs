@@ -115,6 +115,14 @@ pub struct Slot {
 pub struct ThreadRequest {
     scheduler: Scheduler,
     ticket: u64,
+    retain_owner: Option<String>,
+}
+impl ThreadRequest {
+    fn retains(&self, provider: &str) -> bool {
+        self.retain_owner
+            .as_deref()
+            .is_none_or(|owner| owner == provider)
+    }
 }
 impl Drop for ThreadRequest {
     fn drop(&mut self) {
@@ -301,7 +309,7 @@ impl Budget {
         if self.thread.is_some() {
             return;
         }
-        if let Some(lease) = lease.filter(|lease| !lease.request_only()) {
+        if let Some(lease) = lease.filter(|lease| lease.follows_owner()) {
             self.handoff_owner = lease.handoff.then(|| lease.owner.clone()).flatten();
             let mut state = scheduler.0.state.lock().unwrap();
             state.retention.seconds = seconds;
@@ -312,6 +320,7 @@ impl Budget {
             self.thread = Some(Arc::new(ThreadRequest {
                 scheduler: scheduler.clone(),
                 ticket,
+                retain_owner: lease.request_only().then(|| lease.owner.clone()).flatten(),
             }));
         }
     }
@@ -991,6 +1000,8 @@ impl Scheduler {
                                         .as_ref()
                                         .is_none_or(|owner| owner == id);
                                     if let Some(request) = request {
+                                        let retain = retain
+                                            && budget.thread.as_ref().is_none_or(|t| t.retains(id));
                                         if !s.retention.admit(request, id, retain) {
                                             // RpmReservation locks on drop; release it outside the lock.
                                             drop(s);
@@ -1150,7 +1161,11 @@ impl Drop for Slot {
     fn drop(&mut self) {
         let mut s = self.scheduler.0.state.lock().unwrap();
         if let Some(thread) = &self.thread {
-            s.retention.release(thread.ticket, &self.id, self.success);
+            s.retention.release(
+                thread.ticket,
+                &self.id,
+                self.success && thread.retains(&self.id),
+            );
         }
         if let Some(n) = s.active.get_mut(&self.id) {
             *n = n.saturating_sub(1);

@@ -451,7 +451,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         parts.uri.path().trim_end_matches('/'),
         "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
     );
-    let thread = super::compaction::session(&parts.headers);
+    let (thread, thread_identity) = if gateway.client_id() == super::ClientId::Codex
+        && operation == crate::usage::model::Operation::WebSearch
+        && !websocket
+    {
+        super::compaction::search_identity(&parts.headers)
+    } else {
+        super::compaction::identity(&parts.headers)
+    };
     let auxiliary = hints.as_ref().is_ok_and(|h| h.auxiliary);
     if (auxiliary || hints.is_err())
         && gateway.client_id() == super::ClientId::Codex
@@ -469,7 +476,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
         }
     }
-    let ownership = if gateway.client_id() == super::ClientId::Codex
+    let owned_search = gateway.client_id() == super::ClientId::Codex
+        && mode == "auto"
+        && !websocket
+        && operation == crate::usage::model::Operation::WebSearch
+        && !unknown_affinity
+        && pinned.is_none();
+    let ownership = if owned_search {
+        match thread
+            .clone()
+            .map(|session| gateway.0.compaction.prepare_search(session))
+            .transpose()
+        {
+            Ok(lease) => lease.flatten(),
+            Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, &e.code, &e.message),
+        }
+    } else if gateway.client_id() == super::ClientId::Codex
         && mode == "auto"
         && responses
         && !unknown_affinity
@@ -1052,6 +1074,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         protocol.attach_routing_log(failover.routing());
         protocol.attach_thread(wait_budget.thread.clone());
         protocol.request_headers(&parts.headers);
+        protocol.thread_identity(thread_identity);
         if let Some(at) = parts.extensions.get::<ReceivedAt>() {
             protocol.request_received(at.0);
         }
@@ -1070,29 +1093,31 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
         protocol.context(
             thread.clone(),
-            (gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses).then(
-                || {
-                    admission
-                        .handoff_wait
-                        .or(
-                            (new_thread_model_denied && !route.provider.take_new_threads)
-                                .then_some(
-                                    crate::usage::model::RoutingDecision::NewThreadModelDenied,
-                                ),
+            (gateway.client_id() == super::ClientId::Codex
+                && mode == "auto"
+                && (responses || (owned_search && ownership.is_some())))
+            .then(|| {
+                admission
+                    .handoff_wait
+                    .or(
+                        (new_thread_model_denied && !route.provider.take_new_threads)
+                            .then_some(crate::usage::model::RoutingDecision::NewThreadModelDenied),
+                    )
+                    .unwrap_or_else(|| {
+                        super::compaction::decision(
+                            thread.as_deref(),
+                            hints.as_ref().ok(),
+                            continuation,
+                            ownership.as_deref(),
+                            &route.provider.id,
                         )
-                        .unwrap_or_else(|| {
-                            super::compaction::decision(
-                                thread.as_deref(),
-                                hints.as_ref().ok(),
-                                continuation,
-                                ownership.as_deref(),
-                                &route.provider.id,
-                            )
-                        })
-                },
-            ),
+                    })
+            }),
         );
-        if gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses {
+        if gateway.client_id() == super::ClientId::Codex
+            && mode == "auto"
+            && (responses || (owned_search && ownership.is_some()))
+        {
             protocol.routing_evidence(hints.as_ref().ok());
         }
         protocol.watch_lifecycle(

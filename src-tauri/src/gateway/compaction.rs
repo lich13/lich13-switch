@@ -72,6 +72,50 @@ pub fn session(headers: &hyper::HeaderMap) -> Option<String> {
     identity(headers).0
 }
 
+/// Standalone search carries the core-owned thread identity in turn metadata.
+/// Its body `id` belongs to the client session and is not a thread identifier.
+pub fn search_identity(
+    headers: &hyper::HeaderMap,
+) -> (Option<String>, crate::usage::model::ThreadIdentity) {
+    use crate::usage::model::ThreadIdentity as I;
+    #[derive(Deserialize)]
+    struct SearchMetadata {
+        #[serde(default)]
+        thread_id: Option<String>,
+    }
+    let (direct, kind) = identity(headers);
+    if kind == I::Conflict {
+        return (None, kind);
+    }
+    let mut found = None;
+    let mut bytes = 0usize;
+    for header in headers.get_all("x-codex-turn-metadata") {
+        bytes = bytes.saturating_add(header.len());
+        if bytes > 64 * 1024 {
+            return (None, I::Conflict);
+        }
+        // Deriving this small struct also rejects duplicate thread_id keys;
+        // arbitrary metadata and conversation content are never retained.
+        let Ok(metadata) = serde_json::from_slice::<SearchMetadata>(header.as_bytes()) else {
+            return (None, I::Conflict);
+        };
+        let Some(thread) = metadata.thread_id else {
+            continue;
+        };
+        if thread.trim().is_empty() || thread.len() > 256 || thread.chars().any(char::is_control) {
+            return (None, I::Conflict);
+        }
+        let digest = storage::digest(thread.as_bytes());
+        if found.as_ref().is_some_and(|previous| previous != &digest)
+            || (kind == I::Reliable && direct.as_ref() != Some(&digest))
+        {
+            return (None, I::Conflict);
+        }
+        found = Some(digest);
+    }
+    found.map_or((direct, kind), |thread| (Some(thread), I::Reliable))
+}
+
 pub fn identity(
     headers: &hyper::HeaderMap,
 ) -> (Option<String>, crate::usage::model::ThreadIdentity) {
@@ -391,6 +435,9 @@ pub struct Lease {
     // Request-only authority is immutable, including after failures or a
     // concurrent handoff. It must never be upgraded by successful delivery.
     request_only: bool,
+    // An owned search follows the conversation for routing and capacity only.
+    // It cannot create ownership, claim a window, or consume one on delivery.
+    owner_search: bool,
     routing_log: Mutex<Option<Arc<super::routing_log::RoutingLog>>>,
     usage: Mutex<Option<crate::usage::RoutingCompletion>>,
 }
@@ -592,6 +639,7 @@ impl Registry {
                 confirmed: true,
                 intake: Intake::Ordinary,
                 request_only: true,
+                owner_search: false,
                 routing_log: Mutex::new(None),
                 usage: Mutex::new(None),
             }));
@@ -705,6 +753,7 @@ impl Registry {
                 Intake::Ordinary
             },
             request_only: false,
+            owner_search: false,
             routing_log: Mutex::new(None),
             usage: Mutex::new(None),
         }))
@@ -858,6 +907,52 @@ impl Registry {
                 .is_some_and(|entry| model_detour(entry, queued, requirement))
         })
     }
+    pub fn prepare_search(
+        self: &Arc<Self>,
+        session: String,
+    ) -> storage::Result<Option<Arc<Lease>>> {
+        use crate::{errors::code, storage::AppError};
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AppError::new(code::CONVERSATION_OWNERSHIP, POISONED))?;
+        if state.error.is_some() {
+            return Err(AppError::new(
+                code::CONVERSATION_OWNERSHIP,
+                "线程归属状态暂不可用",
+            ));
+        }
+        let Some(entry) = state
+            .entries
+            .get(&session)
+            .filter(|e| !e.establishing && now().saturating_sub(e.updated) < RETENTION_MS)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(Lease {
+            registry: self.clone(),
+            session,
+            epoch: entry.epoch,
+            sequence: state.sequence,
+            boundary_sequence: entry.boundary_sequence,
+            owner: Some(entry.provider.clone()),
+            handoff: false,
+            completed_epoch: Mutex::new(None),
+            fresh: false,
+            preferred: vec![],
+            receivers: vec![],
+            ordinary_receivers: vec![],
+            initial_bound: std::sync::atomic::AtomicBool::new(true),
+            failure_fallback: std::sync::atomic::AtomicBool::new(false),
+            strict: true,
+            confirmed: true,
+            intake: Intake::Ordinary,
+            request_only: true,
+            owner_search: true,
+            routing_log: Mutex::new(None),
+            usage: Mutex::new(None),
+        })))
+    }
     pub fn owner(&self, session: &str) -> Option<String> {
         self.state
             .lock()
@@ -892,6 +987,9 @@ impl Lease {
     pub fn request_only(&self) -> bool {
         self.request_only
     }
+    pub fn follows_owner(&self) -> bool {
+        !self.request_only || self.owner_search
+    }
     pub fn session_digest(&self) -> &str {
         &self.session
     }
@@ -910,6 +1008,9 @@ impl Lease {
         provider: &str,
     ) -> crate::usage::model::RoutingDecision {
         use crate::usage::model::RoutingDecision as D;
+        if self.owner_search {
+            return D::Auxiliary;
+        }
         if self.request_only {
             return D::ModelDetourOwnerPreserved;
         }
@@ -1090,7 +1191,7 @@ impl Lease {
         (intake, owner)
     }
     pub fn owns(&self, provider: &str) -> bool {
-        !self.request_only
+        self.follows_owner()
             && !self.handoff
             && self.registry.state.lock().ok().is_some_and(|state| {
                 state
@@ -1139,6 +1240,19 @@ impl Lease {
             .lock()
             .map_err(|_| AppError::new(code::CONVERSATION_OWNERSHIP, POISONED))?;
         let entry = state.entries.get(&self.session);
+        if self.owner_search
+            && !entry.is_some_and(|entry| {
+                !entry.establishing
+                    && entry.epoch == self.epoch
+                    && Some(&entry.provider) == self.owner.as_ref()
+                    && now().saturating_sub(entry.updated) < RETENTION_MS
+            })
+        {
+            return Err(AppError::new(
+                code::CONVERSATION_OWNERSHIP,
+                "搜索等待期间线程归属已变化，请重试本次请求",
+            ));
+        }
         if !self.request_only && !entry.is_some_and(|entry| self.current(entry)) {
             return Err(AppError::new(
                 code::CONVERSATION_OWNERSHIP,

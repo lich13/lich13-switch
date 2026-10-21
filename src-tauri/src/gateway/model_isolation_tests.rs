@@ -844,3 +844,5 @@ async fn v022_metadata_parse_failure_keeps_existing_owner_pinned() {
     assert_eq!(receiver_hits.load(Ordering::SeqCst), 0);
     gateway.stop().await.unwrap();
 }
+#[path = "search_owner_v02513_tests.rs"]
+mod search_owner_v02513_tests;

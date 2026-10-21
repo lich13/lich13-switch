@@ -14,7 +14,7 @@ pub(super) fn capacity_owner(
         // A legal compaction handoff retains its own receiver/fallback policy;
         // the existing-thread capacity wait applies only to an ordinary bound
         // owner, never to a handoff turn that is already authorized to move.
-        .filter(|l| !l.request_only() && !l.handoff)
+        .filter(|l| l.follows_owner() && !l.handoff)
         .and_then(|l| l.admission_policy().1)
 }
 pub(super) fn capacity_cooling(health: &super::circuit::Health) -> bool {

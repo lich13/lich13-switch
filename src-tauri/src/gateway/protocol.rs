@@ -768,6 +768,9 @@ impl Protocol {
     pub fn set_delivery(&mut self, delivery: std::sync::Arc<Delivery>) {
         self.delivery = delivery;
     }
+    pub fn thread_identity(&mut self, identity: crate::usage::model::ThreadIdentity) {
+        self.identity = Some(identity);
+    }
     pub fn request_headers(&mut self, headers: &hyper::HeaderMap) {
         self.identity = Some(super::compaction::identity(headers).1);
         self.transfer.client_request_hash = ["x-request-id", "request-id", "x-client-request-id"]
