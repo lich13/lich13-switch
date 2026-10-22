@@ -6,5 +6,5 @@
 - 账号切换仅写 auth.json；config.toml 独立原文编辑，Claude settings.json 支持可视化与 JSON 共用内存草稿，保留注释和未知字段。禁止自动重启 Codex。
 - Rust 独占文件及凭据操作；列表和事件只能返回脱敏元数据。真实凭据、用户配置和登录输出不得提交、截图或写入日志。
 - 前端命令／事件契约集中于 src/bridge-contracts.ts，生命周期由 src/subscriptions.ts 管理；Rust 持久化在 src-tauri/src/storage/，应用级迁移入口在 migrations.rs，共享协议结算在 gateway/health_settlement.rs。用户操作细节位于 docs/，版本历史保留于 RELEASE.md。
-- 前端 pnpm test、pnpm build；再执行 cargo test 和 cargo clippy。真实验收区分 Browser 预览、原生程序、官方 OAuth 和 Windows CI。
-- 修改后完成 commit/push、对应 CI/Release 和本地安装验收；只清理任务创建的临时和可再生产物。
+- 按本次改动选择 pnpm test／pnpm build、cargo test／cargo clippy 的最小必要检查范围，验证编译、类型和明确代码故障；完整回归及 Windows 构建沿用现有 CI。Browser、原生程序、官方 OAuth 和业务流程验收默认交用户，提供入口、步骤、预期结果和未覆盖项；仅在用户明确要求或具体代码硬性故障需要时执行必要验收。
+- 代码交付按授权完成 commit/push、对应 CI/Release 和本地安装，安装只做必要的成功状态或启动检查；功能验收标记待用户验收，不阻塞助手交付。普通规则维护不触发发布；只清理任务创建的临时和可再生产物。
