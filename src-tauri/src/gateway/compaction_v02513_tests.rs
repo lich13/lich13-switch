@@ -69,6 +69,7 @@ fn route(provider: Provider) -> Route {
     let client =
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(1), 0));
     Route {
+        dsh_models: None,
         grok: None,
         client_id: ClientId::Codex,
         provider,

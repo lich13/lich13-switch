@@ -27,6 +27,7 @@ pub(super) struct Selection {
     pub current: Current,
     pub pair: Pair,
     pub provider: String,
+    pub models: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -58,6 +59,10 @@ pub(super) fn read_current(
     ports: &[u16],
     resolve: &impl Fn(&str) -> Option<String>,
 ) -> Result<Selection> {
+    read_provider(home, profile, store, ports, resolve, None)
+}
+
+pub(super) fn effective(home: &Path, profile: &str) -> Result<(Input, String, bool)> {
     let mut input = Input::read(home, profile)?;
     let mut source = format!("profile {profile} · bundle");
     if let Some(raw) = input.patch.before.clone() {
@@ -95,18 +100,42 @@ pub(super) fn read_current(
             }
         }
     }
-    let default = input
-        .configs
-        .get(DEFAULT)
-        .ok_or_else(|| error("未找到 DSH 默认模型"))?;
-    let provider =
-        string(default.get("provider")).ok_or_else(|| error("DSH 默认供应商无法静态解析"))?;
-    let model = string(default.get("model")).and_then(|s| crate::events::safe_model(&s));
+    Ok((input, source, overridden))
+}
+
+pub(super) fn read_provider(
+    home: &Path,
+    profile: &str,
+    store: &Store,
+    ports: &[u16],
+    resolve: &impl Fn(&str) -> Option<String>,
+    selected: Option<&str>,
+) -> Result<Selection> {
+    let (input, source, overridden) = effective(home, profile)?;
+    let default = input.configs.get(DEFAULT);
+    let provider = selected
+        .map(str::to_owned)
+        .or_else(|| default.and_then(|d| string(d.get("provider"))))
+        .ok_or_else(|| error("DSH 默认供应商无法静态解析"))?;
+    let model = default
+        .and_then(|d| string(d.get("model")))
+        .and_then(|s| crate::events::safe_model(&s));
     let route = input
         .configs
         .get(PI)
         .and_then(|c| c.get_mapping("providers"))
         .and_then(|p| p.get_mapping(&provider));
+    let models = route
+        .as_ref()
+        .and_then(|r| r.get_sequence("models"))
+        .map(|models| {
+            models
+                .values()
+                .filter_map(|m| string(m.get("id")))
+                .filter_map(|id| crate::events::safe_model(&id))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut warning = "按静态配置判断；启动参数、其他进程环境及项目覆盖未确认".to_owned();
     if overridden {
         warning = format!("home patch 覆盖了 profile 配置；{warning}");
@@ -213,6 +242,7 @@ pub(super) fn read_current(
         current: result,
         pair: selected_pair,
         provider,
+        models,
     })
 }
 

@@ -36,7 +36,7 @@ other_metadata = "fixture-other"
 const IMPORT_ENV: &str = "# fixture-only values\nXAI_API_KEY=fixture-import-api-key\nGROK_MODELS_BASE_URL=https://api.example.invalid/v1\nKEEP_VALUE=fixture-retained\n";
 
 #[test]
-fn global_connection_uses_one_resolution_and_restores_config_and_environment() {
+fn global_connection_import_keeps_only_current_api_configuration() {
     let before = "# native settings\n[models]\ndefault='native-model'\n[model.native-model]\napi_backend='responses'\n[model.other]\nmodel='other-model'\nbase_url='https://other.example.invalid/v1'\napi_key='fixture-other'\n[endpoints]\nmodels_base_url='https://api.example.invalid/v1'\n[auth]\npreferred_method='api_key'\n[features]\ncampaigns=true\n";
     let fixture = Fixture::new(before, Some(IMPORT_ENV));
     let current = super::current::grok(
@@ -67,64 +67,15 @@ fn global_connection_uses_one_resolution_and_restores_config_and_environment() {
         format!("{env}EXTERNAL=fixture-preserved\n"),
     )
     .unwrap();
-    let state = fixture.gateway.try_view().unwrap();
-    fixture
-        .gateway
-        .edit(super::Edit::GrokNative, &state.revision, &fixture.home)
-        .unwrap();
-    let restored = fs::read_to_string(fixture.home.join("config.toml"))
-        .unwrap()
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap();
-    assert_eq!(restored["models"]["default"].as_str(), Some("native-model"));
-    assert_eq!(
-        restored["endpoints"]["models_base_url"].as_str(),
-        Some("https://api.example.invalid/v1")
-    );
-    assert_eq!(restored["features"]["campaigns"].as_bool(), Some(true));
-    assert_eq!(restored["features"]["external"].as_bool(), Some(true));
-    assert_eq!(
-        restored["model"]["other"]["api_key"].as_str(),
-        Some("fixture-other")
-    );
-    let restored =
-        grok_import::environment(&fs::read_to_string(fixture.home.join("endpoint.env")).unwrap())
-            .unwrap();
-    assert_eq!(
-        restored.get("XAI_API_KEY").map(String::as_str),
-        Some("fixture-import-api-key")
-    );
-    assert_eq!(
-        restored.get("EXTERNAL").map(String::as_str),
-        Some("fixture-preserved")
-    );
-}
-
-#[test]
-fn native_restore_checks_environment_conflicts_before_any_config_write() {
-    let fixture = Fixture::new(IMPORT_CONFIG, Some(IMPORT_ENV));
-    fixture.commit(&fixture.valid_preview(None, true)).unwrap();
-    let config = fs::read_to_string(fixture.home.join("config.toml")).unwrap();
-    let env = fs::read_to_string(fixture.home.join("endpoint.env")).unwrap();
-    let changed = format!("{env}XAI_API_KEY=external-fixture-key\n");
-    fs::write(fixture.home.join("endpoint.env"), &changed).unwrap();
-    let state = fixture.gateway.try_view().unwrap();
-    assert_eq!(
-        fixture
-            .gateway
-            .edit(super::Edit::GrokNative, &state.revision, &fixture.home)
-            .err()
+    let active = fixture.gateway.try_view().unwrap();
+    assert!(active.grok_managed);
+    assert_eq!(active.providers.len(), 1);
+    assert!(
+        !serde_json::to_value(&fixture.gateway.0.inner.lock().unwrap().store)
             .unwrap()
-            .code,
-        "CONFLICT"
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.home.join("config.toml")).unwrap(),
-        config
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.home.join("endpoint.env")).unwrap(),
-        changed
+            .as_object()
+            .unwrap()
+            .contains_key("grokNative")
     );
 }
 
@@ -700,49 +651,6 @@ fn commit_rejects_provider_store_revision_conflict_without_partial_writes() {
     assert_eq!(optional_bytes(&environment_path), before_environment);
     assert_eq!(optional_bytes(&store_path), Some(external));
     assert!(!fixture.data.join("grok-import.json").exists());
-}
-
-#[test]
-fn imported_campaign_and_default_ownership_survive_gateway_reconfiguration() {
-    for original_campaign in [None, Some(false), Some(true)] {
-        let mut before = "# user document\n[models]\ndefault='native'\n[model.native]\nmodel='grok-fixture'\napi_backend='responses'\nbase_url='https://fixture.example.invalid/v1'\napi_key='fixture-key'\n[features]\nother=true\n".parse::<toml_edit::DocumentMut>().unwrap();
-        if let Some(enabled) = original_campaign {
-            before["features"]["campaigns"] = value(enabled);
-        }
-        let mut imported = before.clone();
-        imported["models"]["default"] = value(grok_config::MANAGED);
-        imported["model"][grok_config::MANAGED] = imported["model"]["native"].clone();
-        imported["features"]["campaigns"] = value(false);
-        let original =
-            grok_config::Snapshot::imported(&before.to_string(), &imported.to_string()).unwrap();
-        let mut gateway = grok_config::Snapshot::api(
-            &imported.to_string(),
-            &Pair::new("http://127.0.0.1:43721/v1", "fixture-local-key"),
-            &Connection::default(),
-            false,
-        )
-        .unwrap();
-        gateway.retain_original(&original);
-        let mut current = gateway.applied().parse::<toml_edit::DocumentMut>().unwrap();
-        current["features"]["external"] = value(true);
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("config.toml");
-        fs::write(&path, current.to_string()).unwrap();
-        gateway.restore(&path).unwrap();
-        let restored = fs::read_to_string(&path)
-            .unwrap()
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        assert_eq!(restored["models"]["default"].as_str(), Some("native"));
-        assert_eq!(
-            restored["features"]
-                .get("campaigns")
-                .and_then(toml_edit::Item::as_bool),
-            original_campaign
-        );
-        assert_eq!(restored["features"]["external"].as_bool(), Some(true));
-        assert!(restored["model"].get(grok_config::MANAGED).is_none());
-    }
 }
 
 #[test]

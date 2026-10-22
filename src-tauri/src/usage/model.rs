@@ -787,6 +787,8 @@ pub struct Attempt {
     pub id: String,
     pub provider: Option<String>,
     pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_model: Option<String>,
     pub response_model: Option<String>,
     pub pricing_model: Option<String>,
     pub response_id: Option<String>,
@@ -851,6 +853,7 @@ impl Attempt {
         self.provider == other.provider
             && self.operation == other.operation
             && self.requested_model == other.requested_model
+            && self.upstream_model == other.upstream_model
             && self.response_model == other.response_model
             && self.pricing_model == other.pricing_model
             && self.mapping_revision == other.mapping_revision
@@ -961,6 +964,7 @@ impl Default for Attempt {
             id: String::new(),
             provider: None,
             requested_model: None,
+            upstream_model: None,
             response_model: None,
             pricing_model: None,
             response_id: None,

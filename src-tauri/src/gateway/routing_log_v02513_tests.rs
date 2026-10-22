@@ -427,31 +427,25 @@ async fn stale_saved_receipt_cannot_replace_the_newer_routing_outcome() {
         false,
         None,
     );
-    drop(log);
-
-    let changes = diagnostic_barrier(&service, &mut receiver).await;
-    assert!(changes.iter().all(|change| !change.notify));
-    let routes: Vec<_> = changes
-        .into_iter()
-        .filter_map(|change| change.record)
-        .filter(|record| record.reason == Reason::ThreadRouting)
-        .collect();
-    assert_eq!(routes.len(), 1);
-    let routing = routes[0].details.routing.as_ref().unwrap();
-    assert_eq!(routing.outcome, RoutingOutcome::WindowReleased);
+    let final_record = log.state.lock().unwrap().record.clone().unwrap();
     assert_eq!(
-        routes[0].details.handoff_scope.as_deref(),
+        final_record.details.routing.unwrap().outcome,
+        RoutingOutcome::WindowReleased
+    );
+    assert_eq!(
+        final_record.details.handoff_scope.as_deref(),
         Some(newer_scope.as_str())
     );
-    let persisted = persisted_rows(&dir.path().join("events"));
-    let persisted_route = persisted
+    drop(log);
+    let changes = diagnostic_barrier(&service, &mut receiver).await;
+    assert!(changes.iter().all(|change| !change.notify));
+    assert!(changes
         .iter()
-        .find(|row| row["reason"] == "thread_routing")
-        .expect("newer routing outcome should persist");
-    assert_eq!(
-        persisted_route["details"]["routing"]["outcome"],
-        "window_released"
-    );
+        .filter_map(|change| change.record.as_ref())
+        .all(|record| record.reason != Reason::ThreadRouting));
+    assert!(persisted_rows(&dir.path().join("events"))
+        .iter()
+        .all(|row| row["reason"] != "thread_routing"));
 }
 
 fn usage_rows(service: &UsageService) -> Vec<UsageRecord> {

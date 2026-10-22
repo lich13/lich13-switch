@@ -572,7 +572,9 @@ mod tests {
     fn queued_union_preserves_sources_filters_protocol_and_ignores_stale_cache() {
         let dir = tempfile::tempdir().unwrap();
         let primary = Gateway::new(dir.path().join("data")).unwrap();
-        let g = primary.dsh_companion(dir.path().join("data/dsh")).unwrap();
+        let g = primary
+            .grok_companion(dir.path().join("data/grok"))
+            .unwrap();
         {
             let mut state = g.0.inner.lock().unwrap();
             for (name, protocol) in [
@@ -583,7 +585,7 @@ mod tests {
                 state
                     .store
                     .edit(
-                        super::super::Edit::SaveDshProvider {
+                        super::super::Edit::SaveGrokProvider {
                             id: None,
                             name: Some(name.into()),
                             base_url: format!("https://{name}.example.invalid/v1"),

@@ -450,6 +450,25 @@ impl Replay {
         .await
         .map_err(|_| io::Error::other("request inspection interrupted"))?
     }
+    pub async fn mapped_model(&self, encoding: &str, model: &str) -> Result<Bytes, BoxError> {
+        let bytes = self.prefix(MAX_BODY as usize).await?;
+        let encoding = encoding.to_owned();
+        let model = model.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let decoded = decode_prefix(&bytes, &encoding, MAX_BODY as usize + 1)?;
+            if decoded.len() as u64 > MAX_BODY {
+                return Err(io::Error::other("request too large").into());
+            }
+            let mut value: serde_json::Value = serde_json::from_slice(&decoded)?;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| io::Error::other("invalid request"))?;
+            object.insert("model".into(), model.into());
+            Ok(Bytes::from(serde_json::to_vec(&value)?))
+        })
+        .await
+        .map_err(|_| io::Error::other("model mapping interrupted"))?
+    }
     pub fn has_trailers(&self) -> bool {
         self.trailers.is_some()
     }

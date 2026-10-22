@@ -12,7 +12,9 @@ use std::{
 };
 use yaml_edit::{AsYaml, Document, Mapping, Sequence, YamlFile, YamlNode};
 
+pub mod models;
 mod selection;
+pub use models::ModelMapping;
 pub use selection::current;
 pub use selection::{profile_states, ProfileCurrent};
 mod batch;
@@ -188,6 +190,7 @@ pub struct Preview {
     pub warning: Option<String>,
     pub current: Option<super::current::Current>,
     pub states: Vec<ProfileCurrent>,
+    pub providers: Vec<DiscoveredProvider>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -926,7 +929,7 @@ impl Gateway {
         &self,
         home: &Path,
         profile: Option<&str>,
-        protocol: Protocol,
+        _protocol: Protocol,
     ) -> Result<Preview> {
         let mut profiles = vec![];
         if home.join("profiles").is_dir() {
@@ -942,7 +945,9 @@ impl Gateway {
             }
         }
         profiles.sort_by_key(|p| (p != "desktop", p.clone()));
-        let profile = profile.or_else(|| profiles.first().map(String::as_str));
+        let profile = profile
+            .filter(|p| profiles.iter().any(|item| item == p))
+            .or_else(|| profiles.first().map(String::as_str));
         let input = profile.map(|p| Input::read(home, p)).transpose()?;
         let store = self.0.inner.lock().unwrap().store.clone();
         let snapshot = store
@@ -968,17 +973,27 @@ impl Gateway {
             revision: input.as_ref().map(Input::revision).unwrap_or_default(),
             profile: profile.map(str::to_owned),
             profiles: profiles.clone(),
-            models: self.model_union(Some(protocol))?,
+            models: vec![models::FLASH.into(), models::PRO.into()],
+            providers: discover(
+                home,
+                profile.unwrap_or("desktop"),
+                &store,
+                self.0.registry.listener.view()?.port,
+            )?
+            .into_iter()
+            .map(|(view, _)| view)
+            .collect(),
             attached: snapshot.as_ref().is_some_and(|s| s.active),
-            protocol: snapshot
-                .as_ref()
-                .map(|s| s.options.protocol)
-                .or_else(|| current.as_ref().and_then(|c| c.protocol))
-                .unwrap_or(protocol),
-            model: snapshot
-                .as_ref()
-                .and_then(|s| s.options.model.clone())
-                .or_else(|| current.as_ref().and_then(|c| c.model.clone())),
+            protocol: Protocol::ChatCompletions,
+            model: Some(
+                models::default_model(
+                    snapshot
+                        .as_ref()
+                        .and_then(|s| s.options.model.as_deref())
+                        .or_else(|| current.as_ref().and_then(|c| c.model.as_deref())),
+                )
+                .into(),
+            ),
             make_default: snapshot.as_ref().is_none_or(|s| s.options.make_default),
             current: current.clone(),
             states: profile_states(
@@ -1017,11 +1032,13 @@ impl Gateway {
     async fn attach_dsh_locked(
         &self,
         home: &Path,
-        options: Options,
+        mut options: Options,
         expected: &str,
         preview: Option<&str>,
         import: bool,
     ) -> Result<View> {
+        models::require_chat(options.protocol)?;
+        options.model = Some(models::default_model(options.model.as_deref()).into());
         self.recover_dsh_state()?;
         let (old, token) = {
             let s = self.0.inner.lock().unwrap();
@@ -1042,11 +1059,11 @@ impl Gateway {
         if preview.is_some_and(|v| v != input.revision()) {
             return Err(conflict());
         }
-        let models = self
-            .model_union(Some(options.protocol))?
+        models::require_chat(options.protocol)?;
+        let models = models::catalog()
             .into_iter()
-            .map(|id| {
-                let mut value = serde_json::json!({"id":id});
+            .map(|mut value| {
+                let id = value["id"].as_str().unwrap_or_default().to_owned();
                 if let Some(meta) = self
                     .0
                     .usage
@@ -1059,9 +1076,6 @@ impl Gateway {
                         p.models_dev.metadata_from(&id, choices.source(&id))
                     })
                 {
-                    if let Some(name) = meta.name {
-                        value["name"] = name.into();
-                    }
                     if let Some(context) = meta.context {
                         value["contextWindow"] = context.into();
                     }
@@ -1115,6 +1129,9 @@ impl Gateway {
         let mut next = imported;
         next.local_token = token;
         next.dsh = Some(snapshot);
+        if import && !next.initialized {
+            next.mode = "auto".into();
+        }
         next.initialized = true;
         next.resume = Some(super::model::Resume {
             home: home.to_owned(),
@@ -1204,70 +1221,142 @@ impl Gateway {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredProvider {
+    pub profile: String,
+    pub name: String,
+    pub models: Vec<String>,
+    pub error: Option<String>,
+}
+fn discover(
+    home: &Path,
+    preferred: &str,
+    store: &super::model::Store,
+    port: u16,
+) -> Result<Vec<(DiscoveredProvider, Option<selection::Selection>)>> {
+    let mut profiles = selection::profiles(home)?;
+    profiles.sort_by_key(|p| (p != "desktop", p != preferred, p.clone()));
+    let mut found = Vec::new();
+    for profile in profiles {
+        let (input, _, _) = selection::effective(home, &profile)?;
+        let Some(routes) = input
+            .configs
+            .get(PI)
+            .and_then(|c| c.get_mapping("providers"))
+        else {
+            continue;
+        };
+        for id in routes
+            .keys()
+            .filter_map(|k| k.as_scalar().map(|v| v.as_string()))
+        {
+            if id == ROUTE {
+                continue;
+            }
+            let selection = selection::read_provider(
+                home,
+                &profile,
+                store,
+                &[port],
+                &|name| std::env::var(name).ok(),
+                Some(&id),
+            )?;
+            let issue = if selection.current.protocol != Some(Protocol::ChatCompletions) {
+                Some("请将供应商协议改为 Chat Completions".into())
+            } else if selection.pair.token.is_none() || selection.pair.base_url.is_none() {
+                Some("未读取到 API 地址或凭据".into())
+            } else {
+                None
+            };
+            let view = DiscoveredProvider {
+                profile: profile.clone(),
+                name: selection.current.provider_name.clone().unwrap_or(id),
+                models: selection.models.clone(),
+                error: issue,
+            };
+            found.push((view, Some(selection)));
+        }
+    }
+    Ok(found)
+}
 fn import_selection(
     home: &Path,
     options: &Options,
     store: &mut super::model::Store,
     port: u16,
 ) -> Result<()> {
-    let selection = selection::read_current(home, &options.profile, store, &[port], &|name| {
-        std::env::var(name).ok()
-    });
-    if let Ok(selection) = selection {
-        if !matches!(selection.current.state, super::current::Kind::Gateway) {
-            if let (Some(base), Some(token), Some(protocol)) = (
-                selection.pair.base_url,
-                selection.pair.token,
-                selection.current.protocol,
-            ) {
-                let base = super::model::base_url(&base, port)?
-                    .as_str()
-                    .trim_end_matches('/')
-                    .to_owned();
-                if protocol != options.protocol {
-                    return Err(error("所选协议与当前 DSH 连接不同，请确认协议后接入"));
-                }
-                let existing = store
-                    .providers
-                    .iter()
-                    .find(|p| p.base_url == base && p.token == token)
-                    .map(|p| p.id.clone());
-                if let Some(id) = existing {
-                    if store
-                        .grok_connections
-                        .get(&id)
-                        .is_some_and(|c| c.protocol != protocol)
-                    {
-                        return Err(error(
-                            "已有供应商的协议与 DSH 当前连接不同，请先编辑供应商协议",
-                        ));
-                    }
-                    store.selected = Some(id);
-                } else {
-                    store.settings.port = port;
-                    store.edit(
-                        super::model::Edit::SaveDshProvider {
-                            id: None,
-                            base_url: base,
-                            token,
-                            name: Some(
-                                selection
-                                    .current
-                                    .provider_name
-                                    .unwrap_or(selection.provider),
-                            ),
-                            protocol,
-                        },
-                        false,
-                    )?;
-                    store.selected = store.providers.last().map(|p| p.id.clone());
-                }
+    models::require_chat(options.protocol)?;
+    let mut discovered_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (view, selection) in discover(home, &options.profile, store, port)? {
+        if view.error.is_some() {
+            continue;
+        }
+        let Some(selection) = selection else { continue };
+        if matches!(selection.current.state, super::current::Kind::Gateway) {
+            continue;
+        }
+        let (Some(base), Some(token)) = (selection.pair.base_url, selection.pair.token) else {
+            continue;
+        };
+        let base = super::model::base_url(&base, port)?
+            .as_str()
+            .trim_end_matches('/')
+            .to_owned();
+        let existing = store
+            .providers
+            .iter()
+            .find(|p| p.base_url == base && p.token == token)
+            .map(|p| p.id.clone());
+        let id = if let Some(id) = existing {
+            if store
+                .grok_connections
+                .get(&id)
+                .is_some_and(|c| c.protocol != Protocol::ChatCompletions)
+            {
+                return Err(error("已有 DSH 供应商协议不同，请编辑为 Chat Completions"));
             }
+            id
+        } else {
+            store.settings.port = port;
+            store.edit(
+                super::model::Edit::SaveDshProvider {
+                    id: None,
+                    base_url: base,
+                    token,
+                    name: Some(view.name),
+                    protocol: Protocol::ChatCompletions,
+                },
+                false,
+            )?;
+            store
+                .providers
+                .last()
+                .ok_or_else(|| error("未生成供应商"))?
+                .id
+                .clone()
+        };
+        discovered_models
+            .entry(id)
+            .or_default()
+            .extend(selection.models);
+    }
+    for (id, models) in discovered_models {
+        let mapping = store
+            .dsh_models
+            .entry(id.clone())
+            .or_insert_with(|| ModelMapping::infer(&models))
+            .clone();
+        if let Some(p) = store.providers.iter_mut().find(|p| p.id == id) {
+            if p.allowed_models.as_ref() != Some(&mapping.allowed()) {
+                p.version = uuid::Uuid::new_v4().to_string();
+            }
+            p.allowed_models = Some(mapping.allowed());
         }
     }
     if store.providers.is_empty() {
         return Err(error(
-            "未读取到可接入的 DSH API 凭据，请检查凭据来源或先添加供应商",
+            "未读取到可接入的 Chat Completions 供应商，请检查协议和凭据",
         ));
     }
     Ok(())
@@ -1442,7 +1531,8 @@ mod tests {
         {
             let mut state = gateway.0.inner.lock().unwrap();
             let mut store = state.store.clone();
-            for protocol in [Protocol::ChatCompletions, Protocol::Messages] {
+            {
+                let protocol = Protocol::ChatCompletions;
                 store
                     .edit(
                         super::super::Edit::SaveDshProvider {
@@ -1467,7 +1557,7 @@ mod tests {
         let preview = gateway
             .preview_dsh(dir.path(), Some("default"), Protocol::ChatCompletions)
             .unwrap();
-        assert_eq!(preview.models, vec!["openai-completions"]);
+        assert_eq!(preview.models, vec![models::FLASH, models::PRO]);
         let view = gateway
             .attach_dsh(
                 dir.path(),
@@ -1561,106 +1651,10 @@ mod tests {
             .unwrap()
             .contains("fixture-local"));
     }
-    #[tokio::test]
-    async fn dsh_protocols_forward_original_bytes_and_authenticate_locally() {
-        use http_body_util::BodyExt;
-        use hyper::{Request, Response};
-        for protocol in [
-            Protocol::ChatCompletions,
-            Protocol::Responses,
-            Protocol::Messages,
-        ] {
-            let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let upstream_port = upstream.local_addr().unwrap().port();
-            let task = tokio::spawn(async move {
-                let (stream, _) = upstream.accept().await.unwrap();
-                hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(stream),
-                        hyper::service::service_fn(
-                            move |request: Request<hyper::body::Incoming>| async move {
-                                assert!(protocol.accepts(request.uri().path()));
-                                if protocol == Protocol::Messages {
-                                    assert_eq!(request.headers()["x-api-key"], "fixture-upstream");
-                                } else {
-                                    assert_eq!(
-                                        request.headers()["authorization"],
-                                        "Bearer fixture-upstream"
-                                    );
-                                }
-                                let bytes = request.into_body().collect().await.unwrap().to_bytes();
-                                Ok::<_, std::convert::Infallible>(
-                                    Response::builder()
-                                        .header("content-type", "application/json")
-                                        .body(super::super::replay::full(bytes))
-                                        .unwrap(),
-                                )
-                            },
-                        ),
-                    )
-                    .await
-                    .unwrap();
-            });
-            let dir = fixture();
-            let data = dir.path().join("data");
-            storage::private_dir(&data).unwrap();
-            let mut store = super::super::model::Store::default();
-            store
-                .edit(
-                    super::super::Edit::SaveDshProvider {
-                        id: None,
-                        base_url: format!("http://127.0.0.1:{upstream_port}/v1"),
-                        token: "fixture-upstream".into(),
-                        name: None,
-                        protocol,
-                    },
-                    false,
-                )
-                .unwrap();
-            store
-                .persist(&data.join("gateway.json"), "missing")
-                .unwrap();
-            let gateway = Gateway::new_client(data, ClientId::Dsh, None).unwrap();
-            let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = socket.local_addr().unwrap().port();
-            drop(socket);
-            gateway
-                .set_listener_port(port, &gateway.try_listener_view().unwrap().revision)
-                .unwrap();
-            let view = gateway
-                .attach_dsh(
-                    dir.path(),
-                    options(protocol),
-                    &gateway.try_view().unwrap().revision,
-                    None,
-                )
-                .await
-                .unwrap();
-            let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
-            let client = reqwest::Client::builder().no_proxy().build().unwrap();
-            let url = format!("http://127.0.0.1:{}/v1/models", view.listener.port);
-            assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
-            let path = match protocol {
-                Protocol::Responses => "/v1/responses",
-                Protocol::ChatCompletions => "/v1/chat/completions",
-                Protocol::Messages => "/v1/messages",
-            };
-            let body=br#"{ "model": "fixture-model", "messages": [], "reasoning_content": "fixture", "future": [1, 2] }"#;
-            let response = client
-                .post(format!("http://127.0.0.1:{}{path}", view.listener.port))
-                .bearer_auth(&token)
-                .header("content-type", "application/json")
-                .body(body.to_vec())
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), 200);
-            assert_eq!(response.bytes().await.unwrap().as_ref(), body);
-            gateway.stop().await.unwrap();
-            task.abort();
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests_v02515;
+
+#[cfg(test)]
+mod tests_v02517;

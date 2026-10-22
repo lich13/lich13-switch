@@ -49,18 +49,14 @@ export default function UsageLogTable({
       visible: visible("provider"),
     },
     { id: "model", label: "模型", visible: visible("model") },
-    {
-      id: "tokens",
-      label: "Token",
-      visible: tokenFields.some(visible),
-    },
     { id: "cost", label: "费用", visible: visible("cost") },
     {
-      id: "performance",
-      label: "性能",
-      visible: performanceFields.some(visible),
+      id: "metrics",
+      label: "Token / 性能",
+      visible: [...tokenFields, ...performanceFields, "status" as const].some(
+        visible,
+      ),
     },
-    { id: "status", label: "状态码", visible: visible("status") },
   ].filter((c) => c.visible);
   const exact = settings?.logNumberMode === "exact";
   const visibility = (id: LogColumn, visible: boolean) => {
@@ -149,7 +145,11 @@ export default function UsageLogTable({
                     ? `多个模型（${r.attempts.length}）`
                     : a.operation === "web_search"
                       ? "网络搜索"
-                      : (a.responseModel ?? a.requestedModel ?? "—");
+                      : ((a.upstreamModel
+                          ? a.requestedModel
+                          : a.responseModel) ??
+                        a.requestedModel ??
+                        "—");
               const token = (
                 value: number | null | undefined,
                 field: string,
@@ -206,6 +206,8 @@ export default function UsageLogTable({
                 provider: (
                   <span
                     className="usage-provider-inline"
+                    tabIndex={0}
+                    aria-label={`${name(a.provider)} · ${clientName(r.client)}`}
                     title={`${name(a.provider)} · ${clientName(r.client)}`}
                   >
                     <strong>{name(a.provider)}</strong>
@@ -215,10 +217,28 @@ export default function UsageLogTable({
                 model: (
                   <span
                     className="usage-model-name"
+                    tabIndex={0}
+                    aria-label={
+                      [
+                        ...new Set(
+                          [
+                            a.requestedModel,
+                            a.upstreamModel,
+                            a.responseModel,
+                          ].filter(Boolean),
+                        ),
+                      ].join(" → ") || model
+                    }
                     title={
-                      a.requestedModel && a.responseModel
-                        ? `${a.requestedModel} → ${a.responseModel}`
-                        : model
+                      [
+                        ...new Set(
+                          [
+                            a.requestedModel,
+                            a.upstreamModel,
+                            a.responseModel,
+                          ].filter(Boolean),
+                        ),
+                      ].join(" → ") || model
                     }
                   >
                     <strong>{model}</strong>
@@ -261,6 +281,12 @@ export default function UsageLogTable({
                 ),
                 cost: (
                   <span
+                    tabIndex={0}
+                    aria-label={
+                      native
+                        ? "轮次汇总不估算费用"
+                        : (a.price?.cost ?? unpricedReason(a))
+                    }
                     title={
                       native
                         ? "轮次汇总不估算费用"
@@ -277,6 +303,7 @@ export default function UsageLogTable({
                 ),
                 firstToken: (
                   <span
+                    tabIndex={0}
                     title={
                       native
                         ? "无可靠轮次首字时间"
@@ -292,6 +319,7 @@ export default function UsageLogTable({
                 ),
                 duration: (
                   <span
+                    tabIndex={0}
                     title={
                       state ||
                       (native ? "无可靠轮次耗时" : `${a.durationMs} ms`)
@@ -303,6 +331,7 @@ export default function UsageLogTable({
                 ),
                 speed: (
                   <span
+                    tabIndex={0}
                     title={
                       speed == null
                         ? "仅流式且用量和生成时长完整时计算"
@@ -322,39 +351,28 @@ export default function UsageLogTable({
                 reasoning: "推理",
                 hitRate: "命中率",
               };
-              cells.tokens = (
-                <div
-                  className={`usage-token-grid ${visible("reasoning") || visible("hitRate") ? "extended" : ""}`}
-                >
-                  {tokenFields.filter(visible).map((field) => (
-                    <span
-                      key={field}
-                      className={`usage-token-item ${field}`}
-                      aria-label={tokenLabels[field]}
-                      title={tokenLabels[field]}
-                    >
-                      <small>{tokenLabels[field]}</small>
-                      {cells[field]}
-                    </span>
-                  ))}
-                </div>
-              );
-              cells.performance = (
-                <div className="usage-performance">
-                  {performanceFields.filter(visible).map((field) => (
-                    <span key={field}>
-                      <small>
-                        {
-                          {
-                            firstToken: "首字",
-                            duration: "总耗时",
-                            speed: "输出 TPS",
-                          }[field]
-                        }
-                      </small>
-                      {cells[field]}
-                    </span>
-                  ))}
+              const metricLabels = {
+                ...tokenLabels,
+                firstToken: "首字",
+                duration: "耗时",
+                speed: "TPS",
+                status: "HTTP",
+              };
+              cells.metrics = (
+                <div className="usage-inline-metrics">
+                  {[...tokenFields, ...performanceFields, "status" as const]
+                    .filter(visible)
+                    .map((field) => (
+                      <span
+                        key={field}
+                        className={`usage-token-item ${field}`}
+                        aria-label={metricLabels[field]}
+                        title={metricLabels[field]}
+                      >
+                        <small>{metricLabels[field]}</small>
+                        {cells[field]}
+                      </span>
+                    ))}
                 </div>
               );
               return (

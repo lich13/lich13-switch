@@ -708,6 +708,9 @@ impl Trace {
     }
 }
 impl AttemptTrace {
+    pub fn upstream_model(&mut self, model: Option<String>) {
+        self.attempt.upstream_model = model_id(model.as_deref());
+    }
     pub(crate) fn routing_completion(&mut self) -> RoutingCompletion {
         self.routing
             .get_or_insert_with(|| {
@@ -817,20 +820,36 @@ impl AttemptTrace {
                 p.resolve(
                     &self.trace.0.client,
                     self.attempt.provider.as_deref(),
-                    self.attempt.requested_model.as_deref(),
+                    self.attempt
+                        .upstream_model
+                        .as_deref()
+                        .or(self.attempt.requested_model.as_deref()),
                     self.attempt.response_model.as_deref(),
                     &self.settings.pricing_model,
                 )
             })
             .unwrap_or_else(|| {
                 let requested = self.settings.pricing_model == "request"
-                    && self.attempt.requested_model.is_some();
+                    && (self.attempt.upstream_model.is_some()
+                        || self.attempt.requested_model.is_some());
                 let (model, basis) = if requested {
-                    (self.attempt.requested_model.clone(), "request")
+                    (
+                        self.attempt
+                            .upstream_model
+                            .clone()
+                            .or_else(|| self.attempt.requested_model.clone()),
+                        "request",
+                    )
                 } else if self.attempt.response_model.is_some() {
                     (self.attempt.response_model.clone(), "response")
                 } else {
-                    (self.attempt.requested_model.clone(), "request_fallback")
+                    (
+                        self.attempt
+                            .upstream_model
+                            .clone()
+                            .or_else(|| self.attempt.requested_model.clone()),
+                        "request_fallback",
+                    )
                 };
                 (model, basis.into(), None)
             });

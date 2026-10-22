@@ -120,6 +120,12 @@ export type DshPreview = {
   warning: string | null;
   current: CurrentConnection | null;
   states: DshProfileCurrent[];
+  providers: {
+    profile: string;
+    name: string;
+    models: string[];
+    error: string | null;
+  }[];
 };
 export type GrokImportPreview = {
   layers?: string[];
@@ -218,7 +224,12 @@ export type GatewayEdit =
       name?: string | null;
       protocol: GrokProtocol;
     }
-  | { op: "grokNative" | "import" }
+  | { op: "import" }
+  | {
+      op: "dshModelsProvider";
+      id: string;
+      mapping: { flash: string | null; pro: string | null };
+    }
   | { op: "renameProvider"; id: string; name: string }
   | { op: "endpointsProvider"; id: string; baseUrls: string[] }
   | { op: "swapEndpoint"; id: string; baseUrl: string }

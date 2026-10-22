@@ -68,7 +68,7 @@ async fn known_downstream_closes_do_not_append_interruption_events() {
 }
 
 #[tokio::test]
-async fn unknown_failed_and_unsettled_routing_results_remain_observable() {
+async fn internal_failed_and_unsettled_labels_without_error_evidence_are_hidden() {
     for outcome in [
         RoutingOutcome::Failed,
         RoutingOutcome::Attempted,
@@ -94,17 +94,9 @@ async fn unknown_failed_and_unsettled_routing_results_remain_observable() {
             reason: Some(Reason::ThreadRouting),
             ..Default::default()
         });
-        assert_eq!(page.total, 1);
-        assert_eq!(page.items[0].record.action, Action::Returned);
         assert_eq!(
-            page.items[0]
-                .record
-                .details
-                .routing
-                .as_ref()
-                .unwrap()
-                .outcome,
-            outcome
+            page.total, 0,
+            "an internal outcome without an actual failure is not a user-facing log"
         );
     }
 }
@@ -168,4 +160,30 @@ async fn delivered_terminal_does_not_hide_unknown_downstream_faults() {
         assert_eq!(warnings.total, 1);
         assert_eq!(warnings.items[0].level, events::Level::Warning);
     }
+}
+
+#[test]
+fn normal_length_limited_continuation_settles_as_preserved_instead_of_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = super::super::Gateway::new(dir.path().join("gateway")).unwrap();
+    let service = events::Service::new(dir.path());
+    gateway.set_diagnostics(service);
+    let log = RoutingLog::new(&gateway).unwrap();
+    let mut protocol = Protocol::new(true);
+    protocol.diagnostics(&gateway, "fixture-provider", Some("fixture-model"));
+    protocol.attach_routing_log(Some(log.clone()));
+    protocol.context(None, Some(RoutingDecision::BoundaryConsumed));
+    protocol.routing_evidence(None);
+    protocol.response(200, true, "identity");
+    let payload = b"data: {\"choices\":[{\"finish_reason\":\"length\",\"delta\":{}}]}\n\n";
+    protocol.feed(payload);
+    protocol.delivery().handed(payload.len(), true);
+    protocol.finish(Some(200), crate::errors::code::OK);
+    drop(protocol);
+    let record = log.state.lock().unwrap().record.clone().unwrap();
+    assert_eq!(
+        record.details.routing.unwrap().outcome,
+        RoutingOutcome::OwnerPreserved
+    );
+    assert_eq!(record.level, events::Level::Info);
 }

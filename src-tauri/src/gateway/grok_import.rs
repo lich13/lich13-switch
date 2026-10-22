@@ -361,57 +361,6 @@ struct Transaction {
     environment: Option<Change>,
     store: Change,
 }
-pub(super) fn restore_native(
-    data: &Path,
-    home: &Path,
-    snapshot: &grok_config::Snapshot,
-    before_store: String,
-    after_store: String,
-    expected: &str,
-) -> Result<()> {
-    if data.join(JOURNAL).exists() || data.join("gateway-recovery.json").exists() {
-        return Err(AppError::new(code::RECOVERY, "请先处理 Grok 配置事务"));
-    }
-    let (revision, current) = grok_config::read(home)?;
-    if revision != expected {
-        return Err(AppError::new(code::CONFLICT, "Grok 配置已变化"));
-    }
-    let environment = storage::read_bounded(&home.join(ENV_FILE), FILE_LIMIT)?
-        .map(String::from_utf8)
-        .transpose()
-        .map_err(|_| error("Grok 环境文件不是 UTF-8"))?;
-    let restored_environment = snapshot.restore_environment(environment.as_deref())?;
-    let transaction = Transaction {
-        version: 1,
-        home: home.to_owned(),
-        config: Change {
-            after: snapshot.restored(&current)?,
-            before: Some(current),
-        },
-        environment: restored_environment.map(|after| Change {
-            before: environment,
-            after,
-        }),
-        store: Change {
-            before: Some(before_store),
-            after: after_store,
-        },
-    };
-    if transaction
-        .files(data)
-        .iter()
-        .any(|(_, change)| change.after.len() as u64 > FILE_LIMIT)
-    {
-        return Err(AppError::new(code::FILE_SIZE, "Grok 恢复文件超过允许大小"));
-    }
-    storage::atomic_write_bounded(
-        &data.join(JOURNAL),
-        &serde_json::to_vec(&transaction).map_err(|_| error("无法建立 Grok 恢复事务"))?,
-        Some("missing"),
-        JOURNAL_LIMIT,
-    )?;
-    transaction.apply(data)
-}
 impl Transaction {
     fn files(&self, data: &Path) -> Vec<(PathBuf, &Change)> {
         let mut files = vec![(self.home.join("config.toml"), &self.config)];
@@ -557,11 +506,7 @@ impl Gateway {
             {
                 return Err(AppError::new(code::MANAGED, "不能导入网关的本地凭据"));
             }
-            let after_config = migrate(
-                &config,
-                &p,
-                s.store.grok_api_model.is_some() || s.store.grok_native.is_some(),
-            )?;
+            let after_config = migrate(&config, &p, s.store.grok_api_model.is_some())?;
             super::model::base_url(
                 p.pair.base_url.as_deref().unwrap(),
                 self.try_listener_view()?.port,
@@ -708,12 +653,6 @@ impl Gateway {
             .insert(id.clone(), p.profile.connection.clone());
         next.selected = Some(id);
         next.grok_api_model = Some(MANAGED.into());
-        let mut snapshot = grok_config::Snapshot::imported(&p.config, &p.after_config)?;
-        snapshot.imported_environment(p.environment.as_deref(), p.after_environment.as_deref());
-        if let Some(original) = &next.grok_native {
-            snapshot.retain_original(original);
-        }
-        next.grok_native = Some(snapshot);
         next.grok_resume = None;
         next.resume = None;
         next.initialized = true;

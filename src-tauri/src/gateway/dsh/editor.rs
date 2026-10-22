@@ -235,14 +235,24 @@ impl Gateway {
     ) -> Result<FileView> {
         let mut profiles = selection::profiles(home)?;
         profiles.sort_by_key(|p| (p != "desktop", p.clone()));
-        let profile = profile.or_else(|| profiles.first().map(String::as_str));
+        let profile = profile
+            .filter(|p| profiles.iter().any(|item| item == p))
+            .or_else(|| profiles.first().map(String::as_str));
         let path = path(home, profile, key)?;
         let raw = text(&path)?;
-        let mut files = vec![FileKey::ProfilePatch, FileKey::HomePatch];
+        let mut files = vec![FileKey::ProfilePatch];
+        if home.join(PATCH).is_file() {
+            files.push(FileKey::HomePatch);
+        }
         if home.join("settings.yaml").exists() {
             files.push(FileKey::Settings);
         }
-        files.extend([FileKey::Environment, FileKey::Credentials]);
+        if home.join(".env").is_file() {
+            files.push(FileKey::Environment);
+        }
+        if home.join(".credentials.yaml").is_file() {
+            files.push(FileKey::Credentials);
+        }
         Ok(FileView {
             profiles: profiles.clone(),
             profile: profile.map(str::to_owned),

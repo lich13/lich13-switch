@@ -410,6 +410,7 @@ fn legacy_details_unknown_enums_and_sensitive_attempt_ids_are_safe() {
         Some("secret-attempt-id"),
     ))
     .unwrap();
+    unknown["status"] = json!(502);
     let routing = unknown["details"]["routing"].as_object_mut().unwrap();
     routing.insert("decision".into(), Value::String("future_decision".into()));
     routing.insert("outcome".into(), Value::String("future_outcome".into()));
@@ -446,16 +447,14 @@ fn legacy_details_unknown_enums_and_sensitive_attempt_ids_are_safe() {
 fn different_routing_reasons_are_not_merged_by_event_service() {
     let dir = tempfile::tempdir().unwrap();
     let service = events::Service::new(dir.path());
-    service.emit(route_record(
-        RoutingDecision::BoundaryNotObserved,
-        RoutingOutcome::Attempted,
-        Some(ATTEMPT_ONE),
-    ));
-    service.emit(route_record(
-        RoutingDecision::BoundaryConsumed,
-        RoutingOutcome::Attempted,
-        Some(ATTEMPT_TWO),
-    ));
+    for (decision, attempt) in [
+        (RoutingDecision::BoundaryNotObserved, ATTEMPT_ONE),
+        (RoutingDecision::BoundaryConsumed, ATTEMPT_TWO),
+    ] {
+        let mut record = route_record(decision, RoutingOutcome::Failed, Some(attempt));
+        record.details.routing.as_mut().unwrap().failure = Some(Failure::Transport);
+        service.emit(record);
+    }
     let rows = wait_for(&service, |rows| rows.len() == 2);
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().any(|row| {

@@ -526,7 +526,10 @@ fn grok_snapshot(
         .unwrap_or_default();
     let text = super::grok_config::read(home)?.1;
     Ok(Some(
-        if store.as_ref().is_some_and(|s| s.grok_api_model.is_some()) {
+        if store.as_ref().is_some_and(|s| s.grok_api_model.is_some())
+            && super::grok_config::api_profile(&text)
+                .is_ok_and(|p| p.selected == super::grok_config::MANAGED)
+        {
             super::grok_config::Snapshot::api(&text, target, &connection, provider_pair.is_none())?
         } else if provider_pair.is_some() {
             super::grok_config::Snapshot::with_protocol(&text, target, Some(connection.protocol))?
@@ -545,16 +548,6 @@ pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
     } else {
         snapshot.unchanged(text)
     }
-}
-pub fn restore_grok_native(
-    data: &Path,
-    home: &Path,
-    snapshot: super::grok_config::Snapshot,
-    before_store: String,
-    after_store: String,
-    expected: &str,
-) -> Result<()> {
-    super::grok_import::restore_native(data, home, &snapshot, before_store, after_store, expected)
 }
 pub fn exit_pair(data: &Path) -> Result<Option<Pair>> {
     Ok(load(data)?.map(|r| r.exit))

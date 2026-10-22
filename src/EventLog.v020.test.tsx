@@ -83,21 +83,28 @@ beforeEach(() => {
   mock.command.mockReset();
   mock.listeners.clear();
   eventRecords = [baseRecord];
-  mock.command.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
-    if (name === "get_gateway") {
-      return {
-        clientId: args.clientId,
-        providers: [{ id: "provider-1", name: "Fixture Provider" }],
-      };
-    }
-    if (name === "get_app_events") {
-      return { items: structuredClone(eventRecords), total: eventRecords.length, page: 1, error: null };
-    }
-    if (name === "get_app_event") {
-      return eventRecords.find((item) => item.id === args.id) ?? null;
-    }
-    return undefined;
-  });
+  mock.command.mockImplementation(
+    async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === "get_gateway") {
+        return {
+          clientId: args.clientId,
+          providers: [{ id: "provider-1", name: "Fixture Provider" }],
+        };
+      }
+      if (name === "get_app_events") {
+        return {
+          items: structuredClone(eventRecords),
+          total: eventRecords.length,
+          page: 1,
+          error: null,
+        };
+      }
+      if (name === "get_app_event") {
+        return eventRecords.find((item) => item.id === args.id) ?? null;
+      }
+      return undefined;
+    },
+  );
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
     value: "visible",
@@ -116,7 +123,9 @@ it("normalizes a numeric upstream code in the summary and keeps local code as a 
   eventRecords = [numericUpstream];
   const firstView = render(<EventLog />);
 
-  const summary = (await screen.findByText("429 · 上游容量暂时不足")).closest("button")!;
+  const summary = (await screen.findByText("上游容量暂时不足 · 429")).closest(
+    "button",
+  )!;
   expect(summary).toHaveTextContent("429");
   expect(summary).toHaveTextContent("上游容量暂时不足");
   expect(summary).not.toHaveTextContent("CAPACITY_LIMITED");
@@ -133,7 +142,7 @@ it("normalizes a numeric upstream code in the summary and keeps local code as a 
   firstView.unmount();
   render(<EventLog />);
   expect(
-    await screen.findByText("CONNECTION_FAILED · 连接失败", { exact: true }),
+    await screen.findByText("连接失败 · CONNECTION_FAILED", { exact: true }),
   ).toBeInTheDocument();
 });
 
@@ -168,15 +177,23 @@ it("keeps HTTP status and WebSocket close code as separate detail values", async
   const user = userEvent.setup();
   render(<EventLog />);
 
-  await user.click(
-    await screen.findByRole("button", { name: "供应商熔断" }),
-  );
+  await user.click(await screen.findByRole("button", { name: "供应商熔断" }));
   const dialog = await screen.findByRole("dialog", { name: "供应商熔断" });
-  expect(within(dialog).getByText("HTTP 502 · WS 1006", { exact: true })).toBeInTheDocument();
-  expect(within(dialog).getByText("上游错误码").nextElementSibling).toHaveTextContent("overloaded_error");
-  expect(within(dialog).getByText("本地分类").nextElementSibling).toHaveTextContent("UPSTREAM_RESPONSE_ERROR");
-  expect(within(dialog).getByText("影响范围").nextElementSibling).toHaveTextContent("整个供应商");
-  expect(within(dialog).getByText("触发条件").nextElementSibling).toHaveTextContent("连续失败 6/6");
+  expect(
+    within(dialog).getByText("HTTP 502 · WS 1006", { exact: true }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("上游错误码").nextElementSibling,
+  ).toHaveTextContent("overloaded_error");
+  expect(
+    within(dialog).getByText("本地分类").nextElementSibling,
+  ).toHaveTextContent("UPSTREAM_RESPONSE_ERROR");
+  expect(
+    within(dialog).getByText("影响范围").nextElementSibling,
+  ).toHaveTextContent("整个供应商");
+  expect(
+    within(dialog).getByText("触发条件").nextElementSibling,
+  ).toHaveTextContent("连续失败 6/6");
 });
 
 it("renders the original-provider retry action in Chinese", async () => {
@@ -190,7 +207,9 @@ it("renders the original-provider retry action in Chinese", async () => {
   ];
   render(<EventLog />);
 
-  expect(await screen.findByText("未计入熔断，原供应商等待重试", { exact: true })).toBeInTheDocument();
+  expect(
+    await screen.findByText("未计入熔断，原供应商等待重试", { exact: true }),
+  ).toBeInTheDocument();
 });
 
 it("shows recorded circuit cause and deadline evidence in the detail drawer", async () => {
@@ -205,9 +224,7 @@ it("shows recorded circuit cause and deadline evidence in the detail drawer", as
   const user = userEvent.setup();
   render(<EventLog />);
 
-  await user.click(
-    await screen.findByRole("button", { name: "供应商熔断" }),
-  );
+  await user.click(await screen.findByRole("button", { name: "供应商熔断" }));
   const dialog = await screen.findByRole("dialog", { name: "供应商熔断" });
 
   expect(within(dialog).getByText("类别").nextElementSibling).toHaveTextContent(
@@ -244,9 +261,7 @@ it("marks missing circuit cause and retry evidence unrecorded instead of trustin
   const user = userEvent.setup();
   render(<EventLog />);
 
-  await user.click(
-    await screen.findByRole("button", { name: "供应商熔断" }),
-  );
+  await user.click(await screen.findByRole("button", { name: "供应商熔断" }));
   const dialog = await screen.findByRole("dialog", { name: "供应商熔断" });
 
   expect(

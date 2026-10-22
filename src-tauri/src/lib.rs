@@ -1086,8 +1086,12 @@ async fn commit_grok_import(
         &token,
         &expected_revision,
     )?;
+    let result = r
+        .grok
+        .start(&view.revision, &r.home(gateway::ClientId::Grok)?)
+        .await;
     let _ = refresh(&app, &r);
-    Ok(view)
+    result
 }
 #[tauri::command]
 fn reveal_provider_token(

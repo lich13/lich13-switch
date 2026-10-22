@@ -1,3 +1,4 @@
+import { preferredDshProfile, rememberDshProfile } from "./dsh-profile";
 import { useEffect, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
@@ -45,7 +46,7 @@ export default function DshConfigEditor({
   onDirty: (dirty: boolean) => void;
   onMessage: (message: string) => void;
 }) {
-  const [profile, setProfile] = useState("");
+  const [profile, setProfile] = useState(preferredDshProfile);
   const [key, setKey] = useState<DshFileKey>("profilePatch");
   const [doc, setDoc] = useState<DshFileView | null>(null);
   const normalizedSelection = useRef<{
@@ -120,6 +121,7 @@ export default function DshConfigEditor({
     setDoc(null);
     setText("");
     setPrevious(null);
+    rememberDshProfile(nextProfile);
     setProfile(nextProfile);
     setKey(selectedKey);
   }
@@ -210,27 +212,32 @@ export default function DshConfigEditor({
             ))}
           </select>
         </label>
-        <label>
-          文件
-          <select
-            aria-label="DSH 配置文件"
-            value={key}
-            disabled={busy || loading}
-            onChange={(e) =>
-              void switchFile(profile, e.target.value as DshFileKey)
-            }
-          >
-            {choices.files.map((file) => (
-              <option
-                key={file}
-                value={file}
-                disabled={file === "profilePatch" && !profile}
+        {choices.files.some((file) => file !== "profilePatch") && (
+          <details className="dsh-advanced-files">
+            <summary>高级文件</summary>
+            <label>
+              文件
+              <select
+                aria-label="DSH 配置文件"
+                value={key}
+                disabled={busy || loading}
+                onChange={(e) =>
+                  void switchFile(profile, e.target.value as DshFileKey)
+                }
               >
-                {names[file]}
-              </option>
-            ))}
-          </select>
-        </label>
+                {choices.files.map((file) => (
+                  <option
+                    key={file}
+                    value={file}
+                    disabled={file === "profilePatch" && !profile}
+                  >
+                    {names[file]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </details>
+        )}
       </div>
       <div className="editor-toolbar">
         <span>

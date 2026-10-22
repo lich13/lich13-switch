@@ -80,13 +80,13 @@ impl TaskScope {
     }
 }
 
-struct LoopbackServer {
+pub(super) struct LoopbackServer {
     port: u16,
     tasks: TaskScope,
 }
 
 impl LoopbackServer {
-    fn url(&self, path: &str) -> String {
+    pub(super) fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
     }
 }
@@ -97,7 +97,7 @@ impl Drop for LoopbackServer {
     }
 }
 
-async fn server<F, Fut>(handler: F) -> LoopbackServer
+pub(super) async fn server<F, Fut>(handler: F) -> LoopbackServer
 where
     F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response<WireBody>> + Send + 'static,
@@ -650,7 +650,7 @@ async fn grok_gateway_routes_each_native_protocol_with_private_connection_data()
 }
 
 #[tokio::test]
-async fn grok_native_selection_and_gateway_stop_restore_config_without_overwriting_conflicts() {
+async fn grok_gateway_stop_restores_current_api_without_overwriting_conflicts() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let upstream = capturing_server(seen, RESPONSES_RESPONSE_BODY).await;
     let fixture = Fixture::new_manual_provider(&upstream.url("/v1")).await;
@@ -661,7 +661,7 @@ async fn grok_native_selection_and_gateway_stop_restore_config_without_overwriti
     fixture.edit(Edit::Select {
         id: provider_id.clone(),
     });
-    assert!(fixture.gateway.view().grok_native_available);
+    assert!(fixture.gateway.view().grok_managed);
     let direct_config = std::fs::read_to_string(&config_path).unwrap();
     assert_ne!(direct_config.as_bytes(), original_config.as_slice());
     let direct_doc = direct_config.parse::<toml_edit::DocumentMut>().unwrap();
@@ -672,10 +672,6 @@ async fn grok_native_selection_and_gateway_stop_restore_config_without_overwriti
             .and_then(toml_edit::Item::as_str),
         Some(grok_config::MANAGED)
     );
-
-    let native = fixture.edit(Edit::GrokNative);
-    assert!(!native.grok_native_available);
-    assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
 
     fixture.start().await;
     let active_config = std::fs::read_to_string(&config_path).unwrap();
@@ -709,7 +705,10 @@ async fn grok_native_selection_and_gateway_stop_restore_config_without_overwriti
 
     std::fs::write(&config_path, &active_config).unwrap();
     fixture.stop().await;
-    assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        direct_config
+    );
     assert!(!fixture.gateway.view().running);
 }
 

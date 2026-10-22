@@ -585,7 +585,7 @@ describe("v0.18 rankings", () => {
     await renderUsage();
     expect(
       screen.getAllByRole("columnheader").map((header) => header.textContent),
-    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "Token", "费用", "性能"]);
+    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "费用", "Token / 性能"]);
     await user.click(screen.getByRole("tab", { name: "供应商" }));
     expect(
       screen.getAllByRole("columnheader").map((header) => header.textContent),

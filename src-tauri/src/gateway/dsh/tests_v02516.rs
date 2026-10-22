@@ -56,7 +56,7 @@ async fn desktop_without_bundle_is_recognized_imported_and_shared_with_empty_pro
         .unwrap();
     assert_eq!(preview.profile.as_deref(), Some("desktop"));
     assert_eq!(preview.protocol, Protocol::ChatCompletions);
-    assert_eq!(preview.model.as_deref(), Some("fixture-model"));
+    assert_eq!(preview.model.as_deref(), Some(models::FLASH));
     assert!(matches!(
         preview.current.as_ref().unwrap().state,
         Kind::Unmatched { .. }

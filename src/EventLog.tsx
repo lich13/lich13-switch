@@ -303,6 +303,7 @@ function summary(r: EventRecord) {
       .filter(Boolean)
       .join(" · ");
   return [
+    r.details?.message || r.details?.upstreamReason || reasonText(r),
     r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r),
     r.details?.upstreamReason,
     ...(r.details?.delivery?.terminalReceived &&
@@ -310,7 +311,6 @@ function summary(r: EventRecord) {
       ? [reasonText(r)]
       : []),
     r.details?.quotaCheck ? quotaCheckLabel(r.details.quotaCheck) : null,
-    r.details?.message || reasonText(r),
   ]
     .filter(
       (value, index, values) =>

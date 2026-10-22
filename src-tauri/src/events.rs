@@ -210,22 +210,12 @@ impl Record {
             routing.failure.is_some()
                 || self.level != Level::Info
                 || self.status.is_some_and(|status| status >= 400)
-                || matches!(self.action, Action::Routed | Action::Stopped)
+                || self.action == Action::Stopped
                 || matches!(
                     routing.evidence.identity,
-                    Some(
-                        crate::usage::model::ThreadIdentity::Conflict
-                            | crate::usage::model::ThreadIdentity::Unknown
-                    )
+                    Some(crate::usage::model::ThreadIdentity::Conflict)
                 )
-                || routing.evidence.restriction
-                    == Some(crate::usage::model::RoutingRestriction::Unknown)
-                || !matches!(
-                    routing.outcome,
-                    RoutingOutcome::OwnerPreserved
-                        | RoutingOutcome::WindowConsumed
-                        | RoutingOutcome::BoundaryRegistered
-                )
+                || routing.outcome == RoutingOutcome::SaveFailed
         })
     }
     fn merge_seconds(&self) -> u64 {
@@ -855,6 +845,8 @@ mod routing_visibility_tests {
             RoutingOutcome::OwnerPreserved,
             RoutingOutcome::WindowConsumed,
             RoutingOutcome::BoundaryRegistered,
+            RoutingOutcome::Failed,
+            RoutingOutcome::OwnershipSaved,
         ] {
             let mut record = Record::new(
                 None,
@@ -883,7 +875,7 @@ mod routing_visibility_tests {
         let path = dir.path().join("legacy.jsonl");
         std::fs::write(&path, lines.join("\n")).unwrap();
         let loaded = load(&path);
-        assert_eq!(loaded.records.len(), 3);
+        assert_eq!(loaded.records.len(), 5);
         assert!(loaded.records.iter().all(|r| r
             .details
             .routing
@@ -893,7 +885,7 @@ mod routing_visibility_tests {
             .is_some()));
         let service = Service::new(dir.path());
         *service.journal.lock().unwrap() = loaded;
-        assert_eq!(service.query(Filter::default()).total, 3);
+        assert_eq!(service.query(Filter::default()).total, 5);
         // Query/count also defend against routine records still held in memory.
         let mut routine = service.journal.lock().unwrap().records[0].clone();
         routine.id = uuid::Uuid::new_v4().to_string();
@@ -907,7 +899,7 @@ mod routing_visibility_tests {
                     ..Default::default()
                 })
                 .total,
-            3
+            5
         );
         assert!(service.detail(&id).is_none());
     }

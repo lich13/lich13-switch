@@ -4,13 +4,6 @@ import type { GrokImportPreview } from "./bridge-contracts";
 import { errorOf, type GatewayState } from "./types";
 import Modal from "./Modal";
 
-const sources: Record<string, string> = {
-  model: "模型配置",
-  modelApi: "模型 API 地址",
-  environment: "环境变量",
-  global: "全局端点",
-  globalApi: "全局 API 端点",
-};
 export default function GrokImport({
   close,
   update,
@@ -23,17 +16,21 @@ export default function GrokImport({
   const [preview, setPreview] = useState<GrokImportPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [completed, setCompleted] = useState(false);
   const generation = useRef(0),
     token = useRef<string | null>(null);
-  async function load(selected?: string, useEnvironment = true) {
+  async function load(selected?: string) {
     const current = ++generation.current;
+    const previous = token.current;
+    token.current = null;
+    setPreview(null);
     setBusy(true);
     setError("");
+    if (previous)
+      void command("cancel_grok_import", { token: previous }).catch(() => {});
     try {
       const next = await command("preview_grok_import", {
         selected,
-        useEnvironment,
+        useEnvironment: true,
       });
       if (current !== generation.current) {
         if (next.token)
@@ -58,142 +55,78 @@ export default function GrokImport({
         );
     };
   }, []);
-  const model = preview?.models.find((model) => model.key === preview.selected);
+  const model = preview?.models.find((m) => m.key === preview.selected);
   return (
-    <Modal title="导入 Grok 当前配置" close={close} busy={busy} compact>
-      {completed ? (
-        <>
-          <p>
-            已建立独立 API 模型。Grok 中选择 <code>lich13-switch</code> 使用
-            API，选择官方模型使用原生登录。
-          </p>
-          {!!preview?.clearEnvironment.length && (
-            <>
-              <p>
-                当前终端仍保留旧变量。请新开终端，或执行以下命令后再启动 Grok：
-              </p>
-              <pre>unset {preview.clearEnvironment.join(" ")}</pre>
-            </>
-          )}
-          <p>
-            官方登录使用 <code>grok login</code>。
-          </p>
-        </>
-      ) : (
-        <>
-          <label>
-            模型入口
-            <select
-              disabled={busy}
-              value={preview?.selected ?? ""}
-              onChange={(event) =>
-                void load(event.target.value, preview?.environmentLoaded)
-              }
-            >
-              {!preview?.selected && <option value="">请选择模型</option>}
-              {preview?.models.map((model) => (
-                <option key={model.key} value={model.key}>
-                  {model.key}
-                </option>
-              ))}
-            </select>
-          </label>
-          <dl className="import-summary">
-            <dt>读取层</dt>
-            <dd>{preview?.layers?.join(" → ") || "用户配置"}</dd>
-            <dt>模型来源</dt>
-            <dd>{preview?.modelSource || "未知"}</dd>
-          </dl>
-          {model && (
-            <dl className="import-summary">
-              <dt>模型 ID</dt>
-              <dd>{model.model || "未识别"}</dd>
-              <dt>协议</dt>
-              <dd>{model.protocol ?? "未识别"}</dd>
-              <dt>地址</dt>
-              <dd>{model.address ?? "未读取到"}</dd>
-              <dt>地址来源</dt>
-              <dd>{sources[model.addressSource ?? ""] ?? "未记录"}</dd>
-              <dt>API Key</dt>
-              <dd>
-                {model.credentialAvailable
-                  ? "••••••••"
-                  : `未读取到${model.missingEnvironment.length ? `：${model.missingEnvironment.join(" / ")}` : ""}`}
-              </dd>
-              <dt>凭据来源</dt>
-              <dd>
-                {model.credentialSource ??
-                  (preview?.environmentLoaded
-                    ? "endpoint.env"
-                    : "当前进程环境")}
-              </dd>
-            </dl>
-          )}
-          {preview?.environmentAvailable && (
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                disabled={busy}
-                checked={preview.environmentLoaded}
-                onChange={(event) =>
-                  void load(preview.selected, event.target.checked)
-                }
-              />
-              读取 endpoint.env 中的简单赋值
-            </label>
-          )}
-          {preview?.unknown?.map((message) => (
-            <p className="muted" key={message}>
-              {message}
-            </p>
+    <Modal title="接入 Grok 当前配置" close={close} busy={busy} compact>
+      <label>
+        模型
+        <select
+          disabled={busy}
+          value={preview?.selected ?? ""}
+          onChange={(e) => void load(e.target.value)}
+        >
+          {!preview?.selected && <option value="">请选择模型</option>}
+          {preview?.models.map((m) => (
+            <option key={m.key} value={m.key}>
+              {m.key}
+            </option>
           ))}
-          <p>
-            确认后将当前 API 连接迁入独立模型，默认继续使用 API，并关闭 campaign
-            覆盖；撤销受管默认选择时恢复原值。
-          </p>
-        </>
+        </select>
+      </label>
+      {model && (
+        <dl className="import-summary">
+          <dt>地址</dt>
+          <dd>{model.address || "未读取到"}</dd>
+          <dt>API Key</dt>
+          <dd>{model.credentialAvailable ? "••••••••" : "未读取到"}</dd>
+        </dl>
       )}
-      {(error || (!completed && (preview?.error || model?.error))) && (
-        <div className="form-error" role="alert">
+      <details>
+        <summary>配置来源</summary>
+        <dl className="import-summary">
+          <dt>读取层</dt>
+          <dd>{preview?.layers?.join(" → ") || "用户配置"}</dd>
+          <dt>模型来源</dt>
+          <dd>{preview?.modelSource || "未知"}</dd>
+          <dt>协议</dt>
+          <dd>{model?.protocol || "未识别"}</dd>
+        </dl>
+        {preview?.unknown?.map((message) => (
+          <p key={message}>{message}</p>
+        ))}
+      </details>
+      {(error || preview?.error || model?.error) && (
+        <p className="form-error" role="alert">
           {error || preview?.error || model?.error}
-        </div>
+        </p>
       )}
       <footer className="modal-actions">
         <button disabled={busy} onClick={close}>
-          {completed ? "完成" : "取消"}
+          取消
         </button>
-        {!completed && (
-          <button
-            className="primary"
-            disabled={busy || !preview?.token || !!preview.error || !!error}
-            onClick={() => {
-              if (!preview?.token) return;
-              const current = generation.current;
-              setBusy(true);
-              setError("");
-              void command("commit_grok_import", {
-                token: preview.token,
-                expectedRevision: preview.revision,
+        <button
+          className="primary"
+          disabled={busy || !preview?.token || !!preview?.error}
+          onClick={() => {
+            if (!preview?.token) return;
+            setBusy(true);
+            setError("");
+            void command("commit_grok_import", {
+              token: preview.token,
+              expectedRevision: preview.revision,
+            })
+              .then((state) => {
+                token.current = null;
+                update(state);
+                notify("Grok 已导入并接入");
+                close();
               })
-                .then((state) => {
-                  if (current !== generation.current) return;
-                  token.current = null;
-                  update(state);
-                  setCompleted(true);
-                  notify("Grok API 配置已导入");
-                })
-                .catch((e) => {
-                  if (current === generation.current)
-                    setError(errorOf(e).message);
-                })
-                .finally(() => {
-                  if (current === generation.current) setBusy(false);
-                });
-            }}
-          >
-            确认导入
-          </button>
-        )}
+              .catch((e) => setError(errorOf(e).message))
+              .finally(() => setBusy(false));
+          }}
+        >
+          导入并接入
+        </button>
       </footer>
     </Modal>
   );

@@ -28,6 +28,7 @@ vi.mock("@uiw/react-codemirror", () => ({
 import DshConfigEditor from "./DshConfigEditor";
 let doc: DshFileView;
 beforeEach(() => {
+  localStorage.clear();
   doc = {
     profiles: ["desktop", "default"],
     profile: "desktop",
@@ -167,4 +168,34 @@ it("opens the desktop patch and switches the file when choosing a different prof
       key: "profilePatch",
     }),
   );
+});
+
+it("remembers only an actively selected profile across editor mounts", async () => {
+  const user = userEvent.setup();
+  const props = {
+    theme: "dark" as const,
+    select: () => {},
+    onDirty: () => {},
+    onMessage: () => {},
+  };
+  const first = render(<DshConfigEditor {...props} />);
+  await waitFor(() =>
+    expect(screen.getByLabelText("DSH 配置 profile")).toHaveValue("desktop"),
+  );
+  await user.selectOptions(
+    screen.getByLabelText("DSH 配置 profile"),
+    "default",
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("DSH 配置 profile")).toHaveValue("default"),
+  );
+  first.unmount();
+  render(<DshConfigEditor {...props} />);
+  await waitFor(() =>
+    expect(screen.getByLabelText("DSH 配置 profile")).toHaveValue("default"),
+  );
+  expect(mock.command).toHaveBeenLastCalledWith("read_dsh_file", {
+    profile: "default",
+    key: "profilePatch",
+  });
 });

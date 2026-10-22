@@ -164,6 +164,7 @@ export type Provider = {
   rpmWaitReason?: string | null;
   rpmLedgerError?: boolean;
   allowedModels: string[] | null;
+  dshModels?: { flash: string | null; pro: string | null } | null;
   handoffAfterCompaction?: boolean;
   takeNewThreads?: boolean;
 };
@@ -202,7 +203,7 @@ export type DshProfileCurrent = { profile: string; current: CurrentConnection };
 export type GatewayState = {
   listener?: GatewayListener;
   grokModels?: GrokModel[];
-  grokNativeAvailable?: boolean;
+  grokManaged?: boolean;
   dshProfile?: {
     profile: string;
     protocol: GrokProtocol;

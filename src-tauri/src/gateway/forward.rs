@@ -917,7 +917,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 return error(
                     StatusCode::BAD_REQUEST,
                     requirement.code(),
-                    requirement.message(),
+                    if gateway.client_id() == super::ClientId::Dsh {
+                        "没有供应商配置此 DSH 模型映射，请编辑 Flash / Pro 映射"
+                    } else {
+                        requirement.message()
+                    },
                 );
             }
             Err(Rejected::Policy) => {
@@ -1004,7 +1008,37 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             Ok(uri) => uri,
             Err(_) => continue,
         };
-        let mut upstream = Request::new(replay.body());
+        let upstream_model = route
+            .dsh_models
+            .as_ref()
+            .and_then(|mapping| model.as_deref().and_then(|m| mapping.resolve(m)))
+            .map(str::to_owned);
+        let mapped = if let Some(upstream_model) = &upstream_model {
+            match replay
+                .mapped_model(
+                    parts
+                        .headers
+                        .get(header::CONTENT_ENCODING)
+                        .and_then(|h| h.to_str().ok())
+                        .unwrap_or("identity"),
+                    upstream_model,
+                )
+                .await
+            {
+                Ok(body) => Some(body),
+                Err(_) => {
+                    return error(
+                        StatusCode::BAD_REQUEST,
+                        code::CONFIG,
+                        "DSH 模型映射需要有效的 JSON 请求",
+                    )
+                }
+            }
+        } else {
+            None
+        };
+        let mapped_length = mapped.as_ref().map(|b| b.len());
+        let mut upstream = Request::new(mapped.map(replay::full).unwrap_or_else(|| replay.body()));
         *upstream.method_mut() = parts.method.clone();
         *upstream.uri_mut() = uri;
         *upstream.headers_mut() = parts.headers.clone();
@@ -1029,7 +1063,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 );
             }
         }
-        if !replay.has_trailers() {
+        if let Some(length) = mapped_length {
+            upstream.headers_mut().remove(header::CONTENT_ENCODING);
+            upstream.headers_mut().remove(header::TRAILER);
+            upstream
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, length.into());
+        } else if !replay.has_trailers() {
             upstream.headers_mut().insert(
                 header::CONTENT_LENGTH,
                 header::HeaderValue::from(replay.length),
@@ -1093,11 +1133,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.set_delivery(delivery.clone());
         }
         if let Some(trace) = &usage_trace {
-            protocol.attach_usage(trace.attempt(
+            let mut attempt = trace.attempt(
                 &route.provider.id,
                 stream_hint,
                 if websocket { "websocket" } else { "http" },
-            ));
+            );
+            attempt.upstream_model(upstream_model.clone());
+            protocol.attach_usage(attempt);
         }
         protocol.context(
             thread.clone(),
@@ -1190,16 +1232,24 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             Err(_) => {
                 failover.failure(super::failover::Failure::Transport);
-                failover.finish(super::failover::Exit::ReplayUnsafe);
+                let retry_dsh = route.client_id == super::ClientId::Dsh
+                    && mode != "manual"
+                    && pinned.is_none()
+                    && !unknown_affinity
+                    && ordinary_attempts <= settings.max_retries;
                 protocol.timeout("response_headers", settings.first_byte_seconds);
                 protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
-                failover.report_failure(Some(&protocol), || {
+                last_error = Some(failover.report_failure(Some(&protocol), || {
                     admission.permits.report(
                         &gateway,
                         &route,
                         model.as_deref(),
                         Reason::Network,
-                        Action::Returned,
+                        if retry_dsh {
+                            Action::TryingNext
+                        } else {
+                            Action::Returned
+                        },
                         None,
                         attempted,
                         crate::events::Details {
@@ -1209,8 +1259,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             ..protocol.observation.error.clone()
                         },
                     )
-                });
+                }));
                 admission.permits.failure(&settings, None);
+                if retry_dsh {
+                    last_category = code::FIRST_BYTE_TIMEOUT;
+                    continue;
+                }
+                failover.finish(super::failover::Exit::ReplayUnsafe);
                 // The HTTP client already owns the request. Not seeing headers
                 // cannot establish that its body never reached the provider.
                 return error(
@@ -1346,13 +1401,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     cooldown.unwrap_or(Duration::from_secs(settings.capacity_retry_seconds)),
                 );
             }
+            if route.client_id == super::ClientId::Dsh
+                && !model_error
+                && matches!(status.as_u16(), 401..=403)
+            {
+                details.health_scope = Some(crate::events::HealthScope::Provider);
+            }
             let hard_rejection = details.health_scope == Some(crate::events::HealthScope::Provider);
             if hard_rejection {
                 hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
             }
             let capacity = !model_error
                 && !hard_rejection
-                && route.client_id != super::ClientId::Claude
+                && matches!(
+                    route.client_id,
+                    super::ClientId::Codex | super::ClientId::Grok
+                )
                 && (protocol.observation.capacity_error || capacity_message(status, &decoded));
             let wait_same =
                 capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
@@ -1631,11 +1695,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.finish(Some(status.as_u16()), failure_kind);
         }
         if failed
-            && super::attempt::transport_retry(
-                prefix_bytes != 0,
-                protocol.transport_failure(),
-                failure_kind,
-            )
+            && (route.client_id == super::ClientId::Dsh
+                || super::attempt::transport_retry(
+                    prefix_bytes != 0,
+                    protocol.transport_failure(),
+                    failure_kind,
+                ))
         {
             failover.failure(super::failover::Failure::Transport);
             last_error = Some(failover.report_failure(Some(&protocol), || {
@@ -1756,7 +1821,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     cooldown.unwrap_or(Duration::from_secs(settings.capacity_retry_seconds)),
                 );
             }
-            if initial_capacity {
+            if initial_capacity && route.client_id != super::ClientId::Dsh {
                 if wait_same {
                     capacity_wait_owner = Some(route.provider.id.clone());
                     ids.clear();
@@ -1813,7 +1878,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         Action::RetryingSame
                     } else if will_retry {
                         Action::TryingNext
-                    } else if initial_capacity {
+                    } else if initial_capacity && route.client_id != super::ClientId::Dsh {
                         Action::Waiting
                     } else {
                         Action::Returned
@@ -1823,7 +1888,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     details,
                 )
             }));
-            if initial_capacity {
+            if initial_capacity && route.client_id == super::ClientId::Dsh {
+                admission.permits.rate_limited(&settings, cooldown);
+            } else if initial_capacity {
                 admission.permits.capacity_limited(&settings, cooldown);
             } else if initial_hard_rejection {
                 admission.permits.failure(&settings, cooldown);

@@ -164,8 +164,8 @@ pub struct Store {
     pub provider_endpoints: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub grok_connections: BTreeMap<String, super::grok_config::Connection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grok_native: Option<super::grok_config::Snapshot>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dsh_models: BTreeMap<String, super::dsh::ModelMapping>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_resume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,7 +203,7 @@ impl Default for Store {
             providers: vec![],
             provider_endpoints: BTreeMap::new(),
             grok_connections: BTreeMap::new(),
-            grok_native: None,
+            dsh_models: BTreeMap::new(),
             grok_resume: None,
             grok_api_model: None,
             dsh: None,
@@ -251,7 +251,10 @@ pub enum Edit {
         name: Option<String>,
         protocol: super::grok_config::Protocol,
     },
-    GrokNative,
+    DshModelsProvider {
+        id: String,
+        mapping: super::dsh::ModelMapping,
+    },
     RenameProvider {
         id: String,
         name: String,
@@ -428,7 +431,19 @@ impl Store {
             .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
     }
     pub fn edit(&mut self, edit: Edit, running: bool) -> Result<()> {
+        if let Edit::SaveDshProvider { protocol, .. } = &edit {
+            if *protocol != super::grok_config::Protocol::ChatCompletions {
+                return Err(AppError::new(code::PROVIDER, "DSH 仅支持 Chat Completions"));
+            }
+        }
         match edit {
+            Edit::DshModelsProvider { id, mut mapping } => {
+                mapping.validate()?;
+                let provider = self.provider_mut(&id)?;
+                provider.allowed_models = Some(mapping.allowed());
+                provider.version = uuid::Uuid::new_v4().to_string();
+                self.dsh_models.insert(id, mapping);
+            }
             Edit::SaveGrokProvider {
                 id,
                 base_url,
@@ -473,7 +488,6 @@ impl Store {
                     self.provider_mut(&id)?.version = uuid::Uuid::new_v4().to_string();
                 }
             }
-            Edit::GrokNative => return Err(AppError::new(code::GROK_CONFIG, "需要原生配置事务")),
             Edit::ImportProviders { providers } => {
                 if providers.is_empty() || providers.len() > 1000 {
                     return Err(AppError::new(code::IMPORT, "请选择 1–1000 项"));
@@ -615,6 +629,7 @@ impl Store {
             }
             Edit::DeleteProvider { id } => {
                 self.providers.retain(|p| p.id != id);
+                self.dsh_models.remove(&id);
                 self.provider_endpoints.remove(&id);
                 if self.selected.as_deref() == Some(&id) {
                     self.selected = self.providers.first().map(|p| p.id.clone());

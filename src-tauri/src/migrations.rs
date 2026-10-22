@@ -14,7 +14,23 @@ pub fn before_services(data: &Path) -> Result<()> {
 /// before loading a client gateway and by its existing recovery/retry path.
 pub fn gateway(data: &Path) -> Result<()> {
     crate::gateway::recover_for_migration(data)?;
-    crate::gateway::retire_legacy_proxy(data)
+    crate::gateway::retire_legacy_proxy(data)?;
+    let path = data.join("gateway.json");
+    if let Some(raw) = crate::storage::read_optional(&path)? {
+        let mut value: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| {
+            crate::storage::AppError::new(crate::errors::code::STORE, "网关存储无法读取")
+        })?;
+        if value
+            .as_object_mut()
+            .is_some_and(|v| v.remove("grokNative").is_some())
+        {
+            let next = serde_json::to_vec_pretty(&value).map_err(|_| {
+                crate::storage::AppError::new(crate::errors::code::STORE, "网关存储无法保存")
+            })?;
+            crate::storage::atomic_write(&path, &next, Some(&crate::storage::digest(&raw)))?;
+        }
+    }
+    Ok(())
 }
 
 /// Product rename and old startup preferences: native state must be available,

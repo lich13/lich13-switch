@@ -164,8 +164,7 @@ function detailValue(dialog: HTMLElement, label: string): HTMLElement {
 async function openFirstDetail() {
   render(<Usage />);
   const user = userEvent.setup();
-  const row = (await screen.findByRole("table")).querySelector("tbody tr");
-  if (!row) throw new Error("用量列表缺少记录");
+  const row = await screen.findByRole("row", { name: /请求详情/ });
   await user.click(row);
   return screen.findByRole("dialog", { name: "请求详情" });
 }
@@ -252,7 +251,9 @@ it("distinguishes a model detour from a permanent thread handoff", async () => {
   ];
 
   const dialog = await openFirstDetail();
-  expect(within(dialog).getByText("模型绕行，线程归属保持")).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("模型绕行，线程归属保持"),
+  ).toBeInTheDocument();
   expect(detailValue(dialog, "准入限制")).toHaveTextContent("模型白名单不匹配");
   expect(within(dialog).queryByText("压缩后接管")).not.toBeInTheDocument();
 });

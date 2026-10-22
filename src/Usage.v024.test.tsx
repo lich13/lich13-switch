@@ -22,9 +22,24 @@ vi.mock("./bridge", () => ({
 import Usage from "./Usage";
 
 const timestamp = Date.UTC(2026, 9, 15, 2);
-const firstTokens: Tokens = { input: 12, output: 34, cacheRead: 2, cacheWrite: 3 };
-const secondTokens: Tokens = { input: 20, output: 56, cacheRead: 4, cacheWrite: 5 };
-const totalTokens: Tokens = { input: 32, output: 90, cacheRead: 6, cacheWrite: 8 };
+const firstTokens: Tokens = {
+  input: 12,
+  output: 34,
+  cacheRead: 2,
+  cacheWrite: 3,
+};
+const secondTokens: Tokens = {
+  input: 20,
+  output: 56,
+  cacheRead: 4,
+  cacheWrite: 5,
+};
+const totalTokens: Tokens = {
+  input: 32,
+  output: 90,
+  cacheRead: 6,
+  cacheWrite: 8,
+};
 
 function attempt(id: string, model: string, usage: Tokens): Attempt {
   return {
@@ -63,7 +78,11 @@ const record: UsageRecord = {
   deduplication: "独立记录",
 };
 
-function modelGroup(id: string, requests: number, attempts: number): Dashboard["models"][number] {
+function modelGroup(
+  id: string,
+  requests: number,
+  attempts: number,
+): Dashboard["models"][number] {
   return {
     id,
     totals: {
@@ -179,16 +198,18 @@ it("filters Grok session summaries independently and labels their details", asyn
   render(<Usage />);
 
   await screen.findByRole("table");
-  await waitFor(() => expect(estimatedCostValue()).not.toHaveTextContent(/^—$/));
+  await waitFor(() =>
+    expect(estimatedCostValue()).not.toHaveTextContent(/^—$/),
+  );
   await user.selectOptions(screen.getByLabelText("用量客户端"), "grok");
   await user.selectOptions(screen.getByLabelText("用量来源"), "grok_sessions");
 
   expect(
     screen.getByRole("option", { name: "Grok 轮次汇总（独立）" }),
   ).toBeInTheDocument();
-  expect(
-    screen.getByText(/Grok 会话按用户轮次汇总/),
-  ).toHaveTextContent("不与网关请求相加");
+  expect(screen.getByText(/Grok 会话按用户轮次汇总/)).toHaveTextContent(
+    "不与网关请求相加",
+  );
   expect(screen.getByRole("tab", { name: "轮次日志" })).toHaveAttribute(
     "aria-selected",
     "true",
@@ -209,17 +230,22 @@ it("filters Grok session summaries independently and labels their details", asyn
   const row = screen.getByRole("table").querySelector("tbody tr");
   if (!row) throw new Error("用量列表缺少 Grok 会话 fixture");
   const cells = row.querySelectorAll("td");
-  expect(row).toHaveAttribute("aria-label", expect.stringContaining("轮次详情"));
+  expect(row).toHaveAttribute(
+    "aria-label",
+    expect.stringContaining("轮次详情"),
+  );
   expect(cells[2]).toHaveTextContent("多个模型（2）");
-  expect(cells[3]).toHaveTextContent("32");
-  expect(cells[3]).toHaveTextContent("90");
-  expect(cells[3]).toHaveTextContent("6");
-  expect(cells[3]).toHaveTextContent("8");
-  expect(cells[4]).toHaveTextContent("—");
+  expect(cells[4]).toHaveTextContent("32");
+  expect(cells[4]).toHaveTextContent("90");
+  expect(cells[4]).toHaveTextContent("6");
+  expect(cells[4]).toHaveTextContent("8");
+  expect(cells[3]).toHaveTextContent("—");
   await user.click(row);
   const dialog = await screen.findByRole("dialog", { name: "Grok 轮次详情" });
   expect(detailValue(dialog, "来源")).toHaveTextContent(/^Grok Build 会话$/);
-  expect(detailValue(dialog, "轮次 ID")).toHaveTextContent(/^fixture-grok-session$/);
+  expect(detailValue(dialog, "轮次 ID")).toHaveTextContent(
+    /^fixture-grok-session$/,
+  );
   expect(detailValue(dialog, "模型调用")).toHaveTextContent(/^2$/);
   const modelUsageHeading = screen.getByRole("heading", { name: "模型用量" });
   expect(modelUsageHeading).toBeInTheDocument();

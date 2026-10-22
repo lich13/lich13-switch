@@ -263,8 +263,19 @@ impl RoutingLog {
         });
         if let Some(record) = &mut state.record {
             record.status = status;
+            if !success {
+                record.level = events::Level::Warning;
+                record
+                    .details
+                    .message
+                    .get_or_insert_with(|| "请求未正常完成".into());
+            }
             if let Some(routing) = &mut record.details.routing {
-                if routing.outcome == events::RoutingOutcome::Attempted {
+                if routing.outcome == events::RoutingOutcome::Attempted
+                    || (success
+                        && routing.outcome == events::RoutingOutcome::Failed
+                        && routing.failure.is_none())
+                {
                     routing.outcome = if success {
                         events::RoutingOutcome::OwnerPreserved
                     } else {
@@ -283,8 +294,19 @@ impl RoutingLog {
         state.settled = Some(result);
         if let Some(record) = &mut state.record {
             record.status = status.or(record.status);
+            if result == RoutingSettlement::Failed {
+                record.level = events::Level::Warning;
+                record
+                    .details
+                    .message
+                    .get_or_insert_with(|| "请求未正常完成".into());
+            }
             if let Some(routing) = &mut record.details.routing {
-                if routing.outcome == events::RoutingOutcome::Attempted {
+                if routing.outcome == events::RoutingOutcome::Attempted
+                    || (result == RoutingSettlement::Delivered
+                        && routing.outcome == events::RoutingOutcome::Failed
+                        && routing.failure.is_none())
+                {
                     routing.outcome = if result == RoutingSettlement::Delivered {
                         events::RoutingOutcome::OwnerPreserved
                     } else {

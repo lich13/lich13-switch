@@ -511,6 +511,9 @@ function AttemptDetails({
               ] as [string, string][])
             : []),
           ["请求模型", a.requestedModel],
+          ...(a.upstreamModel
+            ? [["上游请求模型", a.upstreamModel] as [string, string]]
+            : []),
           ["收到的响应模型", a.responseModel],
           ["中断状态", interruptionLabel(a) || null],
           [

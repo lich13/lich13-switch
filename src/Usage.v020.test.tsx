@@ -197,7 +197,7 @@ it("renders null table quantities as dashes while keeping K/M compact values", a
   expect(within(compactRow).getByText("1,234")).toBeInTheDocument();
   const missingRow = within(screen.getByRole("table")).getAllByRole("row")[1];
   expect(missingRow.querySelectorAll("td")[2]).toHaveTextContent("—");
-  expect(missingRow.querySelectorAll("td")[3]).toHaveTextContent("—");
+  expect(missingRow.querySelectorAll("td")[4]).toHaveTextContent("—");
 });
 
 it("shows reasoned missing token fields and preserves a real zero duration", async () => {

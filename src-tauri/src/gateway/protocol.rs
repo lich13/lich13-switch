@@ -1443,7 +1443,12 @@ impl Protocol {
             } else {
                 RoutingSettlement::Failed
             }
-        } else if self.delivered_success() {
+        } else if self.succeeded()
+            && self
+                .delivery
+                .terminal
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             RoutingSettlement::Delivered
         } else if self.downstream_close().is_some() {
             RoutingSettlement::DownstreamClosed

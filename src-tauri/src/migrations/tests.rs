@@ -141,3 +141,19 @@ fn corrupt_or_incomplete_recovery_does_not_delete_legacy_proxy_state() {
         assert_recovery_failure_preserves_legacy_state(recovery);
     }
 }
+
+#[test]
+fn retired_grok_native_snapshot_is_removed_without_touching_current_connection() {
+    let data = tempfile::tempdir().unwrap();
+    let path = data.path().join("gateway.json");
+    let old = json!({"schema": 2, "providers": [], "grokNative": {"before": "fixture-private-history", "environment": {}}, "grokApiModel": "grok-fixture", "future": true});
+    fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    gateway(data.path()).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let next: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(next.get("grokNative").is_none());
+    assert_eq!(next["grokApiModel"], old["grokApiModel"]);
+    assert_eq!(next["future"], true);
+    gateway(data.path()).unwrap();
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}

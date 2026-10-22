@@ -1,5 +1,6 @@
 import Advanced from "./GatewayAdvanced";
-import DshProfile from "./DshProfile";
+import DshProfile, { connectDsh } from "./DshProfile";
+import { preferredDshProfile } from "./dsh-profile";
 import CurrentConnection from "./CurrentConnection";
 import GatewayModels from "./GatewayModels";
 import GrokImport from "./GrokImport";
@@ -209,14 +210,64 @@ function GatewayContent({
         {error || "正在读取网关…"}
       </div>
     );
+  const importDsh = () =>
+    run(async () => {
+      const preview = await command("preview_dsh_profile", {
+        profile: preferredDshProfile(),
+        protocol: "chat_completions",
+      });
+      if (!preview.profile || preview.providers?.some((p) => p.error)) {
+        setDialog({ kind: "dsh" });
+        return;
+      }
+      setState(await connectDsh(state, preview));
+      notify(state.running ? "DSH 已同步" : "DSH 已接入，自动切换已启用");
+    });
+  const importGrok = () =>
+    run(async () => {
+      if (state.running) return;
+      if (state.grokManaged) {
+        setState(
+          await command("start_gateway", {
+            clientId: "grok",
+            expectedRevision: state.revision,
+            expectedConfigRevision: state.configRevision,
+          }),
+        );
+      } else {
+        const preview = await command("preview_grok_import", {
+          useEnvironment: true,
+        });
+        if (!preview.token || preview.error) {
+          setDialog({ kind: "grokImport" });
+          return;
+        }
+        setState(
+          await command("commit_grok_import", {
+            token: preview.token,
+            expectedRevision: preview.revision,
+          }),
+        );
+      }
+      notify("Grok 已接入");
+    });
   const toggle = () => {
+    if (
+      clientId === "grok" &&
+      !state.running &&
+      !state.grokManaged &&
+      !state.recoveryPending
+    ) {
+      importGrok();
+      return;
+    }
     if (
       clientId === "dsh" &&
       !state.running &&
       !state.recoveryPending &&
       !state.dshProfile
     ) {
-      setDialog({ kind: "dsh" });
+      importDsh();
       return;
     }
     run(async () => {
@@ -269,13 +320,15 @@ function GatewayContent({
           {clientId === "claude" && (
             <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
           )}
+          {clientId === "grok" && !state.running && (
+            <button disabled={busy} onClick={importGrok}>
+              {state.grokManaged ? "接入当前配置" : "导入并接入"}
+            </button>
+          )}
           {clientId === "dsh" && (
             <>
-              <button
-                disabled={busy}
-                onClick={() => setDialog({ kind: "dsh" })}
-              >
-                {state.running ? "同步模型列表" : "接入 profile"}
+              <button disabled={busy} onClick={importDsh}>
+                {state.running ? "同步 DSH" : "导入并接入"}
               </button>
               {state.dshProfile && (
                 <span className="muted">{state.dshProfile.profile}</span>
@@ -336,11 +389,12 @@ function GatewayContent({
           >
             <button
               className="exchange-button"
-              disabled={busy || clientId === "dsh"}
-              title={
-                clientId === "dsh" ? "请添加供应商并明确选择协议" : undefined
+              disabled={busy}
+              onClick={() =>
+                clientId === "dsh"
+                  ? importDsh()
+                  : setDialog({ kind: "exchange", mode: "import" })
               }
-              onClick={() => setDialog({ kind: "exchange", mode: "import" })}
             >
               <FileInput size={16} />
               导入
@@ -359,24 +413,6 @@ function GatewayContent({
               <MoreHorizontal size={17} />
             </summary>
             <div className="menu-popover" onClick={menuClose}>
-              {clientId === "grok" && (
-                <>
-                  <button
-                    disabled={busy || state.running}
-                    onClick={() => setDialog({ kind: "grokImport" })}
-                  >
-                    导入当前配置
-                  </button>
-                  {state.grokNativeAvailable && (
-                    <button
-                      disabled={busy || state.running}
-                      onClick={() => run(() => edit({ op: "grokNative" }))}
-                    >
-                      恢复原生配置
-                    </button>
-                  )}
-                </>
-              )}
               <button
                 onClick={() => quota.refreshAll()}
                 disabled={!state.providers.length}
@@ -509,7 +545,7 @@ function GatewayContent({
                           }
                         >
                           <Settings2 size={14} />
-                          白名单
+                          {clientId === "dsh" ? "模型映射" : "白名单"}
                         </button>
                         <button
                           onClick={() =>
@@ -611,15 +647,19 @@ function GatewayContent({
             <span>{state.running ? "运行中" : "已关闭"}</span>
             <span>活动连接 {state.activeConnections}</span>
           </div>
-          <details
-            className="model-list-details"
-            id="gateway-model-list"
-            open={modelsOpen}
-            onToggle={(e) => setModelsOpen(e.currentTarget.open)}
-          >
-            <summary>模型列表</summary>
-            {modelsOpen && <GatewayModels key={clientId} clientId={clientId} />}
-          </details>
+          {clientId !== "dsh" && (
+            <details
+              className="model-list-details"
+              id="gateway-model-list"
+              open={modelsOpen}
+              onToggle={(e) => setModelsOpen(e.currentTarget.open)}
+            >
+              <summary>模型列表</summary>
+              {modelsOpen && (
+                <GatewayModels key={clientId} clientId={clientId} />
+              )}
+            </details>
+          )}
           <QuotaRefreshSettings
             seconds={quotaRefreshSeconds}
             onDirtyChange={markQuota}
@@ -655,13 +695,6 @@ function GatewayContent({
           close={() => setDialog(null)}
           update={setState}
           notify={notify}
-          openModels={() => {
-            setDialog(null);
-            setModelsOpen(true);
-            const panel = document.getElementById("gateway-model-list");
-            panel?.closest("details.advanced")?.setAttribute("open", "");
-            panel?.scrollIntoView?.({ block: "nearest" });
-          }}
         />
       )}
       {dialog?.kind === "grokImport" && (
@@ -685,7 +718,7 @@ function GatewayContent({
           close={() => setDialog(null)}
           save={async (payload, revision) => {
             await edit(payload, revision);
-            notify("白名单已保存");
+            notify(clientId === "dsh" ? "模型映射已保存" : "白名单已保存");
           }}
         />
       )}

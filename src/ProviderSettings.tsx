@@ -1,3 +1,5 @@
+import DshModelMapping from "./DshModelMapping";
+import type { GatewayEdit } from "./bridge-contracts";
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw, Search } from "lucide-react";
 import type { EditRevision } from "./gateway-edit";
@@ -6,7 +8,7 @@ import { command } from "./bridge";
 import Modal from "./Modal";
 import { errorOf } from "./types";
 import type { ClientId, ModelCatalog, Provider } from "./types";
-export default function ProviderSettings({
+function StandardProviderSettings({
   provider,
   runtime,
   clientId,
@@ -21,10 +23,7 @@ export default function ProviderSettings({
   clientId: ClientId;
   revision: string;
   disabled?: boolean;
-  save: (
-    edit: { op: "policyProvider"; id: string; allowedModels: string[] | null },
-    revision: EditRevision,
-  ) => Promise<void>;
+  save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
@@ -281,5 +280,15 @@ export default function ProviderSettings({
         </div>
       </form>
     </Modal>
+  );
+}
+
+export default function ProviderSettings(
+  props: Parameters<typeof StandardProviderSettings>[0],
+) {
+  return props.clientId === "dsh" ? (
+    <DshModelMapping {...props} />
+  ) : (
+    <StandardProviderSettings {...props} />
   );
 }

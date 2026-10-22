@@ -84,7 +84,7 @@ it("keeps the upstream code and shows the daily quota reason in summary and deta
 
   const summary = await screen.findByRole("button", { name: /日额度已用尽/ });
   expect(summary).toHaveTextContent(
-    "429 · DAILY_LIMIT_EXCEEDED · 日额度已用尽",
+    "日额度已用尽 · 429 · DAILY_LIMIT_EXCEEDED",
   );
   await user.click(summary);
 
@@ -114,7 +114,7 @@ it("keeps temporary rate-limit retries distinct from daily quota exhaustion", as
   render(<EventLog />);
 
   const summary = await screen.findByRole("button", { name: /上游限流/ });
-  expect(summary).toHaveTextContent("429 · rate_limit_exceeded · 上游限流");
+  expect(summary).toHaveTextContent("上游限流 · 429 · rate_limit_exceeded");
   expect(screen.getByText(/原供应商等待 9 秒/)).toBeInTheDocument();
 });
 

@@ -157,10 +157,7 @@ function QuickContent({
     }
   };
   const run = (fn: () => Promise<void>) => void action(fn).catch(() => {});
-  const edit = async (
-    edit: GatewayEdit,
-    expected?: EditRevision,
-  ) => {
+  const edit = async (edit: GatewayEdit, expected?: EditRevision) => {
     if (!gateway) return;
     await saveGatewayEdit(clientId, gateway, edit, expected, setGateway);
     if (edit.op === "select")
@@ -226,7 +223,11 @@ function QuickContent({
         <button
           className="icon-button"
           aria-label="关闭快捷面板"
-          onClick={() => void command("hide_quick").catch((e) => setError(errorOf(e).message))}
+          onClick={() =>
+            void command("hide_quick").catch((e) =>
+              setError(errorOf(e).message),
+            )
+          }
         >
           <X size={16} />
         </button>
@@ -390,8 +391,8 @@ function QuickContent({
                         <button
                           className="icon-button quick-provider-settings"
                           disabled={rowBusy}
-                          aria-label={`${p.name} 白名单`}
-                          title="白名单"
+                          aria-label={`${p.name} ${clientId === "dsh" ? "模型映射" : "白名单"}`}
+                          title={clientId === "dsh" ? "模型映射" : "白名单"}
                           onClick={() =>
                             void command("open_main", {
                               page: "gateway",

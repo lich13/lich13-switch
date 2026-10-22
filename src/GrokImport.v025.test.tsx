@@ -65,21 +65,15 @@ beforeEach(() => {
 it("previews endpoint.env by default and never displays its token", async () => {
   render(<GrokImport close={vi.fn()} update={vi.fn()} notify={vi.fn()} />);
   const dialog = await screen.findByRole("dialog", {
-    name: "导入 Grok 当前配置",
+    name: "接入 Grok 当前配置",
   });
 
-  await within(dialog).findByRole("checkbox", {
-    name: "读取 endpoint.env 中的简单赋值",
-  });
+  await within(dialog).findByRole("option", { name: "fixture-model" });
   expect(mock.command).toHaveBeenCalledExactlyOnceWith("preview_grok_import", {
     selected: undefined,
     useEnvironment: true,
   });
-  expect(
-    within(dialog).getByRole("checkbox", {
-      name: "读取 endpoint.env 中的简单赋值",
-    }),
-  ).toBeChecked();
+  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
   expect(dialog).not.toHaveTextContent(importToken);
   expect(
     within(dialog).getByRole("option", { name: "fixture-model" }),
@@ -90,11 +84,11 @@ it("does not allow committing a preview with missing credentials", async () => {
   const user = userEvent.setup();
   render(<GrokImport close={vi.fn()} update={vi.fn()} notify={vi.fn()} />);
   const dialog = await screen.findByRole("dialog", {
-    name: "导入 Grok 当前配置",
+    name: "接入 Grok 当前配置",
   });
 
   const confirm = await within(dialog).findByRole("button", {
-    name: "确认导入",
+    name: "导入并接入",
   });
   expect(confirm).toBeDisabled();
   expect(within(dialog).getByRole("alert")).toHaveTextContent(
@@ -107,7 +101,7 @@ it("does not allow committing a preview with missing credentials", async () => {
   );
 });
 
-it("imports the resolved connection only after confirmation and shows cleanup instructions", async () => {
+it("imports and connects the resolved configuration with one action", async () => {
   mock.command.mockImplementation(
     async (name: string, args?: Record<string, unknown>) => {
       if (name === "preview_grok_import")
@@ -125,19 +119,16 @@ it("imports the resolved connection only after confirmation and shows cleanup in
   const notify = vi.fn();
   render(<GrokImport close={vi.fn()} update={update} notify={notify} />);
   const dialog = await screen.findByRole("dialog", {
-    name: "导入 Grok 当前配置",
+    name: "接入 Grok 当前配置",
   });
-  const loadEnvironment = await within(dialog).findByRole("checkbox", {
-    name: "读取 endpoint.env 中的简单赋值",
-  });
-  expect(loadEnvironment).toBeChecked();
+  await within(dialog).findByText("••••••••");
   expect(mock.command).not.toHaveBeenCalledWith(
     "commit_grok_import",
     expect.anything(),
   );
   expect(dialog).not.toHaveTextContent(importToken);
   expect(within(dialog).getByText("••••••••")).toBeInTheDocument();
-  await user.click(within(dialog).getByRole("button", { name: "确认导入" }));
+  await user.click(within(dialog).getByRole("button", { name: "导入并接入" }));
 
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("commit_grok_import", {
@@ -146,57 +137,40 @@ it("imports the resolved connection only after confirmation and shows cleanup in
     }),
   );
   expect(update).toHaveBeenCalledWith(grokGatewayDemo);
-  expect(notify).toHaveBeenCalledWith("Grok API 配置已导入");
-  expect(
-    within(dialog).getByText("unset GROK_MODELS_BASE_URL XAI_API_KEY"),
-  ).toBeInTheDocument();
-  expect(dialog).toHaveTextContent(/请新开终端，或执行以下命令后再启动 Grok：/);
-  expect(within(dialog).getByText("grok login")).toBeInTheDocument();
+  expect(notify).toHaveBeenCalledWith("Grok 已导入并接入");
   expect(dialog).not.toHaveTextContent(importToken);
 });
 
-it("disables confirmation after an endpoint.env preview fails instead of committing the previous preview", async () => {
+it("disables import after changing to a model whose preview fails", async () => {
   mock.command.mockImplementation(
     async (name: string, args?: Record<string, unknown>) => {
       if (name === "preview_grok_import") {
-        if (!args?.useEnvironment)
+        if (args?.selected === "other")
           throw new Error("fixture preview read failed");
-        return structuredClone(credentialPreview);
+        return {
+          ...credentialPreview,
+          models: [
+            ...credentialPreview.models,
+            { ...credentialPreview.models[0], key: "other" },
+          ],
+        };
       }
-      if (name === "commit_grok_import")
-        return structuredClone(grokGatewayDemo);
       if (name === "cancel_grok_import") return;
       throw new Error(`Unexpected fixture command: ${name}`);
     },
   );
   const user = userEvent.setup();
   render(<GrokImport close={vi.fn()} update={vi.fn()} notify={vi.fn()} />);
-  const dialog = await screen.findByRole("dialog", {
-    name: "导入 Grok 当前配置",
-  });
-  const loadEnvironment = await within(dialog).findByRole("checkbox", {
-    name: "读取 endpoint.env 中的简单赋值",
-  });
-  const confirm = within(dialog).getByRole("button", { name: "确认导入" });
-
+  const confirm = await screen.findByRole("button", { name: "导入并接入" });
   await waitFor(() => expect(confirm).toBeEnabled());
-  await user.click(loadEnvironment);
-  await waitFor(() =>
-    expect(mock.command).toHaveBeenCalledWith("preview_grok_import", {
-      selected: "fixture-model",
-      useEnvironment: false,
-    }),
-  );
-  expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+  await user.selectOptions(screen.getByLabelText("模型"), "other");
+  expect(await screen.findByRole("alert")).toHaveTextContent(
     "fixture preview read failed",
   );
-  await waitFor(() => expect(confirm).toBeDisabled());
-
-  await user.click(confirm);
-  expect(mock.command).not.toHaveBeenCalledWith(
-    "commit_grok_import",
-    expect.anything(),
-  );
+  expect(confirm).toBeDisabled();
+  expect(mock.command).toHaveBeenCalledWith("cancel_grok_import", {
+    token: importToken,
+  });
 });
 
 it("cancels the active preview when the user closes the dialog", async () => {
@@ -219,14 +193,14 @@ it("cancels the active preview when the user closes the dialog", async () => {
   const user = userEvent.setup();
   render(<Harness />);
   const dialog = await screen.findByRole("dialog", {
-    name: "导入 Grok 当前配置",
+    name: "接入 Grok 当前配置",
   });
   await within(dialog).findByRole("button", { name: "取消" });
   await user.click(within(dialog).getByRole("button", { name: "取消" }));
 
   await waitFor(() => {
     expect(
-      screen.queryByRole("dialog", { name: "导入 Grok 当前配置" }),
+      screen.queryByRole("dialog", { name: "接入 Grok 当前配置" }),
     ).not.toBeInTheDocument();
     expect(mock.command).toHaveBeenCalledWith("cancel_grok_import", {
       token: importToken,
@@ -248,7 +222,7 @@ it("cancels a preview token that arrives after the dialog unmounts", async () =>
   const { unmount } = render(
     <GrokImport close={vi.fn()} update={vi.fn()} notify={vi.fn()} />,
   );
-  await screen.findByRole("dialog", { name: "导入 Grok 当前配置" });
+  await screen.findByRole("dialog", { name: "接入 Grok 当前配置" });
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("preview_grok_import", {
       selected: undefined,

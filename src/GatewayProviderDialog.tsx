@@ -31,8 +31,9 @@ export default function GatewayDialog({
     [baseUrl, setBaseUrl] = useState(dialog.item?.baseUrl ?? ""),
     [token, setToken] = useState("");
   const [protocol, setProtocol] = useState(
-    dialog.item?.protocol ??
-      (clientId === "dsh" ? "chat_completions" : "responses"),
+    clientId === "dsh"
+      ? "chat_completions"
+      : (dialog.item?.protocol ?? "responses"),
   );
   const [showToken, setShowToken] = useState(false);
   const [revealed, setRevealed] = useState<{
@@ -151,7 +152,7 @@ export default function GatewayDialog({
               />
             </label>
           )}
-          {(clientId === "grok" || clientId === "dsh") && (
+          {clientId === "grok" && (
             <label>
               API 协议
               <select

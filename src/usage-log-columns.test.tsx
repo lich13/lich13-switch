@@ -144,7 +144,7 @@ describe("request log columns", () => {
     expect(screen.getByTitle("Fixture · DSH")).toBeInTheDocument();
     expect(
       screen.getAllByRole("columnheader").map((c) => c.textContent),
-    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "Token", "费用", "性能"]);
+    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "费用", "Token / 性能"]);
     expect(
       screen.getByTitle("fixture-request → fixture-response"),
     ).toBeInTheDocument();

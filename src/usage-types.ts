@@ -129,6 +129,7 @@ export type Attempt = {
   id: string;
   provider: string | null;
   requestedModel: string | null;
+  upstreamModel?: string | null;
   responseModel: string | null;
   pricingModel: string | null;
   responseId: string | null;
