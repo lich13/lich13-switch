@@ -1,5 +1,6 @@
 import Advanced from "./GatewayAdvanced";
 import DshProfile from "./DshProfile";
+import CurrentConnection from "./CurrentConnection";
 import GatewayModels from "./GatewayModels";
 import GrokImport from "./GrokImport";
 import GatewayDialog from "./GatewayProviderDialog";
@@ -581,27 +582,34 @@ function GatewayContent({
             }}
           </SortableProviders>
         </div>
+        <div className="gateway-current" aria-label="当前客户端配置">
+          <CurrentConnection
+            current={state.current}
+            providers={state.providers}
+          />
+          {state.clientId === "dsh" && !!state.dshProfiles?.length && (
+            <details>
+              <summary>各 profile 当前配置</summary>
+              <ul className="dsh-results">
+                {state.dshProfiles.map(({ profile, current }) => (
+                  <li key={profile}>
+                    <strong>{profile}</strong>
+                    <CurrentConnection
+                      current={current}
+                      providers={state.providers}
+                    />
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
         <details className="advanced">
           <summary>高级设置</summary>
           <div className="gateway-diagnostics">
             <code>{state.address}</code>
             <span>{state.running ? "运行中" : "已关闭"}</span>
             <span>活动连接 {state.activeConnections}</span>
-            <span>
-              配置使用{" "}
-              {state.current?.kind === "official"
-                ? "官方"
-                : state.configState === "gateway"
-                  ? "本地网关"
-                  : (state.providers.find((p) => p.id === state.configProvider)
-                      ?.name ?? "未匹配供应商")}
-              {state.current?.by === "urlOnly" && " · 按地址匹配"}
-            </span>
-            {state.current?.model && (
-              <span title={state.current.modelSource ?? undefined}>
-                模型 {state.current.model}
-              </span>
-            )}
           </div>
           <details
             className="model-list-details"

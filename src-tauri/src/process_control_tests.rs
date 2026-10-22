@@ -63,7 +63,139 @@ fn entry(pid: u32, parent: Option<u32>, name: &str, official: bool) -> Entry {
         executable: name.into(),
         user: "fixture-user".into(),
         official_app: official,
+        claude_code: false,
     }
+}
+
+#[test]
+fn claude_code_matches_cli_installations_and_node_entry_not_desktop_or_prompt_text() {
+    let args = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+    for path in [
+        "/fixture/.local/bin/claude",
+        "/fixture/.local/share/claude/versions/2.0.0",
+        "/fixture/Caskroom/claude-code/2.0.0/claude",
+        "/fixture/node_modules/@anthropic-ai/claude-code/claude.exe",
+        "C:\\fixture\\.local\\bin\\claude.exe",
+    ] {
+        assert!(claude_code(Path::new(path), &[]), "{path}");
+    }
+    let node = Path::new("/bin/node");
+    assert!(claude_code(
+        node,
+        &args(&[
+            "node",
+            "/fixture/node_modules/@anthropic-ai/claude-code/cli.js"
+        ])
+    ));
+    assert!(!claude_code(
+        Path::new("/fixture/node"),
+        &[
+            "node".into(),
+            "--eval".into(),
+            "/fixture/node_modules/@anthropic-ai/claude-code/cli.js".into()
+        ]
+    ));
+    assert!(!claude_code(
+        node,
+        &args(&[
+            "node",
+            "/fixture/server.js",
+            "/fixture/node_modules/@anthropic-ai/claude-code/cli.js"
+        ])
+    ));
+    assert!(!claude_code(
+        Path::new("/Applications/Claude.app/Contents/MacOS/Claude"),
+        &[]
+    ));
+    assert!(!claude_code(
+        Path::new("C:\\fixture\\Claude\\claude.exe"),
+        &[]
+    ));
+    assert!(!claude_code(
+        Path::new("/fixture/node_modules/@anthropic-ai/claude-code/vendor/rg"),
+        &[]
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn native_inventory_and_identity_recheck_read_child_arguments_and_user() {
+    struct OwnedChild(std::process::Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = OwnedChild(
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap(),
+    );
+    let pid = Pid::from_u32(child.0.id());
+    let mut native = Native {
+        system: System::new(),
+        #[cfg(target_os = "macos")]
+        terminals: Vec::new(),
+    };
+    let entry = native
+        .inventory()
+        .into_iter()
+        .find(|p| p.pid == pid.as_u32())
+        .unwrap();
+    assert_eq!(entry.parent, Some(std::process::id()));
+    assert!(!entry.user.is_empty());
+    assert_eq!(
+        native
+            .system
+            .process(pid)
+            .unwrap()
+            .cmd()
+            .get(1)
+            .and_then(|arg| arg.to_str()),
+        Some("30")
+    );
+    native.system = System::new();
+    assert_eq!(native.state(&entry), State::Running);
+    assert_eq!(
+        native
+            .system
+            .process(pid)
+            .unwrap()
+            .cmd()
+            .get(1)
+            .and_then(|arg| arg.to_str()),
+        Some("30")
+    );
+}
+
+#[test]
+fn quitting_claude_code_preserves_desktop_and_other_users() {
+    let mut cli = entry(2, None, "/fixture/.local/bin/claude", false);
+    cli.claude_code = true;
+    let mut other = cli.clone();
+    other.pid = 6;
+    other.user = "other-fixture".into();
+    let mut fake = Fake {
+        items: vec![
+            entry(1, None, "/app/switch", false),
+            cli,
+            entry(3, Some(2), "/bin/worker", false),
+            entry(
+                4,
+                None,
+                "/Applications/Claude.app/Contents/MacOS/Claude",
+                false,
+            ),
+            entry(5, Some(4), "/bin/helper", false),
+            other,
+        ],
+        ..Fake::default()
+    };
+    let result = run(&mut fake, 1).unwrap();
+    assert_eq!(result.terminated, 2);
+    assert!(fake.calls.iter().all(|(pid, _)| [2, 3].contains(pid)));
 }
 #[test]
 fn exact_targets_preserve_other_users_own_children_and_changed_identities() {

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     pid: u32,
@@ -16,6 +16,7 @@ struct Entry {
     executable: PathBuf,
     user: String,
     official_app: bool,
+    claude_code: bool,
 }
 const GRACE: Duration = Duration::from_secs(2);
 const EXIT_CONFIRMATION: Duration = Duration::from_secs(1);
@@ -36,6 +37,7 @@ impl Entry {
             && self.started == other.started
             && self.executable == other.executable
             && self.user == other.user
+            && self.claude_code == other.claude_code
     }
 }
 trait Processes {
@@ -65,7 +67,51 @@ fn root(entry: &Entry) -> bool {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    matches!(filename, "codex" | "codex.exe") || entry.official_app
+    matches!(filename, "codex" | "codex.exe") || entry.official_app || entry.claude_code
+}
+
+fn claude_code(executable: &Path, command: &[std::ffi::OsString]) -> bool {
+    let normalized = |path: &Path| {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    };
+    let path = normalized(executable);
+    // Desktop app executables and helpers are not Claude Code CLI entries.
+    if path.contains(".app/") {
+        return false;
+    }
+    let filename = path.rsplit('/').next().unwrap_or("");
+    let package = |s: &str| s.contains("/node_modules/@anthropic-ai/claude-code/");
+    if (matches!(filename, "claude" | "claude.exe") && package(&path))
+        || path.contains("/.local/share/claude/versions/")
+        || (filename == "claude" && path.contains("/caskroom/claude-code/"))
+        || (matches!(filename, "claude" | "claude.exe")
+            && (path.contains("/.local/bin/") || path.contains("/.claude/local/")))
+    {
+        return true;
+    }
+    if !matches!(filename, "node" | "node.exe" | "nodejs") {
+        return false;
+    }
+    if command
+        .iter()
+        .skip(1)
+        .take_while(|arg| arg.to_string_lossy().starts_with('-'))
+        .any(|arg| matches!(arg.to_str(), Some("-e" | "--eval" | "-p" | "--print")))
+    {
+        return false;
+    }
+    // Inspect the script argument, never arbitrary prompt text later in argv.
+    let Some(script) = command
+        .iter()
+        .skip(1)
+        .find(|arg| !arg.to_string_lossy().starts_with('-'))
+    else {
+        return false;
+    };
+    let script = normalized(Path::new(script));
+    package(&script) && script.ends_with("/cli.js")
 }
 fn run(backend: &mut dyn Processes, own_pid: u32) -> Result<Outcome> {
     let inventory = backend.inventory();
@@ -196,6 +242,16 @@ struct Native {
     terminals: Vec<terminal::Captured>,
 }
 impl Native {
+    fn refresh(&mut self, processes: ProcessesToUpdate<'_>) {
+        self.system.refresh_processes_specifics(
+            processes,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_exe(UpdateKind::Always)
+                .with_cmd(UpdateKind::Always)
+                .with_user(UpdateKind::Always),
+        );
+    }
     fn entry(&self, pid: Pid) -> Option<Entry> {
         let p = self.system.process(pid)?;
         let executable = p.exe()?.to_owned();
@@ -213,6 +269,7 @@ impl Native {
                 }
             },
             official_app: official_app(&executable),
+            claude_code: claude_code(&executable, p.cmd()),
             executable,
             user: p.user_id().map(|u| format!("{u:?}")).unwrap_or_default(),
         })
@@ -220,7 +277,7 @@ impl Native {
 }
 impl Processes for Native {
     fn inventory(&mut self) -> Vec<Entry> {
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        self.refresh(ProcessesToUpdate::All);
         self.system
             .processes()
             .keys()
@@ -229,8 +286,7 @@ impl Processes for Native {
     }
     fn state(&mut self, entry: &Entry) -> State {
         let pid = Pid::from_u32(entry.pid);
-        self.system
-            .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        self.refresh(ProcessesToUpdate::Some(&[pid]));
         let Some(process) = self.system.process(pid) else {
             return State::Gone;
         };

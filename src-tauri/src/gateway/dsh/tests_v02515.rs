@@ -352,7 +352,7 @@ async fn editor_preserves_drafts_backups_comments_and_blocks_candidate_overrides
 }
 
 #[tokio::test]
-async fn batch_retains_successes_stops_at_failure_and_restores_shared_credentials_last() {
+async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
     let home = super::tests::fixture();
     extra_profile(home.path(), "b-profile");
     extra_profile(home.path(), "c-profile");
@@ -363,7 +363,7 @@ async fn batch_retains_successes_stops_at_failure_and_restores_shared_credential
     .unwrap();
     let gateway = gateway(home.path());
     let before_env = fs::read_to_string(home.path().join(".env")).unwrap();
-    let result = gateway
+    let failure = gateway
         .attach_dsh_profiles(
             home.path(),
             options("default"),
@@ -372,15 +372,19 @@ async fn batch_retains_successes_stops_at_failure_and_restores_shared_credential
             None,
         )
         .await
-        .unwrap();
+        .err()
+        .expect("all targets must be preflighted");
+    assert!(failure.message.contains("同名"));
+    for profile in ["default", "c-profile"] {
+        assert!(
+            !fs::read_to_string(home.path().join("profiles").join(profile).join(PATCH))
+                .unwrap()
+                .contains(ROUTE)
+        );
+    }
     assert_eq!(
-        result.results.iter().map(|r| r.status).collect::<Vec<_>>(),
-        ["success", "failed", "pending"]
-    );
-    assert!(
-        !fs::read_to_string(home.path().join("profiles/c-profile").join(PATCH))
-            .unwrap()
-            .contains(ROUTE)
+        fs::read_to_string(home.path().join(".env")).unwrap(),
+        before_env
     );
     fs::write(home.path().join("profiles/b-profile").join(PATCH), "[]\n").unwrap();
     let result = gateway
@@ -388,7 +392,7 @@ async fn batch_retains_successes_stops_at_failure_and_restores_shared_credential
             home.path(),
             options("default"),
             true,
-            &result.state.revision,
+            &gateway.try_view().unwrap().revision,
             None,
         )
         .await
@@ -477,6 +481,8 @@ fn interrupted_new_transaction_rolls_back_and_conflicts_leave_recovery_journal()
         patch: input.patch.clone(),
         environment: input.environment.clone(),
         credentials: input.credentials.clone(),
+        home_patch: input.home_patch.clone(),
+        settings: input.settings.clone(),
         store: Change {
             before: None,
             after: "{}".into(),

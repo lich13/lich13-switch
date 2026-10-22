@@ -1887,7 +1887,7 @@ pub fn run() {
             commands::set_clamshell_awake,
             commands::install_power_helper,
             commands::remove_power_helper,
-            commands::force_quit_codex_clients,
+            commands::force_quit_agent_clients,
             commands::get_startup_error,
             commands::get_app_events,
             commands::get_app_event,

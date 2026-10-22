@@ -35,6 +35,122 @@ other_metadata = "fixture-other"
 
 const IMPORT_ENV: &str = "# fixture-only values\nXAI_API_KEY=fixture-import-api-key\nGROK_MODELS_BASE_URL=https://api.example.invalid/v1\nKEEP_VALUE=fixture-retained\n";
 
+#[test]
+fn global_connection_uses_one_resolution_and_restores_config_and_environment() {
+    let before = "# native settings\n[models]\ndefault='native-model'\n[model.native-model]\napi_backend='responses'\n[model.other]\nmodel='other-model'\nbase_url='https://other.example.invalid/v1'\napi_key='fixture-other'\n[endpoints]\nmodels_base_url='https://api.example.invalid/v1'\n[auth]\npreferred_method='api_key'\n[features]\ncampaigns=true\n";
+    let fixture = Fixture::new(before, Some(IMPORT_ENV));
+    let current = super::current::grok(
+        &fixture.home,
+        &super::model::Store::default(),
+        &[43721],
+        &|_| None,
+    );
+    assert!(matches!(
+        current.state,
+        super::current::Kind::Unmatched { .. }
+    ));
+    assert_eq!(current.credential_source.as_deref(), Some("endpoint.env"));
+    let preview = fixture.valid_preview(None, true);
+    assert_eq!(preview.selected, "native-model");
+    fixture.commit(&preview).unwrap();
+    let imported = fs::read_to_string(fixture.home.join("config.toml")).unwrap();
+    let model = grok_config::profile_with_env(&imported, &|_| None).unwrap();
+    assert_eq!(model.selected, grok_config::MANAGED);
+    assert_eq!(model.pair.token.as_deref(), Some("fixture-import-api-key"));
+    assert_eq!(model.model, "native-model");
+    let mut changed = imported.parse::<toml_edit::DocumentMut>().unwrap();
+    changed["features"]["external"] = value(true);
+    fs::write(fixture.home.join("config.toml"), changed.to_string()).unwrap();
+    let env = fs::read_to_string(fixture.home.join("endpoint.env")).unwrap();
+    fs::write(
+        fixture.home.join("endpoint.env"),
+        format!("{env}EXTERNAL=fixture-preserved\n"),
+    )
+    .unwrap();
+    let state = fixture.gateway.try_view().unwrap();
+    fixture
+        .gateway
+        .edit(super::Edit::GrokNative, &state.revision, &fixture.home)
+        .unwrap();
+    let restored = fs::read_to_string(fixture.home.join("config.toml"))
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert_eq!(restored["models"]["default"].as_str(), Some("native-model"));
+    assert_eq!(
+        restored["endpoints"]["models_base_url"].as_str(),
+        Some("https://api.example.invalid/v1")
+    );
+    assert_eq!(restored["features"]["campaigns"].as_bool(), Some(true));
+    assert_eq!(restored["features"]["external"].as_bool(), Some(true));
+    assert_eq!(
+        restored["model"]["other"]["api_key"].as_str(),
+        Some("fixture-other")
+    );
+    let restored =
+        grok_import::environment(&fs::read_to_string(fixture.home.join("endpoint.env")).unwrap())
+            .unwrap();
+    assert_eq!(
+        restored.get("XAI_API_KEY").map(String::as_str),
+        Some("fixture-import-api-key")
+    );
+    assert_eq!(
+        restored.get("EXTERNAL").map(String::as_str),
+        Some("fixture-preserved")
+    );
+}
+
+#[test]
+fn native_restore_checks_environment_conflicts_before_any_config_write() {
+    let fixture = Fixture::new(IMPORT_CONFIG, Some(IMPORT_ENV));
+    fixture.commit(&fixture.valid_preview(None, true)).unwrap();
+    let config = fs::read_to_string(fixture.home.join("config.toml")).unwrap();
+    let env = fs::read_to_string(fixture.home.join("endpoint.env")).unwrap();
+    let changed = format!("{env}XAI_API_KEY=external-fixture-key\n");
+    fs::write(fixture.home.join("endpoint.env"), &changed).unwrap();
+    let state = fixture.gateway.try_view().unwrap();
+    assert_eq!(
+        fixture
+            .gateway
+            .edit(super::Edit::GrokNative, &state.revision, &fixture.home)
+            .err()
+            .unwrap()
+            .code,
+        "CONFLICT"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.home.join("config.toml")).unwrap(),
+        config
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.home.join("endpoint.env")).unwrap(),
+        changed
+    );
+}
+
+#[test]
+fn migration_preserves_global_headers_and_endpoints_overridden_by_the_selected_model() {
+    let config = "[models]\ndefault='custom'\nextra_headers={Authorization='Bearer fixture-global'}\n[model.custom]\nmodel='fixture-model'\nbase_url='https://selected.example.invalid/v1'\napi_key='fixture-key'\nextra_headers={Authorization='Bearer fixture-selected'}\n[endpoints]\nmodels_base_url='https://global.example.invalid/v1'\n";
+    let fixture = Fixture::new(config, None);
+    fixture.commit(&fixture.valid_preview(None, true)).unwrap();
+    let imported = fs::read_to_string(fixture.home.join("config.toml"))
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert_eq!(
+        imported["models"]["extra_headers"]["Authorization"].as_str(),
+        Some("Bearer fixture-global")
+    );
+    assert_eq!(
+        imported["endpoints"]["models_base_url"].as_str(),
+        Some("https://global.example.invalid/v1")
+    );
+    assert_eq!(
+        imported["model"][grok_config::MANAGED]["extra_headers"]["authorization"].as_str(),
+        Some("Bearer fixture-selected")
+    );
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     _primary: Gateway,
@@ -597,7 +713,8 @@ fn imported_campaign_and_default_ownership_survive_gateway_reconfiguration() {
         imported["models"]["default"] = value(grok_config::MANAGED);
         imported["model"][grok_config::MANAGED] = imported["model"]["native"].clone();
         imported["features"]["campaigns"] = value(false);
-        let original = grok_config::Snapshot::imported(&before.to_string(), &imported.to_string());
+        let original =
+            grok_config::Snapshot::imported(&before.to_string(), &imported.to_string()).unwrap();
         let mut gateway = grok_config::Snapshot::api(
             &imported.to_string(),
             &Pair::new("http://127.0.0.1:43721/v1", "fixture-local-key"),

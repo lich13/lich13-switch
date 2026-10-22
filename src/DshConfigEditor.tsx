@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
 import { yaml } from "@codemirror/legacy-modes/mode/yaml";
@@ -46,13 +46,17 @@ export default function DshConfigEditor({
   onMessage: (message: string) => void;
 }) {
   const [profile, setProfile] = useState("");
-  const [key, setKey] = useState<DshFileKey>("homePatch");
+  const [key, setKey] = useState<DshFileKey>("profilePatch");
   const [doc, setDoc] = useState<DshFileView | null>(null);
+  const normalizedSelection = useRef<{
+    profile: string;
+    key: DshFileKey;
+  } | null>(null);
   const [choices, setChoices] = useState<
     Pick<DshFileView, "profiles" | "files">
   >({
     profiles: [],
-    files: ["homePatch"],
+    files: ["profilePatch"],
   });
   const [text, setText] = useState("");
   const [error, setError] = useState("");
@@ -65,15 +69,27 @@ export default function DshConfigEditor({
     return () => onDirty(false);
   }, [dirty, onDirty]);
   useEffect(() => {
+    const normalized = normalizedSelection.current;
+    normalizedSelection.current = null;
+    if (normalized?.profile === profile && normalized.key === key) return;
     let gone = false;
     setLoading(true);
     setError("");
     void command("read_dsh_file", { profile: profile || null, key })
       .then((value) => {
         if (!gone) {
+          if (profile !== (value.profile ?? "") || key !== value.key) {
+            normalizedSelection.current = {
+              profile: value.profile ?? "",
+              key: value.key,
+            };
+          }
           setDoc(value);
           setChoices(value);
           setText(value.text);
+          setProfile(value.profile ?? "");
+          setKey(value.key);
+          setLoading(false);
         }
       })
       .catch((e) => {
@@ -90,6 +106,12 @@ export default function DshConfigEditor({
     };
   }, [profile, key]);
   async function switchFile(nextProfile: string, nextKey: DshFileKey) {
+    const selectedKey =
+      !nextProfile && nextKey === "profilePatch" ? "homePatch" : nextKey;
+    if (nextProfile === profile && selectedKey === key) {
+      if (!doc) await reload();
+      return;
+    }
     if (
       dirty &&
       !(await confirmAction("切换文件或 profile 会丢弃未保存的修改。"))
@@ -99,7 +121,7 @@ export default function DshConfigEditor({
     setText("");
     setPrevious(null);
     setProfile(nextProfile);
-    setKey(!nextProfile && nextKey === "profilePatch" ? "homePatch" : nextKey);
+    setKey(selectedKey);
   }
   async function save(restore = false) {
     if (!doc || busy || loading || doc.readOnly) return;
@@ -180,7 +202,7 @@ export default function DshConfigEditor({
             aria-label="DSH 配置 profile"
             value={profile}
             disabled={busy || loading}
-            onChange={(e) => void switchFile(e.target.value, key)}
+            onChange={(e) => void switchFile(e.target.value, "profilePatch")}
           >
             <option value="">请选择 profile</option>
             {choices.profiles.map((p) => (

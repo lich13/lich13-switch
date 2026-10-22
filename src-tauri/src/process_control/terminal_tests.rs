@@ -101,6 +101,7 @@ IFS= read -r _
         let shell_pid = child.id();
         let mut harness = Self {
             shell: Entry {
+                claude_code: false,
                 pid: shell_pid,
                 parent: None,
                 started: 0,

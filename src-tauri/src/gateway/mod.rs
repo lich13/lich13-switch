@@ -159,6 +159,7 @@ pub struct View {
     pub grok_models: Vec<grok_import::ModelView>,
     pub grok_native_available: bool,
     pub dsh_profile: Option<dsh::Options>,
+    pub dsh_profiles: Vec<dsh::ProfileCurrent>,
     pub client_id: ClientId,
     pub revision: String,
     pub running: bool,
@@ -800,11 +801,7 @@ impl Gateway {
                     .and_then(|home| grok_layers::read(home, &|name| std::env::var(name).ok()).ok())
                     .and_then(|effective| {
                         grok_import::discover(&effective.text, &|name| {
-                            if effective.blocked_env.contains(&name) {
-                                None
-                            } else {
-                                std::env::var(name).ok()
-                            }
+                            effective.resolve(name, &|name| std::env::var(name).ok())
                         })
                         .ok()
                     })
@@ -813,6 +810,18 @@ impl Gateway {
                 Vec::new()
             },
             dsh_profile: s.store.dsh.as_ref().map(|d| d.options.clone()),
+            dsh_profiles: if self.0.client == ClientId::Dsh {
+                s.home
+                    .as_ref()
+                    .map(|home| {
+                        dsh::profile_states(home, &s.store, &ports, &|name| {
+                            std::env::var(name).ok()
+                        })
+                    })
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            },
             client_id: self.0.client,
             grok_native_available: s.store.grok_native.is_some(),
             config_revision,

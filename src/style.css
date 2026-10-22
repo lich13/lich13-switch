@@ -3518,3 +3518,9 @@ button.exchange-button:active:not(:disabled) {
 .event-table th:nth-child(5) {
   width: 150px;
 }
+
+.current-connection { display: flex; flex-wrap: wrap; gap: 4px 12px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.current-connection small { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+.gateway-current { padding: 12px 0; border-top: 1px solid var(--line); }
+.gateway-current > details { margin-top: 8px; }
+.dsh-results .current-connection { flex: 1; min-width: 180px; }

@@ -28,6 +28,8 @@ impl FileKey {
 #[serde(rename_all = "camelCase")]
 pub struct FileView {
     pub profiles: Vec<String>,
+    pub profile: Option<String>,
+    pub key: FileKey,
     pub files: Vec<FileKey>,
     pub text: String,
     pub revision: String,
@@ -231,6 +233,9 @@ impl Gateway {
         profile: Option<&str>,
         key: FileKey,
     ) -> Result<FileView> {
+        let mut profiles = selection::profiles(home)?;
+        profiles.sort_by_key(|p| (p != "desktop", p.clone()));
+        let profile = profile.or_else(|| profiles.first().map(String::as_str));
         let path = path(home, profile, key)?;
         let raw = text(&path)?;
         let mut files = vec![FileKey::ProfilePatch, FileKey::HomePatch];
@@ -239,7 +244,9 @@ impl Gateway {
         }
         files.extend([FileKey::Environment, FileKey::Credentials]);
         Ok(FileView {
-            profiles: selection::profiles(home)?,
+            profiles: profiles.clone(),
+            profile: profile.map(str::to_owned),
+            key,
             files,
             revision: storage::revision(raw.as_deref().map(str::as_bytes)),
             text: if key.writable() {

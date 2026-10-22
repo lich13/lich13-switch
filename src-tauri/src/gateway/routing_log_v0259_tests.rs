@@ -192,15 +192,20 @@ fn unchanged_continuation_does_not_create_a_second_routing_event() {
         ),
         Some(ATTEMPT_TWO),
     );
-    events.emit(log.take(RoutingOutcome::OwnerPreserved).unwrap());
-
-    let rows = wait_for(&events, |rows| rows.len() == 1);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].record.attempt, Some(2));
-    assert_eq!(rows[0].record.count, 1);
-    let routing = rows[0].record.details.routing.as_ref().unwrap();
-    assert_eq!(routing.attempt_id.as_deref(), Some(ATTEMPT_TWO));
-    assert_eq!(routing.decision, RoutingDecision::ExistingThread);
+    let record = log.take(RoutingOutcome::OwnerPreserved).unwrap();
+    assert_eq!(record.attempt, Some(2));
+    assert_eq!(
+        record
+            .details
+            .routing
+            .as_ref()
+            .unwrap()
+            .attempt_id
+            .as_deref(),
+        Some(ATTEMPT_TWO)
+    );
+    assert!(!events.emit_checked(record));
+    assert_eq!(events.query(events::Filter::default()).total, 0);
 }
 
 #[test]

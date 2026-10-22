@@ -44,6 +44,7 @@ pub struct ModelView {
     pub address: Option<String>,
     pub address_source: Option<String>,
     pub credential_available: bool,
+    pub credential_source: Option<String>,
     pub missing_environment: Vec<String>,
     pub error: Option<String>,
 }
@@ -124,7 +125,7 @@ pub(super) fn environment(text: &str) -> Result<BTreeMap<String, String>> {
     }
     Ok(values)
 }
-fn remove_environment(text: &str, names: &BTreeSet<String>) -> String {
+pub(super) fn remove_environment(text: &str, names: &BTreeSet<String>) -> String {
     text.split_inclusive('\n')
         .filter(|line| {
             let line = line.trim_start();
@@ -152,12 +153,17 @@ fn set_selected(doc: &mut DocumentMut, selected: &str) {
     }
     doc["models"]["default"] = Item::Value(v);
 }
-fn remove_auth_headers(item: Option<&mut Item>) {
+fn remove_auth_headers(item: Option<&mut Item>, migrated: Option<&BTreeMap<String, String>>) {
     if let Some(headers) = item.and_then(Item::as_table_like_mut) {
         let names: Vec<_> = headers
             .iter()
-            .filter(|(name, _)| {
-                name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key")
+            .filter(|(name, value)| {
+                (name.eq_ignore_ascii_case("authorization")
+                    || name.eq_ignore_ascii_case("x-api-key"))
+                    && migrated.is_none_or(|headers| {
+                        headers.get(&name.to_ascii_lowercase()).map(String::as_str)
+                            == value.as_str()
+                    })
             })
             .map(|(name, _)| name.to_owned())
             .collect();
@@ -166,7 +172,7 @@ fn remove_auth_headers(item: Option<&mut Item>) {
         }
     }
 }
-fn safe_address(raw: Option<&str>) -> Option<String> {
+pub(super) fn safe_address(raw: Option<&str>) -> Option<String> {
     let mut url = url::Url::parse(raw?).ok()?;
     url.set_username("").ok()?;
     url.set_password(None).ok()?;
@@ -183,6 +189,17 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
             address: safe_address(p.pair.base_url.as_deref()),
             address_source: p.address_source.map(str::to_owned),
             credential_available: p.pair.token.is_some(),
+            credential_source: Some(
+                if p.table
+                    .get("api_key")
+                    .and_then(Item::as_str)
+                    .is_some_and(|v| !v.is_empty())
+                {
+                    "模型 api_key".into()
+                } else {
+                    format!("环境变量：{}", p.credential_names.join(" / "))
+                },
+            ),
             missing_environment: if p.pair.token.is_none() {
                 p.credential_names.clone()
             } else {
@@ -197,6 +214,7 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
             address: None,
             address_source: None,
             credential_available: false,
+            credential_source: None,
             missing_environment: Vec::new(),
             error: Some(e.message.clone()),
         },
@@ -298,8 +316,8 @@ fn migrate(text: &str, p: &Profile, known_managed: bool) -> Result<String> {
             ] {
                 original.remove(field);
             }
-            remove_auth_headers(original.get_mut("extra_headers"));
-            remove_auth_headers(original.get_mut("env_http_headers"));
+            remove_auth_headers(original.get_mut("extra_headers"), None);
+            remove_auth_headers(original.get_mut("env_http_headers"), None);
         }
     }
     // Authentication headers resolved into the independent API model must not
@@ -307,6 +325,7 @@ fn migrate(text: &str, p: &Profile, known_managed: bool) -> Result<String> {
     remove_auth_headers(
         doc.get_mut("models")
             .and_then(|v| v.get_mut("extra_headers")),
+        Some(&p.connection.headers),
     );
     if let Some(endpoints) = doc.get_mut("endpoints").and_then(Item::as_table_like_mut) {
         for field in ["models_base_url", "xai_api_base_url"] {
@@ -341,6 +360,57 @@ struct Transaction {
     config: Change,
     environment: Option<Change>,
     store: Change,
+}
+pub(super) fn restore_native(
+    data: &Path,
+    home: &Path,
+    snapshot: &grok_config::Snapshot,
+    before_store: String,
+    after_store: String,
+    expected: &str,
+) -> Result<()> {
+    if data.join(JOURNAL).exists() || data.join("gateway-recovery.json").exists() {
+        return Err(AppError::new(code::RECOVERY, "请先处理 Grok 配置事务"));
+    }
+    let (revision, current) = grok_config::read(home)?;
+    if revision != expected {
+        return Err(AppError::new(code::CONFLICT, "Grok 配置已变化"));
+    }
+    let environment = storage::read_bounded(&home.join(ENV_FILE), FILE_LIMIT)?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|_| error("Grok 环境文件不是 UTF-8"))?;
+    let restored_environment = snapshot.restore_environment(environment.as_deref())?;
+    let transaction = Transaction {
+        version: 1,
+        home: home.to_owned(),
+        config: Change {
+            after: snapshot.restored(&current)?,
+            before: Some(current),
+        },
+        environment: restored_environment.map(|after| Change {
+            before: environment,
+            after,
+        }),
+        store: Change {
+            before: Some(before_store),
+            after: after_store,
+        },
+    };
+    if transaction
+        .files(data)
+        .iter()
+        .any(|(_, change)| change.after.len() as u64 > FILE_LIMIT)
+    {
+        return Err(AppError::new(code::FILE_SIZE, "Grok 恢复文件超过允许大小"));
+    }
+    storage::atomic_write_bounded(
+        &data.join(JOURNAL),
+        &serde_json::to_vec(&transaction).map_err(|_| error("无法建立 Grok 恢复事务"))?,
+        Some("missing"),
+        JOURNAL_LIMIT,
+    )?;
+    transaction.apply(data)
 }
 impl Transaction {
     fn files(&self, data: &Path) -> Vec<(PathBuf, &Change)> {
@@ -429,31 +499,10 @@ impl Gateway {
         let env_path = home.join(ENV_FILE);
         let available = std::fs::symlink_metadata(&env_path)
             .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink());
-        let env = if use_environment {
-            Some(
-                String::from_utf8(
-                    storage::read_optional(&env_path)?
-                        .ok_or_else(|| error("未找到 endpoint.env"))?,
-                )
-                .map_err(|_| error("环境文件不是 UTF-8"))?,
-            )
-        } else {
-            None
-        };
-        let vars = env
-            .as_deref()
-            .map(environment)
-            .transpose()?
-            .unwrap_or_default();
-        let environment = |name: &str| vars.get(name).cloned().or_else(|| inherited(name));
-        let effective = super::grok_layers::read(home, &environment)?;
-        let resolve = |name: &str| {
-            if effective.blocked_env.contains(&name) {
-                None
-            } else {
-                environment(name)
-            }
-        };
+        let effective =
+            super::grok_layers::read_with_environment(home, use_environment, inherited)?;
+        let env = effective.environment.clone();
+        let resolve = |name: &str| effective.resolve(name, inherited);
         let mut doc = document(&effective.text)?;
         if let Some(selected) = selected {
             if doc.get("model").and_then(|v| v.get(selected)).is_none()
@@ -485,7 +534,7 @@ impl Gateway {
                 .unwrap_or_default()
                 .into(),
             environment_available: available,
-            environment_loaded: use_environment,
+            environment_loaded: env.is_some(),
             clear_environment: Vec::new(),
             error: None,
         };
@@ -659,7 +708,8 @@ impl Gateway {
             .insert(id.clone(), p.profile.connection.clone());
         next.selected = Some(id);
         next.grok_api_model = Some(MANAGED.into());
-        let mut snapshot = grok_config::Snapshot::imported(&p.config, &p.after_config);
+        let mut snapshot = grok_config::Snapshot::imported(&p.config, &p.after_config)?;
+        snapshot.imported_environment(p.environment.as_deref(), p.after_environment.as_deref());
         if let Some(original) = &next.grok_native {
             snapshot.retain_original(original);
         }

@@ -519,8 +519,12 @@ describe("usage records", () => {
     const unavailable = within(rows[0]).getAllByRole("cell");
     const zero = within(rows[1]).getAllByRole("cell");
     for (const label of ["输入", "输出", "缓存读", "缓存写"]) {
-      expect(within(unavailable[3]).getByTitle(label)).toHaveTextContent(/^—$/);
-      expect(within(zero[3]).getByTitle(label)).toHaveTextContent(/^0$/);
+      expect(
+        within(unavailable[3]).getByTitle(label).querySelector(".usage-number"),
+      ).toHaveTextContent(/^—$/);
+      expect(
+        within(zero[3]).getByTitle(label).querySelector(".usage-number"),
+      ).toHaveTextContent(/^0$/);
     }
     expect(unavailable[4]).toHaveTextContent(/^—$/);
     expect(zero[4]).toHaveTextContent(/^\$0$/);

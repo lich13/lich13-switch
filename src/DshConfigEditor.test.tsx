@@ -29,7 +29,9 @@ import DshConfigEditor from "./DshConfigEditor";
 let doc: DshFileView;
 beforeEach(() => {
   doc = {
-    profiles: ["default", "desktop"],
+    profiles: ["desktop", "default"],
+    profile: "desktop",
+    key: "profilePatch",
     files: ["homePatch", "profilePatch", "environment", "credentials"],
     text: "[]\n",
     revision: "r1",
@@ -41,6 +43,8 @@ beforeEach(() => {
     if (name === "read_dsh_file")
       return {
         ...doc,
+        profile: args.profile ?? "desktop",
+        key: args.key,
         readOnly: args.key === "credentials",
         text: args.key === "credentials" ? "refs.FIXTURE: ••••" : doc.text,
       };
@@ -78,13 +82,13 @@ it("keeps the draft after conflict and confirms before profile/file switches", a
   expect(await screen.findByRole("alert")).toHaveTextContent("草稿已保留");
   await user.selectOptions(
     screen.getByLabelText("DSH 配置 profile"),
-    "desktop",
+    "default",
   );
   expect(mock.confirm).toHaveBeenCalledOnce();
   expect(screen.getByRole("textbox", { name: "DSH 配置内容" })).toHaveValue(
     "# draft\n[]\n",
   );
-  expect(screen.getByLabelText("DSH 配置 profile")).toHaveValue("");
+  expect(screen.getByLabelText("DSH 配置 profile")).toHaveValue("desktop");
 });
 it("restores through the revision-checked command and makes credentials readonly", async () => {
   mount();
@@ -95,8 +99,8 @@ it("restores through the revision-checked command and makes credentials readonly
   mock.confirm.mockResolvedValue(true);
   await user.click(screen.getByRole("button", { name: "恢复上一版" }));
   expect(mock.command).toHaveBeenCalledWith("restore_dsh_file", {
-    profile: null,
-    key: "homePatch",
+    profile: "desktop",
+    key: "profilePatch",
     expectedRevision: "r1",
   });
   await user.selectOptions(
@@ -142,5 +146,25 @@ it("keeps file and profile choices available after a read error", async () => {
   await user.selectOptions(screen.getByLabelText("DSH 配置 profile"), "");
   await waitFor(() =>
     expect(screen.getByLabelText("DSH 配置文件")).toHaveValue("homePatch"),
+  );
+});
+
+it("opens the desktop patch and switches the file when choosing a different profile", async () => {
+  mount();
+  const user = userEvent.setup();
+  await waitFor(() =>
+    expect(screen.getByLabelText("DSH 配置 profile")).toHaveValue("desktop"),
+  );
+  expect(screen.getByLabelText("DSH 配置文件")).toHaveValue("profilePatch");
+  await user.selectOptions(screen.getByLabelText("DSH 配置文件"), "homePatch");
+  await user.selectOptions(
+    screen.getByLabelText("DSH 配置 profile"),
+    "default",
+  );
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenLastCalledWith("read_dsh_file", {
+      profile: "default",
+      key: "profilePatch",
+    }),
   );
 });

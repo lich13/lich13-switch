@@ -404,15 +404,94 @@ pub struct Snapshot {
     independent: bool,
     #[serde(default)]
     campaigns: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    migrated_fields: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment: Option<(String, String)>,
 }
 impl Snapshot {
-    pub fn imported(before: &str, applied: &str) -> Self {
-        Self {
+    pub fn imported(before: &str, applied: &str) -> Result<Self> {
+        fn removed(
+            before: &dyn toml_edit::TableLike,
+            after: &dyn toml_edit::TableLike,
+            path: &[String],
+            out: &mut Vec<Vec<String>>,
+        ) {
+            for (key, value) in before.iter() {
+                let mut next = path.to_vec();
+                next.push(key.into());
+                match after.get(key) {
+                    None => out.push(next),
+                    Some(after) => {
+                        if let (Some(a), Some(b)) = (value.as_table_like(), after.as_table_like()) {
+                            removed(a, b, &next, out);
+                        }
+                    }
+                }
+            }
+        }
+        let mut migrated_fields = Vec::new();
+        removed(
+            parse(before)?.as_table(),
+            parse(applied)?.as_table(),
+            &[],
+            &mut migrated_fields,
+        );
+        Ok(Self {
             before: before.into(),
             applied: applied.into(),
             independent: false,
             campaigns: true,
+            migrated_fields,
+            environment: None,
+        })
+    }
+    pub fn imported_environment(&mut self, before: Option<&str>, after: Option<&str>) {
+        self.environment = before
+            .zip(after)
+            .filter(|(a, b)| a != b)
+            .map(|(a, b)| (a.into(), b.into()));
+    }
+    pub fn restore_environment(&self, current: Option<&str>) -> Result<Option<String>> {
+        let Some((before, after)) = &self.environment else {
+            return Ok(None);
+        };
+        let current = current.ok_or_else(|| error("Grok 环境文件已被外部删除，已保留当前配置"))?;
+        if current == after {
+            return Ok(Some(before.clone()));
         }
+        let old = super::grok_import::environment(before)?;
+        let applied = super::grok_import::environment(after)?;
+        let now = super::grok_import::environment(current)?;
+        let names: std::collections::BTreeSet<_> = old
+            .keys()
+            .filter(|name| old.get(*name) != applied.get(*name))
+            .cloned()
+            .collect();
+        if names.iter().any(|name| now.get(name) != applied.get(name)) {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "Grok 已迁移的环境变量被外部修改，已保留当前文件",
+            ));
+        }
+        let mut result = super::grok_import::remove_environment(current, &names);
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        for line in before.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+            if trimmed
+                .split_once('=')
+                .is_some_and(|(name, _)| names.contains(name.trim()))
+            {
+                result.push_str(line);
+                if !line.ends_with('\n') {
+                    result.push('\n');
+                }
+            }
+        }
+        Ok(Some(result))
     }
     pub fn new(text: &str, target: &Pair) -> Result<Self> {
         Self::with_protocol(text, target, None)
@@ -535,6 +614,8 @@ impl Snapshot {
             applied: doc.to_string(),
             independent,
             campaigns: false,
+            migrated_fields: Vec::new(),
+            environment: None,
         })
     }
     fn owned(&self, text: &str) -> Result<(Option<String>, Option<String>, Option<String>)> {
@@ -623,6 +704,13 @@ impl Snapshot {
         if current == target {
             return Ok(());
         }
+        let output = self.patched(current, target, gateway_aliases)?;
+        storage::atomic_write(path, output.as_bytes(), Some(&revision))
+    }
+    pub fn restored(&self, current: &str) -> Result<String> {
+        self.patched(current, &self.before, false)
+    }
+    fn patched(&self, current: &str, target: &str, gateway_aliases: bool) -> Result<String> {
         let owned = self.owned(current)?;
         if owned != self.owned(&self.applied)?
             && owned != self.owned(&self.before)?
@@ -631,6 +719,22 @@ impl Snapshot {
             return Err(AppError::new(
                 code::CONFLICT,
                 "Grok 受管模型已被外部修改，已保留当前配置",
+            ));
+        }
+        let original = parse(&self.before)?;
+        let applied = parse(&self.applied)?;
+        let present = parse(current)?;
+        let at = |doc: &DocumentMut, path: &[String]| {
+            path.iter()
+                .try_fold(doc.as_item(), |item, key| item.get(key))
+                .map(ToString::to_string)
+        };
+        if self.migrated_fields.iter().any(|path| {
+            at(&present, path) != at(&applied, path) && at(&present, path) != at(&original, path)
+        }) {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "Grok 已迁移字段被外部修改，已保留当前配置",
             ));
         }
         let output = if current == self.before || current == self.applied {
@@ -658,9 +762,33 @@ impl Snapshot {
                     table.remove(key);
                 }
             }
+            for path in &self.migrated_fields {
+                let desired = path
+                    .iter()
+                    .try_fold(desired.as_item(), |item, key| item.get(key))
+                    .cloned();
+                let mut parent = doc.as_item_mut();
+                for key in &path[..path.len() - 1] {
+                    if parent.get(key).is_none() {
+                        parent[key] = Item::Table(Table::new());
+                    }
+                    parent = parent
+                        .get_mut(key)
+                        .ok_or_else(|| error("Grok 恢复字段类型已变化"))?;
+                }
+                let key = path.last().unwrap();
+                let table = parent
+                    .as_table_like_mut()
+                    .ok_or_else(|| error("Grok 恢复字段类型已变化"))?;
+                if let Some(value) = desired {
+                    table.insert(key, value);
+                } else {
+                    table.remove(key);
+                }
+            }
             doc.to_string()
         };
-        storage::atomic_write(path, output.as_bytes(), Some(&revision))
+        Ok(output)
     }
     pub fn unchanged(&self, text: &str) -> Result<bool> {
         Ok(self.owned(text)? == self.owned(&self.applied)?)
@@ -672,8 +800,7 @@ impl Snapshot {
         self.before.clone_from(&original.before);
         self.independent = original.independent;
         self.campaigns = original.campaigns;
-    }
-    pub fn original_pair(&self) -> Result<Pair> {
-        pair(&self.before)
+        self.migrated_fields.clone_from(&original.migrated_fields);
+        self.environment.clone_from(&original.environment);
     }
 }

@@ -11,7 +11,7 @@ export const powerCommands = [
   "install_power_helper",
   "remove_power_helper",
   "set_clamshell_awake",
-  "force_quit_codex_clients",
+  "force_quit_agent_clients",
 ];
 export async function powerPreview(
   name: string,
@@ -40,7 +40,7 @@ export async function powerPreview(
       };
       emit("clamshell-state", power);
       return power;
-    case "force_quit_codex_clients":
+    case "force_quit_agent_clients":
       return { terminated: 0, failed: 0 };
   }
 }

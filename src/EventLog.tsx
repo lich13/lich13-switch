@@ -283,7 +283,15 @@ function circuitTrigger(r: EventRecord) {
 }
 function summary(r: EventRecord) {
   if (r.reason === "thread_routing" && r.details?.routing) {
-    return `${routingReason(r.details.routing.decision)} · ${routingOutcome(r.details.routing.outcome)}`;
+    const routing = r.details.routing;
+    return [
+      r.details.upstreamReason ||
+        r.details.message ||
+        (routing.failure ? routingFailure(routing.failure) : null),
+      routingOutcome(routing.outcome),
+    ]
+      .filter(Boolean)
+      .join(" · ");
   }
   if (r.reason === "circuit_open")
     return [

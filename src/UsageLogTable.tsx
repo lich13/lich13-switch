@@ -1,4 +1,3 @@
-import { ArrowDown, ArrowUp, Archive, SquarePen } from "lucide-react";
 import {
   clientName,
   type UsageRecord,
@@ -43,28 +42,25 @@ export default function UsageLogTable({
   ] as const;
   const performanceFields = ["firstToken", "duration", "speed"] as const;
   const columns = [
-    { id: "time", label: "结束时间", width: 132, visible: true },
+    { id: "time", label: "结束时间", visible: true },
     {
       id: "provider",
       label: "供应商 / 客户端",
-      width: 144,
       visible: visible("provider"),
     },
-    { id: "model", label: "模型", width: 182, visible: visible("model") },
+    { id: "model", label: "模型", visible: visible("model") },
     {
       id: "tokens",
       label: "Token",
-      width: 174,
       visible: tokenFields.some(visible),
     },
-    { id: "cost", label: "费用", width: 108, visible: visible("cost") },
+    { id: "cost", label: "费用", visible: visible("cost") },
     {
       id: "performance",
       label: "性能",
-      width: 144,
       visible: performanceFields.some(visible),
     },
-    { id: "status", label: "状态码", width: 64, visible: visible("status") },
+    { id: "status", label: "状态码", visible: visible("status") },
   ].filter((c) => c.visible);
   const exact = settings?.logNumberMode === "exact";
   const visibility = (id: LogColumn, visible: boolean) => {
@@ -116,12 +112,11 @@ export default function UsageLogTable({
         </select>
       </div>
       <div className="usage-table-scroll">
-        <table className="usage-table usage-request-table" aria-busy={busy}>
-          <colgroup>
-            {columns.map((c) => (
-              <col key={c.id} style={{ width: c.width }} />
-            ))}
-          </colgroup>
+        <table
+          className={`usage-table usage-request-table${exact ? " exact" : ""}`}
+          aria-label="请求记录"
+          aria-busy={busy}
+        >
           <thead>
             <tr>
               {columns.map((c) => (
@@ -319,12 +314,6 @@ export default function UsageLogTable({
                 ),
                 status: native ? "—" : (a.status ?? "—"),
               };
-              const tokenIcons = {
-                input: <ArrowDown />,
-                output: <ArrowUp />,
-                cacheRead: <Archive />,
-                cacheWrite: <SquarePen />,
-              };
               const tokenLabels = {
                 input: "输入",
                 output: "输出",
@@ -344,11 +333,7 @@ export default function UsageLogTable({
                       aria-label={tokenLabels[field]}
                       title={tokenLabels[field]}
                     >
-                      {field in tokenIcons ? (
-                        tokenIcons[field as keyof typeof tokenIcons]
-                      ) : (
-                        <small>{tokenLabels[field]}</small>
-                      )}
+                      <small>{tokenLabels[field]}</small>
                       {cells[field]}
                     </span>
                   ))}
@@ -388,6 +373,8 @@ export default function UsageLogTable({
                   {columns.map((c) => (
                     <td
                       key={c.id}
+                      data-field={c.id}
+                      data-label={c.label}
                       title={
                         c.id === "time"
                           ? preciseDate(r.finishedAt ?? r.startedAt)

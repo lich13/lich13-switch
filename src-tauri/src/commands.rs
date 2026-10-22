@@ -59,7 +59,7 @@ pub async fn remove_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<powe
     .map_err(|_| AppError::new(code::POWER, "助手移除失败"))?
 }
 #[tauri::command]
-pub async fn force_quit_codex_clients(r: R<'_>) -> Result<process_control::Outcome> {
+pub async fn force_quit_agent_clients(r: R<'_>) -> Result<process_control::Outcome> {
     if r.force_quitting.swap(true, Ordering::AcqRel) {
         return Err(AppError::new(code::BUSY, "正在退出客户端"));
     }

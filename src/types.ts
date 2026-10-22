@@ -179,9 +179,26 @@ export type GrokModel = {
   address: string | null;
   addressSource: string | null;
   credentialAvailable: boolean;
+  credentialSource?: string | null;
   missingEnvironment: string[];
   error: string | null;
 };
+export type CurrentConnection = {
+  kind: "gateway" | "provider" | "official" | "unmatched" | "unknown";
+  id?: string;
+  by?: "urlToken" | "urlOnly";
+  host?: string;
+  reason?: string;
+  model: string | null;
+  modelSource: string | null;
+  warning: string | null;
+  providerName?: string | null;
+  address?: string | null;
+  addressSource?: string | null;
+  credentialSource?: string | null;
+  protocol?: GrokProtocol | null;
+};
+export type DshProfileCurrent = { profile: string; current: CurrentConnection };
 export type GatewayState = {
   listener?: GatewayListener;
   grokModels?: GrokModel[];
@@ -192,6 +209,7 @@ export type GatewayState = {
     model: string | null;
     makeDefault: boolean;
   } | null;
+  dshProfiles?: DshProfileCurrent[];
   clientId: ClientId;
   revision: string;
   running: boolean;
@@ -202,16 +220,7 @@ export type GatewayState = {
   configRevision: string | null;
   configProvider: string | null;
   configState: string;
-  current?: {
-    kind: "gateway" | "provider" | "official" | "unmatched" | "unknown";
-    id?: string;
-    by?: "urlToken" | "urlOnly";
-    host?: string;
-    reason?: string;
-    model: string | null;
-    modelSource: string | null;
-    warning: string | null;
-  };
+  current?: CurrentConnection;
   configError: string | null;
   configWarning?: string | null;
   connectionMode?: "bearer" | "apiKey";

@@ -4,19 +4,19 @@
 
 主窗口的 DeepSeek Harness 视图与 Codex、Claude Code、Grok Build 使用同一个本地监听，但拥有独立供应商、健康状态、调度、凭据和模型目录。接入入口只显示 DSH profile 的脱敏信息；旧版仅有 `config.yaml` 时提示升级，不自动迁移。
 
-每个 profile 选择一种路由协议。`openai-completions` 和 `openai-responses` 使用 `/v1`，`anthropic-messages` 使用根基址。模型列表来自支持所选协议的在队供应商并集及手动项；列表为空时可手填明确模型 ID。勾选“设为默认”后才管理 `agent-default-model`，只影响新会话。
+每个 profile 选择一种路由协议。`openai-completions` 和 `openai-responses` 使用 `/v1`，`anthropic-messages` 使用根基址。模型列表来自支持所选协议的在队供应商并集及手动项；列表为空时可手填明确模型 ID。统一接入管理 `agent-default-model`，只影响新会话。
 
 接入会保留 DSH YAML 注释、未知字段、其他 provider 和外部配置修改。供应商 Token 留在本应用 Rust 凭据存储；DSH 文件只引用本地网关 token。停止和恢复仅处理受管行，不整文件回滚；遇到外部修改会保留现场。
 
-“同步到全部现有 profile”默认关闭。开启后按 profile 串行应用本次协议、模型和默认选择，不自动创建 profile。每项显示完成、失败或未执行；失败保留此前成功项，并回滚失败项，外部冲突保留恢复事务。所有受管 profile 共用首次接入前的凭据快照；全局停用逐项恢复配置，最后解除时恢复共享凭据。切换协议需先停用。
+“统一接入”默认从 desktop 当前连接预填供应商、协议和模型，将可用凭据导入供应商库，再同步全部已有 profile。写入前预检全部目标，按 profile 串行提交，不自动创建 profile。每项显示完成、失败或未执行；失败保留此前成功项，并回滚失败项，外部冲突保留恢复事务。所有受管 profile 共用首次接入前的凭据快照；已有 home patch 和旧版 settings 覆盖同步写入；全局停用逐项恢复配置，最后解除时恢复共享凭据和全局覆盖。切换协议需先停用。
 
 接入支持空数组及多行 patch，并保留注释和未知条目。非空的行内数组需先在配置编辑器展开为多行 YAML 数组；无法安全编辑时保留原文件并提示处理。
 
-配置页选择 DSH 后，可编辑 profile patch、home patch 和已存在的旧版 `settings.yaml`，无需 bundle 解析成功。`.env` 和 `.credentials.yaml` 只显示名称与遮蔽值。保存和恢复都校验原文件版本与待写入内容，接入期间保护路由和受管默认模型，包括全局覆盖入口；存在恢复事务时拒绝普通编辑。每文件保留一份上一版私有原文备份；失败保留草稿，切换文件前确认未保存修改。
+配置页选择 DSH 后，默认打开实际存在的 desktop patch，切换 profile 自动显示其文件。可编辑 profile patch、home patch 和已存在的旧版 `settings.yaml`，无需 bundle 解析成功。`.env` 和 `.credentials.yaml` 只显示名称与遮蔽值。保存和恢复都校验原文件版本与待写入内容，接入期间保护路由和受管默认模型，包括全局覆盖入口；存在恢复事务时拒绝普通编辑。每文件保留一份上一版私有原文备份；失败保留草稿，切换文件前确认未保存修改。
 
-当前供应商依据可确定的 profile、bundle、profile patch、home patch 和旧版 settings 读取，不以“已接入”代替实际选择。home 覆盖单独提示；启动参数、其他进程环境和项目覆盖无法确认时降低判断置信度。凭据优先读取已存文件，再参考当前可见环境和 home `.env`，不执行 shell 或动态 YAML。bundle 查找支持 DSH home 下的 `runtime/node_modules`、`lib/node_modules` 及 PATH 中实际可执行文件的祖先目录；缺少依赖时先通过 DSH 启动对应 profile 安装。
+当前供应商依据可确定的 profile、bundle、profile patch、home patch 和旧版 settings 读取，不以“已接入”代替实际选择。home 覆盖单独提示；启动参数、其他进程环境和项目覆盖无法确认时降低判断置信度。凭据优先读取已存文件，再参考当前可见环境和 home `.env`，不执行 shell 或动态 YAML。bundle 查找支持 DSH home 下的 `runtime/node_modules`、`lib/node_modules` 及 PATH 中实际可执行文件的祖先目录；bundle 只补充默认配置；桌面安装缺少 npm bundle 时，完整的用户 patch 仍可识别、编辑和接入。
 
-存在多个 profile 时，仅在其静态供应商与模型选择一致时展示共同结果；选择不同时显示无法判断，可在接入面板查看指定 profile。最后同步的 profile 不代表原生启动器的实际选择，参见 [DSH 启动参数](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/src/args.ts)。
+存在多个 profile 时，仅在其静态供应商与模型选择一致时展示共同结果；选择不同时显示“配置不一致”，网关页和接入面板逐项显示实际选择。最后同步的 profile 不代表原生启动器的实际选择，参见 [DSH 启动参数](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/src/args.ts)。
 
 ## Claude 模型发现
 
@@ -24,7 +24,7 @@ Claude 网关只自动管理地址和令牌两个字段。模型发现由用户�
 
 ## Grok Build 配置来源
 
-Grok 导入预览按系统 managed、用户 managed、用户配置、用户 requirements、系统 requirements 的顺序读取。预览会标出模型、地址、协议、凭据可用性、缺失环境变量和无法由 GUI 确认的 `GROK_HOME`、CLI 临时模型、`/model` 选择及远端 campaign 状态。写入只修改用户文件中已确认的受管字段；requirements 或明确环境覆盖阻止接管时显示具体原因。状态读取与接管限制分开：默认模型按 requirements 固定约束、环境变量、用户配置、managed 默认值确定，残留受管模型表不会改变有效选择；模型自己的凭据优先于全局官方登录偏好。地址唯一且凭据不可得时显示“按地址匹配”，已知凭据不同不降级匹配。
+Grok 导入预览按系统 managed、用户 managed、用户配置、用户 requirements、系统 requirements 的顺序读取。预览会标出模型、地址、协议、凭据可用性、缺失环境变量和无法由 GUI 确认的 `GROK_HOME`、CLI 临时模型、`/model` 选择及远端 campaign 状态。写入只修改用户文件中已确认的受管字段；requirements 或明确环境覆盖阻止接管时显示具体原因。状态读取与接管限制分开：默认模型按 requirements 固定约束、环境变量、用户配置、managed 默认值确定，残留受管模型表不会改变有效选择；模型自己的凭据优先于全局官方登录偏好。状态和预览共用全局地址、模型覆盖和 endpoint.env 的简单赋值解析，凭据不进入前端状态；未入库连接显示“已识别、未导入”。地址唯一且凭据不可得时显示“按地址匹配”，已知凭据不同不降级匹配。
 
 ## Codex 账号
 

@@ -20,14 +20,22 @@ beforeEach(() => {
     if (name === "preview_dsh_profile")
       return {
         profiles: ["fixture"],
-        profile: args.profile,
+        profile: args.profile ?? "fixture",
         protocol: args.protocol,
         revision: "fixture-preview",
         models: ["fixture-model"],
         attached: false,
-        model: null,
-        makeDefault: false,
+        model: "fixture-model",
+        makeDefault: true,
         warning: null,
+        current: {
+          kind: "unmatched",
+          model: "fixture-model",
+          modelSource: "profile fixture",
+          providerName: "Fixture",
+          warning: null,
+        },
+        states: [],
       } satisfies DshPreview;
     if (name === "attach_dsh_profiles")
       return {
@@ -52,25 +60,22 @@ it("previews profiles without writing and applies the selected protocol only on 
   );
   await screen.findByRole("option", { name: "fixture" });
   expect(screen.getByLabelText("API 协议")).toHaveValue("chat_completions");
-  expect(
-    screen.getByRole("checkbox", { name: "设为默认（仅新会话）" }),
-  ).not.toBeChecked();
-  await user.selectOptions(screen.getByLabelText("现有 profile"), "fixture");
+  expect(screen.getByLabelText("配置来源")).toHaveValue("fixture");
+  expect(screen.getByLabelText("模型 ID")).toHaveValue("fixture-model");
+  expect(screen.getByText(/已识别、未导入/)).toBeInTheDocument();
   await user.selectOptions(screen.getByLabelText("API 协议"), "messages");
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "接入 profile" })).toBeEnabled(),
+    expect(screen.getByRole("button", { name: "统一接入" })).toBeEnabled(),
   );
   expect(
     mock.command.mock.calls.every(([name]) => name === "preview_dsh_profile"),
   ).toBe(true);
-  await user.click(
-    screen.getByRole("checkbox", { name: "设为默认（仅新会话）" }),
-  );
   await user.type(screen.getByLabelText("模型 ID"), "fixture-model");
-  await user.click(screen.getByRole("button", { name: "接入 profile" }));
-  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  await user.click(screen.getByRole("button", { name: "统一接入" }));
+  await waitFor(() => expect(update).toHaveBeenCalledOnce());
+  expect(close).not.toHaveBeenCalled();
   expect(mock.command).toHaveBeenCalledWith("attach_dsh_profiles", {
-    all: false,
+    all: true,
     options: {
       profile: "fixture",
       protocol: "messages",

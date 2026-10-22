@@ -260,6 +260,7 @@ export default function Pricing({
                   <td>
                     <button
                       className="usage-model-button"
+                      title={id}
                       onClick={(e) => {
                         e.currentTarget.focus();
                         setEditor(id);

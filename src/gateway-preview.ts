@@ -329,10 +329,12 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       "restore_dsh_file",
     ].includes(name)
   ) {
-    const id = `${args.profile ?? "home"}/${args.key}`;
+    const id = `${args.profile ?? "desktop"}/${args.key}`;
     const readonly = args.key === "environment" || args.key === "credentials";
     let file = dshFiles.get(id) ?? {
-      profiles: ["default", "desktop"],
+      profiles: ["desktop", "default"],
+      profile: String(args.profile ?? "desktop"),
+      key: args.key as DshFileKey,
       files: [
         "profilePatch",
         "homePatch",
@@ -367,14 +369,32 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
   if (name === "preview_dsh_profile")
     return {
       profiles: ["default", "desktop"],
-      profile: args.profile ?? null,
+      profile: args.profile ?? "desktop",
       revision: "preview-dsh-profile",
       models: [],
       attached: dshGatewayDemo.running,
       protocol: args.protocol,
       model: null,
-      makeDefault: false,
-      warning: "预览使用合成 profile",
+      makeDefault: true,
+      current: {
+        kind: "unmatched",
+        providerName: "Fixture",
+        model: "fixture-model",
+        modelSource: "profile desktop",
+        warning: null,
+        protocol: "chat_completions",
+      },
+      states: ["desktop", "default"].map((profile) => ({
+        profile,
+        current: {
+          kind: "unmatched",
+          providerName: "Fixture",
+          model: "fixture-model",
+          modelSource: `profile ${profile}`,
+          warning: null,
+        },
+      })),
+      warning: "默认模型仅影响新会话",
     };
   if (name === "attach_dsh_profile" || name === "attach_dsh_profiles") {
     dshGatewayDemo.running = true;

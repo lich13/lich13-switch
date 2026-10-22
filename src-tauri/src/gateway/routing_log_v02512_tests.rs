@@ -887,8 +887,49 @@ async fn conflicts_unknowns_explicit_outcomes_and_policy_restrictions_remain_obs
         ));
     }
 
+    let routine = expected
+        .iter()
+        .copied()
+        .filter(|(_, identity, restriction, outcome)| {
+            !matches!(
+                identity,
+                Some(ThreadIdentity::Conflict | ThreadIdentity::Unknown)
+            ) && *restriction != Some(RoutingRestriction::Unknown)
+                && matches!(
+                    outcome,
+                    RoutingOutcome::OwnerPreserved
+                        | RoutingOutcome::WindowConsumed
+                        | RoutingOutcome::BoundaryRegistered
+                )
+        })
+        .collect::<Vec<_>>();
+    expected.retain(|entry| !routine.contains(entry));
     let snapshot = fixture.settle().await;
     assert_reason_count(&snapshot, Reason::ThreadRouting, expected.len());
+    for (decision, identity, restriction, outcome) in routine {
+        assert!(!row_has_route(
+            &snapshot.memory,
+            decision,
+            identity,
+            restriction,
+            outcome
+        ));
+        assert!(!has_persisted_route(
+            &snapshot,
+            decision,
+            identity,
+            restriction,
+            outcome
+        ));
+        assert!(!row_has_route(
+            &snapshot.reopened,
+            decision,
+            identity,
+            restriction,
+            outcome
+        ));
+    }
+
     for (decision, identity, restriction, outcome) in expected {
         assert!(
             broadcast_has_route(&snapshot.changes, decision, identity, restriction, outcome),

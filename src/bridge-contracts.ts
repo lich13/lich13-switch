@@ -3,6 +3,8 @@
 import type {
   AppError,
   ClientId,
+  CurrentConnection,
+  DshProfileCurrent,
   ConfigDocument,
   GatewaySettings,
   GatewayState,
@@ -116,6 +118,8 @@ export type DshPreview = {
   model: string | null;
   makeDefault: boolean;
   warning: string | null;
+  current: CurrentConnection | null;
+  states: DshProfileCurrent[];
 };
 export type GrokImportPreview = {
   layers?: string[];
@@ -182,6 +186,8 @@ export type DshFileKey =
   | "credentials";
 export type DshFileView = {
   profiles: string[];
+  profile: string | null;
+  key: DshFileKey;
   files: DshFileKey[];
   text: string;
   revision: string;
@@ -375,7 +381,7 @@ export type CommandMap = {
   set_clamshell_awake: Call<{ enabled: boolean } & Revision, PowerState>;
   install_power_helper: Call<None, PowerState>;
   remove_power_helper: Call<None, PowerState>;
-  force_quit_codex_clients: Call<
+  force_quit_agent_clients: Call<
     None,
     { terminated: number; failed: number; terminalCleanupFailed?: number }
   >;

@@ -554,30 +554,7 @@ pub fn restore_grok_native(
     after_store: String,
     expected: &str,
 ) -> Result<()> {
-    if data.join(FILE).exists() {
-        return Err(AppError::new(code::RECOVERY, "请先停止网关并处理配置事务"));
-    }
-    let (revision, current) = read_for(ClientId::Grok, home)?;
-    if revision != expected {
-        return Err(AppError::new(code::CONFLICT, "Grok 配置已变化"));
-    }
-    let record = Journal {
-        client: ClientId::Grok,
-        version: 2,
-        connection: Connection::Bearer,
-        path: ClientId::Grok.config(home),
-        before: current.clone(),
-        applied: current,
-        exit: snapshot.original_pair()?,
-        live: true,
-        config_applied: true,
-        store_before: Some(before_store),
-        store_after: Some(after_store),
-        grok: Some(snapshot),
-    };
-    // The same recovery journal completes both files if a write is interrupted.
-    save(data, &record)?;
-    detach(data)
+    super::grok_import::restore_native(data, home, &snapshot, before_store, after_store, expected)
 }
 pub fn exit_pair(data: &Path) -> Result<Option<Pair>> {
     Ok(load(data)?.map(|r| r.exit))

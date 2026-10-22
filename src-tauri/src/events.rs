@@ -199,6 +199,35 @@ pub struct Record {
     pub details: Details,
 }
 impl Record {
+    fn visible(&self) -> bool {
+        if self.reason == Reason::Recovered {
+            return false;
+        }
+        if self.reason != Reason::ThreadRouting {
+            return true;
+        }
+        self.details.routing.as_ref().is_none_or(|routing| {
+            routing.failure.is_some()
+                || self.level != Level::Info
+                || self.status.is_some_and(|status| status >= 400)
+                || matches!(self.action, Action::Routed | Action::Stopped)
+                || matches!(
+                    routing.evidence.identity,
+                    Some(
+                        crate::usage::model::ThreadIdentity::Conflict
+                            | crate::usage::model::ThreadIdentity::Unknown
+                    )
+                )
+                || routing.evidence.restriction
+                    == Some(crate::usage::model::RoutingRestriction::Unknown)
+                || !matches!(
+                    routing.outcome,
+                    RoutingOutcome::OwnerPreserved
+                        | RoutingOutcome::WindowConsumed
+                        | RoutingOutcome::BoundaryRegistered
+                )
+        })
+    }
     fn merge_seconds(&self) -> u64 {
         if self.reason == Reason::RequestInterrupted {
             60
@@ -479,9 +508,7 @@ fn load(path: &Path) -> Journal {
                             && r.last_at <= now().saturating_add(60) =>
                     {
                         r.details = r.details.sanitized();
-                        if r.reason != Reason::Recovered
-                            && r.last_at >= now().saturating_sub(RETENTION)
-                        {
+                        if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
                             j.records.push_back(r)
                         }
                     }
@@ -654,7 +681,7 @@ impl Service {
     /// Queue acceptance, not a durability acknowledgment. Gateway diagnostics
     /// use this receipt only to avoid a second description of the same fault.
     pub(crate) fn emit_checked(&self, mut r: Record) -> bool {
-        if r.reason == Reason::Recovered {
+        if !r.visible() {
             return false;
         }
         r.details = r.details.sanitized();
@@ -682,7 +709,7 @@ impl Service {
             .records
             .iter()
             .filter(|r| {
-                r.reason != Reason::Recovered
+                r.visible()
                     && r.last_at >= cutoff
                     && f.from.is_none_or(|t| r.last_at >= t)
                     && f.to.is_none_or(|t| r.first_at <= t)
@@ -724,7 +751,7 @@ impl Service {
         journal
             .records
             .iter()
-            .find(|r| r.reason != Reason::Recovered && r.id == target && r.last_at >= cutoff)
+            .find(|r| r.visible() && r.id == target && r.last_at >= cutoff)
             .map(|r| ClassifiedRecord {
                 record: r.clone(),
                 category: classify(r, &causes),
@@ -813,3 +840,75 @@ mod v016_tests {
 #[cfg(test)]
 #[path = "events_v02512_tests.rs"]
 mod v02512_tests;
+
+#[cfg(test)]
+mod routing_visibility_tests {
+    use super::*;
+    use crate::usage::model::{RoutingDecision, RoutingEvidence};
+
+    #[test]
+    fn routine_routing_is_hidden_on_emit_and_legacy_load_but_faults_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut lines = Vec::new();
+        for outcome in [
+            RoutingOutcome::OwnerPreserved,
+            RoutingOutcome::WindowConsumed,
+            RoutingOutcome::BoundaryRegistered,
+        ] {
+            let mut record = Record::new(
+                None,
+                None,
+                None,
+                Reason::ThreadRouting,
+                Action::Returned,
+                Some(200),
+                None,
+            );
+            record.details.routing = Some(RoutingDetails {
+                decision: RoutingDecision::BoundaryConsumed,
+                evidence: RoutingEvidence::default(),
+                outcome,
+                attempt_id: None,
+                failure: None,
+            });
+            assert!(!service.emit_checked(record.clone()));
+            lines.push(serde_json::to_string(&record).unwrap());
+            record.details.routing.as_mut().unwrap().failure =
+                Some(crate::gateway::failover::Failure::Transport);
+            assert!(record.visible());
+            lines.push(serde_json::to_string(&record).unwrap());
+        }
+        assert_eq!(service.query(Filter::default()).total, 0);
+        let path = dir.path().join("legacy.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.records.len(), 3);
+        assert!(loaded.records.iter().all(|r| r
+            .details
+            .routing
+            .as_ref()
+            .unwrap()
+            .failure
+            .is_some()));
+        let service = Service::new(dir.path());
+        *service.journal.lock().unwrap() = loaded;
+        assert_eq!(service.query(Filter::default()).total, 3);
+        // Query/count also defend against routine records still held in memory.
+        let mut routine = service.journal.lock().unwrap().records[0].clone();
+        routine.id = uuid::Uuid::new_v4().to_string();
+        routine.details.routing.as_mut().unwrap().failure = None;
+        let id = routine.id.clone();
+        service.journal.lock().unwrap().records.push_back(routine);
+        assert_eq!(
+            service
+                .query(Filter {
+                    reason: Some(Reason::ThreadRouting),
+                    ..Default::default()
+                })
+                .total,
+            3
+        );
+        assert!(service.detail(&id).is_none());
+    }
+}

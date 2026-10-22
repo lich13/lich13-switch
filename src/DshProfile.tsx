@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { command } from "./bridge";
 import type { DshBatch, DshPreview } from "./bridge-contracts";
 import { errorOf, type GatewayState, type GrokProtocol } from "./types";
 import Modal from "./Modal";
+import CurrentConnection from "./CurrentConnection";
 
 export default function DshProfile({
   state,
@@ -17,15 +18,12 @@ export default function DshProfile({
   notify: (text: string) => void;
   openModels?: () => void;
 }) {
-  const [profile, setProfile] = useState(state.dshProfile?.profile ?? "");
+  const loadedProfile = useRef<string | null>(null);
+  const [profile, setProfile] = useState("");
   const [protocol, setProtocol] = useState<GrokProtocol>(
     state.dshProfile?.protocol ?? "chat_completions",
   );
   const [model, setModel] = useState(state.dshProfile?.model ?? "");
-  const [makeDefault, setMakeDefault] = useState(
-    state.dshProfile?.makeDefault ?? false,
-  );
-  const [all, setAll] = useState(false);
   const [results, setResults] = useState<DshBatch["results"]>([]);
   const [preview, setPreview] = useState<DshPreview | null>(null);
   const [profiles, setProfiles] = useState<string[]>([]);
@@ -42,6 +40,12 @@ export default function DshProfile({
         if (!gone) {
           setPreview(next);
           setProfiles(next.profiles);
+          if (loadedProfile.current !== next.profile) {
+            loadedProfile.current = next.profile;
+            setProfile(next.profile ?? "");
+            setProtocol(next.protocol);
+            setModel(next.model ?? "");
+          }
         }
       })
       .catch((e) => {
@@ -60,8 +64,8 @@ export default function DshProfile({
     setError("");
     try {
       const next = await command("attach_dsh_profiles", {
-        all,
-        options: { profile, protocol, model: model || null, makeDefault },
+        all: true,
+        options: { profile, protocol, model: model || null, makeDefault: true },
         expectedRevision: state.revision,
         previewRevision: preview.revision,
       });
@@ -77,7 +81,6 @@ export default function DshProfile({
           ? "DSH 模型列表已同步"
           : "DSH profile 已接入；默认模型仅影响新会话",
       );
-      if (!all) close();
     } catch (e) {
       setError(errorOf(e).message);
     } finally {
@@ -85,7 +88,7 @@ export default function DshProfile({
     }
   }
   return (
-    <Modal title="DSH profile 接入" close={close} busy={busy}>
+    <Modal title="DSH 统一接入" close={close} busy={busy}>
       <form
         className="gateway-form"
         onSubmit={(e) => {
@@ -94,7 +97,7 @@ export default function DshProfile({
         }}
       >
         <label>
-          现有 profile
+          配置来源
           <select
             required
             value={profile}
@@ -107,6 +110,10 @@ export default function DshProfile({
             ))}
           </select>
         </label>
+        <CurrentConnection
+          current={preview?.current}
+          providers={state.providers}
+        />
         <label>
           API 协议
           <select
@@ -128,7 +135,7 @@ export default function DshProfile({
             list="dsh-model-options"
             value={model}
             maxLength={256}
-            required={makeDefault || !preview?.models.length}
+            required
             onChange={(e) => setModel(e.target.value)}
             placeholder="从列表选择，或填写明确模型 ID"
           />
@@ -151,23 +158,20 @@ export default function DshProfile({
             。
           </p>
         )}
-        <label className="setting-row">
-          <span>同步到全部现有 profile</span>
-          <input
-            type="checkbox"
-            checked={all}
-            disabled={busy}
-            onChange={(e) => setAll(e.target.checked)}
-          />
-        </label>
-        <label className="setting-row">
-          <span>设为默认（仅新会话）</span>
-          <input
-            type="checkbox"
-            checked={makeDefault}
-            onChange={(e) => setMakeDefault(e.target.checked)}
-          />
-        </label>
+        <p className="muted">
+          同步全部 {profiles.length} 个现有 profile，并设为新会话默认。
+        </p>
+        <ul className="dsh-results" aria-label="各 profile 当前配置">
+          {preview?.states.map(({ profile, current }) => (
+            <li key={profile}>
+              <strong>{profile}</strong>
+              <CurrentConnection
+                current={current}
+                providers={state.providers}
+              />
+            </li>
+          ))}
+        </ul>
         {preview?.warning && <p className="muted">{preview.warning}</p>}
         {error && (
           <p className="banner error" role="alert">
@@ -201,7 +205,7 @@ export default function DshProfile({
             className="primary"
             disabled={busy || loading || !preview || !profile}
           >
-            {state.running ? "同步模型列表" : "接入 profile"}
+            {state.running ? "同步全部 profile" : "统一接入"}
           </button>
         </div>
       </form>

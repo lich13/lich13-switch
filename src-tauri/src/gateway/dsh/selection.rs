@@ -23,13 +23,41 @@ pub(super) fn profiles(home: &Path) -> Result<Vec<String>> {
     Ok(profiles)
 }
 
-fn read_current(
+pub(super) struct Selection {
+    pub current: Current,
+    pub pair: Pair,
+    pub provider: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileCurrent {
+    pub profile: String,
+    pub current: Current,
+}
+pub fn profile_states(
+    home: &Path,
+    store: &Store,
+    ports: &[u16],
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Vec<ProfileCurrent> {
+    profiles(home)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|profile| ProfileCurrent {
+            current: profile_current(home, &profile, store, ports, resolve),
+            profile,
+        })
+        .collect()
+}
+
+pub(super) fn read_current(
     home: &Path,
     profile: &str,
     store: &Store,
     ports: &[u16],
     resolve: &impl Fn(&str) -> Option<String>,
-) -> Result<Current> {
+) -> Result<Selection> {
     let mut input = Input::read(home, profile)?;
     let mut source = format!("profile {profile} · bundle");
     if let Some(raw) = input.patch.before.clone() {
@@ -83,6 +111,23 @@ fn read_current(
     if overridden {
         warning = format!("home patch 覆盖了 profile 配置；{warning}");
     }
+    let mut selected_pair = Pair {
+        base_url: None,
+        token: None,
+    };
+    let mut credential_source = None;
+    let protocol = route
+        .as_ref()
+        .and_then(|r| match string(r.get("api")).as_deref() {
+            Some("openai-completions") => Some(Protocol::ChatCompletions),
+            Some("openai-responses") => Some(Protocol::Responses),
+            Some("anthropic-messages") => Some(Protocol::Messages),
+            _ => None,
+        });
+    let provider_name = route
+        .as_ref()
+        .and_then(|r| string(r.get("displayName")))
+        .unwrap_or_else(|| provider.clone());
     let mut result = if provider == "deepseek-official" && route.is_none() {
         Current::new(Kind::Official)
     } else if let Some(route) = route {
@@ -97,17 +142,26 @@ fn read_current(
                 .get_mapping("records")
                 .and_then(|r| r.get_mapping(format!("llm-pi-ai/{provider}")));
             let mut token = string(route.get("apiKey"));
+            if token.is_some() {
+                credential_source = Some("provider apiKey".into());
+            }
             if token.is_none() {
                 token = record
                     .as_ref()
                     .filter(|r| string(r.get("kind")).as_deref() == Some("api-key"))
                     .and_then(|r| string(r.get("key")));
+                if token.is_some() {
+                    credential_source = Some("凭据库 records".into());
+                }
             }
             if token.is_none() {
                 if let Some(key) = string(route.get("apiKeyEnv")) {
                     token = credential
                         .get_mapping("refs")
                         .and_then(|r| string(r.get(&key)));
+                    if token.is_some() {
+                        credential_source = Some("凭据库 refs".into());
+                    }
                     // A launch/project environment is not observable in another process.
                     // Preserve a known mismatch; warn when a launch/project environment
                     // could differ from the visible fallback.
@@ -125,6 +179,9 @@ fn read_current(
                             );
                         }
                         token = fallback;
+                        if token.is_some() {
+                            credential_source = Some("环境变量".into());
+                        }
                     }
                 }
             }
@@ -134,15 +191,11 @@ fn read_current(
             {
                 Current::unknown("DSH 选择了授权记录，无法静态确定访问凭据")
             } else {
-                current::pair(
-                    ClientId::Dsh,
-                    &Pair {
-                        base_url: base,
-                        token,
-                    },
-                    store,
-                    ports,
-                )
+                selected_pair = Pair {
+                    base_url: base,
+                    token,
+                };
+                current::pair(ClientId::Dsh, &selected_pair, store, ports)
             }
         }
     } else {
@@ -151,7 +204,16 @@ fn read_current(
     result.model = model;
     result.model_source = Some(source);
     result.warning = Some(warning);
-    Ok(result)
+    result.provider_name = crate::events::safe_message(&provider_name);
+    result.address_source = Some("llm-pi-ai.providers".into());
+    result.address = super::super::grok_import::safe_address(selected_pair.base_url.as_deref());
+    result.credential_source = credential_source;
+    result.protocol = protocol;
+    Ok(Selection {
+        current: result,
+        pair: selected_pair,
+        provider,
+    })
 }
 
 pub fn current(
@@ -164,13 +226,28 @@ pub fn current(
         Ok(profiles) if !profiles.is_empty() => profiles,
         _ => return Current::unknown("尚无可用 DSH profile"),
     };
+    let initial = read_current(home, &profiles[0], store, ports, resolve);
+    let signature = |selection: &Result<Selection>| {
+        selection.as_ref().ok().map(|s| {
+            (
+                s.pair.base_url.clone(),
+                s.pair.token.clone(),
+                s.provider.clone(),
+                s.current.protocol,
+            )
+        })
+    };
     let mut result = profile_current(home, &profiles[0], store, ports, resolve);
     for profile in &profiles[1..] {
-        let other = profile_current(home, profile, store, ports, resolve);
-        if other.state != result.state || other.model != result.model {
-            return Current::unknown(
-                "多个 DSH profile 的选择不同，启动 profile 无法确认；请在接入面板查看指定 profile",
-            );
+        let selection = read_current(home, profile, store, ports, resolve);
+        let different = signature(&initial) != signature(&selection);
+        let other = selection
+            .map(|s| s.current)
+            .unwrap_or_else(|e| Current::unknown(&e.message));
+        if different || other.state != result.state || other.model != result.model {
+            let mut result = Current::unknown("配置不一致，请查看各 profile 的当前选择");
+            result.model_source = Some("多个 profile".into());
+            return result;
         }
         if other
             .warning
@@ -194,5 +271,6 @@ pub(super) fn profile_current(
     resolve: &impl Fn(&str) -> Option<String>,
 ) -> Current {
     read_current(home, profile, store, ports, resolve)
+        .map(|selection| selection.current)
         .unwrap_or_else(|e| Current::unknown(&e.message))
 }

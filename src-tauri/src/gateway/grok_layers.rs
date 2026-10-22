@@ -20,6 +20,24 @@ pub struct Effective {
     pub block: Option<String>,
     pub selection_error: Option<String>,
     pub blocked_env: Vec<&'static str>,
+    pub environment: Option<String>,
+    pub variables: BTreeMap<String, String>,
+}
+impl Effective {
+    pub fn resolve(
+        &self,
+        name: &str,
+        inherited: &impl Fn(&str) -> Option<String>,
+    ) -> Option<String> {
+        if self.blocked_env.contains(&name) {
+            None
+        } else {
+            self.variables
+                .get(name)
+                .cloned()
+                .or_else(|| inherited(name))
+        }
+    }
 }
 fn error(s: &str) -> AppError {
     AppError::new(code::GROK_CONFIG, s)
@@ -37,12 +55,50 @@ fn merge(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::TableLik
     }
 }
 pub fn read(home: &Path, resolve: &impl Fn(&str) -> Option<String>) -> Result<Effective> {
+    read_with_environment(home, true, resolve)
+}
+pub fn read_with_environment(
+    home: &Path,
+    include: bool,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Result<Effective> {
     let system = if cfg!(all(unix, not(test))) {
         Some(Path::new("/etc/grok"))
     } else {
         None
     };
-    read_at(home, system, resolve)
+    let path = home.join("endpoint.env");
+    if include && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(error("Grok endpoint.env 不能是符号链接"));
+    }
+    let raw = if include {
+        storage::read_bounded(&path, 2 * 1024 * 1024)?
+    } else {
+        None
+    };
+    let environment = raw
+        .as_ref()
+        .map(|raw| {
+            String::from_utf8(raw.clone()).map_err(|_| error("Grok endpoint.env 不是 UTF-8"))
+        })
+        .transpose()?;
+    let variables = environment
+        .as_deref()
+        .map(super::grok_import::environment)
+        .transpose()?
+        .unwrap_or_default();
+    let mut result = read_at(home, system, &|name| {
+        variables.get(name).cloned().or_else(|| resolve(name))
+    })?;
+    if include {
+        result.files.push((path, storage::revision(raw.as_deref())));
+    }
+    if environment.is_some() {
+        result.layers.push("endpoint.env".into());
+    }
+    result.environment = environment;
+    result.variables = variables;
+    Ok(result)
 }
 pub(super) fn read_at(
     home: &Path,
@@ -60,6 +116,8 @@ pub(super) fn read_at(
         block: None,
         selection_error: None,
         blocked_env: vec![],
+        environment: None,
+        variables: BTreeMap::new(),
     };
     let mut doc = DocumentMut::new();
     let mut inputs = vec![];

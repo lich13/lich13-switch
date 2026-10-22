@@ -14,8 +14,12 @@ use yaml_edit::{AsYaml, Document, Mapping, Sequence, YamlFile, YamlNode};
 
 mod selection;
 pub use selection::current;
+pub use selection::{profile_states, ProfileCurrent};
 mod batch;
 pub mod editor;
+mod overlays;
+#[cfg(test)]
+mod tests_v02516;
 pub use batch::Batch;
 
 const ROUTE: &str = "lich13-switch";
@@ -182,6 +186,8 @@ pub struct Preview {
     pub model: Option<String>,
     pub make_default: bool,
     pub warning: Option<String>,
+    pub current: Option<super::current::Current>,
+    pub states: Vec<ProfileCurrent>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +204,10 @@ pub struct Snapshot {
     patch: Change,
     environment: Change,
     credentials: Change,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    home_patch: Option<Change>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settings: Option<Change>,
     #[serde(default)]
     profiles: BTreeMap<String, ProfileSnapshot>,
 }
@@ -229,6 +239,8 @@ impl Snapshot {
             patch: p.patch.clone(),
             environment: self.environment.clone(),
             credentials: self.credentials.clone(),
+            home_patch: self.home_patch.clone(),
+            settings: self.settings.clone(),
             profiles: BTreeMap::new(),
         })
     }
@@ -259,6 +271,8 @@ struct Input {
     patch: Change,
     environment: Change,
     credentials: Change,
+    home_patch: Option<Change>,
+    settings: Option<Change>,
     layers: Vec<(PathBuf, String)>,
     configs: BTreeMap<String, Mapping>,
     names: BTreeMap<String, String>,
@@ -270,6 +284,14 @@ impl Input {
             patch: Change::read(&dir.join(PATCH))?,
             environment: Change::read(&home.join(".env"))?,
             credentials: Change::read(&home.join(".credentials.yaml"))?,
+            home_patch: text(&home.join(PATCH))?.map(|raw| Change {
+                before: Some(raw.clone()),
+                after: raw,
+            }),
+            settings: text(&home.join("settings.yaml"))?.map(|raw| Change {
+                before: Some(raw.clone()),
+                after: raw,
+            }),
             dir,
             layers: vec![],
             configs: BTreeMap::new(),
@@ -296,11 +318,6 @@ impl Input {
                     .ok_or_else(|| error("DSH bundle 名称无效"))?,
             )?;
         }
-        if !input.configs.contains_key(PI) {
-            return Err(error(
-                "当前 profile 未找到 llm-pi-ai，请在 DSH 启用对应 bundle",
-            ));
-        }
         for file in [PATCH, "settings.yaml"] {
             if let Some(raw) = text(&home.join(file))? {
                 input.layers.push((home.join(file), raw));
@@ -308,7 +325,7 @@ impl Input {
         }
         Ok(input)
     }
-    fn bundle(&mut self, home: &Path, name: &str) -> Result<()> {
+    fn bundle(&mut self, home: &Path, name: &str) -> Result<bool> {
         if name.contains("..")
             || name.starts_with('/')
             || name.contains('\\')
@@ -337,11 +354,13 @@ impl Input {
                 }
             }
         }
-        let package = roots
+        let Some(package) = roots
             .iter()
             .map(|r| r.join(name))
             .find(|p| p.join("package.json").is_file())
-            .ok_or_else(|| error("找不到 DSH bundle：请先通过 DSH 启动所选 profile 以安装依赖，并确认 DSH 可执行文件在 PATH 中"))?;
+        else {
+            return Ok(false);
+        };
         let manifest_path = package.join("package.json");
         let raw = text(&manifest_path)?.ok_or_else(|| error("DSH bundle manifest 缺失"))?;
         let manifest: serde_json::Value =
@@ -376,7 +395,7 @@ impl Input {
             self.read_layer(&sequence(&raw)?, 0)?;
             self.layers.push((path, raw));
         }
-        Ok(())
+        Ok(true)
     }
     fn read_layer(&mut self, seq: &Sequence, depth: usize) -> Result<()> {
         if depth > 8 {
@@ -425,6 +444,16 @@ impl Input {
         )
     }
     fn unchanged_layers(&self) -> Result<()> {
+        let home = self
+            .dir
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(conflict)?;
+        for (name, change) in [(PATCH, &self.home_patch), ("settings.yaml", &self.settings)] {
+            if text(&home.join(name))? != change.as_ref().and_then(|c| c.before.clone()) {
+                return Err(conflict());
+            }
+        }
         for (p, raw) in &self.layers {
             if text(p)?.as_deref() != Some(raw) {
                 return Err(conflict());
@@ -538,12 +567,9 @@ fn prepare_shared(
     };
     // JSON is a YAML subset; only the new owned route is serialized.
     let route = yaml(&serde_json::json!({"displayName":"lich13-switch","apiKeyEnv":KEY,"api":api(options.protocol),"baseURL":base,"models":models}).to_string())?.as_mapping().ok_or_else(||error("无法生成 DSH 路由"))?;
-    providers.set(ROUTE, route);
+    providers.set(ROUTE, route.clone());
     if options.make_default {
         let id = model.ok_or_else(|| error("设为默认时请选择一个明确模型"))?;
-        if !input.configs.contains_key(DEFAULT) {
-            return Err(error("此 profile 没有 agent-default-model"));
-        }
         let default = row_config(&patch, DEFAULT, input.configs.get(DEFAULT))?;
         default.set("provider", ROUTE);
         default.set("model", id);
@@ -583,18 +609,29 @@ fn prepare_shared(
         Some(&format!("{KEY}={token}")),
     )?;
     input.credentials.after = credential_file.to_string();
+    overlays::prepare(input, &options, &route, shared)?;
     let mut result = Snapshot {
         options,
         active: true,
         patch: input.patch.clone(),
         environment: input.environment.clone(),
         credentials: input.credentials.clone(),
+        home_patch: input.home_patch.clone(),
+        settings: input.settings.clone(),
         profiles: shared.map(Snapshot::entries).unwrap_or_default(),
     };
     if let Some(old) = previous.filter(|s| s.active) {
         result.patch.before.clone_from(&old.patch.before);
     }
     if let Some(old) = shared.filter(|s| s.active) {
+        for (next, original) in [
+            (&mut result.home_patch, &old.home_patch),
+            (&mut result.settings, &old.settings),
+        ] {
+            if let (Some(next), Some(original)) = (next, original) {
+                next.before.clone_from(&original.before);
+            }
+        }
         result
             .environment
             .before
@@ -632,6 +669,7 @@ fn check_owned(snapshot: &Snapshot, input: &Input) -> Result<()> {
     check_shared(snapshot, input)
 }
 fn check_shared(snapshot: &Snapshot, input: &Input) -> Result<()> {
+    overlays::check(snapshot, input)?;
     if env_value(input.environment.before.as_deref().unwrap_or(""))?
         != env_value(&snapshot.environment.after)?
     {
@@ -728,6 +766,7 @@ fn restore(snapshot: &Snapshot, input: &mut Input) -> Result<()> {
             .and_then(|r| r.get(KEY)),
     );
     input.credentials.after = credential_file.to_string();
+    overlays::restore(snapshot, input)?;
     Ok(())
 }
 #[derive(Serialize, Deserialize)]
@@ -740,17 +779,31 @@ struct Transaction {
     patch: Change,
     environment: Change,
     credentials: Change,
+    #[serde(default)]
+    home_patch: Option<Change>,
+    #[serde(default)]
+    settings: Option<Change>,
     store: Change,
 }
 impl Transaction {
     fn files(&self, data: &Path) -> Result<Vec<(PathBuf, &Change)>> {
         let dir = profile_dir(&self.home, &self.profile)?;
-        Ok(vec![
+        let mut files = vec![
             (dir.join(PATCH), &self.patch),
             (self.home.join(".env"), &self.environment),
             (self.home.join(".credentials.yaml"), &self.credentials),
-            (data.join("gateway.json"), &self.store),
-        ])
+        ];
+        if let Some(change) = &self.home_patch {
+            files.push((self.home.join(PATCH), change));
+        }
+        if let Some(change) = &self.settings {
+            files.push((self.home.join("settings.yaml"), change));
+        }
+        files.push((data.join("gateway.json"), &self.store));
+        for (path, _) in &files {
+            editor::no_symlinks(&self.home, path)?;
+        }
+        Ok(files)
     }
     fn apply(&self, data: &Path) -> Result<()> {
         self.write(data, self.rollback)
@@ -830,6 +883,8 @@ fn commit(
         patch: input.patch.clone(),
         environment: input.environment.clone(),
         credentials: input.credentials.clone(),
+        home_patch: input.home_patch.clone(),
+        settings: input.settings.clone(),
         store: Change {
             before,
             after: after.clone(),
@@ -886,7 +941,8 @@ impl Gateway {
                 }
             }
         }
-        profiles.sort();
+        profiles.sort_by_key(|p| (p != "desktop", p.clone()));
+        let profile = profile.or_else(|| profiles.first().map(String::as_str));
         let input = profile.map(|p| Input::read(home, p)).transpose()?;
         let store = self.0.inner.lock().unwrap().store.clone();
         let snapshot = store
@@ -910,13 +966,27 @@ impl Gateway {
         });
         Ok(Preview {
             revision: input.as_ref().map(Input::revision).unwrap_or_default(),
-            profiles,
             profile: profile.map(str::to_owned),
+            profiles: profiles.clone(),
             models: self.model_union(Some(protocol))?,
             attached: snapshot.as_ref().is_some_and(|s| s.active),
-            protocol,
-            model: snapshot.as_ref().and_then(|s| s.options.model.clone()),
-            make_default: snapshot.as_ref().is_some_and(|s| s.options.make_default),
+            protocol: snapshot
+                .as_ref()
+                .map(|s| s.options.protocol)
+                .or_else(|| current.as_ref().and_then(|c| c.protocol))
+                .unwrap_or(protocol),
+            model: snapshot
+                .as_ref()
+                .and_then(|s| s.options.model.clone())
+                .or_else(|| current.as_ref().and_then(|c| c.model.clone())),
+            make_default: snapshot.as_ref().is_none_or(|s| s.options.make_default),
+            current: current.clone(),
+            states: profile_states(
+                home,
+                &store,
+                &[self.0.registry.listener.view()?.port],
+                &|name| std::env::var(name).ok(),
+            ),
             warning: if home.join("config.yaml").is_file() && !home.join("profiles").is_dir() {
                 Some("仅发现旧 config.yaml，请先通过 DSH 升级；不会自动迁移".into())
             } else {
@@ -941,7 +1011,7 @@ impl Gateway {
         }
         let _listener = self.0.registry.lifecycle.lock().await;
         let _lifecycle = self.0.lifecycle.lock().await;
-        self.attach_dsh_locked(home, options, expected, preview)
+        self.attach_dsh_locked(home, options, expected, preview, true)
             .await
     }
     async fn attach_dsh_locked(
@@ -950,6 +1020,7 @@ impl Gateway {
         options: Options,
         expected: &str,
         preview: Option<&str>,
+        import: bool,
     ) -> Result<View> {
         self.recover_dsh_state()?;
         let (old, token) = {
@@ -1033,14 +1104,15 @@ impl Gateway {
             previous.as_ref(),
             old.as_ref(),
         )?;
+        let mut imported = self.0.inner.lock().unwrap().store.clone();
+        if import {
+            import_selection(home, &options, &mut imported, listener.port)?;
+        }
         let mut s = self.0.inner.lock().unwrap();
         if self.view_revision_with_listener(&s, &listener.previous_revision) != expected {
             return Err(conflict());
         }
-        if s.store.providers.is_empty() {
-            return Err(error("请先添加 DSH 供应商"));
-        }
-        let mut next = s.store.clone();
+        let mut next = imported;
         next.local_token = token;
         next.dsh = Some(snapshot);
         next.initialized = true;
@@ -1097,6 +1169,12 @@ impl Gateway {
                 if index + 1 < snapshots.len() {
                     input.environment.after = input.environment.before.clone().unwrap_or_default();
                     input.credentials.after = input.credentials.before.clone().unwrap_or_default();
+                    for change in [&mut input.home_patch, &mut input.settings]
+                        .into_iter()
+                        .flatten()
+                    {
+                        change.after = change.before.clone().unwrap_or_default();
+                    }
                 }
                 let mut next = s.store.clone();
                 if let Some(dsh) = next.dsh.as_mut() {
@@ -1124,6 +1202,75 @@ impl Gateway {
         self.0.registry.changed();
         self.try_view()
     }
+}
+
+fn import_selection(
+    home: &Path,
+    options: &Options,
+    store: &mut super::model::Store,
+    port: u16,
+) -> Result<()> {
+    let selection = selection::read_current(home, &options.profile, store, &[port], &|name| {
+        std::env::var(name).ok()
+    });
+    if let Ok(selection) = selection {
+        if !matches!(selection.current.state, super::current::Kind::Gateway) {
+            if let (Some(base), Some(token), Some(protocol)) = (
+                selection.pair.base_url,
+                selection.pair.token,
+                selection.current.protocol,
+            ) {
+                let base = super::model::base_url(&base, port)?
+                    .as_str()
+                    .trim_end_matches('/')
+                    .to_owned();
+                if protocol != options.protocol {
+                    return Err(error("所选协议与当前 DSH 连接不同，请确认协议后接入"));
+                }
+                let existing = store
+                    .providers
+                    .iter()
+                    .find(|p| p.base_url == base && p.token == token)
+                    .map(|p| p.id.clone());
+                if let Some(id) = existing {
+                    if store
+                        .grok_connections
+                        .get(&id)
+                        .is_some_and(|c| c.protocol != protocol)
+                    {
+                        return Err(error(
+                            "已有供应商的协议与 DSH 当前连接不同，请先编辑供应商协议",
+                        ));
+                    }
+                    store.selected = Some(id);
+                } else {
+                    store.settings.port = port;
+                    store.edit(
+                        super::model::Edit::SaveDshProvider {
+                            id: None,
+                            base_url: base,
+                            token,
+                            name: Some(
+                                selection
+                                    .current
+                                    .provider_name
+                                    .unwrap_or(selection.provider),
+                            ),
+                            protocol,
+                        },
+                        false,
+                    )?;
+                    store.selected = store.providers.last().map(|p| p.id.clone());
+                }
+            }
+        }
+    }
+    if store.providers.is_empty() {
+        return Err(error(
+            "未读取到可接入的 DSH API 凭据，请检查凭据来源或先添加供应商",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1380,6 +1527,8 @@ mod tests {
             patch: input.patch.clone(),
             environment: input.environment.clone(),
             credentials: input.credentials.clone(),
+            home_patch: input.home_patch.clone(),
+            settings: input.settings.clone(),
             store: Change {
                 before: None,
                 after: serde_json::to_string(&store).unwrap(),

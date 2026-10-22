@@ -26,7 +26,7 @@ export default function GrokImport({
   const [completed, setCompleted] = useState(false);
   const generation = useRef(0),
     token = useRef<string | null>(null);
-  async function load(selected?: string, useEnvironment = false) {
+  async function load(selected?: string, useEnvironment = true) {
     const current = ++generation.current;
     setBusy(true);
     setError("");
@@ -119,6 +119,13 @@ export default function GrokImport({
                 {model.credentialAvailable
                   ? "••••••••"
                   : `未读取到${model.missingEnvironment.length ? `：${model.missingEnvironment.join(" / ")}` : ""}`}
+              </dd>
+              <dt>凭据来源</dt>
+              <dd>
+                {model.credentialSource ??
+                  (preview?.environmentLoaded
+                    ? "endpoint.env"
+                    : "当前进程环境")}
               </dd>
             </dl>
           )}
