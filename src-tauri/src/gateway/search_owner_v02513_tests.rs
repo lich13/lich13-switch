@@ -109,7 +109,8 @@ async fn wait_for_idle_reservation(
     thread: &str,
     provider: &str,
 ) -> (Value, Value) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Windows runners can take longer to publish the async reservation snapshot.
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Some(snapshot) = reservation_snapshot(dir) {
                 if let Some(entry) = reservation_entry(&snapshot, thread, provider) {
