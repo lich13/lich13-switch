@@ -409,7 +409,7 @@ describe("usage records", () => {
       }),
     );
     expect(
-      await within(screen.getByRole("table")).findByText(
+      await within(screen.getByRole("table")).findByTitle(
         "Fixture Provider · Codex",
       ),
     ).toBeInTheDocument();
@@ -446,7 +446,7 @@ describe("usage records", () => {
 
     expect(reportedTokenMetric()).toHaveTextContent("420");
     expect(
-      within(screen.getByRole("table")).getByText("Fixture Provider · Codex"),
+      within(screen.getByRole("table")).getByTitle("Fixture Provider · Codex"),
     ).toBeInTheDocument();
     await act(async () =>
       resolveDashboard({
@@ -459,7 +459,7 @@ describe("usage records", () => {
     );
     await waitFor(() => expect(reportedTokenMetric()).toHaveTextContent("920"));
     expect(
-      within(screen.getByRole("table")).getByText("Fixture Provider · Codex"),
+      within(screen.getByRole("table")).getByTitle("Fixture Provider · Codex"),
     ).toBeInTheDocument();
   });
 
@@ -518,12 +518,12 @@ describe("usage records", () => {
     const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
     const unavailable = within(rows[0]).getAllByRole("cell");
     const zero = within(rows[1]).getAllByRole("cell");
-    for (const index of [3, 4, 5]) {
-      expect(unavailable[index]).toHaveTextContent(/^—$/);
-      expect(zero[index]).toHaveTextContent(/^0$/);
+    for (const label of ["输入", "输出", "缓存读", "缓存写"]) {
+      expect(within(unavailable[3]).getByTitle(label)).toHaveTextContent(/^—$/);
+      expect(within(zero[3]).getByTitle(label)).toHaveTextContent(/^0$/);
     }
-    expect(unavailable[6]).toHaveTextContent(/^—$/);
-    expect(zero[6]).toHaveTextContent(/^\$0$/);
+    expect(unavailable[4]).toHaveTextContent(/^—$/);
+    expect(zero[4]).toHaveTextContent(/^\$0$/);
     const tokenMetric = screen.getByText("已报告 Token").parentElement!;
     expect(within(tokenMetric).getByText("—")).toBeInTheDocument();
 
@@ -552,28 +552,18 @@ describe("usage records", () => {
       within(table)
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent),
-    ).toEqual([
-      "结束时间",
-      "供应商·客户端",
-      "模型",
-      "输入",
-      "输出",
-      "缓存读",
-      "费用",
-      "首字",
-      "tok/s",
-    ]);
+    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "Token", "费用", "性能"]);
     const row = within(table).getAllByRole("row")[1];
     const cells = within(row).getAllByRole("cell");
-    expect(cells).toHaveLength(9);
+    expect(cells).toHaveLength(6);
     expect(cells[1]).toHaveTextContent(/^Fixture Provider/);
     expect(cells[1]).toHaveTextContent(/Codex/);
     expect(cells[2]).toHaveTextContent(/^fixture-response-model/);
-    expect(cells[3]).toHaveTextContent(/^0$/);
-    expect(cells[4]).toHaveTextContent(/^400$/);
-    expect(cells[5]).toHaveTextContent(/^20$/);
-    expect(cells[6]).toHaveTextContent("$0.004568×1.5");
-    expect(cells[6]).toHaveAttribute("title", "0.0045678");
+    expect(within(cells[3]).getByTitle("输入")).toHaveTextContent("0");
+    expect(within(cells[3]).getByTitle("输出")).toHaveTextContent("400");
+    expect(within(cells[3]).getByTitle("缓存读")).toHaveTextContent("20");
+    expect(cells[4]).toHaveTextContent("$0.004568×1.5");
+    expect(cells[4]).toHaveAttribute("title", "0.0045678");
     expect(within(row).queryByText("First Provider")).not.toBeInTheDocument();
     expect(within(row).queryByTitle("HTTP 503")).not.toBeInTheDocument();
 
@@ -751,17 +741,7 @@ describe("usage records", () => {
       within(table)
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent),
-    ).toEqual([
-      "结束时间",
-      "供应商·客户端",
-      "模型",
-      "输入",
-      "输出",
-      "缓存读",
-      "费用",
-      "首字",
-      "tok/s",
-    ]);
+    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "Token", "费用", "性能"]);
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows).toHaveLength(1);
     expect(screen.queryByText("Token/s")).not.toBeInTheDocument();

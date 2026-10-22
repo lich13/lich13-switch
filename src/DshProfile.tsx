@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { command } from "./bridge";
-import type { DshPreview } from "./bridge-contracts";
+import type { DshBatch, DshPreview } from "./bridge-contracts";
 import { errorOf, type GatewayState, type GrokProtocol } from "./types";
 import Modal from "./Modal";
 
@@ -9,11 +9,13 @@ export default function DshProfile({
   close,
   update,
   notify,
+  openModels,
 }: {
   state: GatewayState;
   close: () => void;
   update: (state: GatewayState) => void;
   notify: (text: string) => void;
+  openModels?: () => void;
 }) {
   const [profile, setProfile] = useState(state.dshProfile?.profile ?? "");
   const [protocol, setProtocol] = useState<GrokProtocol>(
@@ -23,6 +25,8 @@ export default function DshProfile({
   const [makeDefault, setMakeDefault] = useState(
     state.dshProfile?.makeDefault ?? false,
   );
+  const [all, setAll] = useState(false);
+  const [results, setResults] = useState<DshBatch["results"]>([]);
   const [preview, setPreview] = useState<DshPreview | null>(null);
   const [profiles, setProfiles] = useState<string[]>([]);
   const [busy, setBusy] = useState(false),
@@ -55,18 +59,25 @@ export default function DshProfile({
     setBusy(true);
     setError("");
     try {
-      const next = await command("attach_dsh_profile", {
+      const next = await command("attach_dsh_profiles", {
+        all,
         options: { profile, protocol, model: model || null, makeDefault },
         expectedRevision: state.revision,
         previewRevision: preview.revision,
       });
-      update(next);
+      update(next.state);
+      setResults(next.results);
+      setPreview(await command("preview_dsh_profile", { profile, protocol }));
+      if (next.results.some((result) => result.status !== "success")) {
+        setError("部分 profile 未完成，已保留成功项。请查看下方结果后重试。");
+        return;
+      }
       notify(
         state.running
           ? "DSH 模型列表已同步"
           : "DSH profile 已接入；默认模型仅影响新会话",
       );
-      close();
+      if (!all) close();
     } catch (e) {
       setError(errorOf(e).message);
     } finally {
@@ -87,7 +98,7 @@ export default function DshProfile({
           <select
             required
             value={profile}
-            disabled={busy || state.running}
+            disabled={busy}
             onChange={(e) => setProfile(e.target.value)}
           >
             <option value="">请选择 profile</option>
@@ -131,6 +142,24 @@ export default function DshProfile({
           所选协议的在队模型：{preview?.models.length ?? "—"}
           。接入或同步时更新路由模型列表。
         </p>
+        {!preview?.models.length && (
+          <p className="model-empty">
+            所选协议没有可用列表，可直接手填模型 ID，或{" "}
+            <button type="button" disabled={busy} onClick={openModels}>
+              管理模型列表
+            </button>
+            。
+          </p>
+        )}
+        <label className="setting-row">
+          <span>同步到全部现有 profile</span>
+          <input
+            type="checkbox"
+            checked={all}
+            disabled={busy}
+            onChange={(e) => setAll(e.target.checked)}
+          />
+        </label>
         <label className="setting-row">
           <span>设为默认（仅新会话）</span>
           <input
@@ -144,6 +173,25 @@ export default function DshProfile({
           <p className="banner error" role="alert">
             {error}
           </p>
+        )}
+        {!!results.length && (
+          <ul className="dsh-results" aria-label="profile 接入结果">
+            {results.map((result) => (
+              <li key={result.profile}>
+                <strong>{result.profile}</strong>
+                <span>
+                  {
+                    { success: "完成", failed: "失败", pending: "未执行" }[
+                      result.status
+                    ]
+                  }
+                </span>
+                {result.error && (
+                  <span className="form-error">{result.error}</span>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
         <div className="form-actions">
           <button type="button" disabled={busy} onClick={close}>

@@ -1,3 +1,8 @@
+import type {
+  GatewayModels,
+  DshFileView,
+  DshFileKey,
+} from "./bridge-contracts";
 import type { GatewayState, GatewaySettings, ProviderQuota } from "./types";
 import { densePreview } from "./preview-fixtures";
 const healthy = {
@@ -195,6 +200,16 @@ function syncListener(port = gatewayDemo.settings.port, changed = false) {
   }
 }
 syncListener();
+const modelViews = new Map<string, GatewayModels>();
+const dshFiles = new Map<string, DshFileView>();
+const dshPrevious = new Map<string, string>();
+const modelIndex = {
+  updatedAt: 1,
+  version: "fixture-index",
+  providers: 1,
+  models: 1,
+  error: null,
+};
 export function gatewayPreview(name: string, args: Record<string, unknown>) {
   const s =
     args.clientId === "dsh"
@@ -204,9 +219,154 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         : args.clientId === "grok"
           ? grokGatewayDemo
           : gatewayDemo;
+  if (["get_models_dev", "update_models_dev"].includes(name)) return modelIndex;
+  if (name === "search_models_dev")
+    return {
+      hits: [
+        {
+          source: "fixture/fixture-model",
+          provider: "fixture",
+          providerName: "Fixture",
+          model: "fixture-model",
+          name: "Fixture model",
+          context: 128000,
+          output: 8192,
+          cost: { input: 1, output: 2 },
+        },
+      ],
+      error: null,
+    };
+  if (
+    [
+      "get_gateway_models",
+      "refresh_gateway_models",
+      "edit_model_list",
+    ].includes(name)
+  ) {
+    let view = modelViews.get(s.clientId);
+    if (!view) {
+      view = {
+        clientId: s.clientId,
+        passthrough: s.clientId === "codex",
+        hint:
+          s.clientId === "codex"
+            ? "Codex 目录透传，本列表只读"
+            : "DSH 接入或同步时写入模型列表",
+        models: [
+          {
+            id: "fixture-model",
+            providers: s.providers
+              .slice(0, 1)
+              .map((p) => ({ id: p.id, name: p.name })),
+            manual: false,
+            source: null,
+            pinned: null,
+            metadata: {
+              sources: ["fixture"],
+              model: "fixture-model",
+              matchedBy: "exact",
+              name: "Fixture model",
+              reasoning: null,
+              reasoningEfforts: null,
+              context: 128000,
+              output: 8192,
+            },
+            price: {
+              source: "models.dev",
+              inputPerM: "1",
+              outputPerM: "2",
+              cacheReadPerM: "0.1",
+              cacheWritePerM: null,
+              deviation: false,
+            },
+          },
+        ],
+        providers: s.providers
+          .filter((p) => p.queued)
+          .map((p) => ({
+            id: p.id,
+            name: p.name,
+            count: 1,
+            checkedAt: 1,
+            stale: false,
+            error: null,
+          })),
+        modelsDev: modelIndex,
+        error: null,
+      };
+      modelViews.set(s.clientId, view);
+    }
+    if (name === "edit_model_list" && !view.passthrough) {
+      const id = String(args.id),
+        model = view.models.find((m) => m.id === id);
+      if (args.op === "add") {
+        if (model) model.manual = true;
+        else
+          view.models.push({
+            id,
+            providers: [],
+            manual: true,
+            source: typeof args.source === "string" ? args.source : null,
+            pinned: null,
+            metadata: null,
+            price: null,
+          });
+      } else if (args.op === "remove") {
+        if (model?.providers.length) model.manual = false;
+        else view.models = view.models.filter((m) => m.id !== id);
+      } else if (model) {
+        model.pinned = args.op === "pin" ? String(args.source) : null;
+        model.source = model.pinned;
+      }
+    }
+    return structuredClone(view);
+  }
+  if (
+    [
+      "read_dsh_file",
+      "save_dsh_file",
+      "read_previous_dsh_file",
+      "restore_dsh_file",
+    ].includes(name)
+  ) {
+    const id = `${args.profile ?? "home"}/${args.key}`;
+    const readonly = args.key === "environment" || args.key === "credentials";
+    let file = dshFiles.get(id) ?? {
+      profiles: ["default", "desktop"],
+      files: [
+        "profilePatch",
+        "homePatch",
+        "environment",
+        "credentials",
+      ] as DshFileKey[],
+      text: readonly ? "FIXTURE_KEY: ••••" : "# Fixture configuration\n[]\n",
+      revision: "fixture-file",
+      readOnly: readonly,
+      canRestore: false,
+    };
+    if (name === "read_previous_dsh_file") return dshPrevious.get(id) ?? "[]\n";
+    if (name === "save_dsh_file" || name === "restore_dsh_file") {
+      if (readonly) throw { code: "CONFIG", message: "此文件只读" };
+      if (args.expectedRevision !== file.revision)
+        throw { code: "CONFLICT", message: "文件已变化，草稿已保留" };
+      const text =
+        name === "restore_dsh_file"
+          ? (dshPrevious.get(id) ?? "[]\n")
+          : String(args.text);
+      dshPrevious.set(id, file.text);
+      file = {
+        ...file,
+        text,
+        revision: `fixture-${Date.now()}`,
+        canRestore: true,
+      };
+    }
+    dshFiles.set(id, file);
+    return structuredClone(file);
+  }
   if (name === "preview_dsh_profile")
     return {
-      profiles: ["default"],
+      profiles: ["default", "desktop"],
       profile: args.profile ?? null,
       revision: "preview-dsh-profile",
       models: [],
@@ -216,10 +376,18 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       makeDefault: false,
       warning: "预览使用合成 profile",
     };
-  if (name === "attach_dsh_profile") {
+  if (name === "attach_dsh_profile" || name === "attach_dsh_profiles") {
     dshGatewayDemo.running = true;
     dshGatewayDemo.dshProfile = args.options as GatewayState["dshProfile"];
     syncListener();
+    if (name === "attach_dsh_profiles")
+      return {
+        state: structuredClone(dshGatewayDemo),
+        results: (args.all
+          ? ["default", "desktop"]
+          : [dshGatewayDemo.dshProfile?.profile]
+        ).map((profile) => ({ profile, status: "success", error: null })),
+      };
     return structuredClone(dshGatewayDemo);
   }
   if (name === "get_gateway_listener") return gatewayDemo.listener;

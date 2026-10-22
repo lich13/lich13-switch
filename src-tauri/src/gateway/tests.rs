@@ -73,7 +73,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-async fn server<F, Fut>(handler: F) -> u16
+pub(super) async fn server<F, Fut>(handler: F) -> u16
 where
     F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response<WireBody>> + Send + 'static,

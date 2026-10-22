@@ -29,7 +29,11 @@ beforeEach(() => {
         makeDefault: false,
         warning: null,
       } satisfies DshPreview;
-    if (name === "attach_dsh_profile") return { ...state, running: true };
+    if (name === "attach_dsh_profiles")
+      return {
+        state: { ...state, running: true },
+        results: [{ profile: "fixture", status: "success", error: null }],
+      };
     throw new Error(`Unexpected command: ${name}`);
   });
 });
@@ -48,7 +52,9 @@ it("previews profiles without writing and applies the selected protocol only on 
   );
   await screen.findByRole("option", { name: "fixture" });
   expect(screen.getByLabelText("API 协议")).toHaveValue("chat_completions");
-  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(
+    screen.getByRole("checkbox", { name: "设为默认（仅新会话）" }),
+  ).not.toBeChecked();
   await user.selectOptions(screen.getByLabelText("现有 profile"), "fixture");
   await user.selectOptions(screen.getByLabelText("API 协议"), "messages");
   await waitFor(() =>
@@ -57,11 +63,14 @@ it("previews profiles without writing and applies the selected protocol only on 
   expect(
     mock.command.mock.calls.every(([name]) => name === "preview_dsh_profile"),
   ).toBe(true);
-  await user.click(screen.getByRole("checkbox"));
+  await user.click(
+    screen.getByRole("checkbox", { name: "设为默认（仅新会话）" }),
+  );
   await user.type(screen.getByLabelText("模型 ID"), "fixture-model");
   await user.click(screen.getByRole("button", { name: "接入 profile" }));
   await waitFor(() => expect(close).toHaveBeenCalledOnce());
-  expect(mock.command).toHaveBeenCalledWith("attach_dsh_profile", {
+  expect(mock.command).toHaveBeenCalledWith("attach_dsh_profiles", {
+    all: false,
     options: {
       profile: "fixture",
       protocol: "messages",

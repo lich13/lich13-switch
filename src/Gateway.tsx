@@ -1,5 +1,6 @@
 import Advanced from "./GatewayAdvanced";
 import DshProfile from "./DshProfile";
+import GatewayModels from "./GatewayModels";
 import GrokImport from "./GrokImport";
 import GatewayDialog from "./GatewayProviderDialog";
 import { subscriptions } from "./subscriptions";
@@ -30,8 +31,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Plus,
   Power,
-  Download,
-  Upload,
+  FileInput,
+  FileOutput,
   Pencil,
   Trash2,
   Network,
@@ -108,6 +109,7 @@ function GatewayContent({
   onFocusHandled?: () => void;
   focusProvider?: { id: string; sequence: number } | null;
 }) {
+  const [modelsOpen, setModelsOpen] = useState(false);
   const dirtyParts = useRef({ quota: false, advanced: false, dialog: false });
   const markQuota = useCallback(
     (value: boolean) => {
@@ -256,44 +258,33 @@ function GatewayContent({
     e.currentTarget.closest("details")?.removeAttribute("open");
   return (
     <section className="gateway-page">
-      {clientId === "claude" && (
-        <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
-      )}
-      {clientId === "grok" && (
-        <div className="gateway-toolbar">
-          <button
-            disabled={busy || state.running}
-            onClick={() => setDialog({ kind: "grokImport" })}
-          >
-            导入当前配置
-          </button>
-          {state.grokNativeAvailable && (
-            <button
-              disabled={busy || state.running}
-              onClick={() => run(() => edit({ op: "grokNative" }))}
-            >
-              恢复原生配置
-            </button>
-          )}
-        </div>
-      )}
-      {clientId === "dsh" && (
-        <div className="gateway-toolbar">
-          <button disabled={busy} onClick={() => setDialog({ kind: "dsh" })}>
-            {state.running ? "同步模型列表" : "接入 profile"}
-          </button>
-          {state.dshProfile && (
-            <span className="muted">{state.dshProfile.profile}</span>
-          )}
-        </div>
-      )}
-      <div className="page-heading gateway-heading">
+      <div className="gateway-navigation">
         <ClientSelection
           client={clientId}
           select={onClientChange}
           disabled={busy}
         />
-        <div className="gateway-toolbar">
+        <div className="gateway-client-actions">
+          {clientId === "claude" && (
+            <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
+          )}
+          {clientId === "dsh" && (
+            <>
+              <button
+                disabled={busy}
+                onClick={() => setDialog({ kind: "dsh" })}
+              >
+                {state.running ? "同步模型列表" : "接入 profile"}
+              </button>
+              {state.dshProfile && (
+                <span className="muted">{state.dshProfile.profile}</span>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      <div className="gateway-heading gateway-action-row">
+        <div className="gateway-route-actions">
           <div className="segmented" aria-label="路由模式">
             <button
               disabled={busy}
@@ -327,6 +318,8 @@ function GatewayContent({
                 ? "处理事务"
                 : "启用"}
           </button>
+        </div>
+        <div className="gateway-provider-actions">
           <button
             className="secondary"
             disabled={busy}
@@ -335,28 +328,54 @@ function GatewayContent({
             <Plus size={15} />
             添加
           </button>
-          <button
-            disabled={busy || clientId === "dsh"}
-            title={
-              clientId === "dsh" ? "请添加供应商并明确选择协议" : undefined
-            }
-            onClick={() => setDialog({ kind: "exchange", mode: "import" })}
+          <div
+            className="exchange-button-group"
+            role="group"
+            aria-label="供应商导入导出"
           >
-            <Download size={15} />
-            导入
-          </button>
-          <button
-            disabled={busy || !state.providers.length}
-            onClick={() => setDialog({ kind: "exchange", mode: "export" })}
-          >
-            <Upload size={15} />
-            导出
-          </button>
+            <button
+              className="exchange-button"
+              disabled={busy || clientId === "dsh"}
+              title={
+                clientId === "dsh" ? "请添加供应商并明确选择协议" : undefined
+              }
+              onClick={() => setDialog({ kind: "exchange", mode: "import" })}
+            >
+              <FileInput size={16} />
+              导入
+            </button>
+            <button
+              className="exchange-button"
+              disabled={busy || !state.providers.length}
+              onClick={() => setDialog({ kind: "exchange", mode: "export" })}
+            >
+              <FileOutput size={16} />
+              导出
+            </button>
+          </div>
           <details className="row-menu">
             <summary aria-label="网关操作">
               <MoreHorizontal size={17} />
             </summary>
             <div className="menu-popover" onClick={menuClose}>
+              {clientId === "grok" && (
+                <>
+                  <button
+                    disabled={busy || state.running}
+                    onClick={() => setDialog({ kind: "grokImport" })}
+                  >
+                    导入当前配置
+                  </button>
+                  {state.grokNativeAvailable && (
+                    <button
+                      disabled={busy || state.running}
+                      onClick={() => run(() => edit({ op: "grokNative" }))}
+                    >
+                      恢复原生配置
+                    </button>
+                  )}
+                </>
+              )}
               <button
                 onClick={() => quota.refreshAll()}
                 disabled={!state.providers.length}
@@ -570,33 +589,29 @@ function GatewayContent({
             <span>活动连接 {state.activeConnections}</span>
             <span>
               配置使用{" "}
-              {state.configState === "gateway"
-                ? "本地网关"
-                : (state.providers.find((p) => p.id === state.configProvider)
-                    ?.name ?? "未匹配供应商")}
+              {state.current?.kind === "official"
+                ? "官方"
+                : state.configState === "gateway"
+                  ? "本地网关"
+                  : (state.providers.find((p) => p.id === state.configProvider)
+                      ?.name ?? "未匹配供应商")}
+              {state.current?.by === "urlOnly" && " · 按地址匹配"}
             </span>
+            {state.current?.model && (
+              <span title={state.current.modelSource ?? undefined}>
+                模型 {state.current.model}
+              </span>
+            )}
           </div>
-          {clientId === "codex" && (
-            <label className="setting-row">
-              连接方式
-              <select
-                aria-label="Codex 连接方式"
-                value={state.connectionMode ?? "bearer"}
-                disabled={busy || state.running || state.recoveryPending}
-                onChange={(e) => {
-                  const mode = e.target.value;
-                  run(async () => {
-                    await edit({ op: "connection", mode });
-                    notify("连接方式已保存");
-                  });
-                }}
-              >
-                <option value="auto">重新识别</option>
-                <option value="bearer">独立 Bearer Token</option>
-                <option value="apiKey">普通 API 登录</option>
-              </select>
-            </label>
-          )}
+          <details
+            className="model-list-details"
+            id="gateway-model-list"
+            open={modelsOpen}
+            onToggle={(e) => setModelsOpen(e.currentTarget.open)}
+          >
+            <summary>模型列表</summary>
+            {modelsOpen && <GatewayModels key={clientId} clientId={clientId} />}
+          </details>
           <QuotaRefreshSettings
             seconds={quotaRefreshSeconds}
             onDirtyChange={markQuota}
@@ -632,6 +647,13 @@ function GatewayContent({
           close={() => setDialog(null)}
           update={setState}
           notify={notify}
+          openModels={() => {
+            setDialog(null);
+            setModelsOpen(true);
+            const panel = document.getElementById("gateway-model-list");
+            panel?.closest("details.advanced")?.setAttribute("open", "");
+            panel?.scrollIntoView?.({ block: "nearest" });
+          }}
         />
       )}
       {dialog?.kind === "grokImport" && (

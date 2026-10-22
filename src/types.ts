@@ -202,6 +202,16 @@ export type GatewayState = {
   configRevision: string | null;
   configProvider: string | null;
   configState: string;
+  current?: {
+    kind: "gateway" | "provider" | "official" | "unmatched" | "unknown";
+    id?: string;
+    by?: "urlToken" | "urlOnly";
+    host?: string;
+    reason?: string;
+    model: string | null;
+    modelSource: string | null;
+    warning: string | null;
+  };
   configError: string | null;
   configWarning?: string | null;
   connectionMode?: "bearer" | "apiKey";

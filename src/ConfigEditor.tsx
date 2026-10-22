@@ -1,5 +1,6 @@
 import { subscriptions } from "./subscriptions";
 import ClaudeProfile from "./ClaudeProfile";
+import DshConfigEditor from "./DshConfigEditor";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
@@ -104,6 +105,15 @@ export default function ConfigEditor(props: Props) {
       : clientId === "grok"
         ? (props.grokHome ?? "~/.grok")
         : props.home;
+  if (clientId === "dsh")
+    return (
+      <DshConfigEditor
+        theme={props.theme}
+        select={(id) => select(id, dirty.current)}
+        onDirty={changed}
+        onMessage={props.onMessage}
+      />
+    );
   return (
     <EditorContent
       key={`${clientId}:${home}`}
@@ -351,12 +361,7 @@ function EditorContent({
         />
       )}
       <div className="config-heading">
-        <ClientSelection
-          includeDsh={false}
-          client={clientId}
-          select={select}
-          disabled={busy}
-        />
+        <ClientSelection client={clientId} select={select} disabled={busy} />
         <div className="inline">
           {clientId === "claude" && (
             <div className="segmented" aria-label="编辑方式">

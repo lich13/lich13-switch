@@ -10,10 +10,12 @@ const mock = vi.hoisted(() => ({
 
 vi.mock("./bridge", () => ({
   command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (state: GatewayState) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
+  subscribe: vi.fn(
+    async (name: string, listener: (state: GatewayState) => void) => {
+      mock.listeners.set(name, listener);
+      return () => mock.listeners.delete(name);
+    },
+  ),
 }));
 
 import Gateway from "./Gateway";
@@ -75,48 +77,22 @@ async function openProviderEditor(
 }
 
 describe("Codex v0.20.0 API login gateway controls", () => {
-  it("persists the Codex connection mode with the current revision", async () => {
-    const user = userEvent.setup();
-    const notify = vi.fn();
-    render(<Gateway notify={notify} />);
-    await openAdvanced(user);
-
-    const mode = screen.getByRole("combobox", { name: "Codex 连接方式" });
-    expect(mode).toHaveValue("bearer");
-    expect(
-      within(mode).getByRole("option", { name: "独立 Bearer Token" }),
-    ).toHaveValue("bearer");
-    expect(
-      within(mode).getByRole("option", { name: "普通 API 登录" }),
-    ).toHaveValue("apiKey");
-
-    await user.selectOptions(mode, "apiKey");
-    await waitFor(() =>
-      expect(mock.command).toHaveBeenCalledWith("update_gateway", {
-        clientId: "codex",
-        edit: { op: "connection", mode: "apiKey" },
-        expectedRevision: "preview-gateway",
-      }),
-    );
-    expect(codexState.connectionMode).toBe("apiKey");
-    expect(notify).toHaveBeenCalledWith("连接方式已保存");
-  });
-
-  it.each([
-    ["running", { running: true, recoveryPending: false }],
-    ["recovery pending", { running: false, recoveryPending: true }],
-  ] as const)("disables connection mode while the gateway is %s", async (_label, state) => {
-    codexState = { ...codexState, ...state };
-    const user = userEvent.setup();
-    render(<Gateway notify={() => {}} />);
-    await openAdvanced(user);
-
-    const mode = screen.getByRole("combobox", { name: "Codex 连接方式" });
-    expect(mode).toBeDisabled();
-    expect(mock.command.mock.calls.some(([name]) => name === "update_gateway")).toBe(
-      false,
-    );
-  });
+  it.each(["bearer", "apiKey"] as const)(
+    "preserves hidden %s connection settings",
+    async (connectionMode) => {
+      codexState.connectionMode = connectionMode;
+      const user = userEvent.setup();
+      render(<Gateway notify={() => {}} />);
+      await openAdvanced(user);
+      expect(
+        screen.queryByRole("combobox", { name: "Codex 连接方式" }),
+      ).not.toBeInTheDocument();
+      expect(codexState.connectionMode).toBe(connectionMode);
+      expect(
+        mock.command.mock.calls.some(([name]) => name === "update_gateway"),
+      ).toBe(false);
+    },
+  );
 
   it("hides Codex connection mode from Claude", async () => {
     localStorage.setItem("lich13-switch.main.client", "claude");
@@ -133,39 +109,42 @@ describe("Codex v0.20.0 API login gateway controls", () => {
   it.each([
     ["bearer", "experimental_bearer_token"],
     ["apiKey", "OPENAI_API_KEY"],
-  ] as const)("uses %s credential labels for adding and editing suppliers", async (connectionMode, label) => {
-    codexState.connectionMode = connectionMode;
-    const user = userEvent.setup();
-    render(<Gateway notify={() => {}} />);
-    await screen.findByRole("button", { name: "添加" });
+  ] as const)(
+    "uses %s credential labels for adding and editing suppliers",
+    async (connectionMode, label) => {
+      codexState.connectionMode = connectionMode;
+      const user = userEvent.setup();
+      render(<Gateway notify={() => {}} />);
+      await screen.findByRole("button", { name: "添加" });
 
-    const addDialog = await openProviderEditor(user, "add");
-    expect(within(addDialog).getByLabelText(label)).toHaveAttribute(
-      "type",
-      "password",
-    );
-    expect(
-      within(addDialog).queryByLabelText(
-        connectionMode === "apiKey"
-          ? "experimental_bearer_token"
-          : "OPENAI_API_KEY",
-      ),
-    ).not.toBeInTheDocument();
-    await user.click(within(addDialog).getByRole("button", { name: "取消" }));
+      const addDialog = await openProviderEditor(user, "add");
+      expect(within(addDialog).getByLabelText(label)).toHaveAttribute(
+        "type",
+        "password",
+      );
+      expect(
+        within(addDialog).queryByLabelText(
+          connectionMode === "apiKey"
+            ? "experimental_bearer_token"
+            : "OPENAI_API_KEY",
+        ),
+      ).not.toBeInTheDocument();
+      await user.click(within(addDialog).getByRole("button", { name: "取消" }));
 
-    const editDialog = await openProviderEditor(user, "edit");
-    expect(within(editDialog).getByLabelText(label)).toHaveAttribute(
-      "type",
-      "password",
-    );
-    expect(
-      within(editDialog).queryByLabelText(
-        connectionMode === "apiKey"
-          ? "experimental_bearer_token"
-          : "OPENAI_API_KEY",
-      ),
-    ).not.toBeInTheDocument();
-  });
+      const editDialog = await openProviderEditor(user, "edit");
+      expect(within(editDialog).getByLabelText(label)).toHaveAttribute(
+        "type",
+        "password",
+      );
+      expect(
+        within(editDialog).queryByLabelText(
+          connectionMode === "apiKey"
+            ? "experimental_bearer_token"
+            : "OPENAI_API_KEY",
+        ),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("keeps the API supplier draft and authoritative state unchanged after a failed save", async () => {
     codexState.connectionMode = "apiKey";
@@ -188,8 +167,14 @@ describe("Codex v0.20.0 API login gateway controls", () => {
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
     const dialog = await openProviderEditor(user, "add");
-    await user.type(within(dialog).getByLabelText("base_url"), "https://api.fixture.invalid/v1");
-    await user.type(within(dialog).getByLabelText("OPENAI_API_KEY"), "fixture-api-key");
+    await user.type(
+      within(dialog).getByLabelText("base_url"),
+      "https://api.fixture.invalid/v1",
+    );
+    await user.type(
+      within(dialog).getByLabelText("OPENAI_API_KEY"),
+      "fixture-api-key",
+    );
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
 
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
@@ -221,8 +206,14 @@ describe("Codex v0.20.0 API login gateway controls", () => {
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
     const dialog = await openProviderEditor(user, "add");
-    await user.type(within(dialog).getByLabelText("base_url"), "https://draft.fixture.invalid/v1");
-    await user.type(within(dialog).getByLabelText("OPENAI_API_KEY"), "draft-api-key");
+    await user.type(
+      within(dialog).getByLabelText("base_url"),
+      "https://draft.fixture.invalid/v1",
+    );
+    await user.type(
+      within(dialog).getByLabelText("OPENAI_API_KEY"),
+      "draft-api-key",
+    );
 
     act(() =>
       mock.listeners.get("gateway-state")!({

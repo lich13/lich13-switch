@@ -3,6 +3,7 @@ use crate::errors::code;
 mod api_login_tests;
 mod claude_config;
 mod codex_api;
+pub(crate) mod current;
 pub(crate) mod dsh;
 pub(crate) mod grok_config;
 mod grok_import;
@@ -58,6 +59,7 @@ mod model;
 mod model_health;
 #[cfg(test)]
 mod model_isolation_tests;
+pub(crate) mod model_list;
 #[cfg(test)]
 mod new_thread_policy_tests;
 #[cfg(test)]
@@ -167,6 +169,7 @@ pub struct View {
     pub config_revision: Option<String>,
     pub config_provider: Option<String>,
     pub config_state: String,
+    pub current: current::Current,
     pub config_error: Option<String>,
     pub config_warning: Option<String>,
     pub connection_mode: String,
@@ -214,6 +217,7 @@ struct Shared {
     events: broadcast::Sender<()>,
     quota: quota::Service,
     catalog: catalog::Service,
+    model_list: model_list::Service,
     endpoints: endpoints::Service,
     exchange: exchange::Service,
     admission: admission::Scheduler,
@@ -507,6 +511,7 @@ impl Gateway {
             exchange: exchange::Service::default(),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             catalog: catalog::Service::new(data.join("provider-models.json")),
+            model_list: model_list::Service::new(data.join("model-list.json")),
             data,
             spool,
             active: AtomicUsize::new(0),
@@ -534,6 +539,9 @@ impl Gateway {
         if let Err(e) = self.0.catalog.remove(&removed) {
             state.error = Some(e.message);
         }
+        if let Err(e) = self.0.model_list.forget(&removed) {
+            state.error = Some(e.message);
+        }
         state.store = store;
         self.0
             .registry
@@ -542,31 +550,17 @@ impl Gateway {
         if !self.0.discover_new_providers.load(Ordering::Relaxed) {
             return;
         }
-        for id in added {
+        if !added.is_empty() {
             let gateway = self.clone();
             tauri::async_runtime::spawn(async move {
-                let usage = gateway.0.usage.lock().unwrap().clone();
-                tokio::join!(
-                    async {
-                        if gateway
-                            .list_models(&id, false)
-                            .await
-                            .is_ok_and(|v| v.checked_at.is_none())
-                        {
-                            let _ = gateway.list_models(&id, true).await;
-                        }
-                    },
-                    async {
-                        if let Some(usage) = usage {
-                            if let Ok(prices) = usage.prices() {
-                                let _ = prices.models_dev.refresh(false).await;
-                            }
-                        }
-                    }
-                );
+                if let Err(e) = gateway.backfill_models().await {
+                    gateway.0.inner.lock().unwrap().error = Some(e.message);
+                    gateway.changed();
+                }
             });
         }
     }
+
     pub fn import_initial(&self, home: &Path) -> Result<()> {
         let _guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
@@ -780,39 +774,39 @@ impl Gateway {
             .as_ref()
             .and_then(|r| r.as_ref().ok())
             .map(|(r, _)| r.clone());
-        let mut config_state =
-            if self.0.client == ClientId::Dsh && s.store.dsh.as_ref().is_some_and(|d| d.active) {
-                "gateway"
-            } else {
-                "unknown"
-            };
-        let mut config_provider = None;
-        if let Some(Ok((_, pair))) = &config {
-            config_state = "unsaved";
-            if pair.is_gateway(
-                self.0.client,
-                &s.store.local_token,
-                &[listener.port, s.store.settings.port],
-            ) {
-                config_state = "gateway";
-            } else if let Some(p) = s
-                .store
-                .providers
-                .iter()
-                .find(|p| pair == &takeover::Pair::new(&p.base_url, &p.token))
-            {
-                config_state = "provider";
-                config_provider = Some(p.id.clone());
+        let ports = [listener.port, s.store.settings.port];
+        let mut current = match (self.0.client, s.home.as_ref()) {
+            (ClientId::Grok, Some(home)) => {
+                current::grok(home, &s.store, &ports, &|name| std::env::var(name).ok())
             }
+            (ClientId::Dsh, Some(home)) => {
+                dsh::current(home, &s.store, &ports, &|name| std::env::var(name).ok())
+            }
+            _ => match &config {
+                Some(Ok((_, pair))) => current::pair(self.0.client, pair, &s.store, &ports),
+                Some(Err(e)) => current::Current::unknown(&e.message),
+                None => current::Current::unknown("尚未找到客户端配置"),
+            },
+        };
+        if self.0.client == ClientId::Claude {
+            current.warning = s.home.as_ref().and_then(|h| claude_config::warning(h));
         }
+        let (config_state, config_provider) = current.legacy();
         Ok(View {
             listener: listener.clone(),
             grok_models: if self.0.client == ClientId::Grok {
                 s.home
                     .as_ref()
-                    .and_then(|home| grok_config::read(home).ok())
-                    .and_then(|(_, text)| {
-                        grok_import::discover(&text, &|name| std::env::var(name).ok()).ok()
+                    .and_then(|home| grok_layers::read(home, &|name| std::env::var(name).ok()).ok())
+                    .and_then(|effective| {
+                        grok_import::discover(&effective.text, &|name| {
+                            if effective.blocked_env.contains(&name) {
+                                None
+                            } else {
+                                std::env::var(name).ok()
+                            }
+                        })
+                        .ok()
                     })
                     .unwrap_or_default()
             } else {
@@ -824,17 +818,17 @@ impl Gateway {
             config_revision,
             config_provider,
             config_state: config_state.into(),
-            config_error: config.and_then(|r| r.err()).map(|e| e.message),
+            config_error: match &current.state {
+                current::Kind::Unknown { reason } => Some(reason.clone()),
+                _ => None,
+            },
             connection_mode: match &s.store.connection {
                 codex_api::Connection::Bearer => "bearer",
                 _ => "apiKey",
             }
             .into(),
-            config_warning: if self.0.client == ClientId::Claude {
-                s.home.as_ref().and_then(|h| claude_config::warning(h))
-            } else {
-                None
-            },
+            config_warning: current.warning.clone(),
+            current,
             last_successful: s.last_successful.clone(),
             revision: self.view_revision(&s)?,
             running: s.running,
@@ -1420,17 +1414,7 @@ impl Gateway {
         config_revision: Option<&str>,
     ) -> Result<View> {
         if self.0.client == ClientId::Dsh {
-            let options = self
-                .0
-                .inner
-                .lock()
-                .unwrap()
-                .store
-                .dsh
-                .as_ref()
-                .map(|s| s.options.clone())
-                .ok_or_else(|| AppError::new(code::CONFIG, "请先在 DSH 接入面板选择 profile"))?;
-            return self.attach_dsh(home, options, expected, None).await;
+            return self.restart_dsh(home, expected).await;
         }
         if self.0.client == ClientId::Codex && crate::official::blocks_gateway(&self.0.data, home) {
             return Err(AppError::new(
@@ -1942,10 +1926,16 @@ impl Gateway {
         }
         if let Some(usage) = self.0.usage.lock().unwrap().as_ref() {
             if let Ok(prices) = usage.prices() {
+                let (choices, _) = self.0.model_list.snapshot();
                 result.metadata = result
                     .models
                     .iter()
-                    .filter_map(|id| prices.models_dev.metadata(id).map(|m| (id.clone(), m)))
+                    .filter_map(|id| {
+                        prices
+                            .models_dev
+                            .metadata_from(id, choices.source(id))
+                            .map(|m| (id.clone(), m))
+                    })
                     .collect();
             }
         }
@@ -1955,35 +1945,13 @@ impl Gateway {
         &self,
         protocol: Option<grok_config::Protocol>,
     ) -> Result<Vec<String>> {
-        let state = self.request_state()?;
-        let mut result = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for provider in state.store.providers.iter().filter(|p| p.queued) {
-            if protocol.is_some_and(|protocol| {
-                state
-                    .store
-                    .grok_connections
-                    .get(&provider.id)
-                    .is_none_or(|c| c.protocol != protocol)
-            }) {
-                continue;
-            }
-            let cached = self
-                .0
-                .catalog
-                .cached(&provider.id, &Self::quota_version(&state.store, provider));
-            let models = provider
-                .allowed_models
-                .as_ref()
-                .or_else(|| (!cached.stale).then_some(&cached.models));
-            for id in models.into_iter().flatten() {
-                if seen.insert(id.clone()) {
-                    result.push(id.clone());
-                }
-            }
-        }
-        Ok(result)
+        Ok(self
+            .union_models(protocol)?
+            .into_iter()
+            .map(|m| m.id)
+            .collect())
     }
+
     fn sync_single_protection(&self, state: &Inner) {
         let mut queue = state.store.providers.iter().filter(|p| p.queued);
         let first = queue.next();

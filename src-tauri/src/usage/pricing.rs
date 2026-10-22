@@ -98,6 +98,16 @@ pub struct PriceDifference {
     pub level: String,
     pub context_threshold: Option<u64>,
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reference {
+    pub source: String,
+    pub input_per_m: Option<String>,
+    pub output_per_m: Option<String>,
+    pub cache_read_per_m: Option<String>,
+    pub cache_write_per_m: Option<String>,
+    pub deviation: bool,
+}
 fn difference(
     field: &str,
     wei: Decimal,
@@ -424,7 +434,58 @@ impl Pricing {
             multiplier: multiplier.into(),
         }
     }
+    pub fn reference(&self, model: &str, source: Option<&str>) -> Option<Reference> {
+        let quote = self.quote(Some(model), "1");
+        if quote.data.is_none() {
+            let state = self.state.read().unwrap();
+            if state.config.excluded.contains(model)
+                || state.config.excluded.contains(&quote.model)
+                || state
+                    .config
+                    .selected
+                    .as_ref()
+                    .is_some_and(|v| !v.contains(&quote.model))
+            {
+                return None;
+            }
+        }
+        let (data, price_source) = if quote.source == "models.dev" || quote.data.is_none() {
+            (
+                self.models_dev.price_from(model, source)?.0,
+                "models.dev".to_owned(),
+            )
+        } else {
+            (quote.data?, quote.source)
+        };
+        let data = if price_source == "models.dev" {
+            crate::models_dev::rates(&data, 0, false)?.0
+        } else {
+            data
+        };
+        let per_m = |key| {
+            unit_rate(&data, key, 0, "").and_then(|(_, value, _)| {
+                value
+                    .checked_mul(Decimal::from(1_000_000))
+                    .map(|v| v.normalize().to_string())
+            })
+        };
+        Some(Reference {
+            source: price_source,
+            input_per_m: per_m("input_cost_per_token"),
+            output_per_m: per_m("output_cost_per_token"),
+            cache_read_per_m: per_m("cache_read_input_token_cost"),
+            cache_write_per_m: per_m("cache_creation_input_token_cost"),
+            deviation: self
+                .compare_from(model, 0, source)
+                .fields
+                .iter()
+                .any(|v| matches!(v.level.as_str(), "deviation" | "severe" | "zero_conflict")),
+        })
+    }
     pub fn compare(&self, model: &str, context: u64) -> PriceComparison {
+        self.compare_from(model, context, None)
+    }
+    fn compare_from(&self, model: &str, context: u64, source: Option<&str>) -> PriceComparison {
         let mut result = PriceComparison {
             model: model.into(),
             context,
@@ -437,13 +498,19 @@ impl Pricing {
         let Some(wei) = state.cache.catalog.get(model) else {
             return result;
         };
-        let Some(provider) = wei["litellm_provider"].as_str() else {
+        let provider = wei["litellm_provider"].as_str();
+        let qualified = provider.map(|provider| format!("{provider}/{model}"));
+        let Some((data, _)) = self
+            .models_dev
+            .price_from(model, source.or(qualified.as_deref()))
+        else {
             return result;
         };
-        let Some((data, _)) = self.models_dev.price(&format!("{provider}/{model}")) else {
-            return result;
-        };
-        if data["models_dev_match"]["providers"] != serde_json::json!([provider]) {
+        if source.is_none()
+            && provider.is_some_and(|provider| {
+                data["models_dev_match"]["providers"] != serde_json::json!([provider])
+            })
+        {
             return result;
         }
         result.source_model = data["models_dev_match"]["model"]

@@ -51,9 +51,16 @@ describe("request log columns", () => {
     expect(logMoney("0.000000123456", true)).toBe("$0.000000123456");
     expect(logMoney("0")).toBe("$0");
   });
-  it("uses explicit columns before narrow defaults and calculates only reported measures", () => {
+  it("uses explicit choices before the grouped defaults and calculates only reported measures", () => {
     expect(columnVisible("time", undefined, true)).toBe(true);
-    expect(columnVisible("speed", undefined, true)).toBe(false);
+    expect(columnVisible("speed", undefined, true)).toBe(true);
+    expect(
+      columnVisible(
+        "speed",
+        { ...defaultSettings, logColumns: { speed: false } },
+        true,
+      ),
+    ).toBe(false);
     expect(
       columnVisible(
         "speed",
@@ -134,7 +141,10 @@ describe("request log columns", () => {
     const row = screen.getByRole("row", { name: /请求详情/ });
     fireEvent.keyDown(row, { key: "Enter" });
     expect(open).toHaveBeenCalledOnce();
-    expect(screen.getByText(/Fixture · DSH/)).toBeInTheDocument();
+    expect(screen.getByTitle("Fixture · DSH")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("columnheader").map((c) => c.textContent),
+    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "Token", "费用", "性能"]);
     expect(
       screen.getByTitle("fixture-request → fixture-response"),
     ).toBeInTheDocument();

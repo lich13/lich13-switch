@@ -920,6 +920,45 @@ fn set_gateway_listener(
     r.gateway.set_listener_port(port, &expected_revision)
 }
 #[tauri::command]
+fn get_gateway_models(
+    client_id: Option<gateway::ClientId>,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::model_list::View> {
+    r.gateway(client_id.unwrap_or_default()).gateway_models()
+}
+#[tauri::command]
+async fn refresh_gateway_models(
+    client_id: Option<gateway::ClientId>,
+    provider_ids: Option<Vec<String>>,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::model_list::View> {
+    r.gateway(client_id.unwrap_or_default())
+        .refresh_gateway_models(provider_ids)
+        .await
+}
+#[tauri::command]
+fn search_models_dev(
+    query: String,
+    limit: Option<usize>,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<models_dev::Search> {
+    Ok(r.usage
+        .prices()?
+        .models_dev
+        .search(&query, limit.unwrap_or(50)))
+}
+#[tauri::command]
+fn edit_model_list(
+    client_id: Option<gateway::ClientId>,
+    op: gateway::model_list::Operation,
+    id: String,
+    source: Option<String>,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::model_list::View> {
+    r.gateway(client_id.unwrap_or_default())
+        .edit_model_list(op, &id, source.as_deref())
+}
+#[tauri::command]
 fn preview_dsh_profile(
     profile: Option<String>,
     protocol: gateway::grok_config::Protocol,
@@ -944,6 +983,77 @@ async fn attach_dsh_profile(
             options,
             &expected_revision,
             Some(&preview_revision),
+        )
+        .await
+}
+#[tauri::command]
+async fn attach_dsh_profiles(
+    options: gateway::dsh::Options,
+    all: bool,
+    expected_revision: String,
+    preview_revision: String,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::dsh::Batch> {
+    r.dsh
+        .attach_dsh_profiles(
+            &r.home(gateway::ClientId::Dsh)?,
+            options,
+            all,
+            &expected_revision,
+            Some(&preview_revision),
+        )
+        .await
+}
+#[tauri::command]
+fn read_dsh_file(
+    profile: Option<String>,
+    key: gateway::dsh::editor::FileKey,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::dsh::editor::FileView> {
+    r.dsh
+        .read_dsh_file(&r.home(gateway::ClientId::Dsh)?, profile.as_deref(), key)
+}
+#[tauri::command]
+fn read_previous_dsh_file(
+    profile: Option<String>,
+    key: gateway::dsh::editor::FileKey,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<String> {
+    r.dsh
+        .previous_dsh_file(&r.home(gateway::ClientId::Dsh)?, profile.as_deref(), key)
+}
+#[tauri::command]
+async fn save_dsh_file(
+    profile: Option<String>,
+    key: gateway::dsh::editor::FileKey,
+    text: String,
+    expected_revision: String,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::dsh::editor::FileView> {
+    r.dsh
+        .save_dsh_file(
+            &r.home(gateway::ClientId::Dsh)?,
+            profile.as_deref(),
+            key,
+            Some(&text),
+            &expected_revision,
+        )
+        .await
+}
+#[tauri::command]
+async fn restore_dsh_file(
+    profile: Option<String>,
+    key: gateway::dsh::editor::FileKey,
+    expected_revision: String,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::dsh::editor::FileView> {
+    r.dsh
+        .save_dsh_file(
+            &r.home(gateway::ClientId::Dsh)?,
+            profile.as_deref(),
+            key,
+            None,
+            &expected_revision,
         )
         .await
 }
@@ -1481,6 +1591,15 @@ pub fn run() {
             usage::commands::connect(app.handle(), &runtime);
             runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
             runtime.dsh.observe_home(&runtime.home(gateway::ClientId::Dsh)?);
+            if runtime.smoke.is_none() {
+                for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = g.backfill_models().await {
+                            g.report_model_error(e);
+                        }
+                    });
+                }
+            }
             runtime.gateway.report_diagnostics();
             runtime.grok.report_diagnostics();
             runtime.dsh.report_diagnostics();
@@ -1791,8 +1910,17 @@ pub fn run() {
             get_gateway_listener,
             set_gateway_listener,
             preview_grok_import,
+            get_gateway_models,
+            refresh_gateway_models,
+            search_models_dev,
+            edit_model_list,
             preview_dsh_profile,
             attach_dsh_profile,
+            attach_dsh_profiles,
+            read_dsh_file,
+            read_previous_dsh_file,
+            save_dsh_file,
+            restore_dsh_file,
             cancel_grok_import,
             commit_grok_import,
             reveal_provider_token,

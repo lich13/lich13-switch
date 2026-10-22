@@ -18,6 +18,7 @@ pub struct Effective {
     pub unknown: Vec<String>,
     pub files: Vec<(PathBuf, String)>,
     pub block: Option<String>,
+    pub selection_error: Option<String>,
     pub blocked_env: Vec<&'static str>,
 }
 fn error(s: &str) -> AppError {
@@ -57,6 +58,7 @@ pub(super) fn read_at(
         ],
         files: vec![],
         block: None,
+        selection_error: None,
         blocked_env: vec![],
     };
     let mut doc = DocumentMut::new();
@@ -95,6 +97,7 @@ pub(super) fn read_at(
             .map_err(|_| error("Grok 配置层 TOML 无效，请在原生客户端核对"))?;
         result.layers.push(label.into());
         if layer.contains_key("version_overrides") {
+            result.selection_error = Some("存在版本覆盖，无法确认生效配置".into());
             result.block = Some(format!(
                 "{label} 包含 version_overrides，无法确认生效版本，请人工选择并核对原生 inspect"
             ));
@@ -152,13 +155,55 @@ pub(super) fn read_at(
     }
     for name in ["GROK_CONFIG", "GROK_CONFIG_PATH", "GROK_CAMPAIGNS_OVERRIDE"] {
         if resolve(name).is_some_and(|s| !s.is_empty()) {
+            result.selection_error = Some("存在无法确认的配置覆盖，请在原生客户端核对".into());
             result.block = Some(format!(
                 "检测到 {name}，无法确认其覆盖结果，请人工核对原生 inspect"
             ));
         }
     }
+    let selected = doc
+        .get("models")
+        .and_then(|v| v.get("default"))
+        .and_then(Item::as_str)
+        .unwrap_or("");
+    if let Some(models) = doc.get("models") {
+        let denied = models
+            .get("disabled_models")
+            .and_then(Item::as_array)
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(selected)));
+        let allowed = models.get("allowed_models").and_then(Item::as_array);
+        if denied
+            || allowed.is_some_and(|a| {
+                !a.is_empty()
+                    && !a
+                        .iter()
+                        .any(|v| v.as_str().is_some_and(|p| pattern_matches(p, selected)))
+            })
+        {
+            result.selection_error = Some("受 requirements 限制".into());
+        }
+    }
     result.text = doc.to_string();
     Ok(result)
+}
+fn pattern_matches(pattern: &str, value: &str) -> bool {
+    let mut matches = vec![false; value.len() + 1];
+    matches[0] = true;
+    for p in pattern.bytes() {
+        let mut next = vec![false; matches.len()];
+        if p == b'*' {
+            next[0] = matches[0];
+        }
+        for (i, v) in value.bytes().enumerate() {
+            next[i + 1] = if p == b'*' {
+                matches[i + 1] || next[i]
+            } else {
+                matches[i] && (p == b'?' || p == v)
+            };
+        }
+        matches = next;
+    }
+    matches[value.len()]
 }
 pub fn unchanged(files: &[(PathBuf, String)]) -> Result<bool> {
     for (path, revision) in files {

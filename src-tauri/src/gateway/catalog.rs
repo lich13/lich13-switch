@@ -259,10 +259,11 @@ pub(super) fn local_list(
         let usage = gateway.0.usage.lock().unwrap().clone();
         let prices = usage.as_ref().and_then(|u| u.prices().ok());
         if let Some(prices) = prices {
+            let (choices, _) = gateway.0.model_list.snapshot();
             for model in value["data"].as_array_mut().into_iter().flatten() {
                 if let Some(name) = model["id"]
                     .as_str()
-                    .and_then(|id| prices.models_dev.metadata(id))
+                    .and_then(|id| prices.models_dev.metadata_from(id, choices.source(id)))
                     .and_then(|m| m.name)
                 {
                     model["display_name"] = name.into();

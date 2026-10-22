@@ -7,12 +7,12 @@ export const logColumns = [
   { id: "input", label: "输入", width: 72, visible: true },
   { id: "output", label: "输出", width: 64, visible: true },
   { id: "cacheRead", label: "缓存读", width: 72, visible: true },
-  { id: "cacheWrite", label: "缓存写", width: 72, visible: false },
+  { id: "cacheWrite", label: "缓存写", width: 72, visible: true },
   { id: "reasoning", label: "推理", width: 64, visible: false },
   { id: "hitRate", label: "命中率", width: 64, visible: false },
   { id: "cost", label: "费用", width: 80, visible: true },
   { id: "firstToken", label: "首字", width: 64, visible: true },
-  { id: "duration", label: "耗时", width: 72, visible: false },
+  { id: "duration", label: "耗时", width: 72, visible: true },
   { id: "speed", label: "tok/s", width: 64, visible: true },
   { id: "status", label: "状态码", width: 56, visible: false },
 ] as const;
@@ -20,14 +20,11 @@ export type LogColumn = (typeof logColumns)[number]["id"];
 export function columnVisible(
   id: LogColumn,
   settings: UsageSettings | undefined,
-  narrow: boolean,
+  _narrow: boolean,
 ) {
   if (id === "time") return true;
   return (
-    settings?.logColumns?.[id] ??
-    (narrow && (id === "firstToken" || id === "speed")
-      ? false
-      : logColumns.find((c) => c.id === id)!.visible)
+    settings?.logColumns?.[id] ?? logColumns.find((c) => c.id === id)!.visible
   );
 }
 export function logNumber(

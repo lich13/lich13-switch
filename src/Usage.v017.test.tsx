@@ -214,17 +214,7 @@ it("renders compact token cells with exact titles and independent speed column",
   );
   expect(
     screen.getAllByRole("columnheader").map((header) => header.textContent),
-  ).toEqual([
-    "结束时间",
-    "供应商·客户端",
-    "模型",
-    "输入",
-    "输出",
-    "缓存读",
-    "费用",
-    "首字",
-    "tok/s",
-  ]);
+  ).toEqual(["结束时间", "供应商 / 客户端", "模型", "Token", "费用", "性能"]);
   const quantity = within(row).getByText("1,234");
   fireEvent.focus(quantity);
   expect(quantity).toHaveTextContent("1,234");

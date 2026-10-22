@@ -92,7 +92,13 @@ let doc: ConfigDocument = {
   revision: "preview",
   path: "~/.codex/config.toml",
 };
-let grokDoc: ConfigDocument = { ...doc, clientId: "grok", path: "~/.grok/config.toml", revision: "preview-grok-config", text: '[models]\ndefault = "grok-4.5"\n' };
+let grokDoc: ConfigDocument = {
+  ...doc,
+  clientId: "grok",
+  path: "~/.grok/config.toml",
+  revision: "preview-grok-config",
+  text: '[models]\ndefault = "grok-4.5"\n',
+};
 let claudeDoc: ConfigDocument = {
   clientId: "claude",
   guarded: false,
@@ -282,7 +288,28 @@ export async function run(
     if (name === "commit_sub2api_import") emit("gateway-state", result);
     return result;
   }
-  if (["get_gateway_listener", "set_gateway_listener", "preview_grok_import", "cancel_grok_import", "commit_grok_import"].includes(name)) {
+  if (
+    [
+      "get_gateway_models",
+      "refresh_gateway_models",
+      "search_models_dev",
+      "edit_model_list",
+      "get_models_dev",
+      "update_models_dev",
+      "preview_dsh_profile",
+      "attach_dsh_profile",
+      "attach_dsh_profiles",
+      "read_dsh_file",
+      "save_dsh_file",
+      "read_previous_dsh_file",
+      "restore_dsh_file",
+      "get_gateway_listener",
+      "set_gateway_listener",
+      "preview_grok_import",
+      "cancel_grok_import",
+      "commit_grok_import",
+    ].includes(name)
+  ) {
     const result = gatewayPreview(name, args);
     if (name === "commit_grok_import") emit("gateway-state", result);
     return result;
@@ -308,18 +335,71 @@ export async function run(
   }
   switch (name) {
     case "preview_account_import":
-      return { token: "preview-official-import", revision: "preview-accounts", rows: [
-        { id: 0, name: "开发账号", format: "sub2api", identityHint: "93bd723015aa", duplicate: false, error: null },
-        { id: 1, name: "工作空间", format: "cliproxyapi", identityHint: "781e2dca0364", duplicate: true, error: null },
-        { id: 2, name: "第 3 项", format: "codex", identityHint: null, duplicate: false, error: "缺少完整的 id_token、access_token 或 refresh_token；不会生成替代 Token" },
-      ] };
+      return {
+        token: "preview-official-import",
+        revision: "preview-accounts",
+        rows: [
+          {
+            id: 0,
+            name: "开发账号",
+            format: "sub2api",
+            identityHint: "93bd723015aa",
+            duplicate: false,
+            error: null,
+          },
+          {
+            id: 1,
+            name: "工作空间",
+            format: "cliproxyapi",
+            identityHint: "781e2dca0364",
+            duplicate: true,
+            error: null,
+          },
+          {
+            id: 2,
+            name: "第 3 项",
+            format: "codex",
+            identityHint: null,
+            duplicate: false,
+            error:
+              "缺少完整的 id_token、access_token 或 refresh_token；不会生成替代 Token",
+          },
+        ],
+      };
     case "commit_account_import":
-      if (!demo.accounts.some(a => a.id === "fixture-imported-official")) demo.accounts.push({ id: "fixture-imported-official", name: "开发账号", kind: "chatgpt", email: null, current: false, updatedAt: 0 });
+      if (!demo.accounts.some((a) => a.id === "fixture-imported-official"))
+        demo.accounts.push({
+          id: "fixture-imported-official",
+          name: "开发账号",
+          kind: "chatgpt",
+          email: null,
+          current: false,
+          updatedAt: 0,
+        });
       break;
     case "preview_account_export":
-      return { revision: "preview-accounts", rows: demo.accounts.map(a => ({ id: a.id, name: a.name, error: a.kind === "chatgpt" ? null : "仅支持 ChatGPT/Codex 官方 OAuth 账号" })) };
+      return {
+        revision: "preview-accounts",
+        rows: demo.accounts.map((a) => ({
+          id: a.id,
+          name: a.name,
+          error:
+            a.kind === "chatgpt"
+              ? null
+              : "仅支持 ChatGPT/Codex 官方 OAuth 账号",
+        })),
+      };
     case "prepare_account_template":
-      return args.replaceTemplate ? { ready: false, token: "preview-oauth-template", rows: [{ id: 0, name: "标准 OAuth" }, { id: 1, name: "自定义并发 OAuth" }] } : { ready: true, token: null, rows: [] };
+      return args.replaceTemplate
+        ? {
+            ready: false,
+            token: "preview-oauth-template",
+            rows: [
+              { id: 0, name: "标准 OAuth" },
+              { id: 1, name: "自定义并发 OAuth" },
+            ],
+          }
+        : { ready: true, token: null, rows: [] };
     case "cancel_account_exchange":
     case "select_account_template":
       return;
@@ -410,7 +490,13 @@ export async function run(
       demo.accounts = demo.accounts.filter((a) => a.id !== args.id);
       break;
     case "read_config":
-      return { ...(args.clientId === "claude" ? claudeDoc : args.clientId === "grok" ? grokDoc : doc) };
+      return {
+        ...(args.clientId === "claude"
+          ? claudeDoc
+          : args.clientId === "grok"
+            ? grokDoc
+            : doc),
+      };
     case "read_previous_config":
       if (!previousConfig[String(args.clientId)])
         throw new Error("没有可恢复的配置");
@@ -425,7 +511,12 @@ export async function run(
       return;
     case "save_config": {
       await run("validate_config", args);
-      const current = args.clientId === "claude" ? claudeDoc : args.clientId === "grok" ? grokDoc : doc;
+      const current =
+        args.clientId === "claude"
+          ? claudeDoc
+          : args.clientId === "grok"
+            ? grokDoc
+            : doc;
       if (args.expectedRevision !== current.revision)
         throw { code: "CONFLICT", message: "配置已被外部修改，草稿已保留" };
       previousConfig[current.clientId] = current.text;

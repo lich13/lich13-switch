@@ -15,6 +15,19 @@ function commandTypeExamples() {
   const detail = command("get_usage_detail", { id: "fixture-record" });
   expectTypeOf(detail).toEqualTypeOf<Promise<UsageRecord>>();
 
+  void command("read_dsh_file", { profile: "default", key: "profilePatch" });
+  // @ts-expect-error File access accepts only the declared enum, never a path.
+  void command("read_dsh_file", { profile: "default", key: "../fixture.yaml" });
+  void command("save_dsh_file", {
+    profile: null,
+    key: "homePatch",
+    text: "[]",
+    expectedRevision: "r1",
+    // @ts-expect-error An arbitrary path is not part of the editor contract.
+    path: "fixture.yaml",
+  });
+  expectTypeOf<CommandResult<"search_models_dev">>().toHaveProperty("error");
+
   // @ts-expect-error Unknown commands must not be callable.
   void command("unknown_fixture_command");
 

@@ -212,8 +212,10 @@ it("filters Grok session summaries independently and labels their details", asyn
   expect(row).toHaveAttribute("aria-label", expect.stringContaining("轮次详情"));
   expect(cells[2]).toHaveTextContent("多个模型（2）");
   expect(cells[3]).toHaveTextContent("32");
-  expect(cells[4]).toHaveTextContent("90");
-  expect(cells[5]).toHaveTextContent("6");
+  expect(cells[3]).toHaveTextContent("90");
+  expect(cells[3]).toHaveTextContent("6");
+  expect(cells[3]).toHaveTextContent("8");
+  expect(cells[4]).toHaveTextContent("—");
   await user.click(row);
   const dialog = await screen.findByRole("dialog", { name: "Grok 轮次详情" });
   expect(detailValue(dialog, "来源")).toHaveTextContent(/^Grok Build 会话$/);

@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "lich13-switch"
-version = "0.25.14"
+version = "0.25.15"
 dependencies = [
  "async-stream",
  "auto-launch",

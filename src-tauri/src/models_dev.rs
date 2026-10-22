@@ -66,6 +66,23 @@ pub struct Metadata {
     pub output: Option<u64>,
     pub reasoning_efforts: Option<BTreeMap<String, Value>>,
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub source: String,
+    pub provider: String,
+    pub provider_name: String,
+    pub model: String,
+    pub name: Option<String>,
+    pub context: Option<u64>,
+    pub output: Option<u64>,
+    pub cost: Option<Value>,
+}
+#[derive(Serialize)]
+pub struct Search {
+    pub hits: Vec<SearchHit>,
+    pub error: Option<String>,
+}
 #[derive(Clone, Default)]
 struct State {
     index: Option<Index>,
@@ -248,9 +265,13 @@ impl Catalog {
         drop(state);
         Ok(self.view())
     }
+    #[cfg(test)]
     pub fn metadata(&self, id: &str) -> Option<Metadata> {
+        self.metadata_from(id, None)
+    }
+    pub fn metadata_from(&self, id: &str, source: Option<&str>) -> Option<Metadata> {
         let state = self.state.read().unwrap();
-        let (matches, basis) = resolve(state.index.as_ref()?, id, false)?;
+        let (matches, basis) = resolve_source(state.index.as_ref()?, id, false, source)?;
         let (_, first_id, first) = *matches.first()?;
         if matches.iter().any(|(_, _, m)| {
             m.name != first.name
@@ -297,8 +318,11 @@ impl Catalog {
         })
     }
     pub fn price(&self, id: &str) -> Option<(Value, String)> {
+        self.price_from(id, None)
+    }
+    pub fn price_from(&self, id: &str, source: Option<&str>) -> Option<(Value, String)> {
         let state = self.state.read().unwrap();
-        let (matches, basis) = resolve(state.index.as_ref()?, id, true)?;
+        let (matches, basis) = resolve_source(state.index.as_ref()?, id, true, source)?;
         let (_, source_model, first) = *matches.first()?;
         let cost = first.cost.as_ref()?;
         if matches
@@ -314,6 +338,58 @@ impl Catalog {
             }}),
             state.version.clone()?,
         ))
+    }
+    pub fn has_source(&self, source: &str) -> bool {
+        self.state
+            .read()
+            .unwrap()
+            .index
+            .as_ref()
+            .is_some_and(|index| qualified(index, source).is_some())
+    }
+    pub fn search(&self, query: &str, limit: usize) -> Search {
+        let state = self.state.read().unwrap();
+        let Some(index) = &state.index else {
+            return Search {
+                hits: vec![],
+                error: Some("模型索引不可用，请刷新 models.dev".into()),
+            };
+        };
+        let query = query.trim().to_lowercase();
+        let hits = index
+            .providers
+            .iter()
+            .flat_map(|(provider, p)| {
+                let query = &query;
+                p.models
+                    .iter()
+                    .filter(move |(key, model)| {
+                        [
+                            provider.as_str(),
+                            p.name.as_str(),
+                            key.as_str(),
+                            model.name.as_deref().unwrap_or(""),
+                        ]
+                        .iter()
+                        .any(|s| s.to_lowercase().contains(query.as_str()))
+                    })
+                    .map(move |(key, model)| SearchHit {
+                        source: format!("{provider}/{key}"),
+                        provider: provider.clone(),
+                        provider_name: p.name.clone(),
+                        model: key.clone(),
+                        name: model.name.clone(),
+                        context: model.limit.as_ref().and_then(|v| v["context"].as_u64()),
+                        output: model.limit.as_ref().and_then(|v| v["output"].as_u64()),
+                        cost: model.cost.clone(),
+                    })
+            })
+            .take(limit.min(50))
+            .collect();
+        Search {
+            hits,
+            error: state.error.clone(),
+        }
     }
 }
 async fn download(source: &str) -> Result<Index> {
@@ -440,7 +516,72 @@ pub fn names(id: &str, pricing: bool) -> Vec<String> {
     names
 }
 type Matched<'a> = (&'a str, &'a str, &'a Model);
+fn qualified<'a>(index: &'a Index, source: &str) -> Option<Matched<'a>> {
+    let (provider, key) = source.split_once('/')?;
+    let (provider, p) = index.providers.get_key_value(provider)?;
+    let (key, model) = p.models.get_key_value(key)?;
+    Some((provider, key, model))
+}
+fn resolve_source<'a>(
+    index: &'a Index,
+    id: &str,
+    pricing: bool,
+    source: Option<&str>,
+) -> Option<(Vec<Matched<'a>>, &'static str)> {
+    if let Some(source) = source {
+        return Some((vec![qualified(index, source)?], "pinned"));
+    }
+    resolve(index, id, pricing)
+}
 fn resolve<'a>(
+    index: &'a Index,
+    id: &str,
+    pricing: bool,
+) -> Option<(Vec<Matched<'a>>, &'static str)> {
+    let (matches, basis) = resolve_candidates(index, id, pricing)?;
+    if matches.len() > 1 {
+        let canonical: BTreeSet<_> = matches
+            .iter()
+            .filter_map(|(_, _, m)| m.canonical_model_id.as_deref())
+            .collect();
+        if canonical.len() == 1 {
+            if let Some(first) = canonical.first().and_then(|id| qualified(index, id)) {
+                return Some((vec![first], "canonical"));
+            }
+        }
+        // Canonical declarations are preferred. Older catalog rows omit them;
+        // recognize only established model families with an actual maker row.
+        let first_party: Vec<_> = matches
+            .iter()
+            .copied()
+            .filter(|(provider, key, model)| {
+                model
+                    .canonical_model_id
+                    .as_deref()
+                    .and_then(|id| id.split_once('/'))
+                    .is_some_and(|(maker, _)| maker == *provider)
+                    || match *provider {
+                        "anthropic" => key.starts_with("claude-"),
+                        "openai" => ["gpt-", "chatgpt-", "o1", "o3", "o4"]
+                            .iter()
+                            .any(|prefix| key.starts_with(prefix)),
+                        "google" => key.starts_with("gemini-"),
+                        "xai" => key.starts_with("grok-"),
+                        "deepseek" => key.starts_with("deepseek-"),
+                        "zhipuai" => key.starts_with("glm-"),
+                        "moonshotai" => key.starts_with("kimi-"),
+                        _ => false,
+                    }
+            })
+            .collect();
+        if first_party.len() == 1 {
+            return Some((first_party, "first-party"));
+        }
+        return None;
+    }
+    Some((matches, basis))
+}
+fn resolve_candidates<'a>(
     index: &'a Index,
     id: &str,
     pricing: bool,
@@ -609,8 +750,14 @@ mod tests {
                 "relay":{"models":{"claude-opus-4-6":{"name":"Relay","reasoning":true,"limit":{"context":100000,"output":8000},"cost":{"input":8,"output":30}}}}
             }),
         );
-        assert!(cat.metadata("claude-opus-4-6").is_none());
-        assert!(cat.price("claude-opus-4-6").is_none());
+        assert_eq!(
+            cat.metadata("claude-opus-4-6").unwrap().sources,
+            vec!["anthropic"]
+        );
+        assert_eq!(
+            cat.price("claude-opus-4-6").unwrap().0["models_dev_cost"]["input"],
+            5
+        );
         let model = cat.metadata("anthropic/claude-opus-4-6").unwrap();
         assert_eq!(model.context, Some(200000));
         assert_eq!(model.reasoning_efforts.unwrap().len(), 2);
@@ -636,6 +783,82 @@ mod tests {
             .unwrap()
             .reasoning_efforts
             .is_none());
+    }
+    #[test]
+    fn source_priority_search_and_ambiguity_use_one_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = catalog(
+            dir.path(),
+            json!({
+                "maker":{"name":"Maker","models":{"native":{"canonical_model_id":"maker/native","name":"Native","cost":{"input":1,"output":2},"limit":{"context":1000}}}},
+                "relay":{"models":{"alias":{"canonical_model_id":"maker/native","name":"Alias","cost":{"input":4,"output":8}},"shared":{"name":"Shared","cost":{"input":1,"output":2}}}},
+                "other":{"models":{"alias":{"canonical_model_id":"maker/native","cost":{"input":9,"output":10}},"shared":{"name":"Shared","cost":{"input":1,"output":2}}}}
+            }),
+        );
+        assert_eq!(cat.metadata("alias").unwrap().model, "native");
+        assert_eq!(cat.price("alias").unwrap().0["models_dev_cost"]["input"], 1);
+        assert!(cat.metadata("shared").is_none());
+        assert!(cat.price("shared").is_none());
+        assert_eq!(
+            cat.metadata_from("shared", Some("relay/alias"))
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Alias")
+        );
+        assert_eq!(
+            cat.price_from("alias", Some("other/alias")).unwrap().0["models_dev_cost"]["input"],
+            9
+        );
+        assert!(cat.price_from("alias", Some("missing/source")).is_none());
+        assert_eq!(
+            cat.price("relay/alias").unwrap().0["models_dev_cost"]["input"],
+            4
+        );
+        assert_eq!(cat.search("alias", 50).hits.len(), 2);
+        assert_eq!(cat.search("", 1).hits.len(), 1);
+        assert!(cat.search("no-match", 50).error.is_none());
+        assert!(Catalog::new(&dir.path().join("empty"))
+            .search("alias", 50)
+            .error
+            .is_some());
+    }
+    #[test]
+    #[ignore = "explicit offline public index comparison"]
+    fn offline_resolution_comparison() {
+        let path = std::env::var("LICH13_MODELS_INDEX").expect("supply a public index snapshot");
+        let index: Index = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(validate(&index));
+        let ids: BTreeSet<_> = index
+            .providers
+            .values()
+            .flat_map(|p| p.models.keys())
+            .filter(|id| !id.contains('/'))
+            .collect();
+        let priced = |found: Option<(Vec<Matched<'_>>, &str)>| {
+            found.is_some_and(|(matches, _)| {
+                matches.first().is_some_and(|(_, _, first)| {
+                    first.cost.is_some()
+                        && matches
+                            .iter()
+                            .all(|(_, _, m)| m.cost == first.cost && m.fast_cost == first.fast_cost)
+                })
+            })
+        };
+        let before = ids
+            .iter()
+            .filter(|id| priced(resolve_candidates(&index, id, true)))
+            .count();
+        let after = ids
+            .iter()
+            .filter(|id| priced(resolve(&index, id, true)))
+            .count();
+        println!(
+            "offline unqualified models={} priced_before={} priced_after={}",
+            ids.len(),
+            before,
+            after
+        );
     }
     #[test]
     fn exact_decimal_bands_and_unsupported_tariffs() {

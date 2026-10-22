@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { ArrowDown, ArrowUp, Archive, SquarePen } from "lucide-react";
 import {
   clientName,
   type UsageRecord,
@@ -32,16 +32,41 @@ export default function UsageLogTable({
   name: (id: string | null) => string;
   open: (r: UsageRecord) => void;
 }) {
-  const [narrow, setNarrow] = useState(window.innerWidth < 900);
-  useEffect(() => {
-    const resize = () => setNarrow(window.innerWidth < 900);
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-  }, []);
-  const columns = logColumns.filter((c) =>
-      columnVisible(c.id, settings, narrow),
-    ),
-    exact = settings?.logNumberMode === "exact";
+  const visible = (id: LogColumn) => columnVisible(id, settings, false);
+  const tokenFields = [
+    "input",
+    "output",
+    "cacheRead",
+    "cacheWrite",
+    "reasoning",
+    "hitRate",
+  ] as const;
+  const performanceFields = ["firstToken", "duration", "speed"] as const;
+  const columns = [
+    { id: "time", label: "结束时间", width: 132, visible: true },
+    {
+      id: "provider",
+      label: "供应商 / 客户端",
+      width: 144,
+      visible: visible("provider"),
+    },
+    { id: "model", label: "模型", width: 182, visible: visible("model") },
+    {
+      id: "tokens",
+      label: "Token",
+      width: 174,
+      visible: tokenFields.some(visible),
+    },
+    { id: "cost", label: "费用", width: 108, visible: visible("cost") },
+    {
+      id: "performance",
+      label: "性能",
+      width: 144,
+      visible: performanceFields.some(visible),
+    },
+    { id: "status", label: "状态码", width: 64, visible: visible("status") },
+  ].filter((c) => c.visible);
+  const exact = settings?.logNumberMode === "exact";
   const visibility = (id: LogColumn, visible: boolean) => {
     if (!settings || id === "time") return;
     save({
@@ -60,7 +85,7 @@ export default function UsageLogTable({
                 <input
                   type="checkbox"
                   disabled={c.id === "time" || !settings}
-                  checked={columnVisible(c.id, settings, narrow)}
+                  checked={visible(c.id)}
                   onChange={(e) => visibility(c.id, e.target.checked)}
                 />
                 {c.label}
@@ -154,7 +179,7 @@ export default function UsageLogTable({
                   {logNumber(value, exact)}
                 </span>
               );
-              const cells: Record<LogColumn, React.ReactNode> = {
+              const cells: Record<string, React.ReactNode> = {
                 time: (
                   <>
                     <span
@@ -188,7 +213,8 @@ export default function UsageLogTable({
                     className="usage-provider-inline"
                     title={`${name(a.provider)} · ${clientName(r.client)}`}
                   >
-                    {name(a.provider)} · {clientName(r.client)}
+                    <strong>{name(a.provider)}</strong>
+                    <small>{clientName(r.client)}</small>
                   </span>
                 ),
                 model: (
@@ -200,7 +226,7 @@ export default function UsageLogTable({
                         : model
                     }
                   >
-                    {model}
+                    <strong>{model}</strong>
                     <span className="usage-badges">
                       {a.stream && !native && (
                         <span className="usage-badge stream">流式</span>
@@ -293,6 +319,59 @@ export default function UsageLogTable({
                 ),
                 status: native ? "—" : (a.status ?? "—"),
               };
+              const tokenIcons = {
+                input: <ArrowDown />,
+                output: <ArrowUp />,
+                cacheRead: <Archive />,
+                cacheWrite: <SquarePen />,
+              };
+              const tokenLabels = {
+                input: "输入",
+                output: "输出",
+                cacheRead: "缓存读",
+                cacheWrite: "缓存写",
+                reasoning: "推理",
+                hitRate: "命中率",
+              };
+              cells.tokens = (
+                <div
+                  className={`usage-token-grid ${visible("reasoning") || visible("hitRate") ? "extended" : ""}`}
+                >
+                  {tokenFields.filter(visible).map((field) => (
+                    <span
+                      key={field}
+                      className={`usage-token-item ${field}`}
+                      aria-label={tokenLabels[field]}
+                      title={tokenLabels[field]}
+                    >
+                      {field in tokenIcons ? (
+                        tokenIcons[field as keyof typeof tokenIcons]
+                      ) : (
+                        <small>{tokenLabels[field]}</small>
+                      )}
+                      {cells[field]}
+                    </span>
+                  ))}
+                </div>
+              );
+              cells.performance = (
+                <div className="usage-performance">
+                  {performanceFields.filter(visible).map((field) => (
+                    <span key={field}>
+                      <small>
+                        {
+                          {
+                            firstToken: "首字",
+                            duration: "总耗时",
+                            speed: "输出 TPS",
+                          }[field]
+                        }
+                      </small>
+                      {cells[field]}
+                    </span>
+                  ))}
+                </div>
+              );
               return (
                 <tr
                   key={r.id}
@@ -324,7 +403,9 @@ export default function UsageLogTable({
                             : "usage-numeric"
                       }
                     >
-                      {cells[c.id]}
+                      <div className={`usage-cell usage-cell-${c.id}`}>
+                        {cells[c.id]}
+                      </div>
                     </td>
                   ))}
                 </tr>

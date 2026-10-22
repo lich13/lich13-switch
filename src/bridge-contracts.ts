@@ -11,6 +11,7 @@ import type {
   GrokProtocol,
   LoginState,
   ModelCatalog,
+  ModelMetadata,
   Preferences,
   ProviderQuota,
   StartupState,
@@ -129,6 +130,72 @@ export type GrokImportPreview = {
   clearEnvironment: string[];
   error: string | null;
 };
+export type GatewayModels = {
+  clientId: ClientId;
+  passthrough: boolean;
+  hint: string;
+  models: {
+    id: string;
+    providers: { id: string; name: string }[];
+    manual: boolean;
+    source: string | null;
+    pinned: string | null;
+    metadata: ModelMetadata | null;
+    price: {
+      source: string;
+      inputPerM: string | null;
+      outputPerM: string | null;
+      cacheReadPerM: string | null;
+      cacheWritePerM: string | null;
+      deviation: boolean;
+    } | null;
+  }[];
+  providers: {
+    id: string;
+    name: string;
+    count: number;
+    checkedAt: number | null;
+    stale: boolean;
+    error: string | null;
+  }[];
+  modelsDev: ModelsDevState;
+  error: string | null;
+};
+export type ModelSearch = {
+  hits: {
+    source: string;
+    provider: string;
+    providerName: string;
+    model: string;
+    name: string | null;
+    context: number | null;
+    output: number | null;
+    cost: Record<string, unknown> | null;
+  }[];
+  error: string | null;
+};
+export type DshFileKey =
+  | "profilePatch"
+  | "homePatch"
+  | "settings"
+  | "environment"
+  | "credentials";
+export type DshFileView = {
+  profiles: string[];
+  files: DshFileKey[];
+  text: string;
+  revision: string;
+  readOnly: boolean;
+  canRestore: boolean;
+};
+export type DshBatch = {
+  state: GatewayState;
+  results: {
+    profile: string;
+    status: "success" | "failed" | "pending";
+    error: string | null;
+  }[];
+};
 export type GatewayEdit =
   | {
       op: "saveProvider";
@@ -242,6 +309,37 @@ export type CommandMap = {
   get_gateway: Call<Client, GatewayState>;
   get_gateway_listener: Call<None, GatewayListener>;
   set_gateway_listener: Call<{ port: number } & Revision, GatewayListener>;
+  get_gateway_models: Call<Client, GatewayModels>;
+  refresh_gateway_models: Call<
+    Client & { providerIds?: string[] | null },
+    GatewayModels
+  >;
+  search_models_dev: Call<{ query: string; limit?: number }, ModelSearch>;
+  edit_model_list: Call<
+    Client & {
+      op: "add" | "remove" | "pin" | "unpin";
+      id: string;
+      source?: string | null;
+    },
+    GatewayModels
+  >;
+  read_dsh_file: Call<{ profile: string | null; key: DshFileKey }, DshFileView>;
+  read_previous_dsh_file: Call<
+    { profile: string | null; key: DshFileKey },
+    string
+  >;
+  save_dsh_file: Call<
+    { profile: string | null; key: DshFileKey; text: string } & Revision,
+    DshFileView
+  >;
+  restore_dsh_file: Call<
+    { profile: string | null; key: DshFileKey } & Revision,
+    DshFileView
+  >;
+  attach_dsh_profiles: Call<
+    { options: DshOptions; all: boolean; previewRevision: string } & Revision,
+    DshBatch
+  >;
   preview_dsh_profile: Call<
     { profile?: string | null; protocol: GrokProtocol },
     DshPreview

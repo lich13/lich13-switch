@@ -24,8 +24,8 @@ import {
   UserRound,
   MoreHorizontal,
   X,
-  Upload,
-  Download,
+  FileInput,
+  FileOutput,
   ScrollText,
   ExternalLink,
   ChevronRight,
@@ -399,20 +399,28 @@ export default function App() {
                 <h1>账号</h1>
               </div>
               <div className="account-actions">
-                <button
-                  disabled={!state}
-                  onClick={() => setExchangeMode("import")}
+                <div
+                  className="exchange-button-group"
+                  role="group"
+                  aria-label="账号导入导出"
                 >
-                  <Upload size={16} />
-                  导入
-                </button>
-                <button
-                  disabled={!state?.accounts.length}
-                  onClick={() => setExchangeMode("export")}
-                >
-                  <Download size={16} />
-                  导出
-                </button>
+                  <button
+                    className="exchange-button"
+                    disabled={!state}
+                    onClick={() => setExchangeMode("import")}
+                  >
+                    <FileInput size={16} />
+                    导入
+                  </button>
+                  <button
+                    className="exchange-button"
+                    disabled={!state?.accounts.length}
+                    onClick={() => setExchangeMode("export")}
+                  >
+                    <FileOutput size={16} />
+                    导出
+                  </button>
+                </div>
                 <button
                   className="primary"
                   onClick={() => setDialog("add")}
@@ -1045,7 +1053,7 @@ function AddAccount({
       ) : (
         <>
           <div className="import-area">
-            <Upload size={26} />
+            <FileInput size={26} />
             <h3>导入 Codex、Sub2API 或 CLIProxyAPI</h3>
 
             <button className="primary" disabled={busy} onClick={onImport}>
@@ -1154,14 +1162,6 @@ function SettingsForm({
         </label>
         <NotificationPermission />
       </div>
-      <label>
-        DeepSeek Harness 目录
-        <input
-          value={prefs.dshHome ?? ""}
-          onChange={(e) => setPrefs({ ...prefs, dshHome: e.target.value })}
-          placeholder="DSH_HOME 的绝对路径"
-        />
-      </label>
       <StartupSettings />
       <PowerSettings />
       <LinkSettings />

@@ -814,3 +814,54 @@ async fn frozen_quotes_survive_remote_updates_and_manual_configuration() {
         ("/prices.json", Some(ETAG)),
     ]);
 }
+#[test]
+fn model_list_references_keep_fixed_and_seed_priority_without_changing_quotes() {
+    use super::pricing::Pricing;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let seed = Pricing::new(dir.path()).unwrap();
+    let model = seed
+        .view()
+        .models
+        .keys()
+        .find(|key| key.as_str() != "sample_spec")
+        .unwrap()
+        .clone();
+    drop(seed);
+    let index = json!({"schema":1,"updated_at":1,"providers":{
+        "maker-a":{"name":"Maker A","models":{(model.clone()):{"cost":{"input":1,"output":2}},"fixture-ambiguous":{"cost":{"input":1,"output":2}}}},
+        "maker-b":{"name":"Maker B","models":{(model.clone()):{"cost":{"input":9,"output":18}},"fixture-ambiguous":{"cost":{"input":9,"output":18}}}}
+    }});
+    std::fs::write(dir.path().join("models-dev-index.json"), index.to_string()).unwrap();
+    let prices = Pricing::new(dir.path()).unwrap();
+    let source = format!("maker-b/{model}");
+    let original = prices.quote(Some(&model), "1");
+    assert_eq!(
+        prices.reference(&model, Some(&source)).unwrap().source,
+        "sub2api"
+    );
+    let view = prices.view();
+    let mut config = view.config;
+    config.fixed.insert(
+        model.clone(),
+        json!({"input_cost_per_token":"0.000003", "output_cost_per_token":"0.000004"}),
+    );
+    prices.configure(config, &view.revision).unwrap();
+    let fixed = prices.reference(&model, Some(&source)).unwrap();
+    assert_eq!(fixed.source, "fixed");
+    assert_eq!(fixed.input_per_m.as_deref(), Some("3"));
+    let reference = prices
+        .reference("fixture-ambiguous", Some("maker-b/fixture-ambiguous"))
+        .unwrap();
+    assert_eq!(reference.source, "models.dev");
+    assert_eq!(reference.input_per_m.as_deref(), Some("9"));
+    assert!(prices.quote(Some("fixture-ambiguous"), "1").data.is_none());
+    assert_eq!(original.source, "sub2api");
+    let view = prices.view();
+    let mut config = view.config;
+    config.excluded.insert("fixture-ambiguous".into());
+    prices.configure(config, &view.revision).unwrap();
+    assert!(prices
+        .reference("fixture-ambiguous", Some("maker-b/fixture-ambiguous"))
+        .is_none());
+}

@@ -10,7 +10,13 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use yaml_edit::{Document, Mapping, Sequence, YamlFile, YamlNode};
+use yaml_edit::{AsYaml, Document, Mapping, Sequence, YamlFile, YamlNode};
+
+mod selection;
+pub use selection::current;
+mod batch;
+pub mod editor;
+pub use batch::Batch;
 
 const ROUTE: &str = "lich13-switch";
 const KEY: &str = "LICH13_SWITCH_GATEWAY_KEY";
@@ -96,16 +102,9 @@ fn find_row(seq: &Sequence, id: &str) -> Result<Option<(usize, Mapping)>> {
     Ok(found)
 }
 fn row_config(seq: &Sequence, id: &str, inherited: Option<&Mapping>) -> Result<Mapping> {
-    let row = if let Some((_, row)) = find_row(seq, id)? {
-        row
-    } else {
-        let row = Mapping::new();
-        row.set("id", id);
-        seq.push(row);
-        find_row(seq, id)?
-            .ok_or_else(|| error("无法添加 DSH 配置行"))?
-            .1
-    };
+    let row = find_row(seq, id)?
+        .ok_or_else(|| error("缺少 DSH 配置行"))?
+        .1;
     if row
         .get("disabled")
         .is_some_and(|n| n.to_bool() != Some(false))
@@ -116,6 +115,33 @@ fn row_config(seq: &Sequence, id: &str, inherited: Option<&Mapping>) -> Result<M
         row.set("config", inherited.cloned().unwrap_or_else(Mapping::new));
     }
     mapping(&row, "config")
+}
+fn editable_patch(raw: &str, make_default: bool) -> Result<(YamlFile, Sequence)> {
+    let (_, seq) = patch_file(raw)?;
+    // yaml-edit cannot append a block mapping to a flow sequence, and appending
+    // after a trailing comment can join the new row to that comment. Insert
+    // complete rows before the existing block instead, leaving its bytes intact.
+    if seq.is_flow_style() && !seq.is_empty() {
+        return Err(error("接入前请将 profile patch 展开为多行 YAML 数组"));
+    }
+    let mut rows = String::new();
+    for id in [PI, DEFAULT] {
+        if (id == PI || make_default) && find_row(&seq, id)?.is_none() {
+            rows.push_str(&format!("- id: {id}\n"));
+        }
+    }
+    if rows.is_empty() {
+        return patch_file(raw);
+    }
+    let range = seq.as_node().unwrap().text_range();
+    let start = usize::from(range.start());
+    let end = if seq.is_empty() {
+        usize::from(range.end())
+    } else {
+        start
+    };
+    let next = format!("{}{}{}", &raw[..start], rows, &raw[end..]);
+    patch_file(&next)
 }
 fn profile_dir(home: &Path, profile: &str) -> Result<PathBuf> {
     if profile.is_empty()
@@ -141,6 +167,7 @@ fn profile_dir(home: &Path, profile: &str) -> Result<PathBuf> {
     {
         return Err(error("DSH profile 不能是符号链接"));
     }
+    editor::no_symlinks(home, &path)?;
     Ok(path)
 }
 #[derive(Serialize)]
@@ -171,6 +198,47 @@ pub struct Snapshot {
     patch: Change,
     environment: Change,
     credentials: Change,
+    #[serde(default)]
+    profiles: BTreeMap<String, ProfileSnapshot>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct ProfileSnapshot {
+    options: Options,
+    active: bool,
+    patch: Change,
+}
+impl Snapshot {
+    fn entries(&self) -> BTreeMap<String, ProfileSnapshot> {
+        if self.profiles.is_empty() {
+            BTreeMap::from([(
+                self.options.profile.clone(),
+                ProfileSnapshot {
+                    options: self.options.clone(),
+                    active: self.active,
+                    patch: self.patch.clone(),
+                },
+            )])
+        } else {
+            self.profiles.clone()
+        }
+    }
+    fn for_profile(&self, profile: &str) -> Option<Self> {
+        self.entries().get(profile).map(|p| Self {
+            options: p.options.clone(),
+            active: p.active,
+            patch: p.patch.clone(),
+            environment: self.environment.clone(),
+            credentials: self.credentials.clone(),
+            profiles: BTreeMap::new(),
+        })
+    }
+    fn active_profiles(&self) -> Vec<Self> {
+        self.entries()
+            .values()
+            .filter(|p| p.active)
+            .filter_map(|p| self.for_profile(&p.options.profile))
+            .collect()
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Change {
@@ -193,6 +261,7 @@ struct Input {
     credentials: Change,
     layers: Vec<(PathBuf, String)>,
     configs: BTreeMap<String, Mapping>,
+    names: BTreeMap<String, String>,
 }
 impl Input {
     fn read(home: &Path, profile: &str) -> Result<Self> {
@@ -204,6 +273,7 @@ impl Input {
             dir,
             layers: vec![],
             configs: BTreeMap::new(),
+            names: BTreeMap::new(),
         };
         input.layers.push((
             input.dir.join("package.json"),
@@ -231,6 +301,11 @@ impl Input {
                 "当前 profile 未找到 llm-pi-ai，请在 DSH 启用对应 bundle",
             ));
         }
+        for file in [PATCH, "settings.yaml"] {
+            if let Some(raw) = text(&home.join(file))? {
+                input.layers.push((home.join(file), raw));
+            }
+        }
         Ok(input)
     }
     fn bundle(&mut self, home: &Path, name: &str) -> Result<()> {
@@ -245,6 +320,8 @@ impl Input {
             self.dir.join("node_modules"),
             home.join("profiles/node_modules"),
             home.join("node_modules"),
+            home.join("runtime/node_modules"),
+            home.join("lib/node_modules"),
         ];
         if let Some(paths) = std::env::var_os("PATH") {
             for path in std::env::split_paths(&paths) {
@@ -264,7 +341,7 @@ impl Input {
             .iter()
             .map(|r| r.join(name))
             .find(|p| p.join("package.json").is_file())
-            .ok_or_else(|| error("无法只读解析 DSH bundle 目录，请确认该 profile 依赖已安装"))?;
+            .ok_or_else(|| error("找不到 DSH bundle：请先通过 DSH 启动所选 profile 以安装依赖，并确认 DSH 可执行文件在 PATH 中"))?;
         let manifest_path = package.join("package.json");
         let raw = text(&manifest_path)?.ok_or_else(|| error("DSH bundle manifest 缺失"))?;
         let manifest: serde_json::Value =
@@ -314,6 +391,12 @@ impl Input {
             }
             if let Some(id) = string(row.get("id")).filter(|s| [PI, DEFAULT].contains(&s.as_str()))
             {
+                if let Some(name) = string(row.get("name")) {
+                    if self.names.get(&id).is_some_and(|old| old != &name) {
+                        continue;
+                    }
+                    self.names.insert(id.clone(), name);
+                }
                 if row
                     .get("disabled")
                     .is_some_and(|v| v.to_bool() != Some(false))
@@ -398,6 +481,7 @@ fn credentials(raw: Option<&str>) -> Result<Document> {
     }
     Ok(doc)
 }
+#[cfg(test)]
 fn prepare(
     input: &mut Input,
     options: Options,
@@ -406,7 +490,21 @@ fn prepare(
     models: &[serde_json::Value],
     previous: Option<&Snapshot>,
 ) -> Result<Snapshot> {
-    let (patch_file, patch) = patch_file(input.patch.before.as_deref().unwrap_or("[]\n"))?;
+    prepare_shared(input, options, token, port, models, previous, previous)
+}
+fn prepare_shared(
+    input: &mut Input,
+    options: Options,
+    token: &str,
+    port: u16,
+    models: &[serde_json::Value],
+    previous: Option<&Snapshot>,
+    shared: Option<&Snapshot>,
+) -> Result<Snapshot> {
+    let (patch_file, patch) = editable_patch(
+        input.patch.before.as_deref().unwrap_or("[]\n"),
+        options.make_default,
+    )?;
     let config = row_config(&patch, PI, input.configs.get(PI))?;
     let providers = mapping(&config, "providers")?;
     if providers.contains_key(ROUTE) && previous.is_none_or(|s| !s.active) {
@@ -416,6 +514,9 @@ fn prepare(
     }
     if let Some(previous) = previous.filter(|s| s.active) {
         check_owned(previous, input)?;
+    }
+    if let Some(shared) = shared.filter(|s| s.active) {
+        check_shared(shared, input)?;
     }
     let model = options.model.as_deref().filter(|s| !s.is_empty());
     if model.is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control)) {
@@ -452,11 +553,12 @@ fn prepare(
             &patch,
             &sequence(old.patch.before.as_deref().unwrap_or("[]"))?,
             &sequence(&old.patch.after)?,
+            input.configs.get(DEFAULT),
         )?;
     }
     let (credential_file, doc) = credential_file(input.credentials.before.as_deref())?;
     let refs = mapping(&doc.as_mapping().unwrap(), "refs")?;
-    if previous.is_none_or(|s| !s.active)
+    if shared.is_none_or(|s| !s.active)
         && (refs.contains_key(KEY)
             || env_value(input.environment.before.as_deref().unwrap_or(""))?.is_some())
     {
@@ -464,6 +566,18 @@ fn prepare(
     }
     refs.set(KEY, token);
     input.patch.after = patch_file.to_string();
+    let generated = sequence(&input.patch.after)?;
+    if !equal(owned_route(&generated)?, owned_route(&patch)?)
+        || (options.make_default
+            && find_row(&generated, DEFAULT)?.is_none_or(|(_, row)| {
+                row.get_mapping("config").is_none_or(|config| {
+                    string(config.get("provider")).as_deref() != Some(ROUTE)
+                        || string(config.get("model")).as_deref() != model
+                })
+            }))
+    {
+        return Err(error("无法生成有效 DSH 补丁，原文件未修改"));
+    }
     input.environment.after = env_set(
         input.environment.before.as_deref().unwrap_or(""),
         Some(&format!("{KEY}={token}")),
@@ -475,9 +589,12 @@ fn prepare(
         patch: input.patch.clone(),
         environment: input.environment.clone(),
         credentials: input.credentials.clone(),
+        profiles: shared.map(Snapshot::entries).unwrap_or_default(),
     };
     if let Some(old) = previous.filter(|s| s.active) {
         result.patch.before.clone_from(&old.patch.before);
+    }
+    if let Some(old) = shared.filter(|s| s.active) {
         result
             .environment
             .before
@@ -487,6 +604,14 @@ fn prepare(
             .before
             .clone_from(&old.credentials.before);
     }
+    result.profiles.insert(
+        result.options.profile.clone(),
+        ProfileSnapshot {
+            options: result.options.clone(),
+            active: true,
+            patch: result.patch.clone(),
+        },
+    );
     Ok(result)
 }
 fn owned_route(seq: &Sequence) -> Result<Option<YamlNode>> {
@@ -503,23 +628,10 @@ fn equal(a: Option<YamlNode>, b: Option<YamlNode>) -> bool {
     }
 }
 fn check_owned(snapshot: &Snapshot, input: &Input) -> Result<()> {
-    let current = sequence(input.patch.before.as_deref().unwrap_or("[]"))?;
-    let applied = sequence(&snapshot.patch.after)?;
-    if !equal(owned_route(&current)?, owned_route(&applied)?) {
-        return Err(conflict());
-    }
-    if snapshot.options.make_default {
-        for key in ["provider", "model", "reasoningEffort"] {
-            let field = |seq: &Sequence| -> Result<Option<YamlNode>> {
-                Ok(find_row(seq, DEFAULT)?
-                    .and_then(|(_, r)| r.get_mapping("config"))
-                    .and_then(|c| c.get(key)))
-            };
-            if !equal(field(&current)?, field(&applied)?) {
-                return Err(conflict());
-            }
-        }
-    }
+    editor::protected_patch(snapshot, input.patch.before.as_deref().unwrap_or("[]"))?;
+    check_shared(snapshot, input)
+}
+fn check_shared(snapshot: &Snapshot, input: &Input) -> Result<()> {
     if env_value(input.environment.before.as_deref().unwrap_or(""))?
         != env_value(&snapshot.environment.after)?
     {
@@ -545,25 +657,35 @@ fn restore_field(map: &Mapping, key: &str, original: Option<YamlNode>) {
         map.remove(key);
     }
 }
-fn restore_default(current: &Sequence, before: &Sequence, after: &Sequence) -> Result<()> {
+fn restore_default(
+    current: &Sequence,
+    before: &Sequence,
+    after: &Sequence,
+    inherited: Option<&Mapping>,
+) -> Result<()> {
     let Some((index, row)) = find_row(current, DEFAULT)? else {
         return Err(conflict());
     };
     let old = find_row(before, DEFAULT)?;
-    if old.is_none() && find_row(after, DEFAULT)?.is_some_and(|(_, r)| yaml_edit::yaml_eq(&r, &row))
+    if old.is_none()
+        && find_row(after, DEFAULT)?.is_some_and(|(_, r)| r.to_string() == row.to_string())
     {
         current.remove(index);
         return Ok(());
     }
     let config = mapping(&row, "config")?;
+    let original = old.as_ref().and_then(|(_, r)| r.get_mapping("config"));
+    if original.is_none()
+        && find_row(after, DEFAULT)?
+            .and_then(|(_, r)| r.get_mapping("config"))
+            .is_some_and(|c| c.to_string() == config.to_string())
+    {
+        row.remove("config");
+        return Ok(());
+    }
+    let original = original.as_ref().or(inherited);
     for key in ["provider", "model", "reasoningEffort"] {
-        restore_field(
-            &config,
-            key,
-            old.as_ref()
-                .and_then(|(_, r)| r.get_mapping("config"))
-                .and_then(|c| c.get(key)),
-        );
+        restore_field(&config, key, original.and_then(|c| c.get(key)));
     }
     Ok(())
 }
@@ -574,16 +696,24 @@ fn restore(snapshot: &Snapshot, input: &mut Input) -> Result<()> {
     let after = sequence(&snapshot.patch.after)?;
     let (index, row) = find_row(&current, PI)?.ok_or_else(conflict)?;
     let old = find_row(&before, PI)?;
-    if old.is_none() && find_row(&after, PI)?.is_some_and(|(_, r)| yaml_edit::yaml_eq(&r, &row)) {
+    if old.is_none() && find_row(&after, PI)?.is_some_and(|(_, r)| r.to_string() == row.to_string())
+    {
         current.remove(index);
     } else {
         let providers = mapping(&mapping(&row, "config")?, "providers")?;
         restore_field(&providers, ROUTE, owned_route(&before)?);
     }
     if snapshot.options.make_default {
-        restore_default(&current, &before, &after)?;
+        restore_default(&current, &before, &after, input.configs.get(DEFAULT))?;
     }
     input.patch.after = patch_file.to_string();
+    if current.is_empty() {
+        input.patch.after.insert_str(
+            usize::from(current.as_node().unwrap().text_range().start()),
+            "[]\n",
+        );
+    }
+    sequence(&input.patch.after)?;
     input.environment.after = env_set(
         input.environment.before.as_deref().unwrap_or(""),
         env_value(snapshot.environment.before.as_deref().unwrap_or(""))?.as_deref(),
@@ -603,6 +733,8 @@ fn restore(snapshot: &Snapshot, input: &mut Input) -> Result<()> {
 #[derive(Serialize, Deserialize)]
 struct Transaction {
     version: u32,
+    #[serde(default)]
+    rollback: bool,
     home: PathBuf,
     profile: String,
     patch: Change,
@@ -621,6 +753,9 @@ impl Transaction {
         ])
     }
     fn apply(&self, data: &Path) -> Result<()> {
+        self.write(data, self.rollback)
+    }
+    fn write(&self, data: &Path, rollback: bool) -> Result<()> {
         if self.version != 1 || !self.home.is_absolute() {
             return Err(error("DSH 恢复事务无效"));
         }
@@ -634,14 +769,32 @@ impl Transaction {
                 return Err(error("DSH 配置超过大小限制"));
             }
         }
+        let files: Vec<_> = if rollback {
+            files.into_iter().rev().collect()
+        } else {
+            files
+        };
         for (path, change) in files {
             let current = text(&path)?;
-            if current.as_deref() != Some(&change.after) {
-                storage::atomic_write(
-                    &path,
-                    change.after.as_bytes(),
-                    Some(&storage::revision(current.as_deref().map(str::as_bytes))),
-                )?;
+            if current != change.before && current.as_deref() != Some(&change.after) {
+                return Err(conflict());
+            }
+            let desired = if rollback {
+                change.before.as_deref()
+            } else {
+                Some(change.after.as_str())
+            };
+            if current.as_deref() != desired {
+                if let Some(raw) = desired {
+                    storage::atomic_write(
+                        &path,
+                        raw.as_bytes(),
+                        Some(&storage::revision(current.as_deref().map(str::as_bytes))),
+                    )?;
+                } else {
+                    std::fs::remove_file(&path).map_err(storage::io_error)?;
+                    storage::sync_parent(&path)?;
+                }
             }
         }
         std::fs::remove_file(data.join(JOURNAL)).map_err(storage::io_error)?;
@@ -671,6 +824,7 @@ fn commit(
     let after = serde_json::to_string_pretty(store).map_err(|_| error("无法生成 DSH 接入事务"))?;
     let tx = Transaction {
         version: 1,
+        rollback: true,
         home: home.to_owned(),
         profile: input.dir.file_name().unwrap().to_string_lossy().into(),
         patch: input.patch.clone(),
@@ -690,7 +844,14 @@ fn commit(
     }
     let raw = serde_json::to_vec(&tx).map_err(|_| error("无法生成 DSH 接入事务"))?;
     storage::atomic_write_bounded(&data.join(JOURNAL), &raw, Some("missing"), 16 * 1024 * 1024)?;
-    tx.apply(data)?;
+    if let Err(failure) = tx.write(data, false) {
+        if tx.write(data, true).is_err() {
+            return Err(error(
+                "DSH 写入失败，回滚遇到冲突；已保留恢复事务和外部修改",
+            ));
+        }
+        return Err(failure);
+    }
     Ok(storage::digest(after.as_bytes()))
 }
 
@@ -727,7 +888,26 @@ impl Gateway {
         }
         profiles.sort();
         let input = profile.map(|p| Input::read(home, p)).transpose()?;
-        let snapshot = self.0.inner.lock().unwrap().store.dsh.clone();
+        let store = self.0.inner.lock().unwrap().store.clone();
+        let snapshot = store
+            .dsh
+            .as_ref()
+            .and_then(|s| profile.and_then(|p| s.for_profile(p)));
+        let current = profile.map(|profile| {
+            selection::profile_current(
+                home,
+                profile,
+                &store,
+                &[self
+                    .0
+                    .registry
+                    .listener
+                    .view()
+                    .map(|v| v.port)
+                    .unwrap_or(43721)],
+                &|name| std::env::var(name).ok(),
+            )
+        });
         Ok(Preview {
             revision: input.as_ref().map(Input::revision).unwrap_or_default(),
             profiles,
@@ -740,7 +920,12 @@ impl Gateway {
             warning: if home.join("config.yaml").is_file() && !home.join("profiles").is_dir() {
                 Some("仅发现旧 config.yaml，请先通过 DSH 升级；不会自动迁移".into())
             } else {
-                Some("启动参数、动态 YAML 和 DSH 已保存的会话选择无法由本应用确认；默认模型仅影响新会话".into())
+                Some(format!(
+                    "{}；默认模型仅影响新会话",
+                    current
+                        .and_then(|c| c.warning)
+                        .unwrap_or_else(|| "启动参数、动态 YAML 和已保存的会话选择未确认".into())
+                ))
             },
         })
     }
@@ -756,6 +941,16 @@ impl Gateway {
         }
         let _listener = self.0.registry.lifecycle.lock().await;
         let _lifecycle = self.0.lifecycle.lock().await;
+        self.attach_dsh_locked(home, options, expected, preview)
+            .await
+    }
+    async fn attach_dsh_locked(
+        &self,
+        home: &Path,
+        options: Options,
+        expected: &str,
+        preview: Option<&str>,
+    ) -> Result<View> {
         self.recover_dsh_state()?;
         let (old, token) = {
             let s = self.0.inner.lock().unwrap();
@@ -766,9 +961,9 @@ impl Gateway {
         };
         if old
             .as_ref()
-            .is_some_and(|s| s.active && s.options.profile != options.profile)
+            .is_some_and(|s| s.active && s.options.protocol != options.protocol)
         {
-            return Err(error("请先停用当前 profile，再接入其他 profile"));
+            return Err(error("请先停用全部 DSH profile，再切换协议"));
         }
         let listener = self.0.registry.listener.prepare().await?;
         self.0.registry.update_ports()?;
@@ -788,7 +983,10 @@ impl Gateway {
                     .unwrap()
                     .as_ref()
                     .and_then(|u| u.prices().ok())
-                    .and_then(|p| p.models_dev.metadata(&id))
+                    .and_then(|p| {
+                        let (choices, _) = self.0.model_list.snapshot();
+                        p.models_dev.metadata_from(&id, choices.source(&id))
+                    })
                 {
                     if let Some(name) = meta.name {
                         value["name"] = name.into();
@@ -825,12 +1023,14 @@ impl Gateway {
             })
             .collect::<Vec<_>>();
         let token = self.0.registry.unique_local_token(self.0.client, &token);
-        let snapshot = prepare(
+        let previous = old.as_ref().and_then(|s| s.for_profile(&options.profile));
+        let snapshot = prepare_shared(
             &mut input,
             options.clone(),
             &token,
             listener.port,
             &models,
+            previous.as_ref(),
             old.as_ref(),
         )?;
         let mut s = self.0.inner.lock().unwrap();
@@ -880,17 +1080,31 @@ impl Gateway {
         self.recover_dsh_state()?;
         {
             let mut s = self.0.inner.lock().unwrap();
-            if let Some(snapshot) = s.store.dsh.clone().filter(|s| s.active) {
+            let snapshots = s
+                .store
+                .dsh
+                .as_ref()
+                .map(Snapshot::active_profiles)
+                .unwrap_or_default();
+            for (index, snapshot) in snapshots.iter().enumerate() {
                 let home = s
                     .home
                     .clone()
                     .or_else(|| s.store.resume.as_ref().map(|r| r.home.clone()))
                     .ok_or_else(|| error("DSH 恢复目录缺失"))?;
                 let mut input = Input::read(&home, &snapshot.options.profile)?;
-                restore(&snapshot, &mut input)?;
+                restore(snapshot, &mut input)?;
+                if index + 1 < snapshots.len() {
+                    input.environment.after = input.environment.before.clone().unwrap_or_default();
+                    input.credentials.after = input.credentials.before.clone().unwrap_or_default();
+                }
                 let mut next = s.store.clone();
                 if let Some(dsh) = next.dsh.as_mut() {
-                    dsh.active = false;
+                    dsh.profiles = dsh.entries();
+                    if let Some(profile) = dsh.profiles.get_mut(&snapshot.options.profile) {
+                        profile.active = false;
+                    }
+                    dsh.active = dsh.profiles.values().any(|p| p.active);
                 }
                 if let Some(resume) = next.resume.as_mut() {
                     resume.desired = preserve;
@@ -1160,6 +1374,7 @@ mod tests {
         };
         let tx = Transaction {
             version: 1,
+            rollback: false,
             home: dir.path().to_owned(),
             profile: "default".into(),
             patch: input.patch.clone(),
@@ -1297,3 +1512,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_v02515;

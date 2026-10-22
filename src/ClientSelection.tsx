@@ -15,9 +15,7 @@ export function useClientSelection(surface: "main" | "quick" | "config") {
   const [client, setClient] = useState<ClientId>(() => {
     try {
       const stored = localStorage.getItem(key);
-      return stored === "claude" ||
-        stored === "grok" ||
-        (stored === "dsh" && surface !== "config")
+      return stored === "claude" || stored === "grok" || stored === "dsh"
         ? stored
         : "codex";
     } catch {

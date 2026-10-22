@@ -699,6 +699,7 @@ export default function EventLog({
                     <button
                       className={"event-code " + r.level}
                       aria-label={reasonText(r)}
+                      title={summary(r)}
                       onClick={(e) => {
                         e.currentTarget.focus({ preventScroll: true });
                         const request = ++detailSequence.current;
@@ -718,7 +719,7 @@ export default function EventLog({
                       <span className={"event-category " + category(r)}>
                         {categories[category(r)]}
                       </span>
-                      {summary(r)}
+                      <span className="event-summary-text">{summary(r)}</span>
                       {r.count > 1 && (
                         <span className="event-count">
                           ×{r.count.toLocaleString()}
@@ -726,7 +727,11 @@ export default function EventLog({
                       )}
                     </button>
                   </td>
-                  <td>{actionText(r)}</td>
+                  <td>
+                    <span className="event-action-text" title={actionText(r)}>
+                      {actionText(r)}
+                    </span>
+                  </td>
                 </tr>
               ))}
           </tbody>
