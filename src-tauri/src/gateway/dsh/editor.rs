@@ -177,9 +177,7 @@ fn mask(key: FileKey, raw: Option<&str>) -> String {
 pub(super) fn protected_patch(snapshot: &Snapshot, raw: &str) -> Result<()> {
     let current = sequence(raw)?;
     let applied = sequence(&snapshot.patch.after)?;
-    if !equal(owned_route(&current)?, owned_route(&applied)?) {
-        return Err(conflict());
-    }
+    check_route(owned_route(&current)?, owned_route(&applied)?)?;
     for id in [PI, DEFAULT] {
         if id == DEFAULT && !snapshot.options.make_default {
             continue;
@@ -194,15 +192,13 @@ pub(super) fn protected_patch(snapshot: &Snapshot, raw: &str) -> Result<()> {
         }
     }
     if snapshot.options.make_default {
-        for key in ["provider", "model", "reasoningEffort"] {
-            let get = |s: &Sequence| -> Result<Option<YamlNode>> {
-                Ok(find_row(s, DEFAULT)?
-                    .and_then(|(_, r)| r.get_mapping("config"))
-                    .and_then(|c| c.get(key)))
-            };
-            if !equal(get(&current)?, get(&applied)?) {
-                return Err(conflict());
-            }
+        let get = |s: &Sequence| -> Result<Option<YamlNode>> {
+            Ok(find_row(s, DEFAULT)?
+                .and_then(|(_, r)| r.get_mapping("config"))
+                .and_then(|c| c.get("provider")))
+        };
+        if !equal(get(&current)?, get(&applied)?) {
+            return Err(conflict_field("默认供应商"));
         }
     }
     Ok(())
@@ -212,14 +208,28 @@ fn protected_overlay(key: FileKey, before: &str, after: &str) -> Result<()> {
     // providers map does not mention our route. Check the candidate overlay.
     for id in [PI, DEFAULT] {
         let node = |raw: &str| -> Result<Option<YamlNode>> {
-            if key == FileKey::Settings {
-                return Ok(yaml(raw)?.get(id));
+            let node = if key == FileKey::Settings {
+                yaml(raw)?.get(id)
+            } else {
+                find_row(&sequence(raw)?, id)?.map(|(_, row)| YamlNode::Mapping(row))
+            };
+            if id == DEFAULT {
+                if let Some(config) = node.as_ref().and_then(|n| n.as_mapping()).and_then(|m| {
+                    if key == FileKey::Settings {
+                        Some(m.clone())
+                    } else {
+                        m.get_mapping("config")
+                    }
+                }) {
+                    config.remove("model");
+                    config.remove("reasoningEffort");
+                }
             }
-            Ok(find_row(&sequence(raw)?, id)?.map(|(_, row)| YamlNode::Mapping(row)))
+            Ok(node)
         };
         if !equal(node(before)?, node(after)?) {
             return Err(error(
-                "DSH 接入期间不能通过全局补丁或旧版 settings 覆盖受管模型；请先停用",
+                "DSH 接入期间不能通过全局补丁或旧版 settings 覆盖受管连接；请先停用",
             ));
         }
     }

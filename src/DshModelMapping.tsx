@@ -5,7 +5,9 @@ import type { EditRevision } from "./gateway-edit";
 import { errorOf, type Provider } from "./types";
 import Modal from "./Modal";
 import { confirmAction } from "./confirmation";
+import { useDshCatalog } from "./dsh-catalog";
 
+const MANUAL = "__manual_model__";
 export default function DshModelMapping({
   provider,
   revision,
@@ -19,49 +21,31 @@ export default function DshModelMapping({
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const [flash, setFlash] = useState(provider.dshModels?.flash ?? "");
-  const [pro, setPro] = useState(provider.dshModels?.pro ?? "");
+  const catalog = useDshCatalog();
+  const [mapping, setMapping] = useState<Record<string, string | null>>({
+    ...provider.dshModels,
+  });
+  const [manual, setManual] = useState<Set<string>>(new Set());
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const baseline = useRef<EditRevision>(revision);
-  const initial = useRef(JSON.stringify([flash, pro]));
-  const dirty = JSON.stringify([flash, pro]) !== initial.current;
+  const initial = useRef(JSON.stringify(mapping));
+  const dirty = JSON.stringify(mapping) !== initial.current;
   const generation = useRef(0);
-  const inferred = useRef(false);
   async function load(force: boolean) {
     const seq = ++generation.current;
     setLoading(true);
     try {
-      const catalog = await command("list_provider_models", {
+      const result = await command("list_provider_models", {
         clientId: "dsh",
         providerId: provider.id,
         force,
       });
       if (seq === generation.current) {
-        setModels(catalog.models);
-        setError("");
-        if (!provider.dshModels && !inferred.current) {
-          inferred.current = true;
-          const unique = (kind: string) => {
-            const choices = [
-              ...new Set(
-                catalog.models.filter(
-                  (id) =>
-                    id.toLowerCase().includes("deepseek") &&
-                    id
-                      .toLowerCase()
-                      .split(/[^a-z0-9]+/)
-                      .includes(kind),
-                ),
-              ),
-            ];
-            return choices.length === 1 ? choices[0] : "";
-          };
-          setFlash((value) => value || unique("flash"));
-          setPro((value) => value || unique("pro"));
-        }
+        setModels(result.models);
+        setError(result.error ?? "");
       }
     } catch (e) {
       if (seq === generation.current) setError(errorOf(e).message);
@@ -82,6 +66,11 @@ export default function DshModelMapping({
   const leave = async () => {
     if (!dirty || (await confirmAction("放弃未保存的模型映射？"))) close();
   };
+  const rows = [...catalog.models];
+  for (const id of Object.keys(mapping))
+    if (!rows.some((m) => m.id === id)) rows.push({ id, name: id });
+  const update = (id: string, value: string) =>
+    setMapping((old) => ({ ...old, [id]: value || null }));
   return (
     <Modal
       title={`${provider.name} 模型映射`}
@@ -90,17 +79,19 @@ export default function DshModelMapping({
       compact
     >
       <form
-        className="gateway-form"
+        className="gateway-form dsh-model-mapping"
         onSubmit={(e) => {
           e.preventDefault();
           setBusy(true);
           setError("");
+          const next = Object.fromEntries(
+            Object.entries(mapping).map(([id, value]) => [
+              id,
+              value?.trim() || null,
+            ]),
+          );
           void save(
-            {
-              op: "dshModelsProvider",
-              id: provider.id,
-              mapping: { flash: flash.trim() || null, pro: pro.trim() || null },
-            },
+            { op: "dshModelsProvider", id: provider.id, mapping: next },
             baseline.current,
           )
             .then(close)
@@ -111,44 +102,75 @@ export default function DshModelMapping({
             .finally(() => setBusy(false));
         }}
       >
-        <label>
-          Flash
-          <input
-            aria-label="Flash 上游模型"
-            list="dsh-provider-models"
-            value={flash}
-            maxLength={256}
-            placeholder="未配置"
-            onChange={(e) => setFlash(e.target.value)}
-          />
-        </label>
-        <label>
-          Pro
-          <input
-            aria-label="Pro 上游模型"
-            list="dsh-provider-models"
-            value={pro}
-            maxLength={256}
-            placeholder="未配置"
-            onChange={(e) => setPro(e.target.value)}
-          />
-        </label>
-        <datalist id="dsh-provider-models">
-          {[...new Set([flash, pro, ...models])].filter(Boolean).map((id) => (
-            <option key={id} value={id} />
-          ))}
-        </datalist>
-        <p className="form-hint">留空时，此供应商不承接对应模型。</p>
-        <button
-          type="button"
-          disabled={loading || busy}
-          onClick={() => void load(true)}
-        >
-          刷新模型列表
-        </button>
-        {error && (
+        {rows.map(({ id, name }) => {
+          const value = mapping[id] ?? "";
+          const options = [...new Set([value, ...models])].filter(Boolean);
+          return (
+            <div className="dsh-mapping-row" key={id}>
+              <label title={id}>
+                <span>{name || id}</span>
+                {name !== id && <small className="muted">{id}</small>}
+                <select
+                  aria-label={`${name || id} 上游模型`}
+                  disabled={busy}
+                  value={manual.has(id) ? MANUAL : value}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setManual((old) => {
+                      const next = new Set(old);
+                      if (value === MANUAL) next.add(id);
+                      else next.delete(id);
+                      return next;
+                    });
+                    if (value !== MANUAL) update(id, value);
+                  }}
+                >
+                  <option value="">不承接</option>
+                  {options.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                  <option value={MANUAL}>手动填写…</option>
+                </select>
+              </label>
+              {manual.has(id) && (
+                <input
+                  aria-label={`${name || id} 自定义模型 ID`}
+                  value={value}
+                  maxLength={256}
+                  disabled={busy}
+                  placeholder="完整模型 ID"
+                  onChange={(e) => update(id, e.target.value)}
+                />
+              )}
+            </div>
+          );
+        })}
+        {!rows.length && (
+          <p className="muted">
+            {catalog.loading ? "正在读取模型…" : "没有可用模型"}
+          </p>
+        )}
+        <div className="dsh-model-actions">
+          <button
+            type="button"
+            disabled={catalog.loading || busy}
+            onClick={() => void catalog.refresh()}
+          >
+            刷新官方模型
+          </button>
+          <button
+            type="button"
+            disabled={loading || busy}
+            onClick={() => void load(true)}
+          >
+            刷新供应商模型
+          </button>
+        </div>
+        {(catalog.error || error) && (
           <p className="form-error" role="alert">
-            {error}
+            {[catalog.error, error].filter(Boolean).join("；")}
           </p>
         )}
         <footer className="modal-actions">

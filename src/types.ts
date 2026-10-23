@@ -164,7 +164,7 @@ export type Provider = {
   rpmWaitReason?: string | null;
   rpmLedgerError?: boolean;
   allowedModels: string[] | null;
-  dshModels?: { flash: string | null; pro: string | null } | null;
+  dshModels?: Record<string, string | null> | null;
   handoffAfterCompaction?: boolean;
   takeNewThreads?: boolean;
 };

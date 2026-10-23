@@ -140,7 +140,9 @@ beforeEach(() => {
     async (name: string, args: Record<string, unknown> = {}) => {
       switch (name) {
         case "get_gateway":
-          return { providers: [{ id: "fixture-provider", name: "Fixture Provider" }] };
+          return {
+            providers: [{ id: "fixture-provider", name: "Fixture Provider" }],
+          };
         case "get_usage_state":
           return structuredClone(usageState);
         case "get_usage_dashboard":
@@ -176,17 +178,28 @@ function detailValue(dialog: HTMLElement, label: string): HTMLElement {
 it("labels the request table time column as end time", async () => {
   render(<Usage />);
   const table = await screen.findByRole("table");
-  expect(within(table).getByRole("columnheader", { name: "结束时间" })).toBeInTheDocument();
-  expect(within(table).queryByRole("columnheader", { name: "时间" })).not.toBeInTheDocument();
+  expect(
+    within(table).getByRole("columnheader", {
+      name: "时间 / 供应商 / 模型",
+    }),
+  ).toBeInTheDocument();
 });
 
 it("shows transfer timestamps, byte counts, and timeout metadata in request details", async () => {
   const user = userEvent.setup();
   render(<Usage />);
-  await user.click((await screen.findByText("fixture-response")).closest("tr")!);
+  await user.click(
+    (await screen.findByText("fixture-response")).closest("tr")!,
+  );
   const dialog = await screen.findByRole("dialog", { name: "请求详情" });
 
-  for (const label of ["请求进入", "上游发送", "收到首字节", "协议终态", "本地结束"]) {
+  for (const label of [
+    "请求进入",
+    "上游发送",
+    "收到首字节",
+    "协议终态",
+    "本地结束",
+  ]) {
     expect(detailValue(dialog, label)).not.toHaveTextContent("—");
   }
   expect(detailValue(dialog, "上游读取").textContent).toMatch(/1,?024 B/);

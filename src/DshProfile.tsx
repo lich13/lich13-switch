@@ -3,17 +3,21 @@ import { command } from "./bridge";
 import type { DshPreview } from "./bridge-contracts";
 import { errorOf, type GatewayState } from "./types";
 import Modal from "./Modal";
+import { useDshCatalog } from "./dsh-catalog";
 import { preferredDshProfile, rememberDshProfile } from "./dsh-profile";
 
-export async function connectDsh(state: GatewayState, preview: DshPreview) {
+export async function connectDsh(
+  state: GatewayState,
+  preview: DshPreview,
+  changeModel = false,
+) {
   if (!preview.profile) throw new Error("没有可用的 DSH profile");
   const result = await command("attach_dsh_profiles", {
     all: true,
     options: {
       profile: preview.profile,
       protocol: "chat_completions",
-      model:
-        preview.model === "deepseek-v4-pro" ? preview.model : "deepseek-flash",
+      model: !preview.attached || changeModel ? preview.model : null,
       makeDefault: true,
     },
     expectedRevision: state.revision,
@@ -47,6 +51,8 @@ export default function DshProfile({
   update: (state: GatewayState) => void;
   notify: (text: string) => void;
 }) {
+  const catalog = useDshCatalog();
+  const [changeModel, setChangeModel] = useState(false);
   const [profile, setProfile] = useState(preferredDshProfile);
   const [preview, setPreview] = useState<DshPreview | null>(null);
   const [busy, setBusy] = useState(false);
@@ -54,6 +60,7 @@ export default function DshProfile({
   useEffect(() => {
     let gone = false;
     setPreview(null);
+    setChangeModel(false);
     setError("");
     void command("preview_dsh_profile", {
       profile,
@@ -86,7 +93,7 @@ export default function DshProfile({
           if (!preview) return;
           setBusy(true);
           setError("");
-          void connectDsh(state, preview)
+          void connectDsh(state, preview, changeModel)
             .then((next) => {
               update(next);
               notify(
@@ -117,20 +124,39 @@ export default function DshProfile({
         <label>
           新会话默认模型
           <select
-            value={
-              preview?.model === "deepseek-v4-pro"
-                ? "deepseek-v4-pro"
-                : "deepseek-flash"
-            }
+            value={preview?.model ?? ""}
+            aria-label="新会话默认模型"
             disabled={!preview || busy}
-            onChange={(e) =>
-              setPreview((p) => p && { ...p, model: e.target.value })
-            }
+            onChange={(e) => {
+              setChangeModel(true);
+              setPreview((p) => p && { ...p, model: e.target.value });
+            }}
           >
-            <option value="deepseek-flash">DeepSeek-V4.1-Flash</option>
-            <option value="deepseek-v4-pro">DeepSeek-V4-Pro</option>
+            {[
+              ...new Set(
+                [preview?.model, ...catalog.models.map((m) => m.id)].filter(
+                  (id): id is string => !!id,
+                ),
+              ),
+            ].map((id) => (
+              <option key={id} value={id}>
+                {catalog.models.find((m) => m.id === id)?.name ?? id}
+              </option>
+            ))}
           </select>
         </label>
+        <button
+          type="button"
+          disabled={busy || catalog.loading}
+          onClick={() => void catalog.refresh()}
+        >
+          刷新官方模型
+        </button>
+        {catalog.error && (
+          <p className="form-error" role="alert">
+            {catalog.error}
+          </p>
+        )}
         {!!preview?.providers?.length && (
           <ul className="dsh-results">
             {preview.providers

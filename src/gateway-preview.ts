@@ -366,6 +366,14 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     dshFiles.set(id, file);
     return structuredClone(file);
   }
+  if (name === "dsh_official_models")
+    return {
+      models: [
+        { id: "deepseek-flash", name: "DeepSeek-V4.1-Flash" },
+        { id: "deepseek-v4-pro", name: "DeepSeek-V4-Pro" },
+      ],
+      error: null,
+    };
   if (name === "preview_dsh_profile")
     return {
       profiles: ["default", "desktop"],

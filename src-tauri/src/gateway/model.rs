@@ -166,6 +166,8 @@ pub struct Store {
     pub grok_connections: BTreeMap<String, super::grok_config::Connection>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dsh_models: BTreeMap<String, super::dsh::ModelMapping>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dsh_catalog: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_resume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,6 +206,7 @@ impl Default for Store {
             provider_endpoints: BTreeMap::new(),
             grok_connections: BTreeMap::new(),
             dsh_models: BTreeMap::new(),
+            dsh_catalog: vec![],
             grok_resume: None,
             grok_api_model: None,
             dsh: None,
@@ -389,8 +392,9 @@ impl Store {
         let mut store: Self = match &raw {
             Some(raw) => {
                 let invalid = || AppError::new(code::STORE, "网关存储无法读取，请保留原文件");
-                let value: serde_json::Value =
+                let mut value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
+                crate::migrations::dsh_model_mappings(&mut value);
                 serde_json::from_value(value).map_err(|_| invalid())?
             }
             None => Self::default(),

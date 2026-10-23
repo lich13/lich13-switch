@@ -297,6 +297,7 @@ export async function run(
       "get_models_dev",
       "update_models_dev",
       "preview_dsh_profile",
+      "dsh_official_models",
       "attach_dsh_profile",
       "attach_dsh_profiles",
       "read_dsh_file",

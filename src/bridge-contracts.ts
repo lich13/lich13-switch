@@ -39,6 +39,18 @@ import type { PreparedTemplate } from "./TemplateChoice";
 
 export type { QuotaCheck, LimitEvidence } from "./limit-labels";
 
+export type DshOfficialModel = {
+  id: string;
+  name: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  inputModalities?: string[];
+};
+export type DshOfficialCatalog = {
+  models: DshOfficialModel[];
+  error: string | null;
+};
+
 export type QuickPreferences = {
   pinned: boolean;
   tab: "providers" | "accounts";
@@ -228,7 +240,7 @@ export type GatewayEdit =
   | {
       op: "dshModelsProvider";
       id: string;
-      mapping: { flash: string | null; pro: string | null };
+      mapping: Record<string, string | null>;
     }
   | { op: "renameProvider"; id: string; name: string }
   | { op: "endpointsProvider"; id: string; baseUrls: string[] }
@@ -340,6 +352,7 @@ export type CommandMap = {
     },
     GatewayModels
   >;
+  dsh_official_models: Call<{ refresh: boolean }, DshOfficialCatalog>;
   read_dsh_file: Call<{ profile: string | null; key: DshFileKey }, DshFileView>;
   read_previous_dsh_file: Call<
     { profile: string | null; key: DshFileKey },

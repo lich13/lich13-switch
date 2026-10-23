@@ -474,6 +474,7 @@ fn interrupted_new_transaction_rolls_back_and_conflicts_leave_recovery_journal()
     )
     .unwrap();
     let tx = Transaction {
+        patches: BTreeMap::new(),
         version: 1,
         rollback: true,
         home: home.path().into(),

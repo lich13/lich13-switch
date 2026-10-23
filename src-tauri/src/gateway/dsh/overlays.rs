@@ -67,14 +67,15 @@ pub(super) fn prepare(
         }
         if let Some(default) = configs.get(DEFAULT).filter(|_| options.make_default) {
             default.set("provider", ROUTE);
-            default.set(
-                "model",
-                options
-                    .model
-                    .as_deref()
-                    .ok_or_else(|| error("请选择默认模型"))?,
-            );
-            default.remove("reasoningEffort");
+            if previous.is_none_or(|p| !p.active) || options.model.is_some() {
+                default.set(
+                    "model",
+                    options
+                        .model
+                        .as_deref()
+                        .ok_or_else(|| error("请选择默认模型"))?,
+                );
+            }
         }
         change.after = file.to_string();
     }
@@ -96,9 +97,7 @@ fn reconcile(raw: &str, snapshot: &Change, settings: bool, restore: bool) -> Res
         let before = original.get(id);
         if id == PI {
             let route = |map: &Mapping| map.get_mapping("providers").and_then(|m| m.get(ROUTE));
-            if !equal(route(current), route(after)) {
-                return Err(conflict());
-            }
+            check_route(route(current), route(after))?;
             if restore {
                 restore_field(
                     &mapping(current, "providers")?,
@@ -107,10 +106,13 @@ fn reconcile(raw: &str, snapshot: &Change, settings: bool, restore: bool) -> Res
                 );
             }
         } else {
-            for key in ["provider", "model", "reasoningEffort"] {
+            for key in ["provider", "model"] {
                 if !equal(before.and_then(|c| c.get(key)), after.get(key)) {
                     if !equal(current.get(key), after.get(key)) {
-                        return Err(conflict());
+                        if key == "model" {
+                            continue;
+                        }
+                        return Err(conflict_field("全局默认供应商"));
                     }
                     if restore {
                         restore_field(current, key, before.and_then(|c| c.get(key)));

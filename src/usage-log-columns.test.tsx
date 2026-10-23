@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import {
   cacheHitRate,
   columnVisible,
@@ -144,9 +144,68 @@ describe("request log columns", () => {
     expect(screen.getByTitle("Fixture · DSH")).toBeInTheDocument();
     expect(
       screen.getAllByRole("columnheader").map((c) => c.textContent),
-    ).toEqual(["结束时间", "供应商 / 客户端", "模型", "费用", "Token / 性能"]);
+    ).toEqual(["时间 / 供应商 / 模型", "Token", "费用", "性能"]);
     expect(
       screen.getByTitle("fixture-request → fixture-response"),
     ).toBeInTheDocument();
+  });
+  it("keeps selected optional metrics and exact long numbers in their groups", () => {
+    const renderTable = (settings: UsageSettings) => (
+      <UsageLogTable
+        rows={[
+          {
+            id: "fixture-exact",
+            client: "dsh",
+            source: "proxy",
+            startedAt: 1,
+            attempts: [
+              {
+                ...attempt,
+                tokens: { ...tokens, input: 1234567890123 },
+                price: { cost: "0.000000123456", multiplier: "1" },
+              },
+            ],
+          } as UsageRecord,
+        ]}
+        busy={false}
+        settings={settings}
+        save={() => {}}
+        name={() => "Fixture"}
+        open={() => {}}
+      />
+    );
+    const settings: UsageSettings = {
+      ...defaultSettings,
+      logNumberMode: "exact",
+      logColumns: { reasoning: true, hitRate: true, status: true },
+    };
+    const { rerender } = render(renderTable(settings));
+    const row = screen.getByRole("row", { name: /请求详情/ });
+    expect(within(row).getByText("1,234,567,890,123")).toBeInTheDocument();
+    expect(within(row).getByText("$0.000000123456")).toBeInTheDocument();
+    expect(within(row).getByLabelText("推理")).toHaveTextContent("20");
+    expect(within(row).getByLabelText("HTTP")).toHaveTextContent("200");
+    expect(within(row).getByLabelText("命中率")).toBeInTheDocument();
+    rerender(
+      renderTable({
+        ...settings,
+        logColumns: {
+          provider: false,
+          model: false,
+          input: false,
+          output: false,
+          cacheRead: false,
+          cacheWrite: false,
+          cost: false,
+          firstToken: false,
+          duration: false,
+          speed: false,
+        },
+      }),
+    );
+    expect(
+      screen.getAllByRole("columnheader").map((cell) => cell.textContent),
+    ).toEqual(["时间 / 供应商 / 模型"]);
+    expect(within(row).queryByText("$0.000000123456")).not.toBeInTheDocument();
   });
 });

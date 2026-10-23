@@ -136,9 +136,9 @@ pub(super) fn read_provider(
                 .collect()
         })
         .unwrap_or_default();
-    let mut warning = "按静态配置判断；启动参数、其他进程环境及项目覆盖未确认".to_owned();
+    let mut warning = String::new();
     if overridden {
-        warning = format!("home patch 覆盖了 profile 配置；{warning}");
+        warning = "home patch 覆盖了 profile 配置".into();
     }
     let mut selected_pair = Pair {
         base_url: None,
@@ -232,7 +232,7 @@ pub(super) fn read_provider(
     };
     result.model = model;
     result.model_source = Some(source);
-    result.warning = Some(warning);
+    result.warning = (!warning.is_empty()).then_some(warning);
     result.provider_name = crate::events::safe_message(&provider_name);
     result.address_source = Some("llm-pi-ai.providers".into());
     result.address = super::super::grok_import::safe_address(selected_pair.base_url.as_deref());

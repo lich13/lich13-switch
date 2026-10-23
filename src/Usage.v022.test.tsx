@@ -145,9 +145,7 @@ beforeEach(() => {
       switch (name) {
         case "get_gateway":
           return {
-            providers: [
-              { id: "fixture-provider", name: "Fixture Provider" },
-            ],
+            providers: [{ id: "fixture-provider", name: "Fixture Provider" }],
           };
         case "get_usage_state":
           return structuredClone(usageState);
@@ -188,7 +186,9 @@ function detailValue(dialog: HTMLElement, label: string): HTMLElement {
 it("uses the second-level finishedAt value for rows and the cell title", async () => {
   render(<Usage />);
   const table = await screen.findByRole("table");
-  expect(within(table).getByRole("columnheader", { name: "结束时间" })).toBeInTheDocument();
+  expect(
+    within(table).getByRole("columnheader", { name: "时间 / 供应商 / 模型" }),
+  ).toBeInTheDocument();
   const row = await screen.findByRole("row", { name: /请求详情$/ });
   const cell = within(row).getAllByRole("cell")[0];
   expect(cell).toHaveAttribute(

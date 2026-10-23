@@ -959,6 +959,15 @@ fn edit_model_list(
         .edit_model_list(op, &id, source.as_deref())
 }
 #[tauri::command]
+async fn dsh_official_models(
+    refresh: bool,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::dsh::official::CatalogView> {
+    r.dsh
+        .dsh_official_models(&r.home(gateway::ClientId::Dsh)?, refresh)
+        .await
+}
+#[tauri::command]
 fn preview_dsh_profile(
     profile: Option<String>,
     protocol: gateway::grok_config::Protocol,
@@ -1918,6 +1927,7 @@ pub fn run() {
             refresh_gateway_models,
             search_models_dev,
             edit_model_list,
+            dsh_official_models,
             preview_dsh_profile,
             attach_dsh_profile,
             attach_dsh_profiles,

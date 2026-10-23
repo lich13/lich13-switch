@@ -1,6 +1,8 @@
 {
   "hosts": {
     "models.dev": {"purpose": "首次缺缓存或用户手动刷新公共模型元数据和参考价格", "files": ["src-tauri/src/models_dev.rs"]},
+    "api.deepseek.com": {"purpose": "打开 DSH 接入或映射设置及手动刷新时只读查询官方模型目录", "files": ["src-tauri/src/gateway/dsh/official.rs"]},
+    "platform.deepseek.com": {"purpose": "校验 DSH 官方登录凭据的签发方，不是请求地址", "files": ["src-tauri/src/gateway/dsh/official.rs"]},
     "api.github.com": {"purpose": "应用检查本仓库的最新 Release", "files": ["src-tauri/src/update.rs"]},
     "raw.githubusercontent.com": {"purpose": "应用读取 Wei-Shaw/model-price-repo 的价格及 SHA-256", "files": ["src-tauri/src/usage/pricing.rs"]},
     "github.com": {"purpose": "用户主动打开项目仓库或发布页；开发预览使用相同入口", "files": ["src-tauri/src/update.rs", "src/preview.ts"]},

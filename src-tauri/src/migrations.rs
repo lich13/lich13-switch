@@ -41,3 +41,19 @@ pub fn login_items(service: &startup::Service) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// v0.25.18: convert the two original slots to stable official model IDs.
+pub(crate) fn dsh_model_mappings(value: &mut serde_json::Value) {
+    if let Some(providers) = value.get_mut("dshModels").and_then(|v| v.as_object_mut()) {
+        for mapping in providers.values_mut().filter_map(|v| v.as_object_mut()) {
+            for (old, id) in [
+                ("flash", crate::gateway::dsh::models::FLASH),
+                ("pro", crate::gateway::dsh::models::PRO),
+            ] {
+                if let Some(model) = mapping.remove(old) {
+                    mapping.entry(id).or_insert(model);
+                }
+            }
+        }
+    }
+}

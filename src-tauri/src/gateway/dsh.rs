@@ -13,6 +13,7 @@ use std::{
 use yaml_edit::{AsYaml, Document, Mapping, Sequence, YamlFile, YamlNode};
 
 pub mod models;
+pub mod official;
 mod selection;
 pub use models::ModelMapping;
 pub use selection::current;
@@ -22,6 +23,8 @@ pub mod editor;
 mod overlays;
 #[cfg(test)]
 mod tests_v02516;
+#[cfg(test)]
+mod tests_v02518;
 pub use batch::Batch;
 
 const ROUTE: &str = "lich13-switch";
@@ -33,6 +36,12 @@ const JOURNAL: &str = "dsh-recovery.json";
 const LIMIT: u64 = 2 * 1024 * 1024;
 fn error(message: &str) -> AppError {
     AppError::new(code::CONFIG, message)
+}
+fn conflict_field(field: &str) -> AppError {
+    AppError::new(
+        code::CONFLICT,
+        &format!("DSH {field}已被外部修改，已保留当前文件"),
+    )
 }
 fn conflict() -> AppError {
     AppError::new(code::CONFLICT, "DSH 受管条目已被外部修改，已保留当前文件")
@@ -526,13 +535,14 @@ fn prepare(
 }
 fn prepare_shared(
     input: &mut Input,
-    options: Options,
+    mut options: Options,
     token: &str,
     port: u16,
     models: &[serde_json::Value],
     previous: Option<&Snapshot>,
     shared: Option<&Snapshot>,
 ) -> Result<Snapshot> {
+    let set_model = options.model.is_some() || previous.is_none_or(|s| !s.active);
     let (patch_file, patch) = editable_patch(
         input.patch.before.as_deref().unwrap_or("[]\n"),
         options.make_default,
@@ -550,7 +560,29 @@ fn prepare_shared(
     if let Some(shared) = shared.filter(|s| s.active) {
         check_shared(shared, input)?;
     }
-    let model = options.model.as_deref().filter(|s| !s.is_empty());
+    let current_model = find_row(&patch, DEFAULT)?
+        .and_then(|(_, r)| r.get_mapping("config"))
+        .and_then(|c| string(c.get("model")));
+    let model = options.model.clone().or_else(|| {
+        if previous.is_some_and(|s| s.active) {
+            current_model
+        } else {
+            None
+        }
+        .or_else(|| {
+            input
+                .configs
+                .get(DEFAULT)
+                .and_then(|c| string(c.get("model")))
+        })
+    });
+    let model = model.or_else(|| {
+        models
+            .first()
+            .and_then(|m| m["id"].as_str())
+            .map(str::to_owned)
+    });
+    let model = model.as_deref().filter(|s| !s.is_empty());
     if model.is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control)) {
         return Err(error("DSH 模型 ID 无效"));
     }
@@ -575,8 +607,9 @@ fn prepare_shared(
         let id = model.ok_or_else(|| error("设为默认时请选择一个明确模型"))?;
         let default = row_config(&patch, DEFAULT, input.configs.get(DEFAULT))?;
         default.set("provider", ROUTE);
-        default.set("model", id);
-        default.remove("reasoningEffort");
+        if set_model {
+            default.set("model", id);
+        }
     } else if let Some(old) = previous.filter(|s| s.active && s.options.make_default) {
         restore_default(
             &patch,
@@ -601,7 +634,7 @@ fn prepare_shared(
             && find_row(&generated, DEFAULT)?.is_none_or(|(_, row)| {
                 row.get_mapping("config").is_none_or(|config| {
                     string(config.get("provider")).as_deref() != Some(ROUTE)
-                        || string(config.get("model")).as_deref() != model
+                        || (set_model && string(config.get("model")).as_deref() != model)
                 })
             }))
     {
@@ -612,7 +645,11 @@ fn prepare_shared(
         Some(&format!("{KEY}={token}")),
     )?;
     input.credentials.after = credential_file.to_string();
+    if set_model {
+        options.model = model.map(str::to_owned);
+    }
     overlays::prepare(input, &options, &route, shared)?;
+    options.model = model.map(str::to_owned);
     let mut result = Snapshot {
         options,
         active: true,
@@ -667,6 +704,28 @@ fn equal(a: Option<YamlNode>, b: Option<YamlNode>) -> bool {
         _ => false,
     }
 }
+fn check_route(current: Option<YamlNode>, applied: Option<YamlNode>) -> Result<()> {
+    if equal(current.clone(), applied.clone()) {
+        return Ok(());
+    }
+    for (key, category) in [
+        ("baseURL", "网关地址"),
+        ("api", "网关协议"),
+        ("apiKeyEnv", "网关凭据引用"),
+        ("apiKey", "网关凭据"),
+        ("models", "受管模型目录"),
+    ] {
+        let field = |node: &Option<YamlNode>| {
+            node.as_ref()
+                .and_then(|n| n.as_mapping())
+                .and_then(|m| m.get(key))
+        };
+        if !equal(field(&current), field(&applied)) {
+            return Err(conflict_field(category));
+        }
+    }
+    Err(conflict_field("受管网关路由"))
+}
 fn check_owned(snapshot: &Snapshot, input: &Input) -> Result<()> {
     editor::protected_patch(snapshot, input.patch.before.as_deref().unwrap_or("[]"))?;
     check_shared(snapshot, input)
@@ -676,7 +735,7 @@ fn check_shared(snapshot: &Snapshot, input: &Input) -> Result<()> {
     if env_value(input.environment.before.as_deref().unwrap_or(""))?
         != env_value(&snapshot.environment.after)?
     {
-        return Err(conflict());
+        return Err(conflict_field("网关环境凭据"));
     }
     let reference = |raw: Option<&str>| -> Result<Option<YamlNode>> {
         Ok(credentials(raw)?
@@ -687,7 +746,7 @@ fn check_shared(snapshot: &Snapshot, input: &Input) -> Result<()> {
         reference(input.credentials.before.as_deref())?,
         reference(Some(&snapshot.credentials.after))?,
     ) {
-        return Err(conflict());
+        return Err(conflict_field("网关凭据引用"));
     }
     Ok(())
 }
@@ -708,7 +767,11 @@ fn restore_default(
         return Err(conflict());
     };
     let old = find_row(before, DEFAULT)?;
+    let preserve_effort = row
+        .get_mapping("config")
+        .is_some_and(|c| c.contains_key("reasoningEffort"));
     if old.is_none()
+        && !preserve_effort
         && find_row(after, DEFAULT)?.is_some_and(|(_, r)| r.to_string() == row.to_string())
     {
         current.remove(index);
@@ -717,6 +780,7 @@ fn restore_default(
     let config = mapping(&row, "config")?;
     let original = old.as_ref().and_then(|(_, r)| r.get_mapping("config"));
     if original.is_none()
+        && !preserve_effort
         && find_row(after, DEFAULT)?
             .and_then(|(_, r)| r.get_mapping("config"))
             .is_some_and(|c| c.to_string() == config.to_string())
@@ -725,8 +789,13 @@ fn restore_default(
         return Ok(());
     }
     let original = original.as_ref().or(inherited);
-    for key in ["provider", "model", "reasoningEffort"] {
-        restore_field(&config, key, original.and_then(|c| c.get(key)));
+    for key in ["provider", "model"] {
+        let applied = find_row(after, DEFAULT)?
+            .and_then(|(_, r)| r.get_mapping("config"))
+            .and_then(|c| c.get(key));
+        if key == "provider" || equal(config.get(key), applied) {
+            restore_field(&config, key, original.and_then(|c| c.get(key)));
+        }
     }
     Ok(())
 }
@@ -787,6 +856,8 @@ struct Transaction {
     #[serde(default)]
     settings: Option<Change>,
     store: Change,
+    #[serde(default)]
+    patches: BTreeMap<String, Change>,
 }
 impl Transaction {
     fn files(&self, data: &Path) -> Result<Vec<(PathBuf, &Change)>> {
@@ -801,6 +872,12 @@ impl Transaction {
         }
         if let Some(change) = &self.settings {
             files.push((self.home.join("settings.yaml"), change));
+        }
+        for (profile, change) in &self.patches {
+            if profile == &self.profile {
+                return Err(error("DSH 恢复事务包含重复 profile"));
+            }
+            files.push((profile_dir(&self.home, profile)?.join(PATCH), change));
         }
         files.push((data.join("gateway.json"), &self.store));
         for (path, _) in &files {
@@ -872,6 +949,16 @@ fn commit(
     store: &super::model::Store,
     expected: &str,
 ) -> Result<String> {
+    commit_patches(data, home, input, store, expected, BTreeMap::new())
+}
+fn commit_patches(
+    data: &Path,
+    home: &Path,
+    input: &Input,
+    store: &super::model::Store,
+    expected: &str,
+    patches: BTreeMap<String, Change>,
+) -> Result<String> {
     input.unchanged_layers()?;
     let before = text(&data.join("gateway.json"))?;
     if storage::revision(before.as_deref().map(str::as_bytes)) != expected {
@@ -879,6 +966,7 @@ fn commit(
     }
     let after = serde_json::to_string_pretty(store).map_err(|_| error("无法生成 DSH 接入事务"))?;
     let tx = Transaction {
+        patches,
         version: 1,
         rollback: true,
         home: home.to_owned(),
@@ -911,6 +999,63 @@ fn commit(
         return Err(failure);
     }
     Ok(storage::digest(after.as_bytes()))
+}
+
+/// Save mapping and all active profile catalogs as one existing recovery transaction.
+pub(super) fn commit_mapping(
+    data: &Path,
+    home: &Path,
+    store: &mut super::model::Store,
+    expected: &str,
+) -> Result<String> {
+    let Some(snapshot) = store.dsh.clone().filter(|s| s.active) else {
+        return store.persist(&data.join("gateway.json"), expected);
+    };
+    let models = models::for_store(store);
+    let mut inputs = vec![];
+    let mut merged = snapshot.clone();
+    for profile in snapshot.active_profiles() {
+        let mut input = Input::read(home, &profile.options.profile)?;
+        let mut options = profile.options.clone();
+        options.model = None;
+        let prepared = prepare_shared(
+            &mut input,
+            options,
+            &store.local_token,
+            store.settings.port,
+            &models,
+            Some(&profile),
+            Some(&snapshot),
+        )?;
+        input.unchanged_layers()?;
+        if let Some(profile) = prepared.profiles.get(&prepared.options.profile) {
+            merged
+                .profiles
+                .insert(prepared.options.profile.clone(), profile.clone());
+        }
+        if prepared.options.profile == merged.options.profile {
+            merged.patch = prepared.patch;
+            merged.options = prepared.options;
+        }
+        merged.home_patch = prepared.home_patch;
+        merged.settings = prepared.settings;
+        inputs.push(input);
+    }
+    let Some(first) = inputs.first() else {
+        return store.persist(&data.join("gateway.json"), expected);
+    };
+    let patches = inputs
+        .iter()
+        .skip(1)
+        .map(|i| {
+            (
+                i.dir.file_name().unwrap().to_string_lossy().into_owned(),
+                i.patch.clone(),
+            )
+        })
+        .collect();
+    store.dsh = Some(merged);
+    commit_patches(data, home, first, store, expected, patches)
 }
 
 impl Gateway {
@@ -973,7 +1118,10 @@ impl Gateway {
             revision: input.as_ref().map(Input::revision).unwrap_or_default(),
             profile: profile.map(str::to_owned),
             profiles: profiles.clone(),
-            models: vec![models::FLASH.into(), models::PRO.into()],
+            models: models::for_store(&store)
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_owned))
+                .collect(),
             providers: discover(
                 home,
                 profile.unwrap_or("desktop"),
@@ -985,15 +1133,20 @@ impl Gateway {
             .collect(),
             attached: snapshot.as_ref().is_some_and(|s| s.active),
             protocol: Protocol::ChatCompletions,
-            model: Some(
-                models::default_model(
-                    snapshot
-                        .as_ref()
-                        .and_then(|s| s.options.model.as_deref())
-                        .or_else(|| current.as_ref().and_then(|c| c.model.as_deref())),
-                )
-                .into(),
-            ),
+            model: current
+                .as_ref()
+                .and_then(|c| c.model.clone())
+                .filter(|id| {
+                    snapshot.as_ref().is_some_and(|s| s.active)
+                        || models::for_store(&store).iter().any(|m| m["id"] == *id)
+                })
+                .or_else(|| snapshot.as_ref().and_then(|s| s.options.model.clone()))
+                .or_else(|| {
+                    models::for_store(&store)
+                        .first()
+                        .and_then(|m| m["id"].as_str())
+                        .map(str::to_owned)
+                }),
             make_default: snapshot.as_ref().is_none_or(|s| s.options.make_default),
             current: current.clone(),
             states: profile_states(
@@ -1005,12 +1158,7 @@ impl Gateway {
             warning: if home.join("config.yaml").is_file() && !home.join("profiles").is_dir() {
                 Some("仅发现旧 config.yaml，请先通过 DSH 升级；不会自动迁移".into())
             } else {
-                Some(format!(
-                    "{}；默认模型仅影响新会话",
-                    current
-                        .and_then(|c| c.warning)
-                        .unwrap_or_else(|| "启动参数、动态 YAML 和已保存的会话选择未确认".into())
-                ))
+                current.and_then(|c| c.warning)
             },
         })
     }
@@ -1038,7 +1186,6 @@ impl Gateway {
         import: bool,
     ) -> Result<View> {
         models::require_chat(options.protocol)?;
-        options.model = Some(models::default_model(options.model.as_deref()).into());
         self.recover_dsh_state()?;
         let (old, token) = {
             let s = self.0.inner.lock().unwrap();
@@ -1060,53 +1207,74 @@ impl Gateway {
             return Err(conflict());
         }
         models::require_chat(options.protocol)?;
-        let models = models::catalog()
-            .into_iter()
-            .map(|mut value| {
-                let id = value["id"].as_str().unwrap_or_default().to_owned();
-                if let Some(meta) = self
-                    .0
-                    .usage
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|u| u.prices().ok())
-                    .and_then(|p| {
-                        let (choices, _) = self.0.model_list.snapshot();
-                        p.models_dev.metadata_from(&id, choices.source(&id))
-                    })
-                {
-                    if let Some(context) = meta.context {
-                        value["contextWindow"] = context.into();
+        let mut models = models::for_store(&self.0.inner.lock().unwrap().store);
+        if let Some(prices) = self
+            .0
+            .usage
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|u| u.prices().ok())
+        {
+            let (choices, _) = self.0.model_list.snapshot();
+            for model in &mut models {
+                let id = model["id"].as_str().unwrap_or_default();
+                if let Some(meta) = prices.models_dev.metadata_from(id, choices.source(id)) {
+                    for (key, value) in
+                        [("contextWindow", meta.context), ("maxTokens", meta.output)]
+                    {
+                        if model.get(key).is_none() {
+                            if let Some(value) = value {
+                                model[key] = value.into();
+                            }
+                        }
                     }
-                    if let Some(output) = meta.output {
-                        value["maxTokens"] = output.into();
-                    }
-                    if let Some(efforts) = meta.reasoning_efforts {
-                        let efforts: BTreeMap<_, _> = efforts
-                            .into_iter()
-                            .filter_map(|(k, v)| {
-                                if k == "none" {
-                                    Some(("off".to_owned(), v))
-                                } else if ["minimal", "low", "medium", "high", "xhigh", "max"]
-                                    .contains(&k.as_str())
-                                    && v.is_string()
-                                {
-                                    Some((k, v))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        if !efforts.is_empty() {
-                            value["reasoningEfforts"] =
-                                serde_json::to_value(efforts).unwrap_or_default();
+                    if model.get("reasoningEfforts").is_none() {
+                        if let Some(efforts) = meta.reasoning_efforts {
+                            let efforts: BTreeMap<_, _> = efforts
+                                .into_iter()
+                                .filter_map(|(key, value)| {
+                                    if key == "none" {
+                                        Some(("off".to_owned(), value))
+                                    } else if ["minimal", "low", "medium", "high", "xhigh", "max"]
+                                        .contains(&key.as_str())
+                                        && value.is_string()
+                                    {
+                                        Some((key, value))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if !efforts.is_empty() {
+                                model["reasoningEfforts"] = serde_json::json!(efforts);
+                            }
                         }
                     }
                 }
-                value
-            })
-            .collect::<Vec<_>>();
+            }
+        }
+        if options.model.is_none()
+            && old
+                .as_ref()
+                .and_then(|s| s.for_profile(&options.profile))
+                .is_none_or(|s| !s.active)
+        {
+            options.model = selection::effective(home, &options.profile)
+                .ok()
+                .and_then(|(input, _, _)| {
+                    input
+                        .configs
+                        .get(DEFAULT)
+                        .and_then(|c| string(c.get("model")))
+                })
+                .filter(|id| models.iter().any(|m| m["id"] == *id))
+                .or_else(|| {
+                    old.as_ref()
+                        .and_then(|s| s.for_profile(&options.profile))
+                        .and_then(|s| s.options.model)
+                });
+        }
         let token = self.0.registry.unique_local_token(self.0.client, &token);
         let previous = old.as_ref().and_then(|s| s.for_profile(&options.profile));
         let snapshot = prepare_shared(
@@ -1182,6 +1350,11 @@ impl Gateway {
                     .or_else(|| s.store.resume.as_ref().map(|r| r.home.clone()))
                     .ok_or_else(|| error("DSH 恢复目录缺失"))?;
                 let mut input = Input::read(&home, &snapshot.options.profile)?;
+                let model = selection::effective(&home, &snapshot.options.profile)?
+                    .0
+                    .configs
+                    .get(DEFAULT)
+                    .and_then(|c| string(c.get("model")));
                 restore(snapshot, &mut input)?;
                 if index + 1 < snapshots.len() {
                     input.environment.after = input.environment.before.clone().unwrap_or_default();
@@ -1198,6 +1371,7 @@ impl Gateway {
                     dsh.profiles = dsh.entries();
                     if let Some(profile) = dsh.profiles.get_mut(&snapshot.options.profile) {
                         profile.active = false;
+                        profile.options.model = model;
                     }
                     dsh.active = dsh.profiles.values().any(|p| p.active);
                 }
@@ -1341,11 +1515,29 @@ fn import_selection(
             .or_default()
             .extend(selection.models);
     }
+    let official_ids: Vec<_> = models::for_store(store)
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+        .collect();
     for (id, models) in discovered_models {
         let mapping = store
             .dsh_models
             .entry(id.clone())
-            .or_insert_with(|| ModelMapping::infer(&models))
+            .or_insert_with(|| {
+                let inferred = ModelMapping::infer(&models);
+                ModelMapping(
+                    official_ids
+                        .iter()
+                        .map(|id| {
+                            let target = inferred
+                                .resolve(id)
+                                .map(str::to_owned)
+                                .or_else(|| models.contains(id).then(|| id.clone()));
+                            (id.clone(), target)
+                        })
+                        .collect(),
+                )
+            })
             .clone();
         if let Some(p) = store.providers.iter_mut().find(|p| p.id == id) {
             if p.allowed_models.as_ref() != Some(&mapping.allowed()) {
@@ -1610,6 +1802,7 @@ mod tests {
             ..Default::default()
         };
         let tx = Transaction {
+            patches: BTreeMap::new(),
             version: 1,
             rollback: false,
             home: dir.path().to_owned(),

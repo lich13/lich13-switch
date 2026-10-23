@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "lich13-switch"
-version = "0.25.17"
+version = "0.25.18"
 dependencies = [
  "async-stream",
  "auto-launch",
@@ -2395,6 +2395,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rusqlite",
  "rust_decimal",
+ "semver",
  "serde",
  "serde_json",
  "sha1",

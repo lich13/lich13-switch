@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.25.17"
+version = "0.25.18"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -19,6 +19,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
+semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
 sha1 = "0.10"

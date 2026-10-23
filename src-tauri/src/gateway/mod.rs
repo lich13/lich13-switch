@@ -1190,6 +1190,7 @@ impl Gateway {
                 "官方账号连接期间不能切换网关供应商",
             ));
         }
+        let sync_dsh_models = matches!(&edit, Edit::DshModelsProvider { .. });
         let mut next = s.store.clone();
         if direct_select && self.0.client == ClientId::Grok {
             next.grok_api_model = Some(grok_config::MANAGED.into());
@@ -1322,6 +1323,8 @@ impl Gateway {
                 config_revision,
             )?;
             storage::digest(after.as_bytes())
+        } else if sync_dsh_models {
+            dsh::commit_mapping(&self.0.data, home, &mut next, &s.revision)?
         } else {
             next.persist(&self.0.data.join("gateway.json"), &s.revision)?
         };
@@ -1899,7 +1902,10 @@ impl Gateway {
         protocol: Option<grok_config::Protocol>,
     ) -> Result<Vec<String>> {
         if self.client_id() == ClientId::Dsh {
-            return Ok(vec![dsh::models::FLASH.into(), dsh::models::PRO.into()]);
+            return Ok(dsh::models::for_store(&self.0.inner.lock().unwrap().store)
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_owned))
+                .collect());
         }
 
         Ok(self

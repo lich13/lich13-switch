@@ -42,22 +42,32 @@ export default function UsageLogTable({
   ] as const;
   const performanceFields = ["firstToken", "duration", "speed"] as const;
   const columns = [
-    { id: "time", label: "结束时间", visible: true },
     {
-      id: "provider",
-      label: "供应商 / 客户端",
-      visible: visible("provider"),
+      id: "identity",
+      label: "时间 / 供应商 / 模型",
+      visible: true,
+      width: "minmax(0, 1fr)",
     },
-    { id: "model", label: "模型", visible: visible("model") },
-    { id: "cost", label: "费用", visible: visible("cost") },
     {
-      id: "metrics",
-      label: "Token / 性能",
-      visible: [...tokenFields, ...performanceFields, "status" as const].some(
-        visible,
-      ),
+      id: "tokens",
+      label: "Token",
+      visible: tokenFields.some(visible),
+      width: "minmax(120px, 0.62fr)",
+    },
+    {
+      id: "cost",
+      label: "费用",
+      visible: visible("cost"),
+      width: "minmax(70px, 0.36fr)",
+    },
+    {
+      id: "performance",
+      label: "性能",
+      visible: [...performanceFields, "status" as const].some(visible),
+      width: "minmax(114px, 0.56fr)",
     },
   ].filter((c) => c.visible);
+  const secondary = columns.filter((c) => c.id !== "identity");
   const exact = settings?.logNumberMode === "exact";
   const visibility = (id: LogColumn, visible: boolean) => {
     if (!settings || id === "time") return;
@@ -112,6 +122,19 @@ export default function UsageLogTable({
           className={`usage-table usage-request-table${exact ? " exact" : ""}`}
           aria-label="请求记录"
           aria-busy={busy}
+          style={
+            {
+              "--usage-columns": columns.map((c) => c.width).join(" "),
+              "--usage-areas": `"${columns.map((c) => c.id).join(" ")}"`,
+              "--usage-narrow-columns":
+                secondary
+                  .map((c) => (c.id === "tokens" ? "minmax(0, 1fr)" : c.width))
+                  .join(" ") || "minmax(0, 1fr)",
+              "--usage-narrow-areas": secondary.length
+                ? `"${secondary.map(() => "identity").join(" ")}" "${secondary.map((c) => c.id).join(" ")}"`
+                : '"identity"',
+            } as React.CSSProperties
+          }
         >
           <thead>
             <tr>
@@ -119,11 +142,7 @@ export default function UsageLogTable({
                 <th
                   key={c.id}
                   className={
-                    c.id === "time"
-                      ? "usage-sticky-time"
-                      : c.id === "provider" || c.id === "model"
-                        ? ""
-                        : "usage-numeric"
+                    c.id === "identity" ? "usage-sticky-time" : "usage-numeric"
                   }
                 >
                   {c.label}
@@ -354,25 +373,49 @@ export default function UsageLogTable({
               const metricLabels = {
                 ...tokenLabels,
                 firstToken: "首字",
-                duration: "耗时",
-                speed: "TPS",
+                duration: "总耗时",
+                speed: "输出 TPS",
                 status: "HTTP",
               };
-              cells.metrics = (
-                <div className="usage-inline-metrics">
-                  {[...tokenFields, ...performanceFields, "status" as const]
+              cells.identity = (
+                <div className="usage-identity-grid">
+                  <div className="usage-identity-time">{cells.time}</div>
+                  {visible("provider") && (
+                    <div className="usage-identity-provider">
+                      {cells.provider}
+                    </div>
+                  )}
+                  {visible("model") && (
+                    <div className="usage-identity-model">{cells.model}</div>
+                  )}
+                </div>
+              );
+              const metric = (
+                field:
+                  | (typeof tokenFields)[number]
+                  | (typeof performanceFields)[number]
+                  | "status",
+              ) => (
+                <span
+                  key={field}
+                  className={`usage-token-item ${field}`}
+                  aria-label={metricLabels[field]}
+                  title={metricLabels[field]}
+                >
+                  <small>{metricLabels[field]}</small>
+                  {cells[field]}
+                </span>
+              );
+              cells.tokens = (
+                <div className="usage-token-grid">
+                  {tokenFields.filter(visible).map(metric)}
+                </div>
+              );
+              cells.performance = (
+                <div className="usage-performance-grid">
+                  {[...performanceFields, "status" as const]
                     .filter(visible)
-                    .map((field) => (
-                      <span
-                        key={field}
-                        className={`usage-token-item ${field}`}
-                        aria-label={metricLabels[field]}
-                        title={metricLabels[field]}
-                      >
-                        <small>{metricLabels[field]}</small>
-                        {cells[field]}
-                      </span>
-                    ))}
+                    .map(metric)}
                 </div>
               );
               return (
@@ -394,18 +437,16 @@ export default function UsageLogTable({
                       data-field={c.id}
                       data-label={c.label}
                       title={
-                        c.id === "time"
+                        c.id === "identity"
                           ? preciseDate(r.finishedAt ?? r.startedAt)
                           : c.id === "cost" && !native
                             ? (a.price?.cost ?? unpricedReason(a))
                             : undefined
                       }
                       className={
-                        c.id === "time"
+                        c.id === "identity"
                           ? "usage-sticky-time"
-                          : c.id === "provider" || c.id === "model"
-                            ? ""
-                            : "usage-numeric"
+                          : "usage-numeric"
                       }
                     >
                       <div className={`usage-cell usage-cell-${c.id}`}>

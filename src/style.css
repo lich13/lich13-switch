@@ -3404,7 +3404,7 @@ button.exchange-button:active:not(:disabled) {
   text-decoration: underline;
 }
 .dsh-file-selectors {
-  padding: 0 28px 16px;
+  padding: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
@@ -3551,4 +3551,46 @@ button.exchange-button:active:not(:disabled) {
 .dsh-results .current-connection {
   flex: 1;
   min-width: 180px;
+}
+
+.dsh-config-page .config-heading {
+  padding: 0;
+  margin-bottom: 12px;
+}
+.dsh-config-page .editor-toolbar {
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.dsh-config-page .editor-toolbar > span {
+  margin-right: auto;
+}
+.dsh-editor-actions {
+  margin-left: auto;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+.dsh-editor-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.dsh-mapping-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.dsh-mapping-row label {
+  min-width: 0;
+}
+.dsh-mapping-row select,
+.dsh-mapping-row input {
+  min-width: 0;
+  width: 100%;
+}
+.dsh-model-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }

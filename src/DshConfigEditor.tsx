@@ -188,63 +188,55 @@ export default function DshConfigEditor({
           select={select}
           disabled={busy || loading}
         />
-        <button
-          className="primary"
-          disabled={!dirty || busy || loading}
-          onClick={() => void save()}
-        >
-          <Save size={15} />
-          {busy ? "保存中…" : "保存"}
-        </button>
-      </div>
-      <div className="dsh-file-selectors">
-        <label>
-          profile
-          <select
-            aria-label="DSH 配置 profile"
-            value={profile}
-            disabled={busy || loading}
-            onChange={(e) => void switchFile(e.target.value, "profilePatch")}
-          >
-            <option value="">请选择 profile</option>
-            {choices.profiles.map((p) => (
-              <option key={p}>{p}</option>
-            ))}
-          </select>
-        </label>
-        {choices.files.some((file) => file !== "profilePatch") && (
-          <details className="dsh-advanced-files">
-            <summary>高级文件</summary>
-            <label>
-              文件
-              <select
-                aria-label="DSH 配置文件"
-                value={key}
-                disabled={busy || loading}
-                onChange={(e) =>
-                  void switchFile(profile, e.target.value as DshFileKey)
-                }
-              >
-                {choices.files.map((file) => (
-                  <option
-                    key={file}
-                    value={file}
-                    disabled={file === "profilePatch" && !profile}
-                  >
-                    {names[file]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </details>
-        )}
       </div>
       <div className="editor-toolbar">
+        <div className="dsh-file-selectors">
+          <label>
+            profile
+            <select
+              aria-label="DSH 配置 profile"
+              value={profile}
+              disabled={busy || loading}
+              onChange={(e) => void switchFile(e.target.value, "profilePatch")}
+            >
+              <option value="">请选择 profile</option>
+              {choices.profiles.map((p) => (
+                <option key={p}>{p}</option>
+              ))}
+            </select>
+          </label>
+          {choices.files.some((file) => file !== "profilePatch") && (
+            <details className="dsh-advanced-files">
+              <summary>高级文件</summary>
+              <label>
+                文件
+                <select
+                  aria-label="DSH 配置文件"
+                  value={key}
+                  disabled={busy || loading}
+                  onChange={(e) =>
+                    void switchFile(profile, e.target.value as DshFileKey)
+                  }
+                >
+                  {choices.files.map((file) => (
+                    <option
+                      key={file}
+                      value={file}
+                      disabled={file === "profilePatch" && !profile}
+                    >
+                      {names[file]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </details>
+          )}
+        </div>
         <span>
           {names[key]}
           {dirty && <span className="status amber"> · 未保存</span>}
         </span>
-        <div className="inline">
+        <div className="inline dsh-editor-actions">
           <button disabled={busy || loading} onClick={() => void reload()}>
             <RotateCcw size={14} />
             重新读取
@@ -270,6 +262,14 @@ export default function DshConfigEditor({
             onClick={() => void save(true)}
           >
             恢复上一版
+          </button>
+          <button
+            className="primary"
+            disabled={!dirty || busy || loading}
+            onClick={() => void save()}
+          >
+            <Save size={15} />
+            {busy ? "保存中…" : "保存"}
           </button>
         </div>
       </div>

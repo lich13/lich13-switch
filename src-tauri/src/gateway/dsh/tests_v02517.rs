@@ -42,17 +42,17 @@ fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping(
     assert_eq!(store.providers[0].name, "Desktop");
     let id = store.providers[0].id.clone();
     assert_eq!(
-        store.dsh_models[&id].pro.as_deref(),
+        store.dsh_models[&id].resolve(models::PRO),
         Some("DeepSeek-V4-Pro")
     );
     store
         .edit(
             Edit::DshModelsProvider {
                 id: id.clone(),
-                mapping: ModelMapping {
-                    flash: Some("manual-flash".into()),
-                    pro: None,
-                },
+                mapping: ModelMapping(BTreeMap::from([
+                    (models::FLASH.into(), Some("manual-flash".into())),
+                    (models::PRO.into(), None),
+                ])),
             },
             false,
         )
@@ -79,12 +79,14 @@ fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping(
         order
     );
     assert_eq!(store.providers[0].name, "Manual name");
-    assert_eq!(store.dsh_models[&id].flash.as_deref(), Some("manual-flash"));
-    assert_eq!(store.dsh_models[&id].pro, None);
     assert_eq!(
-        store.dsh_models[&store.providers[2].id],
-        ModelMapping::default()
+        store.dsh_models[&id].resolve(models::FLASH),
+        Some("manual-flash")
     );
+    assert_eq!(store.dsh_models[&id].resolve(models::PRO), None);
+    assert!(store.dsh_models[&store.providers[2].id]
+        .allowed()
+        .is_empty());
 }
 
 #[test]
@@ -127,8 +129,8 @@ fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
         "deepseek-flash".into(),
         "DeepSeek V4 Pro".into(),
     ]);
-    assert_eq!(mapping.flash, None);
-    assert_eq!(mapping.pro.as_deref(), Some("DeepSeek V4 Pro"));
+    assert_eq!(mapping.resolve(models::FLASH), None);
+    assert_eq!(mapping.resolve(models::PRO), Some("DeepSeek V4 Pro"));
 }
 
 struct Fixture {
@@ -167,10 +169,10 @@ impl Fixture {
                 .unwrap();
             let p = store.providers.last_mut().unwrap();
             p.queued = true;
-            let mapping = ModelMapping {
-                flash: Some(format!("vendor-{index}-flash")),
-                pro: Some(format!("vendor-{index}-pro")),
-            };
+            let mapping = ModelMapping(BTreeMap::from([
+                (models::FLASH.into(), Some(format!("vendor-{index}-flash"))),
+                (models::PRO.into(), Some(format!("vendor-{index}-pro"))),
+            ]));
             p.allowed_models = Some(mapping.allowed());
             store.dsh_models.insert(p.id.clone(), mapping);
         }
@@ -224,6 +226,65 @@ impl Fixture {
 }
 fn success() -> Response<replay::WireBody> {
     Response::builder().header("content-type", "application/json").body(replay::full(br#"{"choices":[{"message":{"role":"assistant","content":"fixture"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#.to_vec())).unwrap()
+}
+
+#[tokio::test]
+async fn arbitrary_official_id_skips_unmapped_providers_and_remaps_each_retry() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut upstreams = vec![];
+    for index in 0..3 {
+        let seen = seen.clone();
+        upstreams.push(
+            server(move |request| {
+                let seen = seen.clone();
+                async move {
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    let value: Value = serde_json::from_slice(&body).unwrap();
+                    seen.lock()
+                        .unwrap()
+                        .push((index, value["model"].as_str().unwrap().to_owned()));
+                    if index == 1 {
+                        Response::builder()
+                            .status(503)
+                            .body(replay::full("unavailable"))
+                            .unwrap()
+                    } else {
+                        success()
+                    }
+                }
+            })
+            .await,
+        );
+    }
+    let fixture = Fixture::new(
+        &upstreams.iter().map(|s| s.url("/v1")).collect::<Vec<_>>(),
+        false,
+    )
+    .await;
+    for (index, provider) in fixture.gateway.view().providers.iter().enumerate() {
+        fixture
+            .gateway
+            .edit(
+                Edit::DshModelsProvider {
+                    id: provider.id.clone(),
+                    mapping: ModelMapping(BTreeMap::from([(
+                        "deepseek-v5-preview".into(),
+                        (index != 0).then(|| format!("vendor-{index}-future")),
+                    )])),
+                },
+                &fixture.gateway.view().revision,
+                fixture.home.path(),
+            )
+            .unwrap();
+    }
+    let response = fixture.request("deepseek-v5-preview", false).await;
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, "vendor-1-future".into()), (2, "vendor-2-future".into())]
+    );
+    fixture.gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -350,10 +411,10 @@ async fn manual_mode_and_empty_pro_mapping_do_not_fall_back_to_flash() {
             .edit(
                 Edit::DshModelsProvider {
                     id: p.id,
-                    mapping: ModelMapping {
-                        flash: Some("flash-only".into()),
-                        pro: None,
-                    },
+                    mapping: ModelMapping(BTreeMap::from([
+                        (models::FLASH.into(), Some("flash-only".into())),
+                        (models::PRO.into(), None),
+                    ])),
                 },
                 &fixture.gateway.try_view().unwrap().revision,
                 fixture.home.path(),

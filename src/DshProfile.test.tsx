@@ -18,6 +18,14 @@ const state: GatewayState = {
 beforeEach(() => {
   localStorage.clear();
   mock.command.mockReset().mockImplementation(async (name, args) => {
+    if (name === "dsh_official_models")
+      return {
+        models: [
+          { id: "deepseek-flash", name: "DeepSeek-V4.1-Flash" },
+          { id: "deepseek-v4-pro", name: "DeepSeek-V4-Pro" },
+        ],
+        error: null,
+      };
     if (name === "preview_dsh_profile")
       return {
         profiles: ["fixture"],
@@ -26,12 +34,12 @@ beforeEach(() => {
         revision: "fixture-preview",
         models: ["fixture-model"],
         attached: false,
-        model: "fixture-model",
+        model: "deepseek-flash",
         makeDefault: true,
         warning: null,
         current: {
           kind: "unmatched",
-          model: "fixture-model",
+          model: "deepseek-flash",
           modelSource: "profile fixture",
           providerName: "Fixture",
           warning: null,
@@ -80,7 +88,9 @@ it("defaults to desktop, fixes the protocol and imports all profiles in one acti
     "deepseek-v4-pro",
   );
   expect(
-    mock.command.mock.calls.every(([name]) => name === "preview_dsh_profile"),
+    mock.command.mock.calls.every(([name]) =>
+      ["preview_dsh_profile", "dsh_official_models"].includes(name),
+    ),
   ).toBe(true);
   await user.click(screen.getByRole("button", { name: "导入并接入" }));
   await waitFor(() => expect(update).toHaveBeenCalledOnce());
@@ -126,4 +136,29 @@ it("preserves manual mode on ordinary sync and enables auto only when connecting
   expect(
     mock.command.mock.calls.filter(([name]) => name === "update_gateway"),
   ).toHaveLength(1);
+});
+
+it("sends no model on ordinary sync and sends an explicitly changed model", async () => {
+  const preview = {
+    ...(await mock.command("preview_dsh_profile", {})),
+    attached: true,
+  } as DshPreview;
+  await connectDsh({ ...state, running: true }, preview);
+  expect(mock.command).toHaveBeenLastCalledWith(
+    "attach_dsh_profiles",
+    expect.objectContaining({
+      options: expect.objectContaining({ model: null }),
+    }),
+  );
+  await connectDsh(
+    { ...state, running: true },
+    { ...preview, model: "deepseek-future" },
+    true,
+  );
+  expect(mock.command).toHaveBeenLastCalledWith(
+    "attach_dsh_profiles",
+    expect.objectContaining({
+      options: expect.objectContaining({ model: "deepseek-future" }),
+    }),
+  );
 });
