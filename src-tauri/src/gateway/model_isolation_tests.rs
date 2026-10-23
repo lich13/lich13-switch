@@ -463,7 +463,6 @@ async fn v022_usage_limit_429_fails_over_to_p2_without_capacity_wait() {
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
     settings.capacity_retry_seconds = 60;
-    settings.total_seconds = 2;
     settings.queue_seconds = 2;
     settings.first_byte_seconds = 1;
     settings.idle_seconds = 1;
@@ -511,7 +510,6 @@ async fn v022_insufficient_balance_429_with_one_provider_returns_original_body_w
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
     settings.capacity_retry_seconds = 60;
-    settings.total_seconds = 2;
     settings.queue_seconds = 2;
     settings.first_byte_seconds = 1;
     settings.idle_seconds = 1;
@@ -562,7 +560,6 @@ async fn v022_temporary_capacity_then_hard_429_does_not_revive_denied_provider()
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
     settings.capacity_retry_seconds = 1;
-    settings.total_seconds = 5;
     settings.queue_seconds = 2;
     settings.first_byte_seconds = 1;
     settings.idle_seconds = 1;

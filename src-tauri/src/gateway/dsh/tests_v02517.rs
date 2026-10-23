@@ -152,7 +152,6 @@ impl Fixture {
         store.settings.max_retries = 2;
         store.settings.first_byte_seconds = 1;
         store.settings.idle_seconds = 1;
-        store.settings.total_seconds = 5;
         store.settings.queue_seconds = 1;
         store.settings.failure_threshold = 1;
         for (index, base) in bases.iter().enumerate() {

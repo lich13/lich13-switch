@@ -58,7 +58,7 @@ describe("gateway advanced settings", () => {
 
     expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
     const retry = screen.getByRole("spinbutton", { name: "WebSocket 断开等待 / 秒" });
-    expect(retry).toHaveValue(60);
+    expect(retry).toHaveValue(300);
     const transient = screen.getByRole("spinbutton", { name: "5xx 连续失败阈值" });
     expect(transient).toHaveValue(6);
     expect(transient).toHaveAttribute("min", "1");

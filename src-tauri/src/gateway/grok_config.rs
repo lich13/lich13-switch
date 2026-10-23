@@ -396,12 +396,31 @@ pub fn read(home: &Path) -> Result<(String, String)> {
 }
 
 /// Legacy snapshots own the selector too; independent API snapshots own only our model.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Snapshot {
     before: String,
     applied: String,
     #[serde(default)]
     independent: bool,
+}
+impl Serialize for Snapshot {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeStruct};
+        let mut state = serializer.serialize_struct("Snapshot", 3)?;
+        state.serialize_field(
+            "before",
+            &self.owned_text(&self.before).map_err(S::Error::custom)?,
+        )?;
+        state.serialize_field(
+            "applied",
+            &self.owned_text(&self.applied).map_err(S::Error::custom)?,
+        )?;
+        state.serialize_field("independent", &self.independent)?;
+        state.end()
+    }
 }
 impl Snapshot {
     pub fn new(text: &str, target: &Pair) -> Result<Self> {
@@ -526,20 +545,31 @@ impl Snapshot {
             independent,
         })
     }
-    fn owned(&self, text: &str) -> Result<(Option<String>, Option<String>)> {
-        let doc = parse(text)?;
+    fn owned(&self, text: &str) -> Result<(Option<toml::Value>, Option<toml::Value>)> {
+        let doc: toml::Value =
+            toml::from_str(text).map_err(|_| error("Grok 配置不是有效的 TOML"))?;
         Ok((
             (!self.independent)
-                .then(|| {
-                    doc.get("models")
-                        .and_then(|v| v.get("default"))
-                        .map(ToString::to_string)
-                })
+                .then(|| doc.get("models").and_then(|v| v.get("default")).cloned())
                 .flatten(),
-            doc.get("model")
-                .and_then(|v| v.get(MANAGED))
-                .map(ToString::to_string),
+            doc.get("model").and_then(|v| v.get(MANAGED)).cloned(),
         ))
+    }
+    fn owned_text(&self, text: &str) -> Result<String> {
+        let source = parse(text)?;
+        let mut doc = DocumentMut::new();
+        for (section, key) in [("models", "default"), ("model", MANAGED)] {
+            if self.independent && section == "models" {
+                continue;
+            }
+            if let Some(field) = source.get(section).and_then(|v| v.get(key)) {
+                let mut table = Table::new();
+                table.set_implicit(section == "model");
+                table.insert(key, field.clone());
+                doc[section] = Item::Table(table);
+            }
+        }
+        Ok(doc.to_string())
     }
     pub fn apply(&self, path: &Path, expected: Option<&str>) -> Result<()> {
         self.write_owned(path, &self.applied, expected, false)
@@ -619,9 +649,7 @@ impl Snapshot {
                 "Grok 受管模型已被外部修改，已保留当前配置",
             ));
         }
-        let output = if current == self.before || current == self.applied {
-            target.to_owned()
-        } else {
+        let output = {
             let desired = parse(target)?;
             let mut doc = parse(current)?;
             for (section, key) in [("models", "default"), ("model", MANAGED)] {
@@ -632,7 +660,16 @@ impl Snapshot {
                     if !doc.contains_key(section) {
                         doc[section] = Item::Table(Table::new());
                     }
-                    doc[section][key] = next.clone();
+                    let position = doc
+                        .get(section)
+                        .and_then(|s| s.get(key))
+                        .and_then(Item::as_table)
+                        .and_then(Table::position);
+                    let mut next = next.clone();
+                    if let (Some(position), Some(table)) = (position, next.as_table_mut()) {
+                        table.set_position(position);
+                    }
+                    doc[section][key] = next;
                 } else if let Some(table) = doc.get_mut(section).and_then(Item::as_table_like_mut) {
                     table.remove(key);
                 }

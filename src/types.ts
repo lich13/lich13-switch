@@ -108,7 +108,7 @@ export type GatewaySettings = {
   minRequests: number;
   firstByteSeconds: number;
   idleSeconds: number;
-  totalSeconds: number;
+  retryBudgetSeconds: number;
   connectSeconds: number;
   queueSeconds: number;
   maxWaiting: number;

@@ -94,6 +94,7 @@ mod v02510_error_tests;
 mod v02510_quota_routing_tests;
 #[cfg(test)]
 mod v02511_event_policy_tests;
+mod wait_budget;
 mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
@@ -455,6 +456,7 @@ impl Gateway {
         let upgrade_error = crate::migrations::gateway(&data)
             .and_then(|()| grok_import::recover(&data))
             .and_then(|()| dsh::recover(&data))
+            .and_then(|()| crate::migrations::gateway_state_after_recovery(&data))
             .err();
         let error = upgrade_error.as_ref().map(|e| e.message.clone());
         let (store, revision) = Store::load(&data.join("gateway.json"))?;
@@ -1179,7 +1181,11 @@ impl Gateway {
                 "官方账号连接期间不能切换网关供应商",
             ));
         }
-        let sync_dsh_models = matches!(&edit, Edit::DshModelsProvider { .. });
+        let sync_dsh_models = self.0.client == ClientId::Dsh
+            && matches!(
+                &edit,
+                Edit::DshModelsProvider { .. } | Edit::Settings { .. }
+            );
         let mut next = s.store.clone();
         if direct_select && self.0.client == ClientId::Grok {
             next.grok_api_model = Some(grok_config::MANAGED.into());

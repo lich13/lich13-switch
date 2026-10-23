@@ -49,7 +49,6 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
     settings.max_retries = 1;
     settings.first_byte_seconds = 1;
     settings.idle_seconds = 5;
-    settings.total_seconds = 10;
     settings.connect_seconds = 2;
     settings.queue_seconds = 1;
     settings.websocket_retry_seconds = 1;
@@ -244,6 +243,45 @@ async fn request_bytes(gateway: &Gateway, path: &str, body: &[u8]) -> Vec<u8> {
         .expect("gateway should finish the request after the first-byte deadline")
         .unwrap();
     response
+}
+
+#[tokio::test]
+async fn effective_sse_output_continues_after_the_shared_wait_budget() {
+    const DELTA: &[u8] =
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture\"}\n\n";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_http_request(&mut stream).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    4 * DELTA.len() + COMPLETED.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            stream.write_all(DELTA).await.unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        stream.write_all(COMPLETED).await.unwrap();
+    });
+    let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
+    let mut settings = gateway.view().settings;
+    settings.retry_budget_seconds = 1;
+    edit(&gateway, &dir, Edit::Settings { settings });
+    let response = request_bytes(&gateway, "/v1/responses", REQUEST_BODY).await;
+    assert_eq!(response_status(&response), Some(200));
+    let text = String::from_utf8_lossy(&response);
+    assert_eq!(text.matches("response.output_text.delta").count(), 4);
+    assert!(text.contains("response.completed"));
+    upstream.await.unwrap();
+    gateway.stop().await.unwrap();
 }
 
 async fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {

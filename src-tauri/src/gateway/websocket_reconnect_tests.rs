@@ -120,8 +120,8 @@ const NATIVE_CREATED: &str = r#"{"type":"response.created","response":{"id":"fix
 const NATIVE_COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-native-response","model":"fixture-model","status":"completed"}}"#;
 
 #[test]
-fn websocket_retry_interval_defaults_to_sixty_seconds_and_accepts_one() {
-    assert_eq!(Settings::default().websocket_retry_seconds, 60);
+fn websocket_retry_interval_defaults_to_three_hundred_seconds_and_accepts_one() {
+    assert_eq!(Settings::default().websocket_retry_seconds, 300);
     let settings = Settings {
         websocket_retry_seconds: 1,
         ..Settings::default()
@@ -494,7 +494,6 @@ fn auto_retry(g: &Gateway, t: &tempfile::TempDir) {
     settings.max_retries = 1;
     settings.connect_seconds = 1;
     settings.first_byte_seconds = 2;
-    settings.total_seconds = 5;
     update(g, t, Edit::Settings { settings });
 }
 
@@ -683,4 +682,87 @@ fn sse_response_model_is_observed_from_first_and_final_events() {
         Some("fixture-final-model")
     );
     assert_eq!(protocol.observation.meter.tokens.input, Some(2));
+}
+
+#[tokio::test]
+async fn shared_wait_budget_ends_native_reconnect_backoff() {
+    let (port, state) = native_server(|_, mut ws, state| async move {
+        if let Some(frame) = native_next("budget fixture create", &mut ws).await {
+            record_native_request(&state, &frame);
+            let _ = ws
+                .send(yawc::Frame::close(1011.into(), "fixture disconnect"))
+                .await;
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+    native_retry_settings(&g, &t, 3, 600);
+    let mut settings = g.view().settings;
+    settings.retry_budget_seconds = 1;
+    settings.websocket_retry_seconds = 60;
+    update(&g, &t, Edit::Settings { settings });
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    client
+        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+        .await
+        .unwrap();
+    let closed = native_next("budget client close", &mut client).await;
+    assert!(closed.is_none_or(|f| f.opcode() == yawc::OpCode::Close));
+    assert_eq!(state.connections.load(Ordering::SeqCst), 1);
+    drop(client);
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_websocket_second_turn_has_a_fresh_wait_budget() {
+    let (port, state) = native_server(|_, mut ws, state| async move {
+        for _ in 0..2 {
+            let frame = native_next("independent budget create", &mut ws)
+                .await
+                .unwrap();
+            record_native_request(&state, &frame);
+            ws.send(yawc::Frame::text(NATIVE_CREATED.to_owned()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            ws.send(yawc::Frame::text(NATIVE_COMPLETED.to_owned()))
+                .await
+                .unwrap();
+        }
+        while let Some(frame) = ws.next().await {
+            if frame.opcode() == yawc::OpCode::Close {
+                break;
+            }
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+    native_retry_settings(&g, &t, 0, 600);
+    let mut settings = g.view().settings;
+    settings.retry_budget_seconds = 1;
+    update(&g, &t, Edit::Settings { settings });
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    for _ in 0..2 {
+        client
+            .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+            .await
+            .unwrap();
+        for event in ["response.created", "response.completed"] {
+            assert!(native_next("independent budget response", &mut client)
+                .await
+                .unwrap()
+                .as_str()
+                .contains(event));
+        }
+    }
+    assert_eq!(state.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    client
+        .send(yawc::Frame::close(1000.into(), "fixture complete"))
+        .await
+        .unwrap();
+    drop(client);
+    g.stop().await.unwrap();
 }

@@ -506,3 +506,42 @@ preferred_method = "api_key"
         Some("https://example.invalid/v1")
     );
 }
+
+#[test]
+fn persisted_snapshot_excludes_other_credentials_and_merges_current_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, SOURCE_CONFIG).unwrap();
+    let profile = grok_config::profile(SOURCE_CONFIG).unwrap();
+    let snapshot = grok_config::Snapshot::api(
+        SOURCE_CONFIG,
+        &Pair::new("http://127.0.0.1:9", "fixture-local-token"),
+        &profile.connection,
+        false,
+    )
+    .unwrap();
+    let json = serde_json::to_string(&snapshot).unwrap();
+    for secret in [
+        "fixture-other-model-key",
+        "fixture-original-upstream-key",
+        "fixture-other-provider-key",
+        "fixture-shared-auth",
+    ] {
+        assert!(!json.contains(secret));
+    }
+    let saved: grok_config::Snapshot = serde_json::from_str(&json).unwrap();
+    saved.apply(&path, None).unwrap();
+    let active = fs::read_to_string(&path).unwrap();
+    assert!(active.contains("fixture-other-provider-key"));
+    assert!(saved.unchanged(&active).unwrap());
+    fs::write(
+        &path,
+        active.replace("fixture-other-provider-key", "fixture-external-secret"),
+    )
+    .unwrap();
+    saved.restore_gateway(&path).unwrap();
+    let restored = fs::read_to_string(&path).unwrap();
+    assert!(restored.contains("fixture-external-secret"));
+    assert!(!restored.contains("fixture-local-token"));
+    assert!(restored.contains("operator_setting = \"fixture-v1\""));
+}

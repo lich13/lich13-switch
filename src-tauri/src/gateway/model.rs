@@ -34,10 +34,10 @@ const DEFAULT_COOLDOWN_SECONDS: u64 = 60;
 const DEFAULT_ERROR_RATE: f64 = 0.6;
 const DEFAULT_MIN_REQUESTS: u32 = 10;
 // These phase limits have different meanings even where the values match.
-const DEFAULT_FIRST_BYTE_SECONDS: u64 = 600;
-const DEFAULT_IDLE_SECONDS: u64 = 600;
-const DEFAULT_TOTAL_SECONDS: u64 = 600;
-const DEFAULT_CONNECT_SECONDS: u64 = 15;
+const DEFAULT_FIRST_BYTE_SECONDS: u64 = 300;
+const DEFAULT_IDLE_SECONDS: u64 = 300;
+const DEFAULT_RETRY_BUDGET_SECONDS: u64 = 300;
+const DEFAULT_CONNECT_SECONDS: u64 = 300;
 pub(super) const USAGE_TAIL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub struct Settings {
     pub rate_limit_seconds: u64,
     #[serde(default = "default_capacity_retry_seconds")]
     pub capacity_retry_seconds: u64,
-    #[serde(default = "default_capacity_retry_seconds")]
+    #[serde(default = "default_request_seconds")]
     pub websocket_retry_seconds: u64,
     #[serde(default = "default_thread_idle_seconds")]
     pub thread_idle_release_seconds: u64,
@@ -64,7 +64,8 @@ pub struct Settings {
     pub min_requests: u32,
     pub first_byte_seconds: u64,
     pub idle_seconds: u64,
-    pub total_seconds: u64,
+    #[serde(default = "default_request_seconds")]
+    pub retry_budget_seconds: u64,
     pub connect_seconds: u64,
     #[serde(default = "default_wait_seconds")]
     pub queue_seconds: u64,
@@ -77,8 +78,11 @@ fn default_thread_idle_seconds() -> u64 {
 fn default_endpoint_probe_seconds() -> u64 {
     300
 }
+fn default_request_seconds() -> u64 {
+    300
+}
 fn default_wait_seconds() -> u64 {
-    30
+    default_request_seconds()
 }
 fn default_transient_failure_threshold() -> u32 {
     6
@@ -103,14 +107,14 @@ impl Default for Settings {
             cooldown_seconds: DEFAULT_COOLDOWN_SECONDS,
             rate_limit_seconds: default_rate_limit_seconds(),
             capacity_retry_seconds: default_capacity_retry_seconds(),
-            websocket_retry_seconds: default_capacity_retry_seconds(),
+            websocket_retry_seconds: default_request_seconds(),
             thread_idle_release_seconds: default_thread_idle_seconds(),
             endpoint_probe_seconds: default_endpoint_probe_seconds(),
             error_rate: DEFAULT_ERROR_RATE,
             min_requests: DEFAULT_MIN_REQUESTS,
             first_byte_seconds: DEFAULT_FIRST_BYTE_SECONDS,
             idle_seconds: DEFAULT_IDLE_SECONDS,
-            total_seconds: DEFAULT_TOTAL_SECONDS,
+            retry_budget_seconds: DEFAULT_RETRY_BUDGET_SECONDS,
             connect_seconds: DEFAULT_CONNECT_SECONDS,
             queue_seconds: default_wait_seconds(),
             max_waiting: default_max_waiting(),
@@ -137,7 +141,7 @@ impl Settings {
                 self.thread_idle_release_seconds,
                 self.first_byte_seconds,
                 self.idle_seconds,
-                self.total_seconds,
+                self.retry_budget_seconds,
                 self.connect_seconds,
                 self.queue_seconds,
             ]
@@ -409,6 +413,7 @@ impl Store {
                 let mut value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
                 crate::migrations::dsh_model_mappings(&mut value);
+                crate::migrations::gateway_wait_budget(&mut value);
                 serde_json::from_value(value).map_err(|_| invalid())?
             }
             None => Self::default(),
@@ -416,14 +421,9 @@ impl Store {
         if !matches!(store.schema, 1 | 2) {
             return Err(AppError::new(code::STORE, "网关存储版本不受支持"));
         }
-        if !store.phase_timeouts {
-            if store.settings.first_byte_seconds == 60 {
-                store.settings.first_byte_seconds = 600;
-            }
-            if store.settings.idle_seconds == 120 {
-                store.settings.idle_seconds = 600;
-            }
-            store.phase_timeouts = true;
+        store.phase_timeouts = true;
+        for model in &mut store.dsh_catalog {
+            super::dsh::models::normalize(model);
         }
         store.settings.validate()?;
         store

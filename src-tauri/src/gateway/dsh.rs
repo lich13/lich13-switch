@@ -21,10 +21,13 @@ pub use selection::{profile_states, ProfileCurrent};
 mod batch;
 pub mod editor;
 mod overlays;
+mod snapshot;
 #[cfg(test)]
 mod tests_v02516;
 #[cfg(test)]
 mod tests_v02518;
+#[cfg(test)]
+mod tests_v02521;
 pub use batch::Batch;
 
 const ROUTE: &str = "lich13-switch";
@@ -213,12 +216,17 @@ pub struct Options {
 pub struct Snapshot {
     pub options: Options,
     pub active: bool,
+    #[serde(serialize_with = "snapshot::patch")]
     patch: Change,
+    #[serde(serialize_with = "snapshot::environment")]
     environment: Change,
+    #[serde(serialize_with = "snapshot::credentials_change")]
     credentials: Change,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "snapshot::home_patch")]
     home_patch: Option<Change>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "snapshot::settings")]
     settings: Option<Change>,
     #[serde(default)]
     profiles: BTreeMap<String, ProfileSnapshot>,
@@ -227,6 +235,7 @@ pub struct Snapshot {
 struct ProfileSnapshot {
     options: Options,
     active: bool,
+    #[serde(serialize_with = "snapshot::patch")]
     patch: Change,
 }
 impl Snapshot {
@@ -531,17 +540,29 @@ fn prepare(
     models: &[serde_json::Value],
     previous: Option<&Snapshot>,
 ) -> Result<Snapshot> {
-    prepare_shared(input, options, token, port, models, previous, previous)
+    prepare_shared(
+        input,
+        options,
+        token,
+        &super::model::Settings {
+            port,
+            ..Default::default()
+        },
+        models,
+        previous,
+        previous,
+    )
 }
 fn prepare_shared(
     input: &mut Input,
     mut options: Options,
     token: &str,
-    port: u16,
+    settings: &super::model::Settings,
     models: &[serde_json::Value],
     previous: Option<&Snapshot>,
     shared: Option<&Snapshot>,
 ) -> Result<Snapshot> {
+    let port = settings.port;
     let set_model = options.model.is_some() || previous.is_none_or(|s| !s.active);
     let (patch_file, patch) = editable_patch(
         input.patch.before.as_deref().unwrap_or("[]\n"),
@@ -587,6 +608,9 @@ fn prepare_shared(
         return Err(error("DSH 模型 ID 无效"));
     }
     let mut models = models.to_vec();
+    for model in &mut models {
+        models::normalize(model);
+    }
     if let Some(id) = model {
         if !models.iter().any(|m| m["id"] == id) {
             models.push(serde_json::json!({"id":id}));
@@ -601,7 +625,16 @@ fn prepare_shared(
         format!("http://127.0.0.1:{port}/v1")
     };
     // JSON is a YAML subset; only the new owned route is serialized.
-    let route = yaml(&serde_json::json!({"displayName":"lich13-switch","apiKeyEnv":KEY,"api":api(options.protocol),"baseURL":base,"models":models}).to_string())?.as_mapping().ok_or_else(||error("无法生成 DSH 路由"))?;
+    let mut route_value = serde_json::json!({"displayName":"lich13-switch","apiKeyEnv":KEY,"api":api(options.protocol),"baseURL":base,"models":models,
+        "streamIdleTimeoutMs": settings.idle_seconds * 1000,
+        "websocketConnectTimeoutMs": settings.connect_seconds * 1000,
+        "retryPolicy": {"mode":"normal", "maxRetries":0}});
+    if options.protocol == Protocol::ChatCompletions {
+        route_value["compat"] = serde_json::json!({"maxTokensField":"max_tokens", "requiresReasoningContentOnAssistantMessages":true, "thinkingFormat":"deepseek", "supportsStore":false, "supportsDeveloperRole":false});
+    }
+    let route = yaml(&route_value.to_string())?
+        .as_mapping()
+        .ok_or_else(|| error("无法生成 DSH 路由"))?;
     providers.set(ROUTE, route.clone());
     if options.make_default {
         let id = model.ok_or_else(|| error("设为默认时请选择一个明确模型"))?;
@@ -699,7 +732,20 @@ fn owned_route(seq: &Sequence) -> Result<Option<YamlNode>> {
 }
 fn equal(a: Option<YamlNode>, b: Option<YamlNode>) -> bool {
     match (a, b) {
-        (Some(a), Some(b)) => a.yaml_eq(&b),
+        (Some(a), Some(b)) => {
+            // Projection stores maps as JSON; key order must not change ownership.
+            if let (Some(a), Some(b)) = (a.as_mapping(), b.as_mapping()) {
+                a.iter().count() == b.iter().count()
+                    && a.iter().all(|(key, value)| equal(Some(value), b.get(key)))
+            } else if let (Some(a), Some(b)) = (a.as_sequence(), b.as_sequence()) {
+                a.values().count() == b.values().count()
+                    && a.values()
+                        .zip(b.values())
+                        .all(|(a, b)| equal(Some(a), Some(b)))
+            } else {
+                a.yaml_eq(&b)
+            }
+        }
         (None, None) => true,
         _ => false,
     }
@@ -772,7 +818,12 @@ fn restore_default(
         .is_some_and(|c| c.contains_key("reasoningEffort"));
     if old.is_none()
         && !preserve_effort
-        && find_row(after, DEFAULT)?.is_some_and(|(_, r)| r.to_string() == row.to_string())
+        && find_row(after, DEFAULT)?.is_some_and(|(_, r)| {
+            equal(
+                Some(YamlNode::Mapping(r)),
+                Some(YamlNode::Mapping(row.clone())),
+            )
+        })
     {
         current.remove(index);
         return Ok(());
@@ -783,7 +834,12 @@ fn restore_default(
         && !preserve_effort
         && find_row(after, DEFAULT)?
             .and_then(|(_, r)| r.get_mapping("config"))
-            .is_some_and(|c| c.to_string() == config.to_string())
+            .is_some_and(|c| {
+                equal(
+                    Some(YamlNode::Mapping(c)),
+                    Some(YamlNode::Mapping(config.clone())),
+                )
+            })
     {
         row.remove("config");
         return Ok(());
@@ -806,7 +862,13 @@ fn restore(snapshot: &Snapshot, input: &mut Input) -> Result<()> {
     let after = sequence(&snapshot.patch.after)?;
     let (index, row) = find_row(&current, PI)?.ok_or_else(conflict)?;
     let old = find_row(&before, PI)?;
-    if old.is_none() && find_row(&after, PI)?.is_some_and(|(_, r)| r.to_string() == row.to_string())
+    if old.is_none()
+        && find_row(&after, PI)?.is_some_and(|(_, r)| {
+            equal(
+                Some(YamlNode::Mapping(r)),
+                Some(YamlNode::Mapping(row.clone())),
+            )
+        })
     {
         current.remove(index);
     } else {
@@ -1022,7 +1084,7 @@ pub(super) fn commit_mapping(
             &mut input,
             options,
             &store.local_token,
-            store.settings.port,
+            &store.settings,
             &models,
             Some(&profile),
             Some(&snapshot),
@@ -1277,11 +1339,13 @@ impl Gateway {
         }
         let token = self.0.registry.unique_local_token(self.0.client, &token);
         let previous = old.as_ref().and_then(|s| s.for_profile(&options.profile));
+        let mut route_settings = self.0.inner.lock().unwrap().store.settings.clone();
+        route_settings.port = listener.port;
         let snapshot = prepare_shared(
             &mut input,
             options.clone(),
             &token,
-            listener.port,
+            &route_settings,
             &models,
             previous.as_ref(),
             old.as_ref(),

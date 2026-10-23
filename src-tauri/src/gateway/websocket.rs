@@ -904,40 +904,52 @@ async fn session(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<(), Failure> {
-    let mut next_turn = None;
-    let mut current_ids = ids;
-    let mut current_routes = routes;
-    let mut current_cfg = cfg.clone();
-    loop {
-        match session_once(
-            g,
-            client,
-            &current_cfg,
-            manual,
-            current_ids.clone(),
-            current_routes.clone(),
-            headers.clone(),
-            uri.clone(),
-            &mut next_turn,
-        )
-        .await
-        {
-            Err((1999, "compaction handoff")) => {
-                current_cfg = g
-                    .request_state()
-                    .map_err(|_| (1011, code::STORE))?
-                    .store
-                    .settings
-                    .clone();
-                current_ids = g.routing_ids(None);
-                current_routes = current_ids
-                    .iter()
-                    .filter_map(|id| g.route(id).map(|route| (id.clone(), route)))
-                    .collect();
+    let request_budget = super::wait_budget::WaitBudget::new(cfg.retry_budget_seconds);
+    let forwarding = async {
+        let mut next_turn = None;
+        let mut current_ids = ids;
+        let mut current_routes = routes;
+        let mut current_cfg = cfg.clone();
+        loop {
+            match session_once(
+                g,
+                client,
+                &current_cfg,
+                manual,
+                current_ids.clone(),
+                current_routes.clone(),
+                headers.clone(),
+                uri.clone(),
+                &mut next_turn,
+                &request_budget,
+            )
+            .await
+            {
+                Err((1999, "compaction handoff")) => {
+                    current_cfg = g
+                        .request_state()
+                        .map_err(|_| (1011, code::STORE))?
+                        .store
+                        .settings
+                        .clone();
+                    current_ids = g.routing_ids(None);
+                    current_routes = current_ids
+                        .iter()
+                        .filter_map(|id| g.route(id).map(|route| (id.clone(), route)))
+                        .collect();
+                }
+                Err(TURN_CANCELLED) => {
+                    request_budget.complete(request_budget.deadline());
+                    cancellation(client).await?;
+                }
+                result => return result,
             }
-            Err(TURN_CANCELLED) => cancellation(client).await?,
-            result => return result,
         }
+    };
+    tokio::select! {
+        biased;
+        _ = request_budget.wait() => Err((1013, code::FIRST_BYTE_TIMEOUT)),
+        result = forwarding => result,
     }
 }
 // The terminal is settled once before reconnecting. A received application
@@ -1045,6 +1057,7 @@ async fn session_once(
     headers: HeaderMap,
     uri: Uri,
     next_turn: &mut Option<Frame>,
+    request_budget: &super::wait_budget::WaitBudget,
 ) -> Result<(), Failure> {
     let first_started = tokio::time::Instant::now();
     let mut first_deadline = first_started + Duration::from_secs(cfg.first_byte_seconds);
@@ -1079,6 +1092,7 @@ async fn session_once(
             if !creates(&frame) {
                 return Err((1008, "expected response.create"));
             }
+            request_budget.begin();
             break frame;
         }
     };
@@ -1499,6 +1513,7 @@ async fn session_once(
             .is_some_and(|id| id != admission.route.provider.id);
         previous_provider = Some(admission.route.provider.id.clone());
         let mut attempt_protocol = super::protocol::Protocol::new(true);
+        attempt_protocol.attach_wait_budget(request_budget);
         attempt_protocol.attach_rpm(admission.take_completion());
         attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
@@ -1827,6 +1842,7 @@ async fn session_once(
     let mut protocol = Some(initial_protocol);
     let mut pending: Option<Frame> = None;
     let mut pending_received_at = turn_received_at;
+    let mut pending_started = tokio::time::Instant::now();
     let mut confirmed_model: Option<String> = None;
     let mut received = false;
     let mut terminal_error = false;
@@ -2017,6 +2033,7 @@ async fn session_once(
                     usage_trace = None;
                     ownership = None;
                     failover.detach();
+                    request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
                     continue;
                 }
@@ -2114,6 +2131,7 @@ async fn session_once(
                     usage_trace = None;
                     ownership = None;
                     failover.detach();
+                    request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
                     continue;
                 }
@@ -2154,6 +2172,7 @@ async fn session_once(
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
+            next.attach_wait_budget(request_budget);
             next.attach_rpm(admission.take_completion());
             next.diagnostics(g, &route.provider.id, current_model.as_deref());
             next.attach_ownership(ownership.clone(), &route.provider.id);
@@ -2212,6 +2231,7 @@ async fn session_once(
                     ownership = None;
                     failover.detach();
                     retry_pending = false;
+                    request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
                     continue;
                 }
@@ -2371,6 +2391,7 @@ async fn session_once(
         }
         if turn.is_none() {
             if let Some(frame) = pending.take() {
+                request_budget.begin_at(pending_started);
                 turn_received_at = pending_received_at;
                 if let Some(previous) = protocol.take().filter(|p| p.succeeded()) {
                     previous_usage = Some((previous, tokio::time::Instant::now() + USAGE_TAIL));
@@ -2525,6 +2546,7 @@ async fn session_once(
                     .await;
                     match waited {
                         Err(TURN_CANCELLED) => {
+                            request_budget.complete(request_budget.deadline());
                             cancellation(client).await?;
                             continue 'turns;
                         }
@@ -2656,6 +2678,7 @@ async fn session_once(
                         turn = Some(admission)
                     }
                     Err(TURN_CANCELLED) => {
+                        request_budget.complete(request_budget.deadline());
                         cancellation(client).await?;
                         continue;
                     }
@@ -2675,6 +2698,7 @@ async fn session_once(
                 terminal_error = false;
                 replay_frame = frame.clone();
                 let mut next_protocol = super::protocol::Protocol::new(true);
+                next_protocol.attach_wait_budget(request_budget);
                 next_protocol.attach_rpm(turn.as_mut().and_then(|a| a.take_completion()));
                 next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
@@ -2892,6 +2916,9 @@ async fn session_once(
         }
         tokio::select! {
             biased;
+            _ = tokio::time::sleep_until(pending_started + Duration::from_secs(cfg.retry_budget_seconds)), if pending.is_some() => {
+                return Err((1013, code::FIRST_BYTE_TIMEOUT));
+            },
             _ = client.closed.changed() => {
                 if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
                 cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
@@ -3017,6 +3044,7 @@ async fn session_once(
                     let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
                     if protocol.as_ref().map_or_else(|| matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error"), |u| u.terminal().is_some()) {
+                        request_budget.complete(request_budget.deadline());
                         if let Some(mut admission) = turn.take() {
                             if let Some(u)=protocol.as_mut() {
                                 u.finish(Some(101), code::UPSTREAM_ERROR);
@@ -3076,6 +3104,7 @@ async fn session_once(
                 } else if creates(&frame) {
                     if pending.is_some() { return Err((1013, "too many pending turns")); }
                     pending_received_at = crate::usage::model::now();
+                    pending_started = tokio::time::Instant::now();
                     pending = Some(frame);
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                     if e.0 == 1008 {

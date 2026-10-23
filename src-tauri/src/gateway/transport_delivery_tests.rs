@@ -177,7 +177,6 @@ impl Fixture {
                 max_retries: 0,
                 first_byte_seconds: 5,
                 idle_seconds: 5,
-                total_seconds: 10,
                 connect_seconds: 2,
                 queue_seconds: 2,
                 ..Settings::default()

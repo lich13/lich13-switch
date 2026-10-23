@@ -395,7 +395,6 @@ async fn filtered_alternatives_retry_p1_and_wait_does_not_consume_response_timeo
         Edit::Settings {
             settings: Settings {
                 capacity_retry_seconds: 2,
-                total_seconds: 1,
                 ..g.view().settings
             },
         },

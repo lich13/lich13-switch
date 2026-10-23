@@ -309,7 +309,6 @@ fn configure(gateway: &Gateway, dir: &tempfile::TempDir) {
                 rate_limit_seconds: 1,
                 first_byte_seconds: 3,
                 idle_seconds: 3,
-                total_seconds: 10,
                 failure_threshold: 10,
                 transient_failure_threshold: 10,
                 ..gateway.view().settings

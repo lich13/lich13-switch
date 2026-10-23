@@ -390,7 +390,6 @@ async fn started_native_gateway(upstream_port: u16, max_rpm: u32) -> (tempfile::
     settings.websocket_retry_seconds = 1;
     settings.first_byte_seconds = 3;
     settings.idle_seconds = 3;
-    settings.total_seconds = 10;
     settings.connect_seconds = 2;
     gateway
         .edit(

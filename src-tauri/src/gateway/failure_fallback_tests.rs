@@ -448,7 +448,6 @@ async fn v024_seeded_http(
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
     settings.capacity_retry_seconds = 60;
-    settings.total_seconds = 10;
     settings.queue_seconds = 2;
     settings.first_byte_seconds = 2;
     settings.idle_seconds = 2;
@@ -675,7 +674,6 @@ async fn v024_compacted_websocket_fails_over(
     let usage = v024_attach_usage(&gateway, &dir);
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
-    settings.total_seconds = 15;
     settings.queue_seconds = 3;
     settings.first_byte_seconds = 3;
     settings.idle_seconds = 3;
@@ -797,7 +795,6 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
     .await;
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
-    settings.total_seconds = 15;
     settings.queue_seconds = 3;
     settings.first_byte_seconds = 3;
     settings.idle_seconds = 3;
@@ -982,7 +979,6 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
     settings.capacity_retry_seconds = 60;
-    settings.total_seconds = 10;
     settings.queue_seconds = 2;
     settings.first_byte_seconds = 2;
     settings.idle_seconds = 2;
@@ -1120,7 +1116,6 @@ async fn v024_http_first_sse_account_rejection_fails_over_with_bounded_evidence(
     gateway.set_diagnostics(diagnostics.clone());
     let mut settings = gateway.view().settings;
     settings.max_retries = 1;
-    settings.total_seconds = 10;
     v024_update(&gateway, &dir, Edit::Settings { settings });
     let providers = gateway.view().providers;
     let first_id = providers[0].id.clone();
@@ -1190,7 +1185,6 @@ async fn v024_http_insufficient_balance_429_without_backup_records_terminal_evid
     let usage = v024_attach_usage(&gateway, &dir);
     let mut settings = gateway.view().settings;
     settings.max_retries = 1;
-    settings.total_seconds = 5;
     v024_update(&gateway, &dir, Edit::Settings { settings });
     let provider_id = gateway.view().providers[0].id.clone();
     v024_start(&gateway, &dir).await;
@@ -1295,7 +1289,6 @@ async fn v024_compacted_http_temporary_usage_limit_waits_on_owner_and_recovers_w
     let mut settings = fixture.gateway.view().settings;
     settings.rate_limit_seconds = 1;
     settings.capacity_retry_seconds = 1;
-    settings.total_seconds = 10;
     v024_update(&fixture.gateway, &fixture.dir, Edit::Settings { settings });
 
     let started = std::time::Instant::now();

@@ -157,3 +157,25 @@ fn retired_grok_native_snapshot_is_removed_without_touching_current_connection()
     gateway(data.path()).unwrap();
     assert_eq!(fs::read(path).unwrap(), bytes);
 }
+
+#[test]
+fn request_budget_migration_replaces_legacy_values_once() {
+    let mut value = json!({"settings": {"totalSeconds":600, "firstByteSeconds":600, "idleSeconds":600, "connectSeconds":15, "queueSeconds":30, "websocketRetrySeconds":60, "cooldownSeconds":17}});
+    gateway_wait_budget(&mut value);
+    for key in [
+        "firstByteSeconds",
+        "idleSeconds",
+        "connectSeconds",
+        "queueSeconds",
+        "websocketRetrySeconds",
+        "retryBudgetSeconds",
+    ] {
+        assert_eq!(value["settings"][key], 300);
+    }
+    assert!(value["settings"].get("totalSeconds").is_none());
+    assert_eq!(value["settings"]["cooldownSeconds"], 17);
+    value["settings"]["firstByteSeconds"] = 91.into();
+    let saved = value.clone();
+    gateway_wait_budget(&mut value);
+    assert_eq!(value, saved);
+}

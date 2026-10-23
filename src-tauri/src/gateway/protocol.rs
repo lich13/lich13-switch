@@ -625,6 +625,7 @@ impl Delivery {
     }
 }
 pub struct Protocol {
+    wait_budget: Option<(super::wait_budget::WaitBudget, Option<tokio::time::Instant>)>,
     rpm_completion: Option<super::admission::Completion>,
     observer: Option<Observer>,
     thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
@@ -664,6 +665,7 @@ pub struct Protocol {
 impl Protocol {
     pub fn new(stream: bool) -> Self {
         Self {
+            wait_budget: None,
             rpm_completion: None,
             observer: None,
             thread: None,
@@ -696,6 +698,14 @@ impl Protocol {
             routing_tail_failure: false,
             fault_reports: std::sync::Mutex::default(),
             failover_generation: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    pub(super) fn attach_wait_budget(&mut self, budget: &super::wait_budget::WaitBudget) {
+        self.wait_budget = Some((budget.clone(), budget.deadline()));
+    }
+    pub(super) fn effective_output(&self) {
+        if let Some((budget, deadline)) = &self.wait_budget {
+            budget.complete(*deadline);
         }
     }
     pub(super) fn attach_rpm(&mut self, completion: Option<super::admission::Completion>) {
@@ -1051,6 +1061,9 @@ impl Protocol {
             self.transfer
                 .terminal_at
                 .get_or_insert_with(crate::usage::model::now);
+        }
+        if self.observation.meter.first_token_ms.is_some() || self.succeeded() {
+            self.effective_output();
         }
         if self.observation.meter.first_token_ms.is_some() && self.first_usage_ms.is_none() {
             self.first_usage_ms = Some(self.started.elapsed().as_millis() as u64);
@@ -1459,6 +1472,12 @@ impl Protocol {
 }
 impl Drop for Protocol {
     fn drop(&mut self) {
+        if let Some((budget, deadline)) = &self.wait_budget {
+            if budget.expired(*deadline) && !self.finished {
+                self.timeout("retry_budget", budget.seconds);
+                self.finish(None, code::FIRST_BYTE_TIMEOUT);
+            }
+        }
         // Only the transport's live cancellation branch performs a bounded
         // tail. Drop itself flushes observed bytes without starting any I/O.
         let stopped = self.stop.as_ref().is_some_and(|s| *s.borrow());

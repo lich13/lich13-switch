@@ -44,6 +44,65 @@ async fn slot(g: &Gateway, routes: &[Route]) -> admission::Admission {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn queue_and_provider_switches_share_the_original_wait_budget() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut urls = Vec::new();
+    for delay in [250, 750, 0] {
+        let hits = hits.clone();
+        let port = server(move |_| {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                Response::builder()
+                    .status(if delay == 0 { 200 } else { 503 })
+                    .body(full("fixture"))
+                    .unwrap()
+            }
+        })
+        .await;
+        urls.push(format!("http://127.0.0.1:{port}/v1"));
+    }
+    let (t, g) = fixture(urls).await;
+    update(
+        &g,
+        &t,
+        Edit::Mode {
+            mode: "auto".into(),
+        },
+    );
+    let mut settings = g.view().settings;
+    settings.retry_budget_seconds = 1;
+    settings.queue_seconds = 10;
+    settings.first_byte_seconds = 10;
+    update(&g, &t, Edit::Settings { settings });
+    for index in 0..3 {
+        limit(&g, &t, index, 1);
+    }
+    start(&g, &t).await;
+    let mut held = Vec::new();
+    for route in routes(&g) {
+        held.push(slot(&g, &[route]).await);
+    }
+    let task = {
+        let g = g.clone();
+        tokio::spawn(async move { request(&g, "/v1/responses", vec![], vec![]).await })
+    };
+    until(|| g.view().waiting_requests == 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(held);
+    let response = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), 504);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    until(|| g.view().waiting_requests == 0).await;
+    assert_eq!(g.0.admission.counts().0.values().sum::<usize>(), 0);
+    g.stop().await.unwrap();
+}
+
 async fn held_stream() -> (u16, Arc<tokio::sync::Semaphore>) {
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let r = release.clone();
@@ -1011,7 +1070,7 @@ async fn resume_port_failure_preserves_config_and_legacy_store_defaults() {
         .remove("maxConcurrency");
     std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     let next = Gateway::new(t.path().to_owned()).unwrap();
-    assert_eq!(next.view().settings.queue_seconds, 30);
+    assert_eq!(next.view().settings.queue_seconds, 300);
     assert_eq!(next.view().settings.max_waiting, 100);
     assert_eq!(next.view().providers[0].max_concurrency, 0);
     next.resume(t.path()).await.unwrap();

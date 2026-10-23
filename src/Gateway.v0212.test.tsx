@@ -100,12 +100,12 @@ it("adds active requests and reserved threads in concurrency controls and expose
   expect(mock.command.mock.calls.some(([name]) => name === "open_main")).toBe(false);
 });
 
-it("uses the v0.21.2 timeout labels and defaults in the advanced gateway form", async () => {
+it("uses the waiting budget label and preserves explicitly saved timeout values", async () => {
   state.settings = {
     ...state.settings,
     firstByteSeconds: 600,
     idleSeconds: 600,
-    totalSeconds: 37,
+    retryBudgetSeconds: 37,
   };
   delete state.settings.threadIdleReleaseSeconds;
   const user = userEvent.setup();
@@ -116,7 +116,7 @@ it("uses the v0.21.2 timeout labels and defaults in the advanced gateway form", 
   expect(screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" })).toHaveValue(300);
   expect(screen.getByRole("spinbutton", { name: "首字节 / 秒" })).toHaveValue(600);
   expect(screen.getByRole("spinbutton", { name: "流静默 / 秒" })).toHaveValue(600);
-  expect(screen.getByRole("spinbutton", { name: "请求上传 / 秒" })).toHaveValue(37);
+  expect(screen.getByRole("spinbutton", { name: "等待与重试预算 / 秒" })).toHaveValue(37);
   expect(screen.queryByRole("spinbutton", { name: "非流式总时限 / 秒" })).not.toBeInTheDocument();
 
   const idle = screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" });
@@ -133,7 +133,7 @@ it("uses the v0.21.2 timeout labels and defaults in the advanced gateway form", 
             threadIdleReleaseSeconds: 420,
             firstByteSeconds: 600,
             idleSeconds: 600,
-            totalSeconds: 37,
+            retryBudgetSeconds: 37,
           }),
         }),
       }),

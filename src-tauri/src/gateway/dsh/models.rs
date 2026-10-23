@@ -67,10 +67,14 @@ pub(super) fn valid_id(id: &str) -> bool {
 }
 
 pub fn catalog() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({"id": FLASH, "name": "DeepSeek-V4.1-Flash"}),
-        serde_json::json!({"id": PRO, "name": "DeepSeek-V4-Pro"}),
-    ]
+    let mut models = vec![
+        serde_json::json!({"id": FLASH, "name": "DeepSeek-V4.1-Flash", "input": ["text", "image"]}),
+        serde_json::json!({"id": PRO, "name": "DeepSeek-V4-Pro", "input": ["text"]}),
+    ];
+    for model in &mut models {
+        normalize(model);
+    }
+    models
 }
 
 /// Retain explicit older IDs without guessing which new model replaces them.
@@ -90,17 +94,17 @@ pub fn for_store(store: &super::super::model::Store) -> Vec<serde_json::Value> {
                                 model[key] = value.into();
                             }
                         }
-                        if let Some(inputs) = entry
-                            .as_mapping()
-                            .and_then(|m| m.get_sequence("inputModalities"))
-                        {
+                        if let Some(inputs) = entry.as_mapping().and_then(|m| {
+                            m.get_sequence("input")
+                                .or_else(|| m.get_sequence("inputModalities"))
+                        }) {
                             let values: Vec<_> = inputs
                                 .values()
                                 .filter_map(|v| string(Some(v)))
                                 .filter(|v| matches!(v.as_str(), "text" | "image"))
                                 .collect();
                             if !values.is_empty() {
-                                model["inputModalities"] = serde_json::json!(values);
+                                model["input"] = serde_json::json!(values);
                             }
                         }
                         if let Some(efforts) = entry
@@ -161,6 +165,9 @@ pub fn for_store(store: &super::super::model::Store) -> Vec<serde_json::Value> {
             models.push(serde_json::json!({"id":id,"name":id}));
         }
     }
+    for model in &mut models {
+        normalize(model);
+    }
     models
 }
 
@@ -169,4 +176,28 @@ pub(super) fn require_chat(protocol: Protocol) -> Result<()> {
         return Err(error("DSH 仅支持 Chat Completions，请先修改供应商协议"));
     }
     Ok(())
+}
+
+/// Normalize old saved catalogs while keeping official capabilities authoritative.
+pub(crate) fn normalize(model: &mut serde_json::Value) {
+    let Some(fields) = model.as_object_mut() else {
+        return;
+    };
+    if let Some(old) = fields.remove("inputModalities") {
+        fields.entry("input").or_insert(old);
+    }
+    if !fields.contains_key("input") {
+        let input = if fields.get("id").and_then(|v| v.as_str()) == Some(FLASH) {
+            serde_json::json!(["text", "image"])
+        } else {
+            serde_json::json!(["text"])
+        };
+        fields.insert("input".into(), input);
+    }
+    if matches!(fields.get("id").and_then(|v| v.as_str()), Some(FLASH | PRO)) {
+        // The managed provider has no built-in catalog to inherit reasoning from.
+        fields.entry("reasoningEfforts").or_insert_with(
+            || serde_json::json!({"off":"none", "low":"low", "high":"high", "max":"max"}),
+        );
+    }
 }

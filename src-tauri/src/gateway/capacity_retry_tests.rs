@@ -29,7 +29,6 @@ fn configure(g: &Gateway, t: &tempfile::TempDir, retries: usize) {
                 rate_limit_seconds: 1,
                 first_byte_seconds: 3,
                 idle_seconds: 3,
-                total_seconds: 3,
                 failure_threshold: 10,
                 ..g.view().settings
             },
@@ -1030,4 +1029,44 @@ async fn websocket_capacity_wait_obeys_response_cancel_and_gateway_stop_with_zer
             g.stop().await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn shared_wait_budget_stops_capacity_backoff_and_releases_admission() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let upstream = server(move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        async {
+            Response::builder()
+                .status(429)
+                .header("retry-after", "60")
+                .body(full("Selected model is at capacity"))
+                .unwrap()
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
+    configure(&g, &t, 0);
+    let mut settings = g.view().settings;
+    settings.retry_budget_seconds = 1;
+    settings.queue_seconds = 10;
+    update(&g, &t, Edit::Settings { settings });
+    start(&g, &t).await;
+    let response = tokio::time::timeout(
+        Duration::from_secs(4),
+        request(
+            &g,
+            "/v1/responses",
+            br#"{"model":"fixture-model","stream":true}"#.to_vec(),
+            vec![("content-type", "application/json")],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), 504);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    until(|| g.view().waiting_requests == 0).await;
+    assert_eq!(g.0.admission.counts().0.values().sum::<usize>(), 0);
+    g.stop().await.unwrap();
 }

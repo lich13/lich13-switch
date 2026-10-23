@@ -60,16 +60,16 @@ fn default_settings_match_current_serialization() {
             "cooldownSeconds": 60,
             "rateLimitSeconds": 5,
             "capacityRetrySeconds": 60,
-            "websocketRetrySeconds": 60,
+            "websocketRetrySeconds": 300,
             "threadIdleReleaseSeconds": 300,
             "endpointProbeSeconds": 300,
             "errorRate": 0.6,
             "minRequests": 10,
-            "firstByteSeconds": 600,
-            "idleSeconds": 600,
-            "totalSeconds": 600,
-            "connectSeconds": 15,
-            "queueSeconds": 30,
+            "firstByteSeconds": 300,
+            "idleSeconds": 300,
+            "retryBudgetSeconds": 300,
+            "connectSeconds": 300,
+            "queueSeconds": 300,
             "maxWaiting": 100
         })
     );

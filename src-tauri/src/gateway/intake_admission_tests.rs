@@ -581,7 +581,6 @@ async fn capacity_wait_keeps_ordinary_owner_when_compact_only_fallback_is_inelig
     let mut settings = gateway.view().settings;
     settings.capacity_retry_seconds = 1;
     settings.max_retries = 1;
-    settings.total_seconds = 10;
     update(&gateway, &dir, Edit::Settings { settings });
     start(&gateway, &dir).await;
     let response = tokio::time::timeout(

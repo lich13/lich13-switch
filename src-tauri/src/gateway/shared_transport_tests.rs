@@ -222,7 +222,6 @@ fn configure(gateway: &Gateway, home: &Path) {
     settings.connect_seconds = 2;
     settings.first_byte_seconds = 30;
     settings.idle_seconds = 30;
-    settings.total_seconds = 60;
     settings.queue_seconds = 2;
     gateway
         .edit(Edit::Settings { settings }, &gateway.view().revision, home)

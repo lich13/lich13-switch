@@ -75,7 +75,6 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
                     connect_seconds: 2,
                     first_byte_seconds: 2,
                     idle_seconds: 2,
-                    total_seconds: 5,
                     queue_seconds: 3,
                     ..Default::default()
                 },

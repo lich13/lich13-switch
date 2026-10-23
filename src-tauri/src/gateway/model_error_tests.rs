@@ -23,7 +23,6 @@ fn auto(g: &Gateway, t: &tempfile::TempDir, max_retries: usize) {
     settings.max_retries = max_retries;
     settings.connect_seconds = 1;
     settings.first_byte_seconds = 2;
-    settings.total_seconds = 5;
     update(g, t, Edit::Settings { settings });
 }
 

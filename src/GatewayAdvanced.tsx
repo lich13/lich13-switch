@@ -58,7 +58,7 @@ export default function Advanced({
     ["minRequests", "最小请求数"],
     ["firstByteSeconds", "首字节 / 秒"],
     ["idleSeconds", "流静默 / 秒"],
-    ["totalSeconds", "请求上传 / 秒"],
+    ["retryBudgetSeconds", "等待与重试预算 / 秒"],
     ["connectSeconds", "连接超时 / 秒"],
     ["endpointProbeSeconds", "端点测速间隔 / 秒"],
     ["queueSeconds", "排队等待 / 秒"],

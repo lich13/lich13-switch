@@ -28,7 +28,6 @@ fn retry_settings(gateway: &Gateway, dir: &tempfile::TempDir) {
     settings.rate_limit_seconds = 1;
     settings.first_byte_seconds = 3;
     settings.idle_seconds = 3;
-    settings.total_seconds = 10;
     update(gateway, dir, Edit::Settings { settings });
     update(
         gateway,

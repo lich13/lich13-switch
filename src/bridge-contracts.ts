@@ -44,7 +44,7 @@ export type DshOfficialModel = {
   name: string;
   contextWindow?: number;
   maxTokens?: number;
-  inputModalities?: string[];
+  input?: string[];
 };
 export type DshOfficialCatalog = {
   models: DshOfficialModel[];

@@ -130,6 +130,7 @@ impl Gateway {
         let port = self.0.registry.listener.view()?.port;
         let mut store = self.0.inner.lock().unwrap().store.clone();
         import_selection(home, &options, &mut store, port)?;
+        store.settings.port = port;
         let models = models::for_store(&store);
         let mut inputs = Vec::new();
         for (index, profile) in profiles.iter().enumerate() {
@@ -157,7 +158,7 @@ impl Gateway {
                     ..options.clone()
                 },
                 &store.local_token,
-                port,
+                &store.settings,
                 &models,
                 previous.as_ref(),
                 store.dsh.as_ref(),

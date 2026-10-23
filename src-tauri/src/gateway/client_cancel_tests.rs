@@ -48,7 +48,6 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
     settings.max_retries = 1;
     settings.first_byte_seconds = 1;
     settings.idle_seconds = 3;
-    settings.total_seconds = 6;
     settings.connect_seconds = 2;
     settings.queue_seconds = 1;
     settings.websocket_retry_seconds = 1;

@@ -215,7 +215,6 @@ impl Fixture {
         settings.connect_seconds = 2;
         settings.first_byte_seconds = 5;
         settings.idle_seconds = 5;
-        settings.total_seconds = 15;
         settings.queue_seconds = 2;
         gateway
             .edit(Edit::Settings { settings }, &gateway.view().revision, &home)

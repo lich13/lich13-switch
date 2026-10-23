@@ -1,4 +1,4 @@
-//! Account catalog discovery never changes the DSH login or its configuration.
+//! Account discovery preserves DSH login; managed routes synchronize transactionally.
 use super::*;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -130,7 +130,7 @@ fn parse_catalog(body: &Value, version: Option<&semver::Version>) -> Result<Vec<
         if inputs.is_empty() {
             continue;
         }
-        let mut model = json!({"id":id, "name":row["name"].as_str().filter(|n| !n.is_empty() && n.len() <= 256 && !n.chars().any(char::is_control)).unwrap_or(id), "inputModalities":inputs});
+        let mut model = json!({"id":id, "name":row["name"].as_str().filter(|n| !n.is_empty() && n.len() <= 256 && !n.chars().any(char::is_control)).unwrap_or(id), "input":inputs});
         let mut valid = true;
         for (from, to) in [
             ("context_window", "contextWindow"),
@@ -148,6 +148,7 @@ fn parse_catalog(body: &Value, version: Option<&semver::Version>) -> Result<Vec<
             }
         }
         if valid {
+            models::normalize(&mut model);
             models.push(model);
         }
     }
@@ -260,7 +261,7 @@ impl Gateway {
         let mut state = self.0.inner.lock().unwrap();
         let mut next = state.store.clone();
         next.dsh_catalog = models;
-        state.revision = next.persist(&self.0.data.join("gateway.json"), &state.revision)?;
+        state.revision = commit_mapping(&self.0.data, home, &mut next, &state.revision)?;
         self.replace_store(&mut state, next);
         Ok(())
     }

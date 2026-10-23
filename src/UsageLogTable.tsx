@@ -5,7 +5,14 @@ import {
 } from "./usage-types";
 import { date, preciseDate, promptTokens, missingReason } from "./usage-format";
 import { durationSeverity, firstTokenSeverity } from "./latency-health";
-import { ArrowDown, ArrowUp, Archive, SquarePen, Brain, Percent } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Archive,
+  SquarePen,
+  Brain,
+  Percent,
+} from "lucide-react";
 import {
   cacheHitRate,
   columnVisible,
@@ -103,29 +110,57 @@ export default function UsageLogTable({
       id: "identity",
       label: "时间 / 供应商 / 模型",
       visible: true,
-      width: "minmax(0, 1fr)",
+      width: "minmax(240px, 1.6fr)",
     },
     {
       id: "tokens",
       label: "Token",
       visible: tokenFields.some(visible),
-      width: "minmax(max-content, 0.62fr)",
+      width: "minmax(max-content, 1fr)",
     },
     {
       id: "cost",
       label: "费用",
       visible: visible("cost"),
-      width: "minmax(70px, 0.36fr)",
+      width: "minmax(max-content, 0.65fr)",
     },
     {
       id: "performance",
       label: "性能",
       visible: [...performanceFields, "status" as const].some(visible),
-      width: "minmax(114px, 0.56fr)",
+      width: "minmax(132px, 0.8fr)",
     },
   ].filter((c) => c.visible);
   const secondary = columns.filter((c) => c.id !== "identity");
   const exact = settings?.logNumberMode === "exact";
+  const tokenWidths = [
+    ["input", "cacheRead"],
+    ["output", "cacheWrite"],
+    ["reasoning", "hitRate"],
+  ].map((fields) => {
+    const lengths = rows.flatMap((row) => {
+      const attempt = row.attempts.at(-1);
+      if (!attempt) return [];
+      const tokens =
+        row.source === "grok" ? promptTokens(row.attempts) : attempt.tokens;
+      return fields
+        .filter((field) => visible(field as LogColumn))
+        .map((field) =>
+          field === "hitRate"
+            ? 6
+            : logNumber(
+                tokens[field as keyof typeof tokens] as number | null,
+                exact,
+              ).length,
+        );
+    });
+    return `calc(${Math.max(4, ...lengths)}ch + 20px)`;
+  });
+  const tokenColumnCount = visible("reasoning") || visible("hitRate") ? 3 : 2;
+  const performanceCount = [...performanceFields, "status" as const].filter(
+    visible,
+  ).length;
+
   return (
     <>
       <div className="usage-table-scroll">
@@ -135,11 +170,17 @@ export default function UsageLogTable({
           aria-busy={busy}
           style={
             {
+              "--usage-token-columns": tokenWidths
+                .slice(0, tokenColumnCount)
+                .join(" "),
+              "--usage-row-height": `${Math.max(64, performanceCount * 16 + 16)}px`,
               "--usage-columns": columns.map((c) => c.width).join(" "),
               "--usage-areas": `"${columns.map((c) => c.id).join(" ")}"`,
               "--usage-narrow-columns":
                 secondary
-                  .map((c) => (c.id === "tokens" ? "minmax(max-content, 1fr)" : c.width))
+                  .map((c) =>
+                    c.id === "tokens" ? "minmax(max-content, 1fr)" : c.width,
+                  )
                   .join(" ") || "minmax(0, 1fr)",
               "--usage-narrow-areas": secondary.length
                 ? `"${secondary.map(() => "identity").join(" ")}" "${secondary.map((c) => c.id).join(" ")}"`
@@ -429,13 +470,29 @@ export default function UsageLogTable({
                 </span>
               );
               cells.tokens = (
-                <div className={`usage-token-grid${visible("reasoning") || visible("hitRate") ? " has-extra" : ""}`}>
+                <div
+                  className={`usage-token-grid${visible("reasoning") || visible("hitRate") ? " has-extra" : ""}`}
+                >
                   {tokenFields.filter(visible).map((field) => {
-                    const Icon = {input: ArrowDown, output: ArrowUp, cacheRead: Archive, cacheWrite: SquarePen, reasoning: Brain, hitRate: Percent}[field];
-                    return <span key={field} className={`usage-token-item ${field}`} aria-label={tokenLabels[field]} title={tokenLabels[field]}>
-                      <Icon size={13} aria-hidden="true" />
-                      {cells[field]}
-                    </span>;
+                    const Icon = {
+                      input: ArrowDown,
+                      output: ArrowUp,
+                      cacheRead: Archive,
+                      cacheWrite: SquarePen,
+                      reasoning: Brain,
+                      hitRate: Percent,
+                    }[field];
+                    return (
+                      <span
+                        key={field}
+                        className={`usage-token-item ${field}`}
+                        aria-label={tokenLabels[field]}
+                        title={tokenLabels[field]}
+                      >
+                        <Icon size={13} aria-hidden="true" />
+                        {cells[field]}
+                      </span>
+                    );
                   })}
                 </div>
               );
