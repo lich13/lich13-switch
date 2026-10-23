@@ -1467,8 +1467,9 @@ pub fn run() {
     let builder = tauri::Builder::default();
     let builder = if smoke.is_none() {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            let has_link = args.iter().any(|arg| arg.starts_with("ccswitch:"));
             links::receive(app, args.iter().cloned());
-            if !args.iter().any(|a| startup::is_login_argument(a)) {
+            if !has_link && !args.iter().any(|a| startup::is_login_argument(a)) {
                 let _ = show(app, None);
             }
         }))
@@ -1876,7 +1877,8 @@ pub fn run() {
             usage::commands::reload_pricing,
             usage::commands::open_pricing_directory,
             links::get_link_handler_state,
-            links::set_link_handler,
+            links::enable_link_picker,
+            links::set_link_receiver,
             links::get_provider_imports,
             links::confirm_provider_import,
             links::cancel_provider_import,

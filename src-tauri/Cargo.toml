@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.25.21"
+version = "0.25.22"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -60,7 +60,7 @@ yaml-edit = "0.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "block2"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "NSRunningApplication", "block2"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString"] }
 block2 = "0.6"
 

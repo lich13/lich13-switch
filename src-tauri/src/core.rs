@@ -62,6 +62,8 @@ struct Store {
     schema: u32,
     profiles: Vec<Profile>,
     preferences: Preferences,
+    #[serde(default)]
+    link_receiver: Option<String>,
     seen_roots: Vec<String>,
     #[serde(default)]
     observed_auth_revisions: BTreeMap<String, String>,
@@ -564,6 +566,7 @@ impl Core {
                     system_notifications: true,
                 },
                 seen_roots: vec![],
+                link_receiver: None,
                 observed_auth_revisions: BTreeMap::new(),
                 auth_sync_version: 1,
                 extensions: BTreeMap::new(),
@@ -613,6 +616,23 @@ impl Core {
     }
     pub fn preferences(&self) -> Preferences {
         self.store.preferences.clone()
+    }
+    pub fn link_receiver(&self) -> Option<String> {
+        self.store.link_receiver.clone()
+    }
+    pub fn set_link_receiver(&mut self, app: Option<String>) -> Result<()> {
+        if app
+            .as_deref()
+            .is_some_and(|id| !crate::links::APPS.iter().any(|(known, _)| *known == id))
+        {
+            return Err(AppError::new(code::IMPORT_LINK, "无效的接收应用"));
+        }
+        let previous = std::mem::replace(&mut self.store.link_receiver, app);
+        if let Err(error) = self.persist() {
+            self.store.link_receiver = previous;
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn import_raw(&mut self, raw: &str, name: Option<String>) -> Result<String> {
         self.normalize_accounts()?;
@@ -1248,6 +1268,53 @@ mod tests {
         std::fs::create_dir(&h).unwrap();
         let c = Core::new(t.path().join("app"), h).unwrap();
         (t, c)
+    }
+    #[test]
+    fn link_receiver_defaults_persists_and_is_not_replaced_by_preferences() {
+        let (dir, mut core) = setup();
+        assert_eq!(core.link_receiver(), None);
+        let old_draft = core.preferences();
+        for (id, _) in crate::links::APPS {
+            core.set_link_receiver(Some((*id).into())).unwrap();
+            core.set_preferences(old_draft.clone()).unwrap();
+            let loaded = Core::new(dir.path().join("app"), core.home()).unwrap();
+            assert_eq!(loaded.link_receiver().as_deref(), Some(*id));
+        }
+        core.set_link_receiver(None).unwrap();
+        assert_eq!(
+            Core::new(dir.path().join("app"), core.home())
+                .unwrap()
+                .link_receiver(),
+            None
+        );
+        let path = dir.path().join("app/accounts.json");
+        let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("linkReceiver");
+        std::fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(
+            Core::new(dir.path().join("app"), core.home())
+                .unwrap()
+                .link_receiver(),
+            None
+        );
+    }
+    #[test]
+    fn link_receiver_failed_write_keeps_previous_value_and_rejects_unknown_apps() {
+        let (dir, mut core) = setup();
+        core.set_link_receiver(Some(crate::links::APPS[0].0.into()))
+            .unwrap();
+        let previous = core.link_receiver();
+        let _fault = storage::faults::inject(storage::faults::Point::Replace);
+        assert!(core.set_link_receiver(None).is_err());
+        assert_eq!(core.link_receiver(), previous);
+        assert_eq!(
+            Core::new(dir.path().join("app"), core.home())
+                .unwrap()
+                .link_receiver(),
+            previous
+        );
+        assert!(core.set_link_receiver(Some("unknown-app".into())).is_err());
+        assert_eq!(core.link_receiver(), previous);
     }
     fn jwt(subject: &str) -> String {
         format!(

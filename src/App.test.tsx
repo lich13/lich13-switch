@@ -40,7 +40,7 @@ import App from "./App";
 import { gatewayDemo } from "./gateway-preview";
 let state: ViewState;
 let doc: ConfigDocument;
-let pendingImports: { id: string; name: string; baseUrl: string }[];
+let pendingImports: import("./bridge-contracts").PendingImport[];
 beforeEach(() => {
   mocks.listeners.clear();
   mocks.command.mockReset();
@@ -90,6 +90,13 @@ beforeEach(() => {
   mocks.command.mockImplementation(
     async (name: string, args: Record<string, unknown>) => {
       switch (name) {
+        case "get_link_handler_state":
+          return {
+            current: "com.lich13.gpt-switch",
+            remembered: "com.lich13.gpt-switch",
+            apps: [{ id: "com.lich13.gpt-switch", name: "lich13-switch" }],
+            systemPicker: false,
+          };
         case "get_provider_imports":
           return structuredClone(pendingImports);
         case "get_gateway":
@@ -401,8 +408,13 @@ describe("user workflows", () => {
     pendingImports = [
       {
         id: "queued-import",
-        name: "链接供应商",
-        baseUrl: "https://import.example.invalid/v1",
+        importError: null,
+        dispatchError: null,
+        provider: {
+          clientId: "codex",
+          name: "链接供应商",
+          baseUrl: "https://import.example.invalid/v1",
+        },
       },
     ];
     await act(async () => mocks.listeners.get("provider-imports")?.(null));
@@ -456,8 +468,13 @@ describe("user workflows", () => {
     pendingImports = [
       {
         id: "config-import",
-        name: "等待草稿的供应商",
-        baseUrl: "https://queued.example.invalid/v1",
+        importError: null,
+        dispatchError: null,
+        provider: {
+          clientId: "codex",
+          name: "等待草稿的供应商",
+          baseUrl: "https://queued.example.invalid/v1",
+        },
       },
     ];
     await act(async () => mocks.listeners.get("provider-imports")?.(null));

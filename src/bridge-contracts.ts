@@ -76,14 +76,15 @@ export type ClaudeLoginState = {
 };
 export type LinkHandlers = {
   current: string | null;
-  apps: { id: string; name: string; path: string }[];
+  apps: { id: string; name: string }[];
+  remembered: string | null;
   systemPicker: boolean;
 };
 export type PendingImport = {
-  clientId?: ClientId;
   id: string;
-  name: string;
-  baseUrl: string;
+  provider: { clientId: ClientId; name: string; baseUrl: string } | null;
+  importError: string | null;
+  dispatchError: string | null;
 };
 export type AccountImportPreview = {
   token: string;
@@ -465,9 +466,18 @@ export type CommandMap = {
   select_account_template: Call<{ token: string; id: number }, void>;
   export_accounts: Call<Revision & { ids: string[]; format: string }, boolean>;
   get_link_handler_state: Call<None, LinkHandlers>;
-  set_link_handler: Call<{ appId: string }, LinkHandlers>;
+  enable_link_picker: Call<None, LinkHandlers>;
+  set_link_receiver: Call<{ appId: string | null }, LinkHandlers>;
   get_provider_imports: Call<None, PendingImport[]>;
-  confirm_provider_import: Call<{ id: string } & Revision, GatewayState>;
+  confirm_provider_import: Call<
+    {
+      id: string;
+      appId: string;
+      remember: boolean;
+      expectedRevision: string | null;
+    },
+    { warning: string | null }
+  >;
   cancel_provider_import: Call<{ id: string }, void>;
   get_claude_profile: Call<None, ClaudeProfileState>;
   switch_claude_profile: Call<

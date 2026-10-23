@@ -138,19 +138,25 @@ let startup = {
 };
 let quick = { pinned: false, tab: "providers", visible: true };
 let linkHandler = "com.lich13.studio";
+let linkReceiver: string | null = null;
 const importPreview = new URLSearchParams(location.search).get("importPreview");
 let imports = importPreview
   ? [
       {
         id: "preview-import",
-        name:
-          importPreview === "long"
-            ? "研发团队使用的跨区域供应商与长名称展示验证".repeat(3)
-            : "sub2api",
-        baseUrl:
-          importPreview === "long"
-            ? `https://api.example.invalid/${"deployment/".repeat(12)}v1`
-            : "https://api.example.invalid/team/v1",
+        importError: null,
+        dispatchError: null,
+        provider: {
+          clientId: "codex",
+          name:
+            importPreview === "long"
+              ? "研发团队使用的跨区域供应商与长名称展示验证".repeat(3)
+              : "sub2api",
+          baseUrl:
+            importPreview === "long"
+              ? `https://api.example.invalid/${"deployment/".repeat(12)}v1`
+              : "https://api.example.invalid/team/v1",
+        },
       },
     ]
   : [];
@@ -159,6 +165,11 @@ const linkApps = [
     id: "com.lich13.gpt-switch",
     name: "lich13-switch",
     path: "/Applications/lich13-switch.app",
+  },
+  {
+    id: "com.ccswitch.desktop",
+    name: "CC Switch",
+    path: "/Applications/CC Switch.app",
   },
   {
     id: "com.lich13.studio",
@@ -218,18 +229,31 @@ export async function run(
   }
 
   if (name === "get_link_handler_state")
-    return { current: linkHandler, apps: linkApps, systemPicker: false };
-  if (name === "set_link_handler") {
-    linkHandler = String(args.appId);
-    return { current: linkHandler, apps: linkApps, systemPicker: false };
+    return {
+      current: linkHandler,
+      apps: linkApps,
+      systemPicker: false,
+      remembered: linkReceiver,
+    };
+  if (name === "enable_link_picker" || name === "set_link_receiver") {
+    if (name === "enable_link_picker") linkHandler = "com.lich13.gpt-switch";
+    else linkReceiver = args.appId == null ? null : String(args.appId);
+    return {
+      current: linkHandler,
+      apps: linkApps,
+      systemPicker: false,
+      remembered: linkReceiver,
+    };
   }
   if (name === "get_provider_imports") return structuredClone(imports);
   if (name === "confirm_provider_import" || name === "cancel_provider_import") {
     if (name === "confirm_provider_import" && importPreview === "error")
       throw { code: "CONFLICT", message: "供应商列表已更新，请重新导入" };
     imports = imports.filter((item) => item.id !== args.id);
+    if (name === "confirm_provider_import" && args.remember)
+      linkReceiver = String(args.appId);
     emit("provider-imports", null);
-    return;
+    return { warning: null };
   }
   if (name === "cleanup_retired_data") return;
   if (name === "check_for_updates")

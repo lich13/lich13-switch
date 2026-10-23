@@ -16,6 +16,21 @@ vi.mock("./bridge", () => ({
   }),
 }));
 import ProviderImports from "./ProviderImports";
+import type { PendingImport, LinkHandlers } from "./bridge-contracts";
+const SELF = "com.lich13.gpt-switch";
+const OTHER = "com.ccswitch.desktop";
+const apps = [
+  { id: SELF, name: "lich13-switch" },
+  { id: OTHER, name: "CC Switch" },
+];
+let handlers: LinkHandlers;
+let warning: string | null;
+const queued = (p: typeof first): PendingImport => ({
+  id: p.id,
+  provider: { clientId: "codex", name: p.name, baseUrl: p.baseUrl },
+  importError: null,
+  dispatchError: null,
+});
 
 const waitForPreview = async (name: string) => {
   const dialog = await screen.findByRole("dialog", { name: "导入供应商" });
@@ -33,14 +48,16 @@ const second = {
   name: "第二个供应商",
   baseUrl: "https://second.example.invalid/v1",
 };
-let pending: (typeof first)[];
+let pending: PendingImport[];
 let revision: string;
 let confirmError: unknown;
 let cancelError: unknown;
 let confirmWait: Promise<void> | null;
 
 beforeEach(() => {
-  pending = [first, second];
+  pending = [queued(first), queued(second)];
+  handlers = { current: SELF, apps, remembered: SELF, systemPicker: false };
+  warning = null;
   revision = "before-import";
   confirmError = null;
   cancelError = null;
@@ -49,6 +66,7 @@ beforeEach(() => {
   mock.listeners.clear();
   mock.command.mockImplementation(
     async (name: string, args?: { id: string; expectedRevision?: string }) => {
+      if (name === "get_link_handler_state") return structuredClone(handlers);
       if (name === "get_provider_imports") return structuredClone(pending);
       if (name === "get_gateway")
         return { ...structuredClone(gatewayDemo), revision };
@@ -56,7 +74,7 @@ beforeEach(() => {
         if (confirmError) throw confirmError;
         if (confirmWait) await confirmWait;
         pending = pending.filter((item) => item.id !== args?.id);
-        return structuredClone(gatewayDemo);
+        return { warning };
       }
       if (name === "cancel_provider_import") {
         if (cancelError) throw cancelError;
@@ -111,7 +129,7 @@ it("waits for an existing dialog and preserves its unsaved input", async () => {
 });
 
 it("does not duplicate a pending import when events or clicks repeat", async () => {
-  pending = [first, { ...first }];
+  pending = [queued(first), queued(first)];
   let finish!: () => void;
   confirmWait = new Promise((resolve) => {
     finish = resolve;
@@ -164,6 +182,8 @@ it("keeps the queued preview after a save conflict and retries with the refreshe
   expect(notify).not.toHaveBeenCalled();
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
     id: first.id,
+    appId: SELF,
+    remember: false,
     expectedRevision: "before-import",
   });
   await waitFor(() =>
@@ -175,6 +195,8 @@ it("keeps the queued preview after a save conflict and retries with the refreshe
   expect(within(dialog).getByText(second.name)).toBeInTheDocument();
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
     id: first.id,
+    appId: SELF,
+    remember: false,
     expectedRevision: "after-external-change",
   });
   expect(notify).toHaveBeenCalledExactlyOnceWith("已添加供应商");
@@ -205,4 +227,92 @@ it("keeps a failed cancellation visible and advances the queue only after cancel
     ),
   ).toBe(false);
   expect(notify).not.toHaveBeenCalled();
+});
+
+it("selects the receiver and imports in the same dialog, remembering only on confirmation", async () => {
+  handlers.remembered = null;
+  pending = [queued(first)];
+  const user = userEvent.setup();
+  render(<ProviderImports notify={() => {}} />);
+  const dialog = await screen.findByRole("dialog", { name: "选择接收应用" });
+  expect(within(dialog).getByRole("button", { name: "打开" })).toBeDisabled();
+  expect(screen.queryByText(first.name)).not.toBeInTheDocument();
+  await user.selectOptions(screen.getByLabelText("接收应用"), SELF);
+  expect(await waitForPreview(first.name)).toBe(dialog);
+  await user.click(screen.getByLabelText("下次不再提示"));
+  await user.click(screen.getByRole("button", { name: "导入" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
+    id: first.id,
+    appId: SELF,
+    remember: true,
+    expectedRevision: revision,
+  });
+});
+
+it("forwards an unsupported local link without requesting gateway state", async () => {
+  handlers.remembered = null;
+  pending = [
+    {
+      id: "external",
+      provider: null,
+      importError: "不支持本地导入",
+      dispatchError: null,
+    },
+  ];
+  const user = userEvent.setup();
+  render(<ProviderImports notify={() => {}} />);
+  await screen.findByRole("dialog", { name: "选择接收应用" });
+  await user.selectOptions(screen.getByLabelText("接收应用"), SELF);
+  expect(screen.getByRole("alert")).toHaveTextContent("不支持本地导入");
+  expect(screen.getByRole("button", { name: "导入" })).toBeDisabled();
+  await user.selectOptions(screen.getByLabelText("接收应用"), OTHER);
+  await user.click(screen.getByRole("button", { name: "打开" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
+    id: "external",
+    appId: OTHER,
+    remember: false,
+    expectedRevision: null,
+  });
+  expect(mock.command.mock.calls.some(([name]) => name === "get_gateway")).toBe(
+    false,
+  );
+});
+
+it("returns a failed remembered receiver to the chooser and preserves the link on retry failure", async () => {
+  handlers.remembered = OTHER;
+  pending = [{ ...queued(first), dispatchError: "接收应用不可用，请重新选择" }];
+  const user = userEvent.setup();
+  render(<ProviderImports notify={() => {}} />);
+  await screen.findByRole("dialog", { name: "选择接收应用" });
+  expect(screen.getByRole("alert")).toHaveTextContent("接收应用不可用");
+  await user.selectOptions(screen.getByLabelText("接收应用"), OTHER);
+  confirmError = { code: "IMPORT_LINK", message: "打开失败" };
+  await user.click(screen.getByRole("button", { name: "打开" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("打开失败");
+  expect(pending).toHaveLength(1);
+  confirmError = null;
+  await user.selectOptions(screen.getByLabelText("接收应用"), SELF);
+  await user.click(await screen.findByRole("button", { name: "导入" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+});
+
+it("reports a preference failure after delivery without offering to deliver the same link again", async () => {
+  pending = [queued(first)];
+  warning = "本次处理已完成，但未能记住接收应用，请在设置中重试";
+  const notify = vi.fn();
+  render(<ProviderImports notify={notify} />);
+  await waitForPreview(first.name);
+  await userEvent.click(screen.getByRole("button", { name: "导入" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(notify).toHaveBeenCalledExactlyOnceWith(warning);
 });

@@ -126,6 +126,7 @@ pub fn state() -> Result<HandlerState> {
     Ok(HandlerState {
         current,
         apps: installed(),
+        remembered: None,
         system_picker: true,
     })
 }
@@ -171,6 +172,29 @@ pub fn set(id: &str, tx: tokio::sync::oneshot::Sender<Result<()>>) {
             .finish();
         open::that(format!("ms-settings:defaultapps?{query}"))
             .map_err(|_| invalid("无法打开系统默认应用设置"))?;
+        Ok(())
+    })();
+    let _ = tx.send(result);
+}
+
+pub fn open(id: &str, raw: &str, tx: tokio::sync::oneshot::Sender<Result<()>>) {
+    use std::{
+        os::windows::process::CommandExt,
+        process::{Command, Stdio},
+    };
+    let result = (|| {
+        let app = installed()
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| invalid("接收应用不可用，请重新选择"))?;
+        Command::new(app.path)
+            .arg(raw)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|_| invalid("无法打开接收应用，请重新选择"))?;
         Ok(())
     })();
     let _ = tx.send(result);

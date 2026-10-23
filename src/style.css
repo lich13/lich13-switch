@@ -1991,7 +1991,7 @@ select:focus-visible {
 .model-settings-entry {
   justify-content: space-between;
 }
-.link-settings > label {
+.link-settings > label:not(.setting-row) {
   display: grid;
   gap: 8px;
   font-size: 13px;

@@ -1,6 +1,6 @@
 use super::*;
-use objc2_app_kit::NSWorkspace;
-use objc2_foundation::{NSBundle, NSError, NSString, NSURL};
+use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
+use objc2_foundation::{NSArray, NSBundle, NSError, NSString, NSURL};
 use std::sync::Mutex;
 
 pub fn state() -> Result<HandlerState> {
@@ -35,6 +35,7 @@ pub fn state() -> Result<HandlerState> {
     Ok(HandlerState {
         current,
         apps,
+        remembered: None,
         system_picker: false,
     })
 }
@@ -63,4 +64,37 @@ pub fn set(id: &str, tx: tokio::sync::oneshot::Sender<Result<()>>) {
             &NSString::from_str("ccswitch"),
             Some(&block),
         );
+}
+
+pub fn open(id: &str, raw: &str, tx: tokio::sync::oneshot::Sender<Result<()>>) {
+    let Some(app) = state()
+        .ok()
+        .and_then(|s| s.apps.into_iter().find(|a| a.id == id))
+    else {
+        let _ = tx.send(Err(invalid("接收应用不可用，请重新选择")));
+        return;
+    };
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(raw)) else {
+        let _ = tx.send(Err(invalid("无效的导入链接")));
+        return;
+    };
+    let application = NSURL::fileURLWithPath(&NSString::from_str(&app.path));
+    let configuration = NSWorkspaceOpenConfiguration::configuration();
+    configuration.setAddsToRecentItems(false);
+    let tx = Mutex::new(Some(tx));
+    let block = block2::RcBlock::new(move |_: *mut NSRunningApplication, error: *mut NSError| {
+        if let Some(tx) = tx.lock().unwrap().take() {
+            let _ = tx.send(if error.is_null() {
+                Ok(())
+            } else {
+                Err(invalid("无法打开接收应用，请重新选择"))
+            });
+        }
+    });
+    NSWorkspace::sharedWorkspace().openURLs_withApplicationAtURL_configuration_completionHandler(
+        &NSArray::from_retained_slice(&[url]),
+        &application,
+        &configuration,
+        Some(&block),
+    );
 }
