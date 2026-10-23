@@ -115,6 +115,7 @@ fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
     assert!(Store::default()
         .edit(
             Edit::SaveDshProvider {
+                quota_access_token: None,
                 id: None,
                 name: None,
                 base_url: "https://example.invalid/v1".into(),
@@ -158,6 +159,7 @@ impl Fixture {
             store
                 .edit(
                     Edit::SaveDshProvider {
+                        quota_access_token: None,
                         id: None,
                         name: Some(format!("Fixture {index}")),
                         base_url: base.clone(),

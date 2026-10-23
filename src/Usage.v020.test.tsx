@@ -200,8 +200,8 @@ it("renders null table quantities as dashes while keeping K/M compact values", a
     missingRow.querySelector('[data-field="identity"] .usage-identity-model'),
   ).toHaveTextContent("—");
   const missingTokens = missingRow.querySelector('[data-field="tokens"]')!;
-  expect(missingTokens.querySelector(".input")).toHaveTextContent("输入—");
-  expect(missingTokens.querySelector(".output")).toHaveTextContent("输出—");
+  expect(within(missingTokens as HTMLElement).getByLabelText("输入")).toHaveTextContent(/^—$/);
+  expect(within(missingTokens as HTMLElement).getByLabelText("输出")).toHaveTextContent(/^—$/);
 });
 
 it("shows reasoned missing token fields and preserves a real zero duration", async () => {

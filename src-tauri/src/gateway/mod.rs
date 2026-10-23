@@ -136,6 +136,7 @@ pub struct ProviderView {
     health: Health,
     model_health: Vec<model_health::ModelHealth>,
     quota_version: String,
+    has_quota_access_token: bool,
     quota: Option<QuotaView>,
     quota_checking: bool,
     quota_check: Option<crate::events::QuotaCheck>,
@@ -190,7 +191,7 @@ struct Inner {
     store: Store,
     revision: String,
     running: bool,
-    upgrade_pending: bool,
+    upgrade_error: Option<AppError>,
     shutdown: Option<watch::Sender<bool>>,
     error: Option<String>,
     circuits: HashMap<String, Circuit>,
@@ -208,7 +209,6 @@ struct Shared {
     client: ClientId,
     diagnostics: Mutex<Option<crate::events::Service>>,
     usage: Mutex<Option<crate::usage::Service>>,
-    diagnostic_conflict: std::sync::atomic::AtomicBool,
     registry: Arc<registry::Registry>,
     inner: Mutex<Inner>,
     lifecycle: tokio::sync::Mutex<()>,
@@ -313,7 +313,6 @@ impl Gateway {
 
     pub fn report_diagnostics(&self) {
         self.0.exchange.prune();
-        use crate::events::{Action, Reason};
         let Ok(view) = self.try_view() else {
             return;
         };
@@ -342,19 +341,6 @@ impl Gateway {
                     events.emit(event);
                 }
             }
-        }
-        let conflict = view.config_error.is_some() || view.error.is_some();
-        if conflict && !self.0.diagnostic_conflict.swap(conflict, Ordering::Relaxed) {
-            self.record(
-                None,
-                None,
-                Reason::ConfigConflict,
-                Action::Stopped,
-                None,
-                None,
-            );
-        } else if !conflict {
-            self.0.diagnostic_conflict.store(false, Ordering::Relaxed);
         }
     }
     pub fn set_diagnostics(&self, events: crate::events::Service) {
@@ -466,12 +452,11 @@ impl Gateway {
         shared: Option<Arc<registry::Registry>>,
     ) -> Result<Self> {
         storage::private_dir(&data)?;
-        let error = crate::migrations::gateway(&data)
+        let upgrade_error = crate::migrations::gateway(&data)
             .and_then(|()| grok_import::recover(&data))
             .and_then(|()| dsh::recover(&data))
-            .err()
-            .map(|e| e.message);
-        let upgrade_pending = error.is_some();
+            .err();
+        let error = upgrade_error.as_ref().map(|e| e.message.clone());
         let (store, revision) = Store::load(&data.join("gateway.json"))?;
         let registry = match shared {
             Some(n) => n,
@@ -493,13 +478,12 @@ impl Gateway {
             client,
             diagnostics: Mutex::new(None),
             usage: Mutex::new(None),
-            diagnostic_conflict: std::sync::atomic::AtomicBool::new(false),
             registry: registry.clone(),
             inner: Mutex::new(Inner {
                 store,
                 revision,
                 running: false,
-                upgrade_pending,
+                upgrade_error,
                 shutdown: None,
                 error,
                 circuits: HashMap::new(),
@@ -572,8 +556,8 @@ impl Gateway {
         if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             return Ok(());
         }
-        if s.upgrade_pending {
-            return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
+        if let Some(error) = &s.upgrade_error {
+            return Err(error.clone());
         }
         if s.store.initialized {
             return Ok(());
@@ -607,6 +591,7 @@ impl Gateway {
             }
             next.edit(
                 Edit::SaveProvider {
+                    quota_access_token: None,
                     id: None,
                     base_url,
                     token,
@@ -697,7 +682,7 @@ impl Gateway {
         // Keep s.revision separate for the on-disk transaction checks below.
         let editable = (
             self.0.client,
-            &s.store.providers,
+            (&s.store.providers, &s.store.quota_access_tokens),
             &s.store.provider_endpoints,
             &s.store.grok_connections,
             &s.store.dsh_models,
@@ -709,7 +694,7 @@ impl Gateway {
             &s.store.local_token,
             s.running,
             &s.home,
-            s.upgrade_pending,
+            s.upgrade_error.is_some(),
             // Hash the listener revision separately below (serde tuples are bounded).
         );
         storage::digest(
@@ -866,7 +851,10 @@ impl Gateway {
                 .map(|p| {
                     let (rpm_used, rpm_retry_in, rpm_limited, rpm_ledger_error) =
                         self.0.admission.rpm_status(&p.id, p.max_rpm);
-                    let (quota_checking, quota_check) = self.0.quota.probe_view(&p.id, &p.version);
+                    let (quota_checking, quota_check) = self
+                        .0
+                        .quota
+                        .probe_view(&p.id, &Self::quota_version(&s.store, p));
                     ProviderView {
                         protocol: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(
                             || {
@@ -878,6 +866,7 @@ impl Gateway {
                             },
                         ),
                         id: p.id.clone(),
+                        has_quota_access_token: s.store.quota_access_tokens.contains_key(&p.id),
                         name: p.name.clone(),
                         base_url: p.base_url.clone(),
                         extra_base_urls: s
@@ -957,7 +946,7 @@ impl Gateway {
                         .retention_error()
                         .then(|| "线程名额记录不可用，请检查私有数据目录".into())
                 }),
-            recovery_pending: s.upgrade_pending
+            recovery_pending: s.upgrade_error.is_some()
                 || self.0.data.join("gateway-recovery.json").exists()
                 || self.0.data.join("grok-import.json").exists()
                 || self.0.data.join("dsh-recovery.json").exists(),
@@ -1171,8 +1160,8 @@ impl Gateway {
         if !s.running && self.0.data.join("gateway-recovery.json").exists() {
             return Err(AppError::new(code::RECOVERY, "请先处理未完成的配置事务"));
         }
-        if s.upgrade_pending {
-            return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
+        if let Some(error) = &s.upgrade_error {
+            return Err(error.clone());
         }
         let direct_select = !s.running && matches!(&edit, Edit::Select { .. });
         if direct_select && self.claude_official() {
@@ -1227,6 +1216,7 @@ impl Gateway {
                 let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
                 next.edit(
                     Edit::SaveProvider {
+                        quota_access_token: None,
                         id: None,
                         base_url,
                         token,
@@ -1395,8 +1385,8 @@ impl Gateway {
                 drop(s);
                 return self.try_view();
             }
-            if s.upgrade_pending {
-                return Err(AppError::new(code::CLEANUP, "请先处理未完成的升级清理"));
+            if let Some(error) = &s.upgrade_error {
+                return Err(error.clone());
             }
             if self.0.data.join("grok-import.json").exists() {
                 return Err(AppError::new(
@@ -1521,6 +1511,9 @@ impl Gateway {
         }
         let (revision, intent, connection) = {
             let s = self.0.inner.lock().unwrap();
+            if let Some(error) = &s.upgrade_error {
+                return Err(error.clone());
+            }
             (
                 self.view_revision(&s)?,
                 s.store.resume.clone(),
@@ -1704,7 +1697,7 @@ impl Gateway {
                 let _ = tx.send(true);
             }
             s.running = false;
-            s.upgrade_pending = false;
+            s.upgrade_error = None;
             self.0.admission.configure(&s.store.providers, false);
             self.0
                 .admission
@@ -1797,8 +1790,15 @@ impl Gateway {
         drop(s);
         self.changed();
     }
-    fn quota_version(_store: &Store, p: &Provider) -> String {
-        p.version.clone()
+    fn quota_version(store: &Store, p: &Provider) -> String {
+        storage::digest(
+            &serde_json::to_vec(&(
+                &p.version,
+                &p.base_url,
+                store.quota_access_tokens.get(&p.id),
+            ))
+            .expect("quota credentials serialize"),
+        )
     }
     pub fn quota_events(&self) -> broadcast::Receiver<QuotaView> {
         self.0.quota.subscribe()
@@ -1822,9 +1822,13 @@ impl Gateway {
         Ok(result)
     }
     fn query_input(&self, id: &str) -> Result<quota::Query> {
-        self.query_snapshot(id).map(|(query, _)| query)
+        self.query_snapshot(id, true).map(|(query, _)| query)
     }
-    fn query_snapshot(&self, id: &str) -> Result<(quota::Query, Option<grok_config::Connection>)> {
+    fn query_snapshot(
+        &self,
+        id: &str,
+        quota: bool,
+    ) -> Result<(quota::Query, Option<grok_config::Connection>)> {
         Ok({
             let s = self.0.inner.lock().unwrap();
             let p = s
@@ -1844,9 +1848,18 @@ impl Gateway {
             let query = quota::Query {
                 client_id: self.0.client,
                 id: p.id.clone(),
-                version: Self::quota_version(&s.store, p),
+                version: if quota {
+                    Self::quota_version(&s.store, p)
+                } else {
+                    p.version.clone()
+                },
                 base: p.base_url.clone(),
                 token: p.token.clone(),
+                quota_access_token: if quota {
+                    s.store.quota_access_tokens.get(id).cloned()
+                } else {
+                    None
+                },
                 client: Client::builder(TokioExecutor::new())
                     .retry_canceled_requests(false)
                     .build(
@@ -1858,7 +1871,7 @@ impl Gateway {
         })
     }
     pub async fn list_models(&self, id: &str, force: bool) -> Result<catalog::View> {
-        let (input, connection) = self.query_snapshot(id)?;
+        let (input, connection) = self.query_snapshot(id, false)?;
         let version = input.version.clone();
         let mut result = self
             .0
@@ -1870,7 +1883,7 @@ impl Gateway {
             .store
             .providers
             .iter()
-            .any(|p| p.id == id && Self::quota_version(&s.store, p) == version)
+            .any(|p| p.id == id && p.version == version)
         {
             return Err(AppError::new(
                 code::STALE,

@@ -199,6 +199,38 @@ pub struct Record {
     pub details: Details,
 }
 impl Record {
+    pub fn configuration_failure(
+        client: ClientId,
+        error: &AppError,
+        startup: bool,
+    ) -> Option<Self> {
+        let reason = if matches!(
+            error.code.as_str(),
+            code::CONFLICT
+                | code::RESUME_CONFLICT
+                | code::CLAUDE_PROFILE_CONFLICT
+                | "CONFIG_CHANGED"
+                | "OFFICIAL_CONFLICT"
+        ) {
+            Reason::ConfigConflict
+        } else if startup {
+            Reason::StartupRecovery
+        } else {
+            return None;
+        };
+        let mut record = Self::new(
+            Some(client),
+            None,
+            None,
+            reason,
+            Action::Stopped,
+            None,
+            None,
+        );
+        record.details.local_code = safe_message(&error.code);
+        record.details.message = safe_message(&error.message);
+        Some(record)
+    }
     fn visible(&self) -> bool {
         if self.reason == Reason::Recovered {
             return false;
@@ -764,6 +796,36 @@ mod v0232_tests;
 #[cfg(test)]
 mod v016_tests {
     use super::*;
+    #[test]
+    fn configuration_diagnostics_preserve_actual_codes_and_safe_causes() {
+        for code in [
+            code::CONFLICT,
+            code::RESUME_CONFLICT,
+            code::CLAUDE_PROFILE_CONFLICT,
+            "CONFIG_CHANGED",
+            "OFFICIAL_CONFLICT",
+        ] {
+            let error = AppError::new(
+                code,
+                "受管字段被外部修改 https://example.invalid/private Bearer fixture-secret",
+            );
+            let record = Record::configuration_failure(ClientId::Dsh, &error, true).unwrap();
+            assert_eq!(record.reason, Reason::ConfigConflict);
+            assert_eq!(record.details.local_code.as_deref(), Some(code));
+            let message = record.details.message.unwrap();
+            assert!(message.contains("受管字段被外部修改"));
+            assert!(!message.contains("example.invalid"));
+            assert!(!message.contains("fixture-secret"));
+        }
+        for code in [code::RECOVERY, "GUARDED", "GATEWAY_ACTIVE", "IO"] {
+            let error = AppError::new(code, "恢复未完成");
+            assert!(Record::configuration_failure(ClientId::Dsh, &error, false).is_none());
+            let record = Record::configuration_failure(ClientId::Dsh, &error, true).unwrap();
+            assert_eq!(record.reason, Reason::StartupRecovery);
+            assert_eq!(record.details.local_code.as_deref(), Some(code));
+            assert_eq!(record.details.message.as_deref(), Some("恢复未完成"));
+        }
+    }
     #[test]
     fn distinct_error_codes_statuses_and_actions_do_not_merge() {
         let mut a = Record::new(

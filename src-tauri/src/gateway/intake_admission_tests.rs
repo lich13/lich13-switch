@@ -213,6 +213,7 @@ fn takeover_edit_updates_one_field_and_rejects_an_empty_operation() {
     store
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://fixture.example.invalid/v1".into(),
                 token: "fixture-token".into(),

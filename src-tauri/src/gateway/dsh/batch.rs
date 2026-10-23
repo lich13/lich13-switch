@@ -231,6 +231,15 @@ impl Gateway {
                     });
                 }
                 Err(error) => {
+                    if let Some(record) =
+                        crate::events::Record::configuration_failure(ClientId::Dsh, &error, false)
+                    {
+                        if let Some(events) =
+                            super::super::locks::published(&self.0.diagnostics).as_ref()
+                        {
+                            events.emit(record);
+                        }
+                    }
                     failed = true;
                     results.push(ProfileResult {
                         profile,

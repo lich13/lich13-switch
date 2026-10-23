@@ -697,6 +697,7 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: base_url.clone(),
                 token: "fixture-token".into(),

@@ -39,6 +39,7 @@ fn http_client() -> HttpClient {
 
 fn query(base: String, id: &str, version: &str) -> Query {
     Query {
+        quota_access_token: None,
         client_id: crate::gateway::ClientId::Codex,
         id: id.into(),
         version: version.into(),

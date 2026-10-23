@@ -184,6 +184,7 @@ impl Fixture {
             },
         });
         fixture.edit(Edit::SaveProvider {
+            quota_access_token: None,
             id: None,
             base_url: url,
             token: "fixture-only-key".into(),

@@ -49,6 +49,7 @@ fn gateway(home: &Path) -> Gateway {
         .store
         .edit(
             Edit::SaveDshProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://relay.example.invalid/v1".into(),
                 token: "fixture-provider".into(),
@@ -137,6 +138,7 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
     store
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 name: None,
                 base_url: "https://relay.example.invalid/v1".into(),
@@ -213,7 +215,7 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
     extra_profile(home.path(), "desktop");
     assert!(matches!(
         super::current(home.path(), &store, &[43721], &|_| None).state,
-        Kind::Unknown { .. }
+        Kind::Mixed
     ));
 }
 
@@ -458,8 +460,8 @@ async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
     gateway.stop_dsh(false).await.unwrap();
 }
 
-#[test]
-fn interrupted_new_transaction_rolls_back_and_conflicts_leave_recovery_journal() {
+#[tokio::test]
+async fn interrupted_new_transaction_rolls_back_and_conflicts_leave_recovery_journal() {
     let home = super::tests::fixture();
     let data = home.path().join("data");
     storage::private_dir(&data).unwrap();
@@ -492,7 +494,13 @@ fn interrupted_new_transaction_rolls_back_and_conflicts_leave_recovery_journal()
     storage::atomic_write(&data.join(JOURNAL), &serde_json::to_vec(&tx).unwrap(), None).unwrap();
     fs::write(input.dir.join(PATCH), &input.patch.after).unwrap();
     fs::write(home.path().join(".env"), "EXTERNAL=kept\n").unwrap();
-    assert!(recover(&data).is_err());
+    let failure = recover(&data).unwrap_err();
+    assert_eq!(failure.code, code::CONFLICT);
+    let parent = Gateway::new(home.path().join("parent-data")).unwrap();
+    let gateway = parent.dsh_companion(data.clone()).unwrap();
+    let resumed = gateway.resume(home.path()).await.unwrap_err();
+    assert_eq!(resumed.code, failure.code);
+    assert_eq!(resumed.message, failure.message);
     assert!(data.join(JOURNAL).exists());
     assert_eq!(
         fs::read_to_string(home.path().join(".env")).unwrap(),

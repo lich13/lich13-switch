@@ -28,6 +28,7 @@ fn provider_secrets_never_appear_in_view() {
     let g = Gateway::new(temp.path().to_path_buf()).unwrap();
     let update = |edit| g.edit(edit, &g.view().revision, temp.path()).unwrap();
     update(Edit::SaveProvider {
+        quota_access_token: Some("fixture-account-access-token".into()),
         id: None,
         base_url: "https://example.test/custom/v1".into(),
         token: "private-fixture-token".into(),
@@ -35,6 +36,8 @@ fn provider_secrets_never_appear_in_view() {
     });
     let json = serde_json::to_string(&g.view()).unwrap();
     assert!(!json.contains("private-fixture"));
+    assert!(!json.contains("fixture-account-access-token"));
+    assert!(g.view().providers[0].has_quota_access_token);
     assert!(!json.contains("localToken"));
 }
 #[test]
@@ -127,6 +130,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &g,
             &t,
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: url,
                 token: "upstream-fixture-token".into(),
@@ -526,6 +530,7 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         &g,
         &t,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: Some(first.clone()),
             base_url: format!("http://127.0.0.1:{closed_port}/v1"),
             token: String::new(),
@@ -558,6 +563,7 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         &g,
         &t,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: Some(first),
             base_url: format!("http://127.0.0.1:{never}"),
             token: String::new(),
@@ -806,6 +812,7 @@ async fn real_codex_cli_with_isolated_home() {
         &g,
         &t,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: None,
             base_url: private["baseUrl"].as_str().unwrap().into(),
             token: private["token"].as_str().unwrap().into(),
@@ -1170,6 +1177,7 @@ async fn quota_late_response_is_discarded_after_provider_edit() {
         &g,
         &t,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: Some(id),
             base_url: format!("http://127.0.0.1:{port}"),
             token: "changed-key".into(),
@@ -1304,6 +1312,8 @@ mod claude_v080;
 #[path = "model_error_tests.rs"]
 mod model_errors;
 
+#[path = "quota_account_tests.rs"]
+mod quota_account;
 #[path = "quota_tests.rs"]
 mod quota_v013;
 

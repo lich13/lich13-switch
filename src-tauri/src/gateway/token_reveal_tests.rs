@@ -6,6 +6,7 @@ fn save_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) ->
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: base_url.into(),
                 token: token.into(),
@@ -164,6 +165,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: base_url.into(),
                 token: String::new(),
@@ -188,6 +190,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: base_url.into(),
                 token: updated_token.into(),
@@ -213,6 +216,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: updated_base_url.into(),
                 token: String::new(),

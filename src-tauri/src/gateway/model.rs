@@ -161,6 +161,8 @@ pub struct Store {
     pub connection: super::codex_api::Connection,
     pub providers: Vec<Provider>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub quota_access_tokens: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_endpoints: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub grok_connections: BTreeMap<String, super::grok_config::Connection>,
@@ -203,6 +205,7 @@ impl Default for Store {
             initialized: false,
             connection: Default::default(),
             providers: vec![],
+            quota_access_tokens: BTreeMap::new(),
             provider_endpoints: BTreeMap::new(),
             grok_connections: BTreeMap::new(),
             dsh_models: BTreeMap::new(),
@@ -236,12 +239,16 @@ pub enum Edit {
         base_url: String,
         token: String,
         #[serde(default)]
+        quota_access_token: Option<String>,
+        #[serde(default)]
         name: Option<String>,
     },
     SaveGrokProvider {
         id: Option<String>,
         base_url: String,
         token: String,
+        #[serde(default)]
+        quota_access_token: Option<String>,
         #[serde(default)]
         name: Option<String>,
         protocol: super::grok_config::Protocol,
@@ -250,6 +257,8 @@ pub enum Edit {
         id: Option<String>,
         base_url: String,
         token: String,
+        #[serde(default)]
+        quota_access_token: Option<String>,
         #[serde(default)]
         name: Option<String>,
         protocol: super::grok_config::Protocol,
@@ -386,6 +395,11 @@ pub(super) fn normalize_api_path(url: &mut url::Url) {
     }
     url.set_path(&path);
 }
+fn quota_site(base: &str) -> String {
+    base.trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_owned()
+}
 impl Store {
     pub fn load(path: &Path) -> Result<(Self, String)> {
         let raw = storage::read_optional(path)?;
@@ -412,6 +426,9 @@ impl Store {
             store.phase_timeouts = true;
         }
         store.settings.validate()?;
+        store
+            .quota_access_tokens
+            .retain(|id, token| !token.is_empty() && store.providers.iter().any(|p| &p.id == id));
         store
             .provider_endpoints
             .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
@@ -452,6 +469,7 @@ impl Store {
                 id,
                 base_url,
                 token,
+                quota_access_token,
                 name,
                 protocol,
             }
@@ -459,6 +477,7 @@ impl Store {
                 id,
                 base_url,
                 token,
+                quota_access_token,
                 name,
                 protocol,
             } => {
@@ -469,6 +488,7 @@ impl Store {
                         id,
                         base_url,
                         token,
+                        quota_access_token,
                         name,
                     },
                     running,
@@ -536,6 +556,7 @@ impl Store {
                         id: None,
                         base_url: raw,
                         token,
+                        quota_access_token: None,
                         name: Some(display_name),
                     },
                     running,
@@ -546,9 +567,24 @@ impl Store {
                 id,
                 base_url: raw,
                 token,
+                quota_access_token,
                 name: display_name,
             } => {
                 let u = base_url(&raw, self.settings.port)?;
+                if quota_access_token.as_ref().is_some_and(|value| {
+                    value.len() > 16384
+                        || value.chars().any(char::is_control)
+                        || (!value.is_empty() && value.trim() != value)
+                }) {
+                    return Err(AppError::new(code::TOKEN, "账号访问令牌格式无效"));
+                }
+                let existing_id = id.clone();
+                if let Some(id) = &id {
+                    let old = self.provider_mut(id)?.base_url.clone();
+                    if quota_site(&old) != quota_site(u.as_str()) {
+                        self.quota_access_tokens.remove(id);
+                    }
+                }
                 if token.contains(['\r', '\n']) {
                     return Err(AppError::new(code::TOKEN, "Token 不得包含换行"));
                 }
@@ -597,6 +633,15 @@ impl Store {
                         self.selected = Some(id);
                     }
                 }
+                if let Some(value) = quota_access_token {
+                    let id =
+                        existing_id.unwrap_or_else(|| self.providers.last().unwrap().id.clone());
+                    if value.is_empty() {
+                        self.quota_access_tokens.remove(&id);
+                    } else {
+                        self.quota_access_tokens.insert(id, value);
+                    }
+                }
             }
             Edit::RenameProvider { id, name: value } => {
                 self.provider_mut(&id)?.name = name(&value)?
@@ -626,12 +671,16 @@ impl Store {
                     .position(|url| url == &selected)
                     .ok_or_else(|| AppError::new(code::ENDPOINT, "辅助端点已变化，请刷新后重试"))?;
                 values[index] = primary;
+                if quota_site(&values[index]) != quota_site(&selected) {
+                    self.quota_access_tokens.remove(&id);
+                }
                 // Swapping roles does not change credentials or the endpoint set.
                 // Keep the provider version so existing conversations retain affinity.
                 self.provider_mut(&id)?.base_url = selected;
                 self.provider_endpoints.insert(id, values);
             }
             Edit::DeleteProvider { id } => {
+                self.quota_access_tokens.remove(&id);
                 self.providers.retain(|p| p.id != id);
                 self.dsh_models.remove(&id);
                 self.provider_endpoints.remove(&id);

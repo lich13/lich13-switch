@@ -211,8 +211,9 @@ export function QuotaInfo({
   const [showDetails, setShowDetails] = useState(false);
   const loading = quota?.state === "loading";
   const keyStatus = quota?.keyStatus === "已过期" ? "已到期" : quota?.keyStatus;
+  const keyOnly = quota?.source === "newapi" && quota.plans[0]?.name === "Key 额度";
   const headline = quota?.plans[0]
-    ? `${quota.plans[0].unlimited ? "" : "剩余 "}${amount(quota.plans[0])}`
+    ? keyOnly ? quota.plans[0].unlimited ? "Key 配额无限制" : `Key 剩余 ${amount(quota.plans[0])}` : `${quota.plans[0].unlimited ? "" : "剩余 "}${amount(quota.plans[0])}`
     : (keyStatus ??
       (quota?.state === "unsupported"
         ? "不可查询"
@@ -279,6 +280,7 @@ export function QuotaInfo({
     );
   return (
     <div className="quota-area" aria-label={`${provider.name} 额度`}>
+      {keyOnly && <div className="quota-key-status">账户余额未开放</div>}
       <div className="quota-summary">
         <strong className="quota-headline">{headline}</strong>
         <div className="quota-freshness">

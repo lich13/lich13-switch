@@ -91,6 +91,7 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
                 gateway,
                 home,
                 Edit::SaveProvider {
+                    quota_access_token: None,
                     id: None,
                     base_url,
                     token: token.into(),
@@ -607,6 +608,7 @@ async fn peer_gateway_urls_and_port_changes_that_create_cross_client_loops_are_r
             let error = gateway
                 .edit(
                     Edit::SaveProvider {
+                        quota_access_token: None,
                         id: None,
                         base_url: format!("http://{host}:{}/loop", peer.view().settings.port),
                         token: "loop-fixture".into(),
@@ -629,6 +631,7 @@ async fn peer_gateway_urls_and_port_changes_that_create_cross_client_loops_are_r
         &f.codex,
         &f.codex_home,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: None,
             base_url: format!("http://127.0.0.1:{upstream_port}/deployment"),
             token: "future-loop-fixture".into(),

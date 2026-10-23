@@ -104,6 +104,7 @@ async fn v022_fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &gateway,
             &dir,
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: url,
                 token: "fixture-token".into(),

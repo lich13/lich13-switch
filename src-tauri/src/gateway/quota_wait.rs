@@ -48,9 +48,10 @@ impl Gateway {
                 event.is_some_and(|e| e.details.error_basis == Some(ErrorBasis::UsageLimit))
             })
             .and_then(|route| {
-                self.query_input(&route.provider.id)
-                    .ok()
-                    .filter(|q| q.version == route.provider.version)
+                self.query_input(&route.provider.id).ok().filter(|q| {
+                    q.version
+                        == Self::quota_version(&self.0.inner.lock().unwrap().store, &route.provider)
+                })
             });
         // Keep one cancellable waiter while the query is pending, even when
         // the configured retry is shorter than its ten-second deadline. The
@@ -91,9 +92,8 @@ impl Gateway {
         // A reset/configuration notification may race the HTTP response. Never
         // authorize another provider with stale credentials or a reset waiter.
         if !self.0.admission.capacity_current(sources)
-            || self
-                .route(&id)
-                .is_none_or(|r| r.provider.version != version || (owner && !r.provider.queued))
+            || !self.query_input(&id).is_ok_and(|q| q.version == version)
+            || self.route(&id).is_none_or(|r| owner && !r.provider.queued)
         {
             return waiting.await.map(|()| false);
         }

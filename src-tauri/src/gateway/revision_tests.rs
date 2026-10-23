@@ -18,6 +18,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let edit = |e| g.edit(e, &g.view().revision, &home).unwrap();
         for (url, token) in [("https://a.invalid", "a"), ("https://b.invalid", "b")] {
             edit(Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: url.into(),
                 token: token.into(),
@@ -58,6 +59,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let selected = g.view().selected;
         g.edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://c.invalid/sub".into(),
                 token: "c".into(),

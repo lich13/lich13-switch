@@ -8,6 +8,7 @@ pub enum Kind {
     Gateway,
     Provider { id: String, by: Match },
     Official,
+    Mixed,
     Unmatched { host: String },
     Unknown { reason: String },
 }
@@ -54,7 +55,7 @@ impl Current {
         match &self.state {
             Kind::Gateway => ("gateway", None),
             Kind::Provider { id, .. } => ("provider", Some(id.clone())),
-            Kind::Official | Kind::Unmatched { .. } => ("unsaved", None),
+            Kind::Official | Kind::Unmatched { .. } | Kind::Mixed => ("unsaved", None),
             Kind::Unknown { .. } => ("unknown", None),
         }
     }
@@ -204,6 +205,7 @@ mod tests {
         store
             .edit(
                 super::super::Edit::SaveProvider {
+                    quota_access_token: None,
                     id: None,
                     base_url: "https://relay.example.invalid/v1".into(),
                     token: "fixture-key".into(),

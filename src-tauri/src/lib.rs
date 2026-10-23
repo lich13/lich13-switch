@@ -75,24 +75,8 @@ struct Runtime {
 }
 impl Runtime {
     fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
-        if matches!(
-            error.code.as_str(),
-            code::CONFLICT
-                | code::RECOVERY
-                | "GUARDED"
-                | "CONFIG_CHANGED"
-                | "OFFICIAL_CONFLICT"
-                | code::GATEWAY_ACTIVE
-        ) {
-            self.diagnostics.emit(events::Record::new(
-                Some(client),
-                None,
-                None,
-                events::Reason::ConfigConflict,
-                events::Action::Stopped,
-                None,
-                None,
-            ));
+        if let Some(record) = events::Record::configuration_failure(client, &error, false) {
+            self.diagnostics.emit(record);
         }
         error
     }
@@ -994,6 +978,7 @@ async fn attach_dsh_profile(
             Some(&preview_revision),
         )
         .await
+        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
 #[tauri::command]
 async fn attach_dsh_profiles(
@@ -1012,6 +997,7 @@ async fn attach_dsh_profiles(
             Some(&preview_revision),
         )
         .await
+        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
 #[tauri::command]
 fn read_dsh_file(
@@ -1048,6 +1034,7 @@ async fn save_dsh_file(
             &expected_revision,
         )
         .await
+        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
 #[tauri::command]
 async fn restore_dsh_file(
@@ -1065,6 +1052,7 @@ async fn restore_dsh_file(
             &expected_revision,
         )
         .await
+        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
 #[tauri::command]
 fn preview_grok_import(
@@ -1281,18 +1269,13 @@ async fn frontend_ready(
             }
             if let Err(e) = r.gateway(client).resume(&r.home(client)?).await {
                 let e = AppError::new(&e.code, &format!("{}：{}", client.name(), e.message));
-                r.diagnostics.emit(events::Record::new(
-                    Some(client),
-                    None,
-                    None,
-                    events::Reason::StartupRecovery,
-                    events::Action::Stopped,
-                    None,
-                    None,
-                ));
+                if let Some(record) = events::Record::configuration_failure(client, &e, true) {
+                    r.diagnostics.emit(record);
+                }
                 *r.startup_error.lock().unwrap() = Some(e.clone());
                 let _ = app.emit("switch-error", e);
             }
+            publish_gateway(&app, r.gateway(client));
         }
         if !r.start_silently {
             show(&app, None)?;
@@ -1380,6 +1363,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
     )?;
     r.gateway.edit(
         gateway::Edit::SaveProvider {
+            quota_access_token: None,
             id: None,
             base_url: "https://example.invalid/v1".into(),
             token: "fixture-only".into(),
@@ -1390,6 +1374,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
     )?;
     r.gateway.edit(
         gateway::Edit::SaveProvider {
+            quota_access_token: None,
             id: None,
             base_url: "https://backup.invalid/v1".into(),
             token: "fixture-backup".into(),

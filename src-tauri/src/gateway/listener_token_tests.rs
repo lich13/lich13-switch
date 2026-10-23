@@ -76,6 +76,7 @@ fn add_codex_provider(gateway: &Gateway, home: &Path) {
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://provider.fixture.invalid/v1".to_owned(),
                 token: "fixture-upstream-token".to_owned(),

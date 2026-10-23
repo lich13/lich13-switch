@@ -312,6 +312,7 @@ api_backend = "responses"
 
 fn add_provider(fixture: &Fixture, base_url: String, token: &str, protocol: Protocol) {
     fixture.edit(Edit::SaveGrokProvider {
+        quota_access_token: None,
         id: None,
         base_url,
         token: token.to_owned(),
@@ -472,6 +473,7 @@ async fn grok_gateway_routes_each_native_protocol_with_private_connection_data()
     let original_config = std::fs::read(fixture.config_path()).unwrap();
     let responses_id = fixture.gateway.view().providers[0].id.clone();
     fixture.edit(Edit::SaveGrokProvider {
+        quota_access_token: None,
         id: Some(responses_id),
         base_url: responses_upstream.url("/v1"),
         token: NEW_RESPONSES_TOKEN.into(),
@@ -797,6 +799,7 @@ async fn grok_initial_discovery_is_read_only_and_manual_connection_survives_reop
     gateway
         .edit(
             Edit::SaveGrokProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://fixture-manual.example.invalid/v1".into(),
                 token: "fixture-manual-messages-token".into(),

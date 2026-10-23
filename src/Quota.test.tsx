@@ -96,6 +96,27 @@ afterEach(() => {
   localStorage.clear();
 });
 describe("quota display and refresh", () => {
+  it.each([false, true])("distinguishes an unavailable account balance from a key quota (unlimited=%s)", (unlimited) => {
+    const q = quotaFixture(provider, {
+      source: "newapi",
+      plans: [quotaPlan({ name: "Key 额度", remaining: 8.5, unlimited })],
+    });
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+    expect(screen.getByText("账户余额未开放")).toBeInTheDocument();
+    expect(screen.getByText(unlimited ? "Key 配额无限制" : "Key 剩余 8.5 USD")).toBeInTheDocument();
+  });
+  it("shows account balance first and retains it with a separate Key query warning", () => {
+    const q = quotaFixture(provider, {
+      source: "newapi", error: "账户余额已更新，Key 配额查询失败",
+      plans: [quotaPlan({ name: "账户余额", remaining: 1.5 }), quotaPlan({ name: "Key 额度", unlimited: true })],
+    });
+    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+    expect(screen.getByText("剩余 1.5 USD")).toBeInTheDocument();
+    expect(screen.getByText("账户余额")).toBeInTheDocument();
+    expect(screen.getByText("Key 额度")).toBeInTheDocument();
+    expect(screen.getByText("账户余额已更新，Key 配额查询失败")).toBeInTheDocument();
+    expect(screen.queryByText("账户余额未开放")).not.toBeInTheDocument();
+  });
   it("refreshes on entry and each minute, pauses while hidden or on another page, resumes with a cache-aware refresh", async () => {
     vi.useFakeTimers();
     const view = render(<Harness />);

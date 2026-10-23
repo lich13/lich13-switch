@@ -151,6 +151,7 @@ export type Provider = {
   health: Health;
   modelHealth?: { model: string; health: Health }[];
   quotaVersion: string;
+  hasQuotaAccessToken?: boolean;
   quota: ProviderQuota | null;
   quotaChecking?: boolean;
   quotaCheck?: import("./limit-labels").QuotaCheck | null;
@@ -185,7 +186,7 @@ export type GrokModel = {
   error: string | null;
 };
 export type CurrentConnection = {
-  kind: "gateway" | "provider" | "official" | "unmatched" | "unknown";
+  kind: "gateway" | "provider" | "official" | "unmatched" | "unknown" | "mixed";
   id?: string;
   by?: "urlToken" | "urlOnly";
   host?: string;

@@ -115,6 +115,7 @@ pub struct Query {
     pub version: String,
     pub base: String,
     pub token: String,
+    pub quota_access_token: Option<String>,
     pub client: HttpClient,
 }
 impl Service {
@@ -236,7 +237,8 @@ impl Service {
                             view.total_usage = data.total_usage;
                             view.state = "ok".into();
                             view.stale = false;
-                            view.error = None;
+                            view.error = data.warning;
+                            view.retry_at = data.retry_at;
                             view.success_at = view.checked_at;
                         }
                         Ok(None) => {
@@ -294,6 +296,13 @@ struct Reply {
     body: Option<Value>,
 }
 async fn get(input: &Query, url: String, auth: bool) -> std::result::Result<Reply, Failure> {
+    get_with_token(input, url, auth.then_some(input.token.as_str())).await
+}
+async fn get_with_token(
+    input: &Query,
+    url: String,
+    token: Option<&str>,
+) -> std::result::Result<Reply, Failure> {
     let request = async {
         let mut req = Request::builder()
             .method("GET")
@@ -304,8 +313,8 @@ async fn get(input: &Query, url: String, auth: bool) -> std::result::Result<Repl
                 header::USER_AGENT,
                 concat!("lich13-switch/", env!("CARGO_PKG_VERSION")),
             );
-        if auth {
-            req = req.header(header::AUTHORIZATION, format!("Bearer {}", input.token));
+        if let Some(token) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         let req = req
             .body(replay::empty())
@@ -353,6 +362,9 @@ async fn get(input: &Query, url: String, auth: bool) -> std::result::Result<Repl
             status,
             body: serde_json::from_slice(&bytes).ok().map(|mut value| {
                 redact_echoed_key(&mut value, &input.token);
+                if let Some(token) = &input.quota_access_token {
+                    redact_echoed_key(&mut value, token);
+                }
                 value
             }),
         })
@@ -398,6 +410,8 @@ struct Data {
     expires_at_unix: Option<i64>,
     today: Option<Usage>,
     total_usage: Option<Usage>,
+    warning: Option<String>,
+    retry_at: Option<u64>,
 }
 fn number(v: &Value) -> Option<f64> {
     v.as_f64()
@@ -694,7 +708,7 @@ fn newapi(v: &Value) -> Option<Data> {
         return None;
     }
     let expires = body["expires_at"].as_i64().filter(|t| *t > 0);
-    Some(Data {
+    let mut data = Data {
         source: "newapi",
         subscriptions: subscriptions(body, "额度单位"),
         plans: vec![plan(
@@ -710,7 +724,21 @@ fn newapi(v: &Value) -> Option<Data> {
             .filter(|t| *t < now() as i64)
             .map(|_| "已到期".into()),
         ..Default::default()
-    })
+    };
+    if let Some(remaining) = n(&body["user_quota"], "total_available") {
+        data.plans.insert(
+            0,
+            plan(
+                "账户余额",
+                Some(remaining),
+                n(&body["user_quota"], "total_used"),
+                None,
+                "额度单位",
+                false,
+            ),
+        );
+    }
+    Some(data)
 }
 fn convert(d: &mut Data, status: &Value) {
     let s = &status["data"];
@@ -753,6 +781,77 @@ fn convert(d: &mut Data, status: &Value) {
 }
 async fn fetch(input: &Query) -> std::result::Result<Option<Data>, Failure> {
     let (sub, new, status) = urls(&input.base)?;
+    if let Some(token) = input.quota_access_token.as_deref() {
+        let account = format!("{}/user/self", status.trim_end_matches("/status"));
+        let response = get_with_token(input, account, Some(token)).await?;
+        let body = response.body.as_ref();
+        let message = match response.status {
+            401 => "账户余额认证失败，请更新账号访问令牌",
+            403 => "账号访问令牌无账户余额查询权限",
+            500..=599 => "账户余额服务暂时不可用",
+            _ => "账户余额接口未返回有效额度，请检查账号访问令牌",
+        };
+        let value = body
+            .filter(|v| (200..300).contains(&response.status) && v["success"] == true)
+            .ok_or_else(|| Failure::new(message))?;
+        let remaining = n(&value["data"], "quota").ok_or_else(|| Failure::new(message))?;
+        let used = n(&value["data"], "used_quota");
+        let mut data = Data {
+            source: "newapi",
+            plans: vec![plan(
+                "账户余额",
+                Some(remaining),
+                used,
+                None,
+                "额度单位",
+                false,
+            )],
+            total_usage: Some(Usage {
+                requests: n(&value["data"], "request_count"),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Resolve units before the optional Key query so its failure cannot
+        // change a successfully read account balance into raw quota units.
+        let units = match get(input, status, false).await {
+            Ok(reply) if reply.status == 200 => reply.body,
+            Err(failure) if failure.retry_at.is_some() => {
+                data.warning = Some("账户余额已更新，单位与 Key 配额查询被限流".into());
+                data.retry_at = failure.retry_at;
+                return Ok(Some(data));
+            }
+            _ => None,
+        };
+        match get(input, new, true).await {
+            Ok(reply) => {
+                if let Some(key) = reply
+                    .body
+                    .as_ref()
+                    .filter(|_| (200..300).contains(&reply.status))
+                    .and_then(newapi)
+                {
+                    data.plans
+                        .extend(key.plans.into_iter().filter(|p| p.name == "Key 额度"));
+                    data.expires_at_unix = key.expires_at_unix;
+                    data.key_status = key.key_status;
+                } else {
+                    data.warning = Some("账户余额已更新，Key 配额查询失败".into());
+                }
+            }
+            Err(failure) => {
+                data.warning = Some(format!(
+                    "账户余额已更新，Key 配额查询失败：{}",
+                    failure.message
+                ));
+                data.retry_at = failure.retry_at;
+            }
+        }
+        if let Some(value) = units {
+            convert(&mut data, &value);
+        }
+        return Ok(Some(data));
+    }
     let first = get(input, sub, true).await?;
     if (200..300).contains(&first.status) || [401, 403].contains(&first.status) {
         if let Some(data) = first.body.as_ref().and_then(sub2) {
@@ -891,5 +990,36 @@ mod tests {
             &json!({"success":false,"data":{"object":"token_usage","total_available":10}})
         )
         .is_none());
+    }
+
+    #[test]
+    fn newapi_user_quota_is_account_balance_not_unlimited_key_placeholder() {
+        for kind in ["USD", "CNY", code::CUSTOM, "TOKENS"] {
+            let mut value = json!({"code":true,"data":{"object":"token_usage","unlimited_quota":true,"total_available":100000000,"user_quota":{"total_available":1000,"total_used":500}}});
+            let mut data = newapi(&value).unwrap();
+            convert(
+                &mut data,
+                &json!({"data":{"quota_per_unit":100,"quota_display_type":kind,"usd_exchange_rate":7,"custom_currency_symbol":"点","custom_currency_exchange_rate":2}}),
+            );
+            assert_eq!(data.plans[0].name, "账户余额");
+            assert!(!data.plans[0].unlimited);
+            assert_eq!(
+                data.plans[0].remaining,
+                Some(match kind {
+                    "USD" => 10.,
+                    "CNY" => 70.,
+                    code::CUSTOM => 20.,
+                    _ => 1000.,
+                })
+            );
+            assert!(data.plans[1].unlimited);
+            value["data"].as_object_mut().unwrap().remove("user_quota");
+            let key_only = newapi(&value).unwrap();
+            assert_eq!(key_only.plans.len(), 1);
+            assert_eq!(key_only.plans[0].name, "Key 额度");
+        }
+        assert!(
+            newapi(&json!({"object":"billing_subscription","hard_limit_usd":100000000})).is_none()
+        );
     }
 }

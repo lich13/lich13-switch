@@ -226,6 +226,7 @@ export type GatewayEdit =
       id?: string | null;
       baseUrl: string;
       token: string;
+      quotaAccessToken?: string;
       name?: string | null;
     }
   | {
@@ -233,6 +234,7 @@ export type GatewayEdit =
       id?: string | null;
       baseUrl: string;
       token: string;
+      quotaAccessToken?: string;
       name?: string | null;
       protocol: GrokProtocol;
     }

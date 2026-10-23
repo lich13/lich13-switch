@@ -31,6 +31,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     store
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://api.example.invalid/deployment".into(),
                 token: "fixture-token".into(),
@@ -44,6 +45,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     store
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://fallback.example.invalid/v1".into(),
                 token: "fixture-token-2".into(),
@@ -56,6 +58,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
 
     let invalid = store.edit(
         Edit::SaveProvider {
+            quota_access_token: None,
             id: None,
             base_url: "https://invalid.example.invalid".into(),
             token: "fixture-token-3".into(),
@@ -349,6 +352,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &g,
         &t,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: None,
             base_url: format!("http://127.0.0.1:{port}"),
             token: "fixture-local".into(),
@@ -401,6 +405,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &g,
         &t,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: Some(id.clone()),
             base_url: format!("http://127.0.0.1:{blocked}"),
             token: "fixture-new".into(),
@@ -467,6 +472,7 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
         &g,
         &t,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: Some(id),
             base_url: format!("http://127.0.0.1:{port}"),
             token: "changed-fixture".into(),

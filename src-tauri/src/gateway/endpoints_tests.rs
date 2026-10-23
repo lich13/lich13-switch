@@ -35,6 +35,7 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
     store
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: primary_raw.into(),
                 token: "fixture-token".into(),
@@ -136,6 +137,7 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://primary.example.invalid/v1".into(),
                 token: "fixture-token".into(),
@@ -305,6 +307,7 @@ async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_e
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: format!("http://127.0.0.1:{upstream_port}/v1"),
                 token: "fixture-token".into(),

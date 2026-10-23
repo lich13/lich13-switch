@@ -212,10 +212,7 @@ impl Gateway {
             }) {
                 continue;
             }
-            let cached = self
-                .0
-                .catalog
-                .cached(&provider.id, &Self::quota_version(&state.store, provider));
+            let cached = self.0.catalog.cached(&provider.id, &provider.version);
             let ids = provider
                 .allowed_models
                 .as_ref()
@@ -283,10 +280,7 @@ impl Gateway {
             .iter()
             .filter(|p| p.queued)
             .map(|p| {
-                let v = self
-                    .0
-                    .catalog
-                    .cached(&p.id, &Self::quota_version(&state.store, p));
+                let v = self.0.catalog.cached(&p.id, &p.version);
                 Provider {
                     id: p.id.clone(),
                     name: p.name.clone(),
@@ -434,7 +428,7 @@ impl Gateway {
                         && self
                             .0
                             .catalog
-                            .cached(&p.id, &Self::quota_version(&state.store, p))
+                            .cached(&p.id, &p.version)
                             .checked_at
                             .is_none()
                 })
@@ -488,6 +482,7 @@ mod tests {
                     .store
                     .edit(
                         super::super::Edit::SaveProvider {
+                            quota_access_token: None,
                             id: None,
                             name: Some(format!("Fixture {n}")),
                             base_url: format!("http://127.0.0.1:{port}/{n}/v1"),
@@ -586,6 +581,7 @@ mod tests {
                     .store
                     .edit(
                         super::super::Edit::SaveGrokProvider {
+                            quota_access_token: None,
                             id: None,
                             name: Some(name.into()),
                             base_url: format!("https://{name}.example.invalid/v1"),
@@ -604,7 +600,7 @@ mod tests {
             g.0.catalog
                 .commit(&super::super::catalog::View {
                     provider_id: p.id.clone(),
-                    version: Gateway::quota_version(&state.store, p),
+                    version: p.version.clone(),
                     models: vec!["cached".into(), "shared".into()],
                     checked_at: Some(1),
                     stale: false,

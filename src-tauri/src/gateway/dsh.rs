@@ -1066,7 +1066,7 @@ impl Gateway {
             let mut state = self.0.inner.lock().unwrap();
             self.replace_store(&mut state, store);
             state.revision = revision;
-            state.upgrade_pending = false;
+            state.upgrade_error = None;
         }
         Ok(())
     }
@@ -1495,6 +1495,7 @@ fn import_selection(
             store.settings.port = port;
             store.edit(
                 super::model::Edit::SaveDshProvider {
+                    quota_access_token: None,
                     id: None,
                     base_url: base,
                     token,
@@ -1728,6 +1729,7 @@ mod tests {
                 store
                     .edit(
                         super::super::Edit::SaveDshProvider {
+                            quota_access_token: None,
                             id: None,
                             base_url: "https://example.invalid/v1".into(),
                             token: format!("fixture-{}", api(protocol)),

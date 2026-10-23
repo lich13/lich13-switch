@@ -32,6 +32,13 @@ async fn sync_restart_and_stop_preserve_each_profiles_model_and_reasoning() {
     change_default(home.path(), "desktop", "deepseek-future", "max");
     change_default(home.path(), "web", models::PRO, "high");
     change_default(home.path(), "headless", models::FLASH, "low");
+    let current = gateway.view();
+    assert_eq!(
+        current.current.state,
+        crate::gateway::current::Kind::Gateway
+    );
+    assert_eq!(current.current.model, None);
+    assert_eq!(current.config_error, None);
     gateway
         .restart_dsh(home.path(), &gateway.view().revision)
         .await
@@ -58,6 +65,13 @@ async fn sync_restart_and_stop_preserve_each_profiles_model_and_reasoning() {
     change_default(home.path(), "desktop", "deepseek-after-sync", "max");
     gateway.stop_for_exit().await.unwrap();
     gateway.resume(home.path()).await.unwrap();
+    let resumed = gateway.view();
+    assert_eq!(
+        resumed.current.state,
+        crate::gateway::current::Kind::Gateway
+    );
+    assert_eq!(resumed.current.model, None);
+    assert_eq!(resumed.config_error, None);
     let (input, _, _) = selection::effective(home.path(), "desktop").unwrap();
     assert_eq!(
         string(input.configs[DEFAULT].get("model")).as_deref(),

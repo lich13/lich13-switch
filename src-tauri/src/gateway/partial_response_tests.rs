@@ -164,6 +164,7 @@ impl Fixture {
             gateway
                 .edit(
                     Edit::SaveProvider {
+                        quota_access_token: None,
                         id: None,
                         base_url: url.clone(),
                         token: FIXTURE_TOKEN.into(),

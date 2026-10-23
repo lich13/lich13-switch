@@ -36,6 +36,7 @@ export default function GatewayDialog({
       : (dialog.item?.protocol ?? "responses"),
   );
   const [showToken, setShowToken] = useState(false);
+  const [quotaAccessToken, setQuotaAccessToken] = useState<string | undefined>();
   const [revealed, setRevealed] = useState<{
     value: string;
     revision: string;
@@ -100,12 +101,12 @@ export default function GatewayDialog({
       if (sequence === revealSequence.current) setRevealing(false);
     }
   };
-  const initialDraft = useRef(JSON.stringify([name, baseUrl, token, protocol]));
+  const initialDraft = useRef(JSON.stringify([name, baseUrl, token, protocol, quotaAccessToken]));
   useEffect(() => {
     onDirtyChange?.(
-      JSON.stringify([name, baseUrl, token, protocol]) !== initialDraft.current,
+      JSON.stringify([name, baseUrl, token, protocol, quotaAccessToken]) !== initialDraft.current,
     );
-  }, [name, baseUrl, token, protocol, onDirtyChange]);
+  }, [name, baseUrl, token, protocol, quotaAccessToken, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const title = `${dialog.item ? "编辑" : "添加"}供应商`;
   return (
@@ -120,6 +121,7 @@ export default function GatewayDialog({
             id: dialog.item?.id ?? null,
             baseUrl,
             token,
+            ...(quotaAccessToken !== undefined ? { quotaAccessToken } : {}),
             ...(!dialog.item ? { name } : {}),
           };
           const payload: GatewayEdit =
@@ -226,6 +228,22 @@ export default function GatewayDialog({
             </span>
           </label>
         </>
+        <label>
+          账号访问令牌（可选）
+          <span className="provider-token-input">
+            <input
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              value={quotaAccessToken ?? ""}
+              onChange={(e) => setQuotaAccessToken(e.target.value || undefined)}
+              placeholder={quotaAccessToken === "" ? "保存后清除" : dialog.item?.hasQuotaAccessToken ? "已配置，留空保留" : "用于 New API 账户余额查询"}
+            />
+            {(dialog.item?.hasQuotaAccessToken || quotaAccessToken) && (
+              <button type="button" className="text-button" onClick={() => setQuotaAccessToken("")}>清除</button>
+            )}
+          </span>
+        </label>
         {error && (
           <div className="banner error" role="alert">
             {error}

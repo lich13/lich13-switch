@@ -498,6 +498,7 @@ mod v02514_tests {
             store
                 .edit(
                     Edit::SaveProvider {
+                        quota_access_token: None,
                         id: None,
                         base_url: format!("https://p{n}.example.invalid"),
                         token: format!("fixture-{n}"),

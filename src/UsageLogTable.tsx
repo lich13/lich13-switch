@@ -5,6 +5,7 @@ import {
 } from "./usage-types";
 import { date, preciseDate, promptTokens, missingReason } from "./usage-format";
 import { durationSeverity, firstTokenSeverity } from "./latency-health";
+import { ArrowDown, ArrowUp, Archive, SquarePen, Brain, Percent } from "lucide-react";
 import {
   cacheHitRate,
   columnVisible,
@@ -108,7 +109,7 @@ export default function UsageLogTable({
       id: "tokens",
       label: "Token",
       visible: tokenFields.some(visible),
-      width: "minmax(120px, 0.62fr)",
+      width: "minmax(max-content, 0.62fr)",
     },
     {
       id: "cost",
@@ -138,7 +139,7 @@ export default function UsageLogTable({
               "--usage-areas": `"${columns.map((c) => c.id).join(" ")}"`,
               "--usage-narrow-columns":
                 secondary
-                  .map((c) => (c.id === "tokens" ? "minmax(0, 1fr)" : c.width))
+                  .map((c) => (c.id === "tokens" ? "minmax(max-content, 1fr)" : c.width))
                   .join(" ") || "minmax(0, 1fr)",
               "--usage-narrow-areas": secondary.length
                 ? `"${secondary.map(() => "identity").join(" ")}" "${secondary.map((c) => c.id).join(" ")}"`
@@ -428,8 +429,14 @@ export default function UsageLogTable({
                 </span>
               );
               cells.tokens = (
-                <div className="usage-token-grid">
-                  {tokenFields.filter(visible).map(metric)}
+                <div className={`usage-token-grid${visible("reasoning") || visible("hitRate") ? " has-extra" : ""}`}>
+                  {tokenFields.filter(visible).map((field) => {
+                    const Icon = {input: ArrowDown, output: ArrowUp, cacheRead: Archive, cacheWrite: SquarePen, reasoning: Brain, hitRate: Percent}[field];
+                    return <span key={field} className={`usage-token-item ${field}`} aria-label={tokenLabels[field]} title={tokenLabels[field]}>
+                      <Icon size={13} aria-hidden="true" />
+                      {cells[field]}
+                    </span>;
+                  })}
                 </div>
               );
               cells.performance = (

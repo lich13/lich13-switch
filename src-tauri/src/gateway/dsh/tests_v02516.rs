@@ -161,7 +161,7 @@ fn same_unimported_address_with_different_credentials_is_inconsistent() {
         .unwrap();
     }
     let current = current(home.path(), &Store::default(), &[43721], &|_| None);
-    assert!(matches!(current.state, Kind::Unknown { reason } if reason.contains("配置不一致")));
+    assert_eq!(current.state, Kind::Mixed);
     assert!(gateway
         .preview_dsh(home.path(), Some("desktop"), Protocol::ChatCompletions)
         .unwrap()

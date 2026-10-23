@@ -824,6 +824,7 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
         &gateway,
         &dir,
         Edit::SaveProvider {
+            quota_access_token: None,
             id: Some(backup_id.clone()),
             base_url: providers[1].base_url.clone(),
             token: "fixture-rotated-token".into(),

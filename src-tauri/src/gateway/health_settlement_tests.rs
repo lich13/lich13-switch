@@ -19,6 +19,7 @@ fn fixture() -> (tempfile::TempDir, Gateway, Route) {
     let view = gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://example.invalid/v1".into(),
                 token: "fixture-token".into(),

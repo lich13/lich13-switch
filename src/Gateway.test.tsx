@@ -590,7 +590,7 @@ describe("client isolation", () => {
     });
     await user.click(screen.getByRole("button", { name: "添加" }));
     const dialog = screen.getByRole("dialog", { name: "添加供应商" });
-    expect(dialog.querySelectorAll("input")).toHaveLength(3);
+    expect(dialog.querySelectorAll("input")).toHaveLength(4);
     const base = within(dialog).getByLabelText("ANTHROPIC_BASE_URL");
     const token = within(dialog).getByLabelText("ANTHROPIC_AUTH_TOKEN");
     expect(token).toHaveAttribute("type", "password");

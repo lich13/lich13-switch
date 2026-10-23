@@ -77,6 +77,29 @@ async function openProviderEditor(
 }
 
 describe("Codex v0.20.0 API login gateway controls", () => {
+  it.each(["preserve", "replace", "clear"] as const)(
+    "keeps a configured account token masked and supports %s on save",
+    async (action) => {
+      codexState.providers[0].hasQuotaAccessToken = true;
+      const user = userEvent.setup();
+      render(<Gateway notify={() => {}} />);
+      await screen.findByRole("button", { name: "添加" });
+      const dialog = await openProviderEditor(user, "edit");
+      const token = within(dialog).getByLabelText(/账号访问令牌/);
+      expect(token).toHaveAttribute("type", "password");
+      expect(token).toHaveValue("");
+      expect(token).toHaveAttribute("placeholder", "已配置，留空保留");
+      if (action === "replace") await user.type(token, "fixture-account-access");
+      if (action === "clear") await user.click(within(dialog).getByRole("button", { name: "清除" }));
+      await user.click(within(dialog).getByRole("button", { name: "保存" }));
+      await waitFor(() => expect(mock.command).toHaveBeenCalledWith("update_gateway", expect.anything()));
+      const edit = mock.command.mock.calls.find(([name]) => name === "update_gateway")![1].edit;
+      if (action === "preserve") expect(edit).not.toHaveProperty("quotaAccessToken");
+      else expect(edit.quotaAccessToken).toBe(action === "clear" ? "" : "fixture-account-access");
+      expect(mock.command.mock.calls.some(([name]) => name === "reveal_provider_token")).toBe(false);
+    },
+  );
+
   it.each(["bearer", "apiKey"] as const)(
     "preserves hidden %s connection settings",
     async (connectionMode) => {

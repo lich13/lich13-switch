@@ -204,6 +204,7 @@ fn sub2api_exchange_rejects_revision_conflicts_and_export_selection_errors() {
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://existing.example.invalid/v1".into(),
                 token: "fixture-existing-key".into(),

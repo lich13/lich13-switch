@@ -14,6 +14,8 @@ export function connectionLabel(
       return "本地网关";
     case "official":
       return "官方";
+    case "mixed":
+      return "各 profile 配置不同";
     case "provider":
       return `${name ?? "供应商"}${current.by === "urlOnly" ? " · 按地址匹配" : ""}`;
     case "unmatched":

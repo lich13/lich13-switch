@@ -256,28 +256,38 @@ pub fn current(
         Ok(profiles) if !profiles.is_empty() => profiles,
         _ => return Current::unknown("尚无可用 DSH profile"),
     };
-    let initial = read_current(home, &profiles[0], store, ports, resolve);
-    let signature = |selection: &Result<Selection>| {
-        selection.as_ref().ok().map(|s| {
-            (
-                s.pair.base_url.clone(),
-                s.pair.token.clone(),
-                s.provider.clone(),
-                s.current.protocol,
-            )
-        })
+    let initial = match read_current(home, &profiles[0], store, ports, resolve) {
+        Ok(selection) => selection,
+        Err(error) => return Current::unknown(&error.message),
     };
-    let mut result = profile_current(home, &profiles[0], store, ports, resolve);
+    let signature = |s: &Selection| {
+        (
+            s.pair.base_url.clone(),
+            s.pair.token.clone(),
+            s.provider.clone(),
+            s.current.protocol,
+        )
+    };
+    let mut result = initial.current.clone();
+    let mut mixed = false;
     for profile in &profiles[1..] {
-        let selection = read_current(home, profile, store, ports, resolve);
+        let selection = match read_current(home, profile, store, ports, resolve) {
+            Ok(selection) => selection,
+            Err(error) => return Current::unknown(&error.message),
+        };
         let different = signature(&initial) != signature(&selection);
-        let other = selection
-            .map(|s| s.current)
-            .unwrap_or_else(|e| Current::unknown(&e.message));
-        if different || other.state != result.state || other.model != result.model {
-            let mut result = Current::unknown("配置不一致，请查看各 profile 的当前选择");
-            result.model_source = Some("多个 profile".into());
+        let other = selection.current;
+        if matches!(result.state, Kind::Unknown { .. }) {
             return result;
+        }
+        if matches!(other.state, Kind::Unknown { .. }) {
+            return other;
+        }
+        if different || other.state != result.state {
+            mixed = true;
+        }
+        if other.model != result.model {
+            result.model = None;
         }
         if other
             .warning
@@ -287,8 +297,11 @@ pub fn current(
             result.warning = other.warning;
         }
     }
+    if mixed {
+        result = Current::new(Kind::Mixed);
+    }
     if profiles.len() > 1 {
-        result.model_source = Some(format!("{} 个 profile 的静态选择一致", profiles.len()));
+        result.model_source = Some(format!("{} 个 profile", profiles.len()));
     }
     result
 }

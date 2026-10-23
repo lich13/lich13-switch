@@ -201,6 +201,11 @@ describe("request log columns", () => {
     expect(within(row).getByLabelText("推理")).toHaveTextContent("20");
     expect(within(row).getByLabelText("HTTP")).toHaveTextContent("200");
     expect(within(row).getByLabelText("命中率")).toBeInTheDocument();
+    for (const label of ["输入", "输出", "缓存读", "缓存写", "推理", "命中率"]) {
+      const metric = within(row).getByLabelText(label);
+      expect(metric.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+      expect(within(metric).queryByText(label)).not.toBeInTheDocument();
+    }
     rerender(
       renderTable({
         ...settings,

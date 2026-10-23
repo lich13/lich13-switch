@@ -32,6 +32,7 @@ async fn resumable_codex() -> Resumable {
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: "https://resume.example.invalid/v1".into(),
                 token: "fixture-resume-token".into(),
@@ -66,6 +67,54 @@ async fn resumable_codex() -> Resumable {
         home,
         gateway: Gateway::new(data).unwrap(),
     }
+}
+
+#[tokio::test]
+async fn restart_diagnostics_wait_for_real_failures_instead_of_unrestored_views() {
+    use crate::events::{Action, Filter, Reason, Record};
+    let fixture = resumable_codex().await;
+    let diagnostics = crate::events::Service::new(&fixture.data);
+    fixture.gateway.set_diagnostics(diagnostics.clone());
+    let mut changes = diagnostics.subscribe();
+    assert!(fixture.gateway.view().config_error.is_some());
+    fixture.gateway.report_diagnostics();
+    fixture.gateway.resume(&fixture.home).await.unwrap();
+    assert!(fixture.gateway.view().config_error.is_none());
+    fixture.gateway.report_diagnostics();
+    fixture.gateway.report_diagnostics();
+    // A queue marker makes the assertion wait for diagnostics already emitted.
+    let marker = Record::new(
+        None,
+        None,
+        None,
+        Reason::StartupRecovery,
+        Action::Stopped,
+        None,
+        None,
+    );
+    let marker_id = marker.id.clone();
+    diagnostics.emit(marker);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while changes
+            .recv()
+            .await
+            .unwrap()
+            .record
+            .is_none_or(|r| r.id != marker_id)
+        {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        diagnostics
+            .query(Filter {
+                reason: Some(Reason::ConfigConflict),
+                ..Default::default()
+            })
+            .total,
+        0
+    );
+    fixture.gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -200,6 +249,7 @@ async fn resumable_claude() -> (tempfile::TempDir, PathBuf, PathBuf, Gateway, Ga
     claude
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: CLAUDE_BASE.into(),
                 token: CLAUDE_TOKEN.into(),

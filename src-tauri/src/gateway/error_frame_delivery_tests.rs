@@ -67,6 +67,7 @@ async fn run_case(streaming: bool, ending: ConsumerEnd) -> (u8, bool, Vec<String
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: base,
                 token: "fixture-upstream-token".into(),

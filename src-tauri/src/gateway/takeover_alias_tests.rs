@@ -311,6 +311,7 @@ fn provider(gateway: &Gateway, home: &Path) {
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url: BASE.into(),
                 token: UPSTREAM.into(),

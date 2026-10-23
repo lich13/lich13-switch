@@ -337,6 +337,7 @@ async fn started_http_gateway(
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url,
                 token: "fixture-token".into(),
@@ -401,6 +402,7 @@ async fn started_native_gateway(upstream_port: u16, max_rpm: u32) -> (tempfile::
     gateway
         .edit(
             Edit::SaveProvider {
+                quota_access_token: None,
                 id: None,
                 base_url,
                 token: "fixture-token".into(),
