@@ -4,6 +4,7 @@ import {
   type UsageSettings,
 } from "./usage-types";
 import { date, preciseDate, promptTokens, missingReason } from "./usage-format";
+import { durationSeverity, firstTokenSeverity } from "./latency-health";
 import {
   cacheHitRate,
   columnVisible,
@@ -16,18 +17,73 @@ import {
   type LogColumn,
 } from "./usage-log-columns";
 
+export function UsageLogControls({
+  settings,
+  save,
+}: {
+  settings: UsageSettings | undefined;
+  save: (settings: UsageSettings) => void;
+}) {
+  const visibility = (id: LogColumn, visible: boolean) => {
+    if (!settings || id === "time") return;
+    save({
+      ...settings,
+      logColumns: { ...settings.logColumns, [id]: visible },
+    });
+  };
+  return (
+    <div className="usage-log-controls">
+      <details className="usage-more">
+        <summary>列设置</summary>
+        <div>
+          {logColumns.map((c) => (
+            <label key={c.id}>
+              <input
+                type="checkbox"
+                disabled={c.id === "time" || !settings}
+                checked={columnVisible(c.id, settings, false)}
+                onChange={(e) => visibility(c.id, e.target.checked)}
+              />
+              {c.label}
+            </label>
+          ))}
+          <button
+            disabled={!settings}
+            onClick={() => settings && save({ ...settings, logColumns: {} })}
+          >
+            恢复默认列
+          </button>
+        </div>
+      </details>
+      <select
+        aria-label="日志数字格式"
+        value={settings?.logNumberMode === "exact" ? "exact" : "compact"}
+        disabled={!settings}
+        onChange={(e) =>
+          settings &&
+          save({
+            ...settings,
+            logNumberMode: e.target.value as "compact" | "exact",
+          })
+        }
+      >
+        <option value="compact">紧凑数字</option>
+        <option value="exact">精确数字</option>
+      </select>
+    </div>
+  );
+}
+
 export default function UsageLogTable({
   rows,
   busy,
   settings,
-  save,
   name,
   open,
 }: {
   rows: UsageRecord[];
   busy: boolean;
   settings: UsageSettings | undefined;
-  save: (settings: UsageSettings) => void;
   name: (id: string | null) => string;
   open: (r: UsageRecord) => void;
 }) {
@@ -69,54 +125,8 @@ export default function UsageLogTable({
   ].filter((c) => c.visible);
   const secondary = columns.filter((c) => c.id !== "identity");
   const exact = settings?.logNumberMode === "exact";
-  const visibility = (id: LogColumn, visible: boolean) => {
-    if (!settings || id === "time") return;
-    save({
-      ...settings,
-      logColumns: { ...settings.logColumns, [id]: visible },
-    });
-  };
   return (
     <>
-      <div className="usage-log-controls">
-        <details className="usage-more">
-          <summary>列设置</summary>
-          <div>
-            {logColumns.map((c) => (
-              <label key={c.id}>
-                <input
-                  type="checkbox"
-                  disabled={c.id === "time" || !settings}
-                  checked={visible(c.id)}
-                  onChange={(e) => visibility(c.id, e.target.checked)}
-                />
-                {c.label}
-              </label>
-            ))}
-            <button
-              disabled={!settings}
-              onClick={() => settings && save({ ...settings, logColumns: {} })}
-            >
-              恢复默认列
-            </button>
-          </div>
-        </details>
-        <select
-          aria-label="日志数字格式"
-          value={exact ? "exact" : "compact"}
-          disabled={!settings}
-          onChange={(e) =>
-            settings &&
-            save({
-              ...settings,
-              logNumberMode: e.target.value as "compact" | "exact",
-            })
-          }
-        >
-          <option value="compact">紧凑数字</option>
-          <option value="exact">精确数字</option>
-        </select>
-      </div>
       <div className="usage-table-scroll">
         <table
           className={`usage-table usage-request-table${exact ? " exact" : ""}`}
@@ -322,6 +332,11 @@ export default function UsageLogTable({
                 ),
                 firstToken: (
                   <span
+                    className={`usage-metric-value ${
+                      native || !a.stream || a.firstTokenMs == null
+                        ? "is-empty"
+                        : `latency-${firstTokenSeverity(a.firstTokenMs)}`
+                    }`}
                     tabIndex={0}
                     title={
                       native
@@ -338,6 +353,11 @@ export default function UsageLogTable({
                 ),
                 duration: (
                   <span
+                    className={`usage-metric-value ${
+                      native
+                        ? "is-empty"
+                        : `latency-${durationSeverity(a.durationMs)}`
+                    }`}
                     tabIndex={0}
                     title={
                       state ||
@@ -350,6 +370,7 @@ export default function UsageLogTable({
                 ),
                 speed: (
                   <span
+                    className={`usage-metric-value ${speed == null ? "is-empty" : "tps"}`}
                     tabIndex={0}
                     title={
                       speed == null

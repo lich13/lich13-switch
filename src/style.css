@@ -19,6 +19,11 @@
   --hover: #1b2d45;
   --warning: #e9bd70;
   --error: #ff8999;
+  --latency-good: #34d399;
+  --latency-warn: #fbbf24;
+  --latency-slow: #fb923c;
+  --latency-critical: #f87171;
+  --tps: #d1d5db;
   --selection: rgba(92, 225, 230, 0.055);
 }
 :root[data-theme="light"] {
@@ -35,6 +40,11 @@
   --hover: #e2ebf7;
   --warning: #95621a;
   --error: #ba2442;
+  --latency-good: #059669;
+  --latency-warn: #d97706;
+  --latency-slow: #ea580c;
+  --latency-critical: #dc2626;
+  --tps: #374151;
   --selection: #eff5ff;
   color: var(--ink);
   background: var(--canvas);

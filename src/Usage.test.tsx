@@ -348,6 +348,88 @@ async function chooseRange(value: string) {
 }
 
 describe("usage records", () => {
+  it("groups request status, column settings and number format in order only on the request tab", async () => {
+    await renderUsage();
+    const toolbar = screen.getByRole("group", { name: "请求日志工具" });
+    const status = within(toolbar).getByRole("combobox", { name: "请求状态" });
+    const columns = within(toolbar).getByText("列设置");
+    const format = within(toolbar).getByRole("combobox", {
+      name: "日志数字格式",
+    });
+    expect(status).toHaveDisplayValue("全部状态");
+    expect(format).toHaveDisplayValue("紧凑数字");
+    expect(Array.from(toolbar.querySelectorAll("select, summary"))).toEqual([
+      status,
+      columns,
+      format,
+    ]);
+    expect(screen.getByRole("tablist", { name: "用量明细" })).toContainElement(
+      toolbar,
+    );
+    for (const tab of ["供应商", "模型", "定价"]) {
+      await userEvent.click(screen.getByRole("tab", { name: tab }));
+      expect(
+        screen.queryByRole("group", { name: "请求日志工具" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("combobox", { name: "日志数字格式" }),
+      ).not.toBeInTheDocument();
+    }
+    await userEvent.click(screen.getByRole("tab", { name: "请求日志" }));
+    expect(
+      screen.getByRole("group", { name: "请求日志工具" }),
+    ).toBeInTheDocument();
+    expect(calls("set_usage_settings")).toHaveLength(0);
+  });
+
+  it("saves column choices, restores defaults and switches compact and exact numbers from the toolbar", async () => {
+    records[0].attempts[0].tokens.input = 12345;
+    await renderUsage();
+    const toolbar = screen.getByRole("group", { name: "请求日志工具" });
+    const initialSettings = structuredClone(state.settings);
+    await userEvent.click(within(toolbar).getByText("列设置"));
+    const output = within(toolbar).getByRole("checkbox", { name: "输出" });
+    expect(output).toBeChecked();
+    await userEvent.click(output);
+    await waitFor(() => expect(output).not.toBeChecked());
+    expect(calls("set_usage_settings").at(-1)![1]).toEqual({
+      settings: { ...initialSettings, logColumns: { output: false } },
+    });
+    expect(
+      within(screen.getByRole("table")).queryByLabelText("输出"),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(
+      within(toolbar).getByRole("button", { name: "恢复默认列" }),
+    );
+    await waitFor(() => expect(output).toBeChecked());
+    const restoredSettings = { ...initialSettings, logColumns: {} };
+    expect(calls("set_usage_settings").at(-1)![1]).toEqual({
+      settings: restoredSettings,
+    });
+    expect(
+      within(screen.getByRole("table")).getByLabelText("输出"),
+    ).toHaveTextContent("400");
+
+    const format = within(toolbar).getByRole("combobox", {
+      name: "日志数字格式",
+    });
+    const inputMetric = () =>
+      within(screen.getByRole("table")).getByLabelText("输入");
+    expect(inputMetric()).toHaveTextContent("12.3K");
+    await userEvent.selectOptions(format, "exact");
+    await waitFor(() => expect(inputMetric()).toHaveTextContent("12,345"));
+    expect(calls("set_usage_settings").at(-1)![1]).toEqual({
+      settings: { ...restoredSettings, logNumberMode: "exact" },
+    });
+    await userEvent.selectOptions(format, "compact");
+    await waitFor(() => expect(inputMetric()).toHaveTextContent("12.3K"));
+    expect(calls("set_usage_settings").at(-1)![1]).toEqual({
+      settings: { ...restoredSettings, logNumberMode: "compact" },
+    });
+    expect(calls("set_usage_settings")).toHaveLength(4);
+  });
+
   it("counts interruptions only on request using the current filters", async () => {
     await renderUsage();
     await userEvent.selectOptions(

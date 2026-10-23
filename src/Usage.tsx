@@ -1,7 +1,7 @@
 import Detail from "./UsageDetail";
 import Sources from "./UsageSources";
 import { date } from "./usage-format";
-import UsageLogTable from "./UsageLogTable";
+import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
 import { Drawer as UsageDrawer } from "./UsageDrawer";
 export { Drawer } from "./UsageDrawer";
 import { subscriptions } from "./subscriptions";
@@ -529,17 +529,27 @@ export default function Usage({
           </button>
         ))}
         {tab === "requests" && (
-          <select
-            aria-label="请求状态"
-            value={status}
-            onChange={(e) => choose(setStatus, e.target.value)}
-          >
-            <option value="">全部状态</option>
-            {["2xx", "4xx", "5xx"].map((v) => (
-              <option key={v}>{v}</option>
-            ))}
-            <option value="none">会话 / 无状态码</option>
-          </select>
+          <div className="usage-toolbar" role="group" aria-label="请求日志工具">
+            <select
+              aria-label="请求状态"
+              value={status}
+              onChange={(e) => choose(setStatus, e.target.value)}
+            >
+              <option value="">全部状态</option>
+              {["2xx", "4xx", "5xx"].map((v) => (
+                <option key={v}>{v}</option>
+              ))}
+              <option value="none">会话 / 无状态码</option>
+            </select>
+            <UsageLogControls
+              settings={state?.settings}
+              save={(settings) => {
+                void command("set_usage_settings", { settings })
+                  .then(setState)
+                  .catch((e) => setError(errorOf(e).message));
+              }}
+            />
+          </div>
         )}
       </div>
       {tab === "requests" ? (
@@ -550,11 +560,6 @@ export default function Usage({
             settings={state?.settings}
             name={name}
             open={(r) => void open(r)}
-            save={(settings) => {
-              void command("set_usage_settings", { settings })
-                .then(setState)
-                .catch((e) => setError(errorOf(e).message));
-            }}
           />
           <Pagination page={logs.page} total={logs.total} onChange={setPage} />
         </>

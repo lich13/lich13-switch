@@ -9,7 +9,7 @@ import {
   logSpeed,
 } from "./usage-log-columns";
 import type { Attempt, UsageRecord, UsageSettings } from "./usage-types";
-import UsageLogTable from "./UsageLogTable";
+import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
 const defaultSettings: UsageSettings = {
   recording: true,
   autoSync: false,
@@ -105,14 +105,38 @@ describe("request log columns", () => {
       }),
     ).toBe("partial");
   });
-  it("persists only an explicit visibility change, locks time and opens details by keyboard", () => {
-    const save = vi.fn(),
-      open = vi.fn();
+  it("persists only an explicit visibility change and locks time", () => {
+    const save = vi.fn();
     const settings: UsageSettings = {
       ...defaultSettings,
       logColumns: {},
       logNumberMode: "compact",
     };
+    render(<UsageLogControls settings={settings} save={save} />);
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("列设置"));
+    expect(screen.getByRole("checkbox", { name: "结束时间" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "推理" }));
+    expect(save).toHaveBeenCalledWith({
+      ...settings,
+      logColumns: { reasoning: true },
+    });
+  });
+  it("disables settings changes until settings are loaded", () => {
+    const save = vi.fn();
+    render(<UsageLogControls settings={undefined} save={save} />);
+    expect(
+      screen.getByRole("combobox", { name: "日志数字格式" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByText("列设置"));
+    for (const checkbox of screen.getAllByRole("checkbox")) {
+      expect(checkbox).toBeDisabled();
+    }
+    expect(screen.getByRole("button", { name: "恢复默认列" })).toBeDisabled();
+    expect(save).not.toHaveBeenCalled();
+  });
+  it("opens details by keyboard and retains grouped columns", () => {
+    const open = vi.fn();
     render(
       <UsageLogTable
         rows={[
@@ -125,19 +149,11 @@ describe("request log columns", () => {
           } as UsageRecord,
         ]}
         busy={false}
-        settings={settings}
-        save={save}
+        settings={defaultSettings}
         name={() => "Fixture"}
         open={open}
       />,
     );
-    expect(save).not.toHaveBeenCalled();
-    expect(screen.getByRole("checkbox", { name: "结束时间" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: "推理" }));
-    expect(save).toHaveBeenCalledWith({
-      ...settings,
-      logColumns: { reasoning: true },
-    });
     const row = screen.getByRole("row", { name: /请求详情/ });
     fireEvent.keyDown(row, { key: "Enter" });
     expect(open).toHaveBeenCalledOnce();
@@ -169,7 +185,6 @@ describe("request log columns", () => {
         ]}
         busy={false}
         settings={settings}
-        save={() => {}}
         name={() => "Fixture"}
         open={() => {}}
       />
@@ -208,4 +223,81 @@ describe("request log columns", () => {
     ).toEqual(["时间 / 供应商 / 模型"]);
     expect(within(row).queryByText("$0.000000123456")).not.toBeInTheDocument();
   });
+  it.each([
+    [0, 0, "good", "good"],
+    [10000, 60000, "warn", "warn"],
+    [30000, 180000, "slow", "slow"],
+    [60000, 300000, "critical", "critical"],
+  ] as const)(
+    "colors measured first-token %i ms and duration %i ms without coloring their labels",
+    (firstTokenMs, durationMs, firstSeverity, durationSeverity) => {
+      render(
+        <UsageLogTable
+          rows={[
+            {
+              id: "fixture-latency",
+              client: "codex",
+              source: "proxy",
+              startedAt: 1,
+              attempts: [{ ...attempt, firstTokenMs, durationMs }],
+            } as UsageRecord,
+          ]}
+          busy={false}
+          settings={defaultSettings}
+          name={() => "Fixture"}
+          open={() => {}}
+        />,
+      );
+      for (const [label, severity] of [
+        ["首字", firstSeverity],
+        ["总耗时", durationSeverity],
+      ]) {
+        const metric = screen.getByLabelText(label);
+        const value = metric.querySelector(".usage-metric-value")!;
+        expect(value).toHaveClass(`latency-${severity}`);
+        expect(value).not.toHaveClass("is-empty");
+        expect(metric.querySelector("small")).not.toHaveAttribute("class");
+      }
+      const speed = screen
+        .getByLabelText("输出 TPS")
+        .querySelector(".usage-metric-value")!;
+      expect(speed).toHaveClass(durationMs === 0 ? "is-empty" : "tps");
+      expect(speed.className).not.toContain("latency-");
+    },
+  );
+  it.each([
+    ["proxy", { firstTokenMs: null }, ["首字", "输出 TPS"]],
+    ["proxy", { stream: false }, ["首字", "输出 TPS"]],
+    ["grok", {}, ["首字", "总耗时", "输出 TPS"]],
+  ] as const)(
+    "keeps missing or inapplicable metrics muted for %s with %j",
+    (source, overrides, labels) => {
+      render(
+        <UsageLogTable
+          rows={[
+            {
+              id: "fixture-missing-latency",
+              client: "grok",
+              source,
+              startedAt: 1,
+              attempts: [{ ...attempt, ...overrides }],
+            } as UsageRecord,
+          ]}
+          busy={false}
+          settings={defaultSettings}
+          name={() => "Fixture"}
+          open={() => {}}
+        />,
+      );
+      for (const label of labels) {
+        const value = screen
+          .getByLabelText(label)
+          .querySelector(".usage-metric-value")!;
+        expect(value).toHaveTextContent("—");
+        expect(value).toHaveClass("is-empty");
+        expect(value.className).not.toContain("latency-");
+        expect(value).not.toHaveClass("tps");
+      }
+    },
+  );
 });

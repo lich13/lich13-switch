@@ -173,8 +173,14 @@
   border-bottom-color: var(--accent);
   color: var(--ink);
 }
-.usage-tabs select {
+.usage-tabs .usage-toolbar {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.usage-toolbar > select {
   width: 140px;
   padding: 5px 8px;
 }
@@ -270,10 +276,6 @@
   padding: 40px 16px;
   text-align: center;
   color: var(--muted);
-}
-.usage-log-controls {
-  justify-content: flex-end;
-  margin: 6px 0;
 }
 .usage-log-controls label {
   display: flex;
@@ -432,6 +434,24 @@
   gap: 0;
   padding-left: 8px;
   border-left: 2px solid var(--line);
+}
+.usage-metric-value.latency-good {
+  color: var(--latency-good);
+}
+.usage-metric-value.latency-warn {
+  color: var(--latency-warn);
+}
+.usage-metric-value.latency-slow {
+  color: var(--latency-slow);
+}
+.usage-metric-value.latency-critical {
+  color: var(--latency-critical);
+}
+.usage-metric-value.tps {
+  color: var(--tps);
+}
+.usage-metric-value.is-empty {
+  color: var(--muted);
 }
 .usage-token-item {
   display: flex;
