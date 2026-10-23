@@ -581,22 +581,22 @@ async fn websocket_cancel_tail_with_continuous_content_and_heartbeat_closes_with
             .unwrap();
         let _ = ready_tx.send(());
         cancel_rx.await.unwrap();
-        let started = Instant::now();
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(100));
         loop {
-            if started.elapsed() >= TAIL_WINDOW + TAIL_TOLERANCE {
-                if let Ok(result) =
-                    tokio::time::timeout(Duration::from_millis(500), websocket.next()).await
-                {
-                    match result {
-                        Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
-                        | None
-                        | Some(Err(_)) => {
-                            let _ = closed_tx.send(Instant::now());
-                        }
-                        Some(Ok(_)) => {}
+            // Observe EOF/Close while sending progress. Successful writes alone
+            // do not prove the peer is still connected, especially on Windows.
+            tokio::select! {
+                biased;
+                frame = websocket.next() => match frame {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+                    | None
+                    | Some(Err(_)) => {
+                        let _ = closed_tx.send(Instant::now());
+                        break;
                     }
-                }
-                break;
+                    Some(Ok(_)) => continue,
+                },
+                _ = heartbeat.tick() => {}
             }
             if websocket
                 .send(tokio_tungstenite::tungstenite::Message::Ping(
@@ -621,7 +621,6 @@ async fn websocket_cancel_tail_with_continuous_content_and_heartbeat_closes_with
                 let _ = closed_tx.send(Instant::now());
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 

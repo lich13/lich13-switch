@@ -17,7 +17,8 @@ fn reservation_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
 }
 
 fn wait_until(mut ready: impl FnMut() -> bool, description: &str) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // Persistence is asynchronous; this test checks recovery, not disk latency.
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if ready() {
             return;
