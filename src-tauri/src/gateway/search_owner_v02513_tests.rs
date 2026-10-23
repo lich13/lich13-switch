@@ -106,6 +106,7 @@ fn reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Option<V
 
 async fn wait_for_idle_reservation(
     dir: &tempfile::TempDir,
+    gateway: &Gateway,
     thread: &str,
     provider: &str,
 ) -> (Value, Value) {
@@ -123,7 +124,15 @@ async fn wait_for_idle_reservation(
         }
     })
     .await
-    .expect("fixture owner reservation did not become idle")
+    .unwrap_or_else(|_| {
+        let memory = serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
+        panic!(
+            "fixture owner reservation did not become idle: persistence_error={}, memory={:?}, disk={:?}",
+            gateway.0.admission.retention_error(),
+            reservation_entry(&memory, thread, provider),
+            reservation_snapshot(dir).and_then(|snapshot| reservation_entry(&snapshot, thread, provider)),
+        )
+    })
 }
 
 fn usage_rows(usage: &Service) -> Vec<Record> {
@@ -211,7 +220,7 @@ async fn seed_owner(
         &thread_hash,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    let (snapshot, entry) = wait_for_idle_reservation(dir, &thread_hash, owner).await;
+    let (snapshot, entry) = wait_for_idle_reservation(dir, gateway, &thread_hash, owner).await;
     assert_eq!(entry["busy"], false);
     assert_eq!(gateway.0.admission.reserved(owner), 1);
     (usage, thread_hash, snapshot, entry)
@@ -280,7 +289,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
             search_request(&gateway, path, &[("thread-id", thread)], SEARCH_REQUEST).await;
         assert_eq!(response.status(), StatusCode::OK, "{path}");
         assert_eq!(response_bytes(response).await, SEARCH_RESPONSE, "{path}");
-        let (after, entry) = wait_for_idle_reservation(&dir, &thread_hash, &owner).await;
+        let (after, entry) = wait_for_idle_reservation(&dir, &gateway, &thread_hash, &owner).await;
         assert_eq!(entry["busy"], false, "{path}");
         assert!(
             entry["idle_since"].as_i64().unwrap() >= baseline_entry["idle_since"].as_i64().unwrap(),
@@ -547,7 +556,7 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
         &thread_hash,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    let (after, entry) = wait_for_idle_reservation(&dir, &thread_hash, &owner).await;
+    let (after, entry) = wait_for_idle_reservation(&dir, &gateway, &thread_hash, &owner).await;
     assert_eq!(entry["busy"], false);
     assert_eq!(entry["idle_since"], baseline_entry["idle_since"]);
     assert_eq!(reservation_entry(&after, &thread_hash, &ordinary), None);
@@ -720,7 +729,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_bytes(response).await, SEARCH_RESPONSE);
 
-    let (after, entry) = wait_for_idle_reservation(&dir, &thread_hash, &owner).await;
+    let (after, entry) = wait_for_idle_reservation(&dir, &gateway, &thread_hash, &owner).await;
     assert_eq!(entry["busy"], false);
     assert!(
         entry["idle_since"].as_i64().unwrap() >= baseline_entry["idle_since"].as_i64().unwrap()

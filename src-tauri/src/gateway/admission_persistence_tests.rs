@@ -101,7 +101,6 @@ fn transient_write_failure_recovers_without_clearing_active_or_recent_retention(
     );
 
     fs::remove_dir(&path).unwrap();
-    fs::write(&path, b"fixture recovery target").unwrap();
     scheduler.signal();
     wait_until(
         || {
@@ -119,6 +118,42 @@ fn transient_write_failure_recovers_without_clearing_active_or_recent_retention(
         "recovered active and recent reservations",
     );
     assert_eq!(scheduler.0.state.lock().unwrap().retention.seconds, 300);
+}
+
+#[test]
+fn final_idle_snapshot_recovers_from_transient_write_failure_without_another_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = reservation_path(&dir);
+    let scheduler = scheduler(&dir);
+    let thread = crate::storage::digest(b"fixture-retention-final-idle");
+    let latest = crate::storage::digest(b"fixture-retention-during-retry");
+    fs::create_dir(&path).unwrap();
+    {
+        let mut state = scheduler.0.state.lock().unwrap();
+        let ticket = state.retention.begin(&thread, None);
+        assert!(state.retention.admit(ticket, "fixture-provider", true));
+        state.retention.release(ticket, "fixture-provider", true);
+        state.retention.finish(ticket);
+    }
+    scheduler.signal();
+    wait_until(|| scheduler.retention_error(), "failed final idle write");
+    add_idle(&scheduler, &latest, "fixture-latest-provider");
+    fs::remove_dir(&path).unwrap();
+
+    // There is no subsequent request or UI event to trigger another signal.
+    wait_until(
+        || {
+            !scheduler.retention_error()
+                && reservations(&path).is_some_and(|entries| {
+                    entries.len() == 2
+                        && reservation(&entries, &thread, "fixture-provider")
+                            .is_some_and(|entry| entry["busy"] == false)
+                        && reservation(&entries, &latest, "fixture-latest-provider")
+                            .is_some_and(|entry| entry["busy"] == false)
+                })
+        },
+        "idle snapshot recovery without another signal",
+    );
 }
 
 #[test]
@@ -152,7 +187,6 @@ fn recovery_retries_when_current_snapshot_matches_last_good_snapshot() {
         state.retention.configure(&Default::default(), 300);
     }
     fs::remove_dir(&path).unwrap();
-    fs::write(&path, b"fixture recovery target").unwrap();
     scheduler.signal();
     wait_until(
         || {

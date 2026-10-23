@@ -361,32 +361,50 @@ impl Scheduler {
         std::thread::spawn(move || {
             let mut previous = Vec::new();
             while updates.recv().is_ok() {
-                let Some(shared) = weak.upgrade() else {
-                    break;
-                };
-                let (snapshot, retry_write) = {
-                    let mut state = shared.state.lock().unwrap();
-                    if state.retention.error {
-                        continue;
-                    }
-                    state.retention.prune();
-                    (state.retention.snapshot(), state.retention_write_error)
-                };
-                if snapshot == previous && !retry_write {
-                    continue;
-                }
-                if storage::atomic_write(&path, &snapshot, None).is_err() {
-                    shared.state.lock().unwrap().retention_write_error = true;
-                    let _ = shared.events.send(());
-                } else {
-                    previous = snapshot;
-                    let recovered = {
-                        let mut state = shared.state.lock().unwrap();
-                        std::mem::take(&mut state.retention_write_error)
+                // A transient failure of the final update otherwise waits forever
+                // for another request. Retry here, without adding a polling task.
+                let delays = [100, 250, 500];
+                for retry in 0..=delays.len() {
+                    let Some(shared) = weak.upgrade() else {
+                        return;
                     };
-                    if recovered {
-                        shared.wake.notify_waiters();
+                    let (snapshot, retry_write) = {
+                        let mut state = shared.state.lock().unwrap();
+                        if state.retention.error {
+                            break;
+                        }
+                        state.retention.prune();
+                        (state.retention.snapshot(), state.retention_write_error)
+                    };
+                    if snapshot == previous && !retry_write {
+                        break;
+                    }
+                    if storage::atomic_write(&path, &snapshot, None).is_err() {
+                        shared.state.lock().unwrap().retention_write_error = true;
                         let _ = shared.events.send(());
+                        let Some(delay) = delays.get(retry) else {
+                            break;
+                        };
+                        drop(shared);
+                        // New state can wake the same retry early. Each attempt
+                        // snapshots memory again, never republishes a stale copy.
+                        if matches!(
+                            updates.recv_timeout(Duration::from_millis(*delay)),
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                        ) {
+                            return;
+                        }
+                    } else {
+                        previous = snapshot;
+                        let recovered = {
+                            let mut state = shared.state.lock().unwrap();
+                            std::mem::take(&mut state.retention_write_error)
+                        };
+                        if recovered {
+                            shared.wake.notify_waiters();
+                            let _ = shared.events.send(());
+                        }
+                        break;
                     }
                 }
             }
@@ -404,6 +422,10 @@ impl Scheduler {
     pub fn retention_error(&self) -> bool {
         let state = self.0.state.lock().unwrap();
         state.retention.error || state.retention_write_error
+    }
+    #[cfg(test)]
+    pub(super) fn retention_snapshot(&self) -> Vec<u8> {
+        self.0.state.lock().unwrap().retention.snapshot()
     }
     fn available(s: &State, id: &str, request: Option<u64>, manual: bool) -> bool {
         let limit = s.limits[id];
