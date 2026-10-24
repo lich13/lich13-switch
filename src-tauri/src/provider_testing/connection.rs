@@ -12,22 +12,32 @@ fn client() -> Result<reqwest::Client> {
         .build()
         .map_err(|_| failure("无法创建测试连接"))
 }
-async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
-    if response.content_length().is_some_and(|n| n > limit as u64) {
-        return Err(failure("测试返回内容超出上限"));
-    }
+async fn bounded(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, TestError> {
+    let status = response.status().as_u16();
     let mut raw = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| failure("测试响应中断"))?
-    {
-        if raw.len() + chunk.len() > limit {
-            return Err(failure("测试返回内容超出上限"));
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = limit - raw.len();
+                raw.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                if chunk.len() > room {
+                    let mut detail =
+                        errors::body(Some(status), &String::from_utf8_lossy(&raw), true);
+                    detail.message = "测试返回内容超出上限".into();
+                    return Err(detail);
+                }
+            }
+            Ok(None) => return Ok(raw),
+            Err(error) => {
+                let mut detail = errors::body(Some(status), &String::from_utf8_lossy(&raw), true);
+                detail.message = format!("测试响应中断：{}", errors::network(error).message);
+                return Err(detail);
+            }
         }
-        raw.extend_from_slice(&chunk);
     }
-    Ok(raw)
 }
 pub(super) fn text_model(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
@@ -55,18 +65,51 @@ pub fn default_model(client: ClientId) -> &'static str {
     }
 }
 impl Service {
-    pub(super) fn default_connection_model(&self, target: &Target) -> String {
-        let key = format!(
-            "{:?}:{}:{}",
-            target.client_id, target.provider_id, target.version
-        );
-        lock(&self.0.data)
+    pub(super) fn models_key(client: ClientId, provider: &str, endpoint: &str) -> String {
+        format!(
+            "{client:?}:{provider}:{}",
+            storage::digest(endpoint.trim_end_matches('/').as_bytes())
+        )
+    }
+    pub(super) fn cached_model(
+        data: &Data,
+        client: ClientId,
+        provider: &str,
+        endpoint: &str,
+        model: &str,
+    ) -> Result<()> {
+        let models = data
+            .saved
             .models
-            .get(&key)
-            .filter(|(at, models)| {
-                at.elapsed() < Duration::from_secs(300) && !models.default_model.is_empty()
-            })
-            .map(|(_, models)| models.default_model.clone())
+            .get(&Self::models_key(client, provider, endpoint))
+            .ok_or_else(|| failure("尚未缓存该端点模型，请手动重新拉取"))?;
+        if !models.models.iter().any(|m| m.id == model) {
+            return Err(failure(
+                "所选模型不在该端点缓存目录中，请重新选择或手动拉取",
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn check_cached_model(&self, target: &Target, model: &str) -> Result<()> {
+        Self::cached_model(
+            &lock(&self.0.data),
+            target.client_id,
+            &target.provider_id,
+            &target.base_url,
+            model,
+        )
+    }
+    pub(super) fn default_connection_model(&self, target: &Target) -> String {
+        lock(&self.0.data)
+            .saved
+            .models
+            .get(&Self::models_key(
+                target.client_id,
+                &target.provider_id,
+                &target.base_url,
+            ))
+            .filter(|models| !models.default_model.is_empty())
+            .map(|models| models.default_model.clone())
             .unwrap_or_else(|| default_model(target.client_id).into())
     }
     pub async fn models(
@@ -74,18 +117,23 @@ impl Service {
         client_id: ClientId,
         provider: &str,
         expected: &str,
+        endpoint: Option<&str>,
         force_refresh: bool,
     ) -> Result<Models> {
-        let target = self
-            .gateway(client_id)
-            .test_target(provider, Some(expected))?;
-        let key = format!("{client_id:?}:{}:{}", provider, target.version);
-        let cached = lock(&self.0.data).models.get(&key).cloned();
-        if let Some((at, models)) = &cached {
-            if !force_refresh && at.elapsed() < Duration::from_secs(60) {
-                return Ok(models.clone());
-            }
+        let gateway = self.gateway(client_id);
+        let endpoint = gateway.test_endpoint(provider, endpoint)?;
+        let key = Self::models_key(client_id, provider, &endpoint);
+        let cached = lock(&self.0.data)
+            .saved
+            .models
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if !force_refresh {
+            return Ok(cached);
         }
+        let target = gateway.test_target_at(provider, Some(expected), Some(&endpoint))?;
+        let mut error_detail = None;
         let result = async {
             let client = client()?;
             let mut url = url::Url::parse(&target.url("/v1/models")?)
@@ -98,20 +146,47 @@ impl Service {
                     .headers(target.headers.clone())
                     .send()
                     .await
-                    .map_err(|_| failure("上游模型目录连接失败"))?;
+                    .map_err(|error| {
+                        let detail = errors::redact(errors::network(error), &target);
+                        let result = failure("上游模型目录连接失败");
+                        error_detail = Some(detail);
+                        result
+                    })?;
                 if !response.status().is_success() {
-                    return Err(failure(&format!(
-                        "上游模型目录返回 HTTP {}",
-                        response.status().as_u16()
-                    )));
+                    let detail = errors::redact(errors::response(response).await, &target);
+                    let result = failure(&detail.message);
+                    error_detail = Some(detail);
+                    return Err(result);
                 }
-                let data: Value =
-                    serde_json::from_slice(&bounded(response, 8 * 1024 * 1024).await?)
-                        .map_err(|_| failure("上游模型目录格式无效"))?;
+                let status = response.status().as_u16();
+                let raw = bounded(response, 8 * 1024 * 1024).await.map_err(|detail| {
+                    error_detail = Some(errors::redact(detail, &target));
+                    failure("读取模型目录失败，详见完整错误信息")
+                })?;
+                let data: Value = serde_json::from_slice(&raw).map_err(|_| {
+                    error_detail = Some(errors::redact(
+                        errors::body(Some(status), &String::from_utf8_lossy(&raw), false),
+                        &target,
+                    ));
+                    failure("上游模型目录格式无效")
+                })?;
+                if is_error(&data) {
+                    error_detail = Some(errors::redact(
+                        errors::body(Some(status), &data.to_string(), false),
+                        &target,
+                    ));
+                    return Err(failure("上游返回模型目录错误"));
+                }
                 let list = data["data"]
                     .as_array()
                     .or_else(|| data["models"].as_array())
-                    .ok_or_else(|| failure("上游未返回模型目录"))?;
+                    .ok_or_else(|| {
+                        error_detail = Some(errors::redact(
+                            errors::body(Some(status), &data.to_string(), false),
+                            &target,
+                        ));
+                        failure("上游未返回模型目录")
+                    })?;
                 for item in list {
                     let id = item["id"]
                         .as_str()
@@ -157,40 +232,37 @@ impl Service {
             models.sort_by(|a, b| a.id.cmp(&b.id));
             models.dedup_by(|a, b| a.id == b.id);
             models.retain(|model| text_model(&model.id));
-            if models.is_empty() {
-                return Err(failure("上游未返回可用的普通对话模型"));
-            }
             let default = default_model(client_id);
             let default_model = models
                 .iter()
                 .find(|m| m.id == default)
-                .or_else(|| models.iter().find(|m| text_model(&m.id)))
-                .unwrap_or(&models[0])
-                .id
-                .clone();
+                .or_else(|| models.first())
+                .map(|model| model.id.clone())
+                .unwrap_or_default();
             Ok(Models {
                 models,
                 default_model,
-                stale: false,
+                fetched_at: Some(self.now()),
                 error: None,
+                error_detail: None,
             })
         }
         .await;
         match result {
             Ok(models) => {
-                lock(&self.0.data)
-                    .models
-                    .insert(key, (Instant::now(), models.clone()));
+                gateway.verify_test_version(provider, &target.version)?;
+                gateway.test_endpoint(provider, Some(&target.base_url))?;
+                let mut data = lock(&self.0.data);
+                let mut next = data.saved.clone();
+                next.models.insert(key, models.clone());
+                self.save(&mut data, next)?;
                 Ok(models)
             }
-            Err(error) => match cached.filter(|(at, _)| at.elapsed() < Duration::from_secs(300)) {
-                Some((_, mut models)) => {
-                    models.stale = true;
-                    models.error = Some(error.message);
-                    Ok(models)
-                }
-                None => Err(error),
-            },
+            Err(error) => Ok(Models {
+                error: Some(error.message),
+                error_detail,
+                ..cached
+            }),
         }
     }
     pub(super) async fn run_connection(&self, id: &str, context: &Context) -> Result<()> {
@@ -209,17 +281,14 @@ impl Service {
             .json(&payload)
             .send()
             .await
-            .map_err(|_| failure("供应商连接失败或超时，请检查地址与网络"))?;
+            .map_err(|error| self.connection_error(id, errors::network(error), target))?;
         self.progress(id, |job, output| {
             job.first_byte_ms = Some(started.elapsed().as_millis() as u64);
             output.diagnostics =
                 json!({"httpStatus":response.status().as_u16(),"protocol":target.protocol});
         });
         if !response.status().is_success() {
-            return Err(failure(&format!(
-                "供应商返回 HTTP {}，请检查该模型、协议及访问权限",
-                response.status().as_u16()
-            )));
+            return Err(self.connection_error(id, errors::response(response).await, target));
         }
         let streaming = response
             .headers()
@@ -227,11 +296,18 @@ impl Service {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|mime| mime.split(';').next() == Some("text/event-stream"));
         if streaming {
-            self.stream(id, response).await?;
+            self.stream(id, response, target).await?;
         } else {
-            let value: Value = serde_json::from_slice(&bounded(response, OUTPUT_LIMIT).await?)
-                .map_err(|_| failure("供应商返回的测试结果不是有效 JSON"))?;
-            reject_error(&value)?;
+            let status = response.status().as_u16();
+            let raw = bounded(response, OUTPUT_LIMIT)
+                .await
+                .map_err(|detail| self.connection_error(id, detail, target))?;
+            let value: Value = serde_json::from_slice(&raw).map_err(|_| {
+                let mut detail = errors::body(Some(status), &String::from_utf8_lossy(&raw), false);
+                detail.message = "供应商返回的测试结果不是有效 JSON".into();
+                self.connection_error(id, detail, target)
+            })?;
+            self.reject_error(id, &value, status, target)?;
             self.result_value(id, &value);
         }
         if self
@@ -268,17 +344,44 @@ impl Service {
             }
         });
     }
-    async fn stream(&self, id: &str, mut response: reqwest::Response) -> Result<()> {
+    fn connection_error(&self, id: &str, detail: TestError, target: &Target) -> AppError {
+        let detail = errors::redact(detail, target);
+        // Only the summary is persisted with the job. The complete response stays in Output.
+        let result = failure(if detail.http_status.is_some() {
+            "上游返回错误，详见完整错误信息"
+        } else {
+            "测试连接失败，详见完整错误信息"
+        });
+        self.progress(id, |_, output| output.error = Some(detail));
+        result
+    }
+    fn reject_error(&self, id: &str, value: &Value, status: u16, target: &Target) -> Result<()> {
+        if is_error(value) {
+            return Err(self.connection_error(
+                id,
+                errors::body(Some(status), &value.to_string(), false),
+                target,
+            ));
+        }
+        Ok(())
+    }
+    async fn stream(
+        &self,
+        id: &str,
+        mut response: reqwest::Response,
+        target: &Target,
+    ) -> Result<()> {
+        let status = response.status().as_u16();
         let mut buffer = Vec::new();
         let mut lines = Vec::new();
         let mut events = 0usize;
         let mut terminal = false;
         let mut total = 0usize;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| failure("流式测试响应中断"))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            let mut detail = errors::network(error);
+            detail.http_status = Some(status);
+            self.connection_error(id, detail, target)
+        })? {
             total += chunk.len();
             if total > OUTPUT_LIMIT {
                 return Err(failure("流式测试输出超限"));
@@ -301,9 +404,14 @@ impl Service {
                         continue;
                     }
                     if !data.is_empty() {
-                        let value: Value = serde_json::from_str(&data)
-                            .map_err(|_| failure("流式测试数据格式无效"))?;
-                        reject_error(&value)?;
+                        let value: Value = serde_json::from_str(&data).map_err(|_| {
+                            self.connection_error(
+                                id,
+                                errors::body(Some(status), &data, false),
+                                target,
+                            )
+                        })?;
+                        self.reject_error(id, &value, status, target)?;
                         self.result_value(id, &value);
                         events += 1;
                         terminal |= matches!(
@@ -352,21 +460,17 @@ pub(super) fn payload(request: &Request, model: &str, protocol: &str) -> (&'stat
         ),
     }
 }
-fn reject_error(value: &Value) -> Result<()> {
-    if value.get("error").is_some_and(|e| !e.is_null())
-        || matches!(
-            value["type"].as_str(),
-            Some("error" | "response.failed" | "response.incomplete")
-        )
-        || matches!(value["status"].as_str(), Some("failed" | "incomplete"))
-    {
-        Err(failure(
-            "上游返回测试错误或不完整结果，请检查模型与供应商能力",
-        ))
-    } else {
-        Ok(())
-    }
+fn is_error(value: &Value) -> bool {
+    [value, &value["response"]].iter().any(|value| {
+        value.get("error").is_some_and(|e| !e.is_null())
+            || matches!(
+                value["type"].as_str(),
+                Some("error" | "response.failed" | "response.incomplete")
+            )
+            || matches!(value["status"].as_str(), Some("failed" | "incomplete"))
+    })
 }
+
 fn append_text(target: &mut String, text: &str) {
     for c in text.chars() {
         if target.len() + c.len_utf8() > TEXT_LIMIT {

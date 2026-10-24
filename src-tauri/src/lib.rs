@@ -1898,8 +1898,6 @@ pub fn run() {
             provider_testing::commands::provider_test_query,
             provider_testing::commands::provider_test_cancel,
             provider_testing::commands::provider_test_retry,
-            provider_testing::commands::provider_test_batch,
-            provider_testing::commands::provider_test_stop_batch,
             provider_testing::commands::provider_test_set_detection,
             provider_testing::commands::provider_test_clear_mark,
             provider_testing::commands::provider_test_models,

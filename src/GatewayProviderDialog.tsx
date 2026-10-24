@@ -293,13 +293,13 @@ export default function GatewayDialog({
         </label>
         {clientId === "codex" && dialog.item && (
           <label className="provider-search-setting">
-            <span>仅网络搜索</span>
             <input
               type="checkbox"
               checked={searchOnly}
               disabled={busy}
               onChange={(e) => setSearchOnly(e.target.checked)}
             />
+            <span>仅网络搜索</span>
           </label>
         )}
         {error && (

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { Copy, RefreshCw } from "lucide-react";
 import { command } from "./bridge";
+import { confirmAction } from "./confirmation";
 import { subscriptions } from "./subscriptions";
 import Modal from "./Modal";
 import { errorOf, type GatewayState, type Provider } from "./types";
 import type {
-  ProviderTestRequest,
   ProviderTestMode,
   ProviderTestKind,
   ProviderTestingState,
@@ -13,10 +13,10 @@ import type {
   ProviderTestModels,
   ProviderTestJob,
   ProviderDetection,
+  ProviderTestError,
 } from "./bridge-contracts";
 import "./provider-testing.css";
 
-// Old modes remain readable in history; new connections only send ordinary chat.
 const modes: Record<ProviderTestMode, string> = {
   text: "普通对话",
   compact: "Compact",
@@ -39,13 +39,15 @@ const statuses: Record<string, string> = {
   disabled: "已关闭",
   degraded: "已标记降智",
   outOfQueue: "已退出队列",
-  idle: "无业务调用，已暂停",
+  idle: "最近一小时无业务调用，已暂停",
   waiting: "等待下次检测",
+  statsUnavailable: "等待调用统计",
+  modelsUnavailable: "等待模型目录",
 };
 type Tab = ProviderTestKind | "history" | "detection" | "bank";
 const active = (job: ProviderTestJob) =>
   ["queued", "running"].includes(job.status);
-const date = (at: number | null) =>
+const date = (at: number | null | undefined) =>
   at == null
     ? "—"
     : new Date(at).toLocaleString("zh-CN", {
@@ -58,33 +60,26 @@ const duration = (job: ProviderTestJob, now: number) =>
 export default function ProviderTesting({
   gateway,
   provider,
-  initialKind = "connection",
   close,
 }: {
   gateway: GatewayState;
-  provider?: Provider;
-  initialKind?: ProviderTestKind;
+  provider: Provider;
   close: () => void;
 }) {
   const tabsId = useId();
+  const scope = { clientId: gateway.clientId, providerId: provider.id };
   const [state, setState] = useState<ProviderTestingState | null>(null);
-  const [tab, setTab] = useState<Tab>(initialKind);
-  const kind: ProviderTestKind =
-    tab === "fingerprint" ? "fingerprint" : "connection";
-  const [selected, setSelected] = useState<string[]>(
-    provider ? [provider.id] : [],
-  );
+  const [tab, setTab] = useState<Tab>("connection");
+  const [endpoint, setEndpoint] = useState(provider.baseUrl);
   const [chosen, setChosen] = useState({ connection: "", fingerprint: "" });
-  const model = chosen[kind];
+  const [concurrency, setConcurrency] = useState(1);
   const [catalog, setCatalog] = useState<{
-    providerId: string;
+    endpoint: string;
     value: ProviderTestModels;
   } | null>(null);
-  const [catalogRefresh, setCatalogRefresh] = useState(0);
-  const forceRefresh = useRef(false);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
-  const [concurrency, setConcurrency] = useState(1);
+  const catalogRequest = useRef(0);
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const [error, setError] = useState("");
@@ -92,22 +87,56 @@ export default function ProviderTesting({
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ProviderTestDetail | null>(null);
   const [detection, setDetection] = useState<ProviderDetection | null>(null);
+  const [detectionSaved, setDetectionSaved] = useState("");
   const [detectionRevision, setDetectionRevision] = useState("");
   const [now, setNow] = useState(Date.now());
-  const fail = useCallback((e: unknown) => setError(errorOf(e).message), []);
-  const refresh = useCallback(
-    async () => setState(await command("provider_test_state")),
-    [],
+  const kind: ProviderTestKind =
+    tab === "fingerprint" ? "fingerprint" : "connection";
+  const testing = tab === "connection" || tab === "fingerprint";
+  const fingerprint = gateway.clientId === "codex" && !provider.searchOnly;
+  const model = chosen[kind];
+  const dirty = !!detection && JSON.stringify(detection) !== detectionSaved;
+  const catalogEndpoint =
+    tab === "detection" ? (detection?.endpoint ?? provider.baseUrl) : endpoint;
+  const models = catalog?.endpoint === catalogEndpoint ? catalog.value : null;
+  const endpoints = [
+    ...new Set([provider.baseUrl, ...(provider.extraBaseUrls ?? [])]),
+  ];
+  const endpointAvailable = endpoints.includes(endpoint);
+  const modelAvailable = !!models?.models.some((m) => m.id === model);
+  const detectionModelAvailable = !!models?.models.some(
+    (m) => m.id === detection?.model,
   );
+  const fail = useCallback((e: unknown) => setError(errorOf(e).message), []);
+  const refresh = useCallback(async () => {
+    setState(
+      await command("provider_test_state", {
+        clientId: gateway.clientId,
+        providerId: provider.id,
+      }),
+    );
+  }, [gateway.clientId, provider.id]);
   useEffect(() => {
-    void refresh().catch(fail);
+    let disposed = false;
+    const read = async () => {
+      const value = await command("provider_test_state", {
+        clientId: gateway.clientId,
+        providerId: provider.id,
+      });
+      if (!disposed) setState(value);
+    };
+    void read().catch(fail);
     const events = subscriptions(fail);
-    events.watch("provider-tests", refresh);
-    return () => events.dispose();
-  }, [refresh, fail]);
+    events.watch("provider-tests", read);
+    return () => {
+      disposed = true;
+      events.dispose();
+    };
+  }, [gateway.clientId, provider.id, fail]);
   useEffect(() => {
     if (!state || detection) return;
     setDetection(structuredClone(state.detection));
+    setDetectionSaved(JSON.stringify(state.detection));
     setDetectionRevision(state.revision);
   }, [state, detection]);
   useEffect(() => {
@@ -118,7 +147,12 @@ export default function ProviderTesting({
     let disposed = false;
     void command("provider_test_query", { id: detailId })
       .then((value) => {
-        if (!disposed) setDetail(value);
+        if (
+          !disposed &&
+          value.job.clientId === gateway.clientId &&
+          value.job.providerId === provider.id
+        )
+          setDetail(value);
       })
       .catch((e) => {
         if (!disposed) fail(e);
@@ -126,61 +160,49 @@ export default function ProviderTesting({
     return () => {
       disposed = true;
     };
-  }, [detailId, state, fail]);
+  }, [detailId, state, gateway.clientId, provider.id, fail]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-
-  const eligible = gateway.providers.filter(
-    (p) => kind !== "fingerprint" || !p.searchOnly,
-  );
-  const selectedIds = selected.filter((id) =>
-    eligible.some((p) => p.id === id),
-  );
-  const first = gateway.providers.find((p) => p.id === selectedIds[0]);
-  const firstId = first?.id;
-  const models =
-    catalog && catalog.providerId === firstId ? catalog.value : null;
-  useEffect(() => {
-    setChosen({ connection: "", fingerprint: "" });
-    setDetailId(null);
-  }, [firstId, gateway.clientId]);
-  useEffect(() => {
-    let disposed = false;
-    const reload = forceRefresh.current;
-    forceRefresh.current = false;
-    setCatalogError("");
-    setCatalogLoading(Boolean(firstId));
-    if (!firstId) return;
-    void command("get_gateway", { clientId: gateway.clientId })
-      .then((current) =>
-        command("provider_test_models", {
+  const loadCatalog = useCallback(
+    async (reload: boolean) => {
+      const request = ++catalogRequest.current;
+      setCatalogLoading(true);
+      setCatalogError("");
+      try {
+        const current = reload
+          ? await command("get_gateway", { clientId: gateway.clientId })
+          : gateway;
+        const value = await command("provider_test_models", {
           clientId: gateway.clientId,
-          providerId: firstId,
+          providerId: provider.id,
           expectedRevision: current.revision,
+          endpoint: catalogEndpoint,
           refresh: reload,
-        }),
-      )
-      .then((value) => {
-        if (disposed) return;
-        setCatalog({ providerId: firstId, value });
-        setChosen((current) => ({
-          ...current,
-          fingerprint: current.fingerprint || value.defaultModel,
-        }));
-      })
-      .catch((e) => {
-        if (!disposed) setCatalogError(errorOf(e).message);
-      })
-      .finally(() => {
-        if (!disposed) setCatalogLoading(false);
-      });
+        });
+        if (request !== catalogRequest.current) return;
+        setCatalog({ endpoint: catalogEndpoint, value });
+        if (value.defaultModel)
+          setChosen((current) => ({
+            ...current,
+            fingerprint: current.fingerprint || value.defaultModel,
+          }));
+      } catch (e) {
+        if (request === catalogRequest.current)
+          setCatalogError(errorOf(e).message);
+      } finally {
+        if (request === catalogRequest.current) setCatalogLoading(false);
+      }
+    },
+    [gateway.clientId, provider.id, catalogEndpoint, gateway.revision],
+  );
+  useEffect(() => {
+    void loadCatalog(false);
     return () => {
-      disposed = true;
+      ++catalogRequest.current;
     };
-  }, [firstId, gateway.clientId, catalogRefresh]);
-
+  }, [loadCatalog]);
   const perform = async (work: () => Promise<void>) => {
     if (pending.current) return;
     pending.current = true;
@@ -197,138 +219,194 @@ export default function ProviderTesting({
       setBusy(false);
     }
   };
+  const leave = async () => {
+    if (!busy && (!dirty || (await confirmAction("放弃未保存的检测设置？"))))
+      close();
+  };
   const scopedJobs =
     state?.jobs.filter(
-      (j) =>
-        j.clientId === gateway.clientId &&
-        (!provider || j.providerId === provider.id),
+      (j) => j.clientId === gateway.clientId && j.providerId === provider.id,
     ) ?? [];
-  const running = scopedJobs.filter(
-    (j) => active(j) && selectedIds.includes(j.providerId),
-  );
-  const currentBatch = scopedJobs.find((j) => j.id === detailId)?.batchId;
+  const running = scopedJobs.filter(active);
   const visibleJobs =
     tab === "history"
       ? scopedJobs
       : scopedJobs.filter(
-          (j) =>
-            j.kind === kind &&
-            (active(j) ||
-              j.id === detailId ||
-              (currentBatch && j.batchId === currentBatch)),
+          (j) => j.kind === kind && (active(j) || j.id === detailId),
         );
   const currentDetail = detail?.job.id === detailId ? detail : null;
-  const modelAvailable = !!models?.models.some((m) => m.id === model);
   const canStart =
-    selectedIds.length > 0 &&
     !busy &&
     !running.length &&
-    ((kind === "connection" && !model) ||
-      (modelAvailable && !catalogLoading && !catalogError && !models?.stale));
+    endpointAvailable &&
+    ((kind === "connection" && !model) || (modelAvailable && !catalogLoading));
   const start = () =>
     perform(async () => {
       const current = await command("get_gateway", {
         clientId: gateway.clientId,
       });
-      const entries: ProviderTestRequest[] = selectedIds.map((providerId) => ({
-        clientId: gateway.clientId,
-        providerId,
-        expectedRevision: current.revision,
-        model,
-        kind,
-        concurrency: kind === "fingerprint" ? concurrency : 1,
-      }));
-      if (entries.length === 1) {
-        const job = await command("provider_test_start", {
-          request: entries[0],
-        });
-        setDetailId(job.id);
-      } else {
-        const batch = await command("provider_test_batch", {
-          requests: entries,
-        });
-        setNotice(`已启动 ${batch.jobs.length} 项测试`);
-        if (batch.jobs[0]) setDetailId(batch.jobs[0].id);
-        if (batch.errors.length)
-          setError(
-            batch.errors
-              .map(
-                (e) =>
-                  `${gateway.providers.find((p) => p.id === e.providerId)?.name ?? "供应商"}：${e.error}`,
-              )
-              .join("；"),
-          );
-      }
+      const job = await command("provider_test_start", {
+        request: {
+          ...scope,
+          expectedRevision: current.revision,
+          endpoint,
+          model,
+          kind,
+          concurrency: kind === "fingerprint" ? concurrency : 1,
+        },
+      });
+      setDetailId(job.id);
     });
   const stop = () =>
     perform(async () => {
-      const batches = [
-        ...new Set(running.flatMap((j) => (j.batchId ? [j.batchId] : []))),
-      ];
-      for (const id of batches)
-        await command("provider_test_stop_batch", { id });
-      for (const job of running.filter((j) => !j.batchId))
+      for (const job of running)
         await command("provider_test_cancel", { id: job.id });
     });
   const retry = () =>
     perform(async () => {
-      if (currentDetail) {
-        const job = await command("provider_test_retry", {
-          id: currentDetail.job.id,
-        });
-        setDetailId(job.id);
-      }
+      if (currentDetail)
+        setDetailId(
+          (await command("provider_test_retry", { id: currentDetail.job.id }))
+            .id,
+        );
     });
-  const setOverride = (
-    id: string,
-    values: Partial<ProviderDetection["providers"][string]>,
-  ) =>
-    setDetection(
-      (d) =>
-        d && {
-          ...d,
-          providers: {
-            ...d.providers,
-            [id]: {
-              ...(d.providers[id] ?? { enabled: null, model: null }),
-              ...values,
-            },
-          },
-        },
-    );
   const readDetection = async () => {
-    const current = await command("provider_test_state");
+    const current = await command("provider_test_state", scope);
     setState(current);
     setDetection(structuredClone(current.detection));
+    setDetectionSaved(JSON.stringify(current.detection));
     setDetectionRevision(current.revision);
   };
-  const testing = tab === "connection" || tab === "fingerprint";
   const tabs: [Tab, string][] = [
     ["connection", "连接测试"],
-    ...(gateway.clientId === "codex" && !provider?.searchOnly
-      ? [["fingerprint", "模型测试"] as [Tab, string]]
-      : []),
+    ...(fingerprint ? [["fingerprint", "模型指纹"] as [Tab, string]] : []),
     ["history", "测试结果"],
-    ...(gateway.clientId === "codex"
+    ...(fingerprint
       ? ([
           ["detection", "定时检测"],
           ["bank", "指纹库"],
         ] as [Tab, string][])
       : []),
   ];
-
+  const status = state?.detectionStatus.find(
+    (s) => s.providerId === provider.id,
+  );
+  const mark = state?.degraded[provider.id];
+  const interval =
+    detection?.mode === "smart"
+      ? detection.minIntervalMinutes
+      : detection?.intervalMinutes;
+  const intervalValid =
+    Number.isInteger(interval) &&
+    interval! >= (detection?.mode === "smart" ? 5 : 1) &&
+    interval! <= (detection?.mode === "smart" ? 30 : 525600);
+  const endpointSelect = (value: string, change: (value: string) => void) => (
+    <label className="provider-test-field provider-test-full">
+      <span>端点</span>
+      <select
+        aria-label="测试端点"
+        value={value}
+        disabled={busy || (testing && !!running.length)}
+        onChange={(e) => change(e.target.value)}
+      >
+        {!endpoints.includes(value) && (
+          <option value={value} disabled>
+            {value}（已移除）
+          </option>
+        )}
+        {endpoints.map((url, index) => (
+          <option key={url} value={url}>
+            {index === 0 ? "主端点" : `辅助端点 ${index}`} · {url}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+  const modelSelect = (
+    value: string,
+    change: (value: string) => void,
+    label: string,
+    allowDefault: boolean,
+  ) => (
+    <label className="provider-test-field">
+      <span>模型</span>
+      <div className="provider-test-model-control">
+        <select
+          aria-label={label}
+          value={value}
+          disabled={busy || catalogLoading || (testing && !!running.length)}
+          onChange={(e) => change(e.target.value)}
+        >
+          {allowDefault ? (
+            <option value="">默认模型</option>
+          ) : (
+            !value && <option value="">选择模型</option>
+          )}
+          {value && !models?.models.some((m) => m.id === value) && (
+            <option value={value} disabled>
+              {value}
+              {models?.fetchedAt ? "（当前不可用）" : "（尚未拉取）"}
+            </option>
+          )}
+          {models?.models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name === m.id ? m.id : `${m.name} (${m.id})`}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="重新拉取模型"
+          title="重新拉取模型"
+          disabled={busy || catalogLoading || (testing && !!running.length)}
+          onClick={() => void loadCatalog(true)}
+        >
+          <RefreshCw size={16} className={catalogLoading ? "spin" : ""} />
+        </button>
+      </div>
+    </label>
+  );
+  const catalogStatus = (
+    <>
+      {catalogLoading ? (
+        <p className="provider-test-hint" role="status">
+          正在读取模型目录…
+        </p>
+      ) : (
+        !models?.fetchedAt && (
+          <p className="provider-test-hint">
+            尚未缓存该端点模型，点击重新拉取。
+          </p>
+        )
+      )}
+      {models?.fetchedAt && (
+        <p className="provider-test-hint">上次拉取 {date(models.fetchedAt)}</p>
+      )}
+      {models?.errorDetail ? (
+        <ErrorDetail detail={models.errorDetail} />
+      ) : (
+        (catalogError || models?.error) && (
+          <p className="provider-test-error" role="alert">
+            {catalogError || models?.error}
+          </p>
+        )
+      )}
+    </>
+  );
   return (
     <Modal
-      title={provider ? `${provider.name} 测试` : "供应商测试"}
-      close={close}
+      title={`${provider.name} · 测试`}
+      close={() => void leave()}
+      busy={busy}
       className="provider-testing"
     >
       <div className="provider-test-tabs" role="tablist" aria-label="测试管理">
         {tabs.map(([id, name], index) => (
           <button
             key={id}
-            id={`${tabsId}-${id}`}
             type="button"
+            id={`${tabsId}-${id}`}
             role="tab"
             aria-selected={tab === id}
             aria-controls={`${tabsId}-panel`}
@@ -363,115 +441,25 @@ export default function ProviderTesting({
       >
         {testing && (
           <>
-            {!provider && (
-              <fieldset className="provider-test-selection">
-                <legend>供应商</legend>
-                <label className="provider-test-select-all">
-                  <input
-                    type="checkbox"
-                    aria-label="全选"
-                    checked={
-                      selectedIds.length > 0 &&
-                      selectedIds.length === eligible.length
-                    }
-                    onChange={(e) =>
-                      setSelected(
-                        e.target.checked ? eligible.map((p) => p.id) : [],
-                      )
-                    }
-                  />
-                  全选
-                  <span>
-                    {selectedIds.length} / {eligible.length}
-                  </span>
-                </label>
-                <div className="provider-test-options">
-                  {gateway.providers.map((p) => (
-                    <label key={p.id}>
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.includes(p.id)}
-                        disabled={kind === "fingerprint" && p.searchOnly}
-                        onChange={(e) =>
-                          setSelected((ids) =>
-                            e.target.checked
-                              ? [...ids, p.id]
-                              : ids.filter((id) => id !== p.id),
-                          )
-                        }
-                      />
-                      <span>
-                        {p.name}
-                        {p.searchOnly ? " · 仅网络搜索" : ""}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
-            )}
             <div
               className={`provider-test-config${kind === "fingerprint" ? " with-concurrency" : ""}`}
             >
-              <label className="provider-test-field">
-                <span>模型</span>
-                <div className="provider-test-model-control">
-                  <select
-                    aria-label="测试模型"
-                    value={model}
-                    disabled={
-                      busy || !!running.length || catalogLoading || !first
-                    }
-                    onChange={(e) =>
-                      setChosen((current) => ({
-                        ...current,
-                        [kind]: e.target.value,
-                      }))
-                    }
-                  >
-                    {kind === "connection" ? (
-                      <option value="">默认模型</option>
-                    ) : (
-                      !model && <option value="">选择模型</option>
-                    )}
-                    {model && !modelAvailable && (
-                      <option value={model} disabled>
-                        {model}
-                        {!catalogLoading && models && !catalogError
-                          ? "（当前不可用）"
-                          : ""}
-                      </option>
-                    )}
-                    {models?.models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name === m.id ? m.id : `${m.name} (${m.id})`}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label="刷新模型目录"
-                    title="刷新模型目录"
-                    disabled={
-                      !first || catalogLoading || busy || !!running.length
-                    }
-                    onClick={() => {
-                      forceRefresh.current = true;
-                      setCatalogRefresh((n) => n + 1);
-                    }}
-                  >
-                    <RefreshCw
-                      size={16}
-                      className={catalogLoading ? "spin" : undefined}
-                    />
-                  </button>
-                </div>
-              </label>
+              {endpointSelect(endpoint, (value) => {
+                setEndpoint(value);
+                setChosen({ connection: "", fingerprint: "" });
+              })}
+              {modelSelect(
+                model,
+                (value) =>
+                  setChosen((previous) => ({ ...previous, [kind]: value })),
+                "测试模型",
+                kind === "connection",
+              )}
               {kind === "fingerprint" && (
                 <label className="provider-test-field">
-                  <span>组并发</span>
+                  <span>并发</span>
                   <select
-                    aria-label="组并发"
+                    aria-label="指纹并发"
                     value={concurrency}
                     disabled={busy || !!running.length}
                     onChange={(e) => setConcurrency(Number(e.target.value))}
@@ -485,28 +473,12 @@ export default function ProviderTesting({
                 </label>
               )}
             </div>
-            {catalogLoading && (
-              <p className="provider-test-hint" role="status">
-                正在读取模型目录…
-              </p>
-            )}
-            {(catalogError || models?.stale) && (
+            {catalogStatus}
+            {model && models?.fetchedAt && !modelAvailable && (
               <p className="provider-test-error" role="alert">
-                {catalogError || models?.error}。
-                {kind === "connection"
-                  ? "可使用默认模型测试，或刷新目录重试。"
-                  : "请刷新目录后重试。"}
+                所选模型不在该端点缓存目录中，请重新选择。
               </p>
             )}
-            {model &&
-              models &&
-              !modelAvailable &&
-              !catalogError &&
-              !catalogLoading && (
-                <p className="provider-test-error" role="alert">
-                  所选模型不在当前供应商目录中，请重新选择。
-                </p>
-              )}
           </>
         )}
         {(testing || tab === "history") && (
@@ -514,7 +486,7 @@ export default function ProviderTesting({
             {!!visibleJobs.length && (
               <div className="provider-test-results" aria-label="测试记录">
                 <div className="provider-test-result-head">
-                  <span>供应商</span>
+                  <span>时间</span>
                   <span>测试</span>
                   <span>状态</span>
                   <span>耗时</span>
@@ -522,19 +494,21 @@ export default function ProviderTesting({
                 </div>
                 {visibleJobs.map((job) => (
                   <div
-                    className={`provider-test-row${detailId === job.id ? " selected" : ""}`}
                     key={job.id}
+                    className={`provider-test-row${job.id === detailId ? " selected" : ""}`}
                   >
                     <button
                       className="provider-test-job"
-                      aria-label={`${job.providerName} ${job.kind === "fingerprint" ? "模型测试" : modes[job.mode]} ${statuses[job.status] ?? job.status}`}
+                      aria-label={`${job.kind === "fingerprint" ? "模型指纹" : modes[job.mode]} ${statuses[job.status] ?? job.status}`}
                       onClick={() => setDetailId(job.id)}
                     >
-                      <span>{job.providerName}</span>
+                      <span>{date(job.createdAt)}</span>
                       <span>
-                        {job.kind === "fingerprint"
-                          ? "模型测试"
-                          : modes[job.mode]}
+                        {job.automatic
+                          ? "定时检测"
+                          : job.kind === "fingerprint"
+                            ? "模型指纹"
+                            : modes[job.mode]}
                       </span>
                       <span
                         className={
@@ -582,16 +556,30 @@ export default function ProviderTesting({
               <input
                 type="checkbox"
                 checked={detection.enabled}
+                disabled={busy}
                 onChange={(e) =>
                   setDetection({ ...detection, enabled: e.target.checked })
                 }
               />
             </label>
             <div className="provider-test-detection-config">
+              {endpointSelect(detection.endpoint ?? provider.baseUrl, (value) =>
+                setDetection({ ...detection, endpoint: value }),
+              )}
+              <div className="provider-test-full">
+                {modelSelect(
+                  detection.model,
+                  (value) => setDetection({ ...detection, model: value }),
+                  "检测模型",
+                  false,
+                )}
+              </div>
               <label className="provider-test-field">
                 <span>检测模式</span>
                 <select
+                  aria-label="检测模式"
                   value={detection.mode}
+                  disabled={busy}
                   onChange={(e) =>
                     setDetection({
                       ...detection,
@@ -610,14 +598,15 @@ export default function ProviderTesting({
                     : "检测周期（分钟）"}
                 </span>
                 <input
-                  type="number"
-                  min={5}
-                  max={detection.mode === "smart" ? 30 : 1440}
-                  value={
-                    detection.mode === "smart"
-                      ? detection.minIntervalMinutes
-                      : detection.intervalMinutes
+                  aria-label={
+                    detection.mode === "smart" ? "最小间隔" : "检测周期"
                   }
+                  type="number"
+                  step="1"
+                  min={detection.mode === "smart" ? 5 : 1}
+                  max={detection.mode === "smart" ? 30 : 525600}
+                  value={interval}
+                  disabled={busy}
                   onChange={(e) =>
                     setDetection({
                       ...detection,
@@ -628,136 +617,91 @@ export default function ProviderTesting({
                   }
                 />
               </label>
-              <label className="provider-test-field provider-test-full">
-                <span>全局检测模型</span>
-                <input
-                  value={detection.model}
-                  onChange={(e) =>
-                    setDetection({ ...detection, model: e.target.value })
-                  }
-                />
-              </label>
             </div>
-            <div className="provider-test-detection-list">
-              <div className="provider-test-detection-head">
-                <span>供应商</span>
-                <span>参与</span>
-                <span>覆盖模型</span>
-                <span>检测状态</span>
+            {catalogStatus}
+            <dl className="provider-test-summary provider-test-detection-summary">
+              <div>
+                <dt>状态</dt>
+                <dd>
+                  {status ? (statuses[status.status] ?? status.status) : "—"}
+                </dd>
               </div>
-              {gateway.providers
-                .filter((p) => !p.searchOnly)
-                .map((p) => {
-                  const override = detection.providers[p.id];
-                  const status = state?.detectionStatus.find(
-                    (s) => s.providerId === p.id,
-                  );
-                  const mark = state?.degraded[p.id];
-                  return (
-                    <div className="provider-test-provider" key={p.id}>
-                      <strong>{p.name}</strong>
-                      <label className="provider-test-provider-enabled">
-                        <span>参与检测</span>
-                        <input
-                          type="checkbox"
-                          aria-label={`${p.name} 参与检测`}
-                          checked={override?.enabled ?? true}
-                          onChange={(e) =>
-                            setOverride(p.id, { enabled: e.target.checked })
-                          }
-                        />
-                      </label>
-                      <input
-                        aria-label={`${p.name} 覆盖模型`}
-                        placeholder={detection.model}
-                        value={override?.model ?? ""}
-                        onChange={(e) =>
-                          setOverride(p.id, { model: e.target.value || null })
-                        }
-                      />
-                      <div className="provider-test-provider-status">
-                        {status ? (
-                          <>
-                            <span>
-                              {statuses[status.status] ?? status.status}
-                            </span>
-                            <span>
-                              最近一小时 {status.recentRequests} 次
-                              {status.intervalMinutes
-                                ? ` · ${status.intervalMinutes} 分钟`
-                                : ""}
-                            </span>
-                            {status.nextAt != null && (
-                              <span>下次 {date(status.nextAt)}</span>
-                            )}
-                            {status.cooldownUntil && (
-                              <span>冷却至 {date(status.cooldownUntil)}</span>
-                            )}
-                            {status.error && (
-                              <span
-                                className="provider-test-error"
-                                role="alert"
-                              >
-                                {status.error}
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          <span>—</span>
-                        )}
-                      </div>
-                      {mark && (
-                        <div className="provider-test-mark" role="status">
-                          <span>
-                            降智：{mark.requestedModel} → {mark.predictedModel}
-                            （{(mark.probability * 100).toFixed(1)}%）
-                          </span>
-                          <button
-                            className="secondary compact"
-                            disabled={busy}
-                            onClick={() =>
-                              void perform(async () => {
-                                const current = await command(
-                                  "provider_test_state",
-                                );
-                                await command("provider_test_clear_mark", {
-                                  providerId: p.id,
-                                  expectedRevision: current.revision,
-                                });
-                              })
-                            }
-                          >
-                            清除标记
-                          </button>
-                          {mark.error && <span role="alert">{mark.error}</span>}
-                          <span>重新入队请使用供应商队列开关。</span>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-            </div>
-            <details className="provider-test-diagnostics">
-              <summary>检测历史</summary>
-              {state?.history.length ? (
-                state.history.map((j) => (
-                  <button
-                    className="provider-test-history"
-                    key={j.id}
-                    onClick={() => {
-                      setDetailId(j.id);
-                      setTab("history");
-                    }}
-                  >
-                    <time>{date(j.completedAt)}</time>
-                    <span>{j.providerName}</span>
-                    <span>{j.report?.prediction ?? statuses[j.status]}</span>
-                  </button>
-                ))
-              ) : (
-                <p className="provider-test-empty">暂无检测记录</p>
+              <div>
+                <dt>上次检测开始</dt>
+                <dd>{date(status?.lastStartedAt)}</dd>
+              </div>
+              <div>
+                <dt>最近一小时</dt>
+                <dd>
+                  {status?.recentRequests == null
+                    ? "暂不可用"
+                    : `${status.recentRequests} 次`}
+                </dd>
+              </div>
+              <div>
+                <dt>当前周期</dt>
+                <dd>
+                  {status?.intervalMinutes == null
+                    ? "—"
+                    : `${status.intervalMinutes} 分钟`}
+                </dd>
+              </div>
+              <div>
+                <dt>下次检测</dt>
+                <dd>{date(status?.nextAt)}</dd>
+              </div>
+              {status?.cooldownUntil && (
+                <div>
+                  <dt>冷却至</dt>
+                  <dd>{date(status.cooldownUntil)}</dd>
+                </div>
               )}
-            </details>
+            </dl>
+            {status?.error && (
+              <p className="provider-test-error" role="alert">
+                {status.error}
+              </p>
+            )}
+            {mark && (
+              <div className="provider-test-mark">
+                <span>
+                  降智：{mark.requestedModel} → {mark.predictedModel}（
+                  {(mark.probability * 100).toFixed(1)}%）
+                </span>
+                <button
+                  className="secondary compact"
+                  disabled={busy || dirty}
+                  onClick={() =>
+                    void perform(async () => {
+                      const current = await command(
+                        "provider_test_state",
+                        scope,
+                      );
+                      await command("provider_test_clear_mark", {
+                        providerId: provider.id,
+                        expectedRevision: current.revision,
+                      });
+                      await readDetection();
+                    })
+                  }
+                >
+                  清除标记
+                </button>
+                {mark.error && <span role="alert">{mark.error}</span>}
+                <span>重新入队请使用供应商队列开关。</span>
+              </div>
+            )}
+            {running.length > 0 && (
+              <button
+                className="text-button provider-test-current"
+                onClick={() => {
+                  setDetailId(running[0].id);
+                  setTab("history");
+                }}
+              >
+                查看当前任务
+              </button>
+            )}
           </>
         )}
         {tab === "bank" && state && (
@@ -766,78 +710,86 @@ export default function ProviderTesting({
               <div>
                 <dt>来源</dt>
                 <dd>
-                  {state.bank.source === "cache"
-                    ? "已更新指纹库"
-                    : "内置指纹库"}
+                  {state.bank.source === "bundled"
+                    ? "内置"
+                    : (state.bank.source ?? "—")}
                 </dd>
               </div>
               <div>
                 <dt>版本</dt>
-                <dd>
-                  {String(state.bank.version?.revision ?? "—").slice(0, 12)}
-                </dd>
+                <dd>{JSON.stringify(state.bank.version ?? {})}</dd>
               </div>
               <div>
-                <dt>最近检查</dt>
-                <dd>{date(state.bank.checkedAt ?? null)}</dd>
+                <dt>检查时间</dt>
+                <dd>{date(state.bank.checkedAt)}</dd>
               </div>
             </dl>
+            <div className="provider-test-bank">
+              <div className="provider-test-bank-head">
+                <span>模型</span>
+                <span>标识</span>
+              </div>
+              {state.bank.models.map((model) => (
+                <div key={model.id}>
+                  <span>{model.name}</span>
+                  <span>{model.id}</span>
+                </div>
+              ))}
+            </div>
             {state.bank.error && (
               <p className="provider-test-error" role="alert">
                 {state.bank.error}
               </p>
             )}
-            <div className="provider-test-bank">
-              <div className="provider-test-bank-head">
-                <span>模型名称</span>
-                <span>模型 ID</span>
-              </div>
-              {state.bank.models.map((m) => (
-                <div key={m.id}>
-                  <span>{m.name}</span>
-                  <span>{m.id}</span>
-                </div>
-              ))}
-            </div>
           </>
         )}
       </div>
       <footer className="provider-test-footer">
         {(error || state?.error) && (
-          <div className="provider-test-error" role="alert">
+          <p className="provider-test-error" role="alert">
             {error || state?.error}
-          </div>
+          </p>
         )}
         {notice && <p role="status">{notice}</p>}
         <div className="provider-test-actions">
-          {currentDetail?.job.canRetry &&
-            (tab === "history" || tab === "fingerprint") && (
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={() => void retry()}
-              >
-                重试失败组
-              </button>
-            )}
-          {testing &&
-            (running.length ? (
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={() => void stop()}
-              >
-                {running.some((j) => j.batchId) ? "停止批次" : "停止测试"}
-              </button>
-            ) : (
-              <button
-                className="primary"
-                disabled={!canStart}
-                onClick={() => void start()}
-              >
-                {selectedIds.length > 1 ? "批量测试" : "开始测试"}
-              </button>
-            ))}
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => void leave()}
+          >
+            关闭
+          </button>
+          {testing && (
+            <>
+              {currentDetail?.job.canRetry && (
+                <button
+                  className="secondary"
+                  disabled={busy || !!running.length}
+                  onClick={() => void retry()}
+                >
+                  重试失败组
+                </button>
+              )}
+              {running.length ? (
+                <button
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => void stop()}
+                >
+                  停止测试
+                </button>
+              ) : (
+                <button
+                  className="primary"
+                  disabled={!canStart}
+                  onClick={() => void start()}
+                >
+                  开始测试
+                </button>
+              )}
+            </>
+          )}
           {tab === "detection" && detection && (
             <>
               <button
@@ -849,10 +801,20 @@ export default function ProviderTesting({
               </button>
               <button
                 className="primary"
-                disabled={busy}
+                disabled={
+                  busy ||
+                  !intervalValid ||
+                  (detection.enabled &&
+                    (!detectionModelAvailable ||
+                      catalogLoading ||
+                      !endpoints.includes(
+                        detection.endpoint ?? provider.baseUrl,
+                      )))
+                }
                 onClick={() =>
                   void perform(async () => {
                     await command("provider_test_set_detection", {
+                      providerId: provider.id,
                       detection,
                       expectedRevision: detectionRevision,
                     });
@@ -861,7 +823,7 @@ export default function ProviderTesting({
                   })
                 }
               >
-                保存检测设置
+                保存
               </button>
             </>
           )}
@@ -872,20 +834,62 @@ export default function ProviderTesting({
               onClick={() =>
                 void perform(async () => {
                   await command("provider_test_update_bank");
+                  setNotice("指纹库已更新");
                 })
               }
             >
-              {state?.bank.updating ? "更新中…" : "更新指纹库"}
-            </button>
-          )}
-          {tab === "history" && !currentDetail?.job.canRetry && (
-            <button className="secondary" onClick={close}>
-              关闭
+              更新指纹库
             </button>
           )}
         </div>
       </footer>
     </Modal>
+  );
+}
+
+function ErrorDetail({ detail }: { detail: ProviderTestError }) {
+  const [copied, setCopied] = useState(false),
+    [copyError, setCopyError] = useState("");
+  const text = [
+    detail.httpStatus != null ? `HTTP ${detail.httpStatus}` : "",
+    detail.message,
+    detail.body,
+    detail.truncated ? "错误正文超出响应上限或读取中断，以上内容不完整。" : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    <section
+      className="provider-test-error-detail"
+      aria-label="完整错误信息"
+      role="alert"
+    >
+      <div>
+        <strong>
+          {detail.httpStatus != null ? `HTTP ${detail.httpStatus}` : "连接错误"}
+        </strong>
+        <button
+          type="button"
+          className="text-button"
+          onClick={() => {
+            setCopyError("");
+            void navigator.clipboard
+              .writeText(text)
+              .then(() => setCopied(true))
+              .catch(() => setCopyError("复制失败，请选择错误正文后复制。"));
+          }}
+        >
+          <Copy size={14} />
+          {copied ? "已复制" : "复制错误"}
+        </button>
+      </div>
+      <p>{detail.message}</p>
+      {detail.body && <pre>{detail.body}</pre>}
+      {detail.truncated && (
+        <p>错误正文超出响应上限或读取中断，以上内容不完整。</p>
+      )}
+      {copyError && <p>{copyError}</p>}
+    </section>
   );
 }
 
@@ -899,6 +903,10 @@ function TestResult({
   return (
     <section className="provider-test-detail" aria-label="测试详情">
       <dl className="provider-test-summary">
+        <div>
+          <dt>测试端点</dt>
+          <dd>{job.endpoint ?? "历史记录未保存端点"}</dd>
+        </div>
         <div>
           <dt>请求模型</dt>
           <dd>{job.requestedModel}</dd>
@@ -948,7 +956,8 @@ function TestResult({
             : "首组命中降智规则，提前完成"}
         </p>
       )}
-      {job.error && (
+      {output?.error && <ErrorDetail detail={output.error} />}
+      {job.error && !output?.error && (
         <p className="provider-test-error" role="alert">
           {job.error}
         </p>
@@ -966,7 +975,13 @@ function TestResult({
             <span>耗时</span>
           </div>
           {job.groups.map((group) => (
-            <details key={group.index}>
+            <details
+              key={group.index}
+              open={
+                group.status === "failed" &&
+                !!output?.groupErrors[String(group.index)]
+              }
+            >
               <summary>
                 <span>第 {group.index + 1} 组</span>
                 <span>{statuses[group.status] ?? group.status}</span>
@@ -993,7 +1008,12 @@ function TestResult({
                     <dd>{group.returnedModel ?? "—"}</dd>
                   </div>
                 </dl>
-                {group.error && (
+                {output?.groupErrors[String(group.index)] && (
+                  <ErrorDetail
+                    detail={output.groupErrors[String(group.index)]}
+                  />
+                )}
+                {group.error && !output?.groupErrors[String(group.index)] && (
                   <p className="provider-test-error" role="alert">
                     {group.error}
                   </p>

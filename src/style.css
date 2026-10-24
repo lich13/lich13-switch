@@ -3607,8 +3607,10 @@ button.exchange-button:active:not(:disabled) {
 
 .gateway-form label.provider-search-setting {
   display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   min-height: 36px;
 }

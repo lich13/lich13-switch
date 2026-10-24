@@ -17,12 +17,14 @@ pub struct Failure {
     pub code: &'static str,
     pub retryable: bool,
     pub uncertain: bool,
+    pub detail: Option<super::TestError>,
 }
 impl Failure {
     pub fn new(code: &'static str, retryable: bool) -> Self {
         Self {
             code,
             retryable,
+            detail: None,
             uncertain: matches!(
                 code,
                 "network_error"
@@ -34,9 +36,31 @@ impl Failure {
             ),
         }
     }
+    fn with_response(mut self, status: u16, raw: &[u8], truncated: bool) -> Self {
+        self.detail = Some(super::errors::body(
+            Some(status),
+            &String::from_utf8_lossy(raw),
+            truncated,
+        ));
+        self
+    }
 }
 pub type TransportResult<T> = std::result::Result<T, Failure>;
 pub fn failure(status: u16, payload: &Value) -> Failure {
+    let mut error = classify_failure(status, payload);
+    error.detail = Some(super::errors::body(
+        (status > 0).then_some(status),
+        &payload.to_string(),
+        false,
+    ));
+    error
+}
+fn network_failure(error: reqwest::Error) -> Failure {
+    let mut failure = Failure::new("network_error", true);
+    failure.detail = Some(super::errors::network(error));
+    failure
+}
+fn classify_failure(status: u16, payload: &Value) -> Failure {
     let text = payload
         .get("error")
         .filter(|v| truthy(v))
@@ -537,7 +561,14 @@ async fn received(
         diag["first_event_ms"] = json!(started.elapsed().as_millis());
     }
     diag["last_event_type"] = event_type.into();
-    let result = collector.accept(event, name, whole);
+    let result = collector.accept(event, name, whole).map_err(|mut error| {
+        error.detail = Some(super::errors::body(
+            diag["http_status"].as_u64().map(|v| v as u16),
+            &event.to_string(),
+            false,
+        ));
+        error
+    });
     if result.is_ok() {
         if let Some(callback) = callback {
             callback(json!({"text":collector.text(),"returned_model":collector.returned_model,"diagnostics":diag}))
@@ -593,8 +624,8 @@ async fn frame(
         }
         return Ok(());
     }
-    let event: Value =
-        serde_json::from_slice(raw).map_err(|_| Failure::new("invalid_stream", true))?;
+    let event: Value = serde_json::from_slice(raw)
+        .map_err(|_| Failure::new("invalid_stream", true).with_response(200, raw, false))?;
     received(collector, diag, &event, &name, false, started, callback).await
 }
 pub async fn execute(
@@ -618,7 +649,7 @@ pub async fn execute(
             .json(&target.payload(prompt))
             .send()
             .await
-            .map_err(|_| Failure::new("network_error", true))?;
+            .map_err(network_failure)?;
         let status = response.status().as_u16();
         diag["http_status"] = status.into();
         let content_type = response
@@ -639,35 +670,43 @@ pub async fn execute(
                 .await
                 .map_err(|_| Failure::new("internal_error", false))?;
         }
-        let mut chunks = response.bytes_stream();
         if status != 200 {
-            let mut raw = vec![];
-            while let Some(chunk) = chunks.next().await {
-                let chunk = chunk.map_err(|_| Failure::new("network_error", true))?;
-                raw.extend(chunk.iter().take(MAX_TEXT - raw.len()));
-                if raw.len() >= MAX_TEXT {
-                    break;
-                }
-            }
-            return Err(failure(
+            let detail = super::errors::response(response).await;
+            let mut failure = classify_failure(
                 status,
-                &serde_json::from_slice(&raw).unwrap_or(json!({})),
-            ));
+                &serde_json::from_str(&detail.body)
+                    .unwrap_or_else(|_| json!({"error": detail.body})),
+            );
+            failure.detail = Some(detail);
+            return Err(failure);
         }
+        let mut chunks = response.bytes_stream();
         let mut buffer = vec![];
         let mut lines = vec![];
         let mut frame_size = 0;
         let mut mode = None;
         while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.map_err(|_| Failure::new("network_error", true))?;
+            let chunk = chunk.map_err(|error| {
+                let mut failure = network_failure(error);
+                if let Some(detail) = &mut failure.detail {
+                    detail.http_status = Some(status);
+                }
+                failure
+            })?;
             diag["bytes"] = json!(integer(&diag["bytes"]).unwrap_or(0) + chunk.len() as i64);
             buffer.extend_from_slice(&chunk);
             if mode.is_none() && !buffer.trim_ascii().is_empty() {
-                mode = Some(buffer.trim_ascii_start().starts_with(b"{"));
+                mode = Some(
+                    content_type == "text/html" || buffer.trim_ascii_start().starts_with(b"{"),
+                );
             }
             if mode == Some(true) {
                 if buffer.len() > MAX_FRAME {
-                    return Err(Failure::new("output_limit", true));
+                    return Err(Failure::new("output_limit", true).with_response(
+                        status,
+                        &buffer[..MAX_FRAME],
+                        true,
+                    ));
                 }
                 continue;
             }
@@ -697,8 +736,9 @@ pub async fn execute(
             }
         }
         if mode == Some(true) {
-            let event = serde_json::from_slice(&buffer)
-                .map_err(|_| Failure::new("invalid_stream", true))?;
+            let event = serde_json::from_slice(&buffer).map_err(|_| {
+                Failure::new("invalid_stream", true).with_response(status, &buffer, false)
+            })?;
             received(&mut collector, diag, &event, "", true, started, &callback).await?;
         } else {
             if !buffer.is_empty() {

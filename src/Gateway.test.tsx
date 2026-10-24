@@ -624,3 +624,16 @@ describe("client isolation", () => {
     });
   });
 });
+
+it("keeps one icon-bearing testing entry per provider and removes global testing", async () => {
+  const user = userEvent.setup();
+  render(<Gateway notify={() => {}} />);
+  await screen.findByRole("button", { name: "添加" });
+  expect(screen.queryByRole("button", { name: "测试与检测" })).not.toBeInTheDocument();
+  const operations = screen.getByLabelText(`${state.providers[0].name} 操作`);
+  await user.click(operations);
+  const menu = within(operations.closest("details")!);
+  const entry = menu.getByRole("button", { name: "连接测试" });
+  expect(entry.querySelector("svg")).not.toBeNull();
+  expect(menu.queryByRole("button", { name: "模型指纹测试" })).not.toBeInTheDocument();
+});

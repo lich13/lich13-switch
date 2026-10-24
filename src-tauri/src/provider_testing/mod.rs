@@ -5,8 +5,10 @@ pub mod commands;
 mod compat;
 mod connection;
 mod downgrade;
+mod errors;
 mod fingerprint;
 mod fingerprint_stream;
+mod migration;
 mod modeltrace;
 mod scheduler;
 pub mod types;
@@ -33,9 +35,9 @@ fn failure(message: &str) -> AppError {
 fn now() -> i64 {
     crate::usage::model::now()
 }
-fn config_revision(saved: &Persisted) -> String {
+fn config_revision(saved: &Persisted, provider: &str) -> String {
     storage::digest(
-        json!({"detection":saved.detection,"degraded":saved.degraded})
+        json!({"detection":saved.detection.get(provider).cloned().unwrap_or_default(),"degraded":saved.degraded.get(provider)})
             .to_string()
             .as_bytes(),
     )
@@ -49,6 +51,7 @@ struct Context {
     target: Target,
     challenges: Vec<(usize, String)>,
     bank: (Value, Value),
+    detection_revision: Option<String>,
 }
 struct Data {
     saved: Persisted,
@@ -56,9 +59,10 @@ struct Data {
     outputs: HashMap<String, Output>,
     contexts: HashMap<String, Context>,
     cancel: HashMap<String, watch::Sender<bool>>,
-    models: HashMap<String, (Instant, Models)>,
     detection_status: HashMap<String, DetectionStatus>,
-    anchors: HashMap<String, i64>,
+    frequencies: std::collections::BTreeMap<String, u64>,
+    frequency_sampled_at: Option<i64>,
+    frequency_error: Option<String>,
     error: Option<String>,
     bank_updating: bool,
 }
@@ -68,10 +72,22 @@ struct Shared {
     gateways: [Gateway; 4],
     events: broadcast::Sender<()>,
     jobs: Arc<Semaphore>,
+    #[cfg(test)]
+    clock: std::sync::atomic::AtomicI64,
 }
 #[derive(Clone)]
 pub struct Service(Arc<Shared>);
 impl Service {
+    fn now(&self) -> i64 {
+        #[cfg(test)]
+        {
+            let at = self.0.clock.load(std::sync::atomic::Ordering::SeqCst);
+            if at != 0 {
+                return at;
+            }
+        }
+        now()
+    }
     pub fn new(directory: &Path, gateways: [Gateway; 4]) -> Result<Self> {
         let path = directory.join("provider-tests.json");
         let raw = storage::read_bounded(&path, STATE_LIMIT)?;
@@ -80,21 +96,30 @@ impl Service {
             .map(serde_json::from_slice)
             .transpose()
             .map_err(|_| failure("测试状态无法读取，已保留原文件"))?;
-        let retired_schedules = value
+        let migrated = value
             .as_mut()
-            .and_then(Value::as_object_mut)
-            .is_some_and(|object| object.remove("schedules").is_some());
+            .map(|value| migration::migrate(value, &gateways))
+            .transpose()?
+            .unwrap_or(false);
         let mut saved: Persisted = value
             .map(serde_json::from_value)
             .transpose()
             .map_err(|_| failure("测试状态无法读取，已保留原文件"))?
             .unwrap_or_default();
-        if saved.schema != 1 {
+        if saved.schema != 2 {
             return Err(failure("测试状态来自更高版本，请升级应用"));
         }
-        let mut changed = retired_schedules;
+        let mut changed = migrated;
         for job in &mut saved.jobs {
             if !job.terminal() {
+                if job.automatic && job.started_at.is_some() {
+                    let timing = saved
+                        .detection_timing
+                        .entry(job.provider_id.clone())
+                        .or_default();
+                    timing.anchor_at = Some(now());
+                    timing.last_started_at = timing.last_started_at.max(job.started_at);
+                }
                 job.status = "interrupted".into();
                 job.completed_at = Some(now());
                 job.error = Some("应用退出时结果未知，未自动重放，请手动重新测试".into());
@@ -117,15 +142,18 @@ impl Service {
             gateways,
             events,
             jobs: Arc::new(Semaphore::new(2)),
+            #[cfg(test)]
+            clock: std::sync::atomic::AtomicI64::new(0),
             data: Mutex::new(Data {
                 saved,
                 revision,
                 outputs: HashMap::new(),
                 contexts: HashMap::new(),
                 cancel: HashMap::new(),
-                models: HashMap::new(),
                 detection_status: HashMap::new(),
-                anchors: HashMap::new(),
+                frequencies: Default::default(),
+                frequency_sampled_at: None,
+                frequency_error: None,
                 error: None,
                 bank_updating: false,
             }),
@@ -168,18 +196,51 @@ impl Service {
             .retain(|id, _| data.saved.jobs.iter().any(|j| &j.id == id));
         Ok(())
     }
-    pub fn state(&self) -> State {
+    pub fn state(&self, client: ClientId, provider: &str) -> Result<State> {
+        self.gateway(client).test_endpoint(provider, None)?;
         let data = lock(&self.0.data);
-        State {
-            revision: config_revision(&data.saved),
-            jobs: data.saved.jobs.iter().rev().cloned().collect(),
-            detection: data.saved.detection.clone(),
-            degraded: data.saved.degraded.clone(),
-            detection_status: data.detection_status.values().cloned().collect(),
-            history: data.saved.history.iter().rev().take(50).cloned().collect(),
+        let scope = |job: &&Job| job.client_id == client && job.provider_id == provider;
+        Ok(State {
+            revision: config_revision(&data.saved, provider),
+            jobs: data
+                .saved
+                .jobs
+                .iter()
+                .rev()
+                .filter(scope)
+                .cloned()
+                .collect(),
+            detection: data
+                .saved
+                .detection
+                .get(provider)
+                .cloned()
+                .unwrap_or_default(),
+            degraded: data
+                .saved
+                .degraded
+                .iter()
+                .filter(|(id, _)| client == ClientId::Codex && id.as_str() == provider)
+                .map(|(id, value)| (id.clone(), value.clone()))
+                .collect(),
+            detection_status: data
+                .detection_status
+                .values()
+                .filter(|s| client == ClientId::Codex && s.provider_id == provider)
+                .cloned()
+                .collect(),
+            history: data
+                .saved
+                .history
+                .iter()
+                .rev()
+                .filter(scope)
+                .take(50)
+                .cloned()
+                .collect(),
             bank: bank::status(&data.saved.bank, data.bank_updating),
             error: data.error.clone(),
-        }
+        })
     }
     pub fn detail(&self, id: &str) -> Result<Detail> {
         let data = lock(&self.0.data);
@@ -215,21 +276,22 @@ impl Service {
         Ok(())
     }
     pub fn start(&self, request: Request) -> Result<Job> {
-        self.start_job(request, false, None)
+        self.start_job(request, false)
     }
-    fn start_job(
-        &self,
-        mut request: Request,
-        automatic: bool,
-        batch: Option<String>,
-    ) -> Result<Job> {
-        let target = self
-            .gateway(request.client_id)
-            .test_target(&request.provider_id, Some(&request.expected_revision))?;
+    fn start_job(&self, mut request: Request, automatic: bool) -> Result<Job> {
+        let target = self.gateway(request.client_id).test_target_at(
+            &request.provider_id,
+            Some(&request.expected_revision),
+            request.endpoint.as_deref(),
+        )?;
+        request.endpoint = Some(target.base_url.clone());
         if request.kind == Kind::Connection && request.model.is_empty() {
             request.model = self.default_connection_model(&target);
         }
         self.validate(&request, &target)?;
+        if request.kind == Kind::Fingerprint {
+            self.check_cached_model(&target, &request.model)?;
+        }
         let mut data = lock(&self.0.data);
         if data.saved.jobs.iter().any(|j| {
             !j.terminal()
@@ -250,13 +312,14 @@ impl Service {
             provider_id: target.provider_id.clone(),
             provider_name: target.provider_name.clone(),
             provider_version: target.version.clone(),
+            endpoint: Some(target.base_url.clone()),
             kind: request.kind,
             mode: Mode::Text,
             requested_model: request.model.clone(),
             forwarded_model: target.model(&request.model),
             returned_model: None,
             status: "queued".into(),
-            created_at: now(),
+            created_at: self.now(),
             started_at: None,
             completed_at: None,
             elapsed_ms: 0,
@@ -274,7 +337,7 @@ impl Service {
                 })
                 .collect(),
             automatic,
-            batch_id: batch,
+            batch_id: None,
             can_retry: false,
             completion_reason: None,
         };
@@ -284,6 +347,7 @@ impl Service {
         let (cancel, receiver) = watch::channel(false);
         data.cancel.insert(job.id.clone(), cancel);
         data.outputs.insert(job.id.clone(), Output::default());
+        let detection_revision = automatic.then(|| config_revision(&data.saved, &job.provider_id));
         data.contexts.insert(
             job.id.clone(),
             Context {
@@ -291,6 +355,7 @@ impl Service {
                 target,
                 challenges,
                 bank: snapshot,
+                detection_revision,
             },
         );
         drop(data);
@@ -318,15 +383,17 @@ impl Service {
                 service
                     .gateway(context.target.client_id)
                     .verify_test_version(&context.target.provider_id, &context.target.version)?;
-                if service.detail(&id)?.job.automatic
-                    && !service.automatic_eligible(&context.target.provider_id)?
-                {
-                    return Err(failure("供应商已退出检测队列，本轮已停止"));
+                service
+                    .gateway(context.target.client_id)
+                    .test_endpoint(&context.target.provider_id, Some(&context.target.base_url))?;
+                if service.detail(&id)?.job.automatic {
+                    service.prepare_automatic(&id, &context)?;
+                } else {
+                    service.update(&id, |job, _| {
+                        job.status = "running".into();
+                        job.started_at = Some(service.now());
+                    })?;
                 }
-                service.update(&id, |job, _| {
-                    job.status = "running".into();
-                    job.started_at = Some(now());
-                })?;
                 if context.request.kind == Kind::Fingerprint {
                     service.run_fingerprint(&id, &context).await
                 } else {
@@ -385,7 +452,7 @@ impl Service {
             }
             .into();
             job.error = result.err().map(|e| e.message);
-            job.completed_at = Some(now());
+            job.completed_at = Some(self.now());
             job.elapsed_ms = elapsed;
             for group in &mut job.groups {
                 if matches!(group.status.as_str(), "running" | "pending") {
@@ -408,8 +475,19 @@ impl Service {
         }
         if automatic {
             if let Some(job) = data.saved.jobs.iter().find(|j| j.id == id).cloned() {
-                data.anchors.insert(job.provider_id.clone(), now());
                 let mut next = data.saved.clone();
+                if job.started_at.is_some()
+                    && data
+                        .contexts
+                        .get(id)
+                        .and_then(|c| c.detection_revision.as_deref())
+                        == Some(config_revision(&data.saved, &job.provider_id).as_str())
+                {
+                    next.detection_timing
+                        .entry(job.provider_id.clone())
+                        .or_default()
+                        .anchor_at = job.completed_at;
+                }
                 next.history.push(job);
                 if let Err(error) = self.save(&mut data, next) {
                     data.error = Some(error.message);
@@ -430,20 +508,6 @@ impl Service {
         } else {
             Err(failure("测试记录不存在"))
         }
-    }
-    pub fn cancel_batch(&self, id: &str) -> Result<()> {
-        let data = lock(&self.0.data);
-        for job in data
-            .saved
-            .jobs
-            .iter()
-            .filter(|job| job.batch_id.as_deref() == Some(id))
-        {
-            if let Some(cancel) = data.cancel.get(&job.id) {
-                cancel.send_replace(true);
-            }
-        }
-        Ok(())
     }
     pub fn retry(&self, id: &str) -> Result<Job> {
         let mut data = lock(&self.0.data);

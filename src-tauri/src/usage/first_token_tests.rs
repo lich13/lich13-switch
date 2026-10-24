@@ -576,3 +576,54 @@ fn legacy_totals_default_to_no_samples_and_new_json_exposes_sum_and_count() {
     assert_eq!(encoded["firstTokenSumMs"], 75);
     assert_eq!(encoded["firstTokenSamples"], 2);
 }
+
+#[test]
+fn detection_counts_persisted_logical_requests_without_retries_or_session_copies() {
+    for legacy in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if legacy {
+            Store::open_v11_fixture(dir.path()).unwrap()
+        } else {
+            Store::open(dir.path()).unwrap()
+        };
+        let mut one = record("fixture-one", Some(10));
+        one.attempts[0].repeat_count = 9;
+        let mut two = record("fixture-two", Some(20));
+        two.started_at += 2000;
+        two.attempts[0].started_at += 2000;
+        let mut retry = two.attempts[0].clone();
+        retry.id = "fixture-retry".into();
+        retry.provider = Some("fixture-other".into());
+        retry.status = Some(503);
+        two.attempts.insert(0, retry);
+        let mut third = record("fixture-third", Some(30));
+        third.started_at += 3000;
+        third.attempts[0].started_at += 3000;
+        third.attempts[0].provider = Some("fixture-other".into());
+        let mut session = record("fixture-session", Some(10));
+        session.source = "codex_sessions".into();
+        let mut older = record("fixture-older", Some(10));
+        older.started_at -= 3_600_000;
+        older.attempts[0].started_at -= 3_600_000;
+        store
+            .write_batch(&[one, two, third, session, older], None)
+            .unwrap();
+        let counts = store
+            .recent_gateway_requests("codex", BASE + 10_000)
+            .unwrap();
+        assert_eq!(counts["fixture-provider"], 2);
+        assert_eq!(counts["fixture-other"], 1);
+        assert!(store
+            .recent_gateway_requests("claude", BASE + 10_000)
+            .unwrap()
+            .is_empty());
+        drop(store);
+        let reloaded = Store::reader(dir.path()).unwrap();
+        assert_eq!(
+            reloaded
+                .recent_gateway_requests("codex", BASE + 10_000)
+                .unwrap(),
+            counts
+        );
+    }
+}

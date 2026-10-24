@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-pub(super) fn smart_interval(requests: usize, minimum: u32) -> Option<u32> {
+pub(super) fn smart_interval(requests: u64, minimum: u32) -> Option<u32> {
     let minutes = match requests {
         0 => return None,
         1..=2 => 30,
@@ -14,95 +14,245 @@ pub(super) fn smart_interval(requests: usize, minimum: u32) -> Option<u32> {
     Some(minutes.max(minimum.clamp(5, 30)))
 }
 fn valid_model(model: &str) -> bool {
-    !model.trim().is_empty() && model.len() <= 256 && !model.chars().any(char::is_control)
+    !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control)
+}
+fn period(data: &Data, config: &Detection, provider: &str) -> Option<u32> {
+    if config.mode == "smart" {
+        data.frequency_error
+            .is_none()
+            .then(|| data.frequencies.get(provider).copied().unwrap_or(0))
+            .and_then(|count| smart_interval(count, config.min_interval_minutes))
+    } else {
+        Some(config.interval_minutes)
+    }
+}
+fn due(timing: &DetectionTiming, minutes: u32, at: i64) -> i64 {
+    (timing.anchor_at.unwrap_or(at) + i64::from(minutes) * 60_000)
+        .max(timing.last_started_at.map_or(0, |start| start + 300_000))
 }
 impl Service {
-    pub(super) fn automatic_eligible(&self, id: &str) -> Result<bool> {
-        let eligible = self
-            .gateway(ClientId::Codex)
-            .test_candidates()?
-            .iter()
-            .any(|p| p.id == id && p.queued && !p.search_only);
-        let data = lock(&self.0.data);
-        Ok(eligible
-            && data.saved.detection.enabled
-            && data
+    fn refresh_frequencies(&self, at: i64, force: bool) {
+        {
+            let data = lock(&self.0.data);
+            if !data
                 .saved
                 .detection
-                .providers
-                .get(id)
-                .and_then(|p| p.enabled)
-                .unwrap_or(true)
-            && !data.saved.degraded.contains_key(id))
+                .values()
+                .any(|c| c.enabled && c.mode == "smart")
+                || (!force
+                    && data
+                        .frequency_sampled_at
+                        .is_some_and(|sample| at >= sample && at - sample < 60_000))
+            {
+                return;
+            }
+        }
+        let counts = self.gateway(ClientId::Codex).detection_request_counts(at);
+        let mut data = lock(&self.0.data);
+        data.frequency_sampled_at = Some(at);
+        match counts {
+            Ok(counts) => {
+                data.frequencies = counts;
+                data.frequency_error = None;
+            }
+            Err(error) => {
+                data.frequencies.clear();
+                data.frequency_error = Some(format!("调用统计暂不可用：{}", error.message));
+            }
+        }
     }
-    pub fn set_detection(&self, mut config: Detection, expected: &str) -> Result<()> {
+    pub fn set_detection(
+        &self,
+        provider: &str,
+        mut config: Detection,
+        expected: &str,
+    ) -> Result<()> {
+        config.model = config.model.trim().into();
         if !["smart", "fixed"].contains(&config.mode.as_str())
-            || config.interval_minutes < 5
-            || config.interval_minutes > 1440
+            || !(1..=525600).contains(&config.interval_minutes)
             || !(5..=30).contains(&config.min_interval_minutes)
             || !valid_model(&config.model)
-            || config.providers.len() > 1000
-            || config
-                .providers
-                .values()
-                .any(|p| p.model.as_ref().is_some_and(|m| !valid_model(m)))
         {
             return Err(failure(
-                "检测配置无效：固定间隔最低 5 分钟，智能最低间隔为 5–30 分钟",
+                "检测配置无效：固定间隔为 1–525600 分钟，智能最低间隔为 5–30 分钟",
             ));
         }
-        let candidates = self.gateway(ClientId::Codex).test_candidates()?;
-        config
-            .providers
-            .retain(|id, _| candidates.iter().any(|p| &p.id == id && !p.search_only));
+        let gateway = self.gateway(ClientId::Codex);
+        if !gateway
+            .test_candidates()?
+            .iter()
+            .any(|p| p.id == provider && !p.search_only)
+        {
+            return Err(failure("定时检测仅用于普通 Codex 供应商"));
+        }
+        let endpoint = gateway.test_endpoint(provider, config.endpoint.as_deref());
+        if config.enabled {
+            config.endpoint = Some(endpoint?);
+        } else if let Ok(endpoint) = endpoint {
+            config.endpoint = Some(endpoint);
+        }
+        let at = self.now();
         let mut data = lock(&self.0.data);
-        if config_revision(&data.saved) != expected {
-            return Err(failure("检测设置已变化，请刷新后重试"));
+        if config_revision(&data.saved, provider) != expected {
+            return Err(failure("该供应商检测设置已变化，请重新读取后重试"));
+        }
+        if config.enabled {
+            Self::cached_model(
+                &data,
+                ClientId::Codex,
+                provider,
+                config.endpoint.as_deref().unwrap(),
+                &config.model,
+            )?;
+        }
+        let previous = data
+            .saved
+            .detection
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        if previous == config {
+            return Ok(());
         }
         let mut next = data.saved.clone();
-        next.detection = config;
+        let timing = next.detection_timing.entry(provider.into()).or_default();
+        if !previous.enabled {
+            timing.anchor_at = Some(at);
+            timing.paused = false;
+        }
+        if !config.enabled {
+            timing.paused = true;
+        }
+        next.detection.insert(provider.into(), config);
         self.save(&mut data, next)?;
-        data.anchors.clear();
-        data.detection_status.clear();
+        Self::cancel_automatic(&data, provider, false);
+        data.detection_status.remove(provider);
         drop(data);
         self.changed();
         Ok(())
     }
     pub fn clear_mark(&self, provider: &str, expected: &str) -> Result<()> {
         let mut data = lock(&self.0.data);
-        if config_revision(&data.saved) != expected {
-            return Err(failure("检测状态已变化，请刷新后重试"));
+        if config_revision(&data.saved, provider) != expected {
+            return Err(failure("该供应商检测状态已变化，请重新读取后重试"));
         }
         let mut next = data.saved.clone();
         next.degraded.remove(provider);
+        next.detection_timing
+            .entry(provider.into())
+            .or_default()
+            .paused = true;
         self.save(&mut data, next)?;
-        data.anchors.remove(provider);
+        Self::cancel_automatic(&data, provider, false);
         drop(data);
         self.changed();
         Ok(())
     }
-    pub fn batch(&self, requests: Vec<Request>) -> Result<Value> {
-        if requests.is_empty() || requests.len() > 1000 {
-            return Err(failure("批量测试应选择 1–1000 个供应商"));
+    fn cancel_automatic(data: &Data, provider: &str, queued_only: bool) {
+        for job in data.saved.jobs.iter().filter(|j| {
+            j.automatic
+                && j.provider_id == provider
+                && !j.terminal()
+                && (!queued_only || j.started_at.is_none())
+        }) {
+            if let Some(cancel) = data.cancel.get(&job.id) {
+                cancel.send_replace(true);
+            }
         }
-        let id = uuid::Uuid::new_v4().to_string();
-        self.batch_with_id(&id, requests)
     }
-    fn batch_with_id(&self, id: &str, requests: Vec<Request>) -> Result<Value> {
-        let mut seen = std::collections::HashSet::new();
-        let mut jobs = vec![];
-        let mut errors = vec![];
-        for request in requests {
-            if !seen.insert((request.client_id, request.provider_id.clone())) {
-                continue;
-            }
-            let provider = request.provider_id.clone();
-            match self.start_job(request, false, Some(id.into())) {
-                Ok(job) => jobs.push(job),
-                Err(error) => errors.push(json!({"providerId":provider,"error":error.message})),
-            }
+    pub(super) fn automatic_current(&self, id: &str) -> bool {
+        let context = lock(&self.0.data).contexts.get(id).cloned();
+        let Some(context) = context else {
+            return false;
+        };
+        let provider = &context.target.provider_id;
+        if self
+            .gateway(ClientId::Codex)
+            .verify_test_version(provider, &context.target.version)
+            .is_err()
+            || self
+                .gateway(ClientId::Codex)
+                .test_endpoint(provider, Some(&context.target.base_url))
+                .is_err()
+            || !self
+                .gateway(ClientId::Codex)
+                .test_candidates()
+                .is_ok_and(|items| {
+                    items
+                        .iter()
+                        .any(|p| p.id == *provider && p.queued && !p.search_only)
+                })
+        {
+            return false;
         }
-        Ok(json!({"id":id,"jobs":jobs,"errors":errors}))
+        let data = lock(&self.0.data);
+        context.detection_revision.as_deref()
+            == Some(config_revision(&data.saved, provider).as_str())
+            && data
+                .saved
+                .detection
+                .get(provider)
+                .is_some_and(|c| c.enabled)
+            && !data.cancel.get(id).is_some_and(|cancel| *cancel.borrow())
+            && !data.saved.degraded.contains_key(provider)
+    }
+    pub(super) fn prepare_automatic(&self, id: &str, context: &Context) -> Result<()> {
+        let at = self.now();
+        self.refresh_frequencies(at, true);
+        let provider = &context.target.provider_id;
+        let current = self.automatic_current(id);
+        let mut data = lock(&self.0.data);
+        let config = data
+            .saved
+            .detection
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        let timing = data
+            .saved
+            .detection_timing
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        let minutes = period(&data, &config, provider);
+        let valid = current
+            && context.detection_revision.as_deref()
+                == Some(config_revision(&data.saved, provider).as_str())
+            && config.model == context.request.model
+            && config.endpoint.as_deref() == Some(context.target.base_url.as_str())
+            && !timing.paused
+            && minutes.is_some_and(|m| due(&timing, m, at) <= at)
+            && Self::cached_model(
+                &data,
+                ClientId::Codex,
+                provider,
+                &context.target.base_url,
+                &config.model,
+            )
+            .is_ok()
+            && !data.cancel.get(id).is_some_and(|cancel| *cancel.borrow());
+        if !valid {
+            if let Some(cancel) = data.cancel.get(id) {
+                cancel.send_replace(true);
+            }
+            return Err(failure("检测条件已变化，本轮未派发，等待下次检测"));
+        }
+        let mut next = data.saved.clone();
+        next.detection_timing
+            .entry(provider.clone())
+            .or_default()
+            .last_started_at = Some(at);
+        let job = next
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
+            .ok_or_else(|| failure("测试记录不存在"))?;
+        job.status = "running".into();
+        job.started_at = Some(at);
+        self.save(&mut data, next)?;
+        drop(data);
+        self.changed();
+        Ok(())
     }
     pub fn run_scheduler(&self) {
         let weak = Arc::downgrade(&self.0);
@@ -127,123 +277,163 @@ impl Service {
         });
     }
     pub(super) fn tick(&self, at: i64, suspended: bool) -> Result<()> {
-        let candidates = self.gateway(ClientId::Codex).test_candidates()?;
+        #[cfg(test)]
+        self.0.clock.store(at, std::sync::atomic::Ordering::SeqCst);
+        let gateway = self.gateway(ClientId::Codex);
+        let candidates = gateway.test_candidates()?;
+        self.refresh_frequencies(at, suspended);
+        let configs = lock(&self.0.data).saved.detection.clone();
+        let endpoints: HashMap<_, _> = candidates
+            .iter()
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    gateway.test_endpoint(
+                        &p.id,
+                        configs.get(&p.id).and_then(|c| c.endpoint.as_deref()),
+                    ),
+                )
+            })
+            .collect();
         let mut launch = vec![];
         {
             let mut data = lock(&self.0.data);
-            if suspended {
-                data.anchors.clear();
-            }
-            let config = data.saved.detection.clone();
+            let mut next = data.saved.clone();
             let live: std::collections::HashSet<_> = candidates
                 .iter()
-                .filter(|c| !c.search_only)
-                .map(|c| c.id.clone())
+                .filter(|p| !p.search_only)
+                .map(|p| p.id.as_str())
                 .collect();
-            for job in data
-                .saved
-                .jobs
-                .iter()
-                .filter(|j| j.automatic && !j.terminal() && !live.contains(&j.provider_id))
+            for job in
+                data.saved.jobs.iter().filter(|j| {
+                    j.automatic && !j.terminal() && !live.contains(j.provider_id.as_str())
+                })
             {
                 if let Some(cancel) = data.cancel.get(&job.id) {
                     cancel.send_replace(true);
                 }
             }
-            data.anchors.retain(|id, _| live.contains(id));
-            data.detection_status.retain(|id, _| live.contains(id));
+            data.detection_status
+                .retain(|id, _| live.contains(id.as_str()));
             for provider in candidates.iter().filter(|p| !p.search_only) {
-                let override_ = config.providers.get(&provider.id);
-                let enabled = config.enabled && override_.and_then(|p| p.enabled).unwrap_or(true);
-                let model = override_
-                    .and_then(|p| p.model.clone())
-                    .unwrap_or_else(|| config.model.clone());
-                let recent = self
-                    .gateway(ClientId::Codex)
-                    .recent_business_requests(&provider.id);
-                let minutes = if config.mode == "smart" {
-                    smart_interval(recent, config.min_interval_minutes)
-                } else {
-                    Some(config.interval_minutes)
-                };
-                let cooldown = data
-                    .saved
-                    .history
-                    .iter()
-                    .rev()
-                    .filter(|j| j.provider_id == provider.id)
-                    .find_map(|j| j.completed_at)
-                    .map(|at| at + 300_000);
-                let active = data.saved.jobs.iter().any(|j| {
-                    j.provider_id == provider.id && j.client_id == ClientId::Codex && !j.terminal()
+                let config = next
+                    .detection
+                    .get(&provider.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let minutes = period(&data, &config, &provider.id);
+                let recent = data
+                    .frequency_error
+                    .is_none()
+                    .then(|| data.frequencies.get(&provider.id).copied().unwrap_or(0));
+                let cache_error = endpoints[&provider.id]
+                    .as_ref()
+                    .map_err(|e| e.message.clone())
+                    .and_then(|endpoint| {
+                        Self::cached_model(
+                            &data,
+                            ClientId::Codex,
+                            &provider.id,
+                            endpoint,
+                            &config.model,
+                        )
+                        .map_err(|e| e.message)
+                    })
+                    .err();
+                let running = data.saved.jobs.iter().find(|j| {
+                    j.client_id == ClientId::Codex && j.provider_id == provider.id && !j.terminal()
                 });
-                if !enabled || !provider.queued {
-                    for job in
-                        data.saved.jobs.iter().filter(|j| {
-                            j.provider_id == provider.id && j.automatic && !j.terminal()
-                        })
-                    {
-                        if let Some(cancel) = data.cancel.get(&job.id) {
-                            cancel.send_replace(true);
-                        }
-                    }
+                let started = running.is_some_and(|j| j.started_at.is_some());
+                let queued = running.is_some() && !started;
+                let timing = next
+                    .detection_timing
+                    .entry(provider.id.clone())
+                    .or_default();
+                if suspended {
+                    timing.anchor_at = Some(at);
+                    Self::cancel_automatic(&data, &provider.id, true);
                 }
-                let status = if !enabled {
+                let status = if !config.enabled {
                     "disabled"
                 } else if data.saved.degraded.contains_key(&provider.id) {
                     "degraded"
                 } else if !provider.queued {
                     "outOfQueue"
-                } else if active {
+                } else if started {
                     "running"
+                } else if config.mode == "smart" && data.frequency_error.is_some() {
+                    "statsUnavailable"
                 } else if minutes.is_none() {
                     "idle"
+                } else if cache_error.is_some() {
+                    "modelsUnavailable"
+                } else if queued {
+                    "queued"
                 } else {
                     "waiting"
                 };
-                let next_at = if status == "waiting" {
-                    let anchor = *data.anchors.entry(provider.id.clone()).or_insert(at);
-                    Some((anchor + i64::from(minutes.unwrap()) * 60_000).max(cooldown.unwrap_or(0)))
-                } else {
-                    if status != "running" {
-                        data.anchors.remove(&provider.id);
+                if matches!(status, "disabled" | "degraded" | "outOfQueue") {
+                    timing.paused = true;
+                    Self::cancel_automatic(&data, &provider.id, false);
+                } else if status == "idle" {
+                    timing.paused = true;
+                    Self::cancel_automatic(&data, &provider.id, true);
+                } else if matches!(status, "statsUnavailable" | "modelsUnavailable") {
+                    Self::cancel_automatic(&data, &provider.id, true);
+                }
+                let next_at = if matches!(status, "waiting" | "queued") {
+                    if timing.paused || timing.anchor_at.is_none() {
+                        timing.anchor_at = Some(at);
+                        timing.paused = false;
                     }
+                    Some(due(timing, minutes.unwrap(), at))
+                } else {
                     None
                 };
-                data.detection_status.insert(
-                    provider.id.clone(),
-                    DetectionStatus {
-                        provider_id: provider.id.clone(),
-                        status: status.into(),
-                        model: model.clone(),
-                        recent_requests: recent,
-                        interval_minutes: minutes,
-                        next_at,
-                        cooldown_until: cooldown.filter(|until| *until > at),
-                        error: None,
-                    },
-                );
-                if next_at.is_some_and(|due| due <= at) {
-                    launch.push((provider.id.clone(), model));
-                    data.anchors.insert(provider.id.clone(), at);
+                let cooldown = timing
+                    .last_started_at
+                    .map(|start| start + 300_000)
+                    .filter(|until| *until > at);
+                let error = match status {
+                    "statsUnavailable" => data.frequency_error.clone(),
+                    "modelsUnavailable" => cache_error,
+                    _ => None,
+                };
+                let status_value = DetectionStatus {
+                    provider_id: provider.id.clone(),
+                    status: status.into(),
+                    model: config.model.clone(),
+                    recent_requests: recent,
+                    last_started_at: timing.last_started_at,
+                    interval_minutes: minutes,
+                    next_at,
+                    cooldown_until: cooldown,
+                    error,
+                };
+                data.detection_status
+                    .insert(provider.id.clone(), status_value);
+                if status == "waiting" && next_at.is_some_and(|due| due <= at) {
+                    launch.push((provider.id.clone(), config));
                 }
             }
+            if next.detection_timing != data.saved.detection_timing {
+                self.save(&mut data, next)?;
+            }
         }
-        for (provider_id, model) in launch {
-            let revision = self.gateway(ClientId::Codex).try_view()?.revision;
-            let result = self.start_job(
+        for (provider_id, config) in launch {
+            let revision = gateway.try_view()?.revision;
+            if let Err(error) = self.start_job(
                 Request {
                     client_id: ClientId::Codex,
                     provider_id: provider_id.clone(),
                     expected_revision: revision,
-                    model,
+                    model: config.model,
+                    endpoint: config.endpoint,
                     kind: Kind::Fingerprint,
                     concurrency: 1,
                 },
                 true,
-                None,
-            );
-            if let Err(error) = result {
+            ) {
                 if let Some(status) = lock(&self.0.data).detection_status.get_mut(&provider_id) {
                     status.error = Some(error.message);
                 }

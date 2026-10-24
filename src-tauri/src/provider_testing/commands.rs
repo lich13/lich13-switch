@@ -3,8 +3,8 @@ use crate::Runtime;
 use tauri::{Emitter, Manager};
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 #[tauri::command]
-pub fn provider_test_state(r: R<'_>) -> State {
-    r.provider_tests.state()
+pub fn provider_test_state(r: R<'_>, client_id: ClientId, provider_id: String) -> Result<State> {
+    r.provider_tests.state(client_id, &provider_id)
 }
 #[tauri::command]
 pub fn provider_test_start(r: R<'_>, request: Request) -> Result<Job> {
@@ -23,21 +23,14 @@ pub fn provider_test_retry(r: R<'_>, id: String) -> Result<Job> {
     r.provider_tests.retry(&id)
 }
 #[tauri::command]
-pub fn provider_test_batch(r: R<'_>, requests: Vec<Request>) -> Result<Value> {
-    r.provider_tests.batch(requests)
-}
-#[tauri::command]
-pub fn provider_test_stop_batch(r: R<'_>, id: String) -> Result<()> {
-    r.provider_tests.cancel_batch(&id)
-}
-#[tauri::command]
 pub fn provider_test_set_detection(
     r: R<'_>,
+    provider_id: String,
     detection: Detection,
     expected_revision: String,
 ) -> Result<()> {
     r.provider_tests
-        .set_detection(detection, &expected_revision)
+        .set_detection(&provider_id, detection, &expected_revision)
 }
 #[tauri::command]
 pub fn provider_test_clear_mark(
@@ -54,6 +47,7 @@ pub async fn provider_test_models(
     client_id: ClientId,
     provider_id: String,
     expected_revision: String,
+    endpoint: Option<String>,
     refresh: Option<bool>,
 ) -> Result<Models> {
     r.provider_tests
@@ -61,6 +55,7 @@ pub async fn provider_test_models(
             client_id,
             &provider_id,
             &expected_revision,
+            endpoint.as_deref(),
             refresh.unwrap_or(false),
         )
         .await

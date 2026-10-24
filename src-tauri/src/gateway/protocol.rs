@@ -793,10 +793,9 @@ impl Protocol {
     pub fn business_request(
         &mut self,
         gateway: &super::Gateway,
-        provider: &str,
+        _provider: &str,
         headers: &hyper::HeaderMap,
     ) {
-        gateway.note_business_request(provider);
         self.business = headers
             .get(hyper::header::USER_AGENT)
             .filter(|v| !v.is_empty())

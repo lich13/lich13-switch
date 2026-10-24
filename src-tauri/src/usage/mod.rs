@@ -412,6 +412,13 @@ impl Service {
             store::Store::reader_with_cache(&self.0.directory, self.0.overview_cache.clone())?;
         reader.snapshot(|db| f(db))
     }
+    pub(crate) fn recent_gateway_requests(
+        &self,
+        client: &str,
+        at: i64,
+    ) -> Result<std::collections::BTreeMap<String, u64>> {
+        self.read(|store| store.recent_gateway_requests(client, at))
+    }
     pub fn maintain(&self) -> Result<()> {
         let result = self.query(|store| {
             store.compact(now())?;

@@ -56,8 +56,7 @@ type Edit = GatewayEdit;
 type Dialog =
   | {
       kind: "testing";
-      item?: Provider;
-      testKind?: "connection" | "fingerprint";
+      item: Provider;
     }
   | { kind: "grokImport" }
   | { kind: "dsh" }
@@ -414,13 +413,6 @@ function GatewayContent({
               导出
             </button>
           </div>
-          <button
-            className="secondary"
-            disabled={busy || !state.providers.length}
-            onClick={() => setDialog({ kind: "testing" })}
-          >
-            测试与检测
-          </button>
           <details className="row-menu">
             <summary aria-label="网关操作">
               <MoreHorizontal size={17} />
@@ -557,21 +549,23 @@ function GatewayContent({
                             setDialog({ kind: "testing", item: p })
                           }
                         >
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <circle cx="3" cy="12" r="2" />
+                            <path d="M5 12h3l3-6 3 12 3-6h2" />
+                            <circle cx="21" cy="12" r="2" />
+                          </svg>
                           连接测试
                         </button>
-                        {clientId === "codex" && !p.searchOnly && (
-                          <button
-                            onClick={() =>
-                              setDialog({
-                                kind: "testing",
-                                item: p,
-                                testKind: "fingerprint",
-                              })
-                            }
-                          >
-                            模型指纹测试
-                          </button>
-                        )}
                         <button
                           onClick={() =>
                             setDialog({ kind: "settings", item: p })
@@ -757,9 +751,11 @@ function GatewayContent({
       )}
       {dialog?.kind === "testing" && (
         <ProviderTesting
+          key={`${clientId}:${dialog.item.id}`}
           gateway={state}
-          provider={dialog.item}
-          initialKind={dialog.testKind}
+          provider={
+            state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item
+          }
           close={() => setDialog(null)}
         />
       )}

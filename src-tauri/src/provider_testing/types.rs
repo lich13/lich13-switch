@@ -32,6 +32,8 @@ pub struct Request {
     pub expected_revision: String,
     pub model: String,
     #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
     pub kind: Kind,
     #[serde(default = "one")]
     pub concurrency: usize,
@@ -62,6 +64,8 @@ pub struct Job {
     pub provider_id: String,
     pub provider_name: String,
     pub provider_version: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
     pub kind: Kind,
     pub mode: Mode,
     pub requested_model: String,
@@ -92,6 +96,16 @@ pub struct Output {
     pub text: String,
     pub groups: BTreeMap<usize, String>,
     pub diagnostics: Value,
+    pub error: Option<TestError>,
+    pub group_errors: BTreeMap<usize, TestError>,
+}
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestError {
+    pub http_status: Option<u16>,
+    pub message: String,
+    pub body: String,
+    pub truncated: bool,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,13 +113,7 @@ pub struct Detail {
     pub job: Job,
     pub output: Option<Output>,
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ProviderDetection {
-    pub enabled: Option<bool>,
-    pub model: Option<String>,
-}
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Detection {
     pub enabled: bool,
@@ -113,7 +121,7 @@ pub struct Detection {
     pub interval_minutes: u32,
     pub min_interval_minutes: u32,
     pub model: String,
-    pub providers: BTreeMap<String, ProviderDetection>,
+    pub endpoint: Option<String>,
 }
 impl Default for Detection {
     fn default() -> Self {
@@ -123,9 +131,16 @@ impl Default for Detection {
             interval_minutes: 15,
             min_interval_minutes: 5,
             model: super::DEFAULT_DETECTION_MODEL.into(),
-            providers: BTreeMap::new(),
+            endpoint: None,
         }
     }
+}
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DetectionTiming {
+    pub anchor_at: Option<i64>,
+    pub last_started_at: Option<i64>,
+    pub paused: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,7 +168,9 @@ pub struct SavedBank {
 pub struct Persisted {
     pub schema: u32,
     pub jobs: Vec<Job>,
-    pub detection: Detection,
+    pub detection: BTreeMap<String, Detection>,
+    pub detection_timing: BTreeMap<String, DetectionTiming>,
+    pub models: BTreeMap<String, Models>,
     pub degraded: BTreeMap<String, Degradation>,
     pub history: Vec<Job>,
     pub bank: SavedBank,
@@ -161,9 +178,11 @@ pub struct Persisted {
 impl Default for Persisted {
     fn default() -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             jobs: vec![],
-            detection: Detection::default(),
+            detection: BTreeMap::new(),
+            detection_timing: BTreeMap::new(),
+            models: BTreeMap::new(),
             degraded: BTreeMap::new(),
             history: vec![],
             bank: SavedBank::default(),
@@ -176,7 +195,8 @@ pub struct DetectionStatus {
     pub provider_id: String,
     pub status: String,
     pub model: String,
-    pub recent_requests: usize,
+    pub recent_requests: Option<u64>,
+    pub last_started_at: Option<i64>,
     pub interval_minutes: Option<u32>,
     pub next_at: Option<i64>,
     pub cooldown_until: Option<i64>,
@@ -194,17 +214,19 @@ pub struct State {
     pub bank: Value,
     pub error: Option<String>,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
     pub name: String,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Models {
     pub models: Vec<Model>,
     pub default_model: String,
-    pub stale: bool,
+    pub fetched_at: Option<i64>,
     pub error: Option<String>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<TestError>,
 }

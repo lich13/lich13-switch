@@ -217,7 +217,6 @@ struct Shared {
     registry: Arc<registry::Registry>,
     inner: Mutex<Inner>,
     lifecycle: tokio::sync::Mutex<()>,
-    business_activity: Mutex<HashMap<String, std::collections::VecDeque<i64>>>,
     clients: Mutex<HashMap<String, HttpClient>>,
     data: PathBuf,
     spool: storage::PrivateTempDir,
@@ -500,7 +499,6 @@ impl Gateway {
                 home: None,
             }),
             lifecycle: tokio::sync::Mutex::new(()),
-            business_activity: Mutex::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
             exchange: exchange::Service::default(),
@@ -2066,31 +2064,6 @@ impl Gateway {
                 s.error = Some("最近成功请求的 User-Agent 保存失败，请重试正常请求".into());
             }
         }
-    }
-    fn note_business_request(&self, provider: &str) {
-        let now = crate::usage::model::now();
-        let mut activity = locks::cache(&self.0.business_activity);
-        let times = activity.entry(provider.into()).or_default();
-        while times.front().is_some_and(|at| *at < now - 3_600_000) {
-            times.pop_front();
-        }
-        // Only the highest smart tier needs more than 120 calls; retain a bounded
-        // recent hour while preserving whether activity is still present.
-        if times.len() == 4096 {
-            times.pop_front();
-        }
-        times.push_back(now);
-    }
-    pub(crate) fn recent_business_requests(&self, provider: &str) -> usize {
-        let now = crate::usage::model::now();
-        let mut activity = locks::cache(&self.0.business_activity);
-        let Some(times) = activity.get_mut(provider) else {
-            return 0;
-        };
-        while times.front().is_some_and(|at| *at < now - 3_600_000) {
-            times.pop_front();
-        }
-        times.len()
     }
     fn route(&self, id: &str) -> Option<Route> {
         let mut s = self.request_state().ok()?;

@@ -676,6 +676,21 @@ impl Store {
             data_version: query::version(&self.connection)?,
         })
     }
+    pub(crate) fn recent_gateway_requests(
+        &self,
+        client: &str,
+        at: i64,
+    ) -> Result<BTreeMap<String, u64>> {
+        // A logical gateway record counts once, regardless of retry attempts or
+        // correlated client-session records. The existing time index bounds this read.
+        let sql = query::native_sql(&self.connection,
+            "SELECT r.provider,count(*) FROM records r WHERE r.client=? AND r.source='proxy' AND r.effective=1 AND r.time>? AND r.time<=? AND r.provider IS NOT NULL GROUP BY r.provider".into());
+        let mut stmt = db(self.connection.prepare(&sql))?;
+        let rows = db(stmt.query_map(params![client, at - 3_600_000, at], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        }))?;
+        db(rows.collect())
+    }
     pub fn dashboard(&self, f: &Filter) -> Result<Dashboard> {
         let _snapshot = self.read_snapshot()?;
         let key = query::overview_key(&self.connection, f)?;

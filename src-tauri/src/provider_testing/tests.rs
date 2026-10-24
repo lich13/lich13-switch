@@ -9,12 +9,72 @@ use std::{future::Future, time::Duration};
 fn fixture() -> (tempfile::TempDir, Service) {
     let dir = tempfile::tempdir().unwrap();
     let codex = Gateway::new(dir.path().join("codex")).unwrap();
+    codex.set_usage(crate::usage::Service::new(dir.path()));
     let claude = codex.companion(dir.path().join("claude")).unwrap();
     let grok = codex.grok_companion(dir.path().join("grok")).unwrap();
     let dsh = codex.dsh_companion(dir.path().join("dsh")).unwrap();
     let service = Service::new(dir.path(), [codex, claude, grok, dsh]).unwrap();
+    service
+        .0
+        .clock
+        .store(now(), std::sync::atomic::Ordering::SeqCst);
     (dir, service)
 }
+fn seed_catalog(service: &Service, id: &str, models: &[&str]) {
+    let endpoint = service
+        .gateway(ClientId::Codex)
+        .test_endpoint(id, None)
+        .unwrap();
+    let mut data = lock(&service.0.data);
+    let mut next = data.saved.clone();
+    next.models.insert(
+        Service::models_key(ClientId::Codex, id, &endpoint),
+        Models {
+            models: models
+                .iter()
+                .map(|id| Model {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                })
+                .collect(),
+            default_model: models[0].into(),
+            fetched_at: Some(service.now()),
+            ..Default::default()
+        },
+    );
+    service.save(&mut data, next).unwrap();
+}
+fn business_requests(service: &Service, provider: &str, count: usize, at: i64) {
+    use crate::usage::model::{Attempt, Record};
+    let records: Vec<_> = (0..120)
+        .map(|i| {
+            let time = at - if i < count { 1000 } else { 3_700_000 };
+            Record {
+                id: format!("fixture-{provider}-{i}"),
+                client: "codex".into(),
+                source: "proxy".into(),
+                started_at: time,
+                finished_at: Some(time),
+                completed: true,
+                attempts: vec![Attempt {
+                    id: format!("fixture-attempt-{i}"),
+                    provider: Some(provider.into()),
+                    started_at: time,
+                    status: Some(200),
+                    outcome: "success".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        })
+        .collect();
+    service
+        .gateway(ClientId::Codex)
+        .test_usage()
+        .query(|store| store.write_batch(&records, None))
+        .unwrap();
+}
+
 async fn server<F, Fut>(handler: F) -> u16
 where
     F: Fn(HttpRequest<Incoming>) -> Fut + Send + Sync + 'static,
@@ -71,6 +131,7 @@ fn request(service: &Service, client: ClientId, id: &str) -> Request {
         provider_id: id.into(),
         expected_revision: service.gateway(client).view().revision,
         model: "fixture-model".into(),
+        endpoint: None,
         kind: Kind::Connection,
         concurrency: 1,
     }
@@ -207,7 +268,11 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
             assert_eq!(seen[0].1["x-api-key"], "fixture-test-token");
             assert!(seen[0].1.contains_key("anthropic-version"));
         }
-        assert_eq!(service.gateway(client).recent_business_requests(&id), 0);
+        assert!(service
+            .gateway(ClientId::Codex)
+            .detection_request_counts(service.now())
+            .unwrap()
+            .is_empty());
         let saved = std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap();
         assert!(!saved.contains("fixture private output"));
         assert!(!saved.contains("fixture-test-token"));
@@ -216,18 +281,29 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
     }
 }
 #[tokio::test]
-async fn catalog_ignores_route_whitelist_filters_media_and_forces_refresh() {
-    let mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let switch = mode.clone();
-    let port=server(move |request| { let switch=switch.clone(); async move {
-        assert!(request.uri().path().ends_with("/models")); assert_eq!(request.headers()["user-agent"],"fixture-business/1.0 exact  UA");
-        if switch.load(std::sync::atomic::Ordering::Relaxed) { response(503,"application/json","{}") }
-        else { response(200,"application/json",r#"{"models":[{"slug":"fixture-model"},{"slug":"fixture-other"},{"slug":"fixture-image"}]}"#) }
+async fn catalog_is_manual_persistent_and_keeps_previous_success_on_failure() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = calls.clone();
+    let port = server(move |request| { let hits = hits.clone(); async move {
+        assert!(request.uri().path().ends_with("/models"));
+        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match n {
+            0 => response(200, "application/json", r#"{"models":[{"slug":"fixture-model"},{"slug":"fixture-other"},{"slug":"fixture-image"}]}"#),
+            1 => response(503, "text/plain", "fixture directory unavailable"),
+            _ => response(200, "application/json", r#"{"data":[]}"#),
+        }
     }}).await;
     let (dir, service) = fixture();
     let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
-    ua(&service, ClientId::Codex);
     let gateway = service.gateway(ClientId::Codex);
+    assert!(service
+        .models(ClientId::Codex, &id, &gateway.view().revision, None, false)
+        .await
+        .unwrap()
+        .models
+        .is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    ua(&service, ClientId::Codex);
     gateway
         .edit(
             Edit::ModelsProvider {
@@ -239,33 +315,56 @@ async fn catalog_ignores_route_whitelist_filters_media_and_forces_refresh() {
         )
         .unwrap();
     let models = service
-        .models(ClientId::Codex, &id, &gateway.view().revision, false)
+        .models(ClientId::Codex, &id, &gateway.view().revision, None, true)
         .await
         .unwrap();
     assert_eq!(models.models.len(), 2);
-    mode.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        !service
-            .models(ClientId::Codex, &id, &gateway.view().revision, false)
+    let reloaded = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    assert_eq!(
+        reloaded
+            .models(ClientId::Codex, &id, &gateway.view().revision, None, false)
             .await
             .unwrap()
-            .stale
+            .models
+            .len(),
+        2
     );
-    // Explicit refresh bypasses the still-fresh cache, preserving it on failure.
-    assert!(
-        service
-            .models(ClientId::Codex, &id, &gateway.view().revision, true)
-            .await
-            .unwrap()
-            .stale
-    );
-    for (at, _) in lock(&service.0.data).models.values_mut() {
-        *at = Instant::now() - Duration::from_secs(301);
-    }
-    assert!(service
-        .models(ClientId::Codex, &id, &gateway.view().revision, true)
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let failed = reloaded
+        .models(ClientId::Codex, &id, &gateway.view().revision, None, true)
         .await
-        .is_err());
+        .unwrap();
+    assert_eq!(failed.models.len(), 2);
+    assert!(failed.error.is_some());
+    assert_eq!(
+        failed.error_detail.unwrap().body,
+        "fixture directory unavailable"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let saved = std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap();
+    assert!(!saved.contains("fixture directory unavailable"));
+    assert!(reloaded
+        .models(ClientId::Codex, &id, &gateway.view().revision, None, false)
+        .await
+        .unwrap()
+        .error
+        .is_none());
+    let empty = reloaded
+        .models(ClientId::Codex, &id, &gateway.view().revision, None, true)
+        .await
+        .unwrap();
+    assert!(empty.error.is_none());
+    assert!(empty.models.is_empty());
+    assert!(empty.default_model.is_empty());
+    assert!(empty.fetched_at.is_some());
+    let restarted = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    assert!(restarted
+        .models(ClientId::Codex, &id, &gateway.view().revision, None, false)
+        .await
+        .unwrap()
+        .models
+        .is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
 }
 #[tokio::test]
 async fn cancellation_restart_retires_appointments_and_preserves_history() {
@@ -289,18 +388,19 @@ async fn cancellation_restart_retires_appointments_and_preserves_history() {
     saved["jobs"][0]["canRetry"] = json!(true);
     saved["jobs"][0]["mode"] = json!("image");
     saved["schedules"] = json!([{"id":"fixture-pending","at":0,"status":"pending","providers":[{"clientId":"codex","providerId":id,"providerVersion":"fixture","model":"fixture"}]}]);
-    saved["detection"]["intervalMinutes"] = json!(25);
+    saved["schema"] = json!(1);
+    saved["detection"] = json!({"intervalMinutes":25});
     saved["history"] = json!([saved["jobs"][0].clone()]);
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let reloaded = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
-    let state = reloaded.state();
+    let state = reloaded.state(ClientId::Codex, &id).unwrap();
     assert_eq!(state.jobs[0].status, "interrupted");
     assert_eq!(state.jobs[0].mode, Mode::Image);
     assert!(!state.jobs[0].can_retry);
     assert_eq!(state.detection.interval_minutes, 25);
     assert_eq!(state.history.len(), 1);
     reloaded.tick(now(), false).unwrap();
-    assert_eq!(reloaded.state().jobs.len(), 1);
+    assert_eq!(reloaded.state(ClientId::Codex, &id).unwrap().jobs.len(), 1);
     let migrated: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert!(migrated.get("schedules").is_none());
     assert_eq!(migrated["bank"], saved["bank"]);
@@ -311,28 +411,39 @@ fn smart_tiers_config_versions_and_corrupt_bank_fallback() {
     for (count, want) in [
         (0, None),
         (1, Some(30)),
+        (2, Some(30)),
         (3, Some(25)),
+        (9, Some(25)),
         (10, Some(20)),
+        (29, Some(20)),
         (30, Some(15)),
+        (59, Some(15)),
         (60, Some(10)),
+        (119, Some(10)),
         (120, Some(5)),
     ] {
         assert_eq!(scheduler::smart_interval(count, 5), want);
+        assert_eq!(
+            scheduler::smart_interval(count, 17),
+            want.map(|v| v.max(17))
+        );
     }
     assert_eq!(scheduler::smart_interval(1000, 20), Some(20));
-    let (_dir, service) = fixture();
-    let state = service.state();
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    seed_catalog(&service, &id, &[DEFAULT_DETECTION_MODEL]);
+    let state = service.state(ClientId::Codex, &id).unwrap();
     assert!(!state.detection.enabled);
     assert_eq!(state.detection.mode, "smart");
     let mut config = state.detection;
-    config.interval_minutes = 4;
+    config.interval_minutes = 0;
     assert!(service
-        .set_detection(config.clone(), &state.revision)
+        .set_detection(&id, config.clone(), &state.revision)
         .is_err());
     config.interval_minutes = 15;
     config.enabled = true;
-    service.set_detection(config, &state.revision).unwrap();
-    assert!(service.clear_mark("fixture", &state.revision).is_err());
+    service.set_detection(&id, config, &state.revision).unwrap();
+    assert!(service.clear_mark(&id, &state.revision).is_err());
     let bad = SavedBank {
         data: Some(json!({"invalid":true})),
         version: Some(json!({"revision":"fixture"})),
@@ -374,6 +485,7 @@ fn fingerprint_request(service: &Service, id: &str, concurrency: usize) -> Reque
     request.kind = Kind::Fingerprint;
     request.model = "gpt-6-sol".into();
     request.concurrency = concurrency;
+    seed_catalog(service, id, &[&request.model]);
     request
 }
 #[tokio::test]
@@ -431,11 +543,19 @@ async fn fingerprint_stops_at_real_99_threshold_and_concurrency_is_one_to_three(
                 );
             }
         }
-        assert!(service.state().degraded.is_empty());
+        assert!(service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .degraded
+            .is_empty());
         assert_eq!(
             service
                 .gateway(ClientId::Codex)
-                .recent_business_requests(&id),
+                .detection_request_counts(service.now())
+                .unwrap()
+                .get(&id)
+                .copied()
+                .unwrap_or(0),
             0
         );
     }
@@ -501,14 +621,30 @@ async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
         .start(fingerprint_request(&service, &id, 1))
         .unwrap();
     completed(&service, &manual.id).await;
-    assert!(service.state().degraded.is_empty());
+    assert!(service
+        .state(ClientId::Codex, &id)
+        .unwrap()
+        .degraded
+        .is_empty());
     assert!(gateway.test_candidates().unwrap()[0].queued);
-    let state = service.state();
+    let state = service.state(ClientId::Codex, &id).unwrap();
     let mut detection = state.detection;
     detection.enabled = true;
-    service.set_detection(detection, &state.revision).unwrap();
+    detection.mode = "fixed".into();
+    detection.model = "gpt-6-sol".into();
+    detection.interval_minutes = 1;
+    seed_catalog(&service, &id, &[DEFAULT_DETECTION_MODEL, "gpt-6-sol"]);
+    service
+        .set_detection(&id, detection, &state.revision)
+        .unwrap();
+    lock(&service.0.data)
+        .saved
+        .detection_timing
+        .get_mut(&id)
+        .unwrap()
+        .anchor_at = Some(service.now() - 60_000);
     let job = service
-        .start_job(fingerprint_request(&service, &id, 1), true, None)
+        .start_job(fingerprint_request(&service, &id, 1), true)
         .unwrap();
     let result = completed(&service, &job.id).await;
     assert_eq!(
@@ -520,7 +656,7 @@ async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
         1
     );
     assert!(!gateway.test_candidates().unwrap()[0].queued);
-    let state = service.state();
+    let state = service.state(ClientId::Codex, &id).unwrap();
     assert!(state.degraded[&id].queue_removed);
     assert_eq!(state.history.len(), 1);
     {
@@ -533,7 +669,11 @@ async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
     assert!(service.detail(&job.id).unwrap().output.is_none());
     service.clear_mark(&id, &state.revision).unwrap();
     assert!(!gateway.test_candidates().unwrap()[0].queued);
-    assert!(service.state().degraded.is_empty());
+    assert!(service
+        .state(ClientId::Codex, &id)
+        .unwrap()
+        .degraded
+        .is_empty());
     let manual = service
         .start(fingerprint_request(&service, &id, 1))
         .unwrap();
@@ -544,7 +684,7 @@ async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
     assert!(!gateway.test_candidates().unwrap()[0].queued);
 }
 #[tokio::test]
-async fn batches_deduplicate_providers_and_stop_without_dispatch() {
+async fn a_provider_has_one_job_and_queued_cancellation_does_not_dispatch() {
     let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = hits.clone();
     let port = server(move |_| {
@@ -560,11 +700,10 @@ async fn batches_deduplicate_providers_and_stop_without_dispatch() {
     ua(&service, ClientId::Codex);
     let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
     let request = request(&service, ClientId::Codex, &id);
-    let batch = service.batch(vec![request.clone(), request]).unwrap();
-    assert_eq!(batch["jobs"].as_array().unwrap().len(), 1);
-    service.cancel_batch(batch["id"].as_str().unwrap()).unwrap();
-    let job = batch["jobs"][0]["id"].as_str().unwrap();
-    assert_eq!(completed(&service, job).await.job.status, "cancelled");
+    let job = service.start(request.clone()).unwrap();
+    assert!(service.start(request).is_err());
+    service.cancel(&job.id).unwrap();
+    assert_eq!(completed(&service, &job.id).await.job.status, "cancelled");
     drop(permit);
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -584,29 +723,49 @@ async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
             dir.path(),
         )
         .unwrap();
-    let state = service.state();
+    seed_catalog(&service, &id, &[DEFAULT_DETECTION_MODEL]);
+    let state = service.state(ClientId::Codex, &id).unwrap();
     let mut detection = state.detection;
     detection.enabled = true;
     service
-        .set_detection(detection.clone(), &state.revision)
+        .set_detection(&id, detection.clone(), &state.revision)
         .unwrap();
-    let at = now();
+    let at = service.now();
     service.tick(at, false).unwrap();
-    assert_eq!(service.state().detection_status[0].status, "idle");
+    assert_eq!(
+        service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .detection_status[0]
+            .status,
+        "idle"
+    );
     detection.mode = "fixed".into();
     detection.interval_minutes = 5;
     service
-        .set_detection(detection, &service.state().revision)
+        .set_detection(
+            &id,
+            detection,
+            &service.state(ClientId::Codex, &id).unwrap().revision,
+        )
         .unwrap();
     service.tick(at, false).unwrap();
     assert_eq!(
-        service.state().detection_status[0].next_at,
+        service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .detection_status[0]
+            .next_at,
         Some(at + 300_000)
     );
     service.tick(at + 3_600_000, true).unwrap();
-    assert!(service.state().jobs.is_empty());
+    assert!(service.state(ClientId::Codex, &id).unwrap().jobs.is_empty());
     assert_eq!(
-        service.state().detection_status[0].next_at,
+        service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .detection_status[0]
+            .next_at,
         Some(at + 3_900_000)
     );
     gateway
@@ -620,7 +779,7 @@ async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
         )
         .unwrap();
     service.tick(at + 3_900_000, false).unwrap();
-    assert!(service.state().jobs.is_empty());
+    assert!(service.state(ClientId::Codex, &id).unwrap().jobs.is_empty());
     gateway
         .edit(
             Edit::QueueProvider {
@@ -633,12 +792,18 @@ async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
         .unwrap();
     service.tick(at + 4_200_000, false).unwrap();
     assert_eq!(
-        service.state().detection_status[0].next_at,
+        service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .detection_status[0]
+            .next_at,
         Some(at + 4_500_000)
     );
     let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
     service.tick(at + 4_500_000, false).unwrap();
-    let idjob = service.state().jobs[0].id.clone();
+    let idjob = service.state(ClientId::Codex, &id).unwrap().jobs[0]
+        .id
+        .clone();
     gateway
         .edit(
             Edit::QueueProvider {
@@ -698,14 +863,22 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
         detail.job.returned_model.as_deref(),
         Some("fixture-returned")
     );
-    assert_eq!(gateway.recent_business_requests(&id), 0);
+    assert_eq!(
+        gateway
+            .detection_request_counts(now())
+            .unwrap()
+            .get(&id)
+            .copied()
+            .unwrap_or(0),
+        0
+    );
     assert!(service
         .start(fingerprint_request(&service, &id, 1))
         .is_err());
 }
 
 #[tokio::test]
-async fn batch_defaults_use_each_provider_catalog_and_missing_catalog_uses_platform_default() {
+async fn defaults_use_each_provider_catalog_and_missing_catalog_uses_platform_default() {
     let (dir, service) = fixture();
     ua(&service, ClientId::Codex);
     let mut ids = vec![];
@@ -740,26 +913,20 @@ async fn batch_defaults_use_each_provider_catalog_and_missing_catalog_uses_platf
                 ClientId::Codex,
                 id,
                 &service.gateway(ClientId::Codex).view().revision,
-                false,
+                None,
+                true,
             )
             .await
             .unwrap();
     }
-    let requests = ids
-        .iter()
-        .map(|id| {
-            let mut r = request(&service, ClientId::Codex, id);
-            r.model.clear();
-            r
-        })
-        .collect();
-    let batch = service.batch(requests).unwrap();
-    for (i, name) in ["fixture-alpha", "fixture-beta"].iter().enumerate() {
-        assert_eq!(batch["jobs"][i]["requestedModel"], *name);
-        let id = batch["jobs"][i]["id"].as_str().unwrap();
-        assert_eq!(completed(&service, id).await.job.status, "completed");
+    for (id, name) in ids.iter().zip(["fixture-alpha", "fixture-beta"]) {
+        let mut r = request(&service, ClientId::Codex, id);
+        r.model.clear();
+        let job = service.start(r).unwrap();
+        assert_eq!(job.requested_model, name);
+        assert_eq!(completed(&service, &job.id).await.job.status, "completed");
     }
-    lock(&service.0.data).models.clear();
+    lock(&service.0.data).saved.models.clear();
     let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
     let mut r = request(&service, ClientId::Codex, &ids[0]);
     r.model.clear();
@@ -807,4 +974,586 @@ fn retired_connection_options_are_not_accepted_by_the_request_contract() {
         value_with_retired_option[field] = value;
         assert!(serde_json::from_value::<Request>(value_with_retired_option).is_err());
     }
+}
+
+fn enable_detection(service: &Service, home: &Path, id: &str, mode: &str, minimum: u32) {
+    let gateway = service.gateway(ClientId::Codex);
+    gateway
+        .edit(
+            Edit::QueueProvider {
+                id: id.into(),
+                queued: true,
+            },
+            &gateway.view().revision,
+            home,
+        )
+        .unwrap();
+    seed_catalog(service, id, &["gpt-6-sol"]);
+    let state = service.state(ClientId::Codex, id).unwrap();
+    service
+        .set_detection(
+            id,
+            Detection {
+                enabled: true,
+                mode: mode.into(),
+                model: "gpt-6-sol".into(),
+                interval_minutes: 1,
+                min_interval_minutes: minimum,
+                ..Default::default()
+            },
+            &state.revision,
+        )
+        .unwrap();
+}
+fn status(service: &Service, id: &str) -> DetectionStatus {
+    service.state(ClientId::Codex, id).unwrap().detection_status[0].clone()
+}
+#[tokio::test]
+async fn smart_schedule_is_independent_durable_and_sampling_does_not_move_deadlines() {
+    let (dir, service) = fixture();
+    let a = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    let b = add(&service, dir.path(), ClientId::Codex, 2, "responses");
+    let at = service.now();
+    ua(&service, ClientId::Codex);
+    business_requests(&service, &a, 1, at);
+    business_requests(&service, &b, 120, at);
+    enable_detection(&service, dir.path(), &a, "smart", 5);
+    enable_detection(&service, dir.path(), &b, "smart", 17);
+    service.tick(at, false).unwrap();
+    assert_eq!(status(&service, &a).recent_requests, Some(1));
+    assert_eq!(status(&service, &a).interval_minutes, Some(30));
+    assert_eq!(status(&service, &a).next_at, Some(at + 1_800_000));
+    assert_eq!(status(&service, &b).recent_requests, Some(120));
+    assert_eq!(status(&service, &b).interval_minutes, Some(17));
+    let b_version = service.state(ClientId::Codex, &b).unwrap().revision;
+    let b_due = status(&service, &b).next_at;
+    let a_version = service.state(ClientId::Codex, &a).unwrap().revision;
+    business_requests(&service, &a, 65, at + 60_000);
+    service.tick(at + 60_000, false).unwrap();
+    assert_eq!(status(&service, &a).interval_minutes, Some(10));
+    assert_eq!(status(&service, &a).next_at, Some(at + 600_000));
+    assert_eq!(
+        service.state(ClientId::Codex, &a).unwrap().revision,
+        a_version
+    );
+    let mut config = service.state(ClientId::Codex, &a).unwrap().detection;
+    config.min_interval_minutes = 20;
+    service.set_detection(&a, config, &a_version).unwrap();
+    service.tick(at + 61_000, false).unwrap();
+    assert_eq!(status(&service, &a).next_at, Some(at + 1_200_000));
+    assert_eq!(status(&service, &b).next_at, b_due);
+    assert_eq!(
+        service.state(ClientId::Codex, &b).unwrap().revision,
+        b_version
+    );
+    let restored = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    restored.tick(at + 62_000, false).unwrap();
+    assert_eq!(status(&restored, &a).next_at, Some(at + 1_200_000));
+    assert_eq!(status(&restored, &a).recent_requests, Some(65));
+    assert_eq!(status(&restored, &b).next_at, b_due);
+    business_requests(&restored, &a, 0, at + 122_000);
+    restored.tick(at + 122_000, false).unwrap();
+    assert_eq!(status(&restored, &a).status, "idle");
+    assert_eq!(status(&restored, &a).next_at, None);
+    business_requests(&restored, &a, 3, at + 182_000);
+    restored.tick(at + 182_000, false).unwrap();
+    assert_eq!(
+        status(&restored, &a).next_at,
+        Some(at + 182_000 + 1_500_000)
+    );
+}
+#[tokio::test]
+async fn queued_smart_work_rechecks_calls_before_dispatch_without_using_cooldown() {
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    ua(&service, ClientId::Codex);
+    let at = service.now();
+    business_requests(&service, &id, 120, at);
+    enable_detection(&service, dir.path(), &id, "smart", 5);
+    let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+    service.tick(at + 300_000, false).unwrap();
+    let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+    assert_eq!(job.status, "queued");
+    business_requests(&service, &id, 0, at + 300_000);
+    drop(permit);
+    let result = completed(&service, &job.id).await;
+    assert_eq!(result.job.status, "cancelled");
+    assert!(result.job.started_at.is_none());
+    assert!(lock(&service.0.data).saved.detection_timing[&id]
+        .last_started_at
+        .is_none());
+    service.tick(at + 301_000, false).unwrap();
+    assert_eq!(status(&service, &id).status, "idle");
+}
+#[tokio::test]
+async fn started_work_survives_idle_sampling_and_cooldown_uses_start_not_completion() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let incoming = entered.clone();
+    let gate = release.clone();
+    let port = server(move |r| {
+        let incoming = incoming.clone();
+        let gate = gate.clone();
+        async move {
+            let _ = r.into_body().collect().await;
+            incoming.notify_one();
+            gate.notified().await;
+            fingerprint_response(&sample("above_99", 0))
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let at = service.now();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    business_requests(&service, &id, 120, at);
+    enable_detection(&service, dir.path(), &id, "smart", 5);
+    service.tick(at + 300_000, false).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+    assert_eq!(job.started_at, Some(at + 300_000));
+    business_requests(&service, &id, 0, at + 420_000);
+    service.tick(at + 420_000, false).unwrap();
+    assert_eq!(service.detail(&job.id).unwrap().job.status, "running");
+    assert_eq!(status(&service, &id).cooldown_until, Some(at + 600_000));
+    release.notify_one();
+    let ended = completed(&service, &job.id).await;
+    assert_eq!(ended.job.status, "completed");
+    assert_eq!(
+        lock(&service.0.data).saved.detection_timing[&id].anchor_at,
+        ended.job.completed_at
+    );
+    assert_eq!(
+        lock(&service.0.data).saved.detection_timing[&id].last_started_at,
+        job.started_at
+    );
+    let restored = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    restored.tick(at + 421_000, false).unwrap();
+    assert_eq!(status(&restored, &id).cooldown_until, Some(at + 600_000));
+    assert_eq!(status(&restored, &id).status, "idle");
+}
+#[tokio::test]
+async fn fixed_period_below_five_minutes_still_obeys_dispatch_cooldown() {
+    let port = server(|r| async {
+        let _ = r.into_body().collect().await;
+        fingerprint_response(&sample("above_99", 0))
+    })
+    .await;
+    let (dir, service) = fixture();
+    let at = service.now();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    enable_detection(&service, dir.path(), &id, "fixed", 5);
+    service.tick(at + 60_000, false).unwrap();
+    let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+    assert_eq!(completed(&service, &job.id).await.job.status, "completed");
+    service.tick(at + 120_000, false).unwrap();
+    assert_eq!(status(&service, &id).next_at, Some(at + 360_000));
+    assert_eq!(service.state(ClientId::Codex, &id).unwrap().jobs.len(), 1);
+    let state = service.state(ClientId::Codex, &id).unwrap();
+    let mut config = state.detection;
+    config.interval_minutes = 10;
+    service
+        .set_detection(&id, config.clone(), &state.revision)
+        .unwrap();
+    service.tick(at + 121_000, false).unwrap();
+    assert_eq!(status(&service, &id).next_at, Some(at + 660_000));
+    config.interval_minutes = 1;
+    let revision = service.state(ClientId::Codex, &id).unwrap().revision;
+    service.set_detection(&id, config, &revision).unwrap();
+    service.tick(at + 122_000, false).unwrap();
+    assert_eq!(status(&service, &id).next_at, Some(at + 360_000));
+    let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+    service.tick(at + 359_999, false).unwrap();
+    assert_eq!(service.state(ClientId::Codex, &id).unwrap().jobs.len(), 1);
+    service.tick(at + 360_000, false).unwrap();
+    let next = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+    assert_ne!(next.id, job.id);
+    service.cancel(&next.id).unwrap();
+    completed(&service, &next.id).await;
+    drop(permit);
+}
+#[tokio::test]
+async fn statistics_failure_is_not_zero_and_never_dispatches() {
+    let (dir, service) = fixture();
+    let at = service.now();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    enable_detection(&service, dir.path(), &id, "smart", 5);
+    let connection = rusqlite::Connection::open(dir.path().join("usage/usage.sqlite")).unwrap();
+    let kind: String = connection
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name='records'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch(&format!(
+            "DROP {} records",
+            if kind == "view" { "VIEW" } else { "TABLE" }
+        ))
+        .unwrap();
+    service.tick(at + 600_000, false).unwrap();
+    let status = status(&service, &id);
+    assert_eq!(status.status, "statsUnavailable");
+    assert!(status.recent_requests.is_none());
+    assert!(status.next_at.is_none());
+    assert!(status.error.unwrap().contains("用量数据库操作失败"));
+    assert!(service.state(ClientId::Codex, &id).unwrap().jobs.is_empty());
+}
+#[tokio::test]
+async fn independent_migration_preserves_effective_controls_and_does_not_enable_new_providers() {
+    let (dir, service) = fixture();
+    let a = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    let b = add(&service, dir.path(), ClientId::Codex, 2, "responses");
+    let path = dir.path().join("provider-tests.json");
+    let old = json!({"schema":1,"detection":{"enabled":true,"mode":"fixed","intervalMinutes":25,"minIntervalMinutes":12,"model":"fixture-global","providers":{a.clone():{"enabled":false,"model":"fixture-local"}}},"jobs":[],"history":[],"bank":{},"degraded":{}});
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let restored = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    let first = restored.state(ClientId::Codex, &a).unwrap().detection;
+    let second = restored.state(ClientId::Codex, &b).unwrap().detection;
+    assert!(!first.enabled);
+    assert_eq!(first.model, "fixture-local");
+    assert!(second.enabled);
+    assert_eq!(second.interval_minutes, 25);
+    assert_eq!(second.min_interval_minutes, 12);
+    restored.tick(restored.now(), false).unwrap();
+    assert!(restored.state(ClientId::Codex, &b).unwrap().jobs.is_empty());
+    let c = add(&restored, dir.path(), ClientId::Codex, 3, "responses");
+    assert!(
+        !restored
+            .state(ClientId::Codex, &c)
+            .unwrap()
+            .detection
+            .enabled
+    );
+    let again = Service::new(dir.path(), restored.0.gateways.clone()).unwrap();
+    assert!(!again.state(ClientId::Codex, &c).unwrap().detection.enabled);
+    let mut disabled = second;
+    disabled.enabled = false;
+    again
+        .set_detection(
+            &b,
+            disabled,
+            &again.state(ClientId::Codex, &b).unwrap().revision,
+        )
+        .unwrap();
+    let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(raw["schema"], 2);
+    assert_eq!(raw["bank"], json!(SavedBank::default()));
+}
+#[tokio::test]
+async fn endpoint_selection_is_fixed_and_catalogs_are_isolated() {
+    let primary = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = primary.clone();
+    let primary_port = server(move |_| {
+        let hits = hits.clone();
+        async move {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            response(
+                200,
+                "application/json",
+                r#"{"data":[{"id":"fixture-primary"}]}"#,
+            )
+        }
+    })
+    .await;
+    let auxiliary = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = auxiliary.clone();
+    let auxiliary_port = server(move |r| {
+        let hits = hits.clone();
+        async move {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if r.uri().path().ends_with("/models") {
+                response(
+                    200,
+                    "application/json",
+                    r#"{"data":[{"id":"fixture-auxiliary"}]}"#,
+                )
+            } else {
+                response(
+                    503,
+                    "application/json",
+                    r#"{"error":{"message":"fixture auxiliary failed"}}"#,
+                )
+            }
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(
+        &service,
+        dir.path(),
+        ClientId::Codex,
+        primary_port,
+        "responses",
+    );
+    ua(&service, ClientId::Codex);
+    let gateway = service.gateway(ClientId::Codex);
+    let endpoint = format!("http://127.0.0.1:{auxiliary_port}/deployment/v1");
+    gateway
+        .edit(
+            serde_json::from_value(json!({"op":"endpointsProvider","id":id,"baseUrls":[endpoint]}))
+                .unwrap(),
+            &gateway.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+    let before = gateway.view().revision;
+    let a = service
+        .models(ClientId::Codex, &id, &before, None, true)
+        .await
+        .unwrap();
+    let b = service
+        .models(ClientId::Codex, &id, &before, Some(&endpoint), true)
+        .await
+        .unwrap();
+    assert_eq!(a.default_model, "fixture-primary");
+    assert_eq!(b.default_model, "fixture-auxiliary");
+    let mut request = request(&service, ClientId::Codex, &id);
+    request.model.clear();
+    request.endpoint = Some(endpoint.clone());
+    let job = service.start(request.clone()).unwrap();
+    assert_eq!(job.requested_model, "fixture-auxiliary");
+    assert_eq!(job.endpoint, Some(endpoint.clone()));
+    let result = completed(&service, &job.id).await;
+    assert_eq!(result.job.status, "failed");
+    assert!(result
+        .output
+        .unwrap()
+        .error
+        .unwrap()
+        .body
+        .contains("fixture auxiliary failed"));
+    assert_eq!(primary.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(auxiliary.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(gateway.view().revision, before);
+    request.endpoint = Some("http://127.0.0.1:1/unconfigured".into());
+    assert!(service
+        .start(request.clone())
+        .err()
+        .unwrap()
+        .message
+        .contains("未配置"));
+    let cached = service
+        .models(ClientId::Codex, &id, &before, None, false)
+        .await
+        .unwrap();
+    assert_eq!(cached.default_model, "fixture-primary");
+    let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+    request.endpoint = Some(endpoint);
+    let queued = service.start(request).unwrap();
+    gateway
+        .edit(
+            Edit::EndpointsProvider {
+                id: id.clone(),
+                base_urls: vec![],
+            },
+            &gateway.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+    drop(permit);
+    let stopped = completed(&service, &queued.id).await;
+    assert!(stopped.job.started_at.is_none());
+    assert!(stopped.job.error.unwrap().contains("未配置"));
+    assert_eq!(primary.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(auxiliary.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+#[tokio::test]
+async fn connection_errors_keep_complete_body_for_all_protocols_and_do_not_persist_it() {
+    for (client, protocol, status, mime, body) in [
+        (ClientId::Codex, "responses", 400, "application/json", json!({"error":{"message":format!("fixture detail {} end-marker fixture-test-token", "x".repeat(40_000)),"code":"bad_model","api_key":"fixture-secret"}}).to_string()),
+        (ClientId::Claude, "messages", 200, "text/event-stream", "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"fixture messages failure end-marker\"}}\n\n".into()),
+        (ClientId::Grok, "chat_completions", 503, "text/html", "<h1>fixture upstream failed end-marker</h1>".into()),
+        (ClientId::Dsh, "chat_completions", 200, "application/json", "{\"error\":{\"message\":\"fixture embedded failure end-marker\"}}".into()),
+    ] {
+        let port = server(move |_| { let body = body.clone(); async move { response(status, mime, body) }}).await;
+        let (dir, service) = fixture(); let id = add(&service, dir.path(), client, port, protocol); ua(&service, client);
+        let job = service.start(request(&service, client, &id)).unwrap();
+        let done = completed(&service, &job.id).await;
+        assert_eq!(done.job.status, "failed");
+        let detail = done.output.unwrap().error.unwrap();
+        assert_eq!(detail.http_status, Some(status)); assert!(detail.body.contains("end-marker")); assert!(!detail.truncated);
+        assert!(!detail.body.contains("fixture-test-token")); assert!(!detail.body.contains("fixture-secret"));
+        let saved = std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap(); assert!(!saved.contains("end-marker"));
+    }
+}
+#[tokio::test]
+async fn interrupted_response_keeps_network_reason_and_redacted_partial_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![];
+            loop {
+                let mut chunk = [0; 4096];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")?
+                                .trim()
+                                .parse::<usize>()
+                                .ok()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"error\":\"fixture partial fixture-test-token").await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    seed_catalog(&service, &id, &["fixture-model"]);
+    let models = service
+        .models(
+            ClientId::Codex,
+            &id,
+            &service.gateway(ClientId::Codex).view().revision,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(models.models[0].id, "fixture-model");
+    let job = service
+        .start(request(&service, ClientId::Codex, &id))
+        .unwrap();
+    let done = completed(&service, &job.id).await;
+    assert_eq!(done.job.status, "failed");
+    for detail in [
+        models.error_detail.unwrap(),
+        done.output.unwrap().error.unwrap(),
+    ] {
+        assert_eq!(detail.http_status, Some(200));
+        assert!(detail.truncated);
+        assert!(detail.message.contains("body"));
+        assert!(detail.body.contains("fixture partial"));
+        assert!(!detail.body.contains("fixture-test-token"));
+    }
+    server.await.unwrap();
+    assert!(
+        !std::fs::read_to_string(dir.path().join("provider-tests.json"))
+            .unwrap()
+            .contains("fixture partial")
+    );
+}
+#[tokio::test]
+async fn fingerprint_errors_retain_plain_http_and_stream_errors_per_group() {
+    for (status, mime, body) in [
+        (401, "text/plain", format!("fixture authentication {} end-marker fixture-test-token", "x".repeat(40_000))),
+        (200, "text/event-stream", "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_api_key\",\"message\":\"fixture embedded end-marker\"}}}\n\n".into()),
+        (200, "text/html", "<h1>fixture failure end-marker</h1>".into()),
+        (200, "text/event-stream", "data: fixture malformed event end-marker\n\n".into()),
+    ] {
+        let port = server(move |_| { let body = body.clone(); async move { response(status, mime, body) }}).await;
+        let (dir, service) = fixture(); let id = add(&service, dir.path(), ClientId::Codex, port, "responses"); ua(&service, ClientId::Codex);
+        let job = service.start(fingerprint_request(&service, &id, 1)).unwrap(); let done = completed(&service, &job.id).await;
+        assert_eq!(done.job.status, "failed");
+        let output = done.output.unwrap();
+        assert_eq!(output.group_errors.len(), 3);
+        for detail in output.group_errors.values() { assert_eq!(detail.http_status, Some(status)); assert!(detail.body.contains("end-marker")); assert!(!detail.body.contains("fixture-test-token")); }
+        assert!(!std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap().contains("end-marker"));
+    }
+}
+#[tokio::test]
+async fn manual_detection_changes_prevent_old_automatic_disposition() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let incoming = entered.clone();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let wait = gate.clone();
+    let port = server(move |_| {
+        let incoming = incoming.clone();
+        let wait = wait.clone();
+        async move {
+            incoming.notify_one();
+            wait.notified().await;
+            fingerprint_response(&sample("automatic_first_group", 0))
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let at = service.now();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    enable_detection(&service, dir.path(), &id, "fixed", 5);
+    service.tick(at + 60_000, false).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let state = service.state(ClientId::Codex, &id).unwrap();
+    let job = state.jobs[0].clone();
+    let mut detection = state.detection;
+    detection.enabled = false;
+    service
+        .set_detection(&id, detection, &state.revision)
+        .unwrap();
+    gate.notify_waiters();
+    let result = completed(&service, &job.id).await;
+    assert_eq!(result.job.status, "cancelled");
+    assert!(service
+        .state(ClientId::Codex, &id)
+        .unwrap()
+        .degraded
+        .is_empty());
+    assert!(service.gateway(ClientId::Codex).test_candidates().unwrap()[0].queued);
+}
+#[tokio::test]
+async fn aggregate_downgrade_is_guarded_and_marked_providers_never_recheck() {
+    let (dir, service) = fixture();
+    let at = service.now();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    ua(&service, ClientId::Codex);
+    enable_detection(&service, dir.path(), &id, "fixed", 5);
+    let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+    service.tick(at + 60_000, false).unwrap();
+    let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+    let report = modeltrace::analyze(
+        &[sample("automatic_first_group", 0)],
+        &modeltrace::bundled().unwrap(),
+    )
+    .unwrap();
+    service
+        .update(&job.id, |job, _| {
+            job.groups[0].report = None;
+            job.report = Some(report);
+        })
+        .unwrap();
+    service.apply_degradation(&job.id);
+    assert!(service.state(ClientId::Codex, &id).unwrap().degraded[&id].queue_removed);
+    service.cancel(&job.id).unwrap();
+    completed(&service, &job.id).await;
+    drop(permit);
+    let gateway = service.gateway(ClientId::Codex);
+    gateway
+        .edit(
+            Edit::QueueProvider {
+                id: id.clone(),
+                queued: true,
+            },
+            &gateway.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+    let jobs = service.state(ClientId::Codex, &id).unwrap().jobs.len();
+    service.tick(at + 3_600_000, false).unwrap();
+    assert_eq!(status(&service, &id).status, "degraded");
+    assert_eq!(
+        service.state(ClientId::Codex, &id).unwrap().jobs.len(),
+        jobs
+    );
 }

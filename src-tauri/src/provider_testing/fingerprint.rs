@@ -103,7 +103,10 @@ impl Service {
         for attempt in 0..3 {
             self.gateway(context.target.client_id)
                 .verify_test_version(&context.target.provider_id, &context.target.version)?;
-            self.update(id, |job, _| {
+            self.gateway(context.target.client_id)
+                .test_endpoint(&context.target.provider_id, Some(&context.target.base_url))?;
+            self.update(id, |job, output| {
+                output.group_errors.remove(&index);
                 let group = &mut job.groups[index];
                 group.status = "running".into();
                 group.attempts += 1;
@@ -170,7 +173,12 @@ impl Service {
                     return Ok(());
                 }
                 Err(error) => {
-                    self.update(id, |job, _| {
+                    self.update(id, |job, output| {
+                        if let Some(detail) = error.detail.clone() {
+                            output
+                                .group_errors
+                                .insert(index, errors::redact(detail, &context.target));
+                        }
                         let group = &mut job.groups[index];
                         group.status = "failed".into();
                         group.elapsed_ms = elapsed;
@@ -189,6 +197,9 @@ impl Service {
         Ok(())
     }
     pub(super) fn apply_degradation(&self, id: &str) {
+        if !self.automatic_current(id) {
+            return;
+        }
         let Ok(detail) = self.detail(id) else {
             return;
         };
@@ -219,7 +230,7 @@ impl Service {
         let mark = Degradation {
             provider_id: job.provider_id.clone(),
             job_id: id.into(),
-            detected_at: now(),
+            detected_at: self.now(),
             requested_model: job.requested_model.clone(),
             predicted_model: compat::string(&report["prediction"]).into(),
             probability: report["probability"].as_f64().unwrap_or(0.0),
@@ -227,17 +238,24 @@ impl Service {
             error: None,
         };
         let mut data = lock(&self.0.data);
+        if data
+            .contexts
+            .get(id)
+            .and_then(|c| c.detection_revision.as_deref())
+            != Some(config_revision(&data.saved, &job.provider_id).as_str())
+            || data.cancel.get(id).is_some_and(|cancel| *cancel.borrow())
+        {
+            return;
+        }
         let mut next = data.saved.clone();
         next.degraded.insert(job.provider_id.clone(), mark);
         if let Err(error) = self.save(&mut data, next) {
             data.error = Some(error.message);
             return;
         }
-        drop(data);
         let result = self
             .gateway(ClientId::Codex)
             .dequeue_degraded(&job.provider_id, &job.provider_version);
-        let mut data = lock(&self.0.data);
         let mut next = data.saved.clone();
         if let Some(mark) = next.degraded.get_mut(&job.provider_id) {
             mark.queue_removed = result.is_ok();

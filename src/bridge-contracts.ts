@@ -89,6 +89,7 @@ export type ProviderTestRequest = {
   providerId: string;
   expectedRevision: string;
   model: string;
+  endpoint: string | null;
   kind: ProviderTestKind;
   concurrency: number;
 };
@@ -124,6 +125,7 @@ export type ProviderTestJob = {
   providerId: string;
   providerName: string;
   providerVersion: string;
+  endpoint: string | null;
   kind: ProviderTestKind;
   mode: ProviderTestMode;
   requestedModel: string;
@@ -143,12 +145,20 @@ export type ProviderTestJob = {
   canRetry: boolean;
   completionReason: string | null;
 };
+export type ProviderTestError = {
+  httpStatus: number | null;
+  message: string;
+  body: string;
+  truncated: boolean;
+};
 export type ProviderTestDetail = {
   job: ProviderTestJob;
   output: {
     text: string;
     groups: Record<string, string>;
     diagnostics: Record<string, unknown>;
+    error: ProviderTestError | null;
+    groupErrors: Record<string, ProviderTestError>;
   } | null;
 };
 export type ProviderDetection = {
@@ -157,7 +167,7 @@ export type ProviderDetection = {
   intervalMinutes: number;
   minIntervalMinutes: number;
   model: string;
-  providers: Record<string, { enabled: boolean | null; model: string | null }>;
+  endpoint: string | null;
 };
 export type ProviderDegradation = {
   providerId: string;
@@ -189,7 +199,8 @@ export type ProviderTestingState = {
     providerId: string;
     status: string;
     model: string;
-    recentRequests: number;
+    recentRequests: number | null;
+    lastStartedAt: number | null;
     intervalMinutes: number | null;
     nextAt: number | null;
     cooldownUntil: number | null;
@@ -199,13 +210,9 @@ export type ProviderTestingState = {
 export type ProviderTestModels = {
   models: { id: string; name: string }[];
   defaultModel: string;
-  stale: boolean;
+  fetchedAt: number | null;
   error: string | null;
-};
-export type ProviderTestBatch = {
-  id: string;
-  jobs: ProviderTestJob[];
-  errors: { providerId: string; error: string }[];
+  errorDetail?: ProviderTestError | null;
 };
 
 export type PendingImport = {
@@ -594,18 +601,20 @@ export type CommandMap = {
   >;
   select_account_template: Call<{ token: string; id: number }, void>;
   export_accounts: Call<Revision & { ids: string[]; format: string }, boolean>;
-  provider_test_state: Call<None, ProviderTestingState>;
+  provider_test_state: Call<
+    { clientId: ClientId; providerId: string },
+    ProviderTestingState
+  >;
   provider_test_start: Call<{ request: ProviderTestRequest }, ProviderTestJob>;
   provider_test_query: Call<{ id: string }, ProviderTestDetail>;
   provider_test_cancel: Call<{ id: string }, void>;
   provider_test_retry: Call<{ id: string }, ProviderTestJob>;
-  provider_test_batch: Call<
-    { requests: ProviderTestRequest[] },
-    ProviderTestBatch
-  >;
-  provider_test_stop_batch: Call<{ id: string }, void>;
   provider_test_set_detection: Call<
-    { detection: ProviderDetection; expectedRevision: string },
+    {
+      providerId: string;
+      detection: ProviderDetection;
+      expectedRevision: string;
+    },
     void
   >;
   provider_test_clear_mark: Call<
@@ -617,6 +626,7 @@ export type CommandMap = {
       clientId: ClientId;
       providerId: string;
       expectedRevision: string;
+      endpoint: string | null;
       refresh?: boolean;
     },
     ProviderTestModels

@@ -11,11 +11,36 @@ pub(crate) struct Target {
     pub search_only: bool,
     pub protocol: String,
     pub headers: HeaderMap,
-    base_url: String,
+    pub base_url: String,
     connection: provider_protocol::Connection,
     mapping: dsh::ModelMapping,
 }
 impl Target {
+    pub fn redact(&self, text: &str) -> String {
+        let mut result = text.to_owned();
+        let mut secrets: Vec<&str> = self
+            .headers
+            .iter()
+            .filter(|(name, _)| {
+                matches!(name.as_str(), "authorization" | "x-api-key" | "cookie")
+                    || self.connection.headers.contains_key(name.as_str())
+            })
+            .filter_map(|(_, value)| value.to_str().ok())
+            .flat_map(|value| [value, value.strip_prefix("Bearer ").unwrap_or(value)])
+            .chain(self.connection.query.values().map(String::as_str))
+            .filter(|value| !value.is_empty())
+            .collect();
+        secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        for secret in secrets {
+            result = result.replace(secret, "[已隐藏]");
+            let encoded: String = url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+            result = result.replace(&encoded, "[已隐藏]");
+            if let Ok(escaped) = serde_json::to_string(secret) {
+                result = result.replace(&escaped[1..escaped.len() - 1], "[已隐藏]");
+            }
+        }
+        result
+    }
     pub fn url(&self, path: &str) -> Result<String> {
         let uri = forward::target(
             &self.base_url,
@@ -40,6 +65,46 @@ pub(crate) struct Candidate {
     pub search_only: bool,
 }
 impl Gateway {
+    pub(crate) fn test_endpoint(&self, id: &str, endpoint: Option<&str>) -> Result<String> {
+        let state = self.request_state()?;
+        let provider = state
+            .store
+            .providers
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| AppError::new(code::PROVIDER, "供应商已删除，请刷新列表"))?;
+        let selected = endpoint.unwrap_or(&provider.base_url).trim_end_matches('/');
+        std::iter::once(&provider.base_url)
+            .chain(state.store.provider_endpoints.get(id).into_iter().flatten())
+            .find(|url| url.trim_end_matches('/') == selected)
+            .map(|url| url.trim_end_matches('/').to_owned())
+            .ok_or_else(|| AppError::new(code::PROVIDER, "测试端点未配置或已删除，请重新选择"))
+    }
+    pub(crate) fn test_target_at(
+        &self,
+        id: &str,
+        expected: Option<&str>,
+        endpoint: Option<&str>,
+    ) -> Result<Target> {
+        let mut target = self.test_target(id, expected)?;
+        target.base_url = self.test_endpoint(id, endpoint)?;
+        // Both reads must refer to the same provider configuration.
+        self.verify_test_version(id, &target.version)?;
+        Ok(target)
+    }
+    pub(crate) fn detection_request_counts(
+        &self,
+        at: i64,
+    ) -> Result<std::collections::BTreeMap<String, u64>> {
+        let usage = self
+            .0
+            .usage
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| AppError::new(code::STATE, "调用统计暂不可用，等待重新读取"))?;
+        usage.recent_gateway_requests("codex", at)
+    }
     pub(crate) fn test_candidates(&self) -> Result<Vec<Candidate>> {
         Ok(self
             .request_state()?
@@ -151,6 +216,9 @@ impl Gateway {
 }
 #[cfg(test)]
 impl Gateway {
+    pub(crate) fn test_usage(&self) -> crate::usage::Service {
+        self.0.usage.lock().unwrap().clone().unwrap()
+    }
     pub(crate) fn remember_test_user_agent(&self, raw: &[u8]) {
         self.remember_user_agent(raw);
     }
