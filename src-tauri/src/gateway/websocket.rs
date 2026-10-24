@@ -1703,17 +1703,29 @@ async fn session_once(
                 let wait_same = failure.capacity
                     && established_capacity_owner.as_deref() == Some(&admission.route.provider.id);
                 let retry_delay = if admission.route.client_id == super::ClientId::Codex
-                    && failure.status.is_some_and(circuit::is_server_error)
+                    && (failure.status.is_some_and(circuit::is_server_error)
+                        || matches!(
+                            failure.details.local_code.as_deref(),
+                            Some(
+                                code::CONNECTION_FAILED
+                                    | code::CONNECT_TIMEOUT
+                                    | code::WS_HANDSHAKE_TIMEOUT
+                            )
+                        ))
                     && !failure.model_unavailable
                     && !failure.capacity
                     && !failure.hard_rejection()
                     && !unknown_affinity
                     && ordinary_attempts <= cfg.max_retries
                     && (pinned.as_deref() == Some(&admission.route.provider.id)
-                        || ownership
-                            .as_ref()
-                            .is_some_and(|lease| lease.owns(&admission.route.provider.id)))
-                {
+                        || if failure.status.is_some_and(circuit::is_server_error) {
+                            ownership
+                                .as_ref()
+                                .is_some_and(|lease| lease.owns(&admission.route.provider.id))
+                        } else {
+                            established_capacity_owner.as_deref()
+                                == Some(&admission.route.provider.id)
+                        }) {
                     super::routing::transient_delay(&mut transient_retries, failure.retry)
                 } else {
                     None
@@ -1803,7 +1815,11 @@ async fn session_once(
                     )
                     .await?
                     .map_err(rejected)?;
-                    if g.routing_ids(pinned.as_deref()).contains(&provider_id) {
+                    if g.routing_ids(pinned.as_deref()).contains(&provider_id)
+                        && routes
+                            .get(&provider_id)
+                            .is_some_and(|route| route.health_for(&requirement).available)
+                    {
                         ids.insert(0, provider_id.clone());
                         retry_owner = Some(provider_id);
                     }

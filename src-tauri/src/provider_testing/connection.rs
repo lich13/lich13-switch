@@ -279,7 +279,10 @@ impl Service {
     async fn connection_inner(&self, id: &str, context: &Context) -> Result<()> {
         let target = &context.target;
         let model = target.model(&context.request.model);
-        let (path, payload) = payload(&context.request, &model, &target.protocol);
+        let (path, mut payload) = payload(&context.request, &model, &target.protocol);
+        if let Some(metadata) = target.codex_metadata() {
+            payload["client_metadata"] = metadata;
+        }
         let started = Instant::now();
         let response = client()?
             .post(target.url(path)?)

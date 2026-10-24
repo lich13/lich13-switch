@@ -632,7 +632,7 @@ impl Delivery {
     }
 }
 pub struct Protocol {
-    business: Option<(super::Gateway, Vec<u8>)>,
+    business: Option<(super::Gateway, super::testing::BusinessIdentity)>,
     wait_budget: Option<(super::wait_budget::WaitBudget, Option<tokio::time::Instant>)>,
     rpm_completion: Option<super::admission::Completion>,
     observer: Option<Observer>,
@@ -796,10 +796,9 @@ impl Protocol {
         _provider: &str,
         headers: &hyper::HeaderMap,
     ) {
-        self.business = headers
-            .get(hyper::header::USER_AGENT)
-            .filter(|v| !v.is_empty())
-            .map(|v| (gateway.clone(), v.as_bytes().to_vec()));
+        self.business = gateway
+            .business_identity(headers)
+            .map(|identity| (gateway.clone(), identity));
     }
     pub fn request_headers(&mut self, headers: &hyper::HeaderMap) {
         self.identity = Some(super::compaction::identity(headers).1);
@@ -1534,8 +1533,8 @@ impl Drop for Protocol {
         let interruption_reported = self.emit_interruption();
         let settlement = self.routing_settlement(interruption_reported);
         if self.delivered_success() && !self.routing_fault {
-            if let Some((gateway, user_agent)) = self.business.take() {
-                gateway.remember_user_agent(&user_agent);
+            if let Some((gateway, identity)) = self.business.take() {
+                gateway.remember_business_identity(identity);
             }
         }
         if let Some(log) = &self.routing_log {

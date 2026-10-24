@@ -161,6 +161,8 @@ pub struct Store {
     pub schema: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub successful_user_agent: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successful_codex_identity: Option<super::testing::CodexIdentity>,
     #[serde(default)]
     pub phase_timeouts: bool,
     #[serde(default)]
@@ -210,6 +212,7 @@ impl Default for Store {
         Self {
             schema: 2,
             successful_user_agent: None,
+            successful_codex_identity: None,
             phase_timeouts: true,
             initialized: false,
             connection: Default::default(),

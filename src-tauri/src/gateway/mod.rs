@@ -961,7 +961,26 @@ impl Gateway {
         })
     }
     pub fn observe_home(&self, home: &Path) {
-        self.0.inner.lock().unwrap().home = Some(home.to_owned());
+        let mut state = self.0.inner.lock().unwrap();
+        if state
+            .store
+            .successful_codex_identity
+            .as_ref()
+            .is_some_and(|identity| !identity.matches_home(Some(home)))
+        {
+            let mut next = state.store.clone();
+            next.successful_codex_identity = None;
+            match next.persist(&self.0.data.join("gateway.json"), &state.revision) {
+                Ok(revision) => {
+                    state.store = next;
+                    state.revision = revision;
+                }
+                Err(_) => {
+                    state.error = Some("客户端身份失效状态保存失败，请重试切换 Codex 目录".into());
+                }
+            }
+        }
+        state.home = Some(home.to_owned());
     }
     pub fn read_config(&self, home: &Path) -> Result<crate::configuration::Document> {
         let s = self.0.inner.lock().unwrap();
@@ -2029,6 +2048,7 @@ impl Gateway {
             })
             .unwrap_or_default()
     }
+    #[cfg(test)]
     pub(crate) fn successful_user_agent(&self) -> Result<hyper::header::HeaderValue> {
         self.request_state()?
             .store
@@ -2043,25 +2063,36 @@ impl Gateway {
                 )
             })
     }
-    fn remember_user_agent(&self, raw: &[u8]) {
+    fn remember_business_identity(&self, identity: testing::BusinessIdentity) {
+        let raw = identity.user_agent.as_slice();
         if raw.is_empty() || raw.len() > 8192 {
             return;
         }
         let Ok(mut s) = self.request_state() else {
             return;
         };
-        if s.store.successful_user_agent.as_deref() == Some(raw) {
+        let codex = identity
+            .codex
+            .filter(|identity| identity.matches_home(s.home.as_deref()));
+        if s.store.successful_user_agent.as_deref() == Some(raw)
+            && codex
+                .as_ref()
+                .is_none_or(|identity| s.store.successful_codex_identity.as_ref() == Some(identity))
+        {
             return;
         }
         let mut next = s.store.clone();
         next.successful_user_agent = Some(raw.to_vec());
+        if let Some(codex) = codex {
+            next.successful_codex_identity = Some(codex);
+        }
         match next.persist(&self.0.data.join("gateway.json"), &s.revision) {
             Ok(revision) => {
                 s.store = next;
                 s.revision = revision;
             }
             Err(_) => {
-                s.error = Some("最近成功请求的 User-Agent 保存失败，请重试正常请求".into());
+                s.error = Some("最近成功请求的客户端身份保存失败，请重试正常请求".into());
             }
         }
     }

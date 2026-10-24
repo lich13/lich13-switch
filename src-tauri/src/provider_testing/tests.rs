@@ -7,11 +7,14 @@ use hyper_util::rt::TokioIo;
 use std::{future::Future, time::Duration};
 
 const INSTALLATION_ID: &str = "11111111-2222-4333-8444-555555555555";
+const SESSION_ID: &str = "fixture-private-session";
+const THREAD_ID: &str = "fixture-private-thread";
 
 fn fixture() -> (tempfile::TempDir, Service) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("installation_id"), INSTALLATION_ID).unwrap();
     let codex = Gateway::new(dir.path().join("codex")).unwrap();
+    codex.observe_home(dir.path());
     codex.set_usage(crate::usage::Service::new(dir.path()));
     let claude = codex.companion(dir.path().join("claude")).unwrap();
     let grok = codex.grok_companion(dir.path().join("grok")).unwrap();
@@ -124,9 +127,28 @@ fn add(service: &Service, home: &Path, client: ClientId, port: u16, protocol: &s
     gateway.view().providers.last().unwrap().id.clone()
 }
 fn ua(service: &Service, client: ClientId) {
-    service
-        .gateway(client)
-        .remember_test_user_agent(b"fixture-business/1.0 exact  UA");
+    if client == ClientId::Codex {
+        identity(
+            service.gateway(client),
+            b"fixture-business/1.0 exact  UA",
+            "fixture-business",
+        );
+    } else {
+        service
+            .gateway(client)
+            .remember_test_user_agent(b"fixture-business/1.0 exact  UA");
+    }
+}
+fn identity(gateway: &Gateway, raw: &[u8], originator: &str) {
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        "user-agent",
+        hyper::header::HeaderValue::from_bytes(raw).unwrap(),
+    );
+    headers.insert("originator", originator.parse().unwrap());
+    headers.insert("session-id", SESSION_ID.parse().unwrap());
+    headers.insert("thread-id", THREAD_ID.parse().unwrap());
+    gateway.remember_test_identity(&headers);
 }
 fn request(service: &Service, client: ClientId, id: &str) -> Request {
     Request {
@@ -258,9 +280,17 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
         if client == ClientId::Codex {
             assert_eq!(seen[0].1["originator"], "fixture-business");
             assert_eq!(seen[0].1["x-codex-installation-id"], INSTALLATION_ID);
+            assert_eq!(seen[0].1["session-id"], SESSION_ID);
+            assert_eq!(seen[0].1["thread-id"], THREAD_ID);
+            assert_eq!(
+                seen[0].2["client_metadata"]["x-codex-installation-id"],
+                INSTALLATION_ID
+            );
         } else {
             assert!(!seen[0].1.contains_key("originator"));
             assert!(!seen[0].1.contains_key("x-codex-installation-id"));
+            assert!(!seen[0].1.contains_key("session-id"));
+            assert!(seen[0].2.get("client_metadata").is_none());
         }
         assert_eq!(
             seen[0].2["model"],
@@ -535,7 +565,7 @@ fn scheduled_fingerprint(service: &Service, home: &Path, id: &str) -> Job {
 }
 
 #[tokio::test]
-async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() {
+async fn strict_client_gate_accepts_local_identity_for_every_codex_test_path() {
     for (user_agent, originator) in [
         ("codex_cli_rs/0.1.2 (fixture; arm64)", "codex_cli_rs"),
         (
@@ -549,13 +579,14 @@ async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() 
             let hits = hits.clone();
             async move {
                 hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                // The default upstream gate requires an official, versioned UA
-                // and at least one x-codex-* header; originator is paired below.
+                // All configured fingerprint signals are ANDed by Sub2API.
                 let ua = r.headers().get("user-agent").unwrap().to_str().unwrap();
                 let official = ua.starts_with("codex_cli_rs/0.1.2")
                     || ua.starts_with("Codex Desktop/0.1.2");
                 let engine = r.headers().keys().any(|key| key.as_str().starts_with("x-codex-"));
-                if !official || !engine {
+                let session = r.headers().get("session-id").is_some_and(|v| v == SESSION_ID);
+                let thread = r.headers().get("thread-id").is_some_and(|v| v == THREAD_ID);
+                if !official || !engine || !session || !thread {
                     return response(403, "application/json", r#"{"error":{"message":"This account only allows Codex official clients","type":"forbidden_error"}}"#);
                 }
                 assert_eq!(ua, user_agent);
@@ -565,7 +596,11 @@ async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() 
                 if r.uri().path().ends_with("/models") {
                     response(200, "application/json", r#"{"data":[{"id":"gpt-6-sol"}]}"#)
                 } else {
-                    let _ = r.into_body().collect().await.unwrap();
+                    let body = r.into_body().collect().await.unwrap().to_bytes();
+                    let body: Value = serde_json::from_slice(&body).unwrap();
+                    if body["client_metadata"]["x-codex-installation-id"] != INSTALLATION_ID {
+                        return response(403, "application/json", r#"{"error":{"message":"This account only allows Codex official clients"}}"#);
+                    }
                     fingerprint_response(&sample("above_99", 0))
                 }
             }
@@ -573,7 +608,7 @@ async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() 
         let (dir, service) = fixture();
         let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
         let gateway = service.gateway(ClientId::Codex);
-        gateway.remember_test_user_agent(user_agent.as_bytes());
+        identity(gateway, user_agent.as_bytes(), originator);
         let target = gateway.test_target(&id, None).unwrap();
         let old = reqwest::Client::builder()
             .no_proxy()
@@ -586,6 +621,26 @@ async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() 
             .await
             .unwrap();
         assert_eq!(old.status(), 403);
+        for missing in ["session-id", "thread-id", "client_metadata"] {
+            let mut headers = target.headers.clone();
+            headers.remove(missing);
+            let body = if missing == "client_metadata" {
+                json!({})
+            } else {
+                json!({"client_metadata": target.codex_metadata().unwrap()})
+            };
+            let rejected = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(target.url("/v1/responses").unwrap())
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), 403, "missing {missing}");
+        }
         let models = service
             .models(ClientId::Codex, &id, &gateway.view().revision, None, true)
             .await
@@ -611,7 +666,7 @@ async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() 
             completed(&service, &automatic.id).await.job.status,
             "completed"
         );
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 8);
         let state = service.state(ClientId::Codex, &id).unwrap();
         assert!(state.degraded.is_empty());
         assert!(gateway.test_candidates().unwrap()[0].queued);
@@ -623,6 +678,8 @@ async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() 
         let saved = std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap();
         assert!(!saved.contains(INSTALLATION_ID));
         assert!(!saved.contains(user_agent));
+        assert!(!saved.contains(SESSION_ID));
+        assert!(!saved.contains(THREAD_ID));
     }
 }
 
@@ -641,11 +698,18 @@ async fn codex_identity_reads_selected_home_and_blocks_invalid_data_without_netw
     let (dir, service) = fixture();
     let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
     let gateway = service.gateway(ClientId::Codex);
-    gateway.remember_test_user_agent(b"Codex Desktop/0.1.2 (fixture)");
+    identity(gateway, b"Codex Desktop/0.1.2 (fixture)", "Codex Desktop");
     seed_catalog(&service, &id, &["fixture-model"]);
     let selected = dir.path().join("selected-codex");
     std::fs::create_dir(&selected).unwrap();
     gateway.observe_home(&selected);
+    assert!(gateway
+        .test_target(&id, None)
+        .err()
+        .unwrap()
+        .message
+        .contains("正常 Codex 请求"));
+    identity(gateway, b"Codex Desktop/0.1.2 (fixture)", "Codex Desktop");
     let file = selected.join("installation_id");
     let missing = gateway.test_target(&id, None).err().unwrap().message;
     assert!(missing.contains("未找到 Codex installation_id"));
@@ -691,7 +755,7 @@ async fn codex_identity_reads_selected_home_and_blocks_invalid_data_without_netw
         b"codex_cli_rs/",
         b"codex\tcli/0.1.2",
     ] {
-        gateway.remember_test_user_agent(invalid);
+        identity(gateway, invalid, "codex_cli_rs");
         assert!(gateway
             .test_target(&id, None)
             .err()
@@ -704,7 +768,7 @@ async fn codex_identity_reads_selected_home_and_blocks_invalid_data_without_netw
 
 #[tokio::test]
 async fn client_restrictions_keep_complete_redacted_errors_without_retry_or_degradation() {
-    let error = json!({"error":{"message":format!("This account only allows Codex official clients; {INSTALLATION_ID}; fixture-test-token; fixture end-marker"),"type":"forbidden_error"}});
+    let error = json!({"error":{"message":format!("This account only allows Codex official clients; {INSTALLATION_ID}; {SESSION_ID}; {THREAD_ID}; fixture-test-token; fixture end-marker"),"type":"forbidden_error"}});
     let stream = format!(
         "event: response.failed\ndata: {}\n\n",
         json!({"type":"response.failed","response":{"status":"failed","error":error["error"]}})
@@ -771,6 +835,8 @@ async fn client_restrictions_keep_complete_redacted_errors_without_retry_or_degr
             let serialized = serde_json::to_string(&done).unwrap();
             assert!(!serialized.contains(INSTALLATION_ID));
             assert!(!serialized.contains("fixture-test-token"));
+            assert!(!serialized.contains(SESSION_ID));
+            assert!(!serialized.contains(THREAD_ID));
             assert!(service.retry(&job_id).is_err());
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
@@ -876,7 +942,14 @@ async fn failed_groups_retry_without_replaying_successful_groups() {
             assert_eq!(r.headers()["user-agent"], "fixture-business/1.0 exact  UA");
             assert_eq!(r.headers()["originator"], "fixture-business");
             assert_eq!(r.headers()["x-codex-installation-id"], INSTALLATION_ID);
-            let _ = r.into_body().collect().await.unwrap();
+            assert_eq!(r.headers()["session-id"], SESSION_ID);
+            assert_eq!(r.headers()["thread-id"], THREAD_ID);
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["client_metadata"]
+                    ["x-codex-installation-id"],
+                INSTALLATION_ID
+            );
             let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             fingerprint_response(&if n < 2 {
                 "1, 2, 3".into()
@@ -898,6 +971,12 @@ async fn failed_groups_retry_without_replaying_successful_groups() {
     assert!(before.job.can_retry);
     assert_eq!(before.job.groups[2].status, "completed");
     let output = before.output.unwrap().groups[&2].clone();
+    // A later business request must not change the identity of this job's retry.
+    identity(
+        service.gateway(ClientId::Codex),
+        b"fixture-new/2.0",
+        "fixture-new",
+    );
     service.retry(&job.id).unwrap();
     let after = completed(&service, &job.id).await;
     assert_eq!(after.job.groups[2].attempts, 1);

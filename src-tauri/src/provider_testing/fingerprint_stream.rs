@@ -495,6 +495,7 @@ pub struct Target {
     pub model: String,
     pub oauth: bool,
     pub protocol: String,
+    pub client_metadata: Option<Value>,
 }
 impl Target {
     pub fn client(&self) -> TransportResult<reqwest::Client> {
@@ -518,6 +519,9 @@ impl Target {
             let mut payload = json!({"model":self.model,"input":[{"role":"user","content":[{"type":"input_text","text":prompt}]}],"instructions":"You are a helpful assistant.","stream":true,"store":false});
             if !self.oauth {
                 payload["max_output_tokens"] = 4096.into();
+            }
+            if let Some(metadata) = &self.client_metadata {
+                payload["client_metadata"] = metadata.clone();
             }
             payload
         }

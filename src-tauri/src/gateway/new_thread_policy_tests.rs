@@ -49,6 +49,10 @@ fn provider(id: &str, handoff: bool, take: bool) -> Provider {
 mod websocket_tests;
 
 #[cfg(test)]
+#[path = "owner_connect_retry_tests.rs"]
+mod owner_connect_retry_tests;
+
+#[cfg(test)]
 #[path = "intake_admission_tests.rs"]
 mod v021_tests;
 

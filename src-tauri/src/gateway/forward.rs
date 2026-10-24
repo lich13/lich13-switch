@@ -1260,6 +1260,26 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         Some(connector::ConnectError::Tls) => code::TLS,
                         _ => code::NETWORK,
                     };
+                    // A connector failure happens before dispatch. An arbitrary
+                    // transport error or a header timeout does not prove that.
+                    let retry_delay = if route.client_id == super::ClientId::Codex
+                        && !dedicated_search
+                        && matches!(
+                            category,
+                            Some(
+                                connector::ConnectError::TargetConnect
+                                    | connector::ConnectError::TargetTimeout
+                            )
+                        )
+                        && !unknown_affinity
+                        && ordinary_attempts <= settings.max_retries
+                        && (pinned.as_deref() == Some(&route.provider.id)
+                            || established_capacity_owner.as_deref() == Some(&route.provider.id))
+                    {
+                        routing::transient_delay(&mut transient_retries, None)
+                    } else {
+                        None
+                    };
                     protocol.finish(None, last_category);
                     last_error = Some(failover.report_failure(Some(&protocol), || {
                         admission.permits.report(
@@ -1267,28 +1287,33 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             &route,
                             model.as_deref(),
                             Reason::Network,
-                            routing::fallback_action(
-                                &gateway,
-                                &route.provider.id,
-                                ids.iter()
-                                    .filter_map(|id| routes.get(id).cloned())
-                                    .collect(),
-                                &requirement,
-                                parts.uri.path(),
-                                ownership.as_deref(),
-                                gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                                &wait_budget,
-                                mode != "manual"
-                                    && pinned.is_none()
-                                    && !unknown_affinity
-                                    && ordinary_attempts <= settings.max_retries,
-                            ),
+                            if retry_delay.is_some() {
+                                Action::RetryingSame
+                            } else {
+                                routing::fallback_action(
+                                    &gateway,
+                                    &route.provider.id,
+                                    ids.iter()
+                                        .filter_map(|id| routes.get(id).cloned())
+                                        .collect(),
+                                    &requirement,
+                                    parts.uri.path(),
+                                    ownership.as_deref(),
+                                    gateway.client_id() == super::ClientId::Codex && !auxiliary,
+                                    &wait_budget,
+                                    mode != "manual"
+                                        && pinned.is_none()
+                                        && !unknown_affinity
+                                        && ordinary_attempts <= settings.max_retries,
+                                )
+                            },
                             None,
                             attempted,
                             crate::events::Details {
                                 phase: Some(crate::events::Phase::Connect),
                                 local_code: Some(connector::diagnostic_code(&e).into()),
                                 counted_failure: Some(true),
+                                wait_seconds: retry_delay.map(|delay| delay.as_secs()),
                                 ..Default::default()
                             },
                         )
@@ -1297,6 +1322,42 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         admission.permits.neutral(&settings);
                     } else {
                         admission.permits.failure(&settings, None);
+                    }
+                    if let Some(delay) = retry_delay {
+                        failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
+                        drop(admission);
+                        match gateway
+                            .0
+                            .admission
+                            .wait_transient(
+                                CapacitySource {
+                                    provider_id: route.provider.id.clone(),
+                                    reset_generation,
+                                },
+                                delay,
+                                settings.max_waiting,
+                            )
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(Rejected::Stopped) => {
+                                failover.finish(super::failover::Exit::Stopped);
+                                return error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    code::STOPPED,
+                                    "网关已停止",
+                                );
+                            }
+                            Err(_) => break,
+                        }
+                        if gateway
+                            .routing_ids(pinned.as_deref())
+                            .contains(&route.provider.id)
+                            && route.health_for(&requirement).available
+                        {
+                            ids.insert(0, route.provider.id.clone());
+                            retry_owner = Some(route.provider.id.clone());
+                        }
                     }
                     continue;
                 }

@@ -2,6 +2,69 @@
 use super::*;
 use hyper::{header, HeaderMap};
 
+/// Only these fields from one successful request may be reused by diagnostics.
+/// Keep the directory binding private too: never mix identities across homes.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodexIdentity {
+    user_agent: Vec<u8>,
+    originator: Vec<u8>,
+    session_id: Vec<u8>,
+    thread_id: Vec<u8>,
+    home_digest: String,
+}
+pub(super) struct BusinessIdentity {
+    pub user_agent: Vec<u8>,
+    pub codex: Option<CodexIdentity>,
+}
+fn home_digest(home: &Path) -> String {
+    storage::digest(home.as_os_str().as_encoded_bytes())
+}
+fn identity_header(raw: &[u8], limit: usize) -> Option<header::HeaderValue> {
+    header::HeaderValue::from_bytes(raw)
+        .ok()
+        .filter(|v| !v.is_empty() && v.len() <= limit && v.to_str().is_ok())
+}
+impl CodexIdentity {
+    fn capture(headers: &HeaderMap, home: &Path) -> Option<Self> {
+        let field = |names: &[&str], limit| {
+            let raw = names.iter().find_map(|name| headers.get(*name))?;
+            identity_header(raw.as_bytes(), limit).map(|v| v.as_bytes().to_vec())
+        };
+        Some(Self {
+            user_agent: field(&["user-agent"], 8192)?,
+            originator: field(&["originator"], 256)?,
+            session_id: field(&["session-id", "session_id"], 512)?,
+            thread_id: field(&["thread-id", "thread_id"], 512)?,
+            home_digest: home_digest(home),
+        })
+    }
+    pub(super) fn matches_home(&self, home: Option<&Path>) -> bool {
+        home.is_some_and(|home| self.home_digest == home_digest(home))
+    }
+    fn headers(&self, home: Option<&Path>) -> Result<HeaderMap> {
+        let missing = || {
+            AppError::new(
+                code::STATE,
+                "缺少当前 Codex 目录的完整客户端身份，请先通过网关完成一次正常 Codex 请求，再运行测试",
+            )
+        };
+        if !self.matches_home(home) {
+            return Err(missing());
+        }
+        let mut headers = HeaderMap::new();
+        for (name, raw, limit) in [
+            ("user-agent", &self.user_agent, 8192),
+            ("originator", &self.originator, 256),
+            ("session-id", &self.session_id, 512),
+            ("thread-id", &self.thread_id, 512),
+        ] {
+            headers.insert(name, identity_header(raw, limit).ok_or_else(missing)?);
+        }
+        Ok(headers)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Target {
     pub client_id: ClientId,
@@ -30,6 +93,10 @@ impl Target {
                         | "user-agent"
                         | "originator"
                         | "x-codex-installation-id"
+                        | "session-id"
+                        | "session_id"
+                        | "thread-id"
+                        | "thread_id"
                 ) || self.connection.headers.contains_key(name.as_str())
             })
             .filter_map(|(_, value)| value.to_str().ok())
@@ -64,6 +131,12 @@ impl Target {
             .unwrap_or(requested)
             .to_owned()
     }
+    pub fn codex_metadata(&self) -> Option<serde_json::Value> {
+        (self.client_id == ClientId::Codex).then(|| {
+            serde_json::json!({"x-codex-installation-id":
+                self.headers["x-codex-installation-id"].to_str().expect("validated installation ID")})
+        })
+    }
 }
 #[derive(Clone)]
 pub(crate) struct Candidate {
@@ -71,17 +144,17 @@ pub(crate) struct Candidate {
     pub queued: bool,
     pub search_only: bool,
 }
-fn codex_identity(
+fn codex_installation(
     user_agent: &header::HeaderValue,
     home: Option<&Path>,
-) -> Result<(header::HeaderValue, header::HeaderValue)> {
+) -> Result<header::HeaderValue> {
     let invalid_ua = || {
         AppError::new(
             code::STATE,
             "已保存的 Codex User-Agent 格式无效，请先通过 Codex 完成一次正常请求",
         )
     };
-    let (originator, _) = user_agent
+    user_agent
         .to_str()
         .ok()
         .and_then(|ua| ua.split_once('/'))
@@ -91,7 +164,6 @@ fn codex_identity(
                 && !version.trim().is_empty()
         })
         .ok_or_else(invalid_ua)?;
-    let originator = header::HeaderValue::from_str(originator.trim()).map_err(|_| invalid_ua())?;
     let home = home.ok_or_else(|| AppError::new(code::STATE, "尚未选择 Codex 配置目录"))?;
     let raw = storage::read_bounded(&home.join("installation_id"), 128)
         .map_err(|error| {
@@ -117,9 +189,25 @@ fn codex_identity(
                 "Codex installation_id 格式无效，请检查当前 Codex 目录后重试",
             )
         })?;
-    Ok((originator, installation))
+    Ok(installation)
 }
 impl Gateway {
+    pub(super) fn business_identity(&self, headers: &HeaderMap) -> Option<BusinessIdentity> {
+        let user_agent = headers.get(header::USER_AGENT)?;
+        if user_agent.is_empty() || user_agent.len() > 8192 {
+            return None;
+        }
+        let codex = (self.client_id() == ClientId::Codex)
+            .then(|| {
+                let state = self.request_state().ok()?;
+                CodexIdentity::capture(headers, state.home.as_deref()?)
+            })
+            .flatten();
+        Some(BusinessIdentity {
+            user_agent: user_agent.as_bytes().to_vec(),
+            codex,
+        })
+    }
     pub(crate) fn test_endpoint(&self, id: &str, endpoint: Option<&str>) -> Result<String> {
         let state = self.request_state()?;
         let provider = state
@@ -174,7 +262,6 @@ impl Gateway {
             .collect())
     }
     pub(crate) fn test_target(&self, id: &str, expected: Option<&str>) -> Result<Target> {
-        let user_agent = self.successful_user_agent()?;
         let state = self.request_state()?;
         if expected.is_some_and(|expected| {
             self.view_revision(&state)
@@ -204,14 +291,41 @@ impl Gateway {
                 .unwrap_or_default(),
             ClientId::Codex => provider_protocol::Connection::default(),
         };
-        let mut headers = HeaderMap::new();
+        let mut headers = if self.client_id() == ClientId::Codex {
+            state
+                .store
+                .successful_codex_identity
+                .as_ref()
+                .ok_or_else(|| {
+                    AppError::new(
+                        code::STATE,
+                        "缺少完整 Codex 客户端身份，请先通过网关完成一次正常 Codex 请求，再运行测试",
+                    )
+                })?
+                .headers(state.home.as_deref())?
+        } else {
+            let mut headers = HeaderMap::new();
+            let user_agent = state
+                .store
+                .successful_user_agent
+                .as_deref()
+                .and_then(|raw| header::HeaderValue::from_bytes(raw).ok())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    AppError::new(
+                        code::STATE,
+                        "请先通过该客户端完成一次正常请求，再运行供应商测试",
+                    )
+                })?;
+            headers.insert(header::USER_AGENT, user_agent);
+            headers
+        };
         connection.authenticate(&mut headers, &provider.token)?;
         if self.client_id() == ClientId::Codex {
-            let (originator, installation) = codex_identity(&user_agent, state.home.as_deref())?;
-            headers.insert("originator", originator);
+            let installation =
+                codex_installation(&headers[header::USER_AGENT], state.home.as_deref())?;
             headers.insert("x-codex-installation-id", installation);
         }
-        headers.insert(header::USER_AGENT, user_agent);
         headers.insert(
             header::ACCEPT_ENCODING,
             header::HeaderValue::from_static("identity"),
@@ -280,6 +394,14 @@ impl Gateway {
         self.0.usage.lock().unwrap().clone().unwrap()
     }
     pub(crate) fn remember_test_user_agent(&self, raw: &[u8]) {
-        self.remember_user_agent(raw);
+        self.remember_business_identity(BusinessIdentity {
+            user_agent: raw.to_vec(),
+            codex: None,
+        });
+    }
+    pub(crate) fn remember_test_identity(&self, headers: &HeaderMap) {
+        if let Some(identity) = self.business_identity(headers) {
+            self.remember_business_identity(identity);
+        }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.25.26"
+version = "0.25.27"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"

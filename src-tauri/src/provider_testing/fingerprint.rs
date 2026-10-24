@@ -96,6 +96,7 @@ impl Service {
             model: context.target.model(&context.request.model),
             oauth: false,
             protocol: context.target.protocol.clone(),
+            client_metadata: context.target.codex_metadata(),
         };
         let client = target
             .client()

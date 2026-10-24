@@ -199,6 +199,87 @@ fn finish_upstream_failure(circuit: &Circuit, cfg: &Settings, status: u16, attem
     permit.finish(Outcome::Failure(None), cfg);
 }
 
+#[tokio::test]
+async fn native_websocket_connect_failure_and_handshake_timeout_retry_the_owner() {
+    for handshake_timeout in [false, true] {
+        let (_dir, gateway, port, backup) = super::owner_connect_retry_tests::setup().await;
+        let stalled = if handshake_timeout {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            Some(tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let _socket = socket;
+                std::future::pending::<()>().await;
+            }))
+        } else {
+            None
+        };
+        let mut client = responses_client(&gateway, "fixture-owner-network").await;
+        client
+            .send(yawc::Frame::text(CREATE.to_owned()))
+            .await
+            .unwrap();
+        super::owner_connect_retry_tests::waiting(&gateway).await;
+        assert_eq!(backup.load(Ordering::SeqCst), 0);
+        if let Some(stalled) = stalled {
+            stalled.abort();
+            let _ = stalled.await;
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let frames = Arc::new(AtomicUsize::new(0));
+        let seen = frames.clone();
+        let restored = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(listener);
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    hyper_util::rt::TokioIo::new(socket),
+                    hyper::service::service_fn(move |mut r: Request<Incoming>| {
+                        let seen = seen.clone();
+                        async move {
+                            let (response, upgraded) = yawc::WebSocket::upgrade_with_options(
+                                &mut r,
+                                yawc::Options::default().with_balanced_compression(),
+                            )
+                            .unwrap();
+                            tokio::spawn(async move {
+                                let mut peer = upgraded.await.unwrap();
+                                while let Some(frame) = peer.next().await {
+                                    if frame.opcode().is_control() {
+                                        continue;
+                                    }
+                                    seen.fetch_add(1, Ordering::SeqCst);
+                                    peer.send(yawc::Frame::text(CREATED.to_owned()))
+                                        .await
+                                        .unwrap();
+                                    peer.send(yawc::Frame::text(COMPLETED.to_owned()))
+                                        .await
+                                        .unwrap();
+                                    break;
+                                }
+                            });
+                            Ok::<_, Infallible>(response.map(|_| replay::empty()))
+                        }
+                    }),
+                )
+                .with_upgrades()
+                .await;
+        });
+        assert_eq!(next_frame(&mut client).await.as_str(), CREATED);
+        assert_eq!(next_frame(&mut client).await.as_str(), COMPLETED);
+        restored.await.unwrap();
+        settled(&gateway).await;
+        assert_eq!(frames.load(Ordering::SeqCst), 1);
+        assert_eq!(backup.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway.view().providers[0].rpm_used, 3);
+        drop(client);
+        gateway.stop().await.unwrap();
+    }
+}
+
 #[test]
 fn all_server_errors_share_six_failure_transient_threshold() {
     let cfg = Settings::default();
