@@ -36,7 +36,12 @@ export default function GatewayDialog({
       : (dialog.item?.protocol ?? "responses"),
   );
   const [showToken, setShowToken] = useState(false);
-  const [quotaAccessToken, setQuotaAccessToken] = useState<string | undefined>();
+  const [quotaAccessToken, setQuotaAccessToken] = useState<
+    string | undefined
+  >();
+  const [searchOnly, setSearchOnly] = useState(
+    Boolean(dialog.item?.searchOnly),
+  );
   const [revealed, setRevealed] = useState<{
     value: string;
     revision: string;
@@ -101,12 +106,36 @@ export default function GatewayDialog({
       if (sequence === revealSequence.current) setRevealing(false);
     }
   };
-  const initialDraft = useRef(JSON.stringify([name, baseUrl, token, protocol, quotaAccessToken]));
+  const initialDraft = useRef(
+    JSON.stringify([
+      name,
+      baseUrl,
+      token,
+      protocol,
+      quotaAccessToken,
+      searchOnly,
+    ]),
+  );
   useEffect(() => {
     onDirtyChange?.(
-      JSON.stringify([name, baseUrl, token, protocol, quotaAccessToken]) !== initialDraft.current,
+      JSON.stringify([
+        name,
+        baseUrl,
+        token,
+        protocol,
+        quotaAccessToken,
+        searchOnly,
+      ]) !== initialDraft.current,
     );
-  }, [name, baseUrl, token, protocol, quotaAccessToken, onDirtyChange]);
+  }, [
+    name,
+    baseUrl,
+    token,
+    protocol,
+    quotaAccessToken,
+    searchOnly,
+    onDirtyChange,
+  ]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const title = `${dialog.item ? "编辑" : "添加"}供应商`;
   return (
@@ -132,7 +161,13 @@ export default function GatewayDialog({
                   ...draft,
                   protocol,
                 }
-              : { op: "saveProvider", ...draft };
+              : {
+                  op: "saveProvider",
+                  ...draft,
+                  ...(clientId === "codex" && dialog.item
+                    ? { searchOnly }
+                    : {}),
+                };
           void save(payload, baseline.current)
             .catch((e) => {
               baseline.current = null;
@@ -237,13 +272,36 @@ export default function GatewayDialog({
               spellCheck={false}
               value={quotaAccessToken ?? ""}
               onChange={(e) => setQuotaAccessToken(e.target.value || undefined)}
-              placeholder={quotaAccessToken === "" ? "保存后清除" : dialog.item?.hasQuotaAccessToken ? "已配置，留空保留" : "用于 New API 账户余额查询"}
+              placeholder={
+                quotaAccessToken === ""
+                  ? "保存后清除"
+                  : dialog.item?.hasQuotaAccessToken
+                    ? "已配置，留空保留"
+                    : "用于 New API 账户余额查询"
+              }
             />
             {(dialog.item?.hasQuotaAccessToken || quotaAccessToken) && (
-              <button type="button" className="text-button" onClick={() => setQuotaAccessToken("")}>清除</button>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => setQuotaAccessToken("")}
+              >
+                清除
+              </button>
             )}
           </span>
         </label>
+        {clientId === "codex" && dialog.item && (
+          <label className="provider-search-setting">
+            <span>仅网络搜索</span>
+            <input
+              type="checkbox"
+              checked={searchOnly}
+              disabled={busy}
+              onChange={(e) => setSearchOnly(e.target.checked)}
+            />
+          </label>
+        )}
         {error && (
           <div className="banner error" role="alert">
             {error}

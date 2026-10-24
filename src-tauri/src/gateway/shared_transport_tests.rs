@@ -193,6 +193,7 @@ fn add_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) {
     gateway
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base_url.to_owned(),

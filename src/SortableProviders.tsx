@@ -25,7 +25,6 @@ import { errorOf, type Provider } from "./types";
 export type ProviderEdit =
   | { op: "reorder"; ids: string[] }
   | { op: "queueProvider"; id: string; queued: boolean }
-  | { op: "searchOnlyProvider"; id: string; searchOnly: boolean }
   | { op: "concurrencyProvider"; id: string; maxConcurrency: number }
   | {
       op: "takeoverProvider";

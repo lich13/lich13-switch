@@ -31,6 +31,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     store
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://api.example.invalid/deployment".into(),
@@ -45,6 +46,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     store
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fallback.example.invalid/v1".into(),
@@ -58,6 +60,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
 
     let invalid = store.edit(
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: None,
             base_url: "https://invalid.example.invalid".into(),
@@ -352,6 +355,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &g,
         &t,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: None,
             base_url: format!("http://127.0.0.1:{port}"),
@@ -405,6 +409,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &g,
         &t,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: Some(id.clone()),
             base_url: format!("http://127.0.0.1:{blocked}"),
@@ -472,6 +477,7 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
         &g,
         &t,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: Some(id),
             base_url: format!("http://127.0.0.1:{port}"),

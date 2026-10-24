@@ -5,12 +5,14 @@ export default function Modal({
   close,
   busy = false,
   compact = false,
+  className = "",
   children,
 }: {
   title: string;
   close: () => void;
   busy?: boolean;
   compact?: boolean;
+  className?: string;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -36,7 +38,7 @@ export default function Modal({
   return (
     <dialog
       ref={ref}
-      className={`modal gateway-modal shared-modal${compact ? " compact-modal" : ""}`}
+      className={`modal gateway-modal shared-modal${compact ? " compact-modal" : ""}${className ? ` ${className}` : ""}`}
       aria-labelledby={titleId}
       aria-busy={busy}
       onKeyDown={(e) => {

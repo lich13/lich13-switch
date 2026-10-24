@@ -138,6 +138,7 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
     store
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 name: None,

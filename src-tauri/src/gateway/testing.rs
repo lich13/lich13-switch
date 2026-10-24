@@ -149,32 +149,6 @@ impl Gateway {
         Ok(())
     }
 }
-impl Gateway {
-    pub(crate) fn next_test_cycle(&self, providers: &[String]) -> Result<i64> {
-        let now = crate::usage::model::now();
-        self.try_view()?
-            .providers
-            .iter()
-            .filter(|p| providers.contains(&p.id))
-            .filter_map(|p| p.quota.as_ref())
-            .flat_map(|q| {
-                q.plans
-                    .iter()
-                    .chain(q.subscriptions.iter().flat_map(|s| s.plans.iter()))
-            })
-            .filter_map(|plan| plan.reset_at.as_deref())
-            .filter_map(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-            .map(|at| at.timestamp_millis() + 3_000)
-            .filter(|at| *at > now)
-            .min()
-            .ok_or_else(|| {
-                AppError::new(
-                    code::STATE,
-                    "所选供应商没有可用的未来周期时间，请先刷新额度或指定时间",
-                )
-            })
-    }
-}
 #[cfg(test)]
 impl Gateway {
     pub(crate) fn remember_test_user_agent(&self, raw: &[u8]) {

@@ -18,7 +18,7 @@ vi.mock("./bridge", () => ({
     return () => mock.listeners.delete(event);
   }),
 }));
-import ProviderTesting, { scheduleTime } from "./ProviderTesting";
+import ProviderTesting from "./ProviderTesting";
 let gateway: typeof gatewayDemo;
 let state: ProviderTestingState;
 let blocked = false;
@@ -29,7 +29,7 @@ const makeJob = (request: ProviderTestRequest): ProviderTestJob => ({
   providerName: "fixture provider",
   providerVersion: "fixture-version",
   kind: request.kind,
-  mode: request.mode,
+  mode: "text",
   requestedModel: request.model,
   forwardedModel: request.model,
   returnedModel: null,
@@ -54,7 +54,6 @@ beforeEach(() => {
   state = {
     revision: "fixture-settings",
     jobs: [],
-    schedules: [],
     degraded: {},
     history: [],
     detectionStatus: [],
@@ -84,7 +83,10 @@ beforeEach(() => {
         if (blocked)
           throw { code: "PROVIDER_TEST", message: "请先完成一次正常请求" };
         return {
-          models: [{ id: "fixture-upstream", name: "Fixture" }],
+          models: [
+            { id: "fixture-upstream", name: "Fixture" },
+            { id: "fixture-alt", name: "Alternate" },
+          ],
           defaultModel: "fixture-upstream",
           stale: false,
           error: null,
@@ -103,7 +105,6 @@ beforeEach(() => {
           output: {
             text: "fixture streamed result",
             groups: {},
-            media: [],
             diagnostics: {},
           },
         };
@@ -118,13 +119,11 @@ beforeEach(() => {
         state.jobs.push(...jobs);
         return { id: "fixture-batch", jobs, errors: [] };
       }
-      if (name === "provider_test_next_cycle")
-        return Date.parse("2026-10-24T10:00:03+08:00");
       return null;
     },
   );
 });
-it("starts a direct test using the latest gateway revision, streams output and cancels without switching", async () => {
+it("selects real models and starts ordinary chat with the current revision", async () => {
   const user = userEvent.setup();
   render(
     <ProviderTesting
@@ -133,25 +132,32 @@ it("starts a direct test using the latest gateway revision, streams output and c
       close={vi.fn()}
     />,
   );
-  await waitFor(() =>
-    expect(screen.getByRole("combobox", { name: "模型" })).toHaveValue(
-      "fixture-upstream",
-    ),
-  );
-  await user.type(screen.getByLabelText("测试输入"), "fixture request");
+  const select = screen.getByRole("combobox", { name: "测试模型" });
+  expect(select.tagName).toBe("SELECT");
+  await screen.findByRole("option", { name: "Alternate (fixture-alt)" });
+  expect(select).toHaveValue("");
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("接口")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("测试类型")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("测试输入")).not.toBeInTheDocument();
+  expect(document.querySelector('input[type="file"]')).toBeNull();
+  expect(screen.queryByRole("tab", { name: "预约" })).not.toBeInTheDocument();
+  await user.selectOptions(select, "fixture-alt");
   await user.click(screen.getByRole("button", { name: "开始测试" }));
   expect(mock.command).toHaveBeenCalledWith("provider_test_start", {
-    request: expect.objectContaining({
-      expectedRevision: "fixture-current",
-      model: "fixture-upstream",
-      input: "fixture request",
+    request: {
       clientId: "codex",
-    }),
+      providerId: gateway.providers[0].id,
+      expectedRevision: "fixture-current",
+      kind: "connection",
+      model: "fixture-alt",
+      concurrency: 1,
+    },
   });
   expect(
     await screen.findByText("fixture streamed result"),
   ).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "停止" }));
+  await user.click(screen.getByRole("button", { name: "停止测试" }));
   expect(mock.command).toHaveBeenCalledWith("provider_test_cancel", {
     id: "fixture-job",
   });
@@ -159,7 +165,8 @@ it("starts a direct test using the latest gateway revision, streams output and c
     mock.command.mock.calls.some(([name]) => name === "update_gateway"),
   ).toBe(false);
 });
-it("shows missing business UA errors and does not start tests on remount", async () => {
+
+it("reports missing business UA without automatically retrying on remount", async () => {
   blocked = true;
   const user = userEvent.setup();
   const first = render(
@@ -193,7 +200,8 @@ it("shows missing business UA errors and does not start tests on remount", async
     mock.command.mock.calls.filter(([name]) => name === "provider_test_start"),
   ).toHaveLength(1);
 });
-it("search-only providers expose a search test and cannot enter fingerprint selection", async () => {
+
+it("runs ordinary chat for search-only providers and excludes fingerprint testing", async () => {
   gateway.providers[0].searchOnly = true;
   const user = userEvent.setup();
   render(
@@ -203,71 +211,51 @@ it("search-only providers expose a search test and cannot enter fingerprint sele
       close={vi.fn()}
     />,
   );
-  await screen.findByRole("combobox", { name: "接口" });
-  expect(screen.getByRole("combobox", { name: "接口" })).toHaveValue("search");
+  await screen.findByRole("option", { name: "Fixture (fixture-upstream)" });
+  expect(
+    screen.queryByRole("tab", { name: "模型测试" }),
+  ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "开始测试" }));
   expect(mock.command).toHaveBeenCalledWith("provider_test_start", {
-    request: expect.objectContaining({ mode: "search" }),
+    request: {
+      clientId: "codex",
+      providerId: gateway.providers[0].id,
+      expectedRevision: "fixture-current",
+      kind: "connection",
+      model: "",
+      concurrency: 1,
+    },
   });
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "测试类型" }),
-    "fingerprint",
-  );
-  expect(
-    screen.getByRole("checkbox", {
-      name: `${gateway.providers[0].name} · 仅网络搜索`,
-    }),
-  ).toBeDisabled();
-  expect(screen.getByRole("button", { name: "开始测试" })).toBeDisabled();
 });
-it("supports batch stopping and schedules the selected providers at cycle plus three seconds", async () => {
+
+it("starts and stops a batch with a separate default for each selected provider", async () => {
   const user = userEvent.setup();
   render(<ProviderTesting gateway={gateway} close={vi.fn()} />);
   await user.click(screen.getByRole("checkbox", { name: "全选" }));
   await user.click(screen.getByRole("button", { name: "批量测试" }));
-  await user.click(
-    (await screen.findAllByRole("button", { name: "停止批次" }))[0],
-  );
+  expect(mock.command).toHaveBeenCalledWith("provider_test_batch", {
+    requests: gateway.providers.map((p) => ({
+      clientId: "codex",
+      providerId: p.id,
+      expectedRevision: "fixture-current",
+      kind: "connection",
+      model: "",
+      concurrency: 1,
+    })),
+  });
+  await user.click(await screen.findByRole("button", { name: "停止批次" }));
   expect(mock.command).toHaveBeenCalledWith("provider_test_stop_batch", {
     id: "fixture-batch",
   });
-  await user.click(screen.getByRole("tab", { name: "预约" }));
-  await user.click(screen.getByRole("button", { name: "最近周期 +3 秒" }));
-  await waitFor(() =>
-    expect(screen.getByLabelText("预约时间（UTC+08:00）")).toHaveValue(
-      "2026-10-24T10:00:03.000",
-    ),
-  );
-  await user.click(screen.getByRole("button", { name: "保存预约" }));
-  expect(mock.command).toHaveBeenCalledWith("provider_test_schedule", {
-    at: Date.parse("2026-10-24T10:00:03+08:00"),
-    requests: expect.arrayContaining([
-      expect.objectContaining({
-        kind: "connection",
-        mode: "text",
-        input: "",
-        media: null,
-      }),
-    ]),
-  });
-  expect(scheduleTime(Date.parse("2026-10-24T02:00:03Z"))).toBe(
-    "2026-10-24T10:00:03",
-  );
 });
-it("keeps detection drafts on background events and uses the configuration revision", async () => {
+
+it("keeps detection drafts across background events and saves against their original revision", async () => {
   const user = userEvent.setup();
   render(<ProviderTesting gateway={gateway} close={vi.fn()} />);
   await user.click(screen.getByRole("tab", { name: "定时检测" }));
   const enabled = await screen.findByLabelText("启用定时检测");
-  expect(enabled).not.toBeChecked();
   await user.click(enabled);
-  state.jobs.push(
-    makeJob({
-      providerId: gateway.providers[0].id,
-      clientId: "codex",
-      model: "fixture",
-    } as ProviderTestRequest),
-  );
+  state.revision = "new-background-revision";
   await act(async () => {
     mock.listeners.get("provider-tests")?.();
   });
@@ -282,19 +270,235 @@ it("keeps detection drafts on background events and uses the configuration revis
     }),
   });
 });
-it("Claude exposes native connection testing without fingerprint or detection controls", async () => {
-  gateway.clientId = "claude";
+
+it.each(["claude", "grok", "dsh"] as const)(
+  "%s exposes only connection and results tabs",
+  async (clientId) => {
+    gateway.clientId = clientId;
+    render(<ProviderTesting gateway={gateway} close={vi.fn()} />);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+      "连接测试",
+      "测试结果",
+    ]);
+    expect(
+      screen.queryByRole("combobox", { name: "接口" }),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it("forces catalog refresh without replacing a user-selected model", async () => {
+  const user = userEvent.setup();
+  render(
+    <ProviderTesting
+      gateway={gateway}
+      provider={gateway.providers[0]}
+      close={vi.fn()}
+    />,
+  );
+  await screen.findByRole("option", { name: "Alternate (fixture-alt)" });
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "测试模型" }),
+    "fixture-alt",
+  );
+  const original = mock.command.getMockImplementation()!;
+  let finish!: (value: unknown) => void;
+  mock.command.mockImplementation((name, args) =>
+    name === "provider_test_models"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : original(name, args),
+  );
+  await user.click(screen.getByRole("button", { name: "刷新模型目录" }));
+  await waitFor(() => expect(finish).toBeTypeOf("function"));
+  expect(mock.command).toHaveBeenCalledWith(
+    "provider_test_models",
+    expect.objectContaining({ refresh: true }),
+  );
+  await act(async () =>
+    finish({
+      models: [
+        { id: "fixture-alt", name: "Alternate" },
+        { id: "fixture-new", name: "New" },
+      ],
+      defaultModel: "fixture-new",
+      stale: false,
+      error: null,
+    }),
+  );
+  expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue(
+    "fixture-alt",
+  );
+});
+
+it("ignores a late catalog response after switching the selected provider", async () => {
+  const user = userEvent.setup();
+  const original = mock.command.getMockImplementation()!;
+  const pendingModels = new Map<string, (value: unknown) => void>();
+  mock.command.mockImplementation((name, args) =>
+    name === "provider_test_models"
+      ? new Promise((resolve) =>
+          pendingModels.set(String(args.providerId), resolve),
+        )
+      : original(name, args),
+  );
   render(<ProviderTesting gateway={gateway} close={vi.fn()} />);
-  await screen.findByRole("tab", { name: "连接与模型测试" });
+  await user.click(
+    screen.getByRole("checkbox", { name: gateway.providers[0].name }),
+  );
+  await waitFor(() =>
+    expect(pendingModels.has(gateway.providers[0].id)).toBe(true),
+  );
+  await user.click(
+    screen.getByRole("checkbox", { name: gateway.providers[1].name }),
+  );
+  await user.click(
+    screen.getByRole("checkbox", { name: gateway.providers[0].name }),
+  );
+  await waitFor(() =>
+    expect(pendingModels.has(gateway.providers[1].id)).toBe(true),
+  );
+  const catalog = (id: string) => ({
+    models: [{ id, name: id }],
+    defaultModel: id,
+    stale: false,
+    error: null,
+  });
+  await act(async () =>
+    pendingModels.get(gateway.providers[1].id)!(catalog("fixture-second")),
+  );
+  await act(async () =>
+    pendingModels.get(gateway.providers[0].id)!(catalog("fixture-first")),
+  );
   expect(
-    screen.queryByRole("option", { name: "模型指纹测试" }),
+    screen.getByRole("option", { name: "fixture-second" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("option", { name: "fixture-first" }),
   ).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue("");
+});
+
+it("preserves a selected model on refresh failure and permits only default connection testing", async () => {
+  const user = userEvent.setup();
+  render(
+    <ProviderTesting
+      gateway={gateway}
+      provider={gateway.providers[0]}
+      close={vi.fn()}
+    />,
+  );
+  await screen.findByRole("option", { name: "Alternate (fixture-alt)" });
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "测试模型" }),
+    "fixture-alt",
+  );
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation((name, args) =>
+    name === "provider_test_models"
+      ? Promise.reject(new Error("目录读取失败"))
+      : original(name, args),
+  );
+  await user.click(screen.getByRole("button", { name: "刷新模型目录" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("目录读取失败");
+  expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue(
+    "fixture-alt",
+  );
+  expect(screen.getByRole("button", { name: "开始测试" })).toBeDisabled();
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "测试模型" }),
+    "",
+  );
+  expect(screen.getByRole("button", { name: "开始测试" })).toBeEnabled();
+  await user.click(screen.getByRole("tab", { name: "模型测试" }));
+  expect(screen.getByRole("button", { name: "开始测试" })).toBeDisabled();
+});
+
+it("opens fingerprint testing directly and submits the selected model and concurrency", async () => {
+  const user = userEvent.setup();
+  render(
+    <ProviderTesting
+      gateway={gateway}
+      provider={gateway.providers[0]}
+      initialKind="fingerprint"
+      close={vi.fn()}
+    />,
+  );
+  await screen.findByRole("option", { name: "Alternate (fixture-alt)" });
+  expect(screen.getByRole("tab", { name: "模型测试" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "测试模型" }),
+    "fixture-alt",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "组并发" }),
+    "3",
+  );
+  await user.click(screen.getByRole("button", { name: "开始测试" }));
+  expect(mock.command).toHaveBeenCalledWith("provider_test_start", {
+    request: expect.objectContaining({
+      kind: "fingerprint",
+      model: "fixture-alt",
+      concurrency: 3,
+    }),
+  });
+  const tabs = screen.getByRole("tablist");
+  within(tabs).getByRole("tab", { name: "模型测试" }).focus();
+  await user.keyboard("{ArrowRight}");
+  expect(screen.getByRole("tab", { name: "测试结果" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+it("keeps all completed jobs in the current batch visible", async () => {
+  const user = userEvent.setup();
+  render(<ProviderTesting gateway={gateway} close={vi.fn()} />);
+  await user.click(screen.getByRole("checkbox", { name: "全选" }));
+  await user.click(screen.getByRole("button", { name: "批量测试" }));
+  await screen.findByRole("button", { name: "停止批次" });
+  state.jobs.forEach((job) => {
+    job.status = "completed";
+    job.completedAt = Date.now() - 10_000;
+  });
+  await act(async () => {
+    mock.listeners.get("provider-tests")?.();
+  });
   expect(
-    screen.queryByRole("tab", { name: "定时检测" }),
-  ).not.toBeInTheDocument();
-  expect(
-    within(screen.getByRole("combobox", { name: "接口" })).getAllByRole(
-      "option",
-    ),
-  ).toHaveLength(1);
+    screen.getAllByRole("button", { name: "fixture provider 普通对话 已完成" }),
+  ).toHaveLength(2);
+});
+
+it("reloads authoritative detection settings and uses the saved revision for the next edit", async () => {
+  const user = userEvent.setup();
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(async (name, args) => {
+    if (name === "provider_test_set_detection") {
+      state.detection = structuredClone(args.detection);
+      state.revision = "fixture-after-save";
+      return null;
+    }
+    return original(name, args);
+  });
+  render(<ProviderTesting gateway={gateway} close={vi.fn()} />);
+  await user.click(screen.getByRole("tab", { name: "定时检测" }));
+  const input = await screen.findByLabelText("全局检测模型");
+  state.detection.model = "fixture-external-model";
+  state.revision = "fixture-external-revision";
+  await user.click(screen.getByRole("button", { name: "重新读取" }));
+  await waitFor(() => expect(input).toHaveValue("fixture-external-model"));
+  await user.clear(input);
+  await user.type(input, "fixture-saved-model");
+  await user.click(screen.getByRole("button", { name: "保存检测设置" }));
+  await screen.findByText("检测设置已保存");
+  expect(input).toHaveValue("fixture-saved-model");
+  await user.click(screen.getByRole("button", { name: "保存检测设置" }));
+  const writes = mock.command.mock.calls.filter(
+    ([name]) => name === "provider_test_set_detection",
+  );
+  expect(writes[0][1].expectedRevision).toBe("fixture-external-revision");
+  expect(writes[1][1].expectedRevision).toBe("fixture-after-save");
 });

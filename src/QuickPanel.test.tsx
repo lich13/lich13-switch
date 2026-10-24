@@ -92,7 +92,10 @@ it("shows ChatGPT subscription labels in the quick account list and hides API-ke
   const unknown = screen.getByRole("button", { name: "切换到 未知账号" });
   const unknownPlan = within(unknown).getByText("未识别");
   expect(unknownPlan).toHaveClass("account-plan");
-  expect(unknownPlan).toHaveAttribute("title", expect.stringContaining("凭据需刷新"));
+  expect(unknownPlan).toHaveAttribute(
+    "title",
+    expect.stringContaining("凭据需刷新"),
+  );
   const api = screen.getByRole("button", { name: "切换到 API 开发账号" });
   expect(within(api).queryByText("API Secret Plan")).not.toBeInTheDocument();
 });
@@ -118,12 +121,14 @@ it("keeps an updated current account when the initial quick state read resolves 
     resolveInitialState = resolve;
   });
   const original = mock.command.getMockImplementation()!;
-  mock.command.mockImplementation((name: string, args: Record<string, unknown> = {}) => {
-    if (name === "get_state") return initialState;
-    if (name === "get_quick")
-      return { pinned: false, tab: "accounts", visible: true };
-    return original(name, args);
-  });
+  mock.command.mockImplementation(
+    (name: string, args: Record<string, unknown> = {}) => {
+      if (name === "get_state") return initialState;
+      if (name === "get_quick")
+        return { pinned: false, tab: "accounts", visible: true };
+      return original(name, args);
+    },
+  );
 
   render(<QuickPanel />);
   await waitFor(() =>
@@ -197,9 +202,9 @@ it("uses current revisions for quick actions without initializing the main windo
 it("keeps the fixed tall panel without dynamic resize commands", async () => {
   render(<QuickPanel />);
   await screen.findByText("api.example.com");
-  expect(mock.command.mock.calls.some(([name]) => name === "resize_quick")).toBe(
-    false,
-  );
+  expect(
+    mock.command.mock.calls.some(([name]) => name === "resize_quick"),
+  ).toBe(false);
 });
 
 it("keeps provider naming separate from selection and exposes reset in the quick panel", async () => {
@@ -330,7 +335,9 @@ it("keeps the provider quota beside the name in the quick panel", async () => {
   const row = name.closest("[data-provider-id]");
   expect(row).not.toBeNull();
   const quota = within(row as HTMLElement).getByLabelText(`${p.name} 额度`);
-  expect(name.compareDocumentPosition(quota) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(
+    name.compareDocumentPosition(quota) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
   expect(within(quota).getByText("Pro")).toHaveClass("quota-subscription");
 });
 
@@ -474,4 +481,15 @@ it("protects an unsaved quick concurrency draft until a client switch is confirm
   expect(
     mock.command.mock.calls.some(([name]) => name === "update_gateway"),
   ).toBe(false);
+});
+
+it("does not offer the search-only policy switch in the quick panel", async () => {
+  render(<QuickPanel />);
+  await screen.findByRole("button", { name: "api.example.com 并发上限" });
+  expect(
+    screen.queryByRole("button", { name: /仅网络搜索/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("checkbox", { name: /仅网络搜索/ }),
+  ).not.toBeInTheDocument();
 });

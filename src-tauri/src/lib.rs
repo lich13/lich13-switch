@@ -1365,6 +1365,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
     )?;
     r.gateway.edit(
         gateway::Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: None,
             base_url: "https://example.invalid/v1".into(),
@@ -1376,6 +1377,7 @@ async fn gateway_smoke(r: &Runtime) -> Result<()> {
     )?;
     r.gateway.edit(
         gateway::Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: None,
             base_url: "https://backup.invalid/v1".into(),
@@ -1898,9 +1900,6 @@ pub fn run() {
             provider_testing::commands::provider_test_retry,
             provider_testing::commands::provider_test_batch,
             provider_testing::commands::provider_test_stop_batch,
-            provider_testing::commands::provider_test_schedule,
-            provider_testing::commands::provider_test_cancel_schedule,
-            provider_testing::commands::provider_test_next_cycle,
             provider_testing::commands::provider_test_set_detection,
             provider_testing::commands::provider_test_clear_mark,
             provider_testing::commands::provider_test_models,

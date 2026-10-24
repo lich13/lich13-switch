@@ -169,6 +169,7 @@ impl Fixture {
         });
         for (index, url) in urls.iter().enumerate() {
             fixture.edit(Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.clone(),

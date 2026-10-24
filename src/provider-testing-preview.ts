@@ -3,14 +3,12 @@ import type {
   ProviderTestDetail,
   ProviderTestRequest,
   ProviderTestingState,
-  ProviderTestSchedule,
 } from "./bridge-contracts";
 import { gatewayPreview } from "./gateway-preview";
 import type { GatewayState } from "./types";
 const state: ProviderTestingState = {
   revision: "preview-tests-1",
   jobs: [],
-  schedules: [],
   degraded: {},
   history: [],
   detectionStatus: [],
@@ -53,10 +51,10 @@ export function providerTestingPreview(
       providerName: provider?.name ?? "供应商",
       providerVersion: "preview",
       kind: request.kind,
-      mode: provider?.searchOnly ? "search" : request.mode,
-      requestedModel: request.model,
-      forwardedModel: request.model,
-      returnedModel: request.model,
+      mode: "text",
+      requestedModel: request.model || "fixture-model",
+      forwardedModel: request.model || "fixture-model",
+      returnedModel: request.model || "fixture-model",
       status: "completed",
       createdAt: Date.now(),
       startedAt: Date.now(),
@@ -74,7 +72,7 @@ export function providerTestingPreview(
     state.jobs.unshift(job);
     details.set(job.id, {
       job,
-      output: { text: "预览测试结果", media: [], groups: {}, diagnostics: {} },
+      output: { text: "预览测试结果", groups: {}, diagnostics: {} },
     });
     return job;
   };
@@ -98,28 +96,6 @@ export function providerTestingPreview(
       errors: [],
     };
   }
-  if (name === "provider_test_schedule") {
-    const schedule: ProviderTestSchedule = {
-      id: crypto.randomUUID(),
-      at: Number(args.at),
-      status: "pending",
-      providers: (args.requests as ProviderTestRequest[]).map((r) => ({
-        clientId: r.clientId,
-        providerId: r.providerId,
-        providerVersion: "preview",
-        model: r.model,
-      })),
-      batchId: null,
-      error: null,
-    };
-    state.schedules.push(schedule);
-    return structuredClone(schedule);
-  }
-  if (name === "provider_test_cancel_schedule") {
-    const schedule = state.schedules.find((s) => s.id === args.id);
-    if (schedule) schedule.status = "cancelled";
-  }
-  if (name === "provider_test_next_cycle") return Date.now() + 3_603_000;
   if (name === "provider_test_set_detection") {
     state.detection = structuredClone(args.detection as ProviderDetection);
     state.revision = crypto.randomUUID();

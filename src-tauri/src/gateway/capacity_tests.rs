@@ -318,6 +318,7 @@ async fn capacity_round_reads_new_queue_and_routes_without_touching_files() {
         &g,
         &t,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: None,
             base_url: format!("http://127.0.0.1:{third}/v1"),

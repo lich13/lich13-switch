@@ -498,6 +498,7 @@ mod v02514_tests {
             store
                 .edit(
                     Edit::SaveProvider {
+                        search_only: None,
                         quota_access_token: None,
                         id: None,
                         base_url: format!("https://p{n}.example.invalid"),

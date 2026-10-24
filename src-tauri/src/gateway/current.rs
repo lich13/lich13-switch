@@ -205,6 +205,7 @@ mod tests {
         store
             .edit(
                 super::super::Edit::SaveProvider {
+                    search_only: None,
                     quota_access_token: None,
                     id: None,
                     base_url: "https://relay.example.invalid/v1".into(),

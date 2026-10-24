@@ -141,24 +141,18 @@ export default function ProviderControls({
     }
   };
   const togglePolicy = async (
-    field: "handoffAfterCompaction" | "takeNewThreads" | "searchOnly",
+    field: "handoffAfterCompaction" | "takeNewThreads",
   ) => {
     if (pending.current || disabled) return;
     pending.current = true;
     setSaving(true);
     try {
       await commit(
-        field === "searchOnly"
-          ? {
-              op: "searchOnlyProvider",
-              id: provider.id,
-              searchOnly: !provider.searchOnly,
-            }
-          : {
-              op: "takeoverProvider",
-              id: provider.id,
-              [field]: !provider[field],
-            },
+        {
+          op: "takeoverProvider",
+          id: provider.id,
+          [field]: !provider[field],
+        },
         revision,
       );
     } catch (e) {
@@ -170,20 +164,6 @@ export default function ProviderControls({
   };
   return (
     <div className="provider-controls">
-      {clientId === "codex" && (
-        <button
-          type="button"
-          className="provider-takeover"
-          aria-label={`${provider.name} 仅网络搜索`}
-          title="仅网络搜索"
-          aria-pressed={Boolean(provider.searchOnly)}
-          disabled={disabled || saving}
-          onClick={() => void togglePolicy("searchOnly")}
-        >
-          <span className="policy-dot" />
-          仅网络搜索
-        </button>
-      )}
       {clientId === "codex" && !provider.searchOnly && (
         <>
           <button

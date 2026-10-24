@@ -12,6 +12,7 @@ pub enum Kind {
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Retained only to read historical job summaries. New tests always use Text.
 pub enum Mode {
     #[default]
     Text,
@@ -24,13 +25,7 @@ pub enum Mode {
     Realtime,
 }
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaInput {
-    pub data_url: String,
-    pub mime: String,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub client_id: ClientId,
     pub provider_id: String,
@@ -38,12 +33,6 @@ pub struct Request {
     pub model: String,
     #[serde(default)]
     pub kind: Kind,
-    #[serde(default)]
-    pub mode: Mode,
-    #[serde(default)]
-    pub input: String,
-    #[serde(default)]
-    pub media: Option<MediaInput>,
     #[serde(default = "one")]
     pub concurrency: usize,
 }
@@ -97,18 +86,10 @@ impl Job {
         !matches!(self.status.as_str(), "queued" | "running")
     }
 }
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Media {
-    pub kind: String,
-    pub mime: String,
-    pub data_url: String,
-}
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Output {
     pub text: String,
-    pub media: Vec<Media>,
     pub groups: BTreeMap<usize, String>,
     pub diagnostics: Value,
 }
@@ -158,24 +139,6 @@ pub struct Degradation {
     pub queue_removed: bool,
     pub error: Option<String>,
 }
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScheduledProvider {
-    pub client_id: ClientId,
-    pub provider_id: String,
-    pub provider_version: String,
-    pub model: String,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Schedule {
-    pub id: String,
-    pub at: i64,
-    pub status: String,
-    pub providers: Vec<ScheduledProvider>,
-    pub batch_id: Option<String>,
-    pub error: Option<String>,
-}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SavedBank {
@@ -190,7 +153,6 @@ pub struct SavedBank {
 pub struct Persisted {
     pub schema: u32,
     pub jobs: Vec<Job>,
-    pub schedules: Vec<Schedule>,
     pub detection: Detection,
     pub degraded: BTreeMap<String, Degradation>,
     pub history: Vec<Job>,
@@ -201,7 +163,6 @@ impl Default for Persisted {
         Self {
             schema: 1,
             jobs: vec![],
-            schedules: vec![],
             detection: Detection::default(),
             degraded: BTreeMap::new(),
             history: vec![],
@@ -226,7 +187,6 @@ pub struct DetectionStatus {
 pub struct State {
     pub revision: String,
     pub jobs: Vec<Job>,
-    pub schedules: Vec<Schedule>,
     pub detection: Detection,
     pub degraded: BTreeMap<String, Degradation>,
     pub detection_status: Vec<DetectionStatus>,

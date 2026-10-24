@@ -65,16 +65,13 @@ fn ua(service: &Service, client: ClientId) {
         .gateway(client)
         .remember_test_user_agent(b"fixture-business/1.0 exact  UA");
 }
-fn request(service: &Service, client: ClientId, id: &str, mode: Mode) -> Request {
+fn request(service: &Service, client: ClientId, id: &str) -> Request {
     Request {
         client_id: client,
         provider_id: id.into(),
         expected_revision: service.gateway(client).view().revision,
         model: "fixture-model".into(),
         kind: Kind::Connection,
-        mode,
-        input: "fixture input".into(),
-        media: None,
         concurrency: 1,
     }
 }
@@ -177,17 +174,13 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
         }}).await;
         let (dir, service) = fixture();
         let id = add(&service, dir.path(), client, port, protocol);
-        assert!(service
-            .start(request(&service, client, &id, Mode::Text))
-            .is_err());
+        assert!(service.start(request(&service, client, &id)).is_err());
         ua(&service, client);
         if client == ClientId::Dsh {
             let gateway = service.gateway(client);
             gateway.edit(serde_json::from_value(json!({"op":"dshModelsProvider","id":id,"mapping":{"fixture-model":"fixture-mapped"}})).unwrap(), &gateway.view().revision, dir.path()).unwrap();
         }
-        let job = service
-            .start(request(&service, client, &id, Mode::Text))
-            .unwrap();
+        let job = service.start(request(&service, client, &id)).unwrap();
         let result = completed(&service, &job.id).await;
         assert_eq!(result.job.status, "completed", "{:?}", result.job.error);
         assert_eq!(
@@ -223,7 +216,7 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
     }
 }
 #[tokio::test]
-async fn catalog_is_real_unfiltered_and_failure_uses_only_recent_cache() {
+async fn catalog_ignores_route_whitelist_filters_media_and_forces_refresh() {
     let mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let switch = mode.clone();
     let port=server(move |request| { let switch=switch.clone(); async move {
@@ -246,14 +239,19 @@ async fn catalog_is_real_unfiltered_and_failure_uses_only_recent_cache() {
         )
         .unwrap();
     let models = service
-        .models(ClientId::Codex, &id, &gateway.view().revision, true)
+        .models(ClientId::Codex, &id, &gateway.view().revision, false)
         .await
         .unwrap();
     assert_eq!(models.models.len(), 2);
     mode.store(true, std::sync::atomic::Ordering::Relaxed);
-    for (at, _) in lock(&service.0.data).models.values_mut() {
-        *at = Instant::now() - Duration::from_secs(61);
-    }
+    assert!(
+        !service
+            .models(ClientId::Codex, &id, &gateway.view().revision, false)
+            .await
+            .unwrap()
+            .stale
+    );
+    // Explicit refresh bypasses the still-fresh cache, preserving it on failure.
     assert!(
         service
             .models(ClientId::Codex, &id, &gateway.view().revision, true)
@@ -269,44 +267,8 @@ async fn catalog_is_real_unfiltered_and_failure_uses_only_recent_cache() {
         .await
         .is_err());
 }
-#[test]
-fn protocol_payloads_and_inputs_cover_all_connection_modes() {
-    let (_dir, service) = fixture();
-    for (client, mode, path) in [
-        (ClientId::Codex, Mode::Compact, "/responses"),
-        (ClientId::Codex, Mode::Image, "/images/generations"),
-        (ClientId::Codex, Mode::Search, "/alpha/search"),
-        (ClientId::Grok, Mode::Text, "/responses"),
-        (ClientId::Grok, Mode::Image, "/images/generations"),
-        (ClientId::Grok, Mode::Video, "/videos/generations"),
-        (ClientId::Grok, Mode::Search, "/responses"),
-        (ClientId::Grok, Mode::Tts, "/tts"),
-        (ClientId::Grok, Mode::Stt, "/stt"),
-        (ClientId::Grok, Mode::Realtime, "/realtime"),
-    ] {
-        let request = request(&service, client, "fixture", mode);
-        let (actual, body) = connection::payload(&request, "fixture-model", "responses").unwrap();
-        assert!(actual.ends_with(path));
-        if mode == Mode::Tts {
-            assert_eq!(body["language"], "en");
-            assert_eq!(body["voice_id"], "Ara");
-        }
-    }
-    let mut request = request(&service, ClientId::Grok, "fixture", Mode::Image);
-    request.media = Some(MediaInput {
-        data_url: "data:image/png;base64,AQID".into(),
-        mime: "image/png".into(),
-    });
-    assert_eq!(
-        connection::input_bytes(request.media.as_ref().unwrap()).unwrap(),
-        [1, 2, 3]
-    );
-    let (path, body) = connection::payload(&request, "fixture-model", "responses").unwrap();
-    assert!(path.ends_with("/images/edits"));
-    assert_eq!(body["image"]["type"], "image_url");
-}
 #[tokio::test]
-async fn cancellation_restart_and_scheduling_do_not_replay_dispatched_jobs() {
+async fn cancellation_restart_retires_appointments_and_preserves_history() {
     let port = server(|r| async {
         let _ = r.into_body().collect().await;
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -317,36 +279,32 @@ async fn cancellation_restart_and_scheduling_do_not_replay_dispatched_jobs() {
     let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
     ua(&service, ClientId::Codex);
     let job = service
-        .start(request(&service, ClientId::Codex, &id, Mode::Text))
+        .start(request(&service, ClientId::Codex, &id))
         .unwrap();
     service.cancel(&job.id).unwrap();
     assert_eq!(completed(&service, &job.id).await.job.status, "cancelled");
-    let mut req = request(&service, ClientId::Codex, &id, Mode::Text);
-    req.input.clear();
-    let schedule = service.schedule(vec![req], now() + 60_000).unwrap();
-    {
-        let mut data = lock(&service.0.data);
-        let mut next = data.saved.clone();
-        next.jobs[0].status = "running".into();
-        next.jobs[0].can_retry = true;
-        let mut dispatched = schedule.clone();
-        dispatched.id = "fixture-dispatched".into();
-        dispatched.status = "dispatching".into();
-        next.schedules.push(dispatched);
-        service.save(&mut data, next).unwrap();
-    }
+    let path = dir.path().join("provider-tests.json");
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["jobs"][0]["status"] = json!("running");
+    saved["jobs"][0]["canRetry"] = json!(true);
+    saved["jobs"][0]["mode"] = json!("image");
+    saved["schedules"] = json!([{"id":"fixture-pending","at":0,"status":"pending","providers":[{"clientId":"codex","providerId":id,"providerVersion":"fixture","model":"fixture"}]}]);
+    saved["detection"]["intervalMinutes"] = json!(25);
+    saved["history"] = json!([saved["jobs"][0].clone()]);
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let reloaded = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
     let state = reloaded.state();
     assert_eq!(state.jobs[0].status, "interrupted");
+    assert_eq!(state.jobs[0].mode, Mode::Image);
     assert!(!state.jobs[0].can_retry);
-    assert!(state
-        .schedules
-        .iter()
-        .any(|s| s.id == schedule.id && s.status == "pending"));
-    assert!(state
-        .schedules
-        .iter()
-        .any(|s| s.id == "fixture-dispatched" && s.status == "interrupted"));
+    assert_eq!(state.detection.interval_minutes, 25);
+    assert_eq!(state.history.len(), 1);
+    reloaded.tick(now(), false).unwrap();
+    assert_eq!(reloaded.state().jobs.len(), 1);
+    let migrated: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(migrated.get("schedules").is_none());
+    assert_eq!(migrated["bank"], saved["bank"]);
+    assert_eq!(migrated["degraded"], saved["degraded"]);
 }
 #[test]
 fn smart_tiers_config_versions_and_corrupt_bank_fallback() {
@@ -412,7 +370,7 @@ fn fingerprint_response(text: &str) -> Response<Full<Bytes>> {
     )
 }
 fn fingerprint_request(service: &Service, id: &str, concurrency: usize) -> Request {
-    let mut request = request(service, ClientId::Codex, id, Mode::Text);
+    let mut request = request(service, ClientId::Codex, id);
     request.kind = Kind::Fingerprint;
     request.model = "gpt-6-sol".into();
     request.concurrency = concurrency;
@@ -586,13 +544,12 @@ async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
     assert!(!gateway.test_candidates().unwrap()[0].queued);
 }
 #[tokio::test]
-async fn pending_appointments_dispatch_once_after_restart_and_batches_stop() {
+async fn batches_deduplicate_providers_and_stop_without_dispatch() {
     let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = hits.clone();
-    let port = server(move |r| {
+    let port = server(move |_| {
         let count = count.clone();
         async move {
-            let _ = r.into_body().collect().await.unwrap();
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             response(200, "application/json", r#"{"output_text":"fixture"}"#)
         }
@@ -601,27 +558,15 @@ async fn pending_appointments_dispatch_once_after_restart_and_batches_stop() {
     let (dir, service) = fixture();
     let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
     ua(&service, ClientId::Codex);
-    let mut req = request(&service, ClientId::Codex, &id, Mode::Text);
-    req.input.clear();
-    let at = now() + 60_000;
-    service.schedule(vec![req.clone(), req], at).unwrap();
-    let service = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
-    service.tick(at + 1, false).unwrap();
-    let state = service.state();
-    assert_eq!(state.jobs.len(), 1);
-    assert_eq!(state.schedules[0].status, "dispatched");
-    completed(&service, &state.jobs[0].id).await;
-    service.tick(at + 60_000, false).unwrap();
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
-    let request = request(&service, ClientId::Codex, &id, Mode::Text);
+    let request = request(&service, ClientId::Codex, &id);
     let batch = service.batch(vec![request.clone(), request]).unwrap();
     assert_eq!(batch["jobs"].as_array().unwrap().len(), 1);
     service.cancel_batch(batch["id"].as_str().unwrap()).unwrap();
     let job = batch["jobs"][0]["id"].as_str().unwrap();
     assert_eq!(completed(&service, job).await.job.status, "cancelled");
     drop(permit);
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 #[tokio::test]
 async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
@@ -708,153 +653,158 @@ async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
     assert_eq!(completed(&service, &idjob).await.job.status, "cancelled");
     drop(permit);
 }
+
 #[tokio::test]
-async fn stream_media_uploads_and_search_only_test_use_native_endpoints() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let capture = seen.clone();
-    let port=server(move |r|{let capture=capture.clone();async move {
-        let path=r.uri().path().to_owned();let content=r.headers().get("content-type").and_then(|v|v.to_str().ok()).unwrap_or("").to_owned();
-        let body=r.into_body().collect().await.unwrap().to_bytes();lock(&capture).push((path.clone(),content,body));
-        if path.ends_with("/stt") {response(200,"application/json",r#"{"text":"fixture transcript"}"#)}
-        else if path.ends_with("/tts") {response(200,"audio/mpeg",Bytes::from_static(b"fixture audio"))}
-        else if path.ends_with("/images/edits") || path.ends_with("/images/generations") {response(200,"text/event-stream",format!("data: {}\n\n",json!({"type":"image_generation.completed","b64_json":"AQID"})))}
-        else if path.ends_with("/alpha/search") {response(200,"application/json",r#"{"results":[]}"#)}
-        else if path.ends_with("/videos/generations") {response(200,"application/json",r#"{"download_url":"data:video/mp4;base64,AQID","status":"success"}"#)}
-        else {response(200,"text/event-stream","data: {\"type\":\"message_start\",\"message\":{\"model\":\"fixture-native\"}}\n\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n")}
-    }}).await;
+async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
+    let port = server(|request| async {
+        assert!(request.uri().path().ends_with("/responses"));
+        let body: Value = serde_json::from_slice(&request.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["stream"], true);
+        response(200, "text/event-stream", concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"fixture-returned\",\"status\":\"completed\"}}\n\n"
+        ))
+    }).await;
     let (dir, service) = fixture();
-    for (client, mode) in [
-        (ClientId::Claude, Mode::Text),
-        (ClientId::Codex, Mode::Image),
-        (ClientId::Grok, Mode::Image),
-        (ClientId::Grok, Mode::Video),
-        (ClientId::Grok, Mode::Tts),
-        (ClientId::Grok, Mode::Stt),
-        (ClientId::Codex, Mode::Search),
-    ] {
-        let id = add(&service, dir.path(), client, port, "responses");
-        ua(&service, client);
-        let mut req = request(&service, client, &id, mode);
-        if mode == Mode::Image {
-            req.media = Some(MediaInput {
-                mime: "image/png".into(),
-                data_url: "data:image/png;base64,AQID".into(),
-            });
-        }
-        if mode == Mode::Search {
-            let gateway = service.gateway(client);
-            gateway
-                .edit(
-                    Edit::SearchOnlyProvider {
-                        id: id.clone(),
-                        search_only: true,
-                    },
-                    &gateway.view().revision,
-                    dir.path(),
-                )
-                .unwrap();
-            req.mode = Mode::Text;
-            req.expected_revision = gateway.view().revision;
-        }
-        let job = service.start(req).unwrap();
-        let detail = completed(&service, &job.id).await;
-        assert_eq!(detail.job.status, "completed", "{:?}", detail.job.error);
-        if mode == Mode::Text {
-            assert_eq!(detail.output.as_ref().unwrap().text, "hello");
-            assert_eq!(detail.job.returned_model.as_deref(), Some("fixture-native"));
-        }
-        if matches!(mode, Mode::Image | Mode::Video | Mode::Tts) {
-            assert_eq!(detail.output.as_ref().unwrap().media.len(), 1);
-        }
-    }
-    let seen = lock(&seen);
-    assert!(seen[1].1.starts_with("multipart/form-data"));
-    assert!(String::from_utf8_lossy(&seen[1].2).contains("name=\"image\""));
-    assert!(seen[5].1.starts_with("multipart/form-data"));
-    assert!(String::from_utf8_lossy(&seen[5].2).contains("name=\"file\""));
-    assert!(seen[6].0.ends_with("/alpha/search"));
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    let gateway = service.gateway(ClientId::Codex);
+    let previous = gateway.view();
+    gateway
+        .edit(
+            Edit::SaveProvider {
+                id: Some(id.clone()),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                token: String::new(),
+                quota_access_token: None,
+                name: None,
+                search_only: Some(true),
+            },
+            &previous.revision,
+            dir.path(),
+        )
+        .unwrap();
+    assert!(gateway.view().providers[0].search_only);
+    let job = service
+        .start(request(&service, ClientId::Codex, &id))
+        .unwrap();
+    let detail = completed(&service, &job.id).await;
+    assert_eq!(detail.job.mode, Mode::Text);
+    assert_eq!(detail.job.status, "completed");
+    assert_eq!(detail.output.unwrap().text, "Hello");
+    assert_eq!(
+        detail.job.returned_model.as_deref(),
+        Some("fixture-returned")
+    );
+    assert_eq!(gateway.recent_business_requests(&id), 0);
+    assert!(service
+        .start(fingerprint_request(&service, &id, 1))
+        .is_err());
 }
 
 #[tokio::test]
-async fn realtime_uses_saved_ua_and_reports_initial_errors() {
-    use futures_util::SinkExt;
-    for error in [false, true] {
-        let port = server(move |mut request| async move {
-            assert!(request.uri().path().ends_with("/realtime"));
-            assert!(request
-                .uri()
-                .query()
-                .unwrap()
-                .contains("model=fixture-model"));
-            assert_eq!(
-                request.headers()["user-agent"],
-                "fixture-business/1.0 exact  UA"
-            );
-            let (response, upgrade) = yawc::WebSocket::upgrade(&mut request).unwrap();
-            tokio::spawn(async move {
-                let mut ws = upgrade.await.unwrap();
-                ws.send(yawc::Frame::text(
-                    if error {
-                        r#"{"type":"error","error":{"code":"fixture_rejection"}}"#
-                    } else {
-                        r#"{"type":"session.created"}"#
-                    }
-                    .to_owned(),
-                ))
-                .await
-                .unwrap();
-            });
-            response.map(|_| Full::new(Bytes::new()))
+async fn batch_defaults_use_each_provider_catalog_and_missing_catalog_uses_platform_default() {
+    let (dir, service) = fixture();
+    ua(&service, ClientId::Codex);
+    let mut ids = vec![];
+    for name in ["fixture-alpha", "fixture-beta"] {
+        let port = server(move |r| async move {
+            if r.uri().path().ends_with("/models") {
+                response(
+                    200,
+                    "application/json",
+                    json!({"data":[{"id":name}]}).to_string(),
+                )
+            } else {
+                let body: Value =
+                    serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes())
+                        .unwrap();
+                assert_eq!(body["model"], name);
+                response(200, "application/json", r#"{"output_text":"Hello"}"#)
+            }
         })
         .await;
-        let (dir, service) = fixture();
-        let id = add(&service, dir.path(), ClientId::Grok, port, "responses");
-        ua(&service, ClientId::Grok);
-        let job = service
-            .start(request(&service, ClientId::Grok, &id, Mode::Realtime))
-            .unwrap();
-        let result = completed(&service, &job.id).await;
-        assert_eq!(
-            result.job.status,
-            if error { "failed" } else { "completed" }
-        );
-        assert_eq!(
-            service
-                .gateway(ClientId::Grok)
-                .recent_business_requests(&id),
-            0
-        );
+        ids.push(add(
+            &service,
+            dir.path(),
+            ClientId::Codex,
+            port,
+            "responses",
+        ));
     }
+    for id in &ids {
+        service
+            .models(
+                ClientId::Codex,
+                id,
+                &service.gateway(ClientId::Codex).view().revision,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    let requests = ids
+        .iter()
+        .map(|id| {
+            let mut r = request(&service, ClientId::Codex, id);
+            r.model.clear();
+            r
+        })
+        .collect();
+    let batch = service.batch(requests).unwrap();
+    for (i, name) in ["fixture-alpha", "fixture-beta"].iter().enumerate() {
+        assert_eq!(batch["jobs"][i]["requestedModel"], *name);
+        let id = batch["jobs"][i]["id"].as_str().unwrap();
+        assert_eq!(completed(&service, id).await.job.status, "completed");
+    }
+    lock(&service.0.data).models.clear();
+    let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+    let mut r = request(&service, ClientId::Codex, &ids[0]);
+    r.model.clear();
+    let job = service.start(r).unwrap();
+    assert_eq!(
+        job.requested_model,
+        connection::default_model(ClientId::Codex)
+    );
+    service.cancel(&job.id).unwrap();
+    completed(&service, &job.id).await;
+    drop(permit);
 }
 
 #[tokio::test]
-async fn compact_and_grok_search_require_native_evidence_not_just_http_success() {
-    for (client, mode) in [
-        (ClientId::Codex, Mode::Compact),
-        (ClientId::Grok, Mode::Search),
+async fn ordinary_chat_rejects_empty_and_incomplete_responses() {
+    for (mime, body) in [
+        ("application/json", r#"{"output":[]}"#),
+        (
+            "text/event-stream",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        ),
+        ("application/json", r#"{"error":{"message":"fixture"}}"#),
     ] {
-        for valid in [false, true] {
-            let port=server(move |r|async move {
-                assert!(r.uri().path().ends_with("/responses"));
-                let body:Value=serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
-                if mode==Mode::Compact {
-                    assert_eq!(body["input"][1]["type"],"compaction_trigger");assert_eq!(body["stream"],true);
-                    let item=if valid {json!({"type":"compaction","encrypted_content":"fixture-compact"})}else{json!({"type":"message"})};
-                    response(200,"text/event-stream",format!("data: {}\n\ndata: {}\n\n",json!({"type":"response.output_item.done","item":item}),json!({"type":"response.completed","response":{"status":"completed","output":[]}})))
-                }else{
-                    assert_eq!(body["tools"][0]["type"],"web_search");assert_eq!(body["include"][0],"web_search_call.action.sources");
-                    response(200,"application/json",json!({"status":"completed","output":if valid {vec![json!({"type":"web_search_call","action":{"sources":[]}})]}else{vec![]}}).to_string())
-                }
-            }).await;
-            let (dir, service) = fixture();
-            let id = add(&service, dir.path(), client, port, "responses");
-            ua(&service, client);
-            let job = service.start(request(&service, client, &id, mode)).unwrap();
-            let detail = completed(&service, &job.id).await;
-            assert_eq!(
-                detail.job.status,
-                if valid { "completed" } else { "failed" }
-            );
-        }
+        let port = server(move |_| async move { response(200, mime, body) }).await;
+        let (dir, service) = fixture();
+        let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+        ua(&service, ClientId::Codex);
+        let job = service
+            .start(request(&service, ClientId::Codex, &id))
+            .unwrap();
+        assert_eq!(completed(&service, &job.id).await.job.status, "failed");
+    }
+}
+
+#[test]
+fn retired_connection_options_are_not_accepted_by_the_request_contract() {
+    let (_dir, service) = fixture();
+    let original = serde_json::to_value(request(&service, ClientId::Codex, "fixture")).unwrap();
+    for (field, value) in [
+        ("mode", json!("search")),
+        ("input", json!("custom")),
+        ("media", json!({"dataUrl":"fixture"})),
+    ] {
+        let mut value_with_retired_option = original.clone();
+        value_with_retired_option[field] = value;
+        assert!(serde_json::from_value::<Request>(value_with_retired_option).is_err());
     }
 }

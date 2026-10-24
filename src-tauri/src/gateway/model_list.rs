@@ -490,6 +490,7 @@ mod tests {
                     .store
                     .edit(
                         super::super::Edit::SaveProvider {
+                            search_only: None,
                             quota_access_token: None,
                             id: None,
                             name: Some(format!("Fixture {n}")),

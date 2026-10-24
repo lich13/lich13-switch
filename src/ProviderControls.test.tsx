@@ -131,7 +131,7 @@ it("places takeover controls first and commits one actual field per click", asyn
   expect(
     within(controls as HTMLElement)
       .getAllByRole("button")
-      .slice(1, 3),
+      .slice(0, 2),
   ).toEqual([handoff, newThreads]);
 
   await user.click(handoff);
@@ -278,8 +278,7 @@ it("Escape closes only the editor, returns focus and hidden panels discard draft
   expect(commit).not.toHaveBeenCalled();
 });
 
-it("switches a Codex provider to search only and hides generation intake controls", async () => {
-  const user = userEvent.setup();
+it("keeps the search policy out of row controls and hides generation intake for search providers", () => {
   const commit = vi.fn().mockResolvedValue(undefined);
   const report = vi.fn();
   const props = {
@@ -292,13 +291,10 @@ it("switches a Codex provider to search only and hides generation intake control
   const { rerender } = render(
     <ProviderControls {...props} provider={provider} />,
   );
-  await user.click(
-    screen.getByRole("button", { name: `${provider.name} 仅网络搜索` }),
-  );
-  expect(commit).toHaveBeenCalledWith(
-    { op: "searchOnlyProvider", id: provider.id, searchOnly: true },
-    "fixture-role",
-  );
+  expect(
+    screen.queryByRole("button", { name: /仅网络搜索/ }),
+  ).not.toBeInTheDocument();
+  expect(commit).not.toHaveBeenCalled();
   rerender(
     <ProviderControls
       {...props}
@@ -306,8 +302,8 @@ it("switches a Codex provider to search only and hides generation intake control
     />,
   );
   expect(
-    screen.getByRole("button", { name: `${provider.name} 仅网络搜索` }),
-  ).toHaveAttribute("aria-pressed", "true");
+    screen.queryByRole("button", { name: /仅网络搜索/ }),
+  ).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: /压缩后接管/ }),
   ).not.toBeInTheDocument();

@@ -90,9 +90,6 @@ export type ProviderTestRequest = {
   expectedRevision: string;
   model: string;
   kind: ProviderTestKind;
-  mode: ProviderTestMode;
-  input: string;
-  media: { dataUrl: string; mime: string } | null;
   concurrency: number;
 };
 export type FingerprintReport = {
@@ -150,7 +147,6 @@ export type ProviderTestDetail = {
   job: ProviderTestJob;
   output: {
     text: string;
-    media: { kind: string; mime: string; dataUrl: string }[];
     groups: Record<string, string>;
     diagnostics: Record<string, unknown>;
   } | null;
@@ -173,19 +169,6 @@ export type ProviderDegradation = {
   queueRemoved: boolean;
   error: string | null;
 };
-export type ProviderTestSchedule = {
-  id: string;
-  at: number;
-  status: string;
-  providers: {
-    clientId: ClientId;
-    providerId: string;
-    providerVersion: string;
-    model: string;
-  }[];
-  batchId: string | null;
-  error: string | null;
-};
 export type FingerprintBankState = {
   version?: Record<string, unknown>;
   source?: string;
@@ -197,7 +180,6 @@ export type FingerprintBankState = {
 export type ProviderTestingState = {
   revision: string;
   jobs: ProviderTestJob[];
-  schedules: ProviderTestSchedule[];
   detection: ProviderDetection;
   degraded: Record<string, ProviderDegradation>;
   history: ProviderTestJob[];
@@ -370,6 +352,7 @@ export type DshBatch = {
 export type GatewayEdit =
   | {
       op: "saveProvider";
+      searchOnly?: boolean;
       id?: string | null;
       baseUrl: string;
       token: string;
@@ -396,7 +379,6 @@ export type GatewayEdit =
   | { op: "swapEndpoint"; id: string; baseUrl: string }
   | { op: "deleteProvider" | "select" | "reset"; id: string }
   | { op: "queueProvider"; id: string; queued: boolean }
-  | { op: "searchOnlyProvider"; id: string; searchOnly: boolean }
   | { op: "concurrencyProvider"; id: string; maxConcurrency: number }
   | { op: "rpmProvider"; id: string; maxRpm: number }
   | { op: "modelsProvider"; id: string; allowedModels: string[] | null }
@@ -622,15 +604,6 @@ export type CommandMap = {
     ProviderTestBatch
   >;
   provider_test_stop_batch: Call<{ id: string }, void>;
-  provider_test_schedule: Call<
-    { requests: ProviderTestRequest[]; at: number },
-    ProviderTestSchedule
-  >;
-  provider_test_cancel_schedule: Call<{ id: string }, void>;
-  provider_test_next_cycle: Call<
-    { clientId: ClientId; providers: string[] },
-    number
-  >;
   provider_test_set_detection: Call<
     { detection: ProviderDetection; expectedRevision: string },
     void
@@ -644,7 +617,7 @@ export type CommandMap = {
       clientId: ClientId;
       providerId: string;
       expectedRevision: string;
-      fingerprint: boolean;
+      refresh?: boolean;
     },
     ProviderTestModels
   >;

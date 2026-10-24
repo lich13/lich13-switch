@@ -18,6 +18,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let edit = |e| g.edit(e, &g.view().revision, &home).unwrap();
         for (url, token) in [("https://a.invalid", "a"), ("https://b.invalid", "b")] {
             edit(Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.into(),
@@ -59,6 +60,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let selected = g.view().selected;
         g.edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://c.invalid/sub".into(),
@@ -161,4 +163,77 @@ async fn actual_edits_still_conflict_and_external_checkpoint_writes_are_not_igno
     assert_eq!(err.code, "CONFLICT");
     assert_eq!(g.view().revision, before);
     assert_eq!(std::fs::read(file).unwrap(), external);
+}
+
+#[tokio::test]
+async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision() {
+    let (dir, gateway) = fixture(vec!["https://api.example.invalid/v1".into()]).await;
+    let initial = gateway.view();
+    let id = initial.providers[0].id.clone();
+    let version = gateway.0.inner.lock().unwrap().store.providers[0]
+        .version
+        .clone();
+    let edit = |base: &str, role: Option<bool>| Edit::SaveProvider {
+        id: Some(id.clone()),
+        base_url: base.into(),
+        token: "fixture-rotated".into(),
+        quota_access_token: None,
+        name: None,
+        search_only: role,
+    };
+    assert!(gateway
+        .edit(edit("invalid", Some(true)), &initial.revision, dir.path())
+        .is_err());
+    assert!(!gateway.view().providers[0].search_only);
+    assert_eq!(gateway.view().revision, initial.revision);
+    gateway
+        .edit(
+            edit("https://changed.example.invalid/v1", Some(true)),
+            &initial.revision,
+            dir.path(),
+        )
+        .unwrap();
+    let updated = gateway.view();
+    assert!(updated.providers[0].search_only);
+    assert_eq!(
+        updated.providers[0].base_url,
+        "https://changed.example.invalid/v1"
+    );
+    {
+        let inner = gateway.0.inner.lock().unwrap();
+        assert_ne!(inner.store.providers[0].version, version);
+        assert_eq!(inner.store.providers[0].token, "fixture-rotated");
+    }
+    assert!(gateway
+        .edit(
+            edit("https://stale.example.invalid/v1", Some(false)),
+            &initial.revision,
+            dir.path()
+        )
+        .is_err());
+    assert_eq!(gateway.view().revision, updated.revision);
+    gateway
+        .edit(
+            edit("https://changed.example.invalid/v1", None),
+            &updated.revision,
+            dir.path(),
+        )
+        .unwrap();
+    assert!(gateway.view().providers[0].search_only);
+    let claude = gateway.companion(dir.path().join("claude-policy")).unwrap();
+    assert!(claude
+        .edit(
+            Edit::SaveProvider {
+                id: None,
+                base_url: "https://claude.example.invalid".into(),
+                token: "fixture".into(),
+                quota_access_token: None,
+                name: None,
+                search_only: Some(true),
+            },
+            &claude.view().revision,
+            dir.path()
+        )
+        .is_err());
+    assert!(claude.view().providers.is_empty());
 }

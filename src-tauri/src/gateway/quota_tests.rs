@@ -122,6 +122,7 @@ async fn quota_cache_is_invalidated_when_provider_version_changes() {
         &g,
         &t,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: Some(id.clone()),
             base_url: format!("http://127.0.0.1:{port}/v1"),

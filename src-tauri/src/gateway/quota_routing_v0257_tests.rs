@@ -148,6 +148,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &gateway,
             &dir,
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,

@@ -91,6 +91,7 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
                 .store
                 .edit(
                     Edit::SaveProvider {
+                        search_only: None,
                         id: None,
                         name: Some(name.into()),
                         base_url: format!("https://{name}.example.invalid/v1"),

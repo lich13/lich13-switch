@@ -31,22 +31,6 @@ pub fn provider_test_stop_batch(r: R<'_>, id: String) -> Result<()> {
     r.provider_tests.cancel_batch(&id)
 }
 #[tauri::command]
-pub fn provider_test_schedule(r: R<'_>, requests: Vec<Request>, at: i64) -> Result<Schedule> {
-    r.provider_tests.schedule(requests, at)
-}
-#[tauri::command]
-pub fn provider_test_cancel_schedule(r: R<'_>, id: String) -> Result<()> {
-    r.provider_tests.cancel_schedule(&id)
-}
-#[tauri::command]
-pub fn provider_test_next_cycle(
-    r: R<'_>,
-    client_id: ClientId,
-    providers: Vec<String>,
-) -> Result<i64> {
-    r.provider_tests.next_cycle(client_id, &providers)
-}
-#[tauri::command]
 pub fn provider_test_set_detection(
     r: R<'_>,
     detection: Detection,
@@ -70,10 +54,15 @@ pub async fn provider_test_models(
     client_id: ClientId,
     provider_id: String,
     expected_revision: String,
-    fingerprint: bool,
+    refresh: Option<bool>,
 ) -> Result<Models> {
     r.provider_tests
-        .models(client_id, &provider_id, &expected_revision, fingerprint)
+        .models(
+            client_id,
+            &provider_id,
+            &expected_revision,
+            refresh.unwrap_or(false),
+        )
         .await
 }
 #[tauri::command]

@@ -338,6 +338,7 @@ async fn started_http_gateway(
     gateway
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url,
@@ -402,6 +403,7 @@ async fn started_native_gateway(upstream_port: u16, max_rpm: u32) -> (tempfile::
     gateway
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url,

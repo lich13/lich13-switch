@@ -275,6 +275,7 @@ fn v023_template_gateway_export_changes_only_name_url_key_for_both_clients() {
         let view = gateway
             .edit(
                 Edit::SaveProvider {
+                    search_only: None,
                     quota_access_token: None,
                     id: None,
                     name: Some(format!("Fixture {platform}")),

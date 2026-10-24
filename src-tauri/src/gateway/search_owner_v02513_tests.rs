@@ -1096,14 +1096,7 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
     ])
     .await;
     let ids = super::v022_ids(&gateway);
-    super::v022_update(
-        &gateway,
-        &dir,
-        Edit::SearchOnlyProvider {
-            id: ids[0].clone(),
-            search_only: true,
-        },
-    );
+    super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[0].clone()));
     let mut settings = gateway.0.inner.lock().unwrap().store.settings.clone();
     settings.max_retries = 0;
     super::v022_update(&gateway, &dir, Edit::Settings { settings });
@@ -1187,14 +1180,7 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
         let (dir, gateway) = super::v022_fixture(bases).await;
         let ids = super::v022_ids(&gateway);
         for id in &ids[1..] {
-            super::v022_update(
-                &gateway,
-                &dir,
-                Edit::SearchOnlyProvider {
-                    id: id.clone(),
-                    search_only: true,
-                },
-            );
+            super::v022_update(&gateway, &dir, search_only_edit(&gateway, &id.clone()));
         }
         super::v022_start(&gateway, &dir).await;
         let response = search_request(&gateway, "/alpha/search", &[], SEARCH_REQUEST).await;
@@ -1252,14 +1238,7 @@ async fn v02523_search_waits_at_most_thirty_seconds_for_content() {
     ])
     .await;
     let ids = super::v022_ids(&gateway);
-    super::v022_update(
-        &gateway,
-        &dir,
-        Edit::SearchOnlyProvider {
-            id: ids[1].clone(),
-            search_only: true,
-        },
-    );
+    super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1].clone()));
     super::v022_start(&gateway, &dir).await;
     let g = gateway.clone();
     let response =
@@ -1314,14 +1293,7 @@ async fn v02523_search_heartbeats_do_not_extend_timeout_and_delivered_content_is
         ])
         .await;
         let ids = super::v022_ids(&gateway);
-        super::v022_update(
-            &gateway,
-            &dir,
-            Edit::SearchOnlyProvider {
-                id: ids[1].clone(),
-                search_only: true,
-            },
-        );
+        super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1].clone()));
         super::v022_start(&gateway, &dir).await;
         let g = gateway.clone();
         let request =
@@ -1398,14 +1370,7 @@ async fn v02523_search_total_budget_and_cancel_stop_before_backup() {
         ])
         .await;
         let ids = super::v022_ids(&gateway);
-        super::v022_update(
-            &gateway,
-            &dir,
-            Edit::SearchOnlyProvider {
-                id: ids[1].clone(),
-                search_only: true,
-            },
-        );
+        super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1].clone()));
         let mut settings = gateway.0.inner.lock().unwrap().store.settings.clone();
         settings.retry_budget_seconds = 5;
         super::v022_update(&gateway, &dir, Edit::Settings { settings });
@@ -1434,5 +1399,22 @@ async fn v02523_search_total_budget_and_cancel_stop_before_backup() {
             gateway.stop().await.unwrap();
         }
         assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+}
+
+fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
+    let provider = gateway
+        .view()
+        .providers
+        .into_iter()
+        .find(|p| p.id == id)
+        .unwrap();
+    Edit::SaveProvider {
+        id: Some(id.to_owned()),
+        base_url: provider.base_url,
+        token: String::new(),
+        quota_access_token: None,
+        name: None,
+        search_only: Some(true),
     }
 }

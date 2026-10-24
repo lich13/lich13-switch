@@ -90,6 +90,7 @@ async fn claude_missing_settings_are_created_without_other_fields() {
     claude
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fixture.invalid/root".into(),

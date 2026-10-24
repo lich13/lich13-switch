@@ -321,6 +321,7 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
         &gateway,
         &home,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: None,
             base_url: second_base.into(),

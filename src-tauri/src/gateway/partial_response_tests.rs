@@ -163,6 +163,7 @@ impl Fixture {
             gateway
                 .edit(
                     Edit::SaveProvider {
+                        search_only: None,
                         quota_access_token: None,
                         id: None,
                         base_url: url.clone(),

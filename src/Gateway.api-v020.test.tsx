@@ -40,10 +40,19 @@ beforeEach(() => {
       if (name === "get_gateway") return structuredClone(current);
       if (name === "query_provider_quota") return undefined;
       if (name === "update_gateway") {
-        const edit = args.edit as { op?: string; mode?: "bearer" | "apiKey" };
+        const edit = args.edit as {
+          op?: string;
+          mode?: "bearer" | "apiKey";
+          id?: string;
+          searchOnly?: boolean;
+        };
         if (edit.op === "connection") {
           current.connectionMode = edit.mode;
           current.revision = `saved-${current.clientId}`;
+        }
+        if (edit.op === "saveProvider" && edit.searchOnly !== undefined) {
+          const provider = current.providers.find((p) => p.id === edit.id);
+          if (provider) provider.searchOnly = edit.searchOnly;
         }
         return structuredClone(current);
       }
@@ -89,14 +98,31 @@ describe("Codex v0.20.0 API login gateway controls", () => {
       expect(token).toHaveAttribute("type", "password");
       expect(token).toHaveValue("");
       expect(token).toHaveAttribute("placeholder", "已配置，留空保留");
-      if (action === "replace") await user.type(token, "fixture-account-access");
-      if (action === "clear") await user.click(within(dialog).getByRole("button", { name: "清除" }));
+      if (action === "replace")
+        await user.type(token, "fixture-account-access");
+      if (action === "clear")
+        await user.click(within(dialog).getByRole("button", { name: "清除" }));
       await user.click(within(dialog).getByRole("button", { name: "保存" }));
-      await waitFor(() => expect(mock.command).toHaveBeenCalledWith("update_gateway", expect.anything()));
-      const edit = mock.command.mock.calls.find(([name]) => name === "update_gateway")![1].edit;
-      if (action === "preserve") expect(edit).not.toHaveProperty("quotaAccessToken");
-      else expect(edit.quotaAccessToken).toBe(action === "clear" ? "" : "fixture-account-access");
-      expect(mock.command.mock.calls.some(([name]) => name === "reveal_provider_token")).toBe(false);
+      await waitFor(() =>
+        expect(mock.command).toHaveBeenCalledWith(
+          "update_gateway",
+          expect.anything(),
+        ),
+      );
+      const edit = mock.command.mock.calls.find(
+        ([name]) => name === "update_gateway",
+      )![1].edit;
+      if (action === "preserve")
+        expect(edit).not.toHaveProperty("quotaAccessToken");
+      else
+        expect(edit.quotaAccessToken).toBe(
+          action === "clear" ? "" : "fixture-account-access",
+        );
+      expect(
+        mock.command.mock.calls.some(
+          ([name]) => name === "reveal_provider_token",
+        ),
+      ).toBe(false);
     },
   );
 
@@ -141,6 +167,9 @@ describe("Codex v0.20.0 API login gateway controls", () => {
       await screen.findByRole("button", { name: "添加" });
 
       const addDialog = await openProviderEditor(user, "add");
+      expect(
+        within(addDialog).queryByLabelText("仅网络搜索"),
+      ).not.toBeInTheDocument();
       expect(within(addDialog).getByLabelText(label)).toHaveAttribute(
         "type",
         "password",
@@ -252,5 +281,95 @@ describe("Codex v0.20.0 API login gateway controls", () => {
     expect(within(dialog).getByLabelText("OPENAI_API_KEY")).toHaveValue(
       "draft-api-key",
     );
+  });
+});
+
+it("edits search policy only inside the API form and discards a cancelled draft", async () => {
+  const user = userEvent.setup();
+  render(<Gateway notify={() => {}} />);
+  await screen.findByRole("button", { name: "添加" });
+  expect(
+    screen.queryByRole("button", { name: /仅网络搜索/ }),
+  ).not.toBeInTheDocument();
+  let dialog = await openProviderEditor(user, "edit");
+  await user.click(
+    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+  );
+  expect(
+    mock.command.mock.calls.some(([name]) => name === "update_gateway"),
+  ).toBe(false);
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  dialog = await openProviderEditor(user, "edit");
+  expect(
+    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+  ).not.toBeChecked();
+  await user.click(
+    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+  );
+  await user.clear(within(dialog).getByLabelText("base_url"));
+  await user.type(
+    within(dialog).getByLabelText("base_url"),
+    "https://changed.example.invalid/v1",
+  );
+  await user.click(within(dialog).getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  const writes = mock.command.mock.calls.filter(
+    ([name]) => name === "update_gateway",
+  );
+  expect(writes).toHaveLength(1);
+  expect(writes[0][1]).toMatchObject({
+    edit: {
+      op: "saveProvider",
+      searchOnly: true,
+      baseUrl: "https://changed.example.invalid/v1",
+      token: "",
+    },
+  });
+  expect(codexState.providers[0].searchOnly).toBe(true);
+});
+
+it("retains the search policy draft through a save conflict and retries with the current revision", async () => {
+  const user = userEvent.setup();
+  const original = mock.command.getMockImplementation()!;
+  let conflict = true;
+  mock.command.mockImplementation(async (name, args) => {
+    if (name === "update_gateway" && conflict) {
+      conflict = false;
+      codexState.revision = "fixture-new-revision";
+      throw { code: "CONFLICT", message: "配置已变化" };
+    }
+    return original(name, args);
+  });
+  render(<Gateway notify={() => {}} />);
+  await screen.findByRole("button", { name: "添加" });
+  const dialog = await openProviderEditor(user, "edit");
+  const initialRevision = codexState.revision;
+  await user.click(
+    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+  );
+  await user.click(within(dialog).getByRole("button", { name: "保存" }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+    "配置已变化",
+  );
+  expect(
+    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+  ).toBeChecked();
+  expect(codexState.providers[0].searchOnly).not.toBe(true);
+  await user.click(within(dialog).getByRole("button", { name: "重试" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  const writes = mock.command.mock.calls.filter(
+    ([name]) => name === "update_gateway",
+  );
+  expect(writes[0][1]).toMatchObject({
+    expectedRevision: initialRevision,
+    edit: { searchOnly: true },
+  });
+  expect(writes[1][1]).toMatchObject({
+    expectedRevision: "fixture-new-revision",
+    edit: { searchOnly: true },
   });
 });

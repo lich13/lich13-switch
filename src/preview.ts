@@ -181,7 +181,6 @@ export async function run(
         "provider_test_state",
         "provider_test_query",
         "provider_test_models",
-        "provider_test_next_cycle",
       ].includes(name)
     )
       emit("provider-tests", null);

@@ -159,6 +159,7 @@ async fn capacity_spills_over_and_returns_to_priority_without_circuit_failures()
     let selected = g.view().selected;
     g.edit(
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: None,
             base_url: "https://new.invalid/v1".into(),
@@ -314,6 +315,7 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
     codex
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://shared.example.test".into(),
@@ -428,6 +430,7 @@ async fn dynamic_limits_keep_slots_across_route_edits_and_do_not_oversubscribe()
         &g,
         &t,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: Some(r[0].provider.id.clone()),
             base_url: "https://changed.invalid".into(),
@@ -516,6 +519,7 @@ async fn panel_edits_preserve_live_slots_files_and_persist_queue_priority() {
         &g,
         &t,
         Edit::SaveProvider {
+            search_only: None,
             quota_access_token: None,
             id: Some(ids[0].clone()),
             base_url: g.view().providers[1].base_url.clone(),

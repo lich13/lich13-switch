@@ -75,16 +75,24 @@ impl Service {
     pub fn new(directory: &Path, gateways: [Gateway; 4]) -> Result<Self> {
         let path = directory.join("provider-tests.json");
         let raw = storage::read_bounded(&path, STATE_LIMIT)?;
-        let mut saved: Persisted = raw
+        let mut value: Option<Value> = raw
             .as_deref()
             .map(serde_json::from_slice)
+            .transpose()
+            .map_err(|_| failure("测试状态无法读取，已保留原文件"))?;
+        let retired_schedules = value
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .is_some_and(|object| object.remove("schedules").is_some());
+        let mut saved: Persisted = value
+            .map(serde_json::from_value)
             .transpose()
             .map_err(|_| failure("测试状态无法读取，已保留原文件"))?
             .unwrap_or_default();
         if saved.schema != 1 {
             return Err(failure("测试状态来自更高版本，请升级应用"));
         }
-        let mut changed = false;
+        let mut changed = retired_schedules;
         for job in &mut saved.jobs {
             if !job.terminal() {
                 job.status = "interrupted".into();
@@ -94,13 +102,6 @@ impl Service {
             }
             if job.can_retry {
                 job.can_retry = false;
-                changed = true;
-            }
-        }
-        for schedule in &mut saved.schedules {
-            if schedule.status == "dispatching" {
-                schedule.status = "interrupted".into();
-                schedule.error = Some("预约已派发但结果未知，未自动重放".into());
                 changed = true;
             }
         }
@@ -172,7 +173,6 @@ impl Service {
         State {
             revision: config_revision(&data.saved),
             jobs: data.saved.jobs.iter().rev().cloned().collect(),
-            schedules: data.saved.schedules.clone(),
             detection: data.saved.detection.clone(),
             degraded: data.saved.degraded.clone(),
             detection_status: data.detection_status.values().cloned().collect(),
@@ -200,29 +200,17 @@ impl Service {
         if request.model.trim().is_empty()
             || request.model.len() > 256
             || request.model.chars().any(char::is_control)
-            || request.input.len() > 32 * 1024
             || !(1..=3).contains(&request.concurrency)
         {
-            return Err(failure("请填写有效模型、输入和 1–3 并发"));
+            return Err(failure("请选择有效模型和 1–3 并发"));
         }
         if request.kind == Kind::Fingerprint
             && (request.client_id != ClientId::Codex || target.search_only)
         {
             return Err(failure("模型指纹检测仅用于普通 Codex 供应商"));
         }
-        let allowed = match request.client_id {
-            ClientId::Codex => matches!(
-                request.mode,
-                Mode::Text | Mode::Compact | Mode::Image | Mode::Search
-            ),
-            ClientId::Claude | ClientId::Dsh => request.mode == Mode::Text,
-            ClientId::Grok => request.mode != Mode::Compact,
-        };
-        if !allowed {
-            return Err(failure("该客户端不支持所选测试类型"));
-        }
-        if let Some(media) = &request.media {
-            connection::input_bytes(media)?;
+        if !connection::text_model(&request.model) {
+            return Err(failure("请选择普通对话模型"));
         }
         Ok(())
     }
@@ -238,8 +226,8 @@ impl Service {
         let target = self
             .gateway(request.client_id)
             .test_target(&request.provider_id, Some(&request.expected_revision))?;
-        if target.search_only {
-            request.mode = Mode::Search;
+        if request.kind == Kind::Connection && request.model.is_empty() {
+            request.model = self.default_connection_model(&target);
         }
         self.validate(&request, &target)?;
         let mut data = lock(&self.0.data);
@@ -263,7 +251,7 @@ impl Service {
             provider_name: target.provider_name.clone(),
             provider_version: target.version.clone(),
             kind: request.kind,
-            mode: request.mode,
+            mode: Mode::Text,
             requested_model: request.model.clone(),
             forwarded_model: target.model(&request.model),
             returned_model: None,

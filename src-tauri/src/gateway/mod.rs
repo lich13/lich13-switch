@@ -599,6 +599,7 @@ impl Gateway {
             }
             next.edit(
                 Edit::SaveProvider {
+                    search_only: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -1110,7 +1111,11 @@ impl Gateway {
         if self.0.client != ClientId::Codex
             && matches!(
                 &edit,
-                Edit::TakeoverProvider { .. } | Edit::SearchOnlyProvider { .. }
+                Edit::TakeoverProvider { .. }
+                    | Edit::SaveProvider {
+                        search_only: Some(_),
+                        ..
+                    }
             )
         {
             return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
@@ -1239,6 +1244,7 @@ impl Gateway {
                 let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
                 next.edit(
                     Edit::SaveProvider {
+                        search_only: None,
                         quota_access_token: None,
                         id: None,
                         base_url,

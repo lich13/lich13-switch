@@ -104,84 +104,6 @@ impl Service {
         }
         Ok(json!({"id":id,"jobs":jobs,"errors":errors}))
     }
-    pub fn schedule(&self, requests: Vec<Request>, at: i64) -> Result<Schedule> {
-        if requests.is_empty()
-            || requests.len() > 1000
-            || at <= now()
-            || at > now() + 366 * 86_400_000
-        {
-            return Err(failure("请选择 1–1000 个供应商和未来一年内的预约时间"));
-        }
-        let mut providers = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for request in requests {
-            if request.kind != Kind::Connection
-                || request.mode != Mode::Text
-                || request.media.is_some()
-                || !request.input.is_empty()
-            {
-                return Err(failure("预约仅支持普通连接测试，不保存素材和输入"));
-            }
-            let target = self
-                .gateway(request.client_id)
-                .test_target(&request.provider_id, Some(&request.expected_revision))?;
-            self.validate(&request, &target)?;
-            if seen.insert((request.client_id, request.provider_id.clone())) {
-                providers.push(ScheduledProvider {
-                    client_id: request.client_id,
-                    provider_id: request.provider_id,
-                    provider_version: target.version,
-                    model: request.model,
-                });
-            }
-        }
-        let schedule = Schedule {
-            id: uuid::Uuid::new_v4().to_string(),
-            at,
-            status: "pending".into(),
-            providers,
-            batch_id: None,
-            error: None,
-        };
-        let mut data = lock(&self.0.data);
-        let mut next = data.saved.clone();
-        if next
-            .schedules
-            .iter()
-            .filter(|s| s.status == "pending")
-            .count()
-            >= 100
-        {
-            return Err(failure("预约数量已达上限，请先取消已有预约"));
-        }
-        next.schedules.push(schedule.clone());
-        if next.schedules.len() > 200 {
-            if let Some(index) = next.schedules.iter().position(|s| s.status != "pending") {
-                next.schedules.remove(index);
-            }
-        }
-        self.save(&mut data, next)?;
-        drop(data);
-        self.changed();
-        Ok(schedule)
-    }
-    pub fn cancel_schedule(&self, id: &str) -> Result<()> {
-        let mut data = lock(&self.0.data);
-        let mut next = data.saved.clone();
-        let schedule = next
-            .schedules
-            .iter_mut()
-            .find(|s| s.id == id && s.status == "pending")
-            .ok_or_else(|| failure("预约已派发或已取消，请在批次中停止运行中的测试"))?;
-        schedule.status = "cancelled".into();
-        self.save(&mut data, next)?;
-        drop(data);
-        self.changed();
-        Ok(())
-    }
-    pub fn next_cycle(&self, client: ClientId, providers: &[String]) -> Result<i64> {
-        self.gateway(client).next_test_cycle(providers)
-    }
     pub fn run_scheduler(&self) {
         let weak = Arc::downgrade(&self.0);
         tauri::async_runtime::spawn(async move {
@@ -205,7 +127,6 @@ impl Service {
         });
     }
     pub(super) fn tick(&self, at: i64, suspended: bool) -> Result<()> {
-        self.dispatch_schedules(at)?;
         let candidates = self.gateway(ClientId::Codex).test_candidates()?;
         let mut launch = vec![];
         {
@@ -317,9 +238,6 @@ impl Service {
                     expected_revision: revision,
                     model,
                     kind: Kind::Fingerprint,
-                    mode: Mode::Text,
-                    input: String::new(),
-                    media: None,
                     concurrency: 1,
                 },
                 true,
@@ -332,68 +250,6 @@ impl Service {
             }
         }
         self.changed();
-        Ok(())
-    }
-    fn dispatch_schedules(&self, at: i64) -> Result<()> {
-        let due: Vec<_> = lock(&self.0.data)
-            .saved
-            .schedules
-            .iter()
-            .filter(|s| s.status == "pending" && s.at <= at)
-            .cloned()
-            .collect();
-        for schedule in due {
-            let batch = uuid::Uuid::new_v4().to_string();
-            {
-                let mut data = lock(&self.0.data);
-                let mut next = data.saved.clone();
-                let Some(current) = next
-                    .schedules
-                    .iter_mut()
-                    .find(|s| s.id == schedule.id && s.status == "pending")
-                else {
-                    continue;
-                };
-                current.status = "dispatching".into();
-                current.batch_id = Some(batch.clone());
-                self.save(&mut data, next)?;
-            }
-            let mut requests = vec![];
-            let mut errors = vec![];
-            for provider in &schedule.providers {
-                let gateway = self.gateway(provider.client_id);
-                if let Err(error) =
-                    gateway.verify_test_version(&provider.provider_id, &provider.provider_version)
-                {
-                    errors.push(error.message);
-                    continue;
-                }
-                requests.push(Request {
-                    client_id: provider.client_id,
-                    provider_id: provider.provider_id.clone(),
-                    expected_revision: gateway.try_view()?.revision,
-                    model: provider.model.clone(),
-                    kind: Kind::Connection,
-                    mode: Mode::Text,
-                    input: String::new(),
-                    media: None,
-                    concurrency: 1,
-                });
-            }
-            let result = self.batch_with_id(&batch, requests)?;
-            if let Some(failed) = result["errors"].as_array() {
-                for error in failed {
-                    errors.push(compat::string(&error["error"]).to_owned());
-                }
-            }
-            let mut data = lock(&self.0.data);
-            let mut next = data.saved.clone();
-            if let Some(current) = next.schedules.iter_mut().find(|s| s.id == schedule.id) {
-                current.status = "dispatched".into();
-                current.error = (!errors.is_empty()).then(|| errors.join("；"));
-            }
-            self.save(&mut data, next)?;
-        }
         Ok(())
     }
 }

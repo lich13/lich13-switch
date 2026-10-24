@@ -163,6 +163,7 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
     store
         .edit(
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fixture.example.invalid/v1".into(),
@@ -453,6 +454,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &gateway,
             &dir,
             Edit::SaveProvider {
+                search_only: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,

@@ -3604,3 +3604,19 @@ button.exchange-button:active:not(:disabled) {
   gap: 8px;
   flex-wrap: wrap;
 }
+
+.gateway-form label.provider-search-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+}
+.gateway-form .provider-search-setting input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}

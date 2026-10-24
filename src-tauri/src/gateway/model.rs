@@ -244,6 +244,8 @@ pub enum Edit {
         display_name: String,
     },
     SaveProvider {
+        #[serde(default)]
+        search_only: Option<bool>,
         id: Option<String>,
         base_url: String,
         token: String,
@@ -294,10 +296,6 @@ pub enum Edit {
     QueueProvider {
         id: String,
         queued: bool,
-    },
-    SearchOnlyProvider {
-        id: String,
-        search_only: bool,
     },
     ConcurrencyProvider {
         id: String,
@@ -494,6 +492,7 @@ impl Store {
                 let replacing_token = !token.is_empty();
                 self.edit(
                     Edit::SaveProvider {
+                        search_only: None,
                         id,
                         base_url,
                         token,
@@ -562,6 +561,7 @@ impl Store {
                 let selected = self.selected.clone();
                 self.edit(
                     Edit::SaveProvider {
+                        search_only: None,
                         id: None,
                         base_url: raw,
                         token,
@@ -573,6 +573,7 @@ impl Store {
                 self.selected = selected;
             }
             Edit::SaveProvider {
+                search_only,
                 id,
                 base_url: raw,
                 token,
@@ -610,6 +611,10 @@ impl Store {
                     let base_url = u.as_str().trim_end_matches('/');
                     let credentials_changed =
                         p.base_url != base_url || (!token.is_empty() && p.token != token);
+                    let policy_changed = search_only.is_some_and(|value| value != p.search_only);
+                    if let Some(value) = search_only {
+                        p.search_only = value;
+                    }
                     p.base_url = base_url.to_owned();
                     if !token.is_empty() {
                         p.token = token;
@@ -617,7 +622,7 @@ impl Store {
                     if display_name.is_some() {
                         p.name = label;
                     }
-                    if credentials_changed {
+                    if credentials_changed || policy_changed {
                         p.version = uuid::Uuid::new_v4().to_string();
                     }
                 } else {
@@ -637,7 +642,7 @@ impl Store {
                         allowed_models: None,
                         handoff_after_compaction: false,
                         take_new_threads: false,
-                        search_only: false,
+                        search_only: search_only.unwrap_or(false),
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);
@@ -699,13 +704,6 @@ impl Store {
                 }
             }
             Edit::QueueProvider { id, queued } => self.provider_mut(&id)?.queued = queued,
-            Edit::SearchOnlyProvider { id, search_only } => {
-                let provider = self.provider_mut(&id)?;
-                if provider.search_only != search_only {
-                    provider.search_only = search_only;
-                    provider.version = uuid::Uuid::new_v4().to_string();
-                }
-            }
             Edit::ConcurrencyProvider {
                 id,
                 max_concurrency,

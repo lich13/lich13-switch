@@ -710,8 +710,10 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           (e.ids as string[]).indexOf(a.id) - (e.ids as string[]).indexOf(b.id),
       );
     if (e.op === "saveProvider") {
-      if (p) p.baseUrl = String(e.baseUrl);
-      else
+      if (p) {
+        p.baseUrl = String(e.baseUrl);
+        if (e.searchOnly !== undefined) p.searchOnly = Boolean(e.searchOnly);
+      } else
         s.providers.push({
           id: crypto.randomUUID(),
           name: new URL(String(e.baseUrl)).hostname,
@@ -731,7 +733,6 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           takeNewThreads: false,
         });
     }
-    if (e.op === "searchOnlyProvider" && p) p.searchOnly = Boolean(e.searchOnly);
     if (["modelsProvider", "policyProvider"].includes(e.op as string) && p)
       p.allowedModels = e.allowedModels as string[] | null;
     if (["policyProvider", "takeoverProvider"].includes(e.op as string) && p) {
