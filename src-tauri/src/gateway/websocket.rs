@@ -1520,6 +1520,7 @@ async fn session_once(
         attempt_protocol.attach_routing_log(failover.routing());
         attempt_protocol.attach_thread(budget.thread.clone());
         attempt_protocol.request_headers(&headers);
+        attempt_protocol.business_request(g, &admission.route.provider.id, &headers);
         attempt_protocol.request_received(turn_received_at);
         attempt_protocol
             .request_speed(value(&first).and_then(|v| crate::usage::model::speed(&v["speed"])));
@@ -1932,6 +1933,7 @@ async fn session_once(
                 g.route(&route.provider.id)
                     .filter(|r| {
                         r.provider.queued
+                            && !r.provider.search_only
                             && requirement.allows(r.provider.allowed_models.as_deref())
                     })
                     .into_iter()
@@ -2054,6 +2056,7 @@ async fn session_once(
                     .route(&route.provider.id)
                     .filter(|r| {
                         r.provider.queued
+                            && !r.provider.search_only
                             && requirement.allows(r.provider.allowed_models.as_deref())
                     })
                     .into_iter()
@@ -2179,6 +2182,7 @@ async fn session_once(
             next.attach_routing_log(failover.routing());
             next.attach_thread(thread_request.clone());
             next.request_headers(&headers);
+            next.business_request(g, &route.provider.id, &headers);
             next.request_received(turn_received_at);
             next.request_speed(
                 value(&replay_frame).and_then(|v| crate::usage::model::speed(&v["speed"])),
@@ -2563,6 +2567,7 @@ async fn session_once(
                         .route(&route.provider.id)
                         .filter(|r| {
                             r.provider.queued
+                                && !r.provider.search_only
                                 && requirement.allows(r.provider.allowed_models.as_deref())
                         })
                         .ok_or((1013, "thread owner is no longer available"))?;
@@ -2705,6 +2710,7 @@ async fn session_once(
                 next_protocol.attach_routing_log(failover.routing());
                 next_protocol.attach_thread(thread_request.clone());
                 next_protocol.request_headers(&headers);
+                next_protocol.business_request(g, &route.provider.id, &headers);
                 next_protocol.request_received(turn_received_at);
                 next_protocol.request_speed(hints.as_ref().and_then(|h| h.speed.clone()));
                 if let Some(trace) = &usage_trace {
@@ -2976,7 +2982,7 @@ async fn session_once(
                     }
                 }
                 if turn.is_some() && !received && ownership.as_ref().is_some_and(|lease| lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)) && value(&frame).is_some_and(|v| super::compaction::incompatible(&v)) {
-                    if let Some(old) = ownership.as_ref().and_then(|lease| lease.owner.as_ref()).and_then(|id| g.route(id)).filter(|old| old.provider.queued && Requirement::model(current_model.as_deref()).allows(old.provider.allowed_models.as_deref())) {
+                    if let Some(old) = ownership.as_ref().and_then(|lease| lease.owner.as_ref()).and_then(|id| g.route(id)).filter(|old| old.provider.queued && !old.provider.search_only && Requirement::model(current_model.as_deref()).allows(old.provider.allowed_models.as_deref())) {
                         let old = g.endpoint_route(old, conversation.as_deref(), None, false).await.map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
                         if ordinary_attempts <= cfg.max_retries {
                             if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), code::CLIENT_ERROR); }

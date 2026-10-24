@@ -116,6 +116,7 @@ export const ErrorCodes = {
   Process: "PROCESS",
   ProtocolError: "PROTOCOL_ERROR",
   Provider: "PROVIDER",
+  ProviderTest: "PROVIDER_TEST",
   ProvidersCoolingDown: "PROVIDERS_COOLING_DOWN",
   Queue: "QUEUE",
   Quota: "QUOTA",

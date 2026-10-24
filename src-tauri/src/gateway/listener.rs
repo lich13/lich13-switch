@@ -336,7 +336,10 @@ pub fn route(
         (Some(ClientId::Claude), "/claude")
     } else if path == "/grok" || path.starts_with("/grok/") {
         (Some(ClientId::Grok), "/grok")
-    } else if path == "/v1" || path.starts_with("/v1/") {
+    } else if path == "/v1"
+        || path.starts_with("/v1/")
+        || path.trim_end_matches('/') == "/alpha/search"
+    {
         (None, "")
     } else {
         return Err(RouteError::NotFound);
@@ -363,6 +366,9 @@ pub fn route(
         }
     }
     let client = matched.ok_or(RouteError::Unauthorized)?;
+    if path.trim_end_matches('/') == "/alpha/search" && client != ClientId::Codex {
+        return Err(RouteError::NotFound);
+    }
     let remaining = &uri.path_and_query().ok_or(RouteError::NotFound)?.as_str()[prefix.len()..];
     let remaining = if remaining.is_empty() {
         "/".to_owned()

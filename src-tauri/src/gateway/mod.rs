@@ -31,6 +31,8 @@ pub use client::{claude_home, dsh_home, grok_home, ClientId};
 pub(crate) use retired::migrate as retire_legacy_proxy;
 mod admission;
 mod attempt;
+#[cfg(test)]
+mod business_ua_tests;
 pub mod catalog;
 mod circuit;
 mod compaction;
@@ -78,6 +80,7 @@ mod replay_policy;
 mod routing;
 mod routing_log;
 mod rpm;
+pub(crate) mod testing;
 mod thread_capacity;
 #[cfg(test)]
 mod token_reveal_tests;
@@ -154,6 +157,7 @@ pub struct ProviderView {
     pub dsh_models: Option<dsh::ModelMapping>,
     pub handoff_after_compaction: bool,
     pub take_new_threads: bool,
+    pub search_only: bool,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -213,6 +217,7 @@ struct Shared {
     registry: Arc<registry::Registry>,
     inner: Mutex<Inner>,
     lifecycle: tokio::sync::Mutex<()>,
+    business_activity: Mutex<HashMap<String, std::collections::VecDeque<i64>>>,
     clients: Mutex<HashMap<String, HttpClient>>,
     data: PathBuf,
     spool: storage::PrivateTempDir,
@@ -495,6 +500,7 @@ impl Gateway {
                 home: None,
             }),
             lifecycle: tokio::sync::Mutex::new(()),
+            business_activity: Mutex::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
             exchange: exchange::Service::default(),
@@ -900,6 +906,7 @@ impl Gateway {
                             .then(|| s.store.dsh_models.get(&p.id).cloned().unwrap_or_default()),
                         handoff_after_compaction: p.handoff_after_compaction,
                         take_new_threads: p.take_new_threads,
+                        search_only: p.search_only,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
                         reserved_threads: if s.store.mode == "auto" {
                             self.0.admission.reserved(&p.id)
@@ -1034,10 +1041,15 @@ impl Gateway {
             store
                 .providers
                 .iter()
-                .find(|p| Some(&p.id) == store.selected.as_ref())
+                .find(|p| !p.search_only && Some(&p.id) == store.selected.as_ref())
         } else {
-            last.and_then(|id| store.providers.iter().find(|p| p.id == id))
-                .or_else(|| store.providers.iter().find(|p| p.queued))
+            last.and_then(|id| {
+                store
+                    .providers
+                    .iter()
+                    .find(|p| p.id == id && !p.search_only)
+            })
+            .or_else(|| store.providers.iter().find(|p| p.queued && !p.search_only))
         };
         p.ok_or_else(|| {
             AppError::new(
@@ -1095,7 +1107,12 @@ impl Gateway {
                 "请先处理未完成的 Grok 导入事务",
             ));
         }
-        if self.0.client != ClientId::Codex && matches!(&edit, Edit::TakeoverProvider { .. }) {
+        if self.0.client != ClientId::Codex
+            && matches!(
+                &edit,
+                Edit::TakeoverProvider { .. } | Edit::SearchOnlyProvider { .. }
+            )
+        {
             return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
         }
         if self.0.client != ClientId::Codex
@@ -1935,7 +1952,11 @@ impl Gateway {
     }
 
     fn sync_single_protection(&self, state: &Inner) {
-        let mut queue = state.store.providers.iter().filter(|p| p.queued);
+        let mut queue = state
+            .store
+            .providers
+            .iter()
+            .filter(|p| p.queued && !p.search_only);
         let first = queue.next();
         let single = if self.0.client == ClientId::Codex
             && state.store.mode == "auto"
@@ -1975,23 +1996,95 @@ impl Gateway {
         let Ok(s) = self.request_state() else {
             return vec![];
         };
-        if let Some(id) = pinned {
-            s.store
-                .providers
-                .iter()
-                .filter(|p| p.id == id)
-                .map(|p| p.id.clone())
-                .collect()
-        } else if s.store.mode == "auto" {
-            s.store
-                .providers
-                .iter()
-                .filter(|p| p.queued)
-                .map(|p| p.id.clone())
-                .collect()
-        } else {
-            s.store.selected.iter().cloned().collect()
+        s.store
+            .providers
+            .iter()
+            .filter(|p| {
+                !p.search_only
+                    && match pinned {
+                        Some(id) => p.id == id,
+                        None if s.store.mode == "auto" => p.queued,
+                        None => s.store.selected.as_deref() == Some(p.id.as_str()),
+                    }
+            })
+            .map(|p| p.id.clone())
+            .collect()
+    }
+    fn search_backups(&self) -> Vec<String> {
+        if self.client_id() != ClientId::Codex {
+            return vec![];
         }
+        self.request_state()
+            .map(|s| {
+                s.store
+                    .providers
+                    .iter()
+                    .filter(|p| p.queued && p.search_only)
+                    .map(|p| p.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub(crate) fn successful_user_agent(&self) -> Result<hyper::header::HeaderValue> {
+        self.request_state()?
+            .store
+            .successful_user_agent
+            .as_deref()
+            .and_then(|raw| hyper::header::HeaderValue::from_bytes(raw).ok())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                AppError::new(
+                    code::STATE,
+                    "请先通过该客户端完成一次正常请求，再运行供应商测试",
+                )
+            })
+    }
+    fn remember_user_agent(&self, raw: &[u8]) {
+        if raw.is_empty() || raw.len() > 8192 {
+            return;
+        }
+        let Ok(mut s) = self.request_state() else {
+            return;
+        };
+        if s.store.successful_user_agent.as_deref() == Some(raw) {
+            return;
+        }
+        let mut next = s.store.clone();
+        next.successful_user_agent = Some(raw.to_vec());
+        match next.persist(&self.0.data.join("gateway.json"), &s.revision) {
+            Ok(revision) => {
+                s.store = next;
+                s.revision = revision;
+            }
+            Err(_) => {
+                s.error = Some("最近成功请求的 User-Agent 保存失败，请重试正常请求".into());
+            }
+        }
+    }
+    fn note_business_request(&self, provider: &str) {
+        let now = crate::usage::model::now();
+        let mut activity = locks::cache(&self.0.business_activity);
+        let times = activity.entry(provider.into()).or_default();
+        while times.front().is_some_and(|at| *at < now - 3_600_000) {
+            times.pop_front();
+        }
+        // Only the highest smart tier needs more than 120 calls; retain a bounded
+        // recent hour while preserving whether activity is still present.
+        if times.len() == 4096 {
+            times.pop_front();
+        }
+        times.push_back(now);
+    }
+    pub(crate) fn recent_business_requests(&self, provider: &str) -> usize {
+        let now = crate::usage::model::now();
+        let mut activity = locks::cache(&self.0.business_activity);
+        let Some(times) = activity.get_mut(provider) else {
+            return 0;
+        };
+        while times.front().is_some_and(|at| *at < now - 3_600_000) {
+            times.pop_front();
+        }
+        times.len()
     }
     fn route(&self, id: &str) -> Option<Route> {
         let mut s = self.request_state().ok()?;

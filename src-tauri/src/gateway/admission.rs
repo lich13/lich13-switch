@@ -328,6 +328,11 @@ impl Budget {
     pub(super) fn set_intake(&mut self, intake: super::compaction::Intake, owner: Option<String>) {
         self.intake = Some((intake, owner));
     }
+    pub(super) fn search_fallback(&mut self) {
+        self.fixed_provider = false;
+        self.intake = None;
+        self.handoff_owner = None;
+    }
     pub fn protect_capacity(&mut self) {
         self.protected_capacity = true;
     }

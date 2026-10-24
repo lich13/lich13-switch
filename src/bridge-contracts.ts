@@ -74,17 +74,163 @@ export type ClaudeLoginState = {
   authenticated: boolean;
   error: string | null;
 };
-export type LinkHandlers = {
-  current: string | null;
-  apps: { id: string; name: string }[];
-  remembered: string | null;
-  systemPicker: boolean;
+export type ProviderTestMode =
+  | "text"
+  | "compact"
+  | "image"
+  | "video"
+  | "search"
+  | "tts"
+  | "stt"
+  | "realtime";
+export type ProviderTestKind = "connection" | "fingerprint";
+export type ProviderTestRequest = {
+  clientId: ClientId;
+  providerId: string;
+  expectedRevision: string;
+  model: string;
+  kind: ProviderTestKind;
+  mode: ProviderTestMode;
+  input: string;
+  media: { dataUrl: string; mime: string } | null;
+  concurrency: number;
 };
+export type FingerprintReport = {
+  prediction: string;
+  prediction_name: string;
+  probability: number;
+  used_outputs: number;
+  results: {
+    model: string;
+    display_name: string;
+    probability: number;
+    score: number;
+  }[];
+  bank_version: Record<string, unknown>;
+};
+export type ProviderTestGroup = {
+  index: number;
+  expected: number;
+  status: string;
+  attempts: number;
+  elapsedMs: number;
+  returnedModel: string | null;
+  report: FingerprintReport | null;
+  diagnostics: Record<string, unknown>;
+  error: string | null;
+  retryable: boolean;
+  uncertain: boolean;
+};
+export type ProviderTestJob = {
+  id: string;
+  clientId: ClientId;
+  providerId: string;
+  providerName: string;
+  providerVersion: string;
+  kind: ProviderTestKind;
+  mode: ProviderTestMode;
+  requestedModel: string;
+  forwardedModel: string;
+  returnedModel: string | null;
+  status: string;
+  createdAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  elapsedMs: number;
+  firstByteMs: number | null;
+  error: string | null;
+  report: FingerprintReport | null;
+  groups: ProviderTestGroup[];
+  automatic: boolean;
+  batchId: string | null;
+  canRetry: boolean;
+  completionReason: string | null;
+};
+export type ProviderTestDetail = {
+  job: ProviderTestJob;
+  output: {
+    text: string;
+    media: { kind: string; mime: string; dataUrl: string }[];
+    groups: Record<string, string>;
+    diagnostics: Record<string, unknown>;
+  } | null;
+};
+export type ProviderDetection = {
+  enabled: boolean;
+  mode: "smart" | "fixed";
+  intervalMinutes: number;
+  minIntervalMinutes: number;
+  model: string;
+  providers: Record<string, { enabled: boolean | null; model: string | null }>;
+};
+export type ProviderDegradation = {
+  providerId: string;
+  jobId: string;
+  detectedAt: number;
+  requestedModel: string;
+  predictedModel: string;
+  probability: number;
+  queueRemoved: boolean;
+  error: string | null;
+};
+export type ProviderTestSchedule = {
+  id: string;
+  at: number;
+  status: string;
+  providers: {
+    clientId: ClientId;
+    providerId: string;
+    providerVersion: string;
+    model: string;
+  }[];
+  batchId: string | null;
+  error: string | null;
+};
+export type FingerprintBankState = {
+  version?: Record<string, unknown>;
+  source?: string;
+  models: { id: string; name: string }[];
+  checkedAt?: number | null;
+  updating: boolean;
+  error: string | null;
+};
+export type ProviderTestingState = {
+  revision: string;
+  jobs: ProviderTestJob[];
+  schedules: ProviderTestSchedule[];
+  detection: ProviderDetection;
+  degraded: Record<string, ProviderDegradation>;
+  history: ProviderTestJob[];
+  bank: FingerprintBankState;
+  error: string | null;
+  detectionStatus: {
+    providerId: string;
+    status: string;
+    model: string;
+    recentRequests: number;
+    intervalMinutes: number | null;
+    nextAt: number | null;
+    cooldownUntil: number | null;
+    error: string | null;
+  }[];
+};
+export type ProviderTestModels = {
+  models: { id: string; name: string }[];
+  defaultModel: string;
+  stale: boolean;
+  error: string | null;
+};
+export type ProviderTestBatch = {
+  id: string;
+  jobs: ProviderTestJob[];
+  errors: { providerId: string; error: string }[];
+};
+
 export type PendingImport = {
   id: string;
   provider: { clientId: ClientId; name: string; baseUrl: string } | null;
   importError: string | null;
-  dispatchError: string | null;
+  error: string | null;
 };
 export type AccountImportPreview = {
   token: string;
@@ -250,6 +396,7 @@ export type GatewayEdit =
   | { op: "swapEndpoint"; id: string; baseUrl: string }
   | { op: "deleteProvider" | "select" | "reset"; id: string }
   | { op: "queueProvider"; id: string; queued: boolean }
+  | { op: "searchOnlyProvider"; id: string; searchOnly: boolean }
   | { op: "concurrencyProvider"; id: string; maxConcurrency: number }
   | { op: "rpmProvider"; id: string; maxRpm: number }
   | { op: "modelsProvider"; id: string; allowedModels: string[] | null }
@@ -465,18 +612,50 @@ export type CommandMap = {
   >;
   select_account_template: Call<{ token: string; id: number }, void>;
   export_accounts: Call<Revision & { ids: string[]; format: string }, boolean>;
-  get_link_handler_state: Call<None, LinkHandlers>;
-  enable_link_picker: Call<None, LinkHandlers>;
-  set_link_receiver: Call<{ appId: string | null }, LinkHandlers>;
+  provider_test_state: Call<None, ProviderTestingState>;
+  provider_test_start: Call<{ request: ProviderTestRequest }, ProviderTestJob>;
+  provider_test_query: Call<{ id: string }, ProviderTestDetail>;
+  provider_test_cancel: Call<{ id: string }, void>;
+  provider_test_retry: Call<{ id: string }, ProviderTestJob>;
+  provider_test_batch: Call<
+    { requests: ProviderTestRequest[] },
+    ProviderTestBatch
+  >;
+  provider_test_stop_batch: Call<{ id: string }, void>;
+  provider_test_schedule: Call<
+    { requests: ProviderTestRequest[]; at: number },
+    ProviderTestSchedule
+  >;
+  provider_test_cancel_schedule: Call<{ id: string }, void>;
+  provider_test_next_cycle: Call<
+    { clientId: ClientId; providers: string[] },
+    number
+  >;
+  provider_test_set_detection: Call<
+    { detection: ProviderDetection; expectedRevision: string },
+    void
+  >;
+  provider_test_clear_mark: Call<
+    { providerId: string; expectedRevision: string },
+    void
+  >;
+  provider_test_models: Call<
+    {
+      clientId: ClientId;
+      providerId: string;
+      expectedRevision: string;
+      fingerprint: boolean;
+    },
+    ProviderTestModels
+  >;
+  provider_test_update_bank: Call<None, FingerprintBankState>;
   get_provider_imports: Call<None, PendingImport[]>;
   confirm_provider_import: Call<
     {
       id: string;
-      appId: string;
-      remember: boolean;
-      expectedRevision: string | null;
+      expectedRevision: string;
     },
-    { warning: string | null }
+    void
   >;
   cancel_provider_import: Call<{ id: string }, void>;
   get_claude_profile: Call<None, ClaudeProfileState>;
@@ -531,6 +710,7 @@ export type EventMap = {
   "app-visibility": boolean;
   "panel-visibility": boolean;
   "provider-imports": null;
+  "provider-tests": null;
   "usage-state": null;
   "pricing-state": null;
   "app-event": EventRecord;

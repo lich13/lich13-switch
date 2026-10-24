@@ -480,6 +480,71 @@ impl Store {
         db(tx.commit())?;
         Ok(!rows.is_empty())
     }
+    /// Revisit retained evidence once after the cache-read correlation change.
+    /// Daily summaries have no one-to-one evidence and are deliberately untouched.
+    pub fn repair_correlations_batch(&mut self) -> Result<bool> {
+        if storage_v12::pending(&self.connection) {
+            return Ok(false);
+        }
+        let cursor: Option<String> = db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='correlation_zero_cache'",
+                [],
+                |r| r.get(0),
+            )
+            .optional())?;
+        if cursor.as_deref() == Some("done") {
+            return Ok(false);
+        }
+        let compact = storage_v12::active(&self.connection);
+        let prefix = if compact { "v12:" } else { "v11:" };
+        let after = cursor
+            .as_deref()
+            .and_then(|s| s.strip_prefix(prefix))
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let tx = db(self.connection.transaction())?;
+        let rows = if compact {
+            storage_v12::correlation_repair_rows(&tx, after)?
+        } else {
+            let mut statement = db(tx.prepare(
+                "SELECT rowid,body FROM records WHERE rowid>?1 ORDER BY rowid LIMIT 128",
+            ))?;
+            let rows = db(statement.query_map([after], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            rows.map(|r| {
+                let (id, body) = db(r)?;
+                Ok((id, bodies::decode(&tx, &body)?))
+            })
+            .collect::<Result<Vec<(i64, Record)>>>()?
+        };
+        for (_, record) in &rows {
+            if !matches!(record.source.as_str(), "proxy" | "grok")
+                && record
+                    .final_attempt()
+                    .is_some_and(|a| a.tokens.cache_read.is_none_or(|n| n == 0))
+            {
+                dedup::reconcile(&tx, record)?;
+            }
+        }
+        let next = if rows.len() < 128 {
+            "done".into()
+        } else {
+            format!("{prefix}{}", rows.last().unwrap().0)
+        };
+        db(tx.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('correlation_zero_cache',?1)",
+            [next],
+        ))?;
+        if !rows.is_empty() {
+            storage_v12::flush(&tx)?;
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok(!rows.is_empty())
+    }
     pub fn needs_repair(&self, source: &str) -> Result<bool> {
         db(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1 AND value='1')",
@@ -639,6 +704,14 @@ impl Store {
     }
     pub fn compact(&mut self, at: i64) -> Result<()> {
         if storage_v12::pending(&self.connection) {
+            return Ok(());
+        }
+        self.repair_correlations_batch()?;
+        if !db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='correlation_zero_cache' AND value='done')",
+            [], |r| r.get::<_, bool>(0),
+        ))? {
+            // Keep the remaining evidence until its bounded repair has run.
             return Ok(());
         }
         self.archive_details_batch(at)?;

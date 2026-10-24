@@ -37,6 +37,7 @@ fn fixture_provider(base_url: &str) -> Provider {
         allowed_models: None,
         handoff_after_compaction: false,
         take_new_threads: false,
+        search_only: false,
     }
 }
 

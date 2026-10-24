@@ -15,6 +15,7 @@ fn provider(id: &str, model: Option<&str>, special: bool) -> Provider {
         allowed_models: model.map(|m| vec![m.into()]),
         handoff_after_compaction: special,
         take_new_threads: special,
+        search_only: false,
     }
 }
 fn hints(model: &str, compacted: bool) -> RequestHints {

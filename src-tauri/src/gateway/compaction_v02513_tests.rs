@@ -40,6 +40,7 @@ fn provider(id: &str, queued: bool, allowed_models: Option<&str>, handoff: bool)
         allowed_models: allowed_models.map(|model| vec![model.into()]),
         handoff_after_compaction: handoff,
         take_new_threads: handoff,
+        search_only: false,
     }
 }
 

@@ -3,11 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { command } from "./bridge";
 import { errorOf } from "./types";
 import Modal from "./Modal";
-import type {
-  LinkHandlers,
-  PendingImport as Pending,
-} from "./bridge-contracts";
-const SELF = "com.lich13.gpt-switch";
+import type { PendingImport as Pending } from "./bridge-contracts";
 
 export default function ProviderImports({
   notify,
@@ -18,10 +14,6 @@ export default function ProviderImports({
 }) {
   const [queue, setQueue] = useState<Pending[]>([]),
     [active, setActive] = useState<Pending | null>(null),
-    [handlers, setHandlers] = useState<LinkHandlers | null>(null),
-    [choose, setChoose] = useState(true),
-    [appId, setAppId] = useState(""),
-    [remember, setRemember] = useState(false),
     [revision, setRevision] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -51,34 +43,14 @@ export default function ProviderImports({
   }, []);
   useEffect(() => {
     if (!active && available && !blocked && queue[0]) {
-      let disposed = false;
-      const pending = queue[0];
-      void command("get_link_handler_state")
-        .then((state) => {
-          if (disposed) return;
-          const ask =
-            state.remembered !== SELF ||
-            !!pending.dispatchError ||
-            !pending.provider;
-          setHandlers(state);
-          setChoose(ask);
-          setAppId(ask ? "" : SELF);
-          setRemember(false);
-          setRevision("");
-          setError(pending.dispatchError ?? "");
-          setActive(pending);
-        })
-        .catch((e) => {
-          if (!disposed) setError(errorOf(e).message);
-        });
-      return () => {
-        disposed = true;
-      };
+      setRevision("");
+      setError(queue[0].error ?? "");
+      setActive(queue[0]);
     }
   }, [queue, active, available, blocked]);
   useEffect(() => {
     setRevision("");
-    if (active?.provider && appId === SELF) {
+    if (active?.provider) {
       let disposed = false;
       void command("get_gateway", { clientId: active.provider.clientId })
         .then((s) => {
@@ -91,7 +63,7 @@ export default function ProviderImports({
         disposed = true;
       };
     }
-  }, [active, appId]);
+  }, [active]);
   const dismiss = () => {
     if (!active) return;
     setQueue((q) => q.filter((p) => p.id !== active.id));
@@ -112,38 +84,9 @@ export default function ProviderImports({
         {error}
       </div>
     ) : null;
-  const local = appId === SELF;
   return (
-    <Modal
-      title={local ? "导入供应商" : "选择接收应用"}
-      close={cancel}
-      busy={busy}
-      compact
-    >
-      {choose && (
-        <label className="field">
-          接收应用
-          <select
-            aria-label="接收应用"
-            disabled={busy}
-            value={appId}
-            onChange={(e) => {
-              setAppId(e.target.value);
-              setError("");
-            }}
-          >
-            <option value="" disabled>
-              请选择接收应用
-            </option>
-            {handlers?.apps.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {local && active.provider && (
+    <Modal title="导入供应商" close={cancel} busy={busy} compact>
+      {active.provider && (
         <dl className="import-preview">
           <div>
             <dt>客户端</dt>
@@ -165,18 +108,7 @@ export default function ProviderImports({
           </div>
         </dl>
       )}
-      {choose && (
-        <label className="setting-row">
-          <span>下次不再提示</span>
-          <input
-            type="checkbox"
-            checked={remember}
-            disabled={busy || !appId}
-            onChange={(e) => setRemember(e.target.checked)}
-          />
-        </label>
-      )}
-      {(error || (local && active.importError)) && (
+      {(error || active.importError) && (
         <div role="alert" className="form-error">
           {error || active.importError}
         </div>
@@ -187,29 +119,22 @@ export default function ProviderImports({
         </button>
         <button
           className="primary"
-          disabled={
-            busy || !appId || (local && (!active.provider || !revision))
-          }
+          disabled={busy || !active.provider || !revision}
           onClick={() => {
             if (busy) return;
             setBusy(true);
             setError("");
             void command("confirm_provider_import", {
               id: active.id,
-              appId,
-              remember,
-              expectedRevision: local ? revision : null,
+              expectedRevision: revision,
             })
-              .then((receipt) => {
+              .then(() => {
                 dismiss();
-                notify(
-                  receipt.warning ??
-                    (local ? "已添加供应商" : "已交给接收应用"),
-                );
+                notify("已添加供应商");
               })
               .catch(async (e) => {
                 setError(errorOf(e).message);
-                if (local && active.provider) {
+                if (active.provider) {
                   const state = await command("get_gateway", {
                     clientId: active.provider.clientId,
                   }).catch(() => null);
@@ -219,7 +144,7 @@ export default function ProviderImports({
               .finally(() => setBusy(false));
           }}
         >
-          {busy ? "正在处理…" : local ? "导入" : "打开"}
+          {busy ? "正在导入…" : "导入"}
         </button>
       </div>
     </Modal>

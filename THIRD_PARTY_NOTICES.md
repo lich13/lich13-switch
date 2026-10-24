@@ -156,3 +156,29 @@ The endpoint probe design references the MIT-licensed CC Switch `src-tauri/src/s
 https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/speedtest.rs
 
 The v0.22 diagnostics and request-detail organization reference CC Switch at `90fb37ffb76bf06f2d021cd020b7f677216e916c`. The Sub2API JSON exchange adapter follows the public account-data format at `ab80abc6d1f929a6864c8804fd077b509d21fda2`; no Sub2API implementation is copied. Model-scoped health, bounded import previews and conservative compaction-opportunity consumption are independently implemented.
+
+## ModelTrace fingerprint tests
+
+The numerical challenge, analyzer and bundled fingerprint bank are adapted from Hanmo123/ModelTrace at `a7edbadabec28fdf8b5cd8181764af80136a668a` (MIT), using the Rust implementation from sub2api-ops-companion. The full upstream license is distributed in `src-tauri/resources/modeltrace/LICENSE.txt`. Provider tests run independently of the gateway business accounting.
+
+MIT License
+
+Copyright (c) 2026 xqy2006
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

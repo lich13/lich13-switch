@@ -403,6 +403,179 @@ fn distinct_response_ids_block_time_based_cross_source_merging() {
     assert_eq!(store.logs(&Filter::default()).unwrap().total, 2);
 }
 
+fn cache_pair() -> (Record, Record) {
+    let mut proxy = record(
+        "fixture-cache-proxy",
+        "codex",
+        "proxy",
+        BASE,
+        Some("fixture-provider"),
+        Some("fixture-model"),
+        usage(100, 20),
+        Some(200),
+    );
+    proxy.attempts[0].tokens.cache_read = None;
+    proxy.attempts[0].duration_ms = 1_234;
+    proxy.attempts[0].first_token_ms = Some(234);
+    proxy.attempts[0].price = Some(price_snapshot("0.06283"));
+    let mut session = record(
+        "fixture-cache-session",
+        "codex",
+        "codex",
+        BASE + 1_200,
+        None,
+        Some("fixture-model"),
+        usage(100, 20),
+        None,
+    );
+    session.attempts[0].tokens.cache_read = Some(0);
+    session.attempts[0].price = Some(price_snapshot("0.06283"));
+    (proxy, session)
+}
+
+#[test]
+fn missing_and_zero_cache_match_in_both_layouts_and_import_orders_without_changing_raw_usage() {
+    for legacy in [false, true] {
+        for reverse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = if legacy {
+                Store::open_v11_fixture(dir.path())
+            } else {
+                Store::open(dir.path())
+            }
+            .unwrap();
+            let (proxy, session) = cache_pair();
+            let rows = if reverse {
+                [session, proxy]
+            } else {
+                [proxy, session]
+            };
+            for row in rows {
+                store.write_batch(&[row], None).unwrap();
+            }
+            let totals = store.dashboard(&all_time()).unwrap().totals;
+            assert_eq!(totals.requests, 1);
+            assert_eq!(totals.tokens.input, Some(100));
+            assert_eq!(totals.tokens.output, Some(20));
+            assert_eq!(totals.cost, "0.06283");
+            let proxy = store.detail("fixture-cache-proxy").unwrap();
+            let session = store.detail("fixture-cache-session").unwrap();
+            assert_eq!(proxy.attempts[0].tokens.cache_read, None);
+            assert_eq!(session.attempts[0].tokens.cache_read, Some(0));
+            assert_eq!(proxy.attempts[0].duration_ms, 1_234);
+            assert_eq!(proxy.attempts[0].first_token_ms, Some(234));
+            assert_eq!(proxy.attempts[0].price.as_ref().unwrap().cost, "0.06283");
+            assert_eq!(session.duplicate_of.as_deref(), Some("fixture-cache-proxy"));
+            for source in ["proxy", "sessions"] {
+                assert_eq!(
+                    store
+                        .dashboard(&Filter {
+                            source: Some(source.into()),
+                            ..all_time()
+                        })
+                        .unwrap()
+                        .totals
+                        .requests,
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cache_alias_keeps_known_conflicts_identity_guards_and_bidirectional_uniqueness() {
+    for mismatch in [
+        "cache",
+        "model",
+        "provider",
+        "operation",
+        "response",
+        "window",
+        "multiple_proxies",
+        "multiple_sessions",
+    ] {
+        let (_dir, mut store, _) = fixture();
+        let (mut proxy, mut session) = cache_pair();
+        let mut extra = None;
+        match mismatch {
+            "cache" => session.attempts[0].tokens.cache_read = Some(1),
+            "model" => session.attempts[0].response_model = Some("fixture-other".into()),
+            "provider" => session.attempts[0].provider = Some("fixture-other".into()),
+            "operation" => session.attempts[0].operation = Operation::Compaction,
+            "response" => {
+                proxy.attempts[0].response_id = Some("fixture-first".into());
+                session.attempts[0].response_id = Some("fixture-second".into());
+            }
+            "window" => session.attempts[0].started_at += 601_000,
+            "multiple_proxies" => {
+                let mut p = proxy.clone();
+                p.id = "fixture-other-proxy".into();
+                extra = Some(p);
+            }
+            "multiple_sessions" => {
+                let mut s = session.clone();
+                s.id = "fixture-other-session".into();
+                extra = Some(s);
+            }
+            _ => unreachable!(),
+        }
+        store.write_batch(&[proxy, session], None).unwrap();
+        if let Some(extra) = extra {
+            store.write_batch(&[extra], None).unwrap();
+        }
+        let session = store.detail("fixture-cache-session").unwrap();
+        assert!(session.duplicate_of.is_none(), "{mismatch}");
+        assert_eq!(
+            session.deduplication,
+            if mismatch.starts_with("multiple") {
+                "ambiguous"
+            } else {
+                ""
+            },
+            "{mismatch}"
+        );
+    }
+}
+
+#[test]
+fn retained_cache_correlations_are_repaired_once_after_restart() {
+    let (dir, mut store, _) = fixture();
+    let (proxy, session) = cache_pair();
+    // Reproduce a database written before the alias was understood.
+    for (sequence, row) in [proxy, session].iter().enumerate() {
+        super::storage_v12::save(&store.connection, row, 1, sequence as i64 + 1).unwrap();
+    }
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 2);
+    drop(store);
+    store = Store::open(dir.path()).unwrap();
+    assert!(store.repair_correlations_batch().unwrap());
+    assert!(!store.repair_correlations_batch().unwrap());
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
+    assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 1);
+    assert_eq!(
+        store.detail("fixture-cache-proxy").unwrap().attempts[0]
+            .price
+            .as_ref()
+            .unwrap()
+            .cost,
+        "0.06283"
+    );
+}
+
+#[test]
+fn archived_cache_alias_prevents_double_billing_without_guessing_a_pair() {
+    let (_dir, mut store, _) = fixture();
+    let (proxy, session) = cache_pair();
+    store.connection.execute("INSERT INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) VALUES(?1,'codex','proxy',?2,?3,NULL,?4,?5,1,'model')",
+        rusqlite::params![proxy.id, BASE, proxy.attempts[0].provider, proxy.signature(), BASE + 1_234]).unwrap();
+    store.write_batch(&[session], None).unwrap();
+    let row = store.detail("fixture-cache-session").unwrap();
+    assert_eq!(row.deduplication, "ambiguous");
+    assert!(row.duplicate_of.is_none());
+    assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 0);
+}
+
 #[test]
 fn ambiguous_cross_source_candidate_is_reviewable_but_not_effective() {
     let (_dir, mut store, _pricing) = fixture();

@@ -731,6 +731,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           takeNewThreads: false,
         });
     }
+    if (e.op === "searchOnlyProvider" && p) p.searchOnly = Boolean(e.searchOnly);
     if (["modelsProvider", "policyProvider"].includes(e.op as string) && p)
       p.allowedModels = e.allowedModels as string[] | null;
     if (["policyProvider", "takeoverProvider"].includes(e.op as string) && p) {

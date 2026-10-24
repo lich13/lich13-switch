@@ -47,7 +47,6 @@ import AccountPlan from "./AccountPlan";
 import AccountExchange from "./AccountExchange";
 import StartupSettings from "./StartupSettings";
 import PowerSettings from "./PowerSettings";
-import LinkSettings from "./LinkSettings";
 import ProviderImports from "./ProviderImports";
 import NotificationPermission from "./NotificationPermission";
 import { version } from "../package.json";
@@ -183,6 +182,13 @@ export default function App() {
           void command("frontend_ready").catch((e) =>
             setError(errorOf(e).message),
           );
+          void command("get_startup_error")
+            .then((error) => {
+              if (!disposed && error) setError(error.message);
+            })
+            .catch((e) => {
+              if (!disposed) setError(errorOf(e).message);
+            });
         }
       })
       .catch((e) => setError(errorOf(e).message));
@@ -1164,7 +1170,6 @@ function SettingsForm({
       </div>
       <StartupSettings />
       <PowerSettings />
-      <LinkSettings />
       <div className="settings-update-row">
         <button
           type="button"

@@ -1148,6 +1148,21 @@ impl Record {
         })
     }
     pub fn signature(&self) -> Option<String> {
+        self.signature_with_cache_read(self.final_attempt()?.tokens.cache_read)
+    }
+    /// Lookup aliases only: the stored signature and raw usage retain unknown
+    /// versus reported zero. A nonzero cache count never acquires an alias.
+    pub(super) fn correlation_signatures(&self) -> [Option<String>; 2] {
+        let alternate = self
+            .final_attempt()
+            .and_then(|a| match a.tokens.cache_read {
+                None => self.signature_with_cache_read(Some(0)),
+                Some(0) => self.signature_with_cache_read(None),
+                Some(_) => None,
+            });
+        [self.signature(), alternate]
+    }
+    fn signature_with_cache_read(&self, cache_read: Option<u64>) -> Option<String> {
         let a = self.final_attempt()?;
         if a.operation == Operation::WebSearch || a.tokens.total().is_none_or(|n| n == 0) {
             return None;
@@ -1168,7 +1183,7 @@ impl Record {
         };
         Some(safe_id(&format!(
             "{}:{model}:{input}:{output}:{:?}:{write:?}",
-            self.client, a.tokens.cache_read
+            self.client, cache_read
         )))
     }
 }

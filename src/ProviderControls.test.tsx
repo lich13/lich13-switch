@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import ProviderControls from "./ProviderControls";
@@ -122,10 +128,11 @@ it("places takeover controls first and commits one actual field per click", asyn
   expect(newThreads).toHaveTextContent("新线程");
   const controls = container.querySelector(".provider-controls");
   expect(controls).not.toBeNull();
-  expect(within(controls as HTMLElement).getAllByRole("button").slice(0, 2)).toEqual([
-    handoff,
-    newThreads,
-  ]);
+  expect(
+    within(controls as HTMLElement)
+      .getAllByRole("button")
+      .slice(1, 3),
+  ).toEqual([handoff, newThreads]);
 
   await user.click(handoff);
   expect(commit).toHaveBeenLastCalledWith(
@@ -154,12 +161,16 @@ it("places takeover controls first and commits one actual field per click", asyn
       report={report}
     />,
   );
-  await user.click(screen.getByRole("button", { name: `${provider.name} 新线程接管` }));
+  await user.click(
+    screen.getByRole("button", { name: `${provider.name} 新线程接管` }),
+  );
   expect(commit).toHaveBeenLastCalledWith(
     { op: "takeoverProvider", id: provider.id, takeNewThreads: true },
     "takeover-revision-2",
   );
-  expect(commit.mock.calls.at(-1)?.[0]).not.toHaveProperty("handoffAfterCompaction");
+  expect(commit.mock.calls.at(-1)?.[0]).not.toHaveProperty(
+    "handoffAfterCompaction",
+  );
 });
 
 it("keeps the authoritative takeover state on failure and blocks duplicate clicks", async () => {
@@ -265,4 +276,43 @@ it("Escape closes only the editor, returns focus and hidden panels discard draft
   await user.click(anchor);
   expect(screen.getByRole("spinbutton")).toHaveValue(provider.maxConcurrency);
   expect(commit).not.toHaveBeenCalled();
+});
+
+it("switches a Codex provider to search only and hides generation intake controls", async () => {
+  const user = userEvent.setup();
+  const commit = vi.fn().mockResolvedValue(undefined);
+  const report = vi.fn();
+  const props = {
+    revision: "fixture-role",
+    disabled: false,
+    commit,
+    report,
+    clientId: "codex" as const,
+  };
+  const { rerender } = render(
+    <ProviderControls {...props} provider={provider} />,
+  );
+  await user.click(
+    screen.getByRole("button", { name: `${provider.name} 仅网络搜索` }),
+  );
+  expect(commit).toHaveBeenCalledWith(
+    { op: "searchOnlyProvider", id: provider.id, searchOnly: true },
+    "fixture-role",
+  );
+  rerender(
+    <ProviderControls
+      {...props}
+      provider={{ ...provider, searchOnly: true }}
+    />,
+  );
+  expect(
+    screen.getByRole("button", { name: `${provider.name} 仅网络搜索` }),
+  ).toHaveAttribute("aria-pressed", "true");
+  expect(
+    screen.queryByRole("button", { name: /压缩后接管/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /新线程接管/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /并发上限/ })).toBeInTheDocument();
 });

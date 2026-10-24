@@ -138,6 +138,7 @@ local_codes! {
     Process => PROCESS = "PROCESS",
     ProtocolError => PROTOCOL_ERROR = "PROTOCOL_ERROR",
     Provider => PROVIDER = "PROVIDER",
+    ProviderTest => PROVIDER_TEST = "PROVIDER_TEST",
     ProvidersCoolingDown => PROVIDERS_COOLING_DOWN = "PROVIDERS_COOLING_DOWN",
     Queue => QUEUE = "QUEUE",
     Quota => QUOTA = "QUOTA",

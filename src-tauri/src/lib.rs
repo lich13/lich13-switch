@@ -22,6 +22,7 @@ mod power;
 #[cfg(target_os = "macos")]
 mod power_macos;
 mod process_control;
+mod provider_testing;
 mod quick;
 mod startup;
 #[cfg(target_os = "macos")]
@@ -53,6 +54,7 @@ struct Runtime {
     core: Mutex<Core>,
     data: PathBuf,
     imports: Mutex<links::Imports>,
+    provider_tests: provider_testing::Service,
     gateway: gateway::Gateway,
     claude: gateway::Gateway,
     grok: gateway::Gateway,
@@ -1554,12 +1556,14 @@ pub fn run() {
             claude.set_diagnostics(diagnostics.clone());
             grok.set_diagnostics(diagnostics.clone());
             dsh.set_diagnostics(diagnostics.clone());
+            let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), grok.clone(), dsh.clone()])?;
             let runtime = Arc::new(Runtime {
                 usage,
                 diagnostics,
                 core: Mutex::new(core),
                 data,
                 imports: Mutex::new(links::Imports::default()),
+                provider_tests,
                 gateway,
                 claude,
                 grok,
@@ -1586,6 +1590,7 @@ pub fn run() {
                 .observe_home(&runtime.home(gateway::ClientId::Claude)?);
             let state = state_for(&runtime)?;
             app.manage(runtime.clone());
+            if runtime.smoke.is_none() { provider_testing::commands::connect(app.handle()); }
             notifications::connect(app.handle(), &runtime.diagnostics);
             usage::commands::connect(app.handle(), &runtime);
             runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
@@ -1603,6 +1608,16 @@ pub fn run() {
             runtime.grok.report_diagnostics();
             runtime.dsh.report_diagnostics();
             runtime.claude.report_diagnostics();
+            if runtime.smoke.is_none() {
+                let handle = app.handle().clone();
+                let r = runtime.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = links::ensure_association(&handle).await {
+                        r.startup_error.lock().unwrap().get_or_insert(error.clone());
+                        let _ = handle.emit("switch-error", error);
+                    }
+                });
+            }
             links::receive(app.handle(), args.iter().cloned());
             quick::Panel::create(app.handle(), runtime.smoke.is_some())?;
             #[cfg(target_os = "macos")]
@@ -1876,9 +1891,20 @@ pub fn run() {
             usage::commands::update_pricing,
             usage::commands::reload_pricing,
             usage::commands::open_pricing_directory,
-            links::get_link_handler_state,
-            links::enable_link_picker,
-            links::set_link_receiver,
+            provider_testing::commands::provider_test_state,
+            provider_testing::commands::provider_test_start,
+            provider_testing::commands::provider_test_query,
+            provider_testing::commands::provider_test_cancel,
+            provider_testing::commands::provider_test_retry,
+            provider_testing::commands::provider_test_batch,
+            provider_testing::commands::provider_test_stop_batch,
+            provider_testing::commands::provider_test_schedule,
+            provider_testing::commands::provider_test_cancel_schedule,
+            provider_testing::commands::provider_test_next_cycle,
+            provider_testing::commands::provider_test_set_detection,
+            provider_testing::commands::provider_test_clear_mark,
+            provider_testing::commands::provider_test_models,
+            provider_testing::commands::provider_test_update_bank,
             links::get_provider_imports,
             links::confirm_provider_import,
             links::cancel_provider_import,

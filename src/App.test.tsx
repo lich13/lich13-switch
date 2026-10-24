@@ -90,13 +90,6 @@ beforeEach(() => {
   mocks.command.mockImplementation(
     async (name: string, args: Record<string, unknown>) => {
       switch (name) {
-        case "get_link_handler_state":
-          return {
-            current: "com.lich13.gpt-switch",
-            remembered: "com.lich13.gpt-switch",
-            apps: [{ id: "com.lich13.gpt-switch", name: "lich13-switch" }],
-            systemPicker: false,
-          };
         case "get_provider_imports":
           return structuredClone(pendingImports);
         case "get_gateway":
@@ -241,7 +234,9 @@ describe("user workflows", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "账号", level: 1 });
 
-    const knownRow = screen.getByText("个人账号").closest<HTMLElement>(".account-row");
+    const knownRow = screen
+      .getByText("个人账号")
+      .closest<HTMLElement>(".account-row");
     expect(knownRow).not.toBeNull();
     expect(within(knownRow as HTMLElement).getByText("Pro")).toHaveClass(
       "account-plan",
@@ -251,7 +246,10 @@ describe("user workflows", () => {
     expect(unknownRow).not.toBeNull();
     const unknownPlan = within(unknownRow as HTMLElement).getByText("未识别");
     expect(unknownPlan).toHaveClass("account-plan");
-    expect(unknownPlan).toHaveAttribute("title", expect.stringContaining("凭据需刷新"));
+    expect(unknownPlan).toHaveAttribute(
+      "title",
+      expect.stringContaining("凭据需刷新"),
+    );
 
     const apiRow = screen.getByText("工作账号").closest(".account-row");
     expect(apiRow).not.toBeNull();
@@ -291,7 +289,9 @@ describe("user workflows", () => {
     act(() => mocks.listeners.get("switch-state")?.(updatedState));
 
     const expectCurrentPlus = () => {
-      const row = screen.getByText("个人账号").closest<HTMLElement>(".account-row");
+      const row = screen
+        .getByText("个人账号")
+        .closest<HTMLElement>(".account-row");
       expect(row).not.toBeNull();
       if (!row) return;
       expect(within(row).getByText("Plus")).toHaveClass("account-plan");
@@ -311,10 +311,20 @@ describe("user workflows", () => {
   it("copies active device login values and keeps API-key accounts without a manual add option", async () => {
     const user = userEvent.setup();
     render(<App />);
-    expect(await screen.findByRole("button", { name: "切换到 工作账号" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "切换到 工作账号" }),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "添加账号" }));
-    expect(screen.queryByRole("button", { name: "API Key" })).not.toBeInTheDocument();
-    const session = { phase: "waiting", mode: "device", url: null as string | null, code: null as string | null, message: "等待授权" };
+    expect(
+      screen.queryByRole("button", { name: "API Key" }),
+    ).not.toBeInTheDocument();
+    const session = {
+      phase: "waiting",
+      mode: "device",
+      url: null as string | null,
+      code: null as string | null,
+      message: "等待授权",
+    };
     act(() => mocks.listeners.get("login-state")?.(session));
     expect(screen.getByRole("button", { name: "复制链接" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "复制设备码" })).toBeDisabled();
@@ -322,20 +332,44 @@ describe("user workflows", () => {
     session.code = "ABCD-EFGH";
     act(() => mocks.listeners.get("login-state")?.({ ...session }));
     await user.click(screen.getByRole("button", { name: "复制链接" }));
-    expect(mocks.command).toHaveBeenCalledWith("copy_login_value", { kind: "url" });
-    expect(screen.getByRole("button", { name: "复制链接" })).toHaveTextContent("已复制");
+    expect(mocks.command).toHaveBeenCalledWith("copy_login_value", {
+      kind: "url",
+    });
+    expect(screen.getByRole("button", { name: "复制链接" })).toHaveTextContent(
+      "已复制",
+    );
     await user.click(screen.getByRole("button", { name: "复制设备码" }));
-    expect(mocks.command).toHaveBeenCalledWith("copy_login_value", { kind: "code" });
-    mocks.command.mockRejectedValueOnce({ code: "CLIPBOARD", message: "无法写入剪贴板，请重试" });
+    expect(mocks.command).toHaveBeenCalledWith("copy_login_value", {
+      kind: "code",
+    });
+    mocks.command.mockRejectedValueOnce({
+      code: "CLIPBOARD",
+      message: "无法写入剪贴板，请重试",
+    });
     await user.click(screen.getByRole("button", { name: "复制链接" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("无法写入剪贴板");
-    act(() => mocks.listeners.get("login-state")?.({ ...session, phase: "cancelling" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "无法写入剪贴板",
+    );
+    act(() =>
+      mocks.listeners.get("login-state")?.({ ...session, phase: "cancelling" }),
+    );
     expect(screen.getByRole("button", { name: "复制链接" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "复制设备码" })).toBeDisabled();
-    act(() => mocks.listeners.get("login-state")?.({ ...session, phase: "cancelled", url: null, code: null }));
-    expect(screen.queryByRole("button", { name: "复制链接" })).not.toBeInTheDocument();
+    act(() =>
+      mocks.listeners.get("login-state")?.({
+        ...session,
+        phase: "cancelled",
+        url: null,
+        code: null,
+      }),
+    );
+    expect(
+      screen.queryByRole("button", { name: "复制链接" }),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "导入凭据" }));
-    expect(screen.getByRole("button", { name: "选择凭据文件" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "选择凭据文件" }),
+    ).toBeInTheDocument();
   });
   it("keeps provider secrets in the open draft across activation and protects explicit navigation", async () => {
     const u = userEvent.setup();
@@ -409,7 +443,7 @@ describe("user workflows", () => {
       {
         id: "queued-import",
         importError: null,
-        dispatchError: null,
+        error: null,
         provider: {
           clientId: "codex",
           name: "链接供应商",
@@ -469,7 +503,7 @@ describe("user workflows", () => {
       {
         id: "config-import",
         importError: null,
-        dispatchError: null,
+        error: null,
         provider: {
           clientId: "codex",
           name: "等待草稿的供应商",
@@ -632,9 +666,15 @@ describe("quota and notification settings", () => {
     expect(document.querySelector(".topbar")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /^设置/ }));
 
-    expect(screen.queryByRole("checkbox", { name: "额度自动刷新" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("spinbutton", { name: "额度刷新间隔" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "保存刷新设置" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "额度自动刷新" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("spinbutton", { name: "额度刷新间隔" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "保存刷新设置" }),
+    ).not.toBeInTheDocument();
   });
 
   it("persists the system notification switch with the same preferences save", async () => {
@@ -653,4 +693,18 @@ describe("quota and notification settings", () => {
       }),
     );
   });
+});
+
+it("shows association errors recorded before frontend event subscriptions", async () => {
+  const original = mocks.command.getMockImplementation()!;
+  mocks.command.mockImplementation(
+    async (name: string, args: Record<string, unknown>) =>
+      name === "get_startup_error"
+        ? { code: "IMPORT_LINK", message: "系统需要确认 CC Switch 链接关联" }
+        : original(name, args),
+  );
+  render(<App />);
+  expect(
+    await screen.findByText("系统需要确认 CC Switch 链接关联"),
+  ).toBeInTheDocument();
 });

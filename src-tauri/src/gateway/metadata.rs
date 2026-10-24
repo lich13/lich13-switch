@@ -222,6 +222,8 @@ fn retained(key: &str) -> bool {
             | "arguments"
             | "input"
             | "output"
+            | "results"
+            | "web_pages"
             | "item"
             | "encrypted_content"
             | "previous_response_id"

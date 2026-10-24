@@ -1,6 +1,7 @@
 import { usageCommands, usagePreview } from "./usage-preview";
 import { powerCommands, powerPreview } from "./power-preview";
 import { gatewayPreview } from "./gateway-preview";
+import { providerTestingPreview } from "./provider-testing-preview";
 import type { ViewState, ConfigDocument, LoginState } from "./types";
 import { densePreview } from "./preview-fixtures";
 const callbacks = new Map<string, Set<(p: never) => void>>();
@@ -137,15 +138,13 @@ let startup = {
   revision: "preview-startup",
 };
 let quick = { pinned: false, tab: "providers", visible: true };
-let linkHandler = "com.lich13.studio";
-let linkReceiver: string | null = null;
 const importPreview = new URLSearchParams(location.search).get("importPreview");
 let imports = importPreview
   ? [
       {
         id: "preview-import",
         importError: null,
-        dispatchError: null,
+        error: null,
         provider: {
           clientId: "codex",
           name:
@@ -160,23 +159,6 @@ let imports = importPreview
       },
     ]
   : [];
-const linkApps = [
-  {
-    id: "com.lich13.gpt-switch",
-    name: "lich13-switch",
-    path: "/Applications/lich13-switch.app",
-  },
-  {
-    id: "com.ccswitch.desktop",
-    name: "CC Switch",
-    path: "/Applications/CC Switch.app",
-  },
-  {
-    id: "com.lich13.studio",
-    name: "lich13studio",
-    path: "/Applications/lich13studio.app",
-  },
-];
 let claudeProfile = {
   mode: "api",
   revision: "preview-profile",
@@ -192,6 +174,19 @@ export async function run(
   name: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  if (name.startsWith("provider_test_")) {
+    const result = providerTestingPreview(name, args);
+    if (
+      ![
+        "provider_test_state",
+        "provider_test_query",
+        "provider_test_models",
+        "provider_test_next_cycle",
+      ].includes(name)
+    )
+      emit("provider-tests", null);
+    return result;
+  }
   if (name === "get_claude_profile" || name === "recover_claude_profile")
     return structuredClone(claudeProfile);
   if (name === "switch_claude_profile") {
@@ -228,32 +223,13 @@ export async function run(
     return structuredClone(claudeLogin);
   }
 
-  if (name === "get_link_handler_state")
-    return {
-      current: linkHandler,
-      apps: linkApps,
-      systemPicker: false,
-      remembered: linkReceiver,
-    };
-  if (name === "enable_link_picker" || name === "set_link_receiver") {
-    if (name === "enable_link_picker") linkHandler = "com.lich13.gpt-switch";
-    else linkReceiver = args.appId == null ? null : String(args.appId);
-    return {
-      current: linkHandler,
-      apps: linkApps,
-      systemPicker: false,
-      remembered: linkReceiver,
-    };
-  }
   if (name === "get_provider_imports") return structuredClone(imports);
   if (name === "confirm_provider_import" || name === "cancel_provider_import") {
     if (name === "confirm_provider_import" && importPreview === "error")
       throw { code: "CONFLICT", message: "供应商列表已更新，请重新导入" };
     imports = imports.filter((item) => item.id !== args.id);
-    if (name === "confirm_provider_import" && args.remember)
-      linkReceiver = String(args.appId);
     emit("provider-imports", null);
-    return { warning: null };
+    return;
   }
   if (name === "cleanup_retired_data") return;
   if (name === "check_for_updates")

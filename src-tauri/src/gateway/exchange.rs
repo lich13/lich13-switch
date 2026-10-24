@@ -112,6 +112,7 @@ fn provider(v: &Value, client: ClientId, port: u16) -> Result<model::Provider> {
         allowed_models: None,
         handoff_after_compaction: false,
         take_new_threads: false,
+        search_only: false,
     })
 }
 impl Gateway {

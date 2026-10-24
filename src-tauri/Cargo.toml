@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.25.22"
+version = "0.25.23"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -22,6 +22,7 @@ serde = { version = "1", features = ["derive"] }
 semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
+regex = "1"
 sha1 = "0.10"
 base64 = "0.22"
 dirs = "6"
@@ -30,7 +31,7 @@ tempfile = "3"
 toml = "0.9"
 tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "net", "fs", "rt-multi-thread", "test-util"] }
 open = "5"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"

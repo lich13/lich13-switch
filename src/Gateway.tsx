@@ -1,3 +1,4 @@
+import ProviderTesting from "./ProviderTesting";
 import Advanced from "./GatewayAdvanced";
 import DshProfile, { connectDsh } from "./DshProfile";
 import { preferredDshProfile } from "./dsh-profile";
@@ -53,6 +54,11 @@ import {
 
 type Edit = GatewayEdit;
 type Dialog =
+  | {
+      kind: "testing";
+      item?: Provider;
+      testKind?: "connection" | "fingerprint";
+    }
   | { kind: "grokImport" }
   | { kind: "dsh" }
   | { kind: "exchange"; mode: "import" | "export" }
@@ -408,6 +414,13 @@ function GatewayContent({
               导出
             </button>
           </div>
+          <button
+            className="secondary"
+            disabled={busy || !state.providers.length}
+            onClick={() => setDialog({ kind: "testing" })}
+          >
+            测试与检测
+          </button>
           <details className="row-menu">
             <summary aria-label="网关操作">
               <MoreHorizontal size={17} />
@@ -506,7 +519,7 @@ function GatewayContent({
 
                     <button
                       className="secondary compact"
-                      disabled={rowBusy}
+                      disabled={rowBusy || p.searchOnly}
                       onClick={() => choose(p)}
                     >
                       {selected ? (
@@ -539,6 +552,26 @@ function GatewayContent({
                         <MoreHorizontal size={17} />
                       </summary>
                       <div className="menu-popover" onClick={menuClose}>
+                        <button
+                          onClick={() =>
+                            setDialog({ kind: "testing", item: p })
+                          }
+                        >
+                          连接测试
+                        </button>
+                        {clientId === "codex" && !p.searchOnly && (
+                          <button
+                            onClick={() =>
+                              setDialog({
+                                kind: "testing",
+                                item: p,
+                                testKind: "fingerprint",
+                              })
+                            }
+                          >
+                            模型指纹测试
+                          </button>
+                        )}
                         <button
                           onClick={() =>
                             setDialog({ kind: "settings", item: p })
@@ -720,6 +753,14 @@ function GatewayContent({
             await edit(payload, revision);
             notify(clientId === "dsh" ? "模型映射已保存" : "白名单已保存");
           }}
+        />
+      )}
+      {dialog?.kind === "testing" && (
+        <ProviderTesting
+          gateway={state}
+          provider={dialog.item}
+          initialKind={dialog.testKind}
+          close={() => setDialog(null)}
         />
       )}
       {dialog?.kind === "quota" && (

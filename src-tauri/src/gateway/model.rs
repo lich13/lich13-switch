@@ -25,6 +25,8 @@ pub struct Provider {
     pub handoff_after_compaction: bool,
     #[serde(default)]
     pub take_new_threads: bool,
+    #[serde(default)]
+    pub search_only: bool,
 }
 // Existing defaults: three retries allow four total upstream attempts.
 const DEFAULT_MAX_RETRIES: usize = 3;
@@ -157,6 +159,8 @@ impl Settings {
 #[serde(rename_all = "camelCase")]
 pub struct Store {
     pub schema: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successful_user_agent: Option<Vec<u8>>,
     #[serde(default)]
     pub phase_timeouts: bool,
     #[serde(default)]
@@ -205,6 +209,7 @@ impl Default for Store {
     fn default() -> Self {
         Self {
             schema: 2,
+            successful_user_agent: None,
             phase_timeouts: true,
             initialized: false,
             connection: Default::default(),
@@ -289,6 +294,10 @@ pub enum Edit {
     QueueProvider {
         id: String,
         queued: bool,
+    },
+    SearchOnlyProvider {
+        id: String,
+        search_only: bool,
     },
     ConcurrencyProvider {
         id: String,
@@ -628,6 +637,7 @@ impl Store {
                         allowed_models: None,
                         handoff_after_compaction: false,
                         take_new_threads: false,
+                        search_only: false,
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);
@@ -689,6 +699,13 @@ impl Store {
                 }
             }
             Edit::QueueProvider { id, queued } => self.provider_mut(&id)?.queued = queued,
+            Edit::SearchOnlyProvider { id, search_only } => {
+                let provider = self.provider_mut(&id)?;
+                if provider.search_only != search_only {
+                    provider.search_only = search_only;
+                    provider.version = uuid::Uuid::new_v4().to_string();
+                }
+            }
             Edit::ConcurrencyProvider {
                 id,
                 max_concurrency,
@@ -794,7 +811,12 @@ impl Store {
                     .sort_by_key(|p| ids.iter().position(|id| id == &p.id).unwrap_or(usize::MAX));
             }
             Edit::Select { id } => {
-                self.provider_mut(&id)?;
+                if self.provider_mut(&id)?.search_only {
+                    return Err(AppError::new(
+                        code::SETTINGS,
+                        "仅网络搜索供应商不能用于普通生成",
+                    ));
+                }
                 self.selected = Some(id);
                 self.mode = "manual".into();
             }

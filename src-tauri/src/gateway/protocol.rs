@@ -21,6 +21,7 @@ pub struct Observation {
     pub first_event_account_error: Option<bool>,
     pub retry_after: Option<std::time::Duration>,
     pub capacity_error: bool,
+    pub search_content: bool,
     pub compaction_fingerprint: Option<String>,
     pub compaction_incompatible: bool,
     responses_seen: bool,
@@ -114,6 +115,12 @@ impl Observation {
             .filter(|v| v.is_object())
             .or_else(|| outer.get("message").filter(|v| v.is_object()))
             .unwrap_or(outer);
+        self.search_content |= outer.get("results").is_some_and(Value::is_array)
+            || outer.get("web_pages").is_some_and(Value::is_array)
+            || matches!(
+                outer.get("type").and_then(Value::as_str),
+                Some("search.result" | "search.results" | "web_search.result")
+            );
         let event = outer.get("type").and_then(Value::as_str).unwrap_or("");
         let status = value.get("status").and_then(Value::as_str).unwrap_or("");
         let response_id = crate::usage::model::response_id(outer);
@@ -625,6 +632,7 @@ impl Delivery {
     }
 }
 pub struct Protocol {
+    business: Option<(super::Gateway, Vec<u8>)>,
     wait_budget: Option<(super::wait_budget::WaitBudget, Option<tokio::time::Instant>)>,
     rpm_completion: Option<super::admission::Completion>,
     observer: Option<Observer>,
@@ -665,6 +673,7 @@ pub struct Protocol {
 impl Protocol {
     pub fn new(stream: bool) -> Self {
         Self {
+            business: None,
             wait_budget: None,
             rpm_completion: None,
             observer: None,
@@ -780,6 +789,18 @@ impl Protocol {
     }
     pub fn thread_identity(&mut self, identity: crate::usage::model::ThreadIdentity) {
         self.identity = Some(identity);
+    }
+    pub fn business_request(
+        &mut self,
+        gateway: &super::Gateway,
+        provider: &str,
+        headers: &hyper::HeaderMap,
+    ) {
+        gateway.note_business_request(provider);
+        self.business = headers
+            .get(hyper::header::USER_AGENT)
+            .filter(|v| !v.is_empty())
+            .map(|v| (gateway.clone(), v.as_bytes().to_vec()));
     }
     pub fn request_headers(&mut self, headers: &hyper::HeaderMap) {
         self.identity = Some(super::compaction::identity(headers).1);
@@ -905,6 +926,11 @@ impl Protocol {
         if let (Some((lease, _)), Some(usage)) = (&self.ownership, &mut self.usage) {
             lease.attach_usage(usage.routing_completion());
         }
+    }
+    pub fn search_content_observed(&self) -> bool {
+        self.observation.search_content
+            || self.observation.meter.first_token_ms.is_some()
+            || self.succeeded()
     }
     pub fn business_observed(&self) -> bool {
         !self.stream
@@ -1508,6 +1534,11 @@ impl Drop for Protocol {
         self.observe_routing_fault();
         let interruption_reported = self.emit_interruption();
         let settlement = self.routing_settlement(interruption_reported);
+        if self.delivered_success() && !self.routing_fault {
+            if let Some((gateway, user_agent)) = self.business.take() {
+                gateway.remember_user_agent(&user_agent);
+            }
+        }
         if let Some(log) = &self.routing_log {
             log.settle(self.status, settlement);
         }

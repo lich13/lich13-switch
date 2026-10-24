@@ -244,7 +244,7 @@ fn query_kind(sql: &str) -> &'static str {
         "prune-records"
     } else if sql.contains("from receipts") {
         "receipt-dedup"
-    } else if sql.contains("signature=") {
+    } else if sql.contains("signature=") || sql.contains("signature in") {
         "signature-dedup"
     } else if sql.contains("response=") {
         "response-dedup"
@@ -489,6 +489,7 @@ fn sqlite_query_plans_cover_usage_reads_dedup_and_prune() {
         BASE,
     );
     store.write_batch(&[old_proxy], None).unwrap();
+    while store.repair_correlations_batch().unwrap() {}
     let (_, prune_capture) = trace_store(&mut store, |store| {
         store.compact(BASE + 40 * DAY_MS).unwrap()
     });
@@ -507,7 +508,7 @@ fn sqlite_query_plans_cover_usage_reads_dedup_and_prune() {
         store.write_batch(&[late_session], None).unwrap()
     });
     assert_sql_contains(&dedup_capture, "from receipts", "dedup-receipts");
-    assert_sql_contains(&dedup_capture, "signature=", "dedup-signature");
+    assert_sql_contains(&dedup_capture, "signature in", "dedup-signature");
     assert_sql_contains(&dedup_capture, "response=", "dedup-response");
     observations.extend(explain_captured(
         &store.connection,

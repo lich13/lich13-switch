@@ -1,0 +1,23 @@
+{
+  "repository": "Hanmo123/ModelTrace",
+  "branch": "hanmo",
+  "revision": "a7edbadabec28fdf8b5cd8181764af80136a668a",
+  "analyzerVersion": 1,
+  "files": {
+    "bank": {
+      "path": "data/unified_bank.json",
+      "sha256": "e514c76928ea38d23bc0f14d3935f23c97b1efb6d96b18a19bdc88ad2d830536",
+      "gitBlob": "7bc72c656fdcdbfc40cd680d91b76afe3b164813"
+    },
+    "core": {
+      "path": "static/fingerprint-core.js",
+      "sha256": "83fa5bd611e18f8339122582335123c8ea168ed242298bb31f4e363abeeb6e4a",
+      "gitBlob": "5dbaa1d2d9cc7e3721524ac4937c97f826e88d1e"
+    },
+    "challenge": {
+      "path": "static/challenge-browser.js",
+      "sha256": "4a3868c9fe237cabde92f0d2bffaf32118f558f7a43fcc336874fecd2bf6be39",
+      "gitBlob": "411ef706a8439aa07fbbc3a4e4648b3cd9e4500a"
+    }
+  }
+}

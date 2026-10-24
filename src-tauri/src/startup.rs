@@ -1,4 +1,4 @@
-//! Native login items, matching lich13studio's installed-bundle/hidden-launch behavior.
+//! Native login items for installed bundles and hidden launches.
 use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};

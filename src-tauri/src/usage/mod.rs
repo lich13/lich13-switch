@@ -283,12 +283,13 @@ impl Service {
                 let repair = inner.store.lock().unwrap().as_mut().map(|store| {
                     let changed = store.repair_metadata_batch()? | store.repair_finish_times()?;
                     let migrated = store.compact_storage_batch()?;
+                    let correlated = store.repair_correlations_batch()?;
                     if store.deferred_backfill() {
                         if let Some(pricing) = &inner.prices {
                             store.backfill(pricing)?;
                         }
                     }
-                    Ok::<_, storage::AppError>(changed || migrated)
+                    Ok::<_, storage::AppError>(changed || migrated || correlated)
                 });
                 let repair_failed = repair
                     .as_ref()

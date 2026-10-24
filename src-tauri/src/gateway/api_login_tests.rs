@@ -55,6 +55,7 @@ fn provider(id: &str, base: &str, token: &str) -> Provider {
         allowed_models: None,
         handoff_after_compaction: true,
         take_new_threads: false,
+        search_only: false,
     }
 }
 

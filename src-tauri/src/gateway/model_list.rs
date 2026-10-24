@@ -202,7 +202,12 @@ impl Gateway {
         let state = self.request_state()?;
         let (file, _) = self.0.model_list.snapshot();
         let mut models: Vec<Model> = vec![];
-        for provider in state.store.providers.iter().filter(|p| p.queued) {
+        for provider in state
+            .store
+            .providers
+            .iter()
+            .filter(|p| p.queued && !p.search_only)
+        {
             if protocol.is_some_and(|protocol| {
                 state
                     .store
@@ -278,7 +283,7 @@ impl Gateway {
             .store
             .providers
             .iter()
-            .filter(|p| p.queued)
+            .filter(|p| p.queued && !p.search_only)
             .map(|p| {
                 let v = self.0.catalog.cached(&p.id, &p.version);
                 Provider {
@@ -396,7 +401,9 @@ impl Gateway {
                 .store
                 .providers
                 .iter()
-                .filter(|p| p.queued && ids.as_ref().is_none_or(|ids| ids.contains(&p.id)))
+                .filter(|p| {
+                    p.queued && !p.search_only && ids.as_ref().is_none_or(|ids| ids.contains(&p.id))
+                })
                 .map(|p| p.id.clone())
                 .collect()
         };
@@ -424,6 +431,7 @@ impl Gateway {
                 .iter()
                 .filter(|p| {
                     p.queued
+                        && !p.search_only
                         && !file.backfilled.contains(&p.id)
                         && self
                             .0

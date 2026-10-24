@@ -19,27 +19,8 @@ mod platform;
 #[path = "links_windows.rs"]
 mod platform;
 
-pub const APPS: &[(&str, &str)] = &[
-    ("com.lich13.gpt-switch", "lich13-switch"),
-    ("com.ccswitch.desktop", "CC Switch"),
-    ("com.lich13.studio", "lich13studio"),
-];
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Handler {
-    pub id: String,
-    pub name: String,
-    #[serde(skip)]
-    pub path: String,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HandlerState {
-    pub current: Option<String>,
-    pub apps: Vec<Handler>,
-    pub system_picker: bool,
-    pub remembered: Option<String>,
-}
+#[cfg(target_os = "macos")]
+pub const APP_ID: &str = "com.lich13.gpt-switch";
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preview {
@@ -59,7 +40,7 @@ pub struct LinkPreview {
     pub id: String,
     pub provider: Option<Preview>,
     pub import_error: Option<String>,
-    pub dispatch_error: Option<String>,
+    pub error: Option<String>,
 }
 struct Pending {
     preview: LinkPreview,
@@ -71,10 +52,6 @@ struct Pending {
 pub struct Imports {
     pending: VecDeque<Pending>,
     handled: VecDeque<(String, Instant)>,
-}
-#[derive(Serialize)]
-pub struct Receipt {
-    warning: Option<String>,
 }
 fn invalid(message: &str) -> AppError {
     AppError::new(code::IMPORT_LINK, message)
@@ -190,7 +167,7 @@ impl Imports {
                 id,
                 provider: parsed.as_ref().ok().map(|p| p.preview.clone()),
                 import_error: parsed.err().map(|e| e.message),
-                dispatch_error: None,
+                error: None,
             },
             raw: raw.to_owned(),
             fingerprint,
@@ -213,7 +190,7 @@ impl Imports {
     fn release(&mut self, id: &str, error: Option<String>) {
         if let Some(p) = self.pending.iter_mut().find(|p| p.preview.id == id) {
             p.processing = false;
-            p.preview.dispatch_error = error;
+            p.preview.error = error;
         }
     }
     fn remove(&mut self, id: &str) {
@@ -230,60 +207,31 @@ pub fn receive(app: &tauri::AppHandle, urls: impl IntoIterator<Item = String>) {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return;
     };
-    type Forward = (String, Option<String>, Option<String>);
-    for url in urls {
-        if !url.starts_with("ccswitch:") {
-            continue;
-        }
-        let pending: Result<Option<Forward>> = (|| {
-            let remembered = crate::lock(&r.core)?.link_receiver();
-            let mut queue = crate::lock(&r.imports)?;
-            if !queue.enqueue(&url)? {
-                return Ok(None);
-            }
-            if remembered.as_deref().is_some_and(|id| id != APPS[0].0) {
-                let id = queue.pending.back().unwrap().preview.id.clone();
-                let raw = queue.claim(&id)?;
-                return Ok(Some((id, Some(raw), remembered)));
-            }
-            Ok(Some((String::new(), None, remembered)))
-        })();
-        match pending {
-            Ok(Some((id, Some(raw), Some(target)))) => {
-                let app = app.clone();
-                let runtime = r.inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    let result: Result<bool> = async {
-                        open_external(&app, &target, raw).await?;
-                        Ok(true)
-                    }
-                    .await;
-                    if let Ok(mut queue) = crate::lock(&runtime.imports) {
-                        match &result {
-                            Ok(true) => queue.remove(&id),
-                            _ => {
-                                queue.release(&id, result.as_ref().err().map(|e| e.message.clone()))
-                            }
-                        }
-                    }
-                    let _ = app.emit("provider-imports", ());
-                    if !matches!(result, Ok(true)) {
-                        let _ = crate::show(&app, None);
-                    }
-                });
-            }
-            Ok(None) => {}
-            Ok(Some((_, None, _))) => {
+    for url in urls.into_iter().filter(|url| url.starts_with("ccswitch:")) {
+        let outcome = crate::lock(&r.imports).and_then(|mut queue| queue.enqueue(&url));
+        match outcome {
+            Ok(true) => {
                 let _ = app.emit("provider-imports", ());
                 let _ = crate::show(app, None);
             }
-            Ok(Some(_)) => {}
+            Ok(false) => {}
             Err(error) => {
                 let _ = app.emit("switch-error", error);
                 let _ = crate::show(app, None);
             }
         }
     }
+}
+/// Only packaged, installed instances may change the system association.
+pub async fn ensure_association(app: &tauri::AppHandle) -> Result<()> {
+    if cfg!(any(test, debug_assertions)) || !platform::installed() {
+        return Ok(());
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || platform::ensure(tx))
+        .map_err(|_| invalid("无法设置 CC Switch 链接关联"))?;
+    rx.await
+        .map_err(|_| invalid("CC Switch 链接关联设置中断，请重启应用重试"))?
 }
 fn main_only(window: &tauri::WebviewWindow) -> Result<()> {
     if window.label() == "main" {
@@ -318,125 +266,45 @@ pub fn cancel_provider_import(
     let _ = window.emit("provider-imports", ());
     Ok(())
 }
-async fn open_external(app: &tauri::AppHandle, id: &str, raw: String) -> Result<()> {
-    if id == APPS[0].0 || !APPS.iter().any(|(known, _)| *known == id) {
-        return Err(invalid("无效的接收应用"));
-    }
-    let id = id.to_owned();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || platform::open(&id, &raw, tx))
-        .map_err(|_| invalid("无法打开接收应用"))?;
-    rx.await.map_err(|_| invalid("打开接收应用中断"))?
-}
 #[tauri::command]
-pub async fn confirm_provider_import(
+pub fn confirm_provider_import(
     window: tauri::WebviewWindow,
     r: tauri::State<'_, Arc<Runtime>>,
     id: String,
-    app_id: String,
-    remember: bool,
-    expected_revision: Option<String>,
-) -> Result<Receipt> {
+    expected_revision: String,
+) -> Result<()> {
     main_only(&window)?;
     let raw = crate::lock(&r.imports)?.claim(&id)?;
-    let outcome = if app_id == APPS[0].0 {
-        (|| {
-            let p = parse(&raw)?;
-            let home = r.home(p.preview.client_id)?;
-            r.gateway(p.preview.client_id).edit(
-                gateway::Edit::ImportLink {
-                    base_url: p.preview.base_url,
-                    token: p.key,
-                    display_name: p.preview.name,
-                },
-                expected_revision
-                    .as_deref()
-                    .ok_or_else(|| invalid("请重新确认供应商信息"))?,
-                &home,
-            )?;
-            Ok(())
-        })()
-    } else {
-        open_external(window.app_handle(), &app_id, raw).await
-    };
+    let outcome: Result<()> = (|| {
+        let p = parse(&raw)?;
+        let home = r.home(p.preview.client_id)?;
+        r.gateway(p.preview.client_id).edit(
+            gateway::Edit::ImportLink {
+                base_url: p.preview.base_url,
+                token: p.key,
+                display_name: p.preview.name,
+            },
+            &expected_revision,
+            &home,
+        )?;
+        Ok(())
+    })();
     if let Err(error) = outcome {
         crate::lock(&r.imports)?.release(&id, Some(error.message.clone()));
         return Err(error);
     }
-    // The link is already delivered. A preference failure must never replay it.
     crate::lock(&r.imports)?.remove(&id);
-    let warning = remember
-        .then(|| crate::lock(&r.core).and_then(|mut c| c.set_link_receiver(Some(app_id))))
-        .and_then(|result| result.err())
-        .map(|_| "本次处理已完成，但未能记住接收应用，请在设置中重试".to_owned());
     let _ = window.emit("provider-imports", ());
-    Ok(Receipt { warning })
-}
-#[tauri::command]
-pub async fn get_link_handler_state(app: tauri::AppHandle) -> Result<HandlerState> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let _ = tx.send(platform::state());
-    })
-    .map_err(|_| invalid("无法查询默认应用"))?;
-    let mut state = rx.await.map_err(|_| invalid("无法查询默认应用"))??;
-    if !state.apps.iter().any(|a| a.id == APPS[0].0) {
-        state.apps.insert(
-            0,
-            Handler {
-                id: APPS[0].0.into(),
-                name: APPS[0].1.into(),
-                path: String::new(),
-            },
-        );
-    }
-    state.remembered = crate::lock(&app.state::<Arc<Runtime>>().core)?.link_receiver();
-    Ok(state)
-}
-#[tauri::command]
-pub async fn set_link_receiver(
-    window: tauri::WebviewWindow,
-    app_id: Option<String>,
-) -> Result<HandlerState> {
-    main_only(&window)?;
-    let app = window.app_handle();
-    let mut state = get_link_handler_state(app.clone()).await?;
-    if app_id
-        .as_ref()
-        .is_some_and(|id| !state.apps.iter().any(|a| a.id == *id))
-    {
-        return Err(invalid("应用未安装或不支持 CC Switch 链接"));
-    }
-    crate::lock(&app.state::<Arc<Runtime>>().core)?.set_link_receiver(app_id.clone())?;
-    state.remembered = app_id;
-    Ok(state)
-}
-#[tauri::command]
-pub async fn enable_link_picker(window: tauri::WebviewWindow) -> Result<HandlerState> {
-    main_only(&window)?;
-    let app = window.app_handle();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || platform::set(APPS[0].0, tx))
-        .map_err(|_| invalid("无法启用链接选择"))?;
-    rx.await.map_err(|_| invalid("默认应用设置中断"))??;
-    get_link_handler_state(app.clone()).await
+    Ok(())
 }
 #[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
     use super::*;
-    pub fn state() -> Result<HandlerState> {
-        Ok(HandlerState {
-            current: None,
-            apps: vec![],
-            system_picker: true,
-            remembered: None,
-        })
+    pub fn installed() -> bool {
+        false
     }
-    pub fn set(_: &str, tx: tokio::sync::oneshot::Sender<Result<()>>) {
+    pub fn ensure(tx: tokio::sync::oneshot::Sender<Result<()>>) {
         let _ = tx.send(Err(invalid("当前平台不支持协议关联")));
-    }
-    pub fn open(_: &str, _: &str, tx: tokio::sync::oneshot::Sender<Result<()>>) {
-        let _ = tx.send(Err(invalid("当前平台不支持打开接收应用")));
     }
 }
 
@@ -503,7 +371,7 @@ mod tests {
         assert_eq!(q.pending.len(), 16);
     }
     #[test]
-    fn external_links_keep_original_bytes_without_exposing_them_in_previews() {
+    fn unsupported_links_show_an_error_without_exposing_secrets() {
         let raw = URL.replace("resource=provider", "resource=skill");
         let mut queue = Imports::default();
         assert!(queue.enqueue(&raw).unwrap());
@@ -521,16 +389,6 @@ mod tests {
         queue.remove(&id);
         assert!(queue.claim(&id).is_err());
         assert!(!queue.enqueue(&raw).unwrap());
-    }
-    #[test]
-    fn handlers_do_not_publish_installation_paths() {
-        let handler = Handler {
-            id: APPS[1].0.into(),
-            name: APPS[1].1.into(),
-            path: "fixture-private-path".into(),
-        };
-        let value = serde_json::to_value(handler).unwrap();
-        assert!(value.get("path").is_none());
     }
     #[test]
     fn invalid_resources_and_secrets_never_enter_errors() {

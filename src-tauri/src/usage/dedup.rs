@@ -34,7 +34,12 @@ fn fingerprint(a: &Record, b: &Record) -> bool {
         && compatible(a, b)
         && (response(a).is_none() || response(b).is_none())
         && a.signature().is_some()
-        && a.signature() == b.signature()
+        && a.correlation_signatures().iter().flatten().any(|s| {
+            b.correlation_signatures()
+                .iter()
+                .flatten()
+                .any(|other| s == other)
+        })
         && end(a).abs_diff(end(b)) <= WINDOW as u64
         && [a, b].iter().filter(|r| r.source == "proxy").all(|r| {
             r.final_attempt().is_some_and(|a| {
@@ -47,16 +52,18 @@ fn rows(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
     if storage_v12::active(c) {
         return storage_v12::candidates(c, seed);
     }
-    let mut stmt=db(c.prepare("SELECT body FROM records WHERE id=?6 UNION SELECT body FROM records WHERE ?2 IS NOT NULL AND client=?1 AND response=?2 UNION SELECT body FROM records WHERE ?3 IS NOT NULL AND client=?1 AND signature=?3 AND source<>'grok' AND source<>?7 AND (source='proxy' OR ?7='proxy') AND time BETWEEN ?4 AND ?5"))?;
+    let signatures = seed.correlation_signatures();
+    let mut stmt=db(c.prepare("SELECT body FROM records WHERE id=?6 UNION SELECT body FROM records WHERE ?2 IS NOT NULL AND client=?1 AND response=?2 UNION SELECT body FROM records WHERE ?3 IS NOT NULL AND client=?1 AND signature IN (?3,?8) AND source<>'grok' AND source<>?7 AND (source='proxy' OR ?7='proxy') AND time BETWEEN ?4 AND ?5"))?;
     let rows = db(stmt.query_map(
         params![
             seed.client,
             response(seed),
-            seed.signature(),
+            signatures[0],
             end(seed).saturating_sub(WINDOW * 2 + 86_400_000),
             end(seed) + WINDOW * 2,
             seed.id,
-            seed.source
+            seed.source,
+            signatures[1]
         ],
         |r| r.get::<_, String>(0),
     ))?;
@@ -119,20 +126,22 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
         all.extend(connected);
     }
     for r in &all {
-        let mut archived_stmt=db(c.prepare("SELECT id,response FROM (SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?2 IS NOT NULL AND response=?2 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) UNION SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?5 IS NOT NULL AND signature=?5 AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) AND source<>'grok' AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=?2 THEN 0 ELSE 1 END,id LIMIT 3"))?;
+        let signatures = r.correlation_signatures();
+        let mut archived_stmt=db(c.prepare("SELECT id,response FROM (SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?2 IS NOT NULL AND response=?2 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) UNION SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?5 IS NOT NULL AND signature IN (?5,?9) AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=?3) AND source<>'grok' AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=?2 THEN 0 ELSE 1 END,id LIMIT 3"))?;
         let archived = db(archived_stmt.query_map(
             params![
                 r.client,
                 response(r),
                 provider(r),
                 r.source,
-                r.signature(),
+                signatures[0],
                 end(r) - WINDOW,
                 end(r) + WINDOW,
                 r.final_attempt()
                     .map(|a| a.operation)
                     .unwrap_or_default()
-                    .as_str()
+                    .as_str(),
+                signatures[1]
             ],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
         ))?;

@@ -64,8 +64,11 @@ jobs:
           Set-Content $marker 'preserve-user-data'
           $protocol = 'HKCU:\Software\Classes\ccswitch\shell\open\command'
           New-Item $protocol -Force | Out-Null
-          Set-Item $protocol '"C:\fixture\lich13studio.exe" "%1"'
+          Set-Item $protocol '"C:\fixture\other-app.exe" "%1"'
           $beforeProtocol = (Get-Item $protocol).GetValue('')
+          $registered = 'HKCU:\Software\RegisteredApplications'
+          New-Item $registered -Force | Out-Null
+          New-ItemProperty $registered -Name 'fixture-retired-link' -Value 'Software\gpt-Switch\LinkHandlers\2\Capabilities' -PropertyType String -Force | Out-Null
           $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw 'Installer failed' }
           $exe = Get-ChildItem $installDir -Filter 'lich13-switch.exe' -Recurse | Select-Object -First 1
@@ -75,6 +78,9 @@ jobs:
           $entry = Get-ItemProperty "$uninstall/gpt-Switch"
           if ($entry.DisplayName -ne 'lich13-switch' -or $entry.DisplayVersion -ne $expectedVersion -or (Test-Path "$uninstall/lich13-switch")) { throw 'Duplicate or invalid upgrade registration' }
           if ((Get-Content $marker).Trim() -ne 'preserve-user-data' -or (Get-Item $protocol).GetValue('') -ne $beforeProtocol) { throw 'Upgrade changed user data or default protocol' }
+          if ((Get-Item $registered).GetValue('fixture-retired-link')) { throw 'Retired link receiver remains' }
+          $selfCommand = 'HKCU:\Software\Classes\gptSwitch.CCSwitch.0\shell\open\command'
+          if ((Get-Item $selfCommand).GetValue('') -ne ('"' + $exe.FullName + '" "%1"')) { throw 'Self link registration is missing' }
           $notice = Get-Content (Join-Path $installDir 'THIRD_PARTY_NOTICES.md') -Raw
           if (!$notice.Contains('Copyright (c) 2025 Jason Young')) { throw 'Third-party notice missing' }
           $report = Join-Path $env:RUNNER_TEMP 'lich13-switch-smoke.json'
@@ -83,6 +89,7 @@ jobs:
           $result = Get-Content $report -Raw | ConvertFrom-Json
           Get-Content $report
           if (!$result.ok -or !$result.webview -or !$result.tray -or !$result.gateway -or !$result.safeExit -or $result.revision -ne $env:GITHUB_SHA) { throw 'Smoke failed' }
+          if ((Get-Item $protocol).GetValue('') -ne $beforeProtocol) { throw 'Smoke changed the real system association' }
           $remove = Start-Process "$installDir/uninstall.exe" -ArgumentList '/S' -Wait -PassThru
           if ($remove.ExitCode -ne 0 -or (Test-Path "$uninstall/gpt-Switch") -or (Test-Path $exe.FullName)) { throw 'Uninstall failed' }
           if ((Get-Item $protocol).GetValue('') -ne $beforeProtocol -or !(Test-Path $marker)) { throw 'Uninstall damaged other app or data' }

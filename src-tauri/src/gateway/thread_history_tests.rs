@@ -39,6 +39,7 @@ fn provider_with_policy(id: &str, handoff: bool, take: bool) -> Provider {
         allowed_models: None,
         handoff_after_compaction: handoff,
         take_new_threads: take,
+        search_only: false,
     }
 }
 

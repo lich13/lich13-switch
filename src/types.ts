@@ -168,6 +168,7 @@ export type Provider = {
   dshModels?: Record<string, string | null> | null;
   handoffAfterCompaction?: boolean;
   takeNewThreads?: boolean;
+  searchOnly?: boolean;
 };
 export type GatewayListener = {
   port: number;

@@ -292,7 +292,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             s.store
                 .providers
                 .iter()
-                .filter(|p| p.queued)
+                .filter(|p| p.queued && !p.search_only)
                 .map(|p| p.id.clone())
                 .collect::<Vec<_>>()
         } else {
@@ -338,7 +338,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         .filter_map(|id| gateway.route(&id).map(|r| (id, r)))
         .collect();
     routes.retain(|_, route| route.accepts_protocol(request.uri().path()));
-    ids.retain(|id| routes.contains_key(id));
+    ids.retain(|id| {
+        routes
+            .get(id)
+            .is_some_and(|route| !route.provider.search_only)
+    });
     let active = Active::new(gateway.clone());
     let websocket = request
         .headers()
@@ -538,8 +542,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         } else {
             None
         };
-        let established_capacity_owner =
-            routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref());
+        let search_backups = if gateway.client_id() == super::ClientId::Codex
+            && operation == crate::usage::model::Operation::WebSearch
+            && !websocket
+        {
+            gateway
+                .search_backups()
+                .into_iter()
+                .filter(|id| routes.contains_key(id))
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+        let dedicated_search = !search_backups.is_empty();
+        if dedicated_search {
+            ids.extend(search_backups);
+        }
+        let established_capacity_owner = if dedicated_search {
+            None
+        } else {
+            routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref())
+        };
         let usage_trace = if matches!(requirement, Requirement::Resource)
             && operation != crate::usage::model::Operation::WebSearch
         {
@@ -583,12 +606,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let mut capacity_sources = Vec::new();
         let mut transient_retries = 0;
         let mut retry_owner: Option<String> = None;
-        while ordinary_attempts <= settings.max_retries {
+        while dedicated_search || ordinary_attempts <= settings.max_retries {
             // An unknown previous_response_id has no safe owner to replay against;
             // preserve the existing one-attempt rule instead of silently
             // repeating the request on an arbitrary provider.
-            if ((unknown_affinity && !capacity_protected)
-                || (gateway.client_id() == super::ClientId::Claude && continuation))
+            if !dedicated_search
+                && ((unknown_affinity && !capacity_protected)
+                    || (gateway.client_id() == super::ClientId::Claude && continuation))
                 && attempted > 0
             {
                 break;
@@ -674,6 +698,15 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .iter()
                 .filter_map(|id| routes.get(id).cloned())
                 .collect();
+            if dedicated_search {
+                candidates.retain(|route| route.provider.search_only == (attempted > 0));
+                if candidates.is_empty() {
+                    break;
+                }
+                if attempted > 0 {
+                    wait_budget.search_fallback();
+                }
+            }
             let mut observed_candidates = candidates.clone();
             observed_candidates.extend(
                 gateway
@@ -694,7 +727,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             if matches_model {
                 candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
             }
-            if let Some(owner) = retry_owner.take() {
+            if dedicated_search && attempted > 0 {
+                // Search backups do not inherit generation intake policies.
+            } else if let Some(owner) = retry_owner.take() {
                 candidates.retain(|route| route.provider.id == owner);
             } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
                 candidates = if attempted > 0 || !hard_denied.is_empty() {
@@ -708,6 +743,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 && !auxiliary
             {
                 candidates = super::compaction::unidentified_candidates(candidates);
+            }
+            if dedicated_search && attempted == 0 {
+                candidates.truncate(1);
             }
             // A second request entering during its owner's capacity cooldown must
             // wait as well. Read the reset generation before the health snapshot.
@@ -828,6 +866,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             if gateway.client_id() == super::ClientId::Codex
                 && mode == "auto"
+                && !dedicated_search
                 && pinned.is_none()
                 && !auxiliary
             {
@@ -849,7 +888,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .admission
                 .acquire_for_immediate(
                     &candidates,
-                    mode == "manual",
+                    mode == "manual" && !(dedicated_search && attempted > 0),
                     settings.max_waiting,
                     &mut wait_budget,
                     &requirement,
@@ -1139,6 +1178,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.attach_routing_log(failover.routing());
             protocol.attach_thread(wait_budget.thread.clone());
             protocol.request_headers(&parts.headers);
+            if !routing::resource(&parts.method, parts.uri.path()) {
+                protocol.business_request(&gateway, &route.provider.id, &parts.headers);
+            }
             protocol.request_speed(hints.as_ref().ok().and_then(|h| h.speed.clone()));
             protocol.thread_identity(thread_identity);
             if let Some(at) = parts.extensions.get::<ReceivedAt>() {
@@ -1202,8 +1244,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .map(watch::Sender::subscribe),
                 None,
             );
-            let deadline =
-                tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds);
+            let search_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let deadline = if dedicated_search {
+                search_deadline
+            } else {
+                tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds)
+            };
             let response = tokio::time::timeout_at(deadline, route.client.request(upstream)).await;
             let mut response = match response {
                 Ok(Ok(response)) => response,
@@ -1247,17 +1293,29 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             },
                         )
                     }));
-                    admission.permits.failure(&settings, None);
+                    if dedicated_search {
+                        admission.permits.neutral(&settings);
+                    } else {
+                        admission.permits.failure(&settings, None);
+                    }
                     continue;
                 }
                 Err(_) => {
                     failover.failure(super::failover::Failure::Transport);
-                    let retry_dsh = route.client_id == super::ClientId::Dsh
-                        && mode != "manual"
-                        && pinned.is_none()
-                        && !unknown_affinity
-                        && ordinary_attempts <= settings.max_retries;
-                    protocol.timeout("response_headers", settings.first_byte_seconds);
+                    let retry_dsh = dedicated_search
+                        || route.client_id == super::ClientId::Dsh
+                            && mode != "manual"
+                            && pinned.is_none()
+                            && !unknown_affinity
+                            && ordinary_attempts <= settings.max_retries;
+                    protocol.timeout(
+                        "response_headers",
+                        if dedicated_search {
+                            30
+                        } else {
+                            settings.first_byte_seconds
+                        },
+                    );
                     protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
                     last_error = Some(failover.report_failure(Some(&protocol), || {
                         admission.permits.report(
@@ -1280,7 +1338,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             },
                         )
                     }));
-                    admission.permits.failure(&settings, None);
+                    if dedicated_search {
+                        admission.permits.neutral(&settings);
+                    } else {
+                        admission.permits.failure(&settings, None);
+                    }
                     if retry_dsh {
                         last_category = code::FIRST_BYTE_TIMEOUT;
                         continue;
@@ -1360,6 +1422,33 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     );
                 }
                 return Response::from_parts(response_parts, replay::empty());
+            }
+            if dedicated_search && status.as_u16() >= 400 {
+                protocol.finish(Some(status.as_u16()), code::HTTP);
+                failover.failure(super::failover::Failure::UpstreamService);
+                last_error = Some(failover.report_failure(Some(&protocol), || {
+                    admission.permits.report(
+                        &gateway,
+                        &route,
+                        model.as_deref(),
+                        Reason::UpstreamService,
+                        if ids
+                            .iter()
+                            .any(|id| routes.get(id).is_some_and(|r| r.provider.search_only))
+                        {
+                            Action::TryingNext
+                        } else {
+                            Action::Returned
+                        },
+                        Some(status.as_u16()),
+                        attempted,
+                        crate::events::Details::default(),
+                    )
+                }));
+                admission.permits.neutral(&settings);
+                last = Some(error(status, code::HTTP, "上游网络搜索请求失败"));
+                last_category = code::HTTP;
+                continue;
             }
             if status.as_u16() >= 400 {
                 let cooldown = response
@@ -1649,6 +1738,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let mut first_deadline = tokio::time::Instant::now()
                 + Duration::from_secs(settings.first_byte_seconds)
                     .saturating_sub(started.elapsed());
+            if dedicated_search {
+                first_deadline = search_deadline;
+            }
             // Buffer only the first complete SSE event (or bounded JSON); preserve
             // the original frames and encoding exactly, including comments/trailers.
             let json = response_parts
@@ -1670,7 +1762,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             if !stream && !json && !bytes.is_empty() {
                                 protocol.effective_output();
                             }
-                            if !bytes.is_empty() {
+                            if !dedicated_search && !bytes.is_empty() {
                                 first_deadline = tokio::time::Instant::now()
                                     + Duration::from_secs(settings.idle_seconds);
                             }
@@ -1686,7 +1778,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         if ended
                             || prefix_bytes >= 2 * 1024 * 1024
                             || (!stream && !json)
-                            || (stream && protocol.observation.first_event_model_error.is_some())
+                            || (stream
+                                && if dedicated_search {
+                                    protocol.search_content_observed()
+                                        || protocol.terminal().is_some()
+                                } else {
+                                    protocol.observation.first_event_model_error.is_some()
+                                })
                         {
                             break;
                         }
@@ -1726,7 +1824,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 protocol.finish(Some(status.as_u16()), failure_kind);
             }
             if failed
-                && (route.client_id == super::ClientId::Dsh
+                && (dedicated_search
+                    || route.client_id == super::ClientId::Dsh
                     || super::attempt::transport_retry(
                         prefix_bytes != 0,
                         protocol.transport_failure(),
@@ -1766,7 +1865,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         },
                     )
                 }));
-                admission.permits.failure(&settings, None);
+                if dedicated_search {
+                    admission.permits.neutral(&settings);
+                } else {
+                    admission.permits.failure(&settings, None);
+                }
                 last_category = failure_kind;
                 continue;
             }
@@ -1786,6 +1889,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         *business = true;
                     }
                 }
+            }
+            if dedicated_search
+                && matches!(
+                    protocol.terminal(),
+                    Some(
+                        super::protocol::Terminal::Failure
+                            | super::protocol::Terminal::Rejected
+                            | super::protocol::Terminal::ModelUnavailable
+                    )
+                )
+            {
+                protocol.finish(Some(status.as_u16()), code::UPSTREAM_REJECTED);
+                failover.failure(super::failover::Failure::UpstreamService);
+                admission.permits.neutral(&settings);
+                last_category = code::UPSTREAM_REJECTED;
+                last = Some(error(
+                    StatusCode::BAD_GATEWAY,
+                    code::UPSTREAM_REJECTED,
+                    "上游网络搜索返回错误",
+                ));
+                continue;
             }
             let initial_model_error = if stream {
                 protocol.observation.first_event_model_error == Some(true)
@@ -2060,7 +2184,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                                 slot.complete();
                             }
                         }
-                        g.persist_success(&route.provider).await;
+                        if !dedicated_search {
+                            g.persist_success(&route.provider).await;
+                        }
                     }
                     return;
                 }
@@ -2200,7 +2326,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             slot.complete();
                         }
                     }
-                    g.persist_success(&route.provider).await;
+                    if !dedicated_search {
+                        g.persist_success(&route.provider).await;
+                    }
                 }
             });
             // Hyper may drop a Content-Length body immediately after its last frame,

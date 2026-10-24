@@ -116,7 +116,11 @@ export default function ProviderControls({
         queue
           ? { op: "queueProvider", id: provider.id, queued: !provider.queued }
           : draft!.kind === "rpm"
-            ? { op: "rpmProvider", id: provider.id, maxRpm: Number(draft!.value) }
+            ? {
+                op: "rpmProvider",
+                id: provider.id,
+                maxRpm: Number(draft!.value),
+              }
             : {
                 op: "concurrencyProvider",
                 id: provider.id,
@@ -136,12 +140,27 @@ export default function ProviderControls({
       setSaving(false);
     }
   };
-  const togglePolicy = async (field: "handoffAfterCompaction" | "takeNewThreads") => {
+  const togglePolicy = async (
+    field: "handoffAfterCompaction" | "takeNewThreads" | "searchOnly",
+  ) => {
     if (pending.current || disabled) return;
     pending.current = true;
     setSaving(true);
     try {
-      await commit({ op: "takeoverProvider", id: provider.id, [field]: !provider[field] }, revision);
+      await commit(
+        field === "searchOnly"
+          ? {
+              op: "searchOnlyProvider",
+              id: provider.id,
+              searchOnly: !provider.searchOnly,
+            }
+          : {
+              op: "takeoverProvider",
+              id: provider.id,
+              [field]: !provider[field],
+            },
+        revision,
+      );
     } catch (e) {
       report(errorOf(e).message);
     } finally {
@@ -151,14 +170,48 @@ export default function ProviderControls({
   };
   return (
     <div className="provider-controls">
-      {clientId === "codex" && <>
-        <button type="button" className="provider-takeover" aria-label={`${provider.name} 压缩后接管`}
-          title="压缩后接管" aria-pressed={Boolean(provider.handoffAfterCompaction)} disabled={disabled || saving}
-          onClick={() => void togglePolicy("handoffAfterCompaction")}><span className="policy-dot" />压缩后</button>
-        <button type="button" className="provider-takeover" aria-label={`${provider.name} 新线程接管`}
-          title="新线程接管" aria-pressed={Boolean(provider.takeNewThreads)} disabled={disabled || saving}
-          onClick={() => void togglePolicy("takeNewThreads")}><span className="policy-dot" />新线程</button>
-      </>}
+      {clientId === "codex" && (
+        <button
+          type="button"
+          className="provider-takeover"
+          aria-label={`${provider.name} 仅网络搜索`}
+          title="仅网络搜索"
+          aria-pressed={Boolean(provider.searchOnly)}
+          disabled={disabled || saving}
+          onClick={() => void togglePolicy("searchOnly")}
+        >
+          <span className="policy-dot" />
+          仅网络搜索
+        </button>
+      )}
+      {clientId === "codex" && !provider.searchOnly && (
+        <>
+          <button
+            type="button"
+            className="provider-takeover"
+            aria-label={`${provider.name} 压缩后接管`}
+            title="压缩后接管"
+            aria-pressed={Boolean(provider.handoffAfterCompaction)}
+            disabled={disabled || saving}
+            onClick={() => void togglePolicy("handoffAfterCompaction")}
+          >
+            <span className="policy-dot" />
+            压缩后
+          </button>
+          <button
+            type="button"
+            className="provider-takeover"
+            aria-label={`${provider.name} 新线程接管`}
+            title="新线程接管"
+            aria-pressed={Boolean(provider.takeNewThreads)}
+            disabled={disabled || saving}
+            onClick={() => void togglePolicy("takeNewThreads")}
+          >
+            <span className="policy-dot" />
+            新线程
+          </button>
+        </>
+      )}
       <button
         ref={anchor}
         type="button"
@@ -172,11 +225,16 @@ export default function ProviderControls({
           setDraft(
             draft
               ? null
-              : { kind: "concurrency", value: String(provider.maxConcurrency), revision },
+              : {
+                  kind: "concurrency",
+                  value: String(provider.maxConcurrency),
+                  revision,
+                },
           );
         }}
       >
-        并发 {provider.activeRequests + (provider.reservedThreads ?? 0)}/{provider.maxConcurrency || "∞"}
+        并发 {provider.activeRequests + (provider.reservedThreads ?? 0)}/
+        {provider.maxConcurrency || "∞"}
       </button>
       <button
         type="button"
@@ -253,7 +311,14 @@ export default function ProviderControls({
                 void update(false);
               }}
             >
-              {draft.kind === "concurrency" && <dl className="concurrency-breakdown"><dt>正在请求</dt><dd>{provider.activeRequests}</dd><dt>线程预留</dt><dd>{provider.reservedThreads ?? 0}</dd></dl>}
+              {draft.kind === "concurrency" && (
+                <dl className="concurrency-breakdown">
+                  <dt>正在请求</dt>
+                  <dd>{provider.activeRequests}</dd>
+                  <dt>线程预留</dt>
+                  <dd>{provider.reservedThreads ?? 0}</dd>
+                </dl>
+              )}
               <label>
                 上限（0 不限）
                 <input

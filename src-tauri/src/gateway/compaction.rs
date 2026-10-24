@@ -31,11 +31,12 @@ pub(super) enum Intake {
     Unavailable,
 }
 fn accepts(provider: &super::model::Provider, intake: Intake) -> bool {
-    accepts_flags(
-        provider.handoff_after_compaction,
-        provider.take_new_threads,
-        intake,
-    )
+    !provider.search_only
+        && accepts_flags(
+            provider.handoff_after_compaction,
+            provider.take_new_threads,
+            intake,
+        )
 }
 pub(super) fn accepts_flags(compacted: bool, new_thread: bool, intake: Intake) -> bool {
     intake != Intake::Unavailable
@@ -56,7 +57,7 @@ pub fn queued(gateway: &super::Gateway) -> storage::Result<Vec<super::model::Pro
         .store
         .providers
         .iter()
-        .filter(|provider| provider.queued)
+        .filter(|provider| provider.queued && !provider.search_only)
         .cloned()
         .collect())
 }
@@ -319,7 +320,9 @@ impl RequestPolicy<'_> {
     fn receivers(&self, owner: &str) -> Vec<String> {
         self.queued
             .iter()
-            .filter(|p| p.queued && self.requirement.allows(p.allowed_models.as_deref()))
+            .filter(|p| {
+                p.queued && !p.search_only && self.requirement.allows(p.allowed_models.as_deref())
+            })
             .take_while(|p| p.id != owner)
             .filter(|p| p.handoff_after_compaction)
             .map(|p| p.id.clone())
@@ -793,7 +796,9 @@ impl Registry {
         }
         let eligible: Vec<_> = queued
             .iter()
-            .filter(|p| p.queued && requirement.allows(p.allowed_models.as_deref()))
+            .filter(|p| {
+                p.queued && !p.search_only && requirement.allows(p.allowed_models.as_deref())
+            })
             .cloned()
             .collect();
         let mut ordered = eligible.to_vec();
@@ -1230,7 +1235,9 @@ impl Lease {
             .store
             .providers
             .iter()
-            .find(|p| p.id == provider.id && (p.queued || pinned))
+            .find(|p| {
+                p.id == provider.id && (p.queued || pinned) && (!p.search_only || self.owner_search)
+            })
             .ok_or_else(|| AppError::new(code::NO_ELIGIBLE_PROVIDER, "供应商队列已变化，请重试"))?;
         if current.version != provider.version {
             return Err(AppError::new(code::PROVIDER, "供应商配置已变化，请重试"));
@@ -1276,7 +1283,7 @@ impl Lease {
                 .store
                 .providers
                 .iter()
-                .filter(|p| p.queued)
+                .filter(|p| p.queued && !p.search_only)
                 .take_while(|p| self.owner.as_deref() != Some(p.id.as_str()))
                 .any(|p| p.id == provider.id);
             let fallback = self
@@ -1294,6 +1301,7 @@ impl Lease {
         if self.request_only
             && !pinned
             && !entry.is_some_and(|e| !e.establishing && e.provider == provider.id)
+            && !(self.owner_search && current.search_only)
             && !accepts(current, Intake::Ordinary)
         {
             return Err(AppError::new(

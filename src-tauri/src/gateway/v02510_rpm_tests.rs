@@ -57,6 +57,7 @@ fn provider(version: &str, queued: bool, max_rpm: u32) -> Provider {
         allowed_models: None,
         handoff_after_compaction: false,
         take_new_threads: false,
+        search_only: false,
     }
 }
 

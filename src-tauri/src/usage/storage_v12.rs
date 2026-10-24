@@ -1258,7 +1258,9 @@ pub(super) fn candidates(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
         .final_attempt()
         .and_then(|a| a.response_id.as_deref())
         .map(key);
-    let sig = seed.signature().map(|v| hint(&key(&v)));
+    let [sig, alternate] = seed
+        .correlation_signatures()
+        .map(|s| s.map(|v| hint(&key(&v))));
     // A session can only match a gateway. Use that equality in the indexed
     // lookup: a long session often contains thousands of identical deltas.
     let sources = if seed.source == "proxy" {
@@ -1266,7 +1268,7 @@ pub(super) fn candidates(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
     } else {
         "source=0"
     };
-    let mut s=db(c.prepare(&format!("SELECT rid FROM v12_records WHERE usage_hint(key)=usage_hint(?1) AND key=?1 UNION SELECT rid FROM v12_records WHERE ?3 IS NOT NULL AND client=usage_label(?2) AND response IS NOT NULL AND usage_hint(response)=usage_hint(?3) AND response=?3 UNION SELECT rid FROM v12_records WHERE ?4 IS NOT NULL AND client=usage_label(?2) AND signature=?4 AND {sources} AND source<>usage_label(?5) AND time BETWEEN ?6 AND ?7")))?;
+    let mut s=db(c.prepare(&format!("SELECT rid FROM v12_records WHERE usage_hint(key)=usage_hint(?1) AND key=?1 UNION SELECT rid FROM v12_records WHERE ?3 IS NOT NULL AND client=usage_label(?2) AND response IS NOT NULL AND usage_hint(response)=usage_hint(?3) AND response=?3 UNION SELECT rid FROM v12_records WHERE ?4 IS NOT NULL AND client=usage_label(?2) AND signature IN (?4,?8) AND {sources} AND source<>usage_label(?5) AND time BETWEEN ?6 AND ?7")))?;
     let rows = db(s.query_map(
         params![
             key(&seed.id),
@@ -1281,12 +1283,26 @@ pub(super) fn candidates(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
             seed.final_attempt()
                 .map(|a| a.started_at.saturating_add(a.duration_ms as i64))
                 .unwrap_or(seed.started_at)
-                .saturating_add(1_200_000)
+                .saturating_add(1_200_000),
+            alternate
         ],
         |r| r.get::<_, i64>(0),
     ))?;
     rows.map(|r| serde_json::from_value(load(c, db(r)?)?).map_err(json_error))
         .collect()
+}
+pub(super) fn correlation_repair_rows(c: &Connection, after: i64) -> Result<Vec<(i64, Record)>> {
+    let mut statement =
+        db(c.prepare("SELECT rid FROM v12_records WHERE rid>?1 ORDER BY rid LIMIT 128"))?;
+    let ids = db(statement.query_map([after], |r| r.get::<_, i64>(0)))?;
+    ids.map(|id| {
+        let id = db(id)?;
+        Ok((
+            id,
+            serde_json::from_value(load(c, id)?).map_err(json_error)?,
+        ))
+    })
+    .collect()
 }
 pub(super) fn peers(c: &Connection, id: &str) -> Result<Vec<Record>> {
     let Some(owner) = owner(c, id)? else {
