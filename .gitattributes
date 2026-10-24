@@ -3,3 +3,5 @@ src-tauri/resources/usage-prices.json -text
 src-tauri/resources/usage-prices.sha256 text eol=lf
 # Persisted usage records depend on this dictionary's exact bytes on every OS.
 src-tauri/src/usage/body-dictionary-v1.json -text
+# The bundled fingerprint bank is verified against its upstream SHA-256.
+src-tauri/resources/modeltrace/unified_bank.json -text
