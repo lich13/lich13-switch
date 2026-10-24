@@ -83,7 +83,8 @@
   color: var(--muted);
 }
 .provider-test-content input:not([type="checkbox"]),
-.provider-test-content select {
+.provider-test-content select,
+.provider-test-content textarea {
   width: 100%;
   min-width: 0;
   height: 36px;
@@ -94,6 +95,43 @@
   background: var(--canvas);
   color: var(--ink);
   font: inherit;
+}
+.provider-test-content textarea {
+  height: auto;
+  min-height: 96px;
+  max-height: 240px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+.provider-test-prompt {
+  margin-top: 16px;
+}
+.provider-test-reply {
+  margin-top: 20px;
+  min-width: 0;
+}
+.provider-test-reply-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 36px;
+}
+.provider-test-reply-heading h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.provider-test-reply-heading > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.provider-test-reply-heading button {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.provider-test-detail > .provider-test-reply {
+  margin: 0 0 20px;
 }
 .provider-test-content input[type="checkbox"] {
   width: 16px;
@@ -210,7 +248,8 @@
   border-radius: 6px;
   font-family: inherit;
 }
-.provider-test-detail pre {
+.provider-test-detail pre,
+.provider-test-output {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 260px;

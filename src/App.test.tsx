@@ -38,6 +38,7 @@ vi.mock("@uiw/react-codemirror", () => ({
 }));
 import App from "./App";
 import { gatewayDemo } from "./gateway-preview";
+import { providerTestingPreview } from "./provider-testing-preview";
 let state: ViewState;
 let doc: ConfigDocument;
 let pendingImports: import("./bridge-contracts").PendingImport[];
@@ -89,6 +90,8 @@ beforeEach(() => {
   };
   mocks.command.mockImplementation(
     async (name: string, args: Record<string, unknown>) => {
+      if (name.startsWith("provider_test_"))
+        return providerTestingPreview(name, args);
       switch (name) {
         case "get_provider_imports":
           return structuredClone(pendingImports);
@@ -425,6 +428,58 @@ describe("user workflows", () => {
     await u.click(await screen.findByRole("button", { name: "添加" }));
     expect(screen.getByLabelText("experimental_bearer_token")).toHaveValue("");
   });
+  it("protects a test prompt before accepting another quick-panel testing target", async () => {
+    localStorage.clear();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("button", { name: "网关" });
+    await act(async () => {
+      mocks.listeners.get("provider-settings")?.({
+        id: gatewayDemo.providers[0].id,
+        clientId: "codex",
+        action: "testing",
+      });
+    });
+    const input = await screen.findByDisplayValue(
+      "Reply with a short greeting.",
+    );
+    await user.type(input, " fixture draft");
+    const target = {
+      id: gatewayDemo.providers[1].id,
+      clientId: "codex",
+      action: "testing",
+    };
+    await act(async () => {
+      mocks.listeners.get("provider-settings")?.(target);
+    });
+    let confirmation = await screen.findByRole("dialog", { name: "确认操作" });
+    expect(
+      within(confirmation).getByText("打开连接测试会丢弃未保存的草稿。"),
+    ).toBeInTheDocument();
+    await user.click(
+      within(confirmation).getByRole("button", { name: "取消" }),
+    );
+    expect(input).toHaveValue("Reply with a short greeting. fixture draft");
+    await act(async () => {
+      mocks.listeners.get("provider-settings")?.(target);
+    });
+    confirmation = await screen.findByRole("dialog", { name: "确认操作" });
+    await user.click(
+      within(confirmation).getByRole("button", { name: "放弃修改" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: `${gatewayDemo.providers[1].name} · 测试`,
+    });
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("textbox", { name: "测试文案" }),
+      ).toHaveValue("Reply with a short greeting."),
+    );
+    expect(
+      mocks.command.mock.calls.some(([name]) => name === "provider_test_start"),
+    ).toBe(false);
+  });
+
   it("queues a provider import behind the active API draft without replacing it", async () => {
     const u = userEvent.setup();
     render(<App />);

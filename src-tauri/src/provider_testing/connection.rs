@@ -451,7 +451,10 @@ impl Service {
     }
 }
 pub(super) fn payload(request: &Request, model: &str, protocol: &str) -> (&'static str, Value) {
-    let text = "Reply with a short greeting.";
+    let text = request
+        .prompt
+        .as_deref()
+        .unwrap_or(DEFAULT_CONNECTION_PROMPT);
     match protocol {
         "messages" => (
             "/v1/messages",

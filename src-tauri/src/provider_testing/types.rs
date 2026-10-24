@@ -37,6 +37,8 @@ pub struct Request {
     pub kind: Kind,
     #[serde(default = "one")]
     pub concurrency: usize,
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 fn one() -> usize {
     1
@@ -168,6 +170,7 @@ pub struct SavedBank {
 pub struct Persisted {
     pub schema: u32,
     pub jobs: Vec<Job>,
+    pub connection_prompts: BTreeMap<String, String>,
     pub detection: BTreeMap<String, Detection>,
     pub detection_timing: BTreeMap<String, DetectionTiming>,
     pub models: BTreeMap<String, Models>,
@@ -180,6 +183,7 @@ impl Default for Persisted {
         Self {
             schema: 2,
             jobs: vec![],
+            connection_prompts: BTreeMap::new(),
             detection: BTreeMap::new(),
             detection_timing: BTreeMap::new(),
             models: BTreeMap::new(),
@@ -206,6 +210,7 @@ pub struct DetectionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct State {
     pub revision: String,
+    pub connection_prompt: String,
     pub jobs: Vec<Job>,
     pub detection: Detection,
     pub degraded: BTreeMap<String, Degradation>,

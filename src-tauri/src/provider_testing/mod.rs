@@ -1,5 +1,5 @@
 //! Direct provider diagnostics. Only summaries/configuration are persisted;
-//! credentials, prompts, samples and media remain in this process.
+//! connection prompts are saved per provider; credentials and responses stay in this process.
 mod bank;
 pub mod commands;
 mod compat;
@@ -28,6 +28,7 @@ use tokio::sync::{broadcast, watch, Semaphore};
 use types::*;
 
 pub const DEFAULT_DETECTION_MODEL: &str = "gpt-6-luna";
+pub const DEFAULT_CONNECTION_PROMPT: &str = "Reply with a short greeting.";
 const STATE_LIMIT: u64 = 32 * 1024 * 1024;
 fn failure(message: &str) -> AppError {
     AppError::new(crate::errors::code::PROVIDER_TEST, message)
@@ -202,6 +203,7 @@ impl Service {
         let scope = |job: &&Job| job.client_id == client && job.provider_id == provider;
         Ok(State {
             revision: config_revision(&data.saved, provider),
+            connection_prompt: Self::connection_prompt(&data.saved, client, provider).into(),
             jobs: data
                 .saved
                 .jobs
@@ -278,6 +280,16 @@ impl Service {
     pub fn start(&self, request: Request) -> Result<Job> {
         self.start_job(request, false)
     }
+    fn prompt_key(client: ClientId, provider: &str) -> String {
+        format!("{client:?}:{provider}")
+    }
+    fn connection_prompt<'a>(saved: &'a Persisted, client: ClientId, provider: &str) -> &'a str {
+        saved
+            .connection_prompts
+            .get(&Self::prompt_key(client, provider))
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_CONNECTION_PROMPT)
+    }
     fn start_job(&self, mut request: Request, automatic: bool) -> Result<Job> {
         let target = self.gateway(request.client_id).test_target_at(
             &request.provider_id,
@@ -299,6 +311,16 @@ impl Service {
                 && j.provider_id == request.provider_id
         }) {
             return Err(failure("该供应商已有测试正在运行或排队"));
+        }
+        if request.kind == Kind::Connection {
+            let prompt = request.prompt.get_or_insert_with(|| {
+                Self::connection_prompt(&data.saved, request.client_id, &request.provider_id).into()
+            });
+            if prompt.trim().is_empty() {
+                return Err(failure("请输入测试文案"));
+            }
+        } else {
+            request.prompt = None;
         }
         let snapshot = bank::snapshot(&data.saved.bank)?;
         let challenges = if request.kind == Kind::Fingerprint {
@@ -342,6 +364,12 @@ impl Service {
             completion_reason: None,
         };
         let mut next = data.saved.clone();
+        if let Some(prompt) = &request.prompt {
+            next.connection_prompts.insert(
+                Self::prompt_key(request.client_id, &request.provider_id),
+                prompt.clone(),
+            );
+        }
         next.jobs.push(job.clone());
         self.save(&mut data, next)?;
         let (cancel, receiver) = watch::channel(false);

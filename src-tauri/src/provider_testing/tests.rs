@@ -159,6 +159,7 @@ fn request(service: &Service, client: ClientId, id: &str) -> Request {
         endpoint: None,
         kind: Kind::Connection,
         concurrency: 1,
+        prompt: None,
     }
 }
 async fn completed(service: &Service, id: &str) -> Detail {
@@ -266,7 +267,9 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
             let gateway = service.gateway(client);
             gateway.edit(serde_json::from_value(json!({"op":"dshModelsProvider","id":id,"mapping":{"fixture-model":"fixture-mapped"}})).unwrap(), &gateway.view().revision, dir.path()).unwrap();
         }
-        let job = service.start(request(&service, client, &id)).unwrap();
+        let mut custom = request(&service, client, &id);
+        custom.prompt = Some("fixture greeting\n第二行".into());
+        let job = service.start(custom).unwrap();
         let result = completed(&service, &job.id).await;
         assert_eq!(result.job.status, "completed", "{:?}", result.job.error);
         assert_eq!(
@@ -276,6 +279,20 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
         let seen = lock(&seen);
         assert_eq!(seen.len(), 1);
         assert!(seen[0].0.ends_with(path));
+        let messages = if protocol == "responses" {
+            "input"
+        } else {
+            "messages"
+        };
+        assert_eq!(
+            seen[0].2[messages][0]["content"][0]["text"],
+            "fixture greeting\n第二行"
+        );
+        let reopened = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+        assert_eq!(
+            reopened.state(client, &id).unwrap().connection_prompt,
+            "fixture greeting\n第二行"
+        );
         assert_eq!(seen[0].1["user-agent"], "fixture-business/1.0 exact  UA");
         if client == ClientId::Codex {
             assert_eq!(seen[0].1["originator"], "fixture-business");
@@ -320,6 +337,128 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
         assert!(!saved.contains("fixture input"));
     }
 }
+#[tokio::test]
+async fn connection_prompts_survive_failure_and_restart_without_crossing_providers() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let capture = seen.clone();
+    let port = server(move |r| {
+        let capture = capture.clone();
+        async move {
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            lock(&capture).push(value["input"][0]["content"][0]["text"].clone());
+            response(
+                403,
+                "application/json",
+                r#"{"error":{"message":"fixture denied"}}"#,
+            )
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    let other = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    let claude = add(&service, dir.path(), ClientId::Claude, port, "messages");
+    ua(&service, ClientId::Codex);
+    let revision = service.state(ClientId::Codex, &id).unwrap().revision;
+    let mut custom = request(&service, ClientId::Codex, &id);
+    custom.prompt = Some("fixture remembered prompt".into());
+    let job = service.start(custom).unwrap();
+    assert_eq!(completed(&service, &job.id).await.job.status, "failed");
+    let job = service
+        .start(request(&service, ClientId::Codex, &id))
+        .unwrap();
+    completed(&service, &job.id).await;
+    assert_eq!(*lock(&seen), vec![json!("fixture remembered prompt"); 2]);
+    let reopened = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    let state = reopened.state(ClientId::Codex, &id).unwrap();
+    assert_eq!(state.connection_prompt, "fixture remembered prompt");
+    assert_eq!(state.revision, revision);
+    assert!(reopened.detail(&job.id).unwrap().output.is_none());
+    assert_eq!(
+        reopened
+            .state(ClientId::Codex, &other)
+            .unwrap()
+            .connection_prompt,
+        DEFAULT_CONNECTION_PROMPT
+    );
+    assert_eq!(
+        reopened
+            .state(ClientId::Claude, &claude)
+            .unwrap()
+            .connection_prompt,
+        DEFAULT_CONNECTION_PROMPT
+    );
+    assert_eq!(
+        Service::connection_prompt(&lock(&reopened.0.data).saved, ClientId::Claude, &id),
+        DEFAULT_CONNECTION_PROMPT
+    );
+
+    let path = dir.path().join("provider-tests.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("connectionPrompts");
+    std::fs::write(&path, legacy.to_string()).unwrap();
+    let legacy = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    assert_eq!(
+        legacy
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .connection_prompt,
+        DEFAULT_CONNECTION_PROMPT
+    );
+    assert_eq!(legacy.state(ClientId::Codex, &id).unwrap().jobs.len(), 2);
+}
+
+#[tokio::test]
+async fn empty_prompts_and_failed_atomic_saves_never_dispatch_or_replace_saved_prompts() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = hits.clone();
+    let port = server(move |_| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async {
+            response(
+                200,
+                "application/json",
+                r#"{"output_text":"fixture reply"}"#,
+            )
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    let mut custom = request(&service, ClientId::Codex, &id);
+    custom.prompt = Some(" \n\t ".into());
+    assert!(service
+        .start(custom.clone())
+        .err()
+        .unwrap()
+        .message
+        .contains("测试文案"));
+    assert!(service.state(ClientId::Codex, &id).unwrap().jobs.is_empty());
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    custom.prompt = Some("fixture saved prompt".into());
+    let job = service.start(custom.clone()).unwrap();
+    assert_eq!(completed(&service, &job.id).await.job.status, "completed");
+    let path = dir.path().join("provider-tests.json");
+    let mut externally_changed = std::fs::read_to_string(&path).unwrap();
+    externally_changed.push(' ');
+    std::fs::write(&path, &externally_changed).unwrap();
+    custom.prompt = Some("fixture unsaved prompt".into());
+    assert!(service.start(custom).is_err());
+    tokio::task::yield_now().await;
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(service.state(ClientId::Codex, &id).unwrap().jobs.len(), 1);
+    assert_eq!(
+        service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .connection_prompt,
+        "fixture saved prompt"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), externally_changed);
+}
+
 #[tokio::test]
 async fn catalog_is_manual_persistent_and_keeps_previous_success_on_failure() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -562,6 +701,63 @@ fn scheduled_fingerprint(service: &Service, home: &Path, id: &str) -> Job {
         .into_iter()
         .find(|job| job.automatic)
         .unwrap()
+}
+
+#[tokio::test]
+async fn remembered_connection_prompts_do_not_change_manual_or_scheduled_challenges() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let capture = seen.clone();
+    let port = server(move |r| {
+        let capture = capture.clone();
+        async move {
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            let text = value["input"][0]["content"][0]["text"].as_str().unwrap();
+            lock(&capture).push(text.to_owned());
+            if text == "fixture saved greeting" {
+                response(
+                    200,
+                    "application/json",
+                    r#"{"output_text":"fixture reply"}"#,
+                )
+            } else {
+                fingerprint_response(&sample("above_99", 0))
+            }
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    let mut connection = request(&service, ClientId::Codex, &id);
+    connection.prompt = Some("fixture saved greeting".into());
+    let job = service.start(connection).unwrap();
+    completed(&service, &job.id).await;
+    let mut manual = fingerprint_request(&service, &id, 1);
+    manual.prompt = Some("fixture ignored fingerprint prompt".into());
+    let manual = service.start(manual).unwrap();
+    assert_eq!(
+        completed(&service, &manual.id).await.job.status,
+        "completed"
+    );
+    let automatic = scheduled_fingerprint(&service, dir.path(), &id);
+    assert_eq!(
+        completed(&service, &automatic.id).await.job.status,
+        "completed"
+    );
+    assert_eq!(
+        service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .connection_prompt,
+        "fixture saved greeting"
+    );
+    let seen = lock(&seen);
+    assert!(seen.len() >= 3);
+    for challenge in &seen[1..] {
+        assert!(challenge.contains("整数"));
+        assert!(!challenge.contains("fixture"));
+    }
 }
 
 #[tokio::test]

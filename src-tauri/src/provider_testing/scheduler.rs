@@ -431,6 +431,7 @@ impl Service {
                     endpoint: config.endpoint,
                     kind: Kind::Fingerprint,
                     concurrency: 1,
+                    prompt: None,
                 },
                 true,
             ) {

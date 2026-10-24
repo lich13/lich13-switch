@@ -84,6 +84,7 @@ export type ProviderTestMode =
   | "stt"
   | "realtime";
 export type ProviderTestKind = "connection" | "fingerprint";
+export type ProviderAction = "settings" | "testing";
 export type ProviderTestRequest = {
   clientId: ClientId;
   providerId: string;
@@ -92,6 +93,7 @@ export type ProviderTestRequest = {
   endpoint: string | null;
   kind: ProviderTestKind;
   concurrency: number;
+  prompt?: string;
 };
 export type FingerprintReport = {
   prediction: string;
@@ -189,6 +191,7 @@ export type FingerprintBankState = {
 };
 export type ProviderTestingState = {
   revision: string;
+  connectionPrompt: string;
   jobs: ProviderTestJob[];
   detection: ProviderDetection;
   degraded: Record<string, ProviderDegradation>;
@@ -464,6 +467,7 @@ export type CommandMap = {
       clientId?: ClientId;
       providerId?: string | null;
       eventId?: string | null;
+      providerAction?: ProviderAction;
     },
     void
   >;
@@ -698,6 +702,8 @@ export type EventMap = {
   "pricing-state": null;
   "app-event": EventRecord;
   "event-log": { id: string; clientId: ClientId; providerId: string | null };
-  "provider-settings": string | { id: string; clientId: ClientId };
+  "provider-settings":
+    | string
+    | { id: string; clientId: ClientId; action?: ProviderAction };
   navigate: string;
 };

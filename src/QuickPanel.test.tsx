@@ -44,6 +44,34 @@ beforeEach(() => {
   );
 });
 afterEach(() => localStorage.clear());
+it.each(["codex", "claude", "grok", "dsh"] as const)(
+  "opens %s connection testing in the main window instead of endpoints",
+  async (clientId) => {
+    localStorage.setItem("lich13-switch.quick.client", clientId);
+    const user = userEvent.setup();
+    const provider = (clientId === "claude" ? claudeGatewayDemo : gatewayDemo)
+      .providers[0];
+    render(<QuickPanel />);
+    const entry = await screen.findByRole("button", {
+      name: `${provider.name} 连接测试`,
+    });
+    expect(entry.querySelector("svg")).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: `${provider.name} 端点` }),
+    ).not.toBeInTheDocument();
+    await user.click(entry);
+    expect(mock.command).toHaveBeenCalledWith("open_main", {
+      page: "gateway",
+      clientId,
+      providerId: provider.id,
+      providerAction: "testing",
+    });
+    expect(
+      mock.command.mock.calls.some(([name]) => name === "provider_test_start"),
+    ).toBe(false);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  },
+);
 it("shows ChatGPT subscription labels in the quick account list and hides API-key plans", async () => {
   const user = userEvent.setup();
   const accounts = structuredClone(demo);

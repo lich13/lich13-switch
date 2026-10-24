@@ -16,7 +16,6 @@ import {
   X,
   Settings2,
   RotateCcw,
-  Network,
 } from "lucide-react";
 import { command, preview } from "./bridge";
 import { errorOf, type GatewayState, type ViewState } from "./types";
@@ -31,7 +30,7 @@ import AuthSyncNotice from "./AuthSyncNotice";
 import AccountPlan from "./AccountPlan";
 import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
-import ProviderEndpoints from "./ProviderEndpoints";
+import ConnectionTestIcon from "./ConnectionTestIcon";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import type { QuickPreferences as Preferences } from "./bridge-contracts";
 export default function QuickPanel() {
@@ -58,9 +57,6 @@ function QuickContent({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [endpointProvider, setEndpointProvider] = useState<
-    GatewayState["providers"][number] | null
-  >(null);
   const [systemDark, setSystemDark] = useState(
     matchMedia("(prefers-color-scheme: dark)").matches,
   );
@@ -406,12 +402,21 @@ function QuickContent({
                         <button
                           type="button"
                           className="icon-button compact"
-                          aria-label={`${p.name} 端点`}
-                          title="端点"
+                          aria-label={`${p.name} 连接测试`}
+                          title="连接测试"
                           disabled={rowBusy}
-                          onClick={() => setEndpointProvider(p)}
+                          onClick={() =>
+                            run(() =>
+                              command("open_main", {
+                                page: "gateway",
+                                providerId: p.id,
+                                clientId,
+                                providerAction: "testing",
+                              }),
+                            )
+                          }
                         >
-                          <Network size={14} />
+                          <ConnectionTestIcon />
                         </button>
                       </div>
                       {providerHandoffStatus(p, gateway) && (
@@ -524,20 +529,6 @@ function QuickContent({
           {prefs.tab === "providers" ? "管理供应商" : "管理账号"}
         </button>
       </footer>
-      {endpointProvider && gateway && (
-        <ProviderEndpoints
-          provider={endpointProvider}
-          runtime={
-            gateway.providers.find((p) => p.id === endpointProvider.id) ??
-            endpointProvider
-          }
-          clientId={clientId}
-          revision={gateway.revision}
-          save={edit}
-          update={setGateway}
-          close={() => setEndpointProvider(null)}
-        />
-      )}
     </div>
   );
 }

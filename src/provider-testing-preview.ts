@@ -11,8 +11,8 @@ const states = new Map<string, ProviderTestingState>();
 const catalogs = new Map<string, ProviderTestModels>();
 const details = new Map<string, ProviderTestDetail>();
 const bank: ProviderTestingState["bank"] = {
-  source: "bundled",
-  version: { revision: "preview" },
+  source: "builtin",
+  version: { revision: "123456789abcdef" },
   models: [],
   checkedAt: null,
   updating: false,
@@ -30,6 +30,7 @@ export function providerTestingPreview(
     if (!state) {
       state = {
         revision: crypto.randomUUID(),
+        connectionPrompt: "Reply with a short greeting.",
         jobs: [],
         degraded: {},
         history: [],
@@ -73,6 +74,12 @@ export function providerTestingPreview(
   }
   if (name === "provider_test_start") {
     const request = args.request as ProviderTestRequest;
+    const state = stateFor(`${request.clientId}:${request.providerId}`);
+    if (request.kind === "connection") {
+      const prompt = request.prompt ?? state.connectionPrompt;
+      if (!prompt.trim()) throw new Error("请输入测试文案");
+      state.connectionPrompt = prompt;
+    }
     const gateway = gatewayPreview("get_gateway", {
       clientId: request.clientId,
     }) as GatewayState;
@@ -103,7 +110,7 @@ export function providerTestingPreview(
       canRetry: false,
       completionReason: null,
     };
-    stateFor(`${request.clientId}:${request.providerId}`).jobs.unshift(job);
+    state.jobs.unshift(job);
     details.set(job.id, {
       job,
       output: {

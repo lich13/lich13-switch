@@ -1,4 +1,5 @@
 import ProviderTesting from "./ProviderTesting";
+import ConnectionTestIcon from "./ConnectionTestIcon";
 import Advanced from "./GatewayAdvanced";
 import DshProfile, { connectDsh } from "./DshProfile";
 import { preferredDshProfile } from "./dsh-profile";
@@ -7,7 +8,7 @@ import GatewayModels from "./GatewayModels";
 import GrokImport from "./GrokImport";
 import GatewayDialog from "./GatewayProviderDialog";
 import { subscriptions } from "./subscriptions";
-import type { GatewayEdit } from "./bridge-contracts";
+import type { GatewayEdit, ProviderAction } from "./bridge-contracts";
 import QuotaRefreshSettings from "./QuotaRefreshSettings";
 import ClaudeProfile from "./ClaudeProfile";
 import ClientSelection, {
@@ -71,7 +72,12 @@ type GatewayProps = {
   notify: (s: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onFocusHandled?: () => void;
-  focusProvider?: { id: string; sequence: number; clientId?: ClientId } | null;
+  focusProvider?: {
+    id: string;
+    sequence: number;
+    clientId?: ClientId;
+    action?: ProviderAction;
+  } | null;
 };
 export default function Gateway(props: GatewayProps) {
   const [clientId, select] = useClientSelection("main");
@@ -85,13 +91,20 @@ export default function Gateway(props: GatewayProps) {
   );
   useEffect(() => {
     if (props.focusProvider)
-      select(props.focusProvider.clientId ?? "codex", dirty.current);
+      // App has already confirmed discarding drafts for explicit navigation.
+      select(props.focusProvider.clientId ?? "codex");
   }, [props.focusProvider?.sequence]);
   return (
     <GatewayContent
       key={clientId}
       {...props}
       clientId={clientId}
+      focusProvider={
+        props.focusProvider &&
+        (props.focusProvider.clientId ?? "codex") === clientId
+          ? props.focusProvider
+          : null
+      }
       onClientChange={(id) => {
         select(id, dirty.current);
       }}
@@ -114,7 +127,11 @@ function GatewayContent({
   notify: (s: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onFocusHandled?: () => void;
-  focusProvider?: { id: string; sequence: number } | null;
+  focusProvider?: {
+    id: string;
+    sequence: number;
+    action?: ProviderAction;
+  } | null;
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
   const dirtyParts = useRef({ quota: false, advanced: false, dialog: false });
@@ -183,7 +200,9 @@ function GatewayContent({
       focusHandled.current = focusProvider.sequence;
       if (p) {
         setDialogVersion(focusProvider.sequence);
-        setDialog({ kind: "settings", item: p });
+        setDialog({ kind: focusProvider.action ?? "settings", item: p });
+      } else {
+        setError("该供应商已不存在，请刷新后重试");
       }
       onFocusHandled?.();
     }
@@ -549,21 +568,7 @@ function GatewayContent({
                             setDialog({ kind: "testing", item: p })
                           }
                         >
-                          <svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            aria-hidden="true"
-                          >
-                            <circle cx="3" cy="12" r="2" />
-                            <path d="M5 12h3l3-6 3 12 3-6h2" />
-                            <circle cx="21" cy="12" r="2" />
-                          </svg>
+                          <ConnectionTestIcon />
                           连接测试
                         </button>
                         <button
@@ -751,7 +756,8 @@ function GatewayContent({
       )}
       {dialog?.kind === "testing" && (
         <ProviderTesting
-          key={`${clientId}:${dialog.item.id}`}
+          key={`${clientId}:${dialog.item.id}:${dialogVersion}`}
+          onDirtyChange={markDialog}
           gateway={state}
           provider={
             state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item

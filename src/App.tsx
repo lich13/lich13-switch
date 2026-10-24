@@ -50,6 +50,7 @@ import PowerSettings from "./PowerSettings";
 import ProviderImports from "./ProviderImports";
 import NotificationPermission from "./NotificationPermission";
 import { version } from "../package.json";
+import type { ProviderAction } from "./bridge-contracts";
 import {
   errorOf,
   type ClientId,
@@ -114,6 +115,7 @@ export default function App() {
   const [focusProvider, setFocusProvider] = useState<{
     id: string;
     clientId?: ClientId;
+    action?: ProviderAction;
     sequence: number;
   } | null>(null);
   const gatewayDraftChanged = useCallback((value: boolean) => {
@@ -219,16 +221,20 @@ export default function App() {
           ),
     );
     events.watch("provider-settings", async (p) => {
+      const target =
+        typeof p === "string" ? { id: p, clientId: "codex" as const } : p;
       if (
         (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
-        !(await confirmAction("打开白名单会丢弃未保存的草稿。"))
+        !(await confirmAction(
+          `${target.action === "testing" ? "打开连接测试" : "打开白名单"}会丢弃未保存的草稿。`,
+        ))
       )
         return;
       if (disposed) return;
       setPage("gateway");
       setDirty(false);
       setFocusProvider({
-        ...(typeof p === "string" ? { id: p, clientId: "codex" as const } : p),
+        ...target,
         sequence: Date.now(),
       });
     });

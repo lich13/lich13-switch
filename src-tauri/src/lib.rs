@@ -201,6 +201,13 @@ fn open_github() -> Result<()> {
 fn open_update_release() -> Result<()> {
     update::open_releases()
 }
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ProviderAction {
+    #[default]
+    Settings,
+    Testing,
+}
 #[tauri::command]
 fn open_main(
     app: tauri::AppHandle,
@@ -208,6 +215,7 @@ fn open_main(
     provider_id: Option<String>,
     client_id: Option<gateway::ClientId>,
     event_id: Option<String>,
+    provider_action: Option<ProviderAction>,
 ) -> Result<()> {
     if page.as_ref().is_some_and(|p| {
         !["accounts", "config", "gateway", "logs", "settings"].contains(&p.as_str())
@@ -227,7 +235,7 @@ fn open_main(
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.emit(
                 "provider-settings",
-                serde_json::json!({"id":id,"clientId":client_id.unwrap_or_default()}),
+                serde_json::json!({"id":id,"clientId":client_id.unwrap_or_default(),"action":provider_action.unwrap_or_default()}),
             );
         }
         Ok(())
@@ -1753,10 +1761,10 @@ pub fn run() {
                 .on_menu_event(|app, e| match e.id().as_ref() {
                     "quit" => quit(app, &app.state::<Arc<Runtime>>()),
                     "open" => {
-                        let _ = open_main(app.clone(), None, None, None, None);
+                        let _ = open_main(app.clone(), None, None, None, None, None);
                     }
                     "config" | "gateway" | "settings" => {
-                        let _ = open_main(app.clone(), Some(e.id().as_ref().into()), None, None, None);
+                        let _ = open_main(app.clone(), Some(e.id().as_ref().into()), None, None, None, None);
                     }
                     "github" => {
                         let _ = update::open_repository();

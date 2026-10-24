@@ -15,6 +15,7 @@ vi.mock("./bridge", () => ({
 }));
 import Gateway from "./Gateway";
 import { claudeGatewayDemo, gatewayDemo } from "./gateway-preview";
+import { providerTestingPreview } from "./provider-testing-preview";
 let state: GatewayState;
 let claudeState: GatewayState;
 beforeEach(() => {
@@ -25,6 +26,7 @@ beforeEach(() => {
   mock.listeners.clear();
   mock.command.mockImplementation(
     async (name: string, args?: { clientId?: ClientId }) => {
+      if (name.startsWith("provider_test_")) return providerTestingPreview(name, args ?? {});
       if (name === "get_gateway" || name === "update_gateway")
         return structuredClone(
           args?.clientId === "claude" ? claudeState : state,
@@ -229,6 +231,19 @@ describe("gateway controls", () => {
     expect(
       mock.command.mock.calls.some(([name]) => name === "update_gateway"),
     ).toBe(false);
+  });
+
+  it("waits for the requested client before consuming connection-test navigation", async () => {
+    const handled = vi.fn();
+    const { rerender } = render(<Gateway notify={() => {}} onFocusHandled={handled} />);
+    await screen.findByRole("button", { name: `${state.providers[0].name} 名称` });
+    const target = claudeState.providers[0];
+    rerender(<Gateway notify={() => {}} focusProvider={{ id: target.id, clientId: "claude", action: "testing", sequence: 3 }} onFocusHandled={handled} />);
+    const dialog = await screen.findByRole("dialog", { name: `${target.name} · 测试` });
+    expect(within(dialog).getByRole("tab", { name: "连接测试" })).toHaveAttribute("aria-selected", "true");
+    expect(handled).toHaveBeenCalledTimes(1);
+    expect(mock.command).toHaveBeenCalledWith("provider_test_state", { clientId: "claude", providerId: target.id });
+    expect(mock.command.mock.calls.some(([name]) => name === "provider_test_start")).toBe(false);
   });
 
   it("accepts an optional display name without adding model settings", async () => {

@@ -61,10 +61,12 @@ export default function ProviderTesting({
   gateway,
   provider,
   close,
+  onDirtyChange,
 }: {
   gateway: GatewayState;
   provider: Provider;
   close: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const tabsId = useId();
   const scope = { clientId: gateway.clientId, providerId: provider.id };
@@ -73,6 +75,8 @@ export default function ProviderTesting({
   const [endpoint, setEndpoint] = useState(provider.baseUrl);
   const [chosen, setChosen] = useState({ connection: "", fingerprint: "" });
   const [concurrency, setConcurrency] = useState(1);
+  const [prompt, setPrompt] = useState<string | null>(null);
+  const [savedPrompt, setSavedPrompt] = useState("");
   const [catalog, setCatalog] = useState<{
     endpoint: string;
     value: ProviderTestModels;
@@ -95,7 +99,13 @@ export default function ProviderTesting({
   const testing = tab === "connection" || tab === "fingerprint";
   const fingerprint = gateway.clientId === "codex" && !provider.searchOnly;
   const model = chosen[kind];
-  const dirty = !!detection && JSON.stringify(detection) !== detectionSaved;
+  const dirty =
+    (!!detection && JSON.stringify(detection) !== detectionSaved) ||
+    (prompt !== null && prompt !== savedPrompt);
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const catalogEndpoint =
     tab === "detection" ? (detection?.endpoint ?? provider.baseUrl) : endpoint;
   const models = catalog?.endpoint === catalogEndpoint ? catalog.value : null;
@@ -139,6 +149,25 @@ export default function ProviderTesting({
     setDetectionSaved(JSON.stringify(state.detection));
     setDetectionRevision(state.revision);
   }, [state, detection]);
+  useEffect(() => {
+    if (!state || prompt !== null) return;
+    setPrompt(state.connectionPrompt);
+    setSavedPrompt(state.connectionPrompt);
+  }, [state, prompt]);
+  useEffect(() => {
+    if (!state || !testing) return;
+    const jobs = state.jobs.filter(
+      (job) =>
+        job.clientId === gateway.clientId &&
+        job.providerId === provider.id &&
+        job.kind === kind,
+    );
+    setDetailId((current) =>
+      jobs.some((job) => job.id === current)
+        ? current
+        : (jobs.find(active)?.id ?? jobs[0]?.id ?? null),
+    );
+  }, [state, testing, kind, gateway.clientId, provider.id]);
   useEffect(() => {
     if (!detailId) {
       setDetail(null);
@@ -220,7 +249,7 @@ export default function ProviderTesting({
     }
   };
   const leave = async () => {
-    if (!busy && (!dirty || (await confirmAction("放弃未保存的检测设置？"))))
+    if (!busy && (!dirty || (await confirmAction("放弃未保存的修改？"))))
       close();
   };
   const scopedJobs =
@@ -239,6 +268,7 @@ export default function ProviderTesting({
     !busy &&
     !running.length &&
     endpointAvailable &&
+    (kind !== "connection" || !!prompt?.trim()) &&
     ((kind === "connection" && !model) || (modelAvailable && !catalogLoading));
   const start = () =>
     perform(async () => {
@@ -253,8 +283,10 @@ export default function ProviderTesting({
           model,
           kind,
           concurrency: kind === "fingerprint" ? concurrency : 1,
+          ...(kind === "connection" ? { prompt: prompt! } : {}),
         },
       });
+      if (kind === "connection") setSavedPrompt(prompt!);
       setDetailId(job.id);
     });
   const stop = () =>
@@ -479,7 +511,28 @@ export default function ProviderTesting({
                 所选模型不在该端点缓存目录中，请重新选择。
               </p>
             )}
+            {kind === "connection" && (
+              <label className="provider-test-field provider-test-prompt">
+                <span>测试文案</span>
+                <textarea
+                  aria-label="测试文案"
+                  value={prompt ?? ""}
+                  disabled={busy || !!running.length || prompt === null}
+                  rows={3}
+                  onChange={(e) => setPrompt(e.target.value)}
+                />
+              </label>
+            )}
           </>
+        )}
+        {tab === "connection" && (
+          <ConnectionReply
+            key={detailId ?? "empty"}
+            detail={
+              currentDetail?.job.kind === "connection" ? currentDetail : null
+            }
+            loading={!!detailId && !currentDetail}
+          />
         )}
         {(testing || tab === "history") && (
           <>
@@ -545,7 +598,11 @@ export default function ProviderTesting({
             )}
             {currentDetail &&
               (tab === "history" || currentDetail.job.kind === kind) && (
-                <TestResult detail={currentDetail} now={now} />
+                <TestResult
+                  detail={currentDetail}
+                  now={now}
+                  showReply={tab === "history"}
+                />
               )}
           </>
         )}
@@ -710,14 +767,22 @@ export default function ProviderTesting({
               <div>
                 <dt>来源</dt>
                 <dd>
-                  {state.bank.source === "bundled"
+                  {state.bank.source === "builtin" ||
+                  state.bank.source === "bundled"
                     ? "内置"
-                    : (state.bank.source ?? "—")}
+                    : state.bank.source === "cache"
+                      ? "已更新"
+                      : "—"}
                 </dd>
               </div>
               <div>
                 <dt>版本</dt>
-                <dd>{JSON.stringify(state.bank.version ?? {})}</dd>
+                <dd>
+                  {typeof state.bank.version?.revision === "string" &&
+                  state.bank.version.revision
+                    ? state.bank.version.revision.slice(0, 7)
+                    : "—"}
+                </dd>
               </div>
               <div>
                 <dt>检查时间</dt>
@@ -893,15 +958,90 @@ function ErrorDetail({ detail }: { detail: ProviderTestError }) {
   );
 }
 
+function ConnectionReply({
+  detail,
+  loading = false,
+}: {
+  detail: ProviderTestDetail | null;
+  loading?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const job = detail?.job;
+  const output = detail?.output;
+  const text = output?.text ?? "";
+  useEffect(() => {
+    setCopied(false);
+    setCopyError("");
+  }, [job?.id, text]);
+  return (
+    <section className="provider-test-reply" aria-label="模型回复">
+      <div className="provider-test-reply-heading">
+        <h3>模型回复</h3>
+        {job && <span>{statuses[job.status] ?? job.status}</span>}
+        <button
+          type="button"
+          className="text-button"
+          disabled={!text}
+          onClick={() => {
+            setCopyError("");
+            void navigator.clipboard
+              .writeText(text)
+              .then(() => setCopied(true))
+              .catch(() => setCopyError("复制失败，请选择回复正文后复制。"));
+          }}
+        >
+          <Copy size={14} />
+          {copied ? "已复制" : "复制回复"}
+        </button>
+      </div>
+      {text ? (
+        <pre className="provider-test-output">{text}</pre>
+      ) : (
+        <p className="provider-test-empty" role="status">
+          {loading
+            ? "正在读取回复…"
+            : !job
+              ? "开始测试后显示回复"
+              : !output
+                ? "回复正文未保留，请重新测试。"
+                : active(job)
+                  ? "正在等待回复…"
+                  : "未收到文本回复"}
+        </p>
+      )}
+      {output?.error ? (
+        <ErrorDetail detail={output.error} />
+      ) : (
+        job?.error && (
+          <p className="provider-test-error" role="alert">
+            {job.error}
+          </p>
+        )
+      )}
+      {copyError && (
+        <p className="provider-test-error" role="alert">
+          {copyError}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function TestResult({
   detail: { job, output },
   now,
+  showReply,
 }: {
   detail: ProviderTestDetail;
   now: number;
+  showReply: boolean;
 }) {
   return (
     <section className="provider-test-detail" aria-label="测试详情">
+      {showReply && job.kind === "connection" && (
+        <ConnectionReply detail={{ job, output }} />
+      )}
       <dl className="provider-test-summary">
         <div>
           <dt>测试端点</dt>
@@ -956,13 +1096,15 @@ function TestResult({
             : "首组命中降智规则，提前完成"}
         </p>
       )}
-      {output?.error && <ErrorDetail detail={output.error} />}
-      {job.error && !output?.error && (
+      {job.kind !== "connection" && output?.error && (
+        <ErrorDetail detail={output.error} />
+      )}
+      {job.kind !== "connection" && job.error && !output?.error && (
         <p className="provider-test-error" role="alert">
           {job.error}
         </p>
       )}
-      {output?.text && (
+      {job.kind !== "connection" && output?.text && (
         <pre className="provider-test-output">{output.text}</pre>
       )}
       {!!job.groups.length && (

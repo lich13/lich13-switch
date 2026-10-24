@@ -26,6 +26,8 @@ let states: Record<string, ProviderTestingState>;
 let catalogs: Record<string, ProviderTestModels>;
 let refreshFailure = false;
 let errorDetail: ProviderTestError | null = null;
+let reply: string;
+let outputAvailable: boolean;
 const emptyCatalog = (): ProviderTestModels => ({
   models: [],
   defaultModel: "",
@@ -80,6 +82,7 @@ beforeEach(() => {
       p.id,
       {
         revision: `fixture-settings-${p.id}`,
+        connectionPrompt: "Reply with a short greeting.",
         jobs: [],
         degraded: {},
         history: [],
@@ -104,6 +107,8 @@ beforeEach(() => {
   catalogs = {};
   refreshFailure = false;
   errorDetail = null;
+  reply = "fixture streamed result";
+  outputAvailable = true;
   mock.command.mockReset();
   mock.listeners.clear();
   mock.command.mockImplementation(
@@ -120,8 +125,11 @@ beforeEach(() => {
         return value;
       }
       if (name === "provider_test_start") {
-        const job = makeJob(args.request as ProviderTestRequest);
-        states[job.providerId].jobs.push(job);
+        const request = args.request as ProviderTestRequest;
+        const job = makeJob(request);
+        states[job.providerId].jobs.unshift(job);
+        if (request.kind === "connection")
+          states[job.providerId].connectionPrompt = request.prompt!;
         return job;
       }
       if (name === "provider_test_query")
@@ -129,13 +137,15 @@ beforeEach(() => {
           job: Object.values(states)
             .flatMap((s) => s.jobs)
             .find((j) => j.id === args.id),
-          output: {
-            text: errorDetail ? "" : "fixture streamed result",
-            groups: {},
-            diagnostics: {},
-            error: errorDetail,
-            groupErrors: {},
-          },
+          output: outputAvailable
+            ? {
+                text: reply,
+                groups: {},
+                diagnostics: {},
+                error: errorDetail,
+                groupErrors: {},
+              }
+            : null,
         };
       if (name === "provider_test_set_detection") {
         const state = states[String(args.providerId)];
@@ -166,6 +176,178 @@ const emit = async () => {
     mock.listeners.get("provider-tests")?.();
   });
 };
+
+it("sends and remembers the provider prompt without overwriting a draft on refresh", async () => {
+  const user = userEvent.setup();
+  const first = open();
+  const input = await screen.findByDisplayValue("Reply with a short greeting.");
+  await user.clear(input);
+  await user.type(input, "fixture greeting{Enter}第二行");
+  states[gateway.providers[0].id].connectionPrompt = "external fixture";
+  await emit();
+  expect(input).toHaveValue("fixture greeting\n第二行");
+  await user.click(screen.getByRole("button", { name: "开始测试" }));
+  await screen.findByRole("button", { name: "停止测试" });
+  expect(mock.command).toHaveBeenCalledWith("provider_test_start", {
+    request: expect.objectContaining({ prompt: "fixture greeting\n第二行" }),
+  });
+  expect(states[gateway.providers[1].id].connectionPrompt).toBe(
+    "Reply with a short greeting.",
+  );
+  first.unmount();
+  open();
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "测试文案" })).toHaveValue(
+      "fixture greeting\n第二行",
+    ),
+  );
+  await screen.findByText("fixture streamed result");
+});
+
+it("blocks whitespace and keeps the draft when starting cannot be saved", async () => {
+  const user = userEvent.setup();
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation((name, args) => {
+    if (name === "provider_test_start") throw new Error("fixture save failed");
+    return original(name, args);
+  });
+  open();
+  const input = await screen.findByDisplayValue("Reply with a short greeting.");
+  await user.clear(input);
+  await user.type(input, " {Enter} ");
+  expect(screen.getByRole("button", { name: "开始测试" })).toBeDisabled();
+  await user.clear(input);
+  await user.type(input, "unsaved fixture");
+  await user.click(screen.getByRole("button", { name: "开始测试" }));
+  await screen.findByText("fixture save failed");
+  expect(input).toHaveValue("unsaved fixture");
+  expect(states[gateway.providers[0].id].connectionPrompt).toBe(
+    "Reply with a short greeting.",
+  );
+  expect(states[gateway.providers[0].id].jobs).toHaveLength(0);
+});
+
+it("confirms closing an unsent prompt and reports draft state to navigation", async () => {
+  const user = userEvent.setup();
+  const close = vi.fn();
+  const dirty = vi.fn();
+  render(
+    <ProviderTesting
+      gateway={gateway}
+      provider={gateway.providers[0]}
+      close={close}
+      onDirtyChange={dirty}
+    />,
+  );
+  const input = await screen.findByDisplayValue("Reply with a short greeting.");
+  await user.type(input, " fixture");
+  expect(dirty).toHaveBeenLastCalledWith(true);
+  await user.click(screen.getAllByRole("button", { name: "关闭" })[0]);
+  await user.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "取消" },
+    ),
+  );
+  expect(input).toHaveValue("Reply with a short greeting. fixture");
+  expect(close).not.toHaveBeenCalled();
+  await user.click(screen.getAllByRole("button", { name: "关闭" })[0]);
+  await user.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "放弃修改" },
+    ),
+  );
+  expect(close).toHaveBeenCalledOnce();
+  expect(states[gateway.providers[0].id].connectionPrompt).toBe(
+    "Reply with a short greeting.",
+  );
+});
+
+it("shows live replies before diagnostics and keeps partial text after stopping", async () => {
+  const user = userEvent.setup();
+  reply = "";
+  open();
+  await screen.findByDisplayValue("Reply with a short greeting.");
+  await user.click(screen.getByRole("button", { name: "开始测试" }));
+  await screen.findByText("正在等待回复…");
+  reply = "fixture first line\n第二行";
+  await emit();
+  const response = screen.getByRole("region", { name: "模型回复" });
+  expect(within(response).getByText(/fixture first line/).textContent).toBe(
+    reply,
+  );
+  expect(
+    response.compareDocumentPosition(
+      screen.getByRole("region", { name: "测试详情" }),
+    ) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  states[gateway.providers[0].id].jobs[0].status = "cancelled";
+  await emit();
+  expect(within(response).getByText("已停止")).toBeInTheDocument();
+  await user.click(within(response).getByRole("button", { name: "复制回复" }));
+  expect(await navigator.clipboard.readText()).toBe(reply);
+  expect(
+    within(response).getByRole("button", { name: "已复制" }),
+  ).toBeInTheDocument();
+});
+
+it("reopens the active connection and explains missing output after restart", async () => {
+  const provider = gateway.providers[0];
+  const base = makeJob({
+    clientId: "codex",
+    providerId: provider.id,
+    expectedRevision: "fixture",
+    endpoint: provider.baseUrl,
+    model: "fixture-model",
+    kind: "connection",
+    concurrency: 1,
+  });
+  states[provider.id].jobs = [
+    { ...base, id: "newer-finished", status: "completed" },
+    { ...base, id: "active-connection" },
+  ];
+  const first = open();
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith("provider_test_query", {
+      id: "active-connection",
+    }),
+  );
+  first.unmount();
+  states[provider.id].jobs = [
+    { ...base, id: "newer-finished", status: "completed" },
+  ];
+  outputAvailable = false;
+  open();
+  await screen.findByText("回复正文未保留，请重新测试。");
+  expect(screen.getByRole("button", { name: "复制回复" })).toBeDisabled();
+});
+
+it("renders compact fingerprint revisions and readable sources", async () => {
+  const user = userEvent.setup();
+  const bank = states[gateway.providers[0].id].bank;
+  bank.source = "builtin";
+  bank.version = {
+    revision: "123456789abcdef",
+    sha256: "fixture-digest",
+    analyzer_version: 1,
+  };
+  open();
+  await user.click(screen.getByRole("tab", { name: "指纹库" }));
+  await screen.findByText("1234567");
+  expect(screen.getByText("内置")).toBeInTheDocument();
+  expect(
+    screen.queryByText(/fixture-digest|analyzer_version/),
+  ).not.toBeInTheDocument();
+  bank.source = "cache";
+  await emit();
+  expect(screen.getByText("已更新")).toBeInTheDocument();
+  bank.source = undefined;
+  bank.version = undefined;
+  await emit();
+  expect(screen.queryByText("1234567")).not.toBeInTheDocument();
+  expect(screen.getByText("版本").nextElementSibling).toHaveTextContent("—");
+});
 
 it("opens only the selected provider and reads cache without fetching upstream", async () => {
   open();
@@ -235,6 +417,7 @@ it("starts ordinary chat at the chosen auxiliary endpoint without changing the g
       model: "fixture-alt",
       kind: "connection",
       concurrency: 1,
+      prompt: "Reply with a short greeting.",
     },
   });
   expect(
@@ -255,7 +438,9 @@ it("allows default chat without a directory but requires a cached fingerprint mo
   const user = userEvent.setup();
   open();
   await screen.findByText("尚未缓存该端点模型，点击重新拉取。");
-  expect(screen.getByRole("button", { name: "开始测试" })).toBeEnabled();
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始测试" })).toBeEnabled(),
+  );
   await user.click(screen.getByRole("tab", { name: "模型指纹" }));
   expect(screen.getByRole("button", { name: "开始测试" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "重新拉取模型" }));
@@ -362,6 +547,9 @@ it("shows and copies the complete upstream error instead of only the code", asyn
     truncated: false,
   };
   open();
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始测试" })).toBeEnabled(),
+  );
   await user.click(screen.getByRole("button", { name: "开始测试" }));
   const error = await screen.findByRole("alert", { name: "完整错误信息" });
   expect(error.querySelector("pre")?.textContent).toBe(errorDetail.body);
