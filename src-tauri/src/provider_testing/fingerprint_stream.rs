@@ -67,6 +67,9 @@ fn classify_failure(status: u16, payload: &Value) -> Failure {
         .unwrap_or(payload)
         .to_string()
         .to_lowercase();
+    if super::errors::is_client_restricted(&text) {
+        return Failure::new("client_restricted", false);
+    }
     if matches!(status, 401..=403)
         || [
             "unauthorized",

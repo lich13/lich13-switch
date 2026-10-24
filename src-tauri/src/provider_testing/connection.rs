@@ -175,7 +175,13 @@ impl Service {
                         errors::body(Some(status), &data.to_string(), false),
                         &target,
                     ));
-                    return Err(failure("上游返回模型目录错误"));
+                    return Err(failure(
+                        if errors::is_client_restricted(&data.to_string()) {
+                            errors::CLIENT_RESTRICTED
+                        } else {
+                            "上游返回模型目录错误"
+                        },
+                    ));
                 }
                 let list = data["data"]
                     .as_array()
@@ -345,9 +351,12 @@ impl Service {
         });
     }
     fn connection_error(&self, id: &str, detail: TestError, target: &Target) -> AppError {
+        let restricted = errors::is_client_restricted(&detail.body);
         let detail = errors::redact(detail, target);
         // Only the summary is persisted with the job. The complete response stays in Output.
-        let result = failure(if detail.http_status.is_some() {
+        let result = failure(if restricted {
+            errors::CLIENT_RESTRICTED
+        } else if detail.http_status.is_some() {
             "上游返回错误，详见完整错误信息"
         } else {
             "测试连接失败，详见完整错误信息"

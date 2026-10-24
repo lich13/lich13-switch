@@ -6,8 +6,11 @@ use hyper::{body::Incoming, Request as HttpRequest, Response};
 use hyper_util::rt::TokioIo;
 use std::{future::Future, time::Duration};
 
+const INSTALLATION_ID: &str = "11111111-2222-4333-8444-555555555555";
+
 fn fixture() -> (tempfile::TempDir, Service) {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("installation_id"), INSTALLATION_ID).unwrap();
     let codex = Gateway::new(dir.path().join("codex")).unwrap();
     codex.set_usage(crate::usage::Service::new(dir.path()));
     let claude = codex.companion(dir.path().join("claude")).unwrap();
@@ -252,6 +255,13 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
         assert_eq!(seen.len(), 1);
         assert!(seen[0].0.ends_with(path));
         assert_eq!(seen[0].1["user-agent"], "fixture-business/1.0 exact  UA");
+        if client == ClientId::Codex {
+            assert_eq!(seen[0].1["originator"], "fixture-business");
+            assert_eq!(seen[0].1["x-codex-installation-id"], INSTALLATION_ID);
+        } else {
+            assert!(!seen[0].1.contains_key("originator"));
+            assert!(!seen[0].1.contains_key("x-codex-installation-id"));
+        }
         assert_eq!(
             seen[0].2["model"],
             if client == ClientId::Dsh {
@@ -488,6 +498,302 @@ fn fingerprint_request(service: &Service, id: &str, concurrency: usize) -> Reque
     seed_catalog(service, id, &[&request.model]);
     request
 }
+fn scheduled_fingerprint(service: &Service, home: &Path, id: &str) -> Job {
+    let gateway = service.gateway(ClientId::Codex);
+    gateway
+        .edit(
+            Edit::QueueProvider {
+                id: id.into(),
+                queued: true,
+            },
+            &gateway.view().revision,
+            home,
+        )
+        .unwrap();
+    seed_catalog(service, id, &["gpt-6-sol"]);
+    let state = service.state(ClientId::Codex, id).unwrap();
+    let detection = Detection {
+        enabled: true,
+        mode: "fixed".into(),
+        interval_minutes: 1,
+        model: "gpt-6-sol".into(),
+        ..state.detection
+    };
+    service
+        .set_detection(id, detection, &state.revision)
+        .unwrap();
+    let at = service.now();
+    service.tick(at, false).unwrap();
+    service.tick(at + 60_000, false).unwrap();
+    service
+        .state(ClientId::Codex, id)
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.automatic)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn default_client_gate_accepts_local_identity_for_every_codex_test_path() {
+    for (user_agent, originator) in [
+        ("codex_cli_rs/0.1.2 (fixture; arm64)", "codex_cli_rs"),
+        (
+            "Codex Desktop/0.1.2 (fixture; arm64) exact  spaces",
+            "Codex Desktop",
+        ),
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits = calls.clone();
+        let port = server(move |r| {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // The default upstream gate requires an official, versioned UA
+                // and at least one x-codex-* header; originator is paired below.
+                let ua = r.headers().get("user-agent").unwrap().to_str().unwrap();
+                let official = ua.starts_with("codex_cli_rs/0.1.2")
+                    || ua.starts_with("Codex Desktop/0.1.2");
+                let engine = r.headers().keys().any(|key| key.as_str().starts_with("x-codex-"));
+                if !official || !engine {
+                    return response(403, "application/json", r#"{"error":{"message":"This account only allows Codex official clients","type":"forbidden_error"}}"#);
+                }
+                assert_eq!(ua, user_agent);
+                assert_eq!(r.headers()["originator"], originator);
+                assert_eq!(r.headers()["x-codex-installation-id"], INSTALLATION_ID);
+                assert_eq!(r.headers()["authorization"], "Bearer fixture-test-token");
+                if r.uri().path().ends_with("/models") {
+                    response(200, "application/json", r#"{"data":[{"id":"gpt-6-sol"}]}"#)
+                } else {
+                    let _ = r.into_body().collect().await.unwrap();
+                    fingerprint_response(&sample("above_99", 0))
+                }
+            }
+        }).await;
+        let (dir, service) = fixture();
+        let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+        let gateway = service.gateway(ClientId::Codex);
+        gateway.remember_test_user_agent(user_agent.as_bytes());
+        let target = gateway.test_target(&id, None).unwrap();
+        let old = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(target.url("/v1/responses").unwrap())
+            .header("user-agent", user_agent)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(old.status(), 403);
+        let models = service
+            .models(ClientId::Codex, &id, &gateway.view().revision, None, true)
+            .await
+            .unwrap();
+        assert!(models.error.is_none());
+        assert_eq!(models.models[0].id, "gpt-6-sol");
+        let connection = service
+            .start(request(&service, ClientId::Codex, &id))
+            .unwrap();
+        assert_eq!(
+            completed(&service, &connection.id).await.job.status,
+            "completed"
+        );
+        let fingerprint = service
+            .start(fingerprint_request(&service, &id, 1))
+            .unwrap();
+        assert_eq!(
+            completed(&service, &fingerprint.id).await.job.status,
+            "completed"
+        );
+        let automatic = scheduled_fingerprint(&service, dir.path(), &id);
+        assert_eq!(
+            completed(&service, &automatic.id).await.job.status,
+            "completed"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        let state = service.state(ClientId::Codex, &id).unwrap();
+        assert!(state.degraded.is_empty());
+        assert!(gateway.test_candidates().unwrap()[0].queued);
+        assert_eq!(gateway.successful_user_agent().unwrap(), user_agent);
+        assert!(gateway
+            .detection_request_counts(service.now())
+            .unwrap()
+            .is_empty());
+        let saved = std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap();
+        assert!(!saved.contains(INSTALLATION_ID));
+        assert!(!saved.contains(user_agent));
+    }
+}
+
+#[tokio::test]
+async fn codex_identity_reads_selected_home_and_blocks_invalid_data_without_network() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = calls.clone();
+    let port = server(move |_| {
+        let hits = hits.clone();
+        async move {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            response(200, "application/json", "{}")
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    let gateway = service.gateway(ClientId::Codex);
+    gateway.remember_test_user_agent(b"Codex Desktop/0.1.2 (fixture)");
+    seed_catalog(&service, &id, &["fixture-model"]);
+    let selected = dir.path().join("selected-codex");
+    std::fs::create_dir(&selected).unwrap();
+    gateway.observe_home(&selected);
+    let file = selected.join("installation_id");
+    let missing = gateway.test_target(&id, None).err().unwrap().message;
+    assert!(missing.contains("未找到 Codex installation_id"));
+    assert!(!file.exists());
+    let selected_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    let raw = format!("{selected_id}\n");
+    std::fs::write(&file, &raw).unwrap();
+    let target = gateway.test_target(&id, None).unwrap();
+    assert_eq!(target.headers["x-codex-installation-id"], selected_id);
+    assert_eq!(target.headers["originator"], "Codex Desktop");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), raw);
+    for invalid in [vec![], b"not-a-uuid".to_vec(), vec![0xff], vec![b'x'; 129]] {
+        std::fs::write(&file, &invalid).unwrap();
+        let error = service
+            .start(request(&service, ClientId::Codex, &id))
+            .err()
+            .unwrap();
+        assert!(error.message.contains("installation_id"));
+        assert!(service
+            .models(ClientId::Codex, &id, &gateway.view().revision, None, true)
+            .await
+            .is_err());
+        let cached = service
+            .models(ClientId::Codex, &id, &gateway.view().revision, None, false)
+            .await
+            .unwrap();
+        assert_eq!(cached.models[0].id, "fixture-model");
+        assert_eq!(std::fs::read(&file).unwrap(), invalid);
+    }
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    assert!(gateway
+        .test_target(&id, None)
+        .err()
+        .unwrap()
+        .message
+        .contains("无法读取 Codex installation_id"));
+    std::fs::remove_dir(&file).unwrap();
+    std::fs::write(&file, selected_id).unwrap();
+    for invalid in [
+        b"missing-version".as_slice(),
+        b"/0.1.2",
+        b"codex_cli_rs/",
+        b"codex\tcli/0.1.2",
+    ] {
+        gateway.remember_test_user_agent(invalid);
+        assert!(gateway
+            .test_target(&id, None)
+            .err()
+            .unwrap()
+            .message
+            .contains("User-Agent 格式无效"));
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn client_restrictions_keep_complete_redacted_errors_without_retry_or_degradation() {
+    let error = json!({"error":{"message":format!("This account only allows Codex official clients; {INSTALLATION_ID}; fixture-test-token; fixture end-marker"),"type":"forbidden_error"}});
+    let stream = format!(
+        "event: response.failed\ndata: {}\n\n",
+        json!({"type":"response.failed","response":{"status":"failed","error":error["error"]}})
+    );
+    for (status, mime, body) in [
+        (403, "application/json", format!("{error}{stream}")),
+        (200, "application/json", error.to_string()),
+        (200, "text/event-stream", stream),
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits = calls.clone();
+        let port = server(move |_| {
+            let hits = hits.clone();
+            let body = body.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                response(status, mime, body)
+            }
+        })
+        .await;
+        let (dir, service) = fixture();
+        let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+        ua(&service, ClientId::Codex);
+        let gateway = service.gateway(ClientId::Codex);
+        let models = service
+            .models(ClientId::Codex, &id, &gateway.view().revision, None, true)
+            .await
+            .unwrap();
+        assert!(models.error.is_some());
+        let detail = models.error_detail.unwrap();
+        assert_eq!(detail.http_status, Some(status));
+        assert!(detail.message.starts_with(errors::CLIENT_RESTRICTED));
+        assert!(detail.body.contains("fixture end-marker"));
+        assert!(!detail.body.contains(INSTALLATION_ID));
+        let connection = service
+            .start(request(&service, ClientId::Codex, &id))
+            .unwrap();
+        let done = completed(&service, &connection.id).await;
+        assert_eq!(done.job.error.as_deref(), Some(errors::CLIENT_RESTRICTED));
+        let detail = done.output.unwrap().error.unwrap();
+        assert_eq!(detail.http_status, Some(status));
+        assert!(detail.message.starts_with(errors::CLIENT_RESTRICTED));
+        assert!(detail.body.contains("fixture end-marker"));
+        assert!(!detail.body.contains(INSTALLATION_ID));
+        assert!(!detail.body.contains("fixture-test-token"));
+        assert!(!detail.truncated);
+        let manual = service
+            .start(fingerprint_request(&service, &id, 1))
+            .unwrap();
+        completed(&service, &manual.id).await;
+        let automatic = scheduled_fingerprint(&service, dir.path(), &id);
+        for job_id in [manual.id, automatic.id] {
+            let done = completed(&service, &job_id).await;
+            assert_eq!(done.job.status, "failed");
+            assert_eq!(done.job.error.as_deref(), Some(errors::CLIENT_RESTRICTED));
+            assert!(!done.job.can_retry);
+            assert!(done.job.report.is_none());
+            assert_eq!(done.job.groups.iter().map(|g| g.attempts).sum::<usize>(), 1);
+            assert!(done.job.groups.iter().all(|g| !g.retryable));
+            let detail = &done.output.as_ref().unwrap().group_errors[&0];
+            assert_eq!(detail.http_status, Some(status));
+            assert!(detail.message.starts_with(errors::CLIENT_RESTRICTED));
+            assert!(detail.body.contains("fixture end-marker"));
+            let serialized = serde_json::to_string(&done).unwrap();
+            assert!(!serialized.contains(INSTALLATION_ID));
+            assert!(!serialized.contains("fixture-test-token"));
+            assert!(service.retry(&job_id).is_err());
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert!(service
+            .state(ClientId::Codex, &id)
+            .unwrap()
+            .degraded
+            .is_empty());
+        assert!(gateway.test_candidates().unwrap()[0].queued);
+        let saved = std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap();
+        assert!(!saved.contains(INSTALLATION_ID));
+        assert!(!saved.contains("fixture end-marker"));
+    }
+    assert_eq!(
+        fingerprint_stream::failure(
+            403,
+            &json!({"error":{"message":"fixture permission denied"}})
+        )
+        .code,
+        "auth_or_quota"
+    );
+}
+
 #[tokio::test]
 async fn fingerprint_stops_at_real_99_threshold_and_concurrency_is_one_to_three() {
     for concurrency in [1, 3] {
@@ -567,6 +873,9 @@ async fn failed_groups_retry_without_replaying_successful_groups() {
     let port = server(move |r| {
         let count = count.clone();
         async move {
+            assert_eq!(r.headers()["user-agent"], "fixture-business/1.0 exact  UA");
+            assert_eq!(r.headers()["originator"], "fixture-business");
+            assert_eq!(r.headers()["x-codex-installation-id"], INSTALLATION_ID);
             let _ = r.into_body().collect().await.unwrap();
             let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             fingerprint_response(&if n < 2 {

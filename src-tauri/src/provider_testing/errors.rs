@@ -3,6 +3,12 @@ use serde_json::Value;
 use std::{error::Error, sync::LazyLock};
 
 pub(super) const ERROR_LIMIT: usize = 64 * 1024 * 1024;
+pub(super) const CLIENT_RESTRICTED: &str = "上游限制客户端身份";
+
+pub(super) fn is_client_restricted(text: &str) -> bool {
+    text.to_ascii_lowercase()
+        .contains("this account only allows codex official clients")
+}
 
 pub(super) fn body(status: Option<u16>, text: &str, truncated: bool) -> TestError {
     let body = serde_json::from_str::<Value>(text)
@@ -11,10 +17,17 @@ pub(super) fn body(status: Option<u16>, text: &str, truncated: bool) -> TestErro
         .unwrap_or_else(|| text.to_owned());
     TestError {
         http_status: status,
-        message: status.map_or_else(
-            || "上游返回测试错误".into(),
-            |status| format!("上游返回 HTTP {status}"),
-        ),
+        message: if is_client_restricted(text) {
+            status.map_or_else(
+                || CLIENT_RESTRICTED.into(),
+                |status| format!("{CLIENT_RESTRICTED}（HTTP {status}）"),
+            )
+        } else {
+            status.map_or_else(
+                || "上游返回测试错误".into(),
+                |status| format!("上游返回 HTTP {status}"),
+            )
+        },
         body,
         truncated,
     }
@@ -51,6 +64,7 @@ pub(super) fn redact(mut detail: TestError, target: &Target) -> TestError {
                             | "set_cookie"
                             | "password"
                             | "secret"
+                            | "x_codex_installation_id"
                     ) {
                         *value = Value::String("[已隐藏]".into());
                     } else {

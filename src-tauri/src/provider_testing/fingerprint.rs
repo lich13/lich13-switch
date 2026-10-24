@@ -187,6 +187,9 @@ impl Service {
                         group.uncertain = error.uncertain;
                         group.error = Some(error_message(error.code).into());
                     })?;
+                    if error.code == "client_restricted" {
+                        return Err(failure(errors::CLIENT_RESTRICTED));
+                    }
                     if !error.retryable || error.uncertain || attempt == 2 {
                         return Ok(());
                     }
@@ -268,6 +271,7 @@ impl Service {
 }
 fn error_message(code: &str) -> &'static str {
     match code {
+        "client_restricted" => errors::CLIENT_RESTRICTED,
         "auth_or_quota" => "认证失败或额度不足",
         "rate_limited" => "上游限流",
         "invalid_model_or_request" => "模型或请求参数被上游拒绝",
