@@ -8,6 +8,9 @@ const CREATED: &str =
     r#"{"type":"response.created","response":{"id":"fixture-response","model":"fixture-model"}}"#;
 const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-response","model":"fixture-model","status":"completed"}}"#;
 const CAPACITY_EVENT: &str = r#"{"type":"error","error":{"code":"rate_limit_exceeded","message":"Selected model is at capacity","status":429}}"#;
+// These cases assert retry counts, content and health; this only bounds a hung
+// loopback request, including scheduler and socket overhead on Windows runners.
+const REQUEST_WAIT: Duration = Duration::from_secs(30);
 
 fn configure(g: &Gateway, t: &tempfile::TempDir, retries: usize) {
     update(
@@ -85,7 +88,7 @@ async fn http_200_sse_capacity_before_output_retries_five_rounds_without_committ
     configure(&g, &t, 0);
     start(&g, &t).await;
     let response = tokio::time::timeout(
-        Duration::from_secs(10),
+        REQUEST_WAIT,
         request(
             &g,
             "/v1/responses",
@@ -178,7 +181,7 @@ async fn ordinary_http_200_sse_error_is_neutral_and_permanent_balance_rejection_
         configure(&g, &t, 0);
         start(&g, &t).await;
         let response = tokio::time::timeout(
-            Duration::from_secs(2),
+            REQUEST_WAIT,
             request(
                 &g,
                 "/v1/responses",
@@ -226,7 +229,7 @@ async fn http_capacity_retries_beyond_five_rounds_even_with_zero_retry_budget() 
     let original =
         br#"{ "model":"fixture-model", "input":["original"], "future":{"keep":true} }"#.to_vec();
     let response = tokio::time::timeout(
-        Duration::from_secs(10),
+        REQUEST_WAIT,
         request(
             &g,
             "/v1/responses?future=keep",

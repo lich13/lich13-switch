@@ -171,16 +171,23 @@ async fn run_case(streaming: bool, ending: ConsumerEnd) -> (u8, bool, Vec<String
     );
     fail_upstream.notify_one();
     match ending {
-        ConsumerEnd::Stall => tokio::time::sleep(Duration::from_millis(1350)).await,
+        ConsumerEnd::Stall => {}
         ConsumerEnd::Close => {
             held_body.notify_one();
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         ConsumerEnd::Stop => {
             gateway.stop().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+    // Observe settlement, not an assumed scheduling delay after notifying the
+    // upstream. Assertions below still require exactly one first-timeout event.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !delivery.is_settled() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("blocked error frame did not settle");
     let result = (
         delivery.error.load(Ordering::Acquire),
         delivery.is_settled(),
