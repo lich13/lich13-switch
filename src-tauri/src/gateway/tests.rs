@@ -1000,7 +1000,23 @@ async fn custom_only_switch_while_stopped_running_and_auto_stop() {
     let response = request(&g, "/v1/new", vec![], vec![]).await;
     assert_eq!(response.status(), 200);
     response.into_body().collect().await.unwrap();
-    assert_eq!(g.view().last_successful.as_deref(), Some(b.as_str()));
+    let view = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let view = g.view();
+            if view.last_successful.as_deref() == Some(b.as_str()) || view.error.is_some() {
+                break view;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("successful provider state did not settle");
+    assert_eq!(view.last_successful.as_deref(), Some(b.as_str()));
+    assert!(
+        view.error.is_none(),
+        "successful provider state failed: {:?}",
+        view.error
+    );
     assert_eq!(std::fs::read(&path).unwrap(), live);
     g.stop().await.unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), direct);
