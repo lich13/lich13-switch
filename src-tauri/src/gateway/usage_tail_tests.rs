@@ -480,29 +480,28 @@ async fn http_cancel_tail_with_continuous_heartbeat_still_closes_within_two_seco
         send_http_chunk(&mut socket, HTTP_FIRST).await.unwrap();
         let _ = ready_tx.send(());
         cancel_rx.await.unwrap();
-        let started = Instant::now();
+        let deadline = tokio::time::Instant::now() + TAIL_WINDOW + TAIL_TOLERANCE;
+        let mut buffer = [0u8; 1];
         loop {
-            if started.elapsed() >= TAIL_WINDOW + TAIL_TOLERANCE {
-                if let Ok(closed) =
-                    tokio::time::timeout(Duration::from_millis(500), wait_for_disconnect(socket))
-                        .await
-                {
-                    let _ = closed_tx.send(closed);
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break,
+                // TCP writes may remain buffered after the peer closes. Observe EOF
+                // while sending heartbeats instead of waiting for a later write error.
+                read = socket.read(&mut buffer) => {
+                    if !matches!(read, Ok(n) if n > 0) {
+                        let _ = closed_tx.send(Instant::now());
+                        break;
+                    }
                 }
-                break;
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if send_http_chunk(&mut socket, b": fixture-heartbeat\n\n").await.is_err()
+                        || send_http_chunk(&mut socket, HTTP_PROGRESS).await.is_err()
+                    {
+                        let _ = closed_tx.send(Instant::now());
+                        break;
+                    }
+                }
             }
-            let heartbeat = b": fixture-heartbeat\n\n";
-            let content =
-                br#"data: {"type":"response.output_text.delta","delta":"fixture-progress"}
-
-"#;
-            if send_http_chunk(&mut socket, heartbeat).await.is_err()
-                || send_http_chunk(&mut socket, content).await.is_err()
-            {
-                let _ = closed_tx.send(Instant::now());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 
