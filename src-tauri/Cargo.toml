@@ -11,12 +11,14 @@ name = "lich13_switch_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+# Keep generated context code compatible with the Tauri 2.11 Windows API.
+tauri-build = { version = "~2.6.3", features = [] }
+tauri-codegen = "~2.6.3"
 
 [dependencies]
 lmfpd = { path = "vendor/lmfpd" }
 tauri = { version = "~2.11", features = ["tray-icon", "image-png"] }
-# Tauri 2.11 needs the pre-2.12 runtime and menu macro interfaces.
+# Keep the runtime and menu macro interfaces compatible with Tauri 2.11.
 tauri-macros = "~2.6.3"
 tauri-runtime = "~2.11.3"
 tauri-runtime-wry = { version = "~2.11.4", default-features = false }
