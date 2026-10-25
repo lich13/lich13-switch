@@ -394,8 +394,24 @@ impl Permit {
             }
             Outcome::Failure(retry) => {
                 let transient = self.failure_event.as_ref().is_some_and(|event| {
-                    event.reason == crate::events::Reason::UpstreamService
-                        && event.status.is_some_and(is_server_error)
+                    use crate::errors::code;
+                    use crate::events::{Phase, Reason};
+                    (event.reason == Reason::UpstreamService
+                        && event.status.is_some_and(is_server_error))
+                        || (event.reason == Reason::Network
+                            && event.status.is_none()
+                            && matches!(
+                                event.details.phase,
+                                Some(Phase::Connect | Phase::WsHandshake)
+                            )
+                            && matches!(
+                                event.details.local_code.as_deref(),
+                                Some(
+                                    code::CONNECTION_FAILED
+                                        | code::CONNECT_TIMEOUT
+                                        | code::WS_HANDSHAKE_TIMEOUT
+                                )
+                            ))
                 });
                 s.record(if transient {
                     SampleKind::Transient
@@ -764,6 +780,76 @@ mod v020_tolerance_tests {
 
     fn expire_retry(circuit: &Circuit) {
         circuit.0.lock().unwrap().retry_until = Some(Instant::now());
+    }
+
+    #[test]
+    fn connection_failures_share_the_5xx_threshold_and_keep_their_network_cause() {
+        use crate::{errors::code, events::Phase};
+        let cfg = Settings {
+            failure_threshold: 1,
+            transient_failure_threshold: 6,
+            min_requests: 1,
+            ..Settings::default()
+        };
+        let circuit = Circuit::default();
+        for (index, local_code) in [
+            code::CONNECTION_FAILED,
+            code::CONNECT_TIMEOUT,
+            code::WS_HANDSHAKE_TIMEOUT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut record = event(Reason::Network, None);
+            record.details.phase = Some(if index == 2 {
+                Phase::WsHandshake
+            } else {
+                Phase::Connect
+            });
+            record.details.local_code = Some(local_code.into());
+            let mut permit = circuit.acquire(false).unwrap();
+            permit.set_failure_event(record);
+            permit.finish(Outcome::Failure(None), &cfg);
+            assert_eq!(circuit.health().state, CircuitState::Closed);
+            assert_eq!(circuit.health().cooldown_reason, None);
+        }
+        for status in [500, 502] {
+            finish_transient(&circuit, &cfg, status);
+            assert_eq!(circuit.health().state, CircuitState::Closed);
+        }
+        let mut record = event(Reason::Network, None);
+        record.details.phase = Some(Phase::Connect);
+        record.details.local_code = Some(code::CONNECTION_FAILED.into());
+        let mut permit = circuit.acquire(false).unwrap();
+        permit.set_failure_event(record);
+        permit.finish(Outcome::Failure(None), &cfg);
+        assert_eq!(circuit.health().state, CircuitState::Open);
+        let opened = circuit.take_open_event().unwrap();
+        assert_eq!(opened.status, None);
+        assert_eq!(
+            opened.details.local_code.as_deref(),
+            Some(code::CONNECTION_FAILED)
+        );
+        assert_eq!(
+            opened.details.circuit.unwrap().trigger,
+            "transient_failures"
+        );
+
+        for (phase, local_code) in [
+            (Phase::Connect, code::TLS_HANDSHAKE_FAILED),
+            (Phase::Connect, code::GATEWAY_LOOP),
+            (Phase::Headers, code::FIRST_BYTE_TIMEOUT),
+            (Phase::Stream, code::CONNECTION_FAILED),
+        ] {
+            let circuit = Circuit::default();
+            let mut record = event(Reason::Network, None);
+            record.details.phase = Some(phase);
+            record.details.local_code = Some(local_code.into());
+            let mut permit = circuit.acquire(false).unwrap();
+            permit.set_failure_event(record);
+            permit.finish(Outcome::Failure(None), &cfg);
+            assert_eq!(circuit.health().state, CircuitState::Open);
+        }
     }
 
     #[test]

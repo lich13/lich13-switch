@@ -626,9 +626,15 @@ async fn http_new_thread_policy_excluded_backup_is_not_reported_as_a_next_provid
 
     let records = settle_events(&gateway, &diagnostics, &mut notifications).await;
     let network = network_records(&records);
-    assert_eq!(network.len(), 1);
+    assert_eq!(network.len(), 2);
     assert_connect_failure(
         network[0],
+        &primary_id,
+        Action::RetryingSame,
+        events::Phase::Connect,
+    );
+    assert_connect_failure(
+        network[1],
         &primary_id,
         Action::Returned,
         events::Phase::Connect,

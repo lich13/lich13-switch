@@ -1718,14 +1718,10 @@ async fn session_once(
                     && !unknown_affinity
                     && ordinary_attempts <= cfg.max_retries
                     && (pinned.as_deref() == Some(&admission.route.provider.id)
-                        || if failure.status.is_some_and(circuit::is_server_error) {
-                            ownership
-                                .as_ref()
-                                .is_some_and(|lease| lease.owns(&admission.route.provider.id))
-                        } else {
-                            established_capacity_owner.as_deref()
-                                == Some(&admission.route.provider.id)
-                        }) {
+                        || ownership
+                            .as_ref()
+                            .is_some_and(|lease| lease.owns(&admission.route.provider.id)))
+                {
                     super::routing::transient_delay(&mut transient_retries, failure.retry)
                 } else {
                     None

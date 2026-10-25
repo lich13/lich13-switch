@@ -275,20 +275,6 @@ export async function run(
   }
   if (
     [
-      "preview_sub2api_import",
-      "prepare_sub2api_export",
-      "select_sub2api_template",
-      "export_sub2api_providers",
-      "cancel_sub2api_import",
-      "commit_sub2api_import",
-    ].includes(name)
-  ) {
-    const result = gatewayPreview(name, args);
-    if (name === "commit_sub2api_import") emit("gateway-state", result);
-    return result;
-  }
-  if (
-    [
       "get_gateway_models",
       "refresh_gateway_models",
       "search_models_dev",

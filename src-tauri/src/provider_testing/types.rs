@@ -286,7 +286,7 @@ impl Default for Persisted {
         }
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectionStatus {
     pub provider_id: String,
@@ -310,8 +310,6 @@ pub struct State {
     pub detection: Detection,
     pub degraded: BTreeMap<String, Degradation>,
     pub detection_status: Vec<DetectionStatus>,
-    pub history: Vec<Job>,
-    pub bank: Value,
     pub error: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]

@@ -82,16 +82,19 @@ export function useProviderQuota(
             (p) => p.id === id && p.quotaVersion === provider.quotaVersion,
           )
         ) {
-          setValues((v) => ({
-            ...v,
-            [id]: {
-              ...(v[id] ?? provider.quota ?? emptyQuota(provider)),
-              state: "error",
-              stale: Boolean((v[id] ?? provider.quota)?.successAt),
-              error: err.message,
-              nextRefreshAt: refreshSeconds > 0 ? Date.now() / 1000 + refreshSeconds : null,
-            },
-          }));
+          const cached = snapshots.current[id];
+          const previous =
+            cached?.version === provider.quotaVersion
+              ? cached
+              : (provider.quota ?? emptyQuota(provider));
+          accept({
+            ...previous,
+            state: "error",
+            stale: Boolean(previous.successAt),
+            error: err.message,
+            nextRefreshAt:
+              refreshSeconds > 0 ? Date.now() / 1000 + refreshSeconds : null,
+          });
         }
       } finally {
         flights.current.delete(flight);
@@ -203,6 +206,16 @@ export function QuotaInfo({
   details?: () => void;
 }) {
   const [showDetails, setShowDetails] = useState(false);
+  const [, updateRetry] = useState(0);
+  const retryAt = quota?.retryAt;
+  useEffect(() => {
+    if (!retryAt || retryAt * 1000 <= Date.now()) return;
+    const timer = window.setTimeout(
+      () => updateRetry((value) => value + 1),
+      retryAt * 1000 - Date.now(),
+    );
+    return () => window.clearTimeout(timer);
+  }, [retryAt]);
   const loading = quota?.state === "loading";
   const keyStatus = quota?.keyStatus === "已过期" ? "已到期" : quota?.keyStatus;
   const keyOnly = quota?.source === "newapi" && quota.plans[0]?.name === "Key 额度";

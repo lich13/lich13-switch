@@ -237,10 +237,6 @@ impl Default for Store {
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Edit {
     #[serde(skip)]
-    ImportProviders {
-        providers: Vec<Provider>,
-    },
-    #[serde(skip)]
     ImportLink {
         base_url: String,
         token: String,
@@ -521,30 +517,6 @@ impl Store {
                 }
                 if connection_changed {
                     self.provider_mut(&id)?.version = uuid::Uuid::new_v4().to_string();
-                }
-            }
-            Edit::ImportProviders { providers } => {
-                if providers.is_empty() || providers.len() > 1000 {
-                    return Err(AppError::new(code::IMPORT, "请选择 1–1000 项"));
-                }
-                let mut pairs = std::collections::HashSet::new();
-                for p in &self.providers {
-                    pairs.insert((
-                        base_url(&p.base_url, self.settings.port)?.to_string(),
-                        p.token.clone(),
-                    ));
-                }
-                for mut p in providers {
-                    p.name = name(&p.name)?;
-                    let u = base_url(&p.base_url, self.settings.port)?;
-                    if !pairs.insert((u.to_string(), p.token.clone())) {
-                        return Err(AppError::new(code::DUPLICATE, "相同地址和 Key 已存在"));
-                    }
-                    p.base_url = u.as_str().trim_end_matches('/').into();
-                    p.queued = false;
-                    p.handoff_after_compaction = false;
-                    p.take_new_threads = false;
-                    self.providers.push(p);
                 }
             }
             Edit::ImportLink {

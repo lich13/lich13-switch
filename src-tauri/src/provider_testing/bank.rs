@@ -116,23 +116,39 @@ fn cached(saved: &super::types::SavedBank) -> Option<(Value, Value)> {
     }
     None
 }
-pub fn snapshot(saved: &super::types::SavedBank) -> Result<(Value, Value)> {
-    cached(saved)
-        .map(Ok)
-        .unwrap_or_else(super::modeltrace::bundled)
+pub(super) struct Resource {
+    pub snapshot: Result<std::sync::Arc<(Value, Value)>>,
+    metadata: Value,
 }
-pub fn status(saved: &super::types::SavedBank, updating: bool) -> Value {
-    let cached = cached(saved);
-    let from_cache = cached.is_some();
-    match cached.map(Ok).unwrap_or_else(super::modeltrace::bundled) {
-        Ok((data, version)) => json!({
-            "version": version,
-            "source": if from_cache { "cache" } else { "builtin" },
-            "models": data["models"].as_array().map(|models| models.iter().map(|m| json!({"id":m["id"],"name":m["display_name"]})).collect::<Vec<_>>()).unwrap_or_default(),
-            "checkedAt": saved.checked_at, "updating": updating,
-            "error": saved.error.clone().or_else(|| (saved.data.is_some() && !from_cache).then(|| "指纹缓存校验失败，已使用内置库".into())),
-        }),
-        Err(error) => json!({"error":error.message,"updating":updating,"models":[]}),
+impl Resource {
+    pub fn load(saved: &super::types::SavedBank) -> Self {
+        let cached = cached(saved);
+        let from_cache = cached.is_some();
+        let snapshot = cached
+            .map(Ok)
+            .unwrap_or_else(super::modeltrace::bundled)
+            .map(std::sync::Arc::new);
+        let metadata = match &snapshot {
+            Ok(snapshot) => json!({
+                "version": snapshot.1,
+                "source": if from_cache { "cache" } else { "builtin" },
+                "models": snapshot.0["models"].as_array().map(|models| models.iter().map(|m| json!({"id":m["id"],"name":m["display_name"]})).collect::<Vec<_>>()).unwrap_or_default(),
+                "error": (saved.data.is_some() && !from_cache).then_some("指纹缓存校验失败，已使用内置库"),
+            }),
+            Err(error) => json!({"error":error.message,"models":[]}),
+        };
+        Self { snapshot, metadata }
+    }
+    pub fn status(&self, saved: &super::types::SavedBank, updating: bool) -> Value {
+        let mut status = self.metadata.clone();
+        status["updating"] = updating.into();
+        if self.snapshot.is_ok() {
+            status["checkedAt"] = saved.checked_at.into();
+            if let Some(error) = &saved.error {
+                status["error"] = error.clone().into();
+            }
+        }
+        status
     }
 }
 async fn read(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {

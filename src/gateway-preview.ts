@@ -452,63 +452,6 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     syncListener(port, true);
     return gatewayDemo.listener;
   }
-  if (name === "preview_sub2api_import")
-    return {
-      token: "preview-sub2api",
-      revision: s.revision,
-      unsupportedProxies: 1,
-      template: {
-        ready: false,
-        token: "preview-import-template",
-        rows: [
-          { id: 0, name: "标准并发模板" },
-          { id: 1, name: "自定义模型映射模板" },
-        ],
-      },
-      rows: [
-        {
-          id: 0,
-          name: "导入供应商",
-          baseUrl: "https://import.example.invalid/v1",
-          concurrency: 3,
-          error: null,
-        },
-        {
-          id: 1,
-          name: "OAuth 账号",
-          baseUrl: null,
-          concurrency: null,
-          error: "仅支持 API Key，OAuth 账号不支持",
-        },
-      ],
-    };
-  if (name === "prepare_sub2api_export")
-    return {
-      ready: !args.replaceTemplate,
-      token: args.replaceTemplate ? "preview-template" : null,
-      rows: [
-        { id: 0, name: "标准并发模板" },
-        { id: 1, name: "自定义模型映射模板" },
-      ],
-    };
-  if (name === "export_sub2api_providers" || name === "select_sub2api_template")
-    return true;
-  if (name === "cancel_sub2api_import") return null;
-  if (name === "commit_sub2api_import") {
-    if (args.expectedRevision !== s.revision)
-      throw { code: "CONFLICT", message: "网关设置已变化，请使用最新状态重试" };
-    s.providers.push({
-      ...s.providers[0],
-      id: crypto.randomUUID(),
-      name: "导入供应商",
-      baseUrl: "https://import.example.invalid/v1",
-      queued: false,
-      handoffAfterCompaction: false,
-      takeNewThreads: false,
-    });
-    s.revision = crypto.randomUUID();
-    return structuredClone(s);
-  }
   if (name === "probe_provider_endpoints") {
     const p = s.providers.find((p) => p.id === args.providerId);
     if (!p) throw new Error("供应商不存在");

@@ -133,7 +133,11 @@ export default function Usage({
     [nativeVisible, setNativeVisible] = useState(true);
   const sequence = useRef(0),
     rowsSequence = useRef(0),
-    stateSequence = useRef(0);
+    stateSequence = useRef(0),
+    detailSequence = useRef(0);
+  useEffect(() => () => {
+    detailSequence.current++;
+  }, []);
   const pending = useRef(new Map<string, Promise<unknown>>());
   const request = useCallback(
     <K extends CommandName>(
@@ -297,15 +301,15 @@ export default function Usage({
     ? (100 * (t.cacheReadEligible ?? 0)) / t.cacheInputEligible
     : null;
   const open = async (r: UsageRecord) => {
+    const id = ++detailSequence.current;
     try {
-      setSelected(
-        await command("get_usage_detail", {
-          id: r.id,
-          source: source || undefined,
-        }),
-      );
+      const detail = await command("get_usage_detail", {
+        id: r.id,
+        source: source || undefined,
+      });
+      if (id === detailSequence.current) setSelected(detail);
     } catch (e) {
-      setError(errorOf(e).message);
+      if (id === detailSequence.current) setError(errorOf(e).message);
     }
   };
   return (
@@ -589,7 +593,10 @@ export default function Usage({
         <Detail
           record={selected}
           name={name}
-          onClose={() => setSelected(null)}
+          onClose={() => {
+            detailSequence.current++;
+            setSelected(null);
+          }}
         />
       )}
       {sheet && state && (

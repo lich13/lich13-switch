@@ -65,13 +65,14 @@ struct Context {
     request: Request,
     target: Target,
     challenges: Vec<(usize, String)>,
-    bank: (Value, Value),
+    bank: Option<Arc<(Value, Value)>>,
     lm: Option<Arc<lm_detector::Resource>>,
     engine: Engine,
     sample_count: usize,
     detection_revision: Option<String>,
 }
 struct Data {
+    bank: bank::Resource,
     saved: Persisted,
     revision: String,
     outputs: HashMap<String, Output>,
@@ -168,6 +169,7 @@ impl Service {
             #[cfg(test)]
             clock: std::sync::atomic::AtomicI64::new(0),
             data: Mutex::new(Data {
+                bank: bank::Resource::load(&saved.bank),
                 saved,
                 revision,
                 outputs: HashMap::new(),
@@ -235,7 +237,7 @@ impl Service {
                 .get(client_key(client))
                 .cloned()
                 .unwrap_or_else(|| PlatformSettings::for_client(client)),
-            banks: json!({"modelTrace":bank::status(&data.saved.bank, data.bank_updating),"lmDetector":lm_detector::status(&data)}),
+            banks: json!({"modelTrace":data.bank.status(&data.saved.bank, data.bank_updating),"lmDetector":lm_detector::status(&data)}),
             jobs: data
                 .saved
                 .jobs
@@ -263,16 +265,6 @@ impl Service {
                 .filter(|(key, _)| **key == scope_key(client, provider))
                 .map(|(_, s)| s.clone())
                 .collect(),
-            history: data
-                .saved
-                .history
-                .iter()
-                .rev()
-                .filter(scope)
-                .take(50)
-                .cloned()
-                .collect(),
-            bank: bank::status(&data.saved.bank, data.bank_updating),
             error: data.error.clone(),
         })
     }
@@ -393,7 +385,12 @@ impl Service {
         } else {
             request.prompt = None;
         }
-        let snapshot = bank::snapshot(&data.saved.bank)?;
+        let snapshot = if request.kind == Kind::Fingerprint && platform.engine == Engine::ModelTrace
+        {
+            Some(data.bank.snapshot.clone()?)
+        } else {
+            None
+        };
         let challenges = if request.kind == Kind::Fingerprint {
             if platform.engine == Engine::LmDetector {
                 lmfpd::generate_challenges(platform.samples())
@@ -453,7 +450,8 @@ impl Service {
             resource_version: lm
                 .as_ref()
                 .map(|r| r.version())
-                .unwrap_or_else(|| snapshot.1.clone()),
+                .or_else(|| snapshot.as_ref().map(|r| r.1.clone()))
+                .unwrap_or(Value::Null),
             tokenizer: request.tokenizer,
             tokenizer_result: None,
         };
@@ -480,7 +478,9 @@ impl Service {
         );
         drop(data);
         self.launch(job.id.clone(), receiver);
-        self.changed();
+        if !automatic {
+            self.changed();
+        }
         Ok(job)
     }
     fn launch(&self, id: String, mut cancel: watch::Receiver<bool>) {
@@ -625,6 +625,14 @@ impl Service {
                 }
             }
         }
+        if data
+            .saved
+            .jobs
+            .iter()
+            .any(|job| job.id == id && job.terminal() && !job.can_retry)
+        {
+            data.contexts.remove(id);
+        }
         drop(data);
         self.changed();
     }
@@ -705,6 +713,7 @@ impl Service {
         let mut data = lock(&self.0.data);
         data.bank_updating = false;
         let mut next = data.saved.clone();
+        let resource = result.as_ref().ok().map(bank::Resource::load);
         match result {
             Ok(bank) => next.bank = bank,
             Err(error) => {
@@ -713,7 +722,10 @@ impl Service {
             }
         }
         self.save(&mut data, next)?;
-        let result = bank::status(&data.saved.bank, false);
+        if let Some(resource) = resource {
+            data.bank = resource;
+        }
+        let result = data.bank.status(&data.saved.bank, false);
         drop(data);
         self.changed();
         Ok(result)

@@ -16,7 +16,7 @@ vi.mock("./bridge", () => ({
 import QuickPanel from "./QuickPanel";
 import { demo } from "./preview";
 import { claudeGatewayDemo, gatewayDemo } from "./gateway-preview";
-import type { ProviderQuota } from "./types";
+import type { GatewayState, ProviderQuota } from "./types";
 beforeEach(() => {
   localStorage.clear();
   mock.command.mockReset();
@@ -520,4 +520,18 @@ it("does not offer the search-only policy switch in the quick panel", async () =
   expect(
     screen.queryByRole("checkbox", { name: /仅网络搜索/ }),
   ).not.toBeInTheDocument();
+});
+
+it("keeps a gateway event that arrives before the initial panel reads", async () => {
+  const original = mock.command.getMockImplementation()!;
+  let resolve!: (value: GatewayState) => void;
+  mock.command.mockImplementation((name, args) => name === "get_gateway"
+    ? new Promise<GatewayState>((done) => { resolve = done; })
+    : original(name, args));
+  render(<QuickPanel />);
+  const latest = structuredClone(gatewayDemo);
+  latest.providers[0].name = "Fixture latest provider";
+  await act(async () => { mock.listeners.get("gateway-state")!(latest); });
+  await act(async () => { resolve(structuredClone(gatewayDemo)); });
+  expect(await screen.findByText("Fixture latest provider")).toBeInTheDocument();
 });

@@ -175,7 +175,7 @@ async fn completed(service: &Service, id: &str) -> Detail {
     tokio::time::timeout(Duration::from_secs(12), async {
         loop {
             let detail = service.detail(id).unwrap();
-            if detail.job.terminal() {
+            if detail.job.terminal() && !lock(&service.0.data).cancel.contains_key(id) {
                 return detail;
             }
             let _ = events.recv().await;
@@ -585,7 +585,7 @@ async fn cancellation_restart_retires_appointments_and_preserves_history() {
     assert_eq!(state.jobs[0].mode, Mode::Image);
     assert!(!state.jobs[0].can_retry);
     assert_eq!(state.detection.interval_minutes, 25);
-    assert_eq!(state.history.len(), 1);
+    assert_eq!(lock(&reloaded.0.data).saved.history.len(), 1);
     reloaded.tick(now(), false).unwrap();
     assert_eq!(reloaded.state(ClientId::Codex, &id).unwrap().jobs.len(), 1);
     let migrated: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -642,15 +642,15 @@ fn smart_tiers_config_versions_and_corrupt_bank_fallback() {
         ..Default::default()
     };
     assert_eq!(
-        bank::snapshot(&bad).unwrap().1,
+        bank::Resource::load(&bad).snapshot.unwrap().1,
         modeltrace::bundled().unwrap().1
     );
-    assert!(bank::status(&bad, false)["error"].is_string());
+    assert!(bank::Resource::load(&bad).status(&bad, false)["error"].is_string());
     let same_version = SavedBank {
         version: Some(modeltrace::bundled().unwrap().1),
         ..bad
     };
-    let status = bank::status(&same_version, false);
+    let status = bank::Resource::load(&same_version).status(&same_version, false);
     assert!(status["error"].is_string());
     assert_eq!(status["source"], "builtin");
 }
@@ -1161,6 +1161,18 @@ async fn failed_groups_retry_without_replaying_successful_groups() {
         .unwrap();
     let before = completed(&service, &job.id).await;
     assert!(before.job.can_retry);
+    let original_bank = lock(&service.0.data).contexts[&job.id]
+        .bank
+        .clone()
+        .unwrap();
+    replace_modeltrace_resource(&service);
+    assert!(Arc::ptr_eq(
+        lock(&service.0.data).contexts[&job.id]
+            .bank
+            .as_ref()
+            .unwrap(),
+        &original_bank
+    ));
     assert_eq!(before.job.groups[2].status, "completed");
     let output = before.output.unwrap().groups[&2].clone();
     // A later business request must not change the identity of this job's retry.
@@ -1175,6 +1187,12 @@ async fn failed_groups_retry_without_replaying_successful_groups() {
     assert_eq!(after.output.unwrap().groups[&2], output);
     assert!(hits.load(std::sync::atomic::Ordering::SeqCst) > 3);
     assert!(after.job.groups[0].attempts > 1);
+    assert_eq!(
+        after.job.report.as_ref().unwrap()["bank_version"],
+        original_bank.1
+    );
+    assert!(!after.job.can_retry);
+    assert!(!lock(&service.0.data).contexts.contains_key(&job.id));
 }
 #[tokio::test]
 async fn automatic_summary_dequeues_and_manual_tests_never_change_queue() {
@@ -1235,7 +1253,7 @@ async fn automatic_summary_dequeues_and_manual_tests_never_change_queue() {
     assert!(!gateway.test_candidates().unwrap()[0].queued);
     let state = service.state(ClientId::Codex, &id).unwrap();
     assert!(state.degraded[&id].queue_removed);
-    assert_eq!(state.history.len(), 1);
+    assert_eq!(lock(&service.0.data).saved.history.len(), 1);
     {
         let mut data = lock(&service.0.data);
         let mut next = data.saved.clone();
@@ -1281,8 +1299,12 @@ async fn a_provider_has_one_job_and_queued_cancellation_does_not_dispatch() {
     let request = request(&service, ClientId::Codex, &id);
     let job = service.start(request.clone()).unwrap();
     assert!(service.start(request).is_err());
+    assert!(lock(&service.0.data).contexts[&job.id].bank.is_none());
+    assert!(lock(&service.0.data).contexts[&job.id].lm.is_none());
     service.cancel(&job.id).unwrap();
     assert_eq!(completed(&service, &job.id).await.job.status, "cancelled");
+    assert!(!lock(&service.0.data).contexts.contains_key(&job.id));
+    assert!(service.detail(&job.id).unwrap().output.is_some());
     drop(permit);
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -2245,6 +2267,16 @@ async fn lm_single_and_three_samples_use_all_four_native_protocols_and_keep_snap
             let job = service.start(req).unwrap();
             assert_eq!(job.sample_count, samples);
             assert_eq!(job.engine, Engine::LmDetector);
+            let resource = service.lm_resource().unwrap();
+            {
+                let data = lock(&service.0.data);
+                let context = &data.contexts[&job.id];
+                assert!(context.bank.is_none());
+                assert!(Arc::ptr_eq(context.lm.as_ref().unwrap(), &resource));
+            }
+            // Reloading the shared cache cannot replace a queued job's resource.
+            *lock(&service.0.lm) = None;
+            assert!(!Arc::ptr_eq(&service.lm_resource().unwrap(), &resource));
             assert_eq!(
                 job.resource_version["revision"],
                 "567e11d65a48d4fbba2713cc4dfbe685cdd05a73"
@@ -2267,6 +2299,11 @@ async fn lm_single_and_three_samples_use_all_four_native_protocols_and_keep_snap
             assert_eq!(done.job.status, "completed", "{:?}", done.job.error);
             assert_eq!(done.job.report.as_ref().unwrap()["used_outputs"], samples);
             assert!(done.job.groups.iter().all(|g| g.status == "completed"));
+            assert_eq!(
+                done.job.report.as_ref().unwrap()["bank_version"],
+                job.resource_version
+            );
+            assert!(!lock(&service.0.data).contexts.contains_key(&job.id));
             if samples == 1 {
                 assert!(done.job.report.as_ref().unwrap()["probability"].is_null());
                 assert_eq!(done.job.report.as_ref().unwrap()["initial"], true);
@@ -2809,6 +2846,7 @@ async fn cancelling_tokenizer_keeps_numeric_ranking_and_stops_following_requests
     assert_eq!(done.job.status, "cancelled");
     assert_eq!(done.job.report.unwrap()["used_outputs"], 1);
     assert_eq!(done.job.tokenizer_result.unwrap()["status"], "cancelled");
+    assert!(!lock(&service.0.data).contexts.contains_key(&job.id));
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
@@ -2878,4 +2916,197 @@ async fn tokenizer_completes_serial_probes_with_two_controls_and_bounded_request
         calls.load(std::sync::atomic::Ordering::SeqCst),
         steps.len() + 1
     );
+}
+
+fn replace_modeltrace_resource(service: &Service) {
+    let mut data = lock(&service.0.data);
+    let (bank, mut version) = data.bank.snapshot.as_ref().unwrap().as_ref().clone();
+    version["revision"] = "fixture-updated-resource".into();
+    let manifest = modeltrace::manifest();
+    let saved = SavedBank {
+        provenance: Some(json!({
+            "core_blob": manifest["files"]["core"]["gitBlob"],
+            "challenge_blob": manifest["files"]["challenge"]["gitBlob"],
+            "stored_sha256": compat::sha256(bank.to_string()),
+        })),
+        data: Some(bank),
+        version: Some(version),
+        ..Default::default()
+    };
+    data.bank = bank::Resource::load(&saved);
+}
+
+#[tokio::test]
+async fn modeltrace_shares_frozen_resources_for_running_and_queued_jobs() {
+    let gate = Arc::new(Semaphore::new(0));
+    let called = Arc::new(tokio::sync::Notify::new());
+    let mut ports = vec![];
+    for _ in 0..2 {
+        let gate = gate.clone();
+        let called = called.clone();
+        ports.push(
+            server(move |_| {
+                let gate = gate.clone();
+                let called = called.clone();
+                async move {
+                    called.notify_one();
+                    gate.acquire().await.unwrap().forget();
+                    fingerprint_response(&sample("above_99", 0))
+                }
+            })
+            .await,
+        );
+    }
+    let (dir, service) = fixture();
+    let ids: Vec<_> = ports
+        .into_iter()
+        .map(|port| add(&service, dir.path(), ClientId::Codex, port, "responses"))
+        .collect();
+    ua(&service, ClientId::Codex);
+    let permit = service.0.jobs.clone().acquire_owned().await.unwrap();
+    let first = service
+        .start(fingerprint_request(&service, &ids[0], 1))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), called.notified())
+        .await
+        .unwrap();
+    let second = service
+        .start(fingerprint_request(&service, &ids[1], 1))
+        .unwrap();
+    let old = {
+        let data = lock(&service.0.data);
+        assert_eq!(
+            data.saved
+                .jobs
+                .iter()
+                .find(|j| j.id == first.id)
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert_eq!(
+            data.saved
+                .jobs
+                .iter()
+                .find(|j| j.id == second.id)
+                .unwrap()
+                .status,
+            "queued"
+        );
+        let first_bank = data.contexts[&first.id].bank.as_ref().unwrap();
+        let second_bank = data.contexts[&second.id].bank.as_ref().unwrap();
+        assert!(Arc::ptr_eq(first_bank, second_bank));
+        Arc::downgrade(first_bank)
+    };
+    replace_modeltrace_resource(&service);
+    assert_eq!(
+        service.state(ClientId::Codex, &ids[0]).unwrap().banks["modelTrace"]["version"]["revision"],
+        "fixture-updated-resource"
+    );
+    drop(permit);
+    gate.add_permits(6);
+    for job in [&first, &second] {
+        let done = completed(&service, &job.id).await;
+        assert_eq!(done.job.status, "completed");
+        assert_eq!(
+            done.job.report.as_ref().unwrap()["bank_version"],
+            job.resource_version
+        );
+        assert!(!lock(&service.0.data).contexts.contains_key(&job.id));
+        assert!(!done.output.unwrap().groups.is_empty());
+    }
+    assert!(old.upgrade().is_none());
+}
+
+#[test]
+fn scheduler_notifies_once_for_changes_and_skips_identical_ticks() {
+    let (dir, service) = fixture();
+    for client in [
+        ClientId::Codex,
+        ClientId::Claude,
+        ClientId::Grok,
+        ClientId::Dsh,
+    ] {
+        add(&service, dir.path(), client, 1, "chat_completions");
+    }
+    let mut events = service.subscribe();
+    service.tick(service.now(), false).unwrap();
+    assert!(events.try_recv().is_ok());
+    assert!(matches!(
+        events.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    service.tick(service.now() + 5_000, false).unwrap();
+    assert!(matches!(
+        events.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[test]
+fn state_wire_omits_unused_fields() {
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    let state = serde_json::to_value(service.state(ClientId::Codex, &id).unwrap()).unwrap();
+    assert!(state.get("bank").is_none());
+    assert!(state.get("history").is_none());
+    assert!(state["banks"]["modelTrace"]["models"].is_array());
+    assert!(state["jobs"].is_array());
+}
+
+#[tokio::test]
+async fn lm_retry_retains_its_resource_and_releases_context_after_success() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = hits.clone();
+    let port = server(move |_| {
+        let count = count.clone();
+        async move {
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            protocol_response(
+                "responses",
+                &if n == 0 {
+                    "1, 2, 3".into()
+                } else {
+                    lm_sample(0)
+                },
+                json!({}),
+            )
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    seed_client_catalog(&service, ClientId::Codex, &id, "fixture-model");
+    service
+        .set_platform(
+            ClientId::Codex,
+            PlatformSettings {
+                engine: Engine::LmDetector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut req = request(&service, ClientId::Codex, &id);
+    req.kind = Kind::Fingerprint;
+    let job = service.start(req).unwrap();
+    assert!(completed(&service, &job.id).await.job.can_retry);
+    let old = {
+        let data = lock(&service.0.data);
+        assert!(data.contexts[&job.id].bank.is_none());
+        Arc::downgrade(data.contexts[&job.id].lm.as_ref().unwrap())
+    };
+    *lock(&service.0.lm) = None;
+    let current = service.lm_resource().unwrap();
+    assert!(!Arc::ptr_eq(&old.upgrade().unwrap(), &current));
+    service.retry(&job.id).unwrap();
+    let done = completed(&service, &job.id).await;
+    assert_eq!(done.job.status, "completed");
+    assert_eq!(
+        done.job.report.as_ref().unwrap()["bank_version"],
+        job.resource_version
+    );
+    assert!(done.output.is_some());
+    assert!(!lock(&service.0.data).contexts.contains_key(&job.id));
+    assert!(old.upgrade().is_none());
 }

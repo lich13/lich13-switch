@@ -312,8 +312,12 @@ impl Service {
                         .map_err(|_| failure("定时检测调度失败"))
                         .and_then(|r| r);
                 if let Err(error) = result {
-                    lock(&service.0.data).error = Some(error.message);
-                    service.changed();
+                    let mut data = lock(&service.0.data);
+                    if data.error.as_ref() != Some(&error.message) {
+                        data.error = Some(error.message);
+                        drop(data);
+                        service.changed();
+                    }
                 }
             }
         });
@@ -321,17 +325,37 @@ impl Service {
     pub(super) fn tick(&self, at: i64, suspended: bool) -> Result<()> {
         #[cfg(test)]
         self.0.clock.store(at, std::sync::atomic::Ordering::SeqCst);
-        self.refresh_frequencies(at, suspended);
-        for client in [
-            ClientId::Codex,
-            ClientId::Claude,
-            ClientId::Grok,
-            ClientId::Dsh,
-        ] {
-            self.tick_client(client, at, suspended)?;
+        let (statuses, revision, error) = {
+            let data = lock(&self.0.data);
+            (
+                data.detection_status.clone(),
+                data.revision.clone(),
+                data.error.clone(),
+            )
+        };
+        let result: Result<()> = (|| {
+            self.refresh_frequencies(at, suspended);
+            for client in [
+                ClientId::Codex,
+                ClientId::Claude,
+                ClientId::Grok,
+                ClientId::Dsh,
+            ] {
+                self.tick_client(client, at, suspended)?;
+            }
+            Ok(())
+        })();
+        let mut data = lock(&self.0.data);
+        if let Err(error) = &result {
+            data.error = Some(error.message.clone());
         }
-        self.changed();
-        Ok(())
+        let changed =
+            statuses != data.detection_status || revision != data.revision || error != data.error;
+        drop(data);
+        if changed {
+            self.changed();
+        }
+        result
     }
     fn tick_client(&self, client: ClientId, at: i64, suspended: bool) -> Result<()> {
         let gateway = self.gateway(client);
@@ -505,7 +529,6 @@ impl Service {
                 }
             }
         }
-        self.changed();
         Ok(())
     }
 }

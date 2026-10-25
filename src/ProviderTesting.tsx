@@ -148,31 +148,40 @@ export default function ProviderTesting({
     (m) => m.id === detection?.model,
   );
   const fail = useCallback((e: unknown) => setError(errorOf(e).message), []);
-  const refresh = useCallback(async () => {
-    setState(
-      await command("provider_test_state", {
-        clientId: gateway.clientId,
-        providerId: provider.id,
-      }),
-    );
-  }, [gateway.clientId, provider.id]);
-  useEffect(() => {
-    let disposed = false;
-    const read = async () => {
-      const value = await command("provider_test_state", {
+  const stateSequence = useRef(0);
+  const mounted = useRef(false);
+  const refresh = useCallback(async (resetDetection = false) => {
+    const sequence = ++stateSequence.current;
+    try {
+      const current = await command("provider_test_state", {
         clientId: gateway.clientId,
         providerId: provider.id,
       });
-      if (!disposed) setState(value);
-    };
-    void read().catch(fail);
+      if (!mounted.current || sequence !== stateSequence.current) return;
+      setState(current);
+      if (resetDetection) {
+        setDetection(structuredClone(current.detection));
+        setDetectionSaved(JSON.stringify(current.detection));
+        setDetectionRevision(current.revision);
+      }
+      return current;
+    } catch (error) {
+      if (mounted.current && sequence === stateSequence.current) throw error;
+    }
+  }, [gateway.clientId, provider.id]);
+  useEffect(() => {
+    mounted.current = true;
+    void refresh().catch(fail);
     const events = subscriptions(fail);
-    events.watch("provider-tests", read);
+    events.watch("provider-tests", async () => {
+      await refresh();
+    });
     return () => {
-      disposed = true;
+      mounted.current = false;
+      stateSequence.current++;
       events.dispose();
     };
-  }, [gateway.clientId, provider.id, fail]);
+  }, [refresh, fail]);
   useEffect(() => {
     if (!state || detection) return;
     setDetection(structuredClone(state.detection));
@@ -335,11 +344,7 @@ export default function ProviderTesting({
         );
     });
   const readDetection = async () => {
-    const current = await command("provider_test_state", scope);
-    setState(current);
-    setDetection(structuredClone(current.detection));
-    setDetectionSaved(JSON.stringify(current.detection));
-    setDetectionRevision(current.revision);
+    await refresh(true);
   };
   const tabs: [Tab, string][] = [
     ["connection", "连接测试"],
@@ -854,10 +859,8 @@ export default function ProviderTesting({
                   disabled={busy || dirty}
                   onClick={() =>
                     void perform(async () => {
-                      const current = await command(
-                        "provider_test_state",
-                        scope,
-                      );
+                      const current = await refresh();
+                      if (!current) return;
                       await command("provider_test_clear_mark", {
                         ...scope,
                         expectedRevision: current.revision,
@@ -1061,13 +1064,6 @@ export default function ProviderTesting({
                     engine: bankEngine,
                   });
                   if (bankEngine === "lmDetector") {
-                    setState(
-                      (current) =>
-                        current && {
-                          ...current,
-                          banks: { ...current.banks, lmDetector: updated },
-                        },
-                    );
                     return;
                   }
                   if (updated.error) throw new Error(updated.error);

@@ -641,3 +641,34 @@ describe("quota display and refresh", () => {
     ).toBeDisabled();
   });
 });
+
+it("waits the configured interval after failed automatic refreshes and preserves cached data", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-25T00:00:00Z"));
+  provider.quota = { ...result(), nextRefreshAt: Date.now() / 1000 - 1, retryAt: Date.now() / 1000 - 2 };
+  mock.command.mockRejectedValue(new Error("fixture quota failure"));
+  render(<Harness />);
+  await flush();
+  expect(mock.command).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+  expect(mock.command).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(mock.command).toHaveBeenCalledTimes(2);
+});
+
+it("enables manual refresh exactly when backoff expires with automatic refresh off", async () => {
+  vi.useFakeTimers();
+  provider.quota = { ...result(), state: "error", retryAt: Date.now() / 1000 + 120 };
+  render(<Harness refreshSeconds={0} />);
+  const button = screen.getByRole("button", { name: `刷新 ${provider.name} 额度` });
+  expect(button).toBeDisabled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(119_999); });
+  expect(button).toBeDisabled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(button).toBeEnabled();
+  expect(mock.command).not.toHaveBeenCalled();
+  fireEvent.click(button);
+  await flush();
+  expect(mock.command).toHaveBeenCalledTimes(1);
+});

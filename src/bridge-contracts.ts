@@ -240,8 +240,6 @@ export type ProviderTestingState = {
   jobs: ProviderTestJob[];
   detection: ProviderDetection;
   degraded: Record<string, ProviderDegradation>;
-  history: ProviderTestJob[];
-  bank: FingerprintBankState;
   banks: Record<DetectionEngine, FingerprintBankState>;
   platform: DetectionPlatform;
   error: string | null;
@@ -286,19 +284,6 @@ export type AccountImportPreview = {
 export type AccountExportPreview = {
   revision: string;
   rows: { id: string; name: string; error: string | null }[];
-};
-export type ProviderImportPreview = {
-  token: string;
-  revision: string;
-  unsupportedProxies: number;
-  template?: PreparedTemplate | null;
-  rows: {
-    id: number;
-    name: string;
-    baseUrl: string | null;
-    concurrency: number | null;
-    error: string | null;
-  }[];
 };
 export type DshOptions = {
   profile: string;
@@ -624,21 +609,6 @@ export type CommandMap = {
   >;
   get_app_event: Call<{ id: string }, EventRecord | null>;
   clear_app_events: Call<None, void>;
-  preview_sub2api_import: Call<Client, ProviderImportPreview | null>;
-  commit_sub2api_import: Call<
-    Client & Revision & { token: string; ids: number[] },
-    GatewayState
-  >;
-  cancel_sub2api_import: Call<Client & { token: string }, void>;
-  prepare_sub2api_export: Call<
-    Client & { replaceTemplate?: boolean },
-    PreparedTemplate | null
-  >;
-  select_sub2api_template: Call<Client & { token: string; id: number }, void>;
-  export_sub2api_providers: Call<
-    Client & Revision & { ids: string[] },
-    boolean
-  >;
   preview_account_import: Call<None, AccountImportPreview | null>;
   commit_account_import: Call<
     Revision & { token: string; selected: { id: number; update: boolean }[] },

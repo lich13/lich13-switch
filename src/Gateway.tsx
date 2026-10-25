@@ -19,7 +19,6 @@ import type { ClientId } from "./types";
 import { saveGatewayEdit, type EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
 import ProviderSettings from "./ProviderSettings";
-import ProviderExchange from "./ProviderExchange";
 import ProviderEndpoints from "./ProviderEndpoints";
 import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
@@ -35,8 +34,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Plus,
   Power,
-  FileInput,
-  FileOutput,
   Pencil,
   Trash2,
   Network,
@@ -61,7 +58,6 @@ type Dialog =
     }
   | { kind: "grokImport" }
   | { kind: "dsh" }
-  | { kind: "exchange"; mode: "import" | "export" }
   | { kind: "provider"; item?: Provider }
   | { kind: "settings"; item: Provider }
   | { kind: "endpoints"; item: Provider }
@@ -174,14 +170,24 @@ function GatewayContent({
   );
   useEffect(() => {
     let disposed = false;
+    let receivedGatewayState = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
     void command("get_gateway", { clientId })
       .then((s) => {
-        if (!disposed && (s.clientId ?? "codex") === clientId) setState(s);
+        if (
+          !disposed &&
+          !receivedGatewayState &&
+          (s.clientId ?? "codex") === clientId
+        ) setState(s);
       })
-      .catch((e) => setError(errorOf(e).message));
+      .catch((e) => {
+        if (!disposed && !receivedGatewayState) setError(errorOf(e).message);
+      });
     events.watch("gateway-state", (s) => {
-      if ((s.clientId ?? "codex") === clientId) setState(s);
+      if ((s.clientId ?? "codex") === clientId) {
+        receivedGatewayState = true;
+        setState(s);
+      }
     });
     return () => {
       disposed = true;
@@ -406,32 +412,6 @@ function GatewayContent({
             <Plus size={15} />
             添加
           </button>
-          <div
-            className="exchange-button-group"
-            role="group"
-            aria-label="供应商导入导出"
-          >
-            <button
-              className="exchange-button"
-              disabled={busy}
-              onClick={() =>
-                clientId === "dsh"
-                  ? importDsh()
-                  : setDialog({ kind: "exchange", mode: "import" })
-              }
-            >
-              <FileInput size={16} />
-              导入
-            </button>
-            <button
-              className="exchange-button"
-              disabled={busy || !state.providers.length}
-              onClick={() => setDialog({ kind: "exchange", mode: "export" })}
-            >
-              <FileOutput size={16} />
-              导出
-            </button>
-          </div>
         </div>
       </div>
       {state.configWarning && (
@@ -697,17 +677,6 @@ function GatewayContent({
           />
         </details>
       </>
-      {dialog?.kind === "exchange" && (
-        <ProviderExchange
-          mode={dialog.mode}
-          state={state}
-          clientId={clientId}
-          close={() => setDialog(null)}
-          update={setState}
-          notify={notify}
-          onDirtyChange={markDialog}
-        />
-      )}
       {dialog?.kind === "dsh" && (
         <DshProfile
           state={state}

@@ -40,9 +40,6 @@ mod connector;
 #[cfg(test)]
 mod diagnostic_test_support;
 mod endpoints;
-pub(crate) mod exchange;
-#[cfg(test)]
-mod exchange_tests;
 pub(crate) mod failover;
 #[cfg(test)]
 mod first_byte_timeout_tests;
@@ -226,7 +223,6 @@ struct Shared {
     catalog: catalog::Service,
     model_list: model_list::Service,
     endpoints: endpoints::Service,
-    exchange: exchange::Service,
     admission: admission::Scheduler,
     compaction: Arc<compaction::Registry>,
 }
@@ -317,7 +313,6 @@ impl Gateway {
     }
 
     pub fn report_diagnostics(&self) {
-        self.0.exchange.prune();
         let Ok(view) = self.try_view() else {
             return;
         };
@@ -501,7 +496,6 @@ impl Gateway {
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
-            exchange: exchange::Service::default(),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             catalog: catalog::Service::new(data.join("provider-models.json")),
             model_list: model_list::Service::new(data.join("model-list.json")),
@@ -1165,10 +1159,7 @@ impl Gateway {
         if self.0.client == ClientId::Dsh
             && matches!(
                 &edit,
-                Edit::SaveProvider { .. }
-                    | Edit::Import
-                    | Edit::ImportProviders { .. }
-                    | Edit::ImportLink { .. }
+                Edit::SaveProvider { .. } | Edit::Import | Edit::ImportLink { .. }
             )
         {
             return Err(AppError::new(

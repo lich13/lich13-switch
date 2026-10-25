@@ -459,7 +459,7 @@ async fn http_partial_sse_prefix_is_returned_with_error_without_replay_after_res
 }
 
 #[tokio::test]
-async fn http_zero_response_still_fails_over_to_the_next_provider() {
+async fn http_zero_response_retries_the_same_provider_before_failover() {
     let first_requests = Arc::new(AtomicUsize::new(0));
     let first = fault_http_server(HttpFault::EmptyResponse, first_requests.clone()).await;
     let fallback_requests = Arc::new(AtomicUsize::new(0));
@@ -492,9 +492,9 @@ async fn http_zero_response_still_fails_over_to_the_next_provider() {
     fixture.stop().await;
 
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["provider"], "fallback");
-    assert_eq!(first_requests.load(Ordering::SeqCst), 1);
-    assert_eq!(fallback_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(value["provider"], "first-retry");
+    assert_eq!(first_requests.load(Ordering::SeqCst), 2);
+    assert_eq!(fallback_requests.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

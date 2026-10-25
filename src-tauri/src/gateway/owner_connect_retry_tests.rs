@@ -155,7 +155,7 @@ async fn owner_retries_obey_the_configured_attempt_limit() {
 async fn owner_open_circuit_does_not_block_eligible_failover() {
     let (dir, gateway, _port, backup) = setup().await;
     let mut settings = gateway.view().settings;
-    settings.failure_threshold = 1;
+    settings.transient_failure_threshold = 1;
     update(&gateway, &dir, Edit::Settings { settings });
     assert_eq!(followup(&gateway).await["provider"], "backup");
     assert_eq!(gateway.view().providers[0].rpm_used, 2);
@@ -242,5 +242,71 @@ async fn dispatched_request_with_no_headers_is_not_replayed_on_owner_or_backup()
     assert_eq!(gateway.view().providers[0].rpm_used, 2);
     silent.abort();
     let _ = silent.await;
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_reset_before_headers_retries_like_5xx_before_failover() {
+    for recover in [true, false] {
+        let (_dir, gateway, port, backup) = setup().await;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let upstream = tokio::spawn(async move {
+            for _ in 0..if recover { 1 } else { 3 } {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                use tokio::io::AsyncReadExt;
+                let mut bytes = [0; 4096];
+                assert!(socket.read(&mut bytes).await.unwrap() > 0);
+                #[allow(deprecated)]
+                socket.set_linger(Some(Duration::ZERO)).unwrap();
+            }
+            if recover {
+                serve_once(listener, 200).await;
+            }
+        });
+        let g = gateway.clone();
+        let pending = tokio::spawn(async move { followup(&g).await });
+        waiting(&gateway).await;
+        assert_eq!(backup.load(Ordering::SeqCst), 0);
+        let response = pending.await.unwrap();
+        upstream.await.unwrap();
+        assert_eq!(
+            response["provider"],
+            if recover { "owner" } else { "backup" }
+        );
+        assert_eq!(
+            gateway.view().providers[0].rpm_used,
+            if recover { 3 } else { 4 }
+        );
+        assert_eq!(backup.load(Ordering::SeqCst), usize::from(!recover));
+        gateway.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn newly_admitted_owner_gets_connection_retries_before_backup() {
+    let (_dir, gateway, port, backup) = setup().await;
+    let g = gateway.clone();
+    let pending = tokio::spawn(async move {
+        let response = request(
+            &g,
+            "fixture-new-network-owner",
+            br#"{"model":"fixture-model","input":[{"role":"user","content":"first"}]}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        serde_json::from_slice::<Value>(&response.into_body().collect().await.unwrap().to_bytes())
+            .unwrap()
+    });
+    waiting(&gateway).await;
+    assert_eq!(backup.load(Ordering::SeqCst), 0);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let upstream = tokio::spawn(serve_once(listener, 200));
+    assert_eq!(pending.await.unwrap()["provider"], "owner");
+    upstream.await.unwrap();
+    assert_eq!(backup.load(Ordering::SeqCst), 0);
     gateway.stop().await.unwrap();
 }

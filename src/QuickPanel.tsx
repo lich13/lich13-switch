@@ -71,6 +71,7 @@ function QuickContent({
   useEffect(() => {
     let disposed = false;
     let receivedAccountState = false;
+    let receivedGatewayState = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
     const watch = events.watch;
     watch("switch-state", (next) => {
@@ -78,7 +79,10 @@ function QuickContent({
       setAccounts(next);
     });
     watch("gateway-state", (s) => {
-      if ((s.clientId ?? "codex") === clientId) setGateway(s);
+      if ((s.clientId ?? "codex") === clientId) {
+        receivedGatewayState = true;
+        setGateway(s);
+      }
     });
     watch("quick-state", setPrefs);
     watch("panel-visibility", setVisible);
@@ -92,7 +96,7 @@ function QuickContent({
       .then(([a, g, p]) => {
         if (!disposed) {
           if (!receivedAccountState) setAccounts(a);
-          setGateway(g);
+          if (!receivedGatewayState) setGateway(g);
           setPrefs(p);
           setVisible(p.visible ?? preview);
         }

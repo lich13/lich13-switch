@@ -350,7 +350,8 @@ async fn score(context: &Context, outputs: Vec<(usize, String)>) -> Result<Value
                     .into_iter()
                     .map(|(_, text)| text)
                     .collect::<Vec<_>>(),
-                &bank,
+                bank.as_deref()
+                    .ok_or_else(|| failure("指纹库上下文已失效"))?,
             )
         }
     })

@@ -201,7 +201,7 @@ fn finish_upstream_failure(circuit: &Circuit, cfg: &Settings, status: u16, attem
 
 #[tokio::test]
 async fn native_websocket_connect_failure_and_handshake_timeout_retry_the_owner() {
-    for handshake_timeout in [false, true] {
+    for (handshake_timeout, new_thread) in [(false, false), (true, false), (false, true)] {
         let (_dir, gateway, port, backup) = super::owner_connect_retry_tests::setup().await;
         let stalled = if handshake_timeout {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
@@ -215,9 +215,17 @@ async fn native_websocket_connect_failure_and_handshake_timeout_retry_the_owner(
         } else {
             None
         };
-        let mut client = responses_client(&gateway, "fixture-owner-network").await;
+        let mut client = responses_client(
+            &gateway,
+            if new_thread {
+                "fixture-new-ws-network-owner"
+            } else {
+                "fixture-owner-network"
+            },
+        )
+        .await;
         client
-            .send(yawc::Frame::text(CREATE.to_owned()))
+            .send(yawc::Frame::text(if new_thread { r#"{"type":"response.create","model":"fixture-model","input":[{"role":"user","content":"first"}]}"#.to_owned() } else { CREATE.to_owned() }))
             .await
             .unwrap();
         super::owner_connect_retry_tests::waiting(&gateway).await;

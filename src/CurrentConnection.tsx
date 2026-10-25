@@ -41,20 +41,6 @@ export default function CurrentConnection({
       {current?.address && (
         <span title={current.address}>{current.address}</span>
       )}
-      {(current?.protocol ||
-        current?.addressSource ||
-        current?.credentialSource) && (
-        <small>
-          {[
-            current.protocol,
-            current.addressSource &&
-              `地址来源：${({ model: "模型配置", modelApi: "模型 API 地址", environment: "环境变量", global: "全局端点", globalApi: "全局 API 端点" } as Record<string, string>)[current.addressSource] ?? current.addressSource}`,
-            current.credentialSource && `凭据：${current.credentialSource}`,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-        </small>
-      )}
     </div>
   );
 }

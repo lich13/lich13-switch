@@ -1,5 +1,6 @@
 import type {
   DetectionPlatform,
+  FingerprintBankState,
   ProviderDetection,
   ProviderTestDetail,
   ProviderTestModels,
@@ -13,7 +14,7 @@ const platforms = new Map<string, DetectionPlatform>();
 const states = new Map<string, ProviderTestingState>();
 const catalogs = new Map<string, ProviderTestModels>();
 const details = new Map<string, ProviderTestDetail>();
-const bank: ProviderTestingState["bank"] = {
+const bank: FingerprintBankState = {
   source: "builtin",
   version: { revision: "123456789abcdef" },
   models: [],
@@ -21,7 +22,7 @@ const bank: ProviderTestingState["bank"] = {
   updating: false,
   error: null,
 };
-const lmBank: ProviderTestingState["bank"] = {
+const lmBank: FingerprintBankState = {
   ...bank,
   version: { revision: "567e11d65a48d4fbba2713cc4dfbe685cdd05a73" },
   updatedAt: null,
@@ -51,7 +52,6 @@ export function providerTestingPreview(
         },
         jobs: [],
         degraded: {},
-        history: [],
         detectionStatus: [],
         error: null,
         detection: {
@@ -62,7 +62,6 @@ export function providerTestingPreview(
           model: key.startsWith("codex:") ? "gpt-6-luna" : "",
           endpoint: null,
         },
-        bank,
       };
       states.set(key, state);
     }

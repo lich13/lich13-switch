@@ -1260,13 +1260,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         Some(connector::ConnectError::Tls) => code::TLS,
                         _ => code::NETWORK,
                     };
-                    // A connector failure happens before dispatch. An arbitrary
-                    // transport error or a header timeout does not prove that.
+                    // Use the same owner and budget as 5xx for connection failures,
+                    // including a peer closing before response headers arrive.
+                    // Header timeouts still use the separate no-replay boundary.
                     let retry_delay = if route.client_id == super::ClientId::Codex
                         && !dedicated_search
                         && matches!(
                             category,
-                            Some(
+                            None | Some(
                                 connector::ConnectError::TargetConnect
                                     | connector::ConnectError::TargetTimeout
                             )
@@ -1274,7 +1275,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         && !unknown_affinity
                         && ordinary_attempts <= settings.max_retries
                         && (pinned.as_deref() == Some(&route.provider.id)
-                            || established_capacity_owner.as_deref() == Some(&route.provider.id))
+                            || ownership
+                                .as_ref()
+                                .is_some_and(|lease| lease.owns(&route.provider.id)))
                     {
                         routing::transient_delay(&mut transient_retries, None)
                     } else {

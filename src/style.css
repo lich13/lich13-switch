@@ -3044,10 +3044,6 @@ select:focus-visible {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.exchange-row > .mono {
-  flex-shrink: 0;
-  font-size: 12px;
-}
 .exchange-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3545,11 +3541,6 @@ button.exchange-button:active:not(:disabled) {
   min-width: 0;
   font-size: 13px;
   overflow-wrap: anywhere;
-}
-.current-connection small {
-  flex-basis: 100%;
-  font-size: 12px;
-  color: var(--muted);
 }
 .gateway-current {
   padding: 12px 0;

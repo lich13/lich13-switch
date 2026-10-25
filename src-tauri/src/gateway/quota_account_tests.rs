@@ -245,7 +245,7 @@ async fn replacing_account_credentials_rejects_an_old_inflight_balance() {
 }
 
 #[tokio::test]
-async fn account_credentials_persist_clear_and_invalidate_cache_without_leaking_to_exports() {
+async fn account_credentials_persist_clear_and_invalidate_cache_without_leaking_to_views() {
     let port = server(|req| async move {
         Response::new(full(match req.uri().path() {
             "/api/user/self" => ACCOUNT,
@@ -268,13 +268,7 @@ async fn account_credentials_persist_clear_and_invalidate_cache_without_leaking_
     assert!(g.view().providers[0].quota.is_some());
     let (store, _) = Store::load(&g.0.data.join("gateway.json")).unwrap();
     assert_eq!(store.quota_access_tokens[&id], ACCOUNT_TOKEN);
-    let exported = t.path().join("fixture-export.json");
-    let template = t.path().join("fixture-template.json");
-    std::fs::write(&template, serde_json::json!({"type":"sub2api-data","version":1,"accounts":[{"name":"Fixture","platform":"openai","type":"apikey","credentials":{"base_url":"https://example.invalid/v1","api_key":"fixture-template-key"}}],"proxies":[]}).to_string()).unwrap();
-    g.exchange_template(&template).unwrap();
-    g.exchange_export(std::slice::from_ref(&id), &g.view().revision, &exported)
-        .unwrap();
-    assert!(!std::fs::read_to_string(exported)
+    assert!(!serde_json::to_string(&g.view())
         .unwrap()
         .contains(ACCOUNT_TOKEN));
     save_account(&g, &t, Some("fixture-account-replacement"), None);
