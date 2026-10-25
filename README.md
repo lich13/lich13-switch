@@ -73,7 +73,7 @@ corepack pnpm tauri dev
 
 ## 依赖维护
 
-Dependabot 每周一 09:00（Asia/Taipei）检查 Cargo、前端和 GitHub Actions，普通更新冷却 7 天。Cargo 覆盖直接与间接依赖，以 `lockfile-only` 在现有约束内维护主锁文件，每次最多 1 个普通 PR；本地 `lmfpd` 的依赖也通过主锁文件审计。前端普通更新允许 minor／patch，按 React 全家桶、其他运行依赖、开发工具分成 3 组，最多 3 个 PR；React 与 React DOM 的运行版本必须一致，对应类型包一起评估。Actions 合为一组，最多 1 个普通 PR，继续固定提交 SHA。
+Dependabot 每周一 09:00（Asia/Taipei）检查 Cargo、前端和 GitHub Actions，普通更新冷却 7 天。Cargo 覆盖直接与间接依赖，以 `lockfile-only` 在现有约束内维护主锁文件，每次最多 1 个普通 PR；同时通过 `allow.update-types` 只允许兼容的 minor／patch，提前排除不兼容候选，避免解析器尝试 reqwest 0.13 等迁移。Cargo 的 `0.x` 次版本变化属于不兼容升级；本地 `lmfpd` 的依赖也通过主锁文件审计。前端普通更新允许 minor／patch，按 React 全家桶、其他运行依赖、开发工具分成 3 组，最多 3 个 PR；React 与 React DOM 的运行版本必须一致，对应类型包一起评估。Actions 合为一组，最多 1 个普通 PR，继续固定提交 SHA。
 
 漏洞告警和自动安全修复在 GitHub 仓库设置中独立启用；安全更新使用独立组，不等待普通更新窗口或冷却期。普通更新的版本限制不屏蔽安全修复。保持人工合并，并启用合并后自动删除分支。
 

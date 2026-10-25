@@ -41,6 +41,8 @@ updates:
     versioning-strategy: lockfile-only
     allow:
       - dependency-type: all
+        # Filter breaking candidates before Cargo resolution, including 0.x minor bumps.
+        update-types: ['version-update:semver-minor', 'version-update:semver-patch']
     groups:
       rust-compatible:
         applies-to: version-updates
