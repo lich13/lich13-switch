@@ -404,13 +404,13 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "9.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6737ce8b81460bf9407909f73ff50bf13f7cb8577e1e76715f57ed0eba58ba44"
+checksum = "f8b851b75c23ca7873623d612fe49bd1989aeb03d08fb9432187eb253d3d4c6b"
 dependencies = [
  "alloc-no-stdlib 3.0.0",
  "alloc-stdlib 0.3.0",
- "brotli-decompressor 6.2.0",
+ "brotli-decompressor 6.0.1",
 ]
 
 [[package]]
@@ -425,9 +425,9 @@ dependencies = [
 
 [[package]]
 name = "brotli-decompressor"
-version = "6.2.0"
+version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34c6783f42c21c952ad7112b354f0ba2f10760e9decea5b1b60523d6e270faaf"
+checksum = "941cd9bd4ddab83cb46fa5a2d428f1c857b24ac78cb876cf7beb710840934bd7"
 dependencies = [
  "alloc-no-stdlib 3.0.0",
  "alloc-stdlib 0.3.0",
@@ -2492,7 +2492,7 @@ dependencies = [
  "webpki-roots",
  "windows 0.62.2",
  "windows-sys 0.61.2",
- "winreg 0.55.0",
+ "winreg 0.56.0",
  "yaml-edit",
  "yawc",
  "zstd",
@@ -4584,7 +4584,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb37631cf71dab5e8ab55e1bdd701e18a52653d90b78e71d0e5598b1e0a61316"
 dependencies = [
  "base64 0.23.1",
- "brotli 9.1.0",
+ "brotli 9.0.0",
  "ico",
  "json-patch",
  "plist",
@@ -4765,7 +4765,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "362ab21cd4cc713f2a02b1a9b5688198b1541cfb6907c4281e9190e0f0ef4aa3"
 dependencies = [
  "anyhow",
- "brotli 9.1.0",
+ "brotli 9.0.0",
  "cargo_metadata",
  "ctor",
  "dom_query 0.28.0",
@@ -6317,16 +6317,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
 dependencies = [
  "winapi",
-]
-
-[[package]]
-name = "winreg"
-version = "0.55.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
-dependencies = [
- "cfg-if",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
