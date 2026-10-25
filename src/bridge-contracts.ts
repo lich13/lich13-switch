@@ -115,6 +115,8 @@ export type FingerprintReport = {
   }[];
   decision?: "scored" | "partial" | "unscorable" | "not_model";
   disposition?: "downgrade" | "notDowngrade" | "unknown";
+  disposition_basis?: "aggregate" | "sample_family" | null;
+  disposition_group_indexes?: number[];
   initial?: boolean;
   ambiguous?: boolean;
   diagnostics?: {
@@ -217,6 +219,8 @@ export type ProviderDegradation = {
   predictedModel: string;
   probability: number | null;
   engine: DetectionEngine;
+  basis?: "aggregate" | "sample_family" | null;
+  groupIndexes?: number[];
   queueRemoved: boolean;
   error: string | null;
 };
@@ -225,6 +229,8 @@ export type FingerprintBankState = {
   source?: string;
   models: { id: string; name: string }[];
   checkedAt?: number | null;
+  updatedAt?: number | null;
+  result?: "updated" | "up-to-date" | "failed" | null;
   updating: boolean;
   error: string | null;
 };

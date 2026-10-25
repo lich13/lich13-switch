@@ -50,12 +50,19 @@ impl Service {
                     .filter(|g| g.status == "completed")
                     .count()
                     == context.sample_count;
-                report["disposition"] = if complete {
-                    downgrade::verdict(&detail.job.forwarded_model, &report)
+                if context.engine == Engine::LmDetector {
+                    let verdict = downgrade::lm_verdict(&detail.job, &report);
+                    report["disposition"] = verdict.disposition.into();
+                    report["disposition_basis"] = json!(verdict.basis);
+                    report["disposition_group_indexes"] = json!(verdict.group_indexes);
                 } else {
-                    "unknown"
+                    report["disposition"] = if complete {
+                        downgrade::verdict(&detail.job.forwarded_model, &report)
+                    } else {
+                        "unknown"
+                    }
+                    .into();
                 }
-                .into();
                 report["ambiguous"] = json!(
                     report["disposition"] == "unknown"
                         && compat::string(&report["prediction_name"]).contains('/')
@@ -228,11 +235,22 @@ impl Service {
         {
             return;
         }
-        let Some(report) = job.report.as_ref().filter(|r| {
-            r["used_outputs"].as_u64() == Some(job.sample_count as u64)
-                && downgrade::verdict(&job.forwarded_model, r) == "downgrade"
-        }) else {
+        let Some(report) = job.report.as_ref() else {
             return;
+        };
+        let (basis, group_indexes) = if job.engine == Engine::LmDetector {
+            let verdict = downgrade::lm_verdict(&job, report);
+            if verdict.disposition != "downgrade" {
+                return;
+            }
+            (verdict.basis, verdict.group_indexes)
+        } else {
+            if report["used_outputs"].as_u64() != Some(job.sample_count as u64)
+                || downgrade::verdict(&job.forwarded_model, report) != "downgrade"
+            {
+                return;
+            }
+            (None, vec![])
         };
         let mark = Degradation {
             provider_id: job.provider_id.clone(),
@@ -242,6 +260,8 @@ impl Service {
             predicted_model: compat::string(&report["prediction"]).into(),
             probability: report["probability"].as_f64(),
             engine: job.engine,
+            basis,
+            group_indexes,
             queue_removed: false,
             error: None,
         };

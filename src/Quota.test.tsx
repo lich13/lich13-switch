@@ -70,7 +70,6 @@ function Harness({
         quota={q.quotaFor(p)}
         refresh={() => void q.refresh(p.id)}
       />
-      <button onClick={() => q.refreshAll()}>全部刷新</button>
     </>
   );
 }
@@ -494,15 +493,18 @@ describe("quota display and refresh", () => {
     expect(screen.getByRole("status")).toHaveTextContent("上游连接超时");
     expect(screen.getByRole("status")).toHaveTextContent("后重试");
   });
-  it("retains the cached balance and retry time when a manual refresh fails", async () => {
-    const retryAt = Date.now() / 1000 + 120;
+  it("retains the cached balance and retry time when a manual refresh fails after the retry window", async () => {
+    const retryAt = Date.now() / 1000 - 1;
     provider.quota = { ...result(), retryAt };
     mock.command.mockRejectedValueOnce(new Error("真实上游错误"));
 
     render(<Harness refreshSeconds={0} />);
-    fireEvent.click(screen.getByRole("button", { name: "全部刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: `刷新 ${provider.name} 额度` }));
     await flush();
 
+    expect(mock.command).toHaveBeenCalledWith("query_provider_quota", {
+      clientId: "codex", providerId: provider.id, force: true,
+    });
     expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
     expect(screen.queryByText("已过期")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("真实上游错误");

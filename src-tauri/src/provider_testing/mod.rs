@@ -235,7 +235,7 @@ impl Service {
                 .get(client_key(client))
                 .cloned()
                 .unwrap_or_else(|| PlatformSettings::for_client(client)),
-            banks: json!({"modelTrace":bank::status(&data.saved.bank, data.bank_updating),"lmDetector":({let mut status=data.lm_status.clone();status["updating"]=data.lm_updating.into();status["error"]=data.lm_error.clone().map(Value::String).unwrap_or_else(|| status["error"].clone());status})}),
+            banks: json!({"modelTrace":bank::status(&data.saved.bank, data.bank_updating),"lmDetector":lm_detector::status(&data)}),
             jobs: data
                 .saved
                 .jobs

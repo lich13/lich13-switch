@@ -380,6 +380,141 @@ it("renders compact fingerprint revisions and readable sources", async () => {
   expect(screen.getByText("版本").nextElementSibling).toHaveTextContent("—");
 });
 
+it.each([
+  ["up-to-date", "已是最新"],
+  ["updated", "已更新"],
+  ["failed", "检查失败"],
+] as const)(
+  "keeps LM Detector %s feedback and times after reopening",
+  async (result, label) => {
+    const user = userEvent.setup();
+    const state = states[gateway.providers[0].id];
+    const bank = state.banks.lmDetector;
+    const delegate = mock.command.getMockImplementation()!;
+    let resolveUpdate: (value: typeof bank) => void = () => {};
+    mock.command.mockImplementation((name, args) =>
+      name === "provider_test_update_bank"
+        ? new Promise((resolve) => {
+            resolveUpdate = resolve;
+          })
+        : delegate(name, args),
+    );
+    const showBank = async () => {
+      await user.click(await screen.findByRole("tab", { name: "指纹库" }));
+      await user.selectOptions(
+        screen.getByRole("combobox", { name: "指纹库检测源" }),
+        "lmDetector",
+      );
+    };
+    const view = open();
+    await showBank();
+    expect(screen.getByText("检查时间").nextElementSibling).toHaveTextContent(
+      "—",
+    );
+    expect(screen.getByText("更新时间").nextElementSibling).toHaveTextContent(
+      "—",
+    );
+    const button = screen.getByRole("button", { name: "检查更新" });
+    await user.dblClick(button);
+    expect(button).toBeDisabled();
+    expect(screen.getByText("更新结果").nextElementSibling).toHaveTextContent(
+      "检查中",
+    );
+    expect(
+      mock.command.mock.calls.filter(
+        ([name]) => name === "provider_test_update_bank",
+      ),
+    ).toHaveLength(1);
+    bank.checkedAt = 1_760_000_000_000;
+    bank.updatedAt = result === "updated" ? bank.checkedAt : 1_750_000_000_000;
+    bank.result = result;
+    bank.error = result === "failed" ? "指纹库更新被上游拒绝或限流" : null;
+    await act(async () => resolveUpdate(structuredClone(bank)));
+    await waitFor(() => expect(button).toBeEnabled());
+    const formatted = (at: number) =>
+      new Date(at).toLocaleString("zh-CN", {
+        timeZone: "Asia/Taipei",
+        hour12: false,
+      });
+    const verify = () => {
+      expect(screen.getByText("更新结果").nextElementSibling).toHaveTextContent(
+        label,
+      );
+      expect(screen.getByText("检查时间").nextElementSibling).toHaveTextContent(
+        formatted(bank.checkedAt!),
+      );
+      expect(screen.getByText("更新时间").nextElementSibling).toHaveTextContent(
+        formatted(bank.updatedAt!),
+      );
+      if (bank.error)
+        expect(screen.getByRole("alert")).toHaveTextContent(bank.error);
+    };
+    verify();
+    expect(state.banks.modelTrace.checkedAt).toBeUndefined();
+    view.unmount();
+    open();
+    await showBank();
+    verify();
+  },
+);
+
+it("shows mixed-family evidence separately from a normal aggregate prediction", async () => {
+  const user = userEvent.setup();
+  const provider = gateway.providers[0];
+  const state = states[provider.id];
+  const job = makeJob({
+    clientId: gateway.clientId,
+    providerId: provider.id,
+    expectedRevision: gateway.revision,
+    model: "gpt-6-sol",
+    endpoint: provider.baseUrl,
+    kind: "fingerprint",
+    concurrency: 1,
+  });
+  job.engine = "lmDetector";
+  job.status = "completed";
+  job.report = {
+    prediction: "gpt-6-sol",
+    prediction_name: "gpt-6-sol",
+    probability: null,
+    used_outputs: 3,
+    results: [],
+    bank_version: {},
+    disposition: "downgrade",
+    disposition_basis: "sample_family",
+    disposition_group_indexes: [2],
+  };
+  state.jobs = [job];
+  state.degraded[provider.id] = {
+    providerId: provider.id,
+    jobId: job.id,
+    detectedAt: 1,
+    requestedModel: "gpt-6-sol",
+    predictedModel: "gpt-6-sol",
+    probability: null,
+    engine: "lmDetector",
+    basis: "sample_family",
+    groupIndexes: [2],
+    queueRemoved: true,
+    error: null,
+  };
+  open();
+  await user.click(await screen.findByRole("tab", { name: "模型指纹" }));
+  const detail = await screen.findByRole("region", { name: "测试详情" });
+  await within(detail).findByText("判定降智");
+  expect(
+    within(detail).getByText("判定依据").nextElementSibling,
+  ).toHaveTextContent("第 2 组出现较低家族");
+  expect(
+    within(detail).getByText("预测模型").nextElementSibling,
+  ).toHaveTextContent("gpt-6-sol");
+  await user.click(screen.getByRole("tab", { name: "定时检测" }));
+  expect(
+    await screen.findByText("降智：第 2 组出现较低家族 · 请求 gpt-6-sol"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/gpt-6-sol → gpt-6-sol/)).not.toBeInTheDocument();
+});
+
 it("opens only the selected provider and reads cache without fetching upstream", async () => {
   open();
   await screen.findByText("尚未缓存该端点模型，点击重新拉取。");

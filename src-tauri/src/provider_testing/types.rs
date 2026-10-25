@@ -214,6 +214,12 @@ pub struct DetectionTiming {
     pub paused: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradationBasis {
+    Aggregate,
+    SampleFamily,
+}
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Degradation {
     pub provider_id: String,
@@ -224,6 +230,10 @@ pub struct Degradation {
     pub probability: Option<f64>,
     #[serde(default)]
     pub engine: Engine,
+    #[serde(default)]
+    pub basis: Option<DegradationBasis>,
+    #[serde(default)]
+    pub group_indexes: Vec<usize>,
     pub queue_removed: bool,
     pub error: Option<String>,
 }
@@ -235,6 +245,14 @@ pub struct SavedBank {
     pub checked_at: Option<i64>,
     pub error: Option<String>,
     pub provenance: Option<Value>,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedLmBank {
+    pub checked_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub result: Option<String>,
+    pub error: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -249,6 +267,7 @@ pub struct Persisted {
     pub degraded: BTreeMap<String, Degradation>,
     pub history: Vec<Job>,
     pub bank: SavedBank,
+    pub lm_bank: SavedLmBank,
 }
 impl Default for Persisted {
     fn default() -> Self {
@@ -263,6 +282,7 @@ impl Default for Persisted {
             degraded: BTreeMap::new(),
             history: vec![],
             bank: SavedBank::default(),
+            lm_bank: SavedLmBank::default(),
         }
     }
 }

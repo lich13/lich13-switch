@@ -82,6 +82,25 @@ pub fn initial_status(directory: &Path) -> Value {
         Err(error) => json!({"models":[],"error":error.message,"updating":false}),
     }
 }
+pub(super) fn status(data: &Data) -> Value {
+    let mut value = data.lm_status.clone();
+    let saved = &data.saved.lm_bank;
+    value["checkedAt"] = json!(saved.checked_at);
+    value["updatedAt"] = json!(saved.updated_at);
+    value["updating"] = data.lm_updating.into();
+    value["result"] = json!(saved.result);
+    value["error"] = data
+        .lm_error
+        .as_ref()
+        .or(saved.error.as_ref())
+        .map(|error| json!(error))
+        .unwrap_or_else(|| value["error"].clone());
+    if data.lm_updating {
+        value["error"] = Value::Null;
+        value["result"] = Value::Null;
+    }
+    value
+}
 fn load(raw: &[u8], updated: bool) -> Result<Resource> {
     let bundle = unpack(raw)?;
     let tokenizer = tokenizer::Bank::from_value(bundle.tokenizer.clone())?;
@@ -129,6 +148,13 @@ impl Service {
         Ok(resource)
     }
     pub async fn update_lm_bank(&self) -> Result<Value> {
+        self.update_lm_bank_from(
+            "https://api.github.com/repos/Ikaleio/lm-detector",
+            "https://raw.githubusercontent.com/Ikaleio/lm-detector",
+        )
+        .await
+    }
+    async fn update_lm_bank_from(&self, api: &str, raw_source: &str) -> Result<Value> {
         {
             let mut data = lock(&self.0.data);
             if data.lm_updating {
@@ -138,32 +164,67 @@ impl Service {
             data.lm_error = None;
         }
         self.changed();
-        let result = download().await;
-        let result = match result {
-            Ok(raw) => {
-                let service = self.clone();
-                tokio::task::spawn_blocking(move || service.install_lm_bundle(raw))
-                    .await
-                    .map_err(|_| failure("指纹资源加载失败"))
-                    .and_then(|r| r)
+        let result = async {
+            let service = self.clone();
+            // Only a fully loaded resource can justify skipping a same-version download.
+            let current = tokio::task::spawn_blocking(move || service.lm_resource().ok())
+                .await
+                .map_err(|_| failure("指纹资源加载失败"))?;
+            let revision = current.as_ref().map(|resource| resource.version());
+            let raw = download(
+                revision.as_ref().and_then(|v| v["revision"].as_str()),
+                api,
+                raw_source,
+            )
+            .await?;
+            match raw {
+                Some(raw) => {
+                    let service = self.clone();
+                    tokio::task::spawn_blocking(move || service.install_lm_bundle(raw))
+                        .await
+                        .map_err(|_| failure("指纹资源加载失败"))
+                        .and_then(|r| r)
+                        .map(|resource| (resource, true))
+                }
+                None => current
+                    .map(|resource| (resource, false))
+                    .ok_or_else(|| failure("指纹资源不可用，请重试更新")),
             }
-            Err(e) => Err(e),
-        };
-        let status = match result {
-            Ok(resource) => {
-                let status = resource.metadata.clone();
-                *lock(&self.0.lm) = Some(resource);
-                lock(&self.0.data).lm_status = status.clone();
-                Ok(status)
+        }
+        .await;
+        // Keep lock ordering consistent with lm_resource; running jobs retain their Arc.
+        if let Ok((resource, _)) = &result {
+            *lock(&self.0.lm) = Some(resource.clone());
+        }
+        let mut data = lock(&self.0.data);
+        data.lm_updating = false;
+        let mut next = data.saved.clone();
+        next.lm_bank.checked_at = Some(self.now());
+        match result {
+            Ok((resource, updated)) => {
+                data.lm_status = resource.metadata.clone();
+                next.lm_bank.error = None;
+                next.lm_bank.result = Some(if updated { "updated" } else { "up-to-date" }.into());
+                if updated {
+                    next.lm_bank.updated_at = next.lm_bank.checked_at;
+                }
             }
             Err(error) => {
-                lock(&self.0.data).lm_error = Some(error.message.clone());
+                next.lm_bank.result = Some("failed".into());
+                next.lm_bank.error = Some(error.message);
+            }
+        }
+        let result = match self.save(&mut data, next) {
+            Ok(()) => Ok(status(&data)),
+            Err(_) => {
+                let error = failure("检测库更新状态无法保存，请重试");
+                data.lm_error = Some(error.message.clone());
                 Err(error)
             }
         };
-        lock(&self.0.data).lm_updating = false;
+        drop(data);
         self.changed();
-        status
+        result
     }
 }
 async fn read(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
@@ -188,7 +249,11 @@ async fn read(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     }
     Ok(raw)
 }
-async fn download() -> Result<Vec<u8>> {
+async fn download(
+    current_revision: Option<&str>,
+    api: &str,
+    raw_source: &str,
+) -> Result<Option<Vec<u8>>> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -197,26 +262,18 @@ async fn download() -> Result<Vec<u8>> {
         .timeout(std::time::Duration::from_secs(90))
         .build()
         .map_err(|_| failure("无法创建指纹更新连接"))?;
-    let commit: Value = serde_json::from_slice(
-        &read(
-            &client,
-            "https://api.github.com/repos/Ikaleio/lm-detector/commits/main",
-        )
-        .await?,
-    )
-    .map_err(|_| failure("指纹库提交无效"))?;
+    let commit: Value =
+        serde_json::from_slice(&read(&client, &format!("{api}/commits/main")).await?)
+            .map_err(|_| failure("指纹库提交无效"))?;
     let revision = compat::string(&commit["sha"]);
     if revision.len() != 40 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(failure("指纹库提交无效"));
     }
+    if current_revision == Some(revision) {
+        return Ok(None);
+    }
     let tree: Value = serde_json::from_slice(
-        &read(
-            &client,
-            &format!(
-                "https://api.github.com/repos/Ikaleio/lm-detector/git/trees/{revision}?recursive=1"
-            ),
-        )
-        .await?,
+        &read(&client, &format!("{api}/git/trees/{revision}?recursive=1")).await?,
     )
     .map_err(|_| failure("指纹库目录无效"))?;
     if tree["truncated"] == true {
@@ -244,11 +301,7 @@ async fn download() -> Result<Vec<u8>> {
             .iter()
             .find(|e| e["path"] == path && e["type"] == "blob")
             .ok_or_else(|| failure("指纹资源缺失"))?;
-        let raw = read(
-            &client,
-            &format!("https://raw.githubusercontent.com/Ikaleio/lm-detector/{revision}/{path}"),
-        )
-        .await?;
+        let raw = read(&client, &format!("{raw_source}/{revision}/{path}")).await?;
         if bank::git_blob_digest(&raw) != expected["sha"] {
             return Err(failure("指纹资源内容校验失败"));
         }
@@ -288,12 +341,178 @@ async fn download() -> Result<Vec<u8>> {
     let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
     gzip.write_all(&serde_json::to_vec(&bundle).map_err(|_| failure("指纹资源无法编码"))?)
         .map_err(|_| failure("指纹资源无法编码"))?;
-    gzip.finish().map_err(|_| failure("指纹资源无法编码"))
+    gzip.finish()
+        .map(Some)
+        .map_err(|_| failure("指纹资源无法编码"))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{fixture, response, server};
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn update_status_survives_restart_and_same_revision_skips_resource_requests() {
+        let bundle = unpack(BUNDLE).unwrap();
+        let files = HashMap::from([
+            (
+                "data/unified_bank.json".to_owned(),
+                serde_json::to_vec(&bundle.bank).unwrap(),
+            ),
+            (
+                "data/shared_detector.bin".to_owned(),
+                STANDARD.decode(bundle.detector).unwrap(),
+            ),
+            (
+                "data/tokenizer_bank.json".to_owned(),
+                serde_json::to_vec(&bundle.tokenizer).unwrap(),
+            ),
+        ]);
+        let mut entries: Vec<_> = bundle
+            .algorithm
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(path, sha)| json!({"path":path,"sha":sha,"type":"blob"}))
+            .collect();
+        entries.extend(files.iter().map(
+            |(path, bytes)| json!({"path":path,"sha":bank::git_blob_digest(bytes),"type":"blob"}),
+        ));
+        let tree = json!({"tree":entries,"truncated":false}).to_string();
+        let mode = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = mode.clone();
+        let hits = requests.clone();
+        let pinned_revision = bundle.revision.clone();
+        let port = server(move |request| {
+            let path = request.uri().path().to_owned();
+            lock(&hits).push(path.clone());
+            let mode = state.load(Ordering::SeqCst);
+            let reply = if mode == 2 {
+                response(503, "text/plain", "fixture unavailable")
+            } else if path == "/commits/main" {
+                response(200, "application/json", json!({"sha":if mode == 0 { pinned_revision.clone() } else if mode == 3 { "2".repeat(40) } else { "1".repeat(40) }}).to_string())
+            } else if path.starts_with("/git/trees/") {
+                response(200, "application/json", tree.clone())
+            } else if let Some((_, name)) = path.split_once("/data/") {
+                if mode == 3 {
+                    response(200, "application/octet-stream", "corrupt fixture")
+                } else {
+                    response(200, "application/octet-stream", files[&format!("data/{name}")].clone())
+                }
+            } else {
+                response(404, "text/plain", "unknown fixture path")
+            };
+            async move { reply }
+        }).await;
+        let source = format!("http://127.0.0.1:{port}");
+        let (dir, service) = fixture();
+        let original = service.lm_resource().unwrap();
+        let first = service.update_lm_bank_from(&source, &source).await.unwrap();
+        assert_eq!(first["result"], "up-to-date");
+        assert_eq!(first["checkedAt"], service.now());
+        assert!(first["updatedAt"].is_null());
+        assert_eq!(*lock(&requests), vec!["/commits/main"]);
+        assert!(!dir.path().join(CACHE).exists());
+        let restarted = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+        assert_eq!(status(&lock(&restarted.0.data)), first);
+
+        mode.store(1, Ordering::SeqCst);
+        service.0.clock.fetch_add(1000, Ordering::SeqCst);
+        let updated = service.update_lm_bank_from(&source, &source).await.unwrap();
+        assert_eq!(updated["result"], "updated");
+        assert_eq!(updated["version"]["revision"], "1".repeat(40));
+        assert_eq!(updated["updatedAt"], service.now());
+        assert_eq!(original.version()["revision"], bundle.revision);
+        let saved = std::fs::read(dir.path().join(CACHE)).unwrap();
+        let restarted = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+        assert_eq!(status(&lock(&restarted.0.data)), updated);
+
+        lock(&requests).clear();
+        service.0.clock.fetch_add(1000, Ordering::SeqCst);
+        let unchanged = service.update_lm_bank_from(&source, &source).await.unwrap();
+        assert_eq!(unchanged["result"], "up-to-date");
+        assert_eq!(unchanged["updatedAt"], updated["updatedAt"]);
+        assert_eq!(*lock(&requests), vec!["/commits/main"]);
+        for failure_mode in [2, 3] {
+            mode.store(failure_mode, Ordering::SeqCst);
+            service.0.clock.fetch_add(1000, Ordering::SeqCst);
+            let failed = service.update_lm_bank_from(&source, &source).await.unwrap();
+            assert_eq!(failed["result"], "failed");
+            assert_eq!(failed["checkedAt"], service.now());
+            assert_eq!(failed["updatedAt"], updated["updatedAt"]);
+            assert!(failed["error"].is_string());
+            assert_eq!(std::fs::read(dir.path().join(CACHE)).unwrap(), saved);
+            let restarted = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+            assert_eq!(status(&lock(&restarted.0.data)), failed);
+        }
+
+        // An invalid local bundle must not turn a matching revision into false success.
+        std::fs::write(dir.path().join(CACHE), b"corrupt fixture").unwrap();
+        let repaired = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+        mode.store(1, Ordering::SeqCst);
+        lock(&requests).clear();
+        let repair = repaired
+            .update_lm_bank_from(&source, &source)
+            .await
+            .unwrap();
+        assert_eq!(repair["result"], "updated");
+        assert!(repair["error"].is_null());
+        assert!(lock(&requests).len() > 1);
+        assert_eq!(
+            repaired.lm_resource().unwrap().version()["revision"],
+            "1".repeat(40)
+        );
+
+        // State write conflicts remain errors; never claim that check metadata was saved.
+        let mut external = std::fs::read(&repaired.0.path).unwrap();
+        external.push(b' ');
+        std::fs::write(&repaired.0.path, &external).unwrap();
+        assert!(repaired
+            .update_lm_bank_from(&source, &source)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&repaired.0.path).unwrap(), external);
+        let failed = status(&lock(&repaired.0.data));
+        assert_eq!(failed["updating"], false);
+        assert_eq!(failed["checkedAt"], repair["checkedAt"]);
+        assert_eq!(failed["error"], "检测库更新状态无法保存，请重试");
+    }
+
+    #[tokio::test]
+    async fn simultaneous_updates_are_rejected_without_changing_check_time() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entered = started.clone();
+        let wait = release.clone();
+        let revision = unpack(BUNDLE).unwrap().revision;
+        let port = server(move |_| {
+            let entered = entered.clone();
+            let wait = wait.clone();
+            let revision = revision.clone();
+            async move {
+                entered.notify_one();
+                wait.notified().await;
+                response(200, "application/json", json!({"sha":revision}).to_string())
+            }
+        })
+        .await;
+        let source = format!("http://127.0.0.1:{port}");
+        let (_dir, service) = fixture();
+        let running = service.clone();
+        let url = source.clone();
+        let task = tokio::spawn(async move { running.update_lm_bank_from(&url, &url).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+            .await
+            .unwrap();
+        assert!(service.update_lm_bank_from(&source, &source).await.is_err());
+        assert!(status(&lock(&service.0.data))["checkedAt"].is_null());
+        assert_eq!(status(&lock(&service.0.data))["updating"], true);
+        release.notify_one();
+        assert_eq!(task.await.unwrap().unwrap()["result"], "up-to-date");
+        assert_eq!(status(&lock(&service.0.data))["updating"], false);
+    }
     #[test]
     fn pinned_sdk_matches_upstream_scoring_fixtures() {
         let resource = load(BUNDLE, false).unwrap();

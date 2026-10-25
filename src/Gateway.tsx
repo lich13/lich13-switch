@@ -432,19 +432,6 @@ function GatewayContent({
               导出
             </button>
           </div>
-          <details className="row-menu">
-            <summary aria-label="网关操作">
-              <MoreHorizontal size={17} />
-            </summary>
-            <div className="menu-popover" onClick={menuClose}>
-              <button
-                onClick={() => quota.refreshAll()}
-                disabled={!state.providers.length}
-              >
-                刷新全部额度
-              </button>
-            </div>
-          </details>
         </div>
       </div>
       {state.configWarning && (

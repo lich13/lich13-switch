@@ -99,12 +99,6 @@ export function useProviderQuota(
     },
     [accept, clientId, refreshSeconds],
   );
-  const refreshAll = useCallback(
-    (force = true) => {
-      for (const p of latest.current) void refresh(p.id, force);
-    },
-    [refresh],
-  );
   const identity = providers.map((p) => p.id + p.quotaVersion).join("|");
   const quotaFor = (p: Provider) => {
     const q = values[p.id];
@@ -139,7 +133,7 @@ export function useProviderQuota(
     void tick();
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [active, nativeVisible, visible, identity, refreshSeconds, refresh]);
-  return { quotaFor, refresh, refreshAll };
+  return { quotaFor, refresh };
 }
 function emptyQuota(p: Provider): ProviderQuota {
   return {

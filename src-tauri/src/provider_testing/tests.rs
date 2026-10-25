@@ -84,7 +84,7 @@ fn business_requests(service: &Service, provider: &str, count: usize, at: i64) {
         .unwrap();
 }
 
-async fn server<F, Fut>(handler: F) -> u16
+pub(super) async fn server<F, Fut>(handler: F) -> u16
 where
     F: Fn(HttpRequest<Incoming>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response<Full<Bytes>>> + Send + 'static,
@@ -109,7 +109,11 @@ where
     });
     port
 }
-fn response(status: u16, content: &str, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
+pub(super) fn response(
+    status: u16,
+    content: &str,
+    body: impl Into<Bytes>,
+) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
         .header("content-type", content)
@@ -2364,6 +2368,128 @@ async fn scheduled_single_sample_dequeues_but_partial_three_does_not() {
         assert!(service.state(ClientId::Codex, &id).is_err());
     }
 }
+
+#[tokio::test]
+async fn lm_mixed_evidence_only_dequeues_automatic_jobs_in_their_own_platform() {
+    for client in [
+        ClientId::Codex,
+        ClientId::Claude,
+        ClientId::Grok,
+        ClientId::Dsh,
+    ] {
+        let (dir, service) = fixture();
+        let protocol = if client == ClientId::Claude {
+            "messages"
+        } else if client == ClientId::Codex {
+            "responses"
+        } else {
+            "chat_completions"
+        };
+        let id = add(&service, dir.path(), client, 1, protocol);
+        ua(&service, client);
+        let gateway = service.gateway(client);
+        let requested = if client == ClientId::Dsh {
+            "fixture-mapped-model"
+        } else {
+            "gpt-6-sol"
+        };
+        if client == ClientId::Dsh {
+            gateway.edit(serde_json::from_value(json!({"op":"dshModelsProvider","id":id,"mapping":{(requested):"gpt-6-sol"}})).unwrap(), &gateway.view().revision, dir.path()).unwrap();
+        }
+        gateway
+            .edit(
+                Edit::QueueProvider {
+                    id: id.clone(),
+                    queued: true,
+                },
+                &gateway.view().revision,
+                dir.path(),
+            )
+            .unwrap();
+        seed_client_catalog(&service, client, &id, requested);
+        service
+            .set_platform(
+                client,
+                PlatformSettings {
+                    engine: Engine::LmDetector,
+                    lm_detector_samples: 3,
+                    ..PlatformSettings::default()
+                },
+            )
+            .unwrap();
+        let state = service.state(client, &id).unwrap();
+        service
+            .set_detection(
+                client,
+                &id,
+                Detection {
+                    enabled: true,
+                    model: requested.into(),
+                    mode: "fixed".into(),
+                    ..state.detection
+                },
+                &state.revision,
+            )
+            .unwrap();
+        let permits = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+        for automatic in [false, true] {
+            let mut req = request(&service, client, &id);
+            req.kind = Kind::Fingerprint;
+            req.model = requested.into();
+            let job = service.start_job(req, automatic).unwrap();
+            assert_eq!(job.forwarded_model, "gpt-6-sol");
+            let report = |model: &str, count| json!({"prediction":model,"prediction_name":model,"used_outputs":count,"probability":null,"decision":if count == 1 {"partial"} else {"scored"}});
+            service
+                .update(&job.id, |job, _| {
+                    job.report = Some(report("gpt-6-sol", 3));
+                    for group in &mut job.groups {
+                        group.status = "completed".into();
+                        group.report = Some(report(
+                            if group.index == 1 {
+                                "grok-4.7"
+                            } else {
+                                "gpt-6-sol"
+                            },
+                            1,
+                        ));
+                    }
+                    job.groups[0].report = Some(report("fixture-unknown", 1));
+                })
+                .unwrap();
+            service.apply_degradation(&job.id);
+            assert!(service.state(client, &id).unwrap().degraded.is_empty());
+            assert!(gateway.test_candidates().unwrap()[0].queued);
+            service
+                .update(&job.id, |job, _| {
+                    job.groups[0].report = Some(report("gpt-6-sol", 1))
+                })
+                .unwrap();
+            service.apply_degradation(&job.id);
+            let state = service.state(client, &id).unwrap();
+            assert_eq!(state.degraded.is_empty(), !automatic);
+            assert_eq!(gateway.test_candidates().unwrap()[0].queued, !automatic);
+            if automatic {
+                let mark = &state.degraded[&id];
+                assert!(mark.queue_removed);
+                assert_eq!(mark.predicted_model, "gpt-6-sol");
+                assert!(matches!(mark.basis, Some(DegradationBasis::SampleFamily)));
+                assert_eq!(mark.group_indexes, vec![2]);
+                assert_eq!(
+                    lock(&service.0.data)
+                        .saved
+                        .degraded
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    vec![scope_key(client, &id)]
+                );
+            }
+            service.cancel(&job.id).unwrap();
+            completed(&service, &job.id).await;
+        }
+        drop(permits);
+    }
+}
 #[tokio::test]
 async fn tokenizer_reads_late_usage_and_preserves_zero_and_message_cache_counts() {
     for (protocol,body,expected) in [
@@ -2565,6 +2691,8 @@ fn detection_controls_and_marks_are_isolated_for_identical_provider_ids() {
                     probability: None,
                     engine: Engine::LmDetector,
                     queue_removed: false,
+                    basis: None,
+                    group_indexes: vec![],
                     error: None,
                 },
             );

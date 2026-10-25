@@ -21,6 +21,12 @@ const bank: ProviderTestingState["bank"] = {
   updating: false,
   error: null,
 };
+const lmBank: ProviderTestingState["bank"] = {
+  ...bank,
+  version: { revision: "567e11d65a48d4fbba2713cc4dfbe685cdd05a73" },
+  updatedAt: null,
+  result: null,
+};
 export function providerTestingPreview(
   name: string,
   args: Record<string, unknown>,
@@ -41,10 +47,7 @@ export function providerTestingPreview(
         },
         banks: {
           modelTrace: bank,
-          lmDetector: {
-            ...bank,
-            version: { revision: "567e11d65a48d4fbba2713cc4dfbe685cdd05a73" },
-          },
+          lmDetector: lmBank,
         },
         jobs: [],
         degraded: {},
@@ -259,8 +262,10 @@ export function providerTestingPreview(
     state.revision = crypto.randomUUID();
   }
   if (name === "provider_test_update_bank") {
-    bank.checkedAt = Date.now();
-    return structuredClone(bank);
+    const selected = args.engine === "lmDetector" ? lmBank : bank;
+    selected.checkedAt = Date.now();
+    if (args.engine === "lmDetector") selected.result = "up-to-date";
+    return structuredClone(selected);
   }
   return null;
 }

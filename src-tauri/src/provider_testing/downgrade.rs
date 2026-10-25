@@ -1,5 +1,6 @@
 //! User-selected model hierarchy; unknown identifiers never imply recovery.
 use super::compat::{integer, string};
+use super::types::{DegradationBasis, Job};
 use regex::Regex;
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -147,29 +148,93 @@ pub fn is_downgrade(requested: &str, predicted: &str) -> bool {
     classify(requested, predicted) == Some(true)
 }
 pub fn verdict(requested: &str, report: &Value) -> &'static str {
-    if !valid_report(report) {
+    let Some(members) = report_members(report) else {
         return "unknown";
+    };
+    if members.len() > 1 {
+        return if members.iter().all(|m| classify(requested, m) == Some(true)) {
+            "downgrade"
+        } else {
+            "unknown"
+        };
     }
-    let predicted = string(&report["prediction"]);
-    // Explicit membership from the pinned bank. A new merged identity is not guessed.
-    let display = string(&report["prediction_name"]);
-    if display.contains('/') {
-        if predicted == "gpt-6-astra" && display == "gpt-6-astra/6.1-sol" {
-            return if ["gpt-6-astra", "gpt-6.1-sol"]
-                .iter()
-                .all(|m| classify(requested, m) == Some(true))
-            {
-                "downgrade"
-            } else {
-                "unknown"
-            };
-        }
-        return "unknown";
-    }
-    match classify(requested, predicted) {
+    match classify(requested, members[0]) {
         Some(true) => "downgrade",
         Some(false) => "notDowngrade",
         None => "unknown",
+    }
+}
+fn report_members(report: &Value) -> Option<Vec<&str>> {
+    if !valid_report(report) {
+        return None;
+    }
+    let predicted = string(&report["prediction"]);
+    let display = string(&report["prediction_name"]);
+    if !display.contains('/') {
+        return Some(vec![predicted]);
+    }
+    // Explicit membership from the pinned bank. A new merged identity is not guessed.
+    (predicted == "gpt-6-astra" && display == "gpt-6-astra/6.1-sol")
+        .then(|| vec!["gpt-6-astra", "gpt-6.1-sol"])
+}
+pub struct LmVerdict {
+    pub disposition: &'static str,
+    pub basis: Option<DegradationBasis>,
+    /// One-based group numbers, for display and persisted evidence.
+    pub group_indexes: Vec<usize>,
+}
+pub fn lm_verdict(job: &Job, report: &Value) -> LmVerdict {
+    let unknown = || LmVerdict {
+        disposition: "unknown",
+        basis: None,
+        group_indexes: vec![],
+    };
+    let requested = &job.forwarded_model;
+    let aggregate = verdict(requested, report);
+    if job.groups.len() != job.sample_count
+        || ![1, 3].contains(&job.sample_count)
+        || integer(&report["used_outputs"]) != Some(job.sample_count as i64)
+        || aggregate == "unknown"
+        || job.groups.iter().any(|group| {
+            group.status != "completed"
+                || group.uncertain
+                || group.retryable
+                || group.error.is_some()
+                || group.report.as_ref().is_none_or(|r| {
+                    integer(&r["used_outputs"]) != Some(1) || verdict(requested, r) == "unknown"
+                })
+        })
+    {
+        return unknown();
+    }
+    let Some(requested_family) = family(&normalize(requested)) else {
+        return unknown();
+    };
+    let group_indexes: Vec<_> = job
+        .groups
+        .iter()
+        .filter(|group| {
+            group
+                .report
+                .as_ref()
+                .and_then(report_members)
+                .is_some_and(|members| {
+                    members.iter().all(|model| {
+                        family(&normalize(model)).is_some_and(|rank| rank < requested_family)
+                    })
+                })
+        })
+        .map(|group| group.index + 1)
+        .collect();
+    let mixed = !group_indexes.is_empty();
+    LmVerdict {
+        disposition: if mixed { "downgrade" } else { aggregate },
+        basis: Some(if mixed {
+            DegradationBasis::SampleFamily
+        } else {
+            DegradationBasis::Aggregate
+        }),
+        group_indexes,
     }
 }
 
@@ -177,6 +242,97 @@ pub fn verdict(requested: &str, report: &Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn lm_job(models: &[&str], aggregate: &str) -> Job {
+        let report = |model: &str, count| json!({"prediction":model,"prediction_name":model,"used_outputs":count,"decision":if count == 1 {"partial"} else {"scored"},"probability":null});
+        serde_json::from_value(json!({
+            "id":"fixture-job","clientId":"codex","providerId":"fixture-provider",
+            "providerName":"Fixture","providerVersion":"fixture-version","kind":"fingerprint",
+            "mode":"text","requestedModel":"gpt-6-sol","forwardedModel":"gpt-6-sol",
+            "status":"completed","createdAt":1,"elapsedMs":1,"automatic":false,"canRetry":false,
+            "engine":"lmDetector","sampleCount":models.len(),"report":report(aggregate, models.len()),
+            "groups":models.iter().enumerate().map(|(index, model)| super::super::types::Group {
+                index, status:"completed".into(), report:Some(report(model, 1)), ..Default::default()
+            }).collect::<Vec<_>>()
+        })).unwrap()
+    }
+
+    #[test]
+    fn lm_mixed_family_uses_complete_groups_and_same_family_uses_aggregate() {
+        let mixed = lm_job(&["gpt-6-sol", "grok-4.7", "claude-sonnet-5"], "gpt-6-sol");
+        let result = lm_verdict(&mixed, mixed.report.as_ref().unwrap());
+        assert_eq!(result.disposition, "downgrade");
+        assert!(matches!(result.basis, Some(DegradationBasis::SampleFamily)));
+        assert_eq!(result.group_indexes, vec![2]);
+        for (aggregate, expected) in [("gpt-6-sol", "notDowngrade"), ("gpt-6-luna", "downgrade")] {
+            let job = lm_job(&["gpt-6-luna", "gpt-6-sol", "gpt-6-sol"], aggregate);
+            let result = lm_verdict(&job, job.report.as_ref().unwrap());
+            assert_eq!(result.disposition, expected);
+            assert!(matches!(result.basis, Some(DegradationBasis::Aggregate)));
+            assert!(result.group_indexes.is_empty());
+        }
+        let mut mapped = mixed.clone();
+        mapped.requested_model = "fixture-mapped-alias".into();
+        assert_eq!(
+            lm_verdict(&mapped, mapped.report.as_ref().unwrap()).disposition,
+            "downgrade"
+        );
+        let single = lm_job(&["grok-4.7"], "grok-4.7");
+        assert_eq!(
+            lm_verdict(&single, single.report.as_ref().unwrap()).group_indexes,
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn lm_unknown_or_incomplete_sample_vetoes_even_a_degraded_aggregate() {
+        let original = lm_job(&["gpt-6-luna", "grok-4.7", "gpt-6-sol"], "gpt-6-luna");
+        for mutation in 0..9 {
+            let mut job = original.clone();
+            match mutation {
+                0 => job.groups[0].status = "failed".into(),
+                1 => job.groups[0].uncertain = true,
+                2 => job.groups[0].retryable = true,
+                3 => job.groups[0].error = Some("fixture failure".into()),
+                4 => {
+                    job.groups[0].report.as_mut().unwrap()["prediction"] = "gpt-custom-alias".into()
+                }
+                5 => job.report.as_mut().unwrap()["prediction"] = "unknown-fixture".into(),
+                6 => job.report.as_mut().unwrap()["used_outputs"] = 2.into(),
+                7 => {
+                    job.groups.pop();
+                }
+                _ => {
+                    job.groups[0].report.as_mut().unwrap()["prediction_name"] =
+                        "unknown/merged".into()
+                }
+            }
+            let result = lm_verdict(&job, job.report.as_ref().unwrap());
+            assert_eq!(result.disposition, "unknown", "mutation {mutation}");
+            assert!(result.basis.is_none());
+            assert!(result.group_indexes.is_empty());
+        }
+    }
+
+    #[test]
+    fn lm_known_merged_candidates_keep_the_existing_unanimous_rule() {
+        let mut job = lm_job(&["gpt-6-astra"], "gpt-6-astra");
+        job.groups[0].report.as_mut().unwrap()["prediction_name"] = "gpt-6-astra/6.1-sol".into();
+        job.report.as_mut().unwrap()["prediction_name"] = "gpt-6-astra/6.1-sol".into();
+        for (requested, expected) in [
+            ("claude-sonnet-5", "downgrade"),
+            ("gpt-6.1-astra", "downgrade"),
+            ("gpt-6-astra", "unknown"),
+            ("gpt-6-sol", "unknown"),
+        ] {
+            job.forwarded_model = requested.into();
+            assert_eq!(
+                lm_verdict(&job, job.report.as_ref().unwrap()).disposition,
+                expected,
+                "{requested}"
+            );
+        }
+    }
 
     #[test]
     fn downgrade_vectors_preserve_legacy_exception_and_rank_tiers_first() {

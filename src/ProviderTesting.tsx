@@ -18,12 +18,27 @@ import type {
   ProviderTestJob,
   ProviderDetection,
   ProviderTestError,
+  FingerprintReport,
 } from "./bridge-contracts";
 import "./provider-testing.css";
 
 const engineNames = { modelTrace: "ModelTrace", lmDetector: "LM Detector" };
+const bankResults: Record<string, string> = {
+  updated: "已更新",
+  "up-to-date": "已是最新",
+  failed: "检查失败",
+};
 const percent = (value: number | null | undefined) =>
   value == null ? "—" : `${(value * 100).toFixed(2)}%`;
+const basisLabel = (
+  basis: FingerprintReport["disposition_basis"],
+  groups: number[] = [],
+) =>
+  basis === "sample_family"
+    ? `第 ${groups.join("、")} 组出现较低家族`
+    : basis === "aggregate"
+      ? "汇总依据"
+      : "";
 const modes: Record<ProviderTestMode, string> = {
   text: "普通对话",
   compact: "Compact",
@@ -821,8 +836,18 @@ export default function ProviderTesting({
             {mark && (
               <div className="provider-test-mark">
                 <span>
-                  降智：{mark.requestedModel} → {mark.predictedModel}（
-                  {percent(mark.probability)}）
+                  {mark.basis === "sample_family" ? (
+                    <>
+                      降智：{basisLabel(mark.basis, mark.groupIndexes)} · 请求{" "}
+                      {mark.requestedModel}
+                    </>
+                  ) : (
+                    <>
+                      降智：{mark.requestedModel} → {mark.predictedModel}（
+                      {percent(mark.probability)}）
+                      {mark.basis && ` · ${basisLabel(mark.basis)}`}
+                    </>
+                  )}
                 </span>
                 <button
                   className="secondary compact"
@@ -870,6 +895,7 @@ export default function ProviderTesting({
               <select
                 aria-label="指纹库检测源"
                 value={bankEngine}
+                disabled={busy || selectedBank.updating}
                 onChange={(e) =>
                   setBankEngine(e.target.value as DetectionEngine)
                 }
@@ -903,6 +929,24 @@ export default function ProviderTesting({
                 <dt>检查时间</dt>
                 <dd>{date(selectedBank.checkedAt)}</dd>
               </div>
+              {bankEngine === "lmDetector" && (
+                <>
+                  <div>
+                    <dt>更新时间</dt>
+                    <dd>{date(selectedBank.updatedAt)}</dd>
+                  </div>
+                  <div>
+                    <dt>更新结果</dt>
+                    <dd role="status">
+                      {busy || selectedBank.updating
+                        ? "检查中"
+                        : selectedBank.error
+                          ? "检查失败"
+                          : (bankResults[selectedBank.result ?? ""] ?? "—")}
+                    </dd>
+                  </div>
+                </>
+              )}
             </dl>
             <div className="provider-test-bank">
               <div className="provider-test-bank-head">
@@ -1016,12 +1060,22 @@ export default function ProviderTesting({
                   const updated = await command("provider_test_update_bank", {
                     engine: bankEngine,
                   });
+                  if (bankEngine === "lmDetector") {
+                    setState(
+                      (current) =>
+                        current && {
+                          ...current,
+                          banks: { ...current.banks, lmDetector: updated },
+                        },
+                    );
+                    return;
+                  }
                   if (updated.error) throw new Error(updated.error);
                   setNotice(`${engineNames[bankEngine]} 指纹库已更新`);
                 })
               }
             >
-              更新指纹库
+              {bankEngine === "lmDetector" ? "检查更新" : "更新指纹库"}
             </button>
           )}
         </div>
@@ -1226,6 +1280,17 @@ function TestResult({
         </div>
         {job.report && (
           <>
+            {job.report.disposition_basis && (
+              <div>
+                <dt>判定依据</dt>
+                <dd>
+                  {basisLabel(
+                    job.report.disposition_basis,
+                    job.report.disposition_group_indexes,
+                  )}
+                </dd>
+              </div>
+            )}
             <div>
               <dt>预测模型</dt>
               <dd>{job.report.prediction_name || job.report.prediction}</dd>

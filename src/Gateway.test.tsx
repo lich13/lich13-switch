@@ -108,6 +108,8 @@ describe("gateway controls", () => {
     const provider = await screen.findByRole("button", {
       name: `${state.providers[0].name} 名称`,
     });
+    expect(screen.queryByLabelText("网关操作")).not.toBeInTheDocument();
+    expect(screen.queryByText("刷新全部额度")).not.toBeInTheDocument();
     await user.dblClick(provider);
     const input = screen.getByRole("textbox", {
       name: `${state.providers[0].name} 名称`,
