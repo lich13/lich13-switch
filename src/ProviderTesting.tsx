@@ -1,3 +1,5 @@
+import { flushTestPrompt, useTestPrompt } from "./provider-test-prompt";
+import { clientName } from "./ClientSelection";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Copy, RefreshCw } from "lucide-react";
 import { command } from "./bridge";
@@ -6,6 +8,8 @@ import { subscriptions } from "./subscriptions";
 import Modal from "./Modal";
 import { errorOf, type GatewayState, type Provider } from "./types";
 import type {
+  DetectionEngine,
+  DetectionPlatform,
   ProviderTestMode,
   ProviderTestKind,
   ProviderTestingState,
@@ -17,6 +21,9 @@ import type {
 } from "./bridge-contracts";
 import "./provider-testing.css";
 
+const engineNames = { modelTrace: "ModelTrace", lmDetector: "LM Detector" };
+const percent = (value: number | null | undefined) =>
+  value == null ? "—" : `${(value * 100).toFixed(2)}%`;
 const modes: Record<ProviderTestMode, string> = {
   text: "普通对话",
   compact: "Compact",
@@ -75,8 +82,12 @@ export default function ProviderTesting({
   const [endpoint, setEndpoint] = useState(provider.baseUrl);
   const [chosen, setChosen] = useState({ connection: "", fingerprint: "" });
   const [concurrency, setConcurrency] = useState(1);
-  const [prompt, setPrompt] = useState<string | null>(null);
-  const [savedPrompt, setSavedPrompt] = useState("");
+  const promptState = useTestPrompt(state?.connectionPrompt);
+  const { prompt } = promptState;
+  const [tokenizer, setTokenizer] = useState(false);
+  const [bankEngine, setBankEngine] = useState<DetectionEngine>(
+    gateway.clientId === "codex" ? "modelTrace" : "lmDetector",
+  );
   const [catalog, setCatalog] = useState<{
     endpoint: string;
     value: ProviderTestModels;
@@ -97,11 +108,15 @@ export default function ProviderTesting({
   const kind: ProviderTestKind =
     tab === "fingerprint" ? "fingerprint" : "connection";
   const testing = tab === "connection" || tab === "fingerprint";
-  const fingerprint = gateway.clientId === "codex" && !provider.searchOnly;
+  const fingerprint = !provider.searchOnly;
+  const platform = state?.platform;
+  const sampleCount =
+    platform?.engine === "lmDetector"
+      ? platform.lmDetectorSamples
+      : (platform?.modelTraceSamples ?? 3);
+  const selectedBank = state?.banks[bankEngine];
   const model = chosen[kind];
-  const dirty =
-    (!!detection && JSON.stringify(detection) !== detectionSaved) ||
-    (prompt !== null && prompt !== savedPrompt);
+  const dirty = !!detection && JSON.stringify(detection) !== detectionSaved;
   useEffect(() => {
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
@@ -149,11 +164,6 @@ export default function ProviderTesting({
     setDetectionSaved(JSON.stringify(state.detection));
     setDetectionRevision(state.revision);
   }, [state, detection]);
-  useEffect(() => {
-    if (!state || prompt !== null) return;
-    setPrompt(state.connectionPrompt);
-    setSavedPrompt(state.connectionPrompt);
-  }, [state, prompt]);
   useEffect(() => {
     if (!state || !testing) return;
     const jobs = state.jobs.filter(
@@ -249,8 +259,8 @@ export default function ProviderTesting({
     }
   };
   const leave = async () => {
-    if (!busy && (!dirty || (await confirmAction("放弃未保存的修改？"))))
-      close();
+    if (busy || !(await flushTestPrompt())) return;
+    if (!dirty || (await confirmAction("放弃未保存的修改？"))) close();
   };
   const scopedJobs =
     state?.jobs.filter(
@@ -267,11 +277,14 @@ export default function ProviderTesting({
   const canStart =
     !busy &&
     !running.length &&
+    !!state &&
     endpointAvailable &&
     (kind !== "connection" || !!prompt?.trim()) &&
     ((kind === "connection" && !model) || (modelAvailable && !catalogLoading));
   const start = () =>
     perform(async () => {
+      if (!(await promptState.flush())) return;
+      const promptSnapshot = promptState.snapshot();
       const current = await command("get_gateway", {
         clientId: gateway.clientId,
       });
@@ -282,11 +295,15 @@ export default function ProviderTesting({
           endpoint,
           model,
           kind,
-          concurrency: kind === "fingerprint" ? concurrency : 1,
-          ...(kind === "connection" ? { prompt: prompt! } : {}),
+          concurrency:
+            kind === "fingerprint" ? Math.min(concurrency, sampleCount) : 1,
+          tokenizer:
+            kind === "fingerprint" &&
+            platform?.engine === "lmDetector" &&
+            tokenizer,
+          ...(kind === "connection" ? { prompt: promptSnapshot! } : {}),
         },
       });
-      if (kind === "connection") setSavedPrompt(prompt!);
       setDetailId(job.id);
     });
   const stop = () =>
@@ -360,7 +377,7 @@ export default function ProviderTesting({
     label: string,
     allowDefault: boolean,
   ) => (
-    <label className="provider-test-field">
+    <label className="provider-test-field provider-test-full">
       <span>模型</span>
       <div className="provider-test-model-control">
         <select
@@ -399,6 +416,71 @@ export default function ProviderTesting({
       </div>
     </label>
   );
+  const platformControls = (manual: boolean) =>
+    platform && (
+      <div className="provider-test-platform provider-test-full">
+        <label className="provider-test-field">
+          <span>检测源</span>
+          <select
+            aria-label="检测源"
+            value={platform.engine}
+            disabled={busy}
+            onChange={(e) =>
+              void savePlatform({
+                ...platform,
+                engine: e.target.value as DetectionEngine,
+              })
+            }
+          >
+            <option value="modelTrace">ModelTrace</option>
+            <option value="lmDetector">LM Detector</option>
+          </select>
+        </label>
+        <label className="provider-test-field">
+          <span>采样组数</span>
+          <select
+            aria-label="采样组数"
+            value={sampleCount}
+            disabled={busy}
+            onChange={(e) =>
+              void savePlatform({
+                ...platform,
+                [platform.engine === "lmDetector"
+                  ? "lmDetectorSamples"
+                  : "modelTraceSamples"]: Number(e.target.value),
+              })
+            }
+          >
+            <option value={1}>1 组 · 快速判断</option>
+            <option value={3}>3 组 · 汇总判断</option>
+          </select>
+        </label>
+        {manual && (
+          <label className="provider-test-field">
+            <span>并发</span>
+            <select
+              aria-label="指纹并发"
+              value={Math.min(concurrency, sampleCount)}
+              disabled={busy || !!running.length}
+              onChange={(e) => setConcurrency(Number(e.target.value))}
+            >
+              {Array.from({ length: sampleCount }, (_, i) => i + 1).map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+    );
+  const savePlatform = (next: DetectionPlatform) =>
+    perform(async () => {
+      await command("provider_test_set_platform", {
+        clientId: gateway.clientId,
+        platform: next,
+      });
+    });
   const catalogStatus = (
     <>
       {catalogLoading ? (
@@ -473,9 +555,7 @@ export default function ProviderTesting({
       >
         {testing && (
           <>
-            <div
-              className={`provider-test-config${kind === "fingerprint" ? " with-concurrency" : ""}`}
-            >
+            <div className="provider-test-config">
               {endpointSelect(endpoint, (value) => {
                 setEndpoint(value);
                 setChosen({ connection: "", fingerprint: "" });
@@ -487,21 +567,18 @@ export default function ProviderTesting({
                 "测试模型",
                 kind === "connection",
               )}
-              {kind === "fingerprint" && (
-                <label className="provider-test-field">
-                  <span>并发</span>
-                  <select
-                    aria-label="指纹并发"
-                    value={concurrency}
+              {kind === "fingerprint" && platformControls(true)}
+              {kind === "fingerprint" && platform?.engine === "lmDetector" && (
+                <label className="provider-test-tokenizer provider-test-full">
+                  <input
+                    type="checkbox"
+                    checked={tokenizer}
                     disabled={busy || !!running.length}
-                    onChange={(e) => setConcurrency(Number(e.target.value))}
-                  >
-                    {[1, 2, 3].map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(e) => setTokenizer(e.target.checked)}
+                  />
+                  <span>
+                    附加分词器探测 <small>最多 22 次短请求，仅供参考</small>
+                  </span>
                 </label>
               )}
             </div>
@@ -513,14 +590,27 @@ export default function ProviderTesting({
             )}
             {kind === "connection" && (
               <label className="provider-test-field provider-test-prompt">
-                <span>测试文案</span>
+                <span>测试文案 · 全局</span>
                 <textarea
                   aria-label="测试文案"
                   value={prompt ?? ""}
-                  disabled={busy || !!running.length || prompt === null}
+                  disabled={prompt === null}
                   rows={3}
-                  onChange={(e) => setPrompt(e.target.value)}
+                  onChange={(e) => promptState.change(e.target.value)}
                 />
+                {promptState.saving && <span role="status">正在保存…</span>}
+                {promptState.error && (
+                  <span className="provider-test-error" role="alert">
+                    {promptState.error}{" "}
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => void promptState.flush()}
+                    >
+                      重试保存
+                    </button>
+                  </span>
+                )}
               </label>
             )}
           </>
@@ -613,12 +703,21 @@ export default function ProviderTesting({
               <input
                 type="checkbox"
                 checked={detection.enabled}
-                disabled={busy}
+                disabled={
+                  busy ||
+                  (!detection.enabled &&
+                    (!detection.model || !detectionModelAvailable))
+                }
                 onChange={(e) =>
                   setDetection({ ...detection, enabled: e.target.checked })
                 }
               />
             </label>
+            <p className="provider-test-hint">
+              {clientName(gateway.clientId)}{" "}
+              的所有供应商共用检测源和组数，改选后自动保存，新任务生效。模型、端点和周期仅用于本供应商。
+            </p>
+            {platformControls(false)}
             <div className="provider-test-detection-config">
               {endpointSelect(detection.endpoint ?? provider.baseUrl, (value) =>
                 setDetection({ ...detection, endpoint: value }),
@@ -723,7 +822,7 @@ export default function ProviderTesting({
               <div className="provider-test-mark">
                 <span>
                   降智：{mark.requestedModel} → {mark.predictedModel}（
-                  {(mark.probability * 100).toFixed(1)}%）
+                  {percent(mark.probability)}）
                 </span>
                 <button
                   className="secondary compact"
@@ -735,7 +834,7 @@ export default function ProviderTesting({
                         scope,
                       );
                       await command("provider_test_clear_mark", {
-                        providerId: provider.id,
+                        ...scope,
                         expectedRevision: current.revision,
                       });
                       await readDetection();
@@ -744,6 +843,9 @@ export default function ProviderTesting({
                 >
                   清除标记
                 </button>
+                <span>
+                  {mark.queueRemoved ? "已退出自动队列" : "退队未完成"}
+                </span>
                 {mark.error && <span role="alert">{mark.error}</span>}
                 <span>重新入队请使用供应商队列开关。</span>
               </div>
@@ -761,16 +863,29 @@ export default function ProviderTesting({
             )}
           </>
         )}
-        {tab === "bank" && state && (
+        {tab === "bank" && selectedBank && (
           <>
+            <label className="provider-test-field provider-test-bank-source">
+              <span>检测源</span>
+              <select
+                aria-label="指纹库检测源"
+                value={bankEngine}
+                onChange={(e) =>
+                  setBankEngine(e.target.value as DetectionEngine)
+                }
+              >
+                <option value="modelTrace">ModelTrace</option>
+                <option value="lmDetector">LM Detector</option>
+              </select>
+            </label>
             <dl className="provider-test-summary">
               <div>
                 <dt>来源</dt>
                 <dd>
-                  {state.bank.source === "builtin" ||
-                  state.bank.source === "bundled"
+                  {selectedBank.source === "builtin" ||
+                  selectedBank.source === "bundled"
                     ? "内置"
-                    : state.bank.source === "cache"
+                    : selectedBank.source === "cache"
                       ? "已更新"
                       : "—"}
                 </dd>
@@ -778,15 +893,15 @@ export default function ProviderTesting({
               <div>
                 <dt>版本</dt>
                 <dd>
-                  {typeof state.bank.version?.revision === "string" &&
-                  state.bank.version.revision
-                    ? state.bank.version.revision.slice(0, 7)
+                  {typeof selectedBank.version?.revision === "string" &&
+                  selectedBank.version.revision
+                    ? selectedBank.version.revision.slice(0, 7)
                     : "—"}
                 </dd>
               </div>
               <div>
                 <dt>检查时间</dt>
-                <dd>{date(state.bank.checkedAt)}</dd>
+                <dd>{date(selectedBank.checkedAt)}</dd>
               </div>
             </dl>
             <div className="provider-test-bank">
@@ -794,16 +909,16 @@ export default function ProviderTesting({
                 <span>模型</span>
                 <span>标识</span>
               </div>
-              {state.bank.models.map((model) => (
+              {selectedBank.models.map((model) => (
                 <div key={model.id}>
                   <span>{model.name}</span>
                   <span>{model.id}</span>
                 </div>
               ))}
             </div>
-            {state.bank.error && (
+            {selectedBank.error && (
               <p className="provider-test-error" role="alert">
-                {state.bank.error}
+                {selectedBank.error}
               </p>
             )}
           </>
@@ -879,7 +994,7 @@ export default function ProviderTesting({
                 onClick={() =>
                   void perform(async () => {
                     await command("provider_test_set_detection", {
-                      providerId: provider.id,
+                      ...scope,
                       detection,
                       expectedRevision: detectionRevision,
                     });
@@ -895,11 +1010,14 @@ export default function ProviderTesting({
           {tab === "bank" && (
             <button
               className="primary"
-              disabled={busy || state?.bank.updating}
+              disabled={busy || selectedBank?.updating}
               onClick={() =>
                 void perform(async () => {
-                  await command("provider_test_update_bank");
-                  setNotice("指纹库已更新");
+                  const updated = await command("provider_test_update_bank", {
+                    engine: bankEngine,
+                  });
+                  if (updated.error) throw new Error(updated.error);
+                  setNotice(`${engineNames[bankEngine]} 指纹库已更新`);
                 })
               }
             >
@@ -1043,6 +1161,41 @@ function TestResult({
         <ConnectionReply detail={{ job, output }} />
       )}
       <dl className="provider-test-summary">
+        {job.kind === "fingerprint" && (
+          <>
+            <div>
+              <dt>结论</dt>
+              <dd>
+                {active(job)
+                  ? "检测中"
+                  : job.report?.disposition === "downgrade"
+                    ? "判定降智"
+                    : job.report?.disposition === "notDowngrade"
+                      ? "未命中降智规则"
+                      : job.report?.ambiguous
+                        ? "无法确定"
+                        : "无法判定"}
+                {job.report?.initial && (
+                  <span className="provider-test-inline-meta">初步判断</span>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>检测源</dt>
+              <dd>
+                {engineNames[job.engine]} · {job.report?.used_outputs ?? 0} /{" "}
+                {job.sampleCount} 组有效
+                {!active(job) &&
+                  job.report &&
+                  job.report.used_outputs < job.sampleCount && (
+                    <span className="provider-test-inline-meta">
+                      样本不足，仅供参考
+                    </span>
+                  )}
+              </dd>
+            </div>
+          </>
+        )}
         <div>
           <dt>测试端点</dt>
           <dd>{job.endpoint ?? "历史记录未保存端点"}</dd>
@@ -1075,12 +1228,12 @@ function TestResult({
           <>
             <div>
               <dt>预测模型</dt>
-              <dd>{job.report.prediction}</dd>
+              <dd>{job.report.prediction_name || job.report.prediction}</dd>
             </div>
             <div>
-              <dt>匹配度</dt>
+              <dt>置信度</dt>
               <dd>
-                {(job.report.probability * 100).toFixed(2)}%
+                {percent(job.report.probability)}
                 <span className="provider-test-inline-meta">
                   有效组 {job.report.used_outputs}
                 </span>
@@ -1089,6 +1242,65 @@ function TestResult({
           </>
         )}
       </dl>
+      {!!job.report?.results.length && (
+        <div className="provider-test-ranking" aria-label="候选排名">
+          <div>
+            <span>候选模型</span>
+            <span>评分</span>
+            <span>置信度</span>
+          </div>
+          {job.report.results.slice(0, 5).map((r, i) => (
+            <div key={r.model}>
+              <span>
+                {i + 1}. {r.display_name || r.model}
+              </span>
+              <span>{r.score.toFixed(3)}</span>
+              <span>{percent(r.probability)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {job.tokenizerResult && (
+        <details className="provider-test-diagnostics">
+          <summary>
+            分词器探测 ·{" "}
+            {statuses[job.tokenizerResult.status] ?? job.tokenizerResult.status}
+            {job.tokenizerResult.verdict
+              ? job.tokenizerResult.verdict.kind === "unknown"
+                ? " · 无法确定"
+                : ` · ${job.tokenizerResult.verdict.kind === "exact" ? "匹配" : "相近"} ${job.tokenizerResult.verdict.top.id}`
+              : ""}
+          </summary>
+          <p className="provider-test-hint">
+            分词器结果独立展示，不参与降智判定或退队。
+          </p>
+          {job.tokenizerResult.baselineDrift && (
+            <p className="provider-test-hint">
+              两次对照用量不一致，上游可能添加了变化的隐藏输入。
+            </p>
+          )}
+          {job.tokenizerResult.error && (
+            <p className="provider-test-error">{job.tokenizerResult.error}</p>
+          )}
+          {job.tokenizerResult.verdict && (
+            <p>
+              置信度 {percent(job.tokenizerResult.verdict.confidence)}
+              {job.tokenizerResult.verdict.claim &&
+                ` · 与请求型号${{ consistent: "一致", inconsistent: "不一致", uncertain: "关系无法确定" }[job.tokenizerResult.verdict.claim.status] ?? "关系无法确定"}`}
+            </p>
+          )}
+          {job.tokenizerResult.steps?.map((step, i) => (
+            <div key={i} className="provider-test-tokenizer-step">
+              <span>{step.probe ?? "对照"}</span>
+              <span>
+                {step.tokens == null
+                  ? (step.error ?? "等待用量")
+                  : `${step.tokens} tokens`}
+              </span>
+            </div>
+          ))}
+        </details>
+      )}
       {job.completionReason && (
         <p className="provider-test-hint">
           {job.completionReason === "confidence99"
@@ -1113,30 +1325,50 @@ function TestResult({
             <span>分组</span>
             <span>状态</span>
             <span>预测模型</span>
-            <span>匹配度</span>
+            <span>置信度</span>
             <span>耗时</span>
           </div>
           {job.groups.map((group) => (
-            <details
-              key={group.index}
-              open={
-                group.status === "failed" &&
-                !!output?.groupErrors[String(group.index)]
-              }
-            >
+            <details key={group.index}>
               <summary>
                 <span>第 {group.index + 1} 组</span>
                 <span>{statuses[group.status] ?? group.status}</span>
-                <span>{group.report?.prediction ?? "—"}</span>
                 <span>
-                  {group.report
-                    ? `${(group.report.probability * 100).toFixed(2)}%`
-                    : "—"}
+                  {group.report?.prediction_name ||
+                    group.report?.prediction ||
+                    "—"}
+                </span>
+                <span>
+                  {group.report ? percent(group.report.probability) : "—"}
                 </span>
                 <span>{(group.elapsedMs / 1000).toFixed(2)} s</span>
               </summary>
               <div className="provider-test-group-detail">
                 <dl className="provider-test-summary">
+                  {group.report?.decision && (
+                    <div>
+                      <dt>评分状态</dt>
+                      <dd>
+                        {
+                          {
+                            scored: "已评分",
+                            partial: "初步排名",
+                            unscorable: "样本不足",
+                            not_model: "异常序列",
+                          }[group.report.decision]
+                        }
+                      </dd>
+                    </div>
+                  )}
+                  {group.report?.diagnostics?.[0] && (
+                    <div>
+                      <dt>有效整数</dt>
+                      <dd>
+                        {group.report.diagnostics[0].parsed_numbers} / 至少{" "}
+                        {group.report.diagnostics[0].minimum_numbers}
+                      </dd>
+                    </div>
+                  )}
                   <div>
                     <dt>目标整数</dt>
                     <dd>{group.expected}</dd>
@@ -1165,7 +1397,9 @@ function TestResult({
                     上游结果未知，未自动重放。
                   </p>
                 )}
-                <pre>{JSON.stringify(group.diagnostics, null, 2)}</pre>
+                {!!Object.keys(group.diagnostics ?? {}).length && (
+                  <pre>{JSON.stringify(group.diagnostics, null, 2)}</pre>
+                )}
                 {output?.groups[String(group.index)] && (
                   <pre>{output.groups[String(group.index)]}</pre>
                 )}

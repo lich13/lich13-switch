@@ -83,6 +83,12 @@ export type ProviderTestMode =
   | "tts"
   | "stt"
   | "realtime";
+export type DetectionEngine = "modelTrace" | "lmDetector";
+export type DetectionPlatform = {
+  engine: DetectionEngine;
+  modelTraceSamples: 1 | 3;
+  lmDetectorSamples: 1 | 3;
+};
 export type ProviderTestKind = "connection" | "fingerprint";
 export type ProviderAction = "settings" | "testing";
 export type ProviderTestRequest = {
@@ -94,18 +100,29 @@ export type ProviderTestRequest = {
   kind: ProviderTestKind;
   concurrency: number;
   prompt?: string;
+  tokenizer?: boolean;
 };
 export type FingerprintReport = {
   prediction: string;
   prediction_name: string;
-  probability: number;
+  probability: number | null;
   used_outputs: number;
   results: {
     model: string;
     display_name: string;
-    probability: number;
+    probability: number | null;
     score: number;
   }[];
+  decision?: "scored" | "partial" | "unscorable" | "not_model";
+  disposition?: "downgrade" | "notDowngrade" | "unknown";
+  initial?: boolean;
+  ambiguous?: boolean;
+  diagnostics?: {
+    parsed_numbers: number;
+    minimum_numbers: number;
+    accepted: boolean;
+  }[];
+  planned_outputs?: number;
   bank_version: Record<string, unknown>;
 };
 export type ProviderTestGroup = {
@@ -146,6 +163,27 @@ export type ProviderTestJob = {
   batchId: string | null;
   canRetry: boolean;
   completionReason: string | null;
+  engine: DetectionEngine;
+  sampleCount: number;
+  resourceVersion: Record<string, unknown>;
+  tokenizer: boolean;
+  tokenizerResult: {
+    status: string;
+    error?: string;
+    baselineDrift?: boolean;
+    steps: {
+      probe: string | null;
+      state: string;
+      tokens?: number;
+      error?: string;
+    }[];
+    verdict?: {
+      kind: string;
+      top: { id: string };
+      confidence: number;
+      claim: { status: string; probability: number } | null;
+    } | null;
+  } | null;
 };
 export type ProviderTestError = {
   httpStatus: number | null;
@@ -177,7 +215,8 @@ export type ProviderDegradation = {
   detectedAt: number;
   requestedModel: string;
   predictedModel: string;
-  probability: number;
+  probability: number | null;
+  engine: DetectionEngine;
   queueRemoved: boolean;
   error: string | null;
 };
@@ -197,6 +236,8 @@ export type ProviderTestingState = {
   degraded: Record<string, ProviderDegradation>;
   history: ProviderTestJob[];
   bank: FingerprintBankState;
+  banks: Record<DetectionEngine, FingerprintBankState>;
+  platform: DetectionPlatform;
   error: string | null;
   detectionStatus: {
     providerId: string;
@@ -609,12 +650,18 @@ export type CommandMap = {
     { clientId: ClientId; providerId: string },
     ProviderTestingState
   >;
+  provider_test_save_prompt: Call<{ prompt: string }, void>;
+  provider_test_set_platform: Call<
+    { clientId: ClientId; platform: DetectionPlatform },
+    void
+  >;
   provider_test_start: Call<{ request: ProviderTestRequest }, ProviderTestJob>;
   provider_test_query: Call<{ id: string }, ProviderTestDetail>;
   provider_test_cancel: Call<{ id: string }, void>;
   provider_test_retry: Call<{ id: string }, ProviderTestJob>;
   provider_test_set_detection: Call<
     {
+      clientId: ClientId;
       providerId: string;
       detection: ProviderDetection;
       expectedRevision: string;
@@ -622,7 +669,7 @@ export type CommandMap = {
     void
   >;
   provider_test_clear_mark: Call<
-    { providerId: string; expectedRevision: string },
+    { clientId: ClientId; providerId: string; expectedRevision: string },
     void
   >;
   provider_test_models: Call<
@@ -635,7 +682,10 @@ export type CommandMap = {
     },
     ProviderTestModels
   >;
-  provider_test_update_bank: Call<None, FingerprintBankState>;
+  provider_test_update_bank: Call<
+    { engine: DetectionEngine },
+    FingerprintBankState
+  >;
   get_provider_imports: Call<None, PendingImport[]>;
   confirm_provider_import: Call<
     {

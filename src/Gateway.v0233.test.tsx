@@ -399,7 +399,7 @@ describe("gateway provider token visibility", () => {
         await user.click(await screen.findByRole("button", { name: "添加" }));
         await screen.findByRole("dialog", { name: "添加供应商" });
       } else {
-        fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+        await user.click(screen.getByRole("button", { name: "Codex" }));
         await openProviderEditor(user, "codex");
       }
       const token = screen.getByLabelText(tokenLabel("codex"));

@@ -428,7 +428,7 @@ describe("user workflows", () => {
     await u.click(await screen.findByRole("button", { name: "添加" }));
     expect(screen.getByLabelText("experimental_bearer_token")).toHaveValue("");
   });
-  it("protects a test prompt before accepting another quick-panel testing target", async () => {
+  it("saves the global prompt before accepting another quick-panel testing target", async () => {
     localStorage.clear();
     const user = userEvent.setup();
     render(<App />);
@@ -452,28 +452,16 @@ describe("user workflows", () => {
     await act(async () => {
       mocks.listeners.get("provider-settings")?.(target);
     });
-    let confirmation = await screen.findByRole("dialog", { name: "确认操作" });
-    expect(
-      within(confirmation).getByText("打开连接测试会丢弃未保存的草稿。"),
-    ).toBeInTheDocument();
-    await user.click(
-      within(confirmation).getByRole("button", { name: "取消" }),
-    );
-    expect(input).toHaveValue("Reply with a short greeting. fixture draft");
-    await act(async () => {
-      mocks.listeners.get("provider-settings")?.(target);
+    expect(mocks.command).toHaveBeenCalledWith("provider_test_save_prompt", {
+      prompt: "Reply with a short greeting. fixture draft",
     });
-    confirmation = await screen.findByRole("dialog", { name: "确认操作" });
-    await user.click(
-      within(confirmation).getByRole("button", { name: "放弃修改" }),
-    );
     const dialog = await screen.findByRole("dialog", {
       name: `${gatewayDemo.providers[1].name} · 测试`,
     });
     await waitFor(() =>
       expect(
         within(dialog).getByRole("textbox", { name: "测试文案" }),
-      ).toHaveValue("Reply with a short greeting."),
+      ).toHaveValue("Reply with a short greeting. fixture draft"),
     );
     expect(
       mocks.command.mock.calls.some(([name]) => name === "provider_test_start"),

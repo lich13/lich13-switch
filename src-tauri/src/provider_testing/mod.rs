@@ -1,5 +1,5 @@
 //! Direct provider diagnostics. Only summaries/configuration are persisted;
-//! connection prompts are saved per provider; credentials and responses stay in this process.
+//! connection prompts are shared globally; credentials and responses stay in this process.
 mod bank;
 pub mod commands;
 mod compat;
@@ -8,9 +8,11 @@ mod downgrade;
 mod errors;
 mod fingerprint;
 mod fingerprint_stream;
+mod lm_detector;
 mod migration;
 mod modeltrace;
 mod scheduler;
+mod tokenizer;
 pub mod types;
 
 use crate::{
@@ -36,9 +38,21 @@ fn failure(message: &str) -> AppError {
 fn now() -> i64 {
     crate::usage::model::now()
 }
-fn config_revision(saved: &Persisted, provider: &str) -> String {
+fn client_key(client: ClientId) -> &'static str {
+    match client {
+        ClientId::Codex => "codex",
+        ClientId::Claude => "claude",
+        ClientId::Grok => "grok",
+        ClientId::Dsh => "dsh",
+    }
+}
+fn scope_key(client: ClientId, provider: &str) -> String {
+    format!("{}:{provider}", client_key(client))
+}
+fn config_revision(saved: &Persisted, client: ClientId, provider: &str) -> String {
+    let key = scope_key(client, provider);
     storage::digest(
-        json!({"detection":saved.detection.get(provider).cloned().unwrap_or_default(),"degraded":saved.degraded.get(provider)})
+        json!({"detection":saved.detection.get(&key).cloned().unwrap_or_else(|| Detection::for_client(client)),"degraded":saved.degraded.get(&key)})
             .to_string()
             .as_bytes(),
     )
@@ -52,6 +66,9 @@ struct Context {
     target: Target,
     challenges: Vec<(usize, String)>,
     bank: (Value, Value),
+    lm: Option<Arc<lm_detector::Resource>>,
+    engine: Engine,
+    sample_count: usize,
     detection_revision: Option<String>,
 }
 struct Data {
@@ -63,9 +80,12 @@ struct Data {
     detection_status: HashMap<String, DetectionStatus>,
     frequencies: std::collections::BTreeMap<String, u64>,
     frequency_sampled_at: Option<i64>,
-    frequency_error: Option<String>,
+    frequency_error: HashMap<String, String>,
     error: Option<String>,
     bank_updating: bool,
+    lm_updating: bool,
+    lm_error: Option<String>,
+    lm_status: Value,
 }
 struct Shared {
     path: PathBuf,
@@ -73,6 +93,7 @@ struct Shared {
     gateways: [Gateway; 4],
     events: broadcast::Sender<()>,
     jobs: Arc<Semaphore>,
+    lm: Mutex<Option<Arc<lm_detector::Resource>>>,
     #[cfg(test)]
     clock: std::sync::atomic::AtomicI64,
 }
@@ -107,7 +128,7 @@ impl Service {
             .transpose()
             .map_err(|_| failure("测试状态无法读取，已保留原文件"))?
             .unwrap_or_default();
-        if saved.schema != 2 {
+        if saved.schema != 3 {
             return Err(failure("测试状态来自更高版本，请升级应用"));
         }
         let mut changed = migrated;
@@ -116,7 +137,7 @@ impl Service {
                 if job.automatic && job.started_at.is_some() {
                     let timing = saved
                         .detection_timing
-                        .entry(job.provider_id.clone())
+                        .entry(scope_key(job.client_id, &job.provider_id))
                         .or_default();
                     timing.anchor_at = Some(now());
                     timing.last_started_at = timing.last_started_at.max(job.started_at);
@@ -143,6 +164,7 @@ impl Service {
             gateways,
             events,
             jobs: Arc::new(Semaphore::new(2)),
+            lm: Mutex::new(None),
             #[cfg(test)]
             clock: std::sync::atomic::AtomicI64::new(0),
             data: Mutex::new(Data {
@@ -154,9 +176,12 @@ impl Service {
                 detection_status: HashMap::new(),
                 frequencies: Default::default(),
                 frequency_sampled_at: None,
-                frequency_error: None,
+                frequency_error: Default::default(),
                 error: None,
                 bank_updating: false,
+                lm_updating: false,
+                lm_error: None,
+                lm_status: lm_detector::initial_status(directory),
             }),
         })))
     }
@@ -202,8 +227,15 @@ impl Service {
         let data = lock(&self.0.data);
         let scope = |job: &&Job| job.client_id == client && job.provider_id == provider;
         Ok(State {
-            revision: config_revision(&data.saved, provider),
-            connection_prompt: Self::connection_prompt(&data.saved, client, provider).into(),
+            revision: config_revision(&data.saved, client, provider),
+            connection_prompt: data.saved.connection_prompt.clone(),
+            platform: data
+                .saved
+                .platforms
+                .get(client_key(client))
+                .cloned()
+                .unwrap_or_else(|| PlatformSettings::for_client(client)),
+            banks: json!({"modelTrace":bank::status(&data.saved.bank, data.bank_updating),"lmDetector":({let mut status=data.lm_status.clone();status["updating"]=data.lm_updating.into();status["error"]=data.lm_error.clone().map(Value::String).unwrap_or_else(|| status["error"].clone());status})}),
             jobs: data
                 .saved
                 .jobs
@@ -215,21 +247,21 @@ impl Service {
             detection: data
                 .saved
                 .detection
-                .get(provider)
+                .get(&scope_key(client, provider))
                 .cloned()
-                .unwrap_or_default(),
+                .unwrap_or_else(|| Detection::for_client(client)),
             degraded: data
                 .saved
                 .degraded
                 .iter()
-                .filter(|(id, _)| client == ClientId::Codex && id.as_str() == provider)
-                .map(|(id, value)| (id.clone(), value.clone()))
+                .filter(|(id, _)| id.as_str() == scope_key(client, provider))
+                .map(|(_, value)| (provider.to_owned(), value.clone()))
                 .collect(),
             detection_status: data
                 .detection_status
-                .values()
-                .filter(|s| client == ClientId::Codex && s.provider_id == provider)
-                .cloned()
+                .iter()
+                .filter(|(key, _)| **key == scope_key(client, provider))
+                .map(|(_, s)| s.clone())
                 .collect(),
             history: data
                 .saved
@@ -267,10 +299,8 @@ impl Service {
         {
             return Err(failure("请选择有效模型和 1–3 并发"));
         }
-        if request.kind == Kind::Fingerprint
-            && (request.client_id != ClientId::Codex || target.search_only)
-        {
-            return Err(failure("模型指纹检测仅用于普通 Codex 供应商"));
+        if request.kind == Kind::Fingerprint && target.search_only {
+            return Err(failure("模型指纹检测仅用于普通供应商"));
         }
         if !connection::text_model(&request.model) {
             return Err(failure("请选择普通对话模型"));
@@ -280,15 +310,37 @@ impl Service {
     pub fn start(&self, request: Request) -> Result<Job> {
         self.start_job(request, false)
     }
-    fn prompt_key(client: ClientId, provider: &str) -> String {
-        format!("{client:?}:{provider}")
+    pub fn set_prompt(&self, prompt: String) -> Result<()> {
+        if prompt.trim().is_empty() {
+            return Err(failure("请输入测试文案"));
+        }
+        if prompt.len() > 256 * 1024 {
+            return Err(failure("测试文案过长"));
+        }
+        let mut data = lock(&self.0.data);
+        if data.saved.connection_prompt == prompt {
+            return Ok(());
+        }
+        let mut next = data.saved.clone();
+        next.connection_prompt = prompt;
+        self.save(&mut data, next)?;
+        drop(data);
+        self.changed();
+        Ok(())
     }
-    fn connection_prompt<'a>(saved: &'a Persisted, client: ClientId, provider: &str) -> &'a str {
-        saved
-            .connection_prompts
-            .get(&Self::prompt_key(client, provider))
-            .map(String::as_str)
-            .unwrap_or(DEFAULT_CONNECTION_PROMPT)
+    pub fn set_platform(&self, client: ClientId, settings: PlatformSettings) -> Result<()> {
+        if ![1, 3].contains(&settings.model_trace_samples)
+            || ![1, 3].contains(&settings.lm_detector_samples)
+        {
+            return Err(failure("采样组数只能是 1 或 3"));
+        }
+        let mut data = lock(&self.0.data);
+        let mut next = data.saved.clone();
+        next.platforms.insert(client_key(client).into(), settings);
+        self.save(&mut data, next)?;
+        drop(data);
+        self.changed();
+        Ok(())
     }
     fn start_job(&self, mut request: Request, automatic: bool) -> Result<Job> {
         let target = self.gateway(request.client_id).test_target_at(
@@ -304,6 +356,25 @@ impl Service {
         if request.kind == Kind::Fingerprint {
             self.check_cached_model(&target, &request.model)?;
         }
+        let platform = lock(&self.0.data)
+            .saved
+            .platforms
+            .get(client_key(request.client_id))
+            .cloned()
+            .unwrap_or_else(|| PlatformSettings::for_client(request.client_id));
+        let lm = if request.kind == Kind::Fingerprint && platform.engine == Engine::LmDetector {
+            Some(self.lm_resource()?)
+        } else {
+            None
+        };
+        request.concurrency = request.concurrency.min(platform.samples());
+        if request.tokenizer
+            && (automatic
+                || request.kind != Kind::Fingerprint
+                || platform.engine != Engine::LmDetector)
+        {
+            return Err(failure("分词器仅用于 LM Detector 手动检测"));
+        }
         let mut data = lock(&self.0.data);
         if data.saved.jobs.iter().any(|j| {
             !j.terminal()
@@ -313,9 +384,9 @@ impl Service {
             return Err(failure("该供应商已有测试正在运行或排队"));
         }
         if request.kind == Kind::Connection {
-            let prompt = request.prompt.get_or_insert_with(|| {
-                Self::connection_prompt(&data.saved, request.client_id, &request.provider_id).into()
-            });
+            let prompt = request
+                .prompt
+                .get_or_insert_with(|| data.saved.connection_prompt.clone());
             if prompt.trim().is_empty() {
                 return Err(failure("请输入测试文案"));
             }
@@ -324,7 +395,18 @@ impl Service {
         }
         let snapshot = bank::snapshot(&data.saved.bank)?;
         let challenges = if request.kind == Kind::Fingerprint {
-            modeltrace::challenges()
+            if platform.engine == Engine::LmDetector {
+                lmfpd::generate_challenges(platform.samples())
+                    .map_err(|_| failure("指纹挑战生成失败"))?
+                    .into_iter()
+                    .map(|c| (c.expected_count as usize, c.prompt))
+                    .collect()
+            } else {
+                modeltrace::challenges()
+                    .into_iter()
+                    .take(platform.samples())
+                    .collect()
+            }
         } else {
             vec![]
         };
@@ -362,20 +444,27 @@ impl Service {
             batch_id: None,
             can_retry: false,
             completion_reason: None,
+            engine: platform.engine,
+            sample_count: if request.kind == Kind::Fingerprint {
+                platform.samples()
+            } else {
+                1
+            },
+            resource_version: lm
+                .as_ref()
+                .map(|r| r.version())
+                .unwrap_or_else(|| snapshot.1.clone()),
+            tokenizer: request.tokenizer,
+            tokenizer_result: None,
         };
         let mut next = data.saved.clone();
-        if let Some(prompt) = &request.prompt {
-            next.connection_prompts.insert(
-                Self::prompt_key(request.client_id, &request.provider_id),
-                prompt.clone(),
-            );
-        }
         next.jobs.push(job.clone());
         self.save(&mut data, next)?;
         let (cancel, receiver) = watch::channel(false);
         data.cancel.insert(job.id.clone(), cancel);
         data.outputs.insert(job.id.clone(), Output::default());
-        let detection_revision = automatic.then(|| config_revision(&data.saved, &job.provider_id));
+        let detection_revision =
+            automatic.then(|| config_revision(&data.saved, job.client_id, &job.provider_id));
         data.contexts.insert(
             job.id.clone(),
             Context {
@@ -383,6 +472,9 @@ impl Service {
                 target,
                 challenges,
                 bank: snapshot,
+                lm,
+                engine: platform.engine,
+                sample_count: platform.samples(),
                 detection_revision,
             },
         );
@@ -489,6 +581,15 @@ impl Service {
                     group.uncertain = group.attempts > 0;
                 }
             }
+            if cancelled {
+                if let Some(tokenizer) = job
+                    .tokenizer_result
+                    .as_mut()
+                    .filter(|r| r["status"] == "running")
+                {
+                    tokenizer["status"] = "cancelled".into();
+                }
+            }
             job.can_retry = !cancelled
                 && !job.automatic
                 && job
@@ -509,10 +610,12 @@ impl Service {
                         .contexts
                         .get(id)
                         .and_then(|c| c.detection_revision.as_deref())
-                        == Some(config_revision(&data.saved, &job.provider_id).as_str())
+                        == Some(
+                            config_revision(&data.saved, job.client_id, &job.provider_id).as_str(),
+                        )
                 {
                     next.detection_timing
-                        .entry(job.provider_id.clone())
+                        .entry(scope_key(job.client_id, &job.provider_id))
                         .or_default()
                         .anchor_at = job.completed_at;
                 }

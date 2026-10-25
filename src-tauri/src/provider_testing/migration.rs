@@ -1,6 +1,48 @@
 use super::*;
 
 pub(super) fn migrate(value: &mut Value, gateways: &[Gateway; 4]) -> Result<bool> {
+    if value["schema"] == 3 {
+        return Ok(false);
+    }
+    migrate_v1(value, gateways)?;
+    let prompts = value.get("connectionPrompts").cloned().unwrap_or(json!({}));
+    let mut jobs: Vec<_> = value["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|j| j["kind"] == "connection")
+        .collect();
+    jobs.sort_by_key(|j| std::cmp::Reverse(j["createdAt"].as_i64().unwrap_or(0)));
+    let prompt = jobs
+        .iter()
+        .find_map(|j| {
+            let client: ClientId = serde_json::from_value(j["clientId"].clone()).ok()?;
+            let key = format!("{client:?}:{}", j["providerId"].as_str()?);
+            prompts[&key].as_str().filter(|p| !p.trim().is_empty())
+        })
+        .unwrap_or(DEFAULT_CONNECTION_PROMPT)
+        .to_owned();
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| failure("测试状态无法读取，已保留原文件"))?;
+    for field in ["detection", "detectionTiming", "degraded"] {
+        let old = object.remove(field).unwrap_or(json!({}));
+        let old = old
+            .as_object()
+            .ok_or_else(|| failure("检测配置无法迁移，已保留原文件"))?;
+        let scoped: serde_json::Map<String, Value> = old
+            .iter()
+            .map(|(id, v)| (scope_key(ClientId::Codex, id), v.clone()))
+            .collect();
+        object.insert(field.into(), Value::Object(scoped));
+    }
+    object.remove("connectionPrompts");
+    object.insert("connectionPrompt".into(), prompt.into());
+    object.insert("schema".into(), json!(3));
+    Ok(true)
+}
+
+fn migrate_v1(value: &mut Value, gateways: &[Gateway; 4]) -> Result<bool> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| failure("测试状态无法读取，已保留原文件"))?;

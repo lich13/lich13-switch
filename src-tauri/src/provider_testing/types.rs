@@ -5,6 +5,48 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum Engine {
+    #[default]
+    ModelTrace,
+    LmDetector,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PlatformSettings {
+    pub engine: Engine,
+    pub model_trace_samples: usize,
+    pub lm_detector_samples: usize,
+}
+impl Default for PlatformSettings {
+    fn default() -> Self {
+        Self {
+            engine: Engine::ModelTrace,
+            model_trace_samples: 3,
+            lm_detector_samples: 1,
+        }
+    }
+}
+impl PlatformSettings {
+    pub fn for_client(client: ClientId) -> Self {
+        Self {
+            engine: if client == ClientId::Codex {
+                Engine::ModelTrace
+            } else {
+                Engine::LmDetector
+            },
+            ..Self::default()
+        }
+    }
+    pub fn samples(&self) -> usize {
+        match self.engine {
+            Engine::ModelTrace => self.model_trace_samples,
+            Engine::LmDetector => self.lm_detector_samples,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Kind {
     #[default]
     Connection,
@@ -39,6 +81,8 @@ pub struct Request {
     pub concurrency: usize,
     #[serde(default)]
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub tokenizer: bool,
 }
 fn one() -> usize {
     1
@@ -86,6 +130,19 @@ pub struct Job {
     pub batch_id: Option<String>,
     pub can_retry: bool,
     pub completion_reason: Option<String>,
+    #[serde(default)]
+    pub engine: Engine,
+    #[serde(default = "three")]
+    pub sample_count: usize,
+    #[serde(default)]
+    pub resource_version: Value,
+    #[serde(default)]
+    pub tokenizer: bool,
+    #[serde(default)]
+    pub tokenizer_result: Option<Value>,
+}
+fn three() -> usize {
+    3
 }
 impl Job {
     pub fn terminal(&self) -> bool {
@@ -137,6 +194,18 @@ impl Default for Detection {
         }
     }
 }
+impl Detection {
+    pub fn for_client(client: ClientId) -> Self {
+        Self {
+            model: if client == ClientId::Codex {
+                super::DEFAULT_DETECTION_MODEL.into()
+            } else {
+                String::new()
+            },
+            ..Self::default()
+        }
+    }
+}
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DetectionTiming {
@@ -152,7 +221,9 @@ pub struct Degradation {
     pub detected_at: i64,
     pub requested_model: String,
     pub predicted_model: String,
-    pub probability: f64,
+    pub probability: Option<f64>,
+    #[serde(default)]
+    pub engine: Engine,
     pub queue_removed: bool,
     pub error: Option<String>,
 }
@@ -170,7 +241,8 @@ pub struct SavedBank {
 pub struct Persisted {
     pub schema: u32,
     pub jobs: Vec<Job>,
-    pub connection_prompts: BTreeMap<String, String>,
+    pub connection_prompt: String,
+    pub platforms: BTreeMap<String, PlatformSettings>,
     pub detection: BTreeMap<String, Detection>,
     pub detection_timing: BTreeMap<String, DetectionTiming>,
     pub models: BTreeMap<String, Models>,
@@ -181,9 +253,10 @@ pub struct Persisted {
 impl Default for Persisted {
     fn default() -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             jobs: vec![],
-            connection_prompts: BTreeMap::new(),
+            connection_prompt: super::DEFAULT_CONNECTION_PROMPT.into(),
+            platforms: BTreeMap::new(),
             detection: BTreeMap::new(),
             detection_timing: BTreeMap::new(),
             models: BTreeMap::new(),
@@ -211,6 +284,8 @@ pub struct DetectionStatus {
 pub struct State {
     pub revision: String,
     pub connection_prompt: String,
+    pub platform: PlatformSettings,
+    pub banks: Value,
     pub jobs: Vec<Job>,
     pub detection: Detection,
     pub degraded: BTreeMap<String, Degradation>,

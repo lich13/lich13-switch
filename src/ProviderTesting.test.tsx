@@ -68,6 +68,11 @@ const makeJob = (request: ProviderTestRequest): ProviderTestJob => ({
   batchId: null,
   canRetry: false,
   completionReason: null,
+  engine: "modelTrace",
+  sampleCount: 3,
+  resourceVersion: {},
+  tokenizer: false,
+  tokenizerResult: null,
 });
 beforeEach(() => {
   gateway = structuredClone(gatewayDemo);
@@ -83,6 +88,15 @@ beforeEach(() => {
       {
         revision: `fixture-settings-${p.id}`,
         connectionPrompt: "Reply with a short greeting.",
+        platform: {
+          engine: "modelTrace",
+          modelTraceSamples: 3,
+          lmDetectorSamples: 1,
+        },
+        banks: {
+          modelTrace: { models: [], updating: false, error: null },
+          lmDetector: { models: [], updating: false, error: null },
+        },
         jobs: [],
         degraded: {},
         history: [],
@@ -113,6 +127,18 @@ beforeEach(() => {
   mock.listeners.clear();
   mock.command.mockImplementation(
     async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === "provider_test_save_prompt") {
+        for (const state of Object.values(states))
+          state.connectionPrompt = String(args.prompt);
+        return;
+      }
+      if (name === "provider_test_set_platform") {
+        for (const state of Object.values(states))
+          state.platform = structuredClone(
+            args.platform as ProviderTestingState["platform"],
+          );
+        return;
+      }
       if (name === "provider_test_state")
         return structuredClone(states[String(args.providerId)]);
       if (name === "get_gateway") return structuredClone(gateway);
@@ -128,8 +154,6 @@ beforeEach(() => {
         const request = args.request as ProviderTestRequest;
         const job = makeJob(request);
         states[job.providerId].jobs.unshift(job);
-        if (request.kind === "connection")
-          states[job.providerId].connectionPrompt = request.prompt!;
         return job;
       }
       if (name === "provider_test_query")
@@ -177,7 +201,7 @@ const emit = async () => {
   });
 };
 
-it("sends and remembers the provider prompt without overwriting a draft on refresh", async () => {
+it("saves and shares the global prompt without overwriting a draft on refresh", async () => {
   const user = userEvent.setup();
   const first = open();
   const input = await screen.findByDisplayValue("Reply with a short greeting.");
@@ -192,7 +216,7 @@ it("sends and remembers the provider prompt without overwriting a draft on refre
     request: expect.objectContaining({ prompt: "fixture greeting\n第二行" }),
   });
   expect(states[gateway.providers[1].id].connectionPrompt).toBe(
-    "Reply with a short greeting.",
+    "fixture greeting\n第二行",
   );
   first.unmount();
   open();
@@ -208,7 +232,8 @@ it("blocks whitespace and keeps the draft when starting cannot be saved", async 
   const user = userEvent.setup();
   const original = mock.command.getMockImplementation()!;
   mock.command.mockImplementation((name, args) => {
-    if (name === "provider_test_start") throw new Error("fixture save failed");
+    if (name === "provider_test_save_prompt")
+      throw new Error("fixture save failed");
     return original(name, args);
   });
   open();
@@ -227,7 +252,13 @@ it("blocks whitespace and keeps the draft when starting cannot be saved", async 
   expect(states[gateway.providers[0].id].jobs).toHaveLength(0);
 });
 
-it("confirms closing an unsent prompt and reports draft state to navigation", async () => {
+it("preserves an unsaved prompt after a failed flush until explicitly discarded", async () => {
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation((name, args) => {
+    if (name === "provider_test_save_prompt")
+      throw new Error("fixture save failed");
+    return original(name, args);
+  });
   const user = userEvent.setup();
   const close = vi.fn();
   const dirty = vi.fn();
@@ -241,7 +272,7 @@ it("confirms closing an unsent prompt and reports draft state to navigation", as
   );
   const input = await screen.findByDisplayValue("Reply with a short greeting.");
   await user.type(input, " fixture");
-  expect(dirty).toHaveBeenLastCalledWith(true);
+  expect(dirty).toHaveBeenLastCalledWith(false);
   await user.click(screen.getAllByRole("button", { name: "关闭" })[0]);
   await user.click(
     within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
@@ -325,7 +356,7 @@ it("reopens the active connection and explains missing output after restart", as
 
 it("renders compact fingerprint revisions and readable sources", async () => {
   const user = userEvent.setup();
-  const bank = states[gateway.providers[0].id].bank;
+  const bank = states[gateway.providers[0].id].banks.modelTrace;
   bank.source = "builtin";
   bank.version = {
     revision: "123456789abcdef",
@@ -418,6 +449,7 @@ it("starts ordinary chat at the chosen auxiliary endpoint without changing the g
       kind: "connection",
       concurrency: 1,
       prompt: "Reply with a short greeting.",
+      tokenizer: false,
     },
   });
   expect(
@@ -590,6 +622,7 @@ it("saves independent detection settings and preserves a draft during runtime up
   await user.click(screen.getByRole("button", { name: "保存" }));
   await screen.findByText("检测设置已保存");
   expect(mock.command).toHaveBeenCalledWith("provider_test_set_detection", {
+    clientId: "codex",
     providerId: gateway.providers[0].id,
     expectedRevision: `fixture-settings-${gateway.providers[0].id}`,
     detection: expect.objectContaining({
@@ -655,7 +688,7 @@ it("shows the provider's actual interval, start time and unavailable statistics"
   await emit();
   expect(await screen.findByText("暂不可用")).toBeInTheDocument();
 });
-it("keeps search-only and non-Codex providers on ordinary connections", async () => {
+it("excludes search-only providers and enables fingerprint tabs on other clients", async () => {
   gateway.providers[0].searchOnly = true;
   const first = open();
   expect(
@@ -668,9 +701,7 @@ it("keeps search-only and non-Codex providers on ordinary connections", async ()
   gateway.clientId = "claude";
   gateway.providers[0].searchOnly = false;
   open();
-  expect(
-    screen.queryByRole("tab", { name: "模型指纹" }),
-  ).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "模型指纹" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "连接测试" })).toBeInTheDocument();
 });
 it("keeps keyboard navigation inside the provider's testing tabs", async () => {
@@ -683,4 +714,60 @@ it("keeps keyboard navigation inside the provider's testing tabs", async () => {
   expect(screen.getByRole("tab", { name: "指纹库" })).toHaveFocus();
   await user.keyboard("{Home}");
   expect(screen.getByRole("tab", { name: "连接测试" })).toHaveFocus();
+});
+
+it("remembers each source count across providers and resets the optional tokenizer on reopen", async () => {
+  const user = userEvent.setup();
+  seed();
+  seed(1);
+  const first = open();
+  await user.click(await screen.findByRole("tab", { name: "模型指纹" }));
+  expect(screen.getByRole("combobox", { name: "采样组数" })).toHaveValue("3");
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "检测源" }),
+    "lmDetector",
+  );
+  expect(screen.getByRole("combobox", { name: "采样组数" })).toHaveValue("1");
+  expect(
+    within(screen.getByRole("combobox", { name: "指纹并发" })).getAllByRole(
+      "option",
+    ),
+  ).toHaveLength(1);
+  const tokenizer = screen.getByRole("checkbox", { name: /附加分词器/ });
+  expect(tokenizer).not.toBeChecked();
+  await user.click(tokenizer);
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "采样组数" }),
+    "3",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "检测源" }),
+    "modelTrace",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "采样组数" }),
+    "1",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "检测源" }),
+    "lmDetector",
+  );
+  expect(screen.getByRole("combobox", { name: "采样组数" })).toHaveValue("3");
+  first.unmount();
+  open(1);
+  await user.click(await screen.findByRole("tab", { name: "模型指纹" }));
+  await waitFor(() =>
+    expect(screen.getByRole("combobox", { name: "检测源" })).toHaveValue(
+      "lmDetector",
+    ),
+  );
+  expect(screen.getByRole("combobox", { name: "采样组数" })).toHaveValue("3");
+  expect(
+    screen.getByRole("checkbox", { name: /附加分词器/ }),
+  ).not.toBeChecked();
+  await user.click(screen.getByRole("tab", { name: "定时检测" }));
+  expect(screen.getByRole("combobox", { name: "采样组数" })).toHaveValue("3");
+  expect(
+    screen.queryByRole("checkbox", { name: /附加分词器/ }),
+  ).not.toBeInTheDocument();
 });

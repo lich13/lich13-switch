@@ -1,3 +1,4 @@
+import { flushTestPrompt } from "./provider-test-prompt";
 import { subscriptions } from "./subscriptions";
 import { confirmAction } from "./confirmation";
 import {
@@ -127,6 +128,7 @@ export default function App() {
   const navigate = useCallback(
     async (next: "accounts" | "config" | "gateway" | "logs" | "usage") => {
       if (next === pageRef.current) return;
+      if (!(await flushTestPrompt())) return;
       if (
         (gatewayDirty.current || usageDirty.current) &&
         !(await confirmAction("离开当前页面会丢弃未保存的表单。"))
@@ -203,6 +205,7 @@ export default function App() {
     events.watch("navigate", (p) =>
       p === "settings"
         ? (async () => {
+            if (!(await flushTestPrompt())) return;
             if (
               (gatewayDirty.current ||
                 usageDirty.current ||
@@ -221,6 +224,7 @@ export default function App() {
           ),
     );
     events.watch("provider-settings", async (p) => {
+      if (!(await flushTestPrompt())) return;
       const target =
         typeof p === "string" ? { id: p, clientId: "codex" as const } : p;
       if (
@@ -239,6 +243,7 @@ export default function App() {
       });
     });
     events.watch("event-log", async (p) => {
+      if (!(await flushTestPrompt())) return;
       if (
         (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
         !(await confirmAction("查看日志会丢弃未保存的草稿。"))

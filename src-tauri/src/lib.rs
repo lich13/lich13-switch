@@ -1903,6 +1903,8 @@ pub fn run() {
             usage::commands::open_pricing_directory,
             provider_testing::commands::provider_test_state,
             provider_testing::commands::provider_test_start,
+            provider_testing::commands::provider_test_save_prompt,
+            provider_testing::commands::provider_test_set_platform,
             provider_testing::commands::provider_test_query,
             provider_testing::commands::provider_test_cancel,
             provider_testing::commands::provider_test_retry,

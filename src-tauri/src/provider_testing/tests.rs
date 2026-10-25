@@ -10,15 +10,18 @@ const INSTALLATION_ID: &str = "11111111-2222-4333-8444-555555555555";
 const SESSION_ID: &str = "fixture-private-session";
 const THREAD_ID: &str = "fixture-private-thread";
 
-fn fixture() -> (tempfile::TempDir, Service) {
+pub(super) fn fixture() -> (tempfile::TempDir, Service) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("installation_id"), INSTALLATION_ID).unwrap();
     let codex = Gateway::new(dir.path().join("codex")).unwrap();
     codex.observe_home(dir.path());
-    codex.set_usage(crate::usage::Service::new(dir.path()));
     let claude = codex.companion(dir.path().join("claude")).unwrap();
     let grok = codex.grok_companion(dir.path().join("grok")).unwrap();
     let dsh = codex.dsh_companion(dir.path().join("dsh")).unwrap();
+    let usage = crate::usage::Service::new(dir.path());
+    for gateway in [&codex, &claude, &grok, &dsh] {
+        gateway.set_usage(usage.clone());
+    }
     let service = Service::new(dir.path(), [codex, claude, grok, dsh]).unwrap();
     service
         .0
@@ -160,6 +163,7 @@ fn request(service: &Service, client: ClientId, id: &str) -> Request {
         kind: Kind::Connection,
         concurrency: 1,
         prompt: None,
+        tokenizer: false,
     }
 }
 async fn completed(service: &Service, id: &str) -> Detail {
@@ -269,6 +273,7 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
         }
         let mut custom = request(&service, client, &id);
         custom.prompt = Some("fixture greeting\n第二行".into());
+        service.set_prompt(custom.prompt.clone().unwrap()).unwrap();
         let job = service.start(custom).unwrap();
         let result = completed(&service, &job.id).await;
         assert_eq!(result.job.status, "completed", "{:?}", result.job.error);
@@ -338,7 +343,7 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
     }
 }
 #[tokio::test]
-async fn connection_prompts_survive_failure_and_restart_without_crossing_providers() {
+async fn global_prompt_survives_failure_and_restart_across_clients() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let capture = seen.clone();
     let port = server(move |r| {
@@ -363,6 +368,7 @@ async fn connection_prompts_survive_failure_and_restart_without_crossing_provide
     let revision = service.state(ClientId::Codex, &id).unwrap().revision;
     let mut custom = request(&service, ClientId::Codex, &id);
     custom.prompt = Some("fixture remembered prompt".into());
+    service.set_prompt(custom.prompt.clone().unwrap()).unwrap();
     let job = service.start(custom).unwrap();
     assert_eq!(completed(&service, &job.id).await.job.status, "failed");
     let job = service
@@ -380,23 +386,19 @@ async fn connection_prompts_survive_failure_and_restart_without_crossing_provide
             .state(ClientId::Codex, &other)
             .unwrap()
             .connection_prompt,
-        DEFAULT_CONNECTION_PROMPT
+        "fixture remembered prompt"
     );
     assert_eq!(
         reopened
             .state(ClientId::Claude, &claude)
             .unwrap()
             .connection_prompt,
-        DEFAULT_CONNECTION_PROMPT
-    );
-    assert_eq!(
-        Service::connection_prompt(&lock(&reopened.0.data).saved, ClientId::Claude, &id),
-        DEFAULT_CONNECTION_PROMPT
+        "fixture remembered prompt"
     );
 
     let path = dir.path().join("provider-tests.json");
     let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    legacy.as_object_mut().unwrap().remove("connectionPrompts");
+    legacy.as_object_mut().unwrap().remove("connectionPrompt");
     std::fs::write(&path, legacy.to_string()).unwrap();
     let legacy = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
     assert_eq!(
@@ -438,6 +440,8 @@ async fn empty_prompts_and_failed_atomic_saves_never_dispatch_or_replace_saved_p
     assert!(service.state(ClientId::Codex, &id).unwrap().jobs.is_empty());
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     custom.prompt = Some("fixture saved prompt".into());
+    assert!(service.set_prompt(" \n\t ".into()).is_err());
+    service.set_prompt(custom.prompt.clone().unwrap()).unwrap();
     let job = service.start(custom.clone()).unwrap();
     assert_eq!(completed(&service, &job.id).await.job.status, "completed");
     let path = dir.path().join("provider-tests.json");
@@ -617,12 +621,16 @@ fn smart_tiers_config_versions_and_corrupt_bank_fallback() {
     let mut config = state.detection;
     config.interval_minutes = 0;
     assert!(service
-        .set_detection(&id, config.clone(), &state.revision)
+        .set_detection(ClientId::Codex, &id, config.clone(), &state.revision)
         .is_err());
     config.interval_minutes = 15;
     config.enabled = true;
-    service.set_detection(&id, config, &state.revision).unwrap();
-    assert!(service.clear_mark(&id, &state.revision).is_err());
+    service
+        .set_detection(ClientId::Codex, &id, config, &state.revision)
+        .unwrap();
+    assert!(service
+        .clear_mark(ClientId::Codex, &id, &state.revision)
+        .is_err());
     let bad = SavedBank {
         data: Some(json!({"invalid":true})),
         version: Some(json!({"revision":"fixture"})),
@@ -689,7 +697,7 @@ fn scheduled_fingerprint(service: &Service, home: &Path, id: &str) -> Job {
         ..state.detection
     };
     service
-        .set_detection(id, detection, &state.revision)
+        .set_detection(ClientId::Codex, id, detection, &state.revision)
         .unwrap();
     let at = service.now();
     service.tick(at, false).unwrap();
@@ -731,6 +739,9 @@ async fn remembered_connection_prompts_do_not_change_manual_or_scheduled_challen
     ua(&service, ClientId::Codex);
     let mut connection = request(&service, ClientId::Codex, &id);
     connection.prompt = Some("fixture saved greeting".into());
+    service
+        .set_prompt(connection.prompt.clone().unwrap())
+        .unwrap();
     let job = service.start(connection).unwrap();
     completed(&service, &job.id).await;
     let mut manual = fingerprint_request(&service, &id, 1);
@@ -862,7 +873,7 @@ async fn strict_client_gate_accepts_local_identity_for_every_codex_test_path() {
             completed(&service, &automatic.id).await.job.status,
             "completed"
         );
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 8);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 12);
         let state = service.state(ClientId::Codex, &id).unwrap();
         assert!(state.degraded.is_empty());
         assert!(gateway.test_candidates().unwrap()[0].queued);
@@ -1057,7 +1068,7 @@ async fn client_restrictions_keep_complete_redacted_errors_without_retry_or_degr
 }
 
 #[tokio::test]
-async fn fingerprint_stops_at_real_99_threshold_and_concurrency_is_one_to_three() {
+async fn fingerprint_completes_all_three_groups_even_above_99() {
     for concurrency in [1, 3] {
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = hits.clone();
@@ -1088,29 +1099,10 @@ async fn fingerprint_stops_at_real_99_threshold_and_concurrency_is_one_to_three(
             .unwrap();
         let detail = completed(&service, &job.id).await;
         assert_eq!(detail.job.status, "completed");
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), concurrency);
-        if concurrency == 1 {
-            assert_eq!(
-                detail.job.completion_reason.as_deref(),
-                Some("confidence99")
-            );
-            assert_eq!(detail.job.groups[1].status, "skipped");
-        } else {
-            assert!((1..=3).contains(
-                &detail.job.report.as_ref().unwrap()["used_outputs"]
-                    .as_u64()
-                    .unwrap()
-            ));
-            assert!(detail.job.groups.iter().all(|g| g.attempts == 1));
-            if detail.job.completion_reason.is_some() {
-                assert!(
-                    detail.job.report.as_ref().unwrap()["probability"]
-                        .as_f64()
-                        .unwrap()
-                        >= 0.99
-                );
-            }
-        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(detail.job.completion_reason.is_none());
+        assert_eq!(detail.job.report.as_ref().unwrap()["used_outputs"], 3);
+        assert!(detail.job.groups.iter().all(|g| g.attempts == 1));
         assert!(service
             .state(ClientId::Codex, &id)
             .unwrap()
@@ -1181,7 +1173,7 @@ async fn failed_groups_retry_without_replaying_successful_groups() {
     assert!(after.job.groups[0].attempts > 1);
 }
 #[tokio::test]
-async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
+async fn automatic_summary_dequeues_and_manual_tests_never_change_queue() {
     let port = server(|r| async {
         let _ = r.into_body().collect().await.unwrap();
         fingerprint_response(&sample("automatic_first_group", 0))
@@ -1219,25 +1211,22 @@ async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
     detection.interval_minutes = 1;
     seed_catalog(&service, &id, &[DEFAULT_DETECTION_MODEL, "gpt-6-sol"]);
     service
-        .set_detection(&id, detection, &state.revision)
+        .set_detection(ClientId::Codex, &id, detection, &state.revision)
         .unwrap();
     lock(&service.0.data)
         .saved
         .detection_timing
-        .get_mut(&id)
+        .get_mut(&scope_key(ClientId::Codex, &id))
         .unwrap()
         .anchor_at = Some(service.now() - 60_000);
     let job = service
         .start_job(fingerprint_request(&service, &id, 1), true)
         .unwrap();
     let result = completed(&service, &job.id).await;
-    assert_eq!(
-        result.job.completion_reason.as_deref(),
-        Some("firstGroupDowngrade")
-    );
+    assert!(result.job.completion_reason.is_none());
     assert_eq!(
         result.job.groups.iter().map(|g| g.attempts).sum::<usize>(),
-        1
+        3
     );
     assert!(!gateway.test_candidates().unwrap()[0].queued);
     let state = service.state(ClientId::Codex, &id).unwrap();
@@ -1251,7 +1240,9 @@ async fn automatic_first_group_dequeues_and_manual_tests_never_change_queue() {
     }
     assert!(service.detail(&job.id).unwrap().job.report.is_some());
     assert!(service.detail(&job.id).unwrap().output.is_none());
-    service.clear_mark(&id, &state.revision).unwrap();
+    service
+        .clear_mark(ClientId::Codex, &id, &state.revision)
+        .unwrap();
     assert!(!gateway.test_candidates().unwrap()[0].queued);
     assert!(service
         .state(ClientId::Codex, &id)
@@ -1312,7 +1303,7 @@ async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
     let mut detection = state.detection;
     detection.enabled = true;
     service
-        .set_detection(&id, detection.clone(), &state.revision)
+        .set_detection(ClientId::Codex, &id, detection.clone(), &state.revision)
         .unwrap();
     let at = service.now();
     service.tick(at, false).unwrap();
@@ -1328,6 +1319,7 @@ async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
     detection.interval_minutes = 5;
     service
         .set_detection(
+            ClientId::Codex,
             &id,
             detection,
             &service.state(ClientId::Codex, &id).unwrap().revision,
@@ -1576,6 +1568,7 @@ fn enable_detection(service: &Service, home: &Path, id: &str, mode: &str, minimu
     let state = service.state(ClientId::Codex, id).unwrap();
     service
         .set_detection(
+            ClientId::Codex,
             id,
             Detection {
                 enabled: true,
@@ -1622,7 +1615,9 @@ async fn smart_schedule_is_independent_durable_and_sampling_does_not_move_deadli
     );
     let mut config = service.state(ClientId::Codex, &a).unwrap().detection;
     config.min_interval_minutes = 20;
-    service.set_detection(&a, config, &a_version).unwrap();
+    service
+        .set_detection(ClientId::Codex, &a, config, &a_version)
+        .unwrap();
     service.tick(at + 61_000, false).unwrap();
     assert_eq!(status(&service, &a).next_at, Some(at + 1_200_000));
     assert_eq!(status(&service, &b).next_at, b_due);
@@ -1663,9 +1658,11 @@ async fn queued_smart_work_rechecks_calls_before_dispatch_without_using_cooldown
     let result = completed(&service, &job.id).await;
     assert_eq!(result.job.status, "cancelled");
     assert!(result.job.started_at.is_none());
-    assert!(lock(&service.0.data).saved.detection_timing[&id]
-        .last_started_at
-        .is_none());
+    assert!(
+        lock(&service.0.data).saved.detection_timing[&scope_key(ClientId::Codex, &id)]
+            .last_started_at
+            .is_none()
+    );
     service.tick(at + 301_000, false).unwrap();
     assert_eq!(status(&service, &id).status, "idle");
 }
@@ -1675,13 +1672,17 @@ async fn started_work_survives_idle_sampling_and_cooldown_uses_start_not_complet
     let release = Arc::new(tokio::sync::Notify::new());
     let incoming = entered.clone();
     let gate = release.clone();
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let port = server(move |r| {
+        let first = first.clone();
         let incoming = incoming.clone();
         let gate = gate.clone();
         async move {
             let _ = r.into_body().collect().await;
-            incoming.notify_one();
-            gate.notified().await;
+            if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                incoming.notify_one();
+                gate.notified().await;
+            }
             fingerprint_response(&sample("above_99", 0))
         }
     })
@@ -1706,11 +1707,12 @@ async fn started_work_survives_idle_sampling_and_cooldown_uses_start_not_complet
     let ended = completed(&service, &job.id).await;
     assert_eq!(ended.job.status, "completed");
     assert_eq!(
-        lock(&service.0.data).saved.detection_timing[&id].anchor_at,
+        lock(&service.0.data).saved.detection_timing[&scope_key(ClientId::Codex, &id)].anchor_at,
         ended.job.completed_at
     );
     assert_eq!(
-        lock(&service.0.data).saved.detection_timing[&id].last_started_at,
+        lock(&service.0.data).saved.detection_timing[&scope_key(ClientId::Codex, &id)]
+            .last_started_at,
         job.started_at
     );
     let restored = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
@@ -1740,13 +1742,15 @@ async fn fixed_period_below_five_minutes_still_obeys_dispatch_cooldown() {
     let mut config = state.detection;
     config.interval_minutes = 10;
     service
-        .set_detection(&id, config.clone(), &state.revision)
+        .set_detection(ClientId::Codex, &id, config.clone(), &state.revision)
         .unwrap();
     service.tick(at + 121_000, false).unwrap();
     assert_eq!(status(&service, &id).next_at, Some(at + 660_000));
     config.interval_minutes = 1;
     let revision = service.state(ClientId::Codex, &id).unwrap().revision;
-    service.set_detection(&id, config, &revision).unwrap();
+    service
+        .set_detection(ClientId::Codex, &id, config, &revision)
+        .unwrap();
     service.tick(at + 122_000, false).unwrap();
     assert_eq!(status(&service, &id).next_at, Some(at + 360_000));
     let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
@@ -1819,13 +1823,14 @@ async fn independent_migration_preserves_effective_controls_and_does_not_enable_
     disabled.enabled = false;
     again
         .set_detection(
+            ClientId::Codex,
             &b,
             disabled,
             &again.state(ClientId::Codex, &b).unwrap().revision,
         )
         .unwrap();
     let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(raw["schema"], 2);
+    assert_eq!(raw["schema"], 3);
     assert_eq!(raw["bank"], json!(SavedBank::default()));
 }
 #[tokio::test]
@@ -2084,7 +2089,7 @@ async fn manual_detection_changes_prevent_old_automatic_disposition() {
     let mut detection = state.detection;
     detection.enabled = false;
     service
-        .set_detection(&id, detection, &state.revision)
+        .set_detection(ClientId::Codex, &id, detection, &state.revision)
         .unwrap();
     gate.notify_waiters();
     let result = completed(&service, &job.id).await;
@@ -2107,13 +2112,15 @@ async fn aggregate_downgrade_is_guarded_and_marked_providers_never_recheck() {
     service.tick(at + 60_000, false).unwrap();
     let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
     let report = modeltrace::analyze(
-        &[sample("automatic_first_group", 0)],
+        &vec![sample("automatic_first_group", 0); 3],
         &modeltrace::bundled().unwrap(),
     )
     .unwrap();
     service
         .update(&job.id, |job, _| {
-            job.groups[0].report = None;
+            for group in &mut job.groups {
+                group.status = "completed".into();
+            }
             job.report = Some(report);
         })
         .unwrap();
@@ -2139,5 +2146,608 @@ async fn aggregate_downgrade_is_guarded_and_marked_providers_never_recheck() {
     assert_eq!(
         service.state(ClientId::Codex, &id).unwrap().jobs.len(),
         jobs
+    );
+}
+
+fn seed_client_catalog(service: &Service, client: ClientId, id: &str, model: &str) {
+    let endpoint = service.gateway(client).test_endpoint(id, None).unwrap();
+    let mut data = lock(&service.0.data);
+    let mut next = data.saved.clone();
+    next.models.insert(
+        Service::models_key(client, id, &endpoint),
+        Models {
+            models: vec![Model {
+                id: model.into(),
+                name: model.into(),
+            }],
+            default_model: model.into(),
+            fetched_at: Some(service.now()),
+            ..Default::default()
+        },
+    );
+    service.save(&mut data, next).unwrap();
+}
+fn lm_sample(index: usize) -> String {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/lm-analyze.json")).unwrap();
+    fixture["cases"][0]["outputs"][index]["text"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+fn protocol_response(protocol: &str, text: &str, usage: Value) -> Response<Full<Bytes>> {
+    let value = match protocol {
+        "messages" => {
+            json!({"type":"message","model":"fixture-returned","content":[{"type":"thinking","thinking":"hidden fixture"},{"type":"text","text":text}],"stop_reason":"end_turn","usage":usage})
+        }
+        "chat_completions" => {
+            json!({"model":"fixture-returned","choices":[{"index":0,"message":{"content":text},"finish_reason":"stop"}],"usage":usage})
+        }
+        _ => {
+            json!({"object":"response","model":"fixture-returned","status":"completed","output_text":text,"usage":usage})
+        }
+    };
+    response(200, "application/json", value.to_string())
+}
+#[tokio::test]
+async fn lm_single_and_three_samples_use_all_four_native_protocols_and_keep_snapshots() {
+    for (client, protocol) in [
+        (ClientId::Codex, "responses"),
+        (ClientId::Claude, "messages"),
+        (ClientId::Grok, "chat_completions"),
+        (ClientId::Dsh, "chat_completions"),
+    ] {
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured = bodies.clone();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = hits.clone();
+        let port = server(move |r| {
+            let captured = captured.clone();
+            let count = count.clone();
+            async move {
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let path = r.uri().path().to_owned();
+                let headers = r.headers().clone();
+                let body: Value =
+                    serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes())
+                        .unwrap();
+                lock(&captured).push((path, headers, body));
+                protocol_response(protocol, &lm_sample(n % 3), json!({}))
+            }
+        })
+        .await;
+        let (dir, service) = fixture();
+        let id = add(&service, dir.path(), client, port, protocol);
+        ua(&service, client);
+        seed_client_catalog(&service, client, &id, "fixture-model");
+        if client == ClientId::Dsh {
+            let g = service.gateway(client);
+            g.edit(serde_json::from_value(json!({"op":"dshModelsProvider","id":id,"mapping":{"fixture-model":"deepseek-v4-pro"}})).unwrap(),&g.view().revision,dir.path()).unwrap();
+        }
+        for samples in [1, 3] {
+            service
+                .set_platform(
+                    client,
+                    PlatformSettings {
+                        engine: Engine::LmDetector,
+                        lm_detector_samples: samples,
+                        ..PlatformSettings::default()
+                    },
+                )
+                .unwrap();
+            let permits = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+            let mut req = request(&service, client, &id);
+            req.kind = Kind::Fingerprint;
+            req.concurrency = 3;
+            let job = service.start(req).unwrap();
+            assert_eq!(job.sample_count, samples);
+            assert_eq!(job.engine, Engine::LmDetector);
+            assert_eq!(
+                job.resource_version["revision"],
+                "567e11d65a48d4fbba2713cc4dfbe685cdd05a73"
+            );
+            service
+                .set_platform(
+                    client,
+                    PlatformSettings {
+                        engine: Engine::ModelTrace,
+                        ..PlatformSettings::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                lock(&service.0.data).contexts[&job.id].request.concurrency,
+                samples
+            );
+            drop(permits);
+            let done = completed(&service, &job.id).await;
+            assert_eq!(done.job.status, "completed", "{:?}", done.job.error);
+            assert_eq!(done.job.report.as_ref().unwrap()["used_outputs"], samples);
+            assert!(done.job.groups.iter().all(|g| g.status == "completed"));
+            if samples == 1 {
+                assert!(done.job.report.as_ref().unwrap()["probability"].is_null());
+                assert_eq!(done.job.report.as_ref().unwrap()["initial"], true);
+            }
+            assert!(service.state(client, &id).unwrap().degraded.is_empty());
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
+        for (path, headers, body) in lock(&bodies).iter() {
+            assert!(path.ends_with(match protocol {
+                "messages" => "/messages",
+                "chat_completions" => "/chat/completions",
+                _ => "/responses",
+            }));
+            assert_eq!(headers["user-agent"], "fixture-business/1.0 exact  UA");
+            if protocol == "messages" {
+                assert_eq!(body["max_tokens"], 8192);
+            }
+            if client == ClientId::Dsh {
+                assert_eq!(body["model"], "deepseek-v4-pro");
+            }
+            if client == ClientId::Codex {
+                assert_eq!(
+                    body["client_metadata"]["x-codex-installation-id"],
+                    INSTALLATION_ID
+                );
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn scheduled_single_sample_dequeues_but_partial_three_does_not() {
+    for samples in [1, 3] {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = hits.clone();
+        let port = server(move |_| {
+            let count = count.clone();
+            async move {
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                protocol_response(
+                    "messages",
+                    &if n == 0 { lm_sample(0) } else { "1, 2".into() },
+                    json!({}),
+                )
+            }
+        })
+        .await;
+        let (dir, service) = fixture();
+        let client = ClientId::Claude;
+        let id = add(&service, dir.path(), client, port, "messages");
+        ua(&service, client);
+        let g = service.gateway(client);
+        g.edit(
+            Edit::QueueProvider {
+                id: id.clone(),
+                queued: true,
+            },
+            &g.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+        seed_client_catalog(&service, client, &id, "claude-opus-4.8");
+        service
+            .set_platform(
+                client,
+                PlatformSettings {
+                    engine: Engine::LmDetector,
+                    lm_detector_samples: samples,
+                    ..PlatformSettings::default()
+                },
+            )
+            .unwrap();
+        let state = service.state(client, &id).unwrap();
+        service
+            .set_detection(
+                client,
+                &id,
+                Detection {
+                    enabled: true,
+                    model: "claude-opus-4.8".into(),
+                    mode: "fixed".into(),
+                    interval_minutes: 1,
+                    ..state.detection
+                },
+                &state.revision,
+            )
+            .unwrap();
+        let at = service.now();
+        service.tick(at, false).unwrap();
+        service.tick(at + 60_000, false).unwrap();
+        let job = service.state(client, &id).unwrap().jobs[0].clone();
+        let done = completed(&service, &job.id).await;
+        assert_eq!(done.job.report.as_ref().unwrap()["used_outputs"], 1);
+        let state = service.state(client, &id).unwrap();
+        assert_eq!(state.degraded.is_empty(), samples == 3);
+        assert_eq!(g.test_candidates().unwrap()[0].queued, samples == 3);
+        if samples == 1 {
+            assert!(state.degraded[&id].probability.is_none());
+        }
+        assert!(service.state(ClientId::Codex, &id).is_err());
+    }
+}
+#[tokio::test]
+async fn tokenizer_reads_late_usage_and_preserves_zero_and_message_cache_counts() {
+    for (protocol,body,expected) in [
+        ("chat_completions","data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":0}}\n\ndata: [DONE]\n\n",Some(0)),
+        ("messages","event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"fixture\",\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":3}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"hidden\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":null},\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",Some(12)),
+        ("responses","data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"OK\",\"usage\":{\"input_tokens\":17}}}\n\n",Some(17)),
+        ("responses","data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"OK\"}}\n\n",None),
+    ] {
+        let port=server(move |_|async move{response(200,"text/event-stream",body)}).await;
+        let target=fingerprint_stream::Target{url:format!("http://127.0.0.1:{port}"),headers:Default::default(),proxy:None,model:"fixture".into(),oauth:false,protocol:protocol.into(),client_metadata:None};
+        let mut diag=json!({});
+        let (text,_)=fingerprint_stream::execute_body(&target,&target.lm_payload("fixture").unwrap(),0,&target.client().unwrap(),None,&mut diag,true).await.unwrap();
+        assert_eq!(text,"OK");assert_eq!(diag["input_tokens"].as_i64(),expected);
+    }
+}
+#[tokio::test]
+async fn tokenizer_failure_leaves_numeric_result_and_is_not_replayed_by_group_retry() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let port = server(move |_| {
+        let seen = seen.clone();
+        async move {
+            let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = if n == 0 { lm_sample(0) } else { "OK".into() };
+            protocol_response("responses", &text, json!({}))
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    seed_client_catalog(&service, ClientId::Codex, &id, "fixture-model");
+    service
+        .set_platform(
+            ClientId::Codex,
+            PlatformSettings {
+                engine: Engine::LmDetector,
+                ..PlatformSettings::default()
+            },
+        )
+        .unwrap();
+    let mut req = request(&service, ClientId::Codex, &id);
+    req.kind = Kind::Fingerprint;
+    req.tokenizer = true;
+    let job = service.start(req).unwrap();
+    let done = completed(&service, &job.id).await;
+    assert_eq!(done.job.status, "completed");
+    assert_eq!(done.job.report.unwrap()["used_outputs"], 1);
+    assert_eq!(done.job.tokenizer_result.unwrap()["status"], "failed");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(!done.job.can_retry);
+}
+#[test]
+fn schema_three_migrates_prompt_from_latest_connection_and_keeps_scoped_history() {
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    let path = dir.path().join("provider-tests.json");
+    let mut saved = json!(Persisted::default());
+    saved["schema"] = 2.into();
+    saved.as_object_mut().unwrap().remove("connectionPrompt");
+    saved["connectionPrompts"] =
+        json!({format!("Codex:{id}"):"old fixture", "Claude:other":"latest fixture"});
+    let job = |client: &str, provider: &str, at: i64| json!({"id":format!("fixture-{at}"),"clientId":client,"providerId":provider,"providerName":"Fixture","providerVersion":"fixture","kind":"connection","mode":"text","requestedModel":"fixture-model","forwardedModel":"fixture-model","returnedModel":null,"status":"completed","createdAt":at,"startedAt":null,"completedAt":at,"elapsedMs":0,"firstByteMs":null,"error":null,"report":null,"groups":[],"automatic":false,"batchId":null,"canRetry":false,"completionReason":null});
+    saved["jobs"] = json!([job("codex", &id, 1), job("claude", "other", 2)]);
+    saved["detection"] = json!({id.clone():Detection{enabled:true,..Default::default()}});
+    saved["detectionTiming"] = json!({id.clone():{"anchorAt":123,"lastStartedAt":100}});
+    std::fs::write(&path, saved.to_string()).unwrap();
+    let restored = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    let state = restored.state(ClientId::Codex, &id).unwrap();
+    assert_eq!(state.connection_prompt, "latest fixture");
+    assert_eq!(state.jobs[0].engine, Engine::ModelTrace);
+    assert_eq!(state.jobs[0].sample_count, 3);
+    assert!(state.detection.enabled);
+    let saved = &lock(&restored.0.data).saved;
+    assert_eq!(saved.schema, 3);
+    assert_eq!(
+        saved.detection_timing[&scope_key(ClientId::Codex, &id)].anchor_at,
+        Some(123)
+    );
+    assert!(!saved
+        .detection
+        .contains_key(&scope_key(ClientId::Claude, &id)));
+    let mut next = saved.clone();
+    next.detection.insert(
+        scope_key(ClientId::Claude, &id),
+        Detection {
+            model: "claude-opus-4.8".into(),
+            ..Detection::for_client(ClientId::Claude)
+        },
+    );
+    assert_eq!(
+        config_revision(saved, ClientId::Codex, &id),
+        config_revision(&next, ClientId::Codex, &id)
+    );
+    assert_ne!(
+        config_revision(saved, ClientId::Claude, &id),
+        config_revision(&next, ClientId::Claude, &id)
+    );
+}
+
+#[tokio::test]
+async fn automatic_identity_change_prevents_disposition_and_dequeue_failure_keeps_mark() {
+    let (dir, service) = fixture();
+    let at = service.now();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    ua(&service, ClientId::Codex);
+    enable_detection(&service, dir.path(), &id, "fixed", 5);
+    let permits = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+    service.tick(at + 60_000, false).unwrap();
+    let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+    let report = modeltrace::analyze(
+        &vec![sample("automatic_first_group", 0); 3],
+        &modeltrace::bundled().unwrap(),
+    )
+    .unwrap();
+    service
+        .update(&job.id, |job, _| {
+            for group in &mut job.groups {
+                group.status = "completed".into();
+            }
+            job.report = Some(report);
+        })
+        .unwrap();
+    identity(
+        service.gateway(ClientId::Codex),
+        b"fixture-changed/2.0",
+        "fixture-changed",
+    );
+    service.apply_degradation(&job.id);
+    assert!(service
+        .state(ClientId::Codex, &id)
+        .unwrap()
+        .degraded
+        .is_empty());
+    ua(&service, ClientId::Codex);
+    let path = dir.path().join("codex/gateway.json");
+    let mut raw = std::fs::read(&path).unwrap();
+    raw.push(b' ');
+    std::fs::write(&path, raw).unwrap();
+    service.apply_degradation(&job.id);
+    let state = service.state(ClientId::Codex, &id).unwrap();
+    let mark = &state.degraded[&id];
+    assert!(!mark.queue_removed);
+    assert!(mark.error.is_some());
+    assert!(service.gateway(ClientId::Codex).test_candidates().unwrap()[0].queued);
+    service.cancel(&job.id).unwrap();
+    completed(&service, &job.id).await;
+    drop(permits);
+}
+
+#[test]
+fn detection_controls_and_marks_are_isolated_for_identical_provider_ids() {
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+    add(&service, dir.path(), ClientId::Claude, 2, "messages");
+    let path = dir.path().join("claude/gateway.json");
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw["providers"][0]["id"] = id.clone().into();
+    std::fs::write(&path, raw.to_string()).unwrap();
+    let codex = Gateway::new(dir.path().join("codex")).unwrap();
+    codex.observe_home(dir.path());
+    let claude = codex.companion(dir.path().join("claude")).unwrap();
+    let grok = codex.grok_companion(dir.path().join("grok")).unwrap();
+    let dsh = codex.dsh_companion(dir.path().join("dsh")).unwrap();
+    let service = Service::new(dir.path(), [codex, claude, grok, dsh]).unwrap();
+    let codex = service.state(ClientId::Codex, &id).unwrap();
+    let claude = service.state(ClientId::Claude, &id).unwrap();
+    assert_eq!(codex.platform.engine, Engine::ModelTrace);
+    assert_eq!(claude.platform.engine, Engine::LmDetector);
+    assert!(claude.detection.model.is_empty());
+    assert!(!claude.detection.enabled);
+    service
+        .set_detection(
+            ClientId::Claude,
+            &id,
+            Detection {
+                model: "claude-opus-4.8".into(),
+                ..claude.detection
+            },
+            &claude.revision,
+        )
+        .unwrap();
+    assert_eq!(
+        service.state(ClientId::Codex, &id).unwrap().revision,
+        codex.revision
+    );
+    {
+        let mut data = lock(&service.0.data);
+        let mut next = data.saved.clone();
+        for client in [ClientId::Codex, ClientId::Claude] {
+            next.degraded.insert(
+                scope_key(client, &id),
+                Degradation {
+                    provider_id: id.clone(),
+                    job_id: "fixture".into(),
+                    detected_at: 1,
+                    requested_model: "fixture".into(),
+                    predicted_model: "fixture".into(),
+                    probability: None,
+                    engine: Engine::LmDetector,
+                    queue_removed: false,
+                    error: None,
+                },
+            );
+        }
+        service.save(&mut data, next).unwrap();
+    }
+    let state = service.state(ClientId::Claude, &id).unwrap();
+    service
+        .clear_mark(ClientId::Claude, &id, &state.revision)
+        .unwrap();
+    assert!(service
+        .state(ClientId::Claude, &id)
+        .unwrap()
+        .degraded
+        .is_empty());
+    assert!(!service
+        .state(ClientId::Codex, &id)
+        .unwrap()
+        .degraded
+        .is_empty());
+}
+
+#[test]
+fn business_counts_are_isolated_for_each_client_with_the_same_provider_id() {
+    use crate::usage::model::{Attempt, Record};
+    let (_dir, service) = fixture();
+    let at = service.now();
+    let clients = [
+        ClientId::Codex,
+        ClientId::Claude,
+        ClientId::Grok,
+        ClientId::Dsh,
+    ];
+    let mut records = Vec::new();
+    for (index, client) in clients.iter().enumerate() {
+        for n in 0..=index {
+            records.push(Record {
+                id: format!("fixture-{}-{n}", client_key(*client)),
+                client: client_key(*client).into(),
+                source: "proxy".into(),
+                started_at: at - 1000,
+                finished_at: Some(at - 999),
+                completed: true,
+                attempts: vec![Attempt {
+                    id: format!("fixture-attempt-{index}-{n}"),
+                    provider: Some("fixture-shared".into()),
+                    started_at: at - 1000,
+                    status: Some(200),
+                    outcome: "success".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+    }
+    service
+        .gateway(ClientId::Codex)
+        .test_usage()
+        .query(|store| store.write_batch(&records, None))
+        .unwrap();
+    for (index, client) in clients.iter().enumerate() {
+        assert_eq!(
+            service
+                .gateway(*client)
+                .detection_request_counts(at)
+                .unwrap()["fixture-shared"],
+            (index + 1) as u64
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelling_tokenizer_keeps_numeric_ranking_and_stops_following_requests() {
+    let called = Arc::new(tokio::sync::Notify::new());
+    let notify = called.clone();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let port = server(move |_| {
+        let notify = notify.clone();
+        let seen = seen.clone();
+        async move {
+            let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                protocol_response("responses", &lm_sample(0), json!({}))
+            } else {
+                notify.notify_one();
+                std::future::pending::<Response<Full<Bytes>>>().await
+            }
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    seed_client_catalog(&service, ClientId::Codex, &id, "fixture-model");
+    service
+        .set_platform(
+            ClientId::Codex,
+            PlatformSettings {
+                engine: Engine::LmDetector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut req = request(&service, ClientId::Codex, &id);
+    req.kind = Kind::Fingerprint;
+    req.tokenizer = true;
+    let job = service.start(req).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), called.notified())
+        .await
+        .unwrap();
+    service.cancel(&job.id).unwrap();
+    let done = completed(&service, &job.id).await;
+    assert_eq!(done.job.status, "cancelled");
+    assert_eq!(done.job.report.unwrap()["used_outputs"], 1);
+    assert_eq!(done.job.tokenizer_result.unwrap()["status"], "cancelled");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn tokenizer_completes_serial_probes_with_two_controls_and_bounded_requests() {
+    let bundle: Value = serde_json::from_reader(flate2::read::GzDecoder::new(
+        include_bytes!("../../resources/lm-detector/bundle.json.gz").as_slice(),
+    ))
+    .unwrap();
+    let bank = &bundle["tokenizer"];
+    let prefix = bank["wrapper"]["prefix"].as_str().unwrap();
+    let suffix = bank["wrapper"]["suffix"].as_str().unwrap();
+    let mut counts = HashMap::from([(format!("{prefix}{suffix}"), 20i64)]);
+    for (i, probe) in bank["probes"].as_array().unwrap().iter().enumerate() {
+        counts.insert(
+            format!("{prefix}{}{suffix}", probe["text"].as_str().unwrap()),
+            20 + bank["classes"][0]["counts"][i].as_i64().unwrap(),
+        );
+    }
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let counts = Arc::new(counts);
+    let port = server(move |r| {
+        let seen = seen.clone();
+        let counts = counts.clone();
+        async move {
+            let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                return protocol_response("responses", &lm_sample(0), json!({}));
+            }
+            assert!(n <= 22, "tokenizer exceeded its request bound");
+            let body: Value =
+                serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+            let prompt = body["input"][0]["content"].as_str().unwrap();
+            protocol_response("responses", "OK", json!({"input_tokens":counts[prompt]}))
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    seed_client_catalog(&service, ClientId::Codex, &id, "fixture-model");
+    service
+        .set_platform(
+            ClientId::Codex,
+            PlatformSettings {
+                engine: Engine::LmDetector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut req = request(&service, ClientId::Codex, &id);
+    req.kind = Kind::Fingerprint;
+    req.tokenizer = true;
+    let job = service.start(req).unwrap();
+    let done = completed(&service, &job.id).await;
+    assert_eq!(done.job.status, "completed");
+    assert_eq!(done.job.report.unwrap()["used_outputs"], 1);
+    let result = done.job.tokenizer_result.unwrap();
+    assert_eq!(result["status"], "completed");
+    let steps = result["steps"].as_array().unwrap();
+    assert!((6..=22).contains(&steps.len()));
+    assert_eq!(steps.iter().filter(|s| s["probe"].is_null()).count(), 2);
+    assert!(steps.first().unwrap()["probe"].is_null() && steps.last().unwrap()["probe"].is_null());
+    assert_eq!(result["verdict"]["top"]["id"], "o200k");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        steps.len() + 1
     );
 }

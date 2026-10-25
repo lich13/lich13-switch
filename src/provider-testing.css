@@ -406,10 +406,21 @@
     display: none;
   }
   .provider-test-groups summary {
-    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
   }
-  .provider-test-groups summary > :nth-last-child(-n + 2) {
+  .provider-test-groups summary > :nth-child(3) {
+    grid-column: 1 / -1;
+  }
+  .provider-test-groups summary > :nth-child(4) {
     text-align: left;
+  }
+  .provider-test-groups summary > :nth-child(4)::before {
+    content: "置信度 ";
+    color: var(--muted);
+  }
+  .provider-test-groups summary > :nth-child(5)::before {
+    content: "耗时 ";
+    color: var(--muted);
   }
   .provider-test-history {
     grid-template-columns: minmax(0, 1fr);
@@ -450,4 +461,68 @@
 }
 .provider-test-current {
   margin-top: 16px;
+}
+
+.provider-test-platform {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.3fr) minmax(72px, 0.6fr);
+  gap: 16px;
+}
+.provider-test-platform:not(:has(label:nth-child(3))) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.provider-test-tokenizer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.provider-test-tokenizer small {
+  color: var(--muted);
+  margin-left: 8px;
+}
+.provider-test-bank-source {
+  margin-bottom: 20px;
+}
+.provider-test-ranking {
+  margin-top: 20px;
+}
+.provider-test-ranking > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px 80px;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.provider-test-ranking > div:first-child {
+  color: var(--muted);
+  font-size: 12px;
+}
+.provider-test-ranking > div > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.provider-test-ranking > div > span:not(:first-child) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.provider-test-tokenizer-step {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+  .provider-test-platform,
+  .provider-test-platform:not(:has(label:nth-child(3))) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .provider-test-tokenizer small {
+    display: block;
+    margin: 0;
+  }
+  .provider-test-actions {
+    flex-wrap: wrap;
+  }
 }

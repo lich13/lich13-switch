@@ -7,8 +7,23 @@ pub fn provider_test_state(r: R<'_>, client_id: ClientId, provider_id: String) -
     r.provider_tests.state(client_id, &provider_id)
 }
 #[tauri::command]
-pub fn provider_test_start(r: R<'_>, request: Request) -> Result<Job> {
-    r.provider_tests.start(request)
+pub async fn provider_test_start(r: R<'_>, request: Request) -> Result<Job> {
+    let service = r.provider_tests.clone();
+    tokio::task::spawn_blocking(move || service.start(request))
+        .await
+        .map_err(|_| failure("测试资源加载失败"))?
+}
+#[tauri::command]
+pub fn provider_test_save_prompt(r: R<'_>, prompt: String) -> Result<()> {
+    r.provider_tests.set_prompt(prompt)
+}
+#[tauri::command]
+pub fn provider_test_set_platform(
+    r: R<'_>,
+    client_id: ClientId,
+    platform: PlatformSettings,
+) -> Result<()> {
+    r.provider_tests.set_platform(client_id, platform)
 }
 #[tauri::command]
 pub fn provider_test_query(r: R<'_>, id: String) -> Result<Detail> {
@@ -25,21 +40,23 @@ pub fn provider_test_retry(r: R<'_>, id: String) -> Result<Job> {
 #[tauri::command]
 pub fn provider_test_set_detection(
     r: R<'_>,
+    client_id: ClientId,
     provider_id: String,
     detection: Detection,
     expected_revision: String,
 ) -> Result<()> {
     r.provider_tests
-        .set_detection(&provider_id, detection, &expected_revision)
+        .set_detection(client_id, &provider_id, detection, &expected_revision)
 }
 #[tauri::command]
 pub fn provider_test_clear_mark(
     r: R<'_>,
+    client_id: ClientId,
     provider_id: String,
     expected_revision: String,
 ) -> Result<()> {
     r.provider_tests
-        .clear_mark(&provider_id, &expected_revision)
+        .clear_mark(client_id, &provider_id, &expected_revision)
 }
 #[tauri::command]
 pub async fn provider_test_models(
@@ -61,8 +78,11 @@ pub async fn provider_test_models(
         .await
 }
 #[tauri::command]
-pub async fn provider_test_update_bank(r: R<'_>) -> Result<Value> {
-    r.provider_tests.update_bank().await
+pub async fn provider_test_update_bank(r: R<'_>, engine: Engine) -> Result<Value> {
+    match engine {
+        Engine::ModelTrace => r.provider_tests.update_bank().await,
+        Engine::LmDetector => r.provider_tests.update_lm_bank().await,
+    }
 }
 pub fn connect(app: &tauri::AppHandle) {
     let service = app.state::<Arc<Runtime>>().provider_tests.clone();

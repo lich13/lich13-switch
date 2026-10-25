@@ -1,0 +1,21 @@
+{
+  "revision": "567e11d65a48d4fbba2713cc4dfbe685cdd05a73",
+  "sha256": "2a401d471ae59be65ad58a31e06becf92a639021543bae2870c4d7a3dfaecb9a",
+  "algorithm": {
+    "sdk/rust/src/analysis.rs": "02d6c14f9529a747c2e8d40a724873168a75a2f5",
+    "sdk/rust/src/challenge.rs": "e6430c11899532acf55c2fd7a95f2d0d3befe51d",
+    "sdk/rust/src/codec.rs": "72a24fc4a5f39fa09474faaea9fbb556c4e8a07c",
+    "sdk/rust/src/data.rs": "ef6e76b0544b71aa2f455328ff8b3ac627589e8d",
+    "sdk/rust/src/error.rs": "f2db8fc906ba90f028c00f3c32779363badc91e1",
+    "sdk/rust/src/features.rs": "9976432a26c72fdab179f24bc229403b6f2dca83",
+    "sdk/rust/src/lib.rs": "cd06cd18860ffebfd0b72cb829444e8f0bcab9e9",
+    "sdk/rust/src/ranker.rs": "3f12ac7d2e86d04cc44d251cf55d89876c77f876",
+    "sdk/rust/src/request.rs": "ad720d6e4c20fad855f68084f90c04071674dcfb",
+    "sdk/rust/src/sample.rs": "dea6e15fdcb8d397738d42fdef8f82b5ea26a1b3",
+    "sdk/rust/src/templates.json": "d33e19614172f4c683908ebd7bc7a721b6e6a48d",
+    "shared/tokenizer-bank.ts": "f4e8191b8eeae46853375fdfd789a8e9253a7a8a",
+    "shared/tokenizer-posterior.ts": "1fcf945cae317d410921bf3234da7b28fa554e73",
+    "shared/tokenizer-probe.ts": "9a59abe6b2aeade07aa4da16a13ab513839f2824",
+    "shared/tokenizer-usage.ts": "aff115f20aaac3c49e3e0d2b4aa3986a02dfbc01"
+  }
+}

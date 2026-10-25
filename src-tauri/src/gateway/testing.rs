@@ -246,7 +246,15 @@ impl Gateway {
             .unwrap()
             .clone()
             .ok_or_else(|| AppError::new(code::STATE, "调用统计暂不可用，等待重新读取"))?;
-        usage.recent_gateway_requests("codex", at)
+        usage.recent_gateway_requests(
+            match self.client_id() {
+                ClientId::Codex => "codex",
+                ClientId::Claude => "claude",
+                ClientId::Grok => "grok",
+                ClientId::Dsh => "dsh",
+            },
+            at,
+        )
     }
     pub(crate) fn test_candidates(&self) -> Result<Vec<Candidate>> {
         Ok(self

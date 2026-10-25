@@ -27,52 +27,52 @@ impl Service {
             });
         }
         while let Some(result) = running.next().await {
-            let index = result?;
+            result?;
             let detail = self.detail(id)?;
             let outputs: Vec<_> = detail
                 .job
                 .groups
                 .iter()
                 .filter(|group| group.status == "completed")
-                .filter_map(|group| detail.output.as_ref()?.groups.get(&group.index).cloned())
+                .filter_map(|group| {
+                    Some((
+                        group.expected,
+                        detail.output.as_ref()?.groups.get(&group.index)?.clone(),
+                    ))
+                })
                 .collect();
-            let report = modeltrace::analyze(&outputs, &context.bank)?;
-            let first = detail
-                .job
-                .groups
-                .first()
-                .and_then(|group| group.report.as_ref());
-            let downgraded_first = detail.job.automatic
-                && index == 0
-                && first.is_some_and(|report| {
-                    downgrade::valid_report(report)
-                        && downgrade::is_downgrade(
-                            &context.request.model,
-                            compat::string(&report["prediction"]),
-                        )
-                });
-            let early = report["probability"].as_f64().is_some_and(|p| p >= 0.99);
+            let mut report = score(context, outputs).await?;
+            if !report.is_null() {
+                let complete = detail
+                    .job
+                    .groups
+                    .iter()
+                    .filter(|g| g.status == "completed")
+                    .count()
+                    == context.sample_count;
+                report["disposition"] = if complete {
+                    downgrade::verdict(&detail.job.forwarded_model, &report)
+                } else {
+                    "unknown"
+                }
+                .into();
+                report["ambiguous"] = json!(
+                    report["disposition"] == "unknown"
+                        && compat::string(&report["prediction_name"]).contains('/')
+                );
+                report["planned_outputs"] = context.sample_count.into();
+                report["initial"] =
+                    json!(context.engine == Engine::LmDetector && context.sample_count == 1);
+            }
             self.update(id, |job, _| {
                 job.report = (!report.is_null()).then_some(report);
-                if downgraded_first {
-                    job.completion_reason = Some("firstGroupDowngrade".into());
-                } else if early {
-                    job.completion_reason = Some("confidence99".into());
-                }
             })?;
-            if downgraded_first || early {
-                // Dropping in-flight futures cancels local waits; never replay them.
-                drop(running);
+        }
+        if context.request.tokenizer && self.detail(id)?.job.tokenizer_result.is_none() {
+            if let Err(error) = self.run_tokenizer(id, context).await {
                 self.update(id, |job, _| {
-                    for group in &mut job.groups {
-                        if matches!(group.status.as_str(), "running" | "pending") {
-                            group.uncertain = group.attempts > 0;
-                            group.status = "skipped".into();
-                            group.retryable = false;
-                        }
-                    }
+                    job.tokenizer_result = Some(json!({"status":"failed","error":error.message}))
                 })?;
-                break;
             }
         }
         let detail = self.detail(id)?;
@@ -89,14 +89,13 @@ impl Service {
     }
     async fn fingerprint_group(&self, id: &str, context: &Context, index: usize) -> Result<()> {
         let (expected, prompt) = &context.challenges[index];
-        let target = fingerprint_stream::Target {
-            url: context.target.url("/v1/responses")?,
-            headers: context.target.headers.clone(),
-            proxy: None,
-            model: context.target.model(&context.request.model),
-            oauth: false,
-            protocol: context.target.protocol.clone(),
-            client_metadata: context.target.codex_metadata(),
+        let target = target(context)?;
+        let body = if context.engine == Engine::LmDetector {
+            target
+                .lm_payload(prompt)
+                .map_err(|_| failure("指纹请求构造失败"))?
+        } else {
+            target.payload(prompt)
         };
         let client = target
             .client()
@@ -140,13 +139,18 @@ impl Service {
             });
             let result = tokio::time::timeout(
                 Duration::from_secs(180),
-                fingerprint_stream::execute(
+                fingerprint_stream::execute_body(
                     &target,
-                    prompt,
-                    *expected,
+                    &body,
+                    if context.engine == Engine::ModelTrace {
+                        *expected
+                    } else {
+                        0
+                    },
                     &client,
                     Some(callback),
                     &mut diagnostics,
+                    false,
                 ),
             )
             .await
@@ -154,7 +158,7 @@ impl Service {
             let elapsed = started.elapsed().as_millis() as u64;
             match result {
                 Ok((output, returned)) => {
-                    let report = modeltrace::analyze(std::slice::from_ref(&output), &context.bank)?;
+                    let report = score(context, vec![(*expected, output.clone())]).await?;
                     let valid = downgrade::valid_report(&report);
                     self.update(id, |job, result| {
                         let group = &mut job.groups[index];
@@ -165,7 +169,14 @@ impl Service {
                         group.report = (!report.is_null()).then_some(report);
                         group.retryable = !valid;
                         group.uncertain = false;
-                        group.error = (!valid).then(|| "有效整数不足 80 个，无法判定指纹".into());
+                        group.error = (!valid).then(|| {
+                            if context.engine == Engine::ModelTrace {
+                                "有效整数不足 80 个，无法判定指纹"
+                            } else {
+                                "样本未通过 LM Detector 校验，请查看评分诊断"
+                            }
+                            .into()
+                        });
                         if returned.is_some() {
                             job.returned_model = returned;
                         }
@@ -208,36 +219,29 @@ impl Service {
             return;
         };
         let job = detail.job;
-        let report = job
+        if job
             .groups
-            .first()
-            .and_then(|g| g.report.as_ref())
-            .filter(|r| {
-                downgrade::valid_report(r)
-                    && downgrade::is_downgrade(
-                        &job.requested_model,
-                        compat::string(&r["prediction"]),
-                    )
-            })
-            .or_else(|| {
-                job.report.as_ref().filter(|r| {
-                    downgrade::valid_report(r)
-                        && downgrade::is_downgrade(
-                            &job.requested_model,
-                            compat::string(&r["prediction"]),
-                        )
-                })
-            });
-        let Some(report) = report else {
+            .iter()
+            .filter(|g| g.status == "completed")
+            .count()
+            != job.sample_count
+        {
+            return;
+        }
+        let Some(report) = job.report.as_ref().filter(|r| {
+            r["used_outputs"].as_u64() == Some(job.sample_count as u64)
+                && downgrade::verdict(&job.forwarded_model, r) == "downgrade"
+        }) else {
             return;
         };
         let mark = Degradation {
             provider_id: job.provider_id.clone(),
             job_id: id.into(),
             detected_at: self.now(),
-            requested_model: job.requested_model.clone(),
+            requested_model: job.forwarded_model.clone(),
             predicted_model: compat::string(&report["prediction"]).into(),
-            probability: report["probability"].as_f64().unwrap_or(0.0),
+            probability: report["probability"].as_f64(),
+            engine: job.engine,
             queue_removed: false,
             error: None,
         };
@@ -246,22 +250,26 @@ impl Service {
             .contexts
             .get(id)
             .and_then(|c| c.detection_revision.as_deref())
-            != Some(config_revision(&data.saved, &job.provider_id).as_str())
+            != Some(config_revision(&data.saved, job.client_id, &job.provider_id).as_str())
             || data.cancel.get(id).is_some_and(|cancel| *cancel.borrow())
         {
             return;
         }
         let mut next = data.saved.clone();
-        next.degraded.insert(job.provider_id.clone(), mark);
+        next.degraded
+            .insert(scope_key(job.client_id, &job.provider_id), mark);
         if let Err(error) = self.save(&mut data, next) {
             data.error = Some(error.message);
             return;
         }
         let result = self
-            .gateway(ClientId::Codex)
+            .gateway(job.client_id)
             .dequeue_degraded(&job.provider_id, &job.provider_version);
         let mut next = data.saved.clone();
-        if let Some(mark) = next.degraded.get_mut(&job.provider_id) {
+        if let Some(mark) = next
+            .degraded
+            .get_mut(&scope_key(job.client_id, &job.provider_id))
+        {
             mark.queue_removed = result.is_ok();
             mark.error = result.err().map(|e| e.message);
         }
@@ -270,7 +278,7 @@ impl Service {
         }
     }
 }
-fn error_message(code: &str) -> &'static str {
+pub(super) fn error_message(code: &str) -> &'static str {
     match code {
         "client_restricted" => errors::CLIENT_RESTRICTED,
         "auth_or_quota" => "认证失败或额度不足",
@@ -283,4 +291,49 @@ fn error_message(code: &str) -> &'static str {
         "output_limit" => "上游输出超出测试限制",
         _ => "上游模型测试失败",
     }
+}
+
+pub(super) fn target(context: &Context) -> Result<fingerprint_stream::Target> {
+    let path = match context.target.protocol.as_str() {
+        "responses" => "/v1/responses",
+        "messages" => "/v1/messages",
+        "chat_completions" => "/v1/chat/completions",
+        _ => return Err(failure("检测协议不受支持")),
+    };
+    Ok(fingerprint_stream::Target {
+        url: context.target.url(path)?,
+        headers: context.target.headers.clone(),
+        proxy: None,
+        model: context.target.model(&context.request.model),
+        oauth: false,
+        protocol: context.target.protocol.clone(),
+        client_metadata: context.target.codex_metadata(),
+    })
+}
+async fn score(context: &Context, outputs: Vec<(usize, String)>) -> Result<Value> {
+    let lm = context.lm.clone();
+    let bank = context.bank.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(resource) = lm {
+            resource.analyze(
+                &outputs
+                    .into_iter()
+                    .map(|(count, text)| lmfpd::Output {
+                        text,
+                        expected_count: count as u64,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            modeltrace::analyze(
+                &outputs
+                    .into_iter()
+                    .map(|(_, text)| text)
+                    .collect::<Vec<_>>(),
+                &bank,
+            )
+        }
+    })
+    .await
+    .map_err(|_| failure("指纹评分失败"))?
 }

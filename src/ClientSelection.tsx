@@ -1,3 +1,4 @@
+import { flushTestPrompt } from "./provider-test-prompt";
 import { useCallback, useState } from "react";
 import type { ClientId } from "./types";
 import { confirmAction } from "./confirmation";
@@ -25,6 +26,7 @@ export function useClientSelection(surface: "main" | "quick" | "config") {
   const select = useCallback(
     async (next: ClientId, dirty = false) => {
       if (next === client) return true;
+      if (!(await flushTestPrompt())) return false;
       if (
         (dirty || document.querySelector("[data-provider-draft]")) &&
         !(await confirmAction("切换客户端会丢弃未保存的修改。"))
