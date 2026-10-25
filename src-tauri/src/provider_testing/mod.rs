@@ -44,6 +44,7 @@ fn client_key(client: ClientId) -> &'static str {
         ClientId::Claude => "claude",
         ClientId::Grok => "grok",
         ClientId::Dsh => "dsh",
+        ClientId::Agy => "agy",
     }
 }
 fn scope_key(client: ClientId, provider: &str) -> String {
@@ -91,7 +92,7 @@ struct Data {
 struct Shared {
     path: PathBuf,
     data: Mutex<Data>,
-    gateways: [Gateway; 4],
+    gateways: Vec<Gateway>,
     events: broadcast::Sender<()>,
     jobs: Arc<Semaphore>,
     lm: Mutex<Option<Arc<lm_detector::Resource>>>,
@@ -111,7 +112,8 @@ impl Service {
         }
         now()
     }
-    pub fn new(directory: &Path, gateways: [Gateway; 4]) -> Result<Self> {
+    pub fn new(directory: &Path, gateways: impl Into<Vec<Gateway>>) -> Result<Self> {
+        let gateways = gateways.into();
         let path = directory.join("provider-tests.json");
         let raw = storage::read_bounded(&path, STATE_LIMIT)?;
         let mut value: Option<Value> = raw
@@ -300,6 +302,9 @@ impl Service {
         Ok(())
     }
     pub fn start(&self, request: Request) -> Result<Job> {
+        if request.client_id == ClientId::Agy && request.kind == Kind::Fingerprint {
+            return Err(failure("Antigravity 支持连接测试"));
+        }
         self.start_job(request, false)
     }
     pub fn set_prompt(&self, prompt: String) -> Result<()> {

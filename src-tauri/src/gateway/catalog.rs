@@ -204,8 +204,10 @@ pub(super) fn local_list(
     uri: &hyper::Uri,
     headers: &hyper::HeaderMap,
 ) -> Option<hyper::Response<replay::WireBody>> {
-    if gateway.client_id() == super::ClientId::Codex
-        || !matches!(uri.path(), "/models" | "/v1/models")
+    if matches!(
+        gateway.client_id(),
+        super::ClientId::Codex | super::ClientId::Agy
+    ) || !matches!(uri.path(), "/models" | "/v1/models")
     {
         return None;
     }
@@ -332,10 +334,15 @@ async fn fetch(
     let fail = |message: &str| (message.to_owned(), None);
     let claude = input.client_id == super::ClientId::Claude
         || connection.is_some_and(|c| c.protocol == super::grok_config::Protocol::Messages);
-    let target = super::forward::target(
-        &input.base,
-        &"/v1/models".parse().expect("static model path"),
-    )
+    let gemini = input.client_id == super::ClientId::Agy;
+    let target = if gemini {
+        super::gemini::target(&input.base, &"/v1beta/models".parse().unwrap())
+    } else {
+        super::forward::target(
+            &input.base,
+            &"/v1/models".parse().expect("static model path"),
+        )
+    }
     .map_err(|_| fail("模型接口地址无效"))?;
     let target = if let Some(connection) = connection {
         connection
@@ -407,12 +414,22 @@ async fn fetch(
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| fail("模型接口没有返回有效 JSON"))?;
         let data = value
-            .get("data")
+            .get(if gemini { "models" } else { "data" })
             .and_then(|v| v.as_array())
             .ok_or_else(|| fail("无法识别模型列表，可手动添加模型 ID"))?;
         let page: Vec<String> = data
             .iter()
-            .filter_map(|v| v.get("id").and_then(|v| v.as_str()))
+            .filter_map(|v| {
+                v.get(if gemini { "name" } else { "id" })
+                    .and_then(|v| v.as_str())
+            })
+            .map(|id| {
+                if gemini {
+                    id.strip_prefix("models/").unwrap_or(id)
+                } else {
+                    id
+                }
+            })
             .filter(|id| {
                 !id.is_empty()
                     && id.len() <= 256
@@ -425,11 +442,18 @@ async fn fetch(
         if models.len() > 4096 {
             return Err(fail("单供应商模型列表超过 4,096 个"));
         }
-        if !claude || value.get("has_more").and_then(|v| v.as_bool()) != Some(true) {
+        if if gemini {
+            value
+                .get("nextPageToken")
+                .and_then(|v| v.as_str())
+                .is_none_or(str::is_empty)
+        } else {
+            !claude || value.get("has_more").and_then(|v| v.as_bool()) != Some(true)
+        } {
             break;
         }
         let cursor = value
-            .get("last_id")
+            .get(if gemini { "nextPageToken" } else { "last_id" })
             .and_then(|v| v.as_str())
             .filter(|v| !v.is_empty() && v.len() <= 256)
             .ok_or_else(|| fail("模型分页标记无效"))?;
@@ -438,13 +462,13 @@ async fn fetch(
         }
         let pairs: Vec<_> = url
             .query_pairs()
-            .filter(|(key, _)| key != "after_id")
+            .filter(|(key, _)| key != if gemini { "pageToken" } else { "after_id" })
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect();
         url.query_pairs_mut()
             .clear()
             .extend_pairs(pairs)
-            .append_pair("after_id", cursor);
+            .append_pair(if gemini { "pageToken" } else { "after_id" }, cursor);
     }
     models.sort();
     models.dedup();

@@ -96,6 +96,7 @@ beforeEach(() => {
     claude: structuredClone(claudeGatewayDemo),
     grok: structuredClone(grokGatewayDemo),
     dsh: { ...structuredClone(grokGatewayDemo), clientId: "dsh" },
+    agy: { ...structuredClone(grokGatewayDemo), clientId: "agy" },
   };
   revealToken = async (clientId) => `fixture-stored-${clientId}-token`;
   nextUpdateError = null;

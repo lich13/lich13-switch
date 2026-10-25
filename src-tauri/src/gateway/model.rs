@@ -178,6 +178,8 @@ pub struct Store {
     pub grok_connections: BTreeMap<String, super::grok_config::Connection>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dsh_models: BTreeMap<String, super::dsh::ModelMapping>,
+    #[serde(default)]
+    pub agy_models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dsh_catalog: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,6 +223,7 @@ impl Default for Store {
             provider_endpoints: BTreeMap::new(),
             grok_connections: BTreeMap::new(),
             dsh_models: BTreeMap::new(),
+            agy_models: BTreeMap::new(),
             dsh_catalog: vec![],
             grok_resume: None,
             grok_api_model: None,
@@ -241,6 +244,8 @@ pub enum Edit {
         base_url: String,
         token: String,
         display_name: String,
+        protocol: super::provider_protocol::Protocol,
+        model: Option<String>,
     },
     SaveProvider {
         #[serde(default)]
@@ -458,6 +463,16 @@ impl Store {
             .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
     }
     pub fn edit(&mut self, edit: Edit, running: bool) -> Result<()> {
+        if let Edit::SaveGrokProvider {
+            protocol: super::provider_protocol::Protocol::GeminiNative,
+            ..
+        } = &edit
+        {
+            return Err(AppError::new(
+                code::PROVIDER,
+                "Grok Build 不支持 Gemini Native",
+            ));
+        }
         if let Edit::SaveDshProvider { protocol, .. } = &edit {
             if *protocol != super::grok_config::Protocol::ChatCompletions {
                 return Err(AppError::new(code::PROVIDER, "DSH 仅支持 Chat Completions"));
@@ -523,10 +538,16 @@ impl Store {
                 base_url: raw,
                 token,
                 display_name,
+                protocol,
+                model,
             } => {
                 let url = base_url(&raw, self.settings.port)?;
                 if self.providers.iter().any(|p| {
                     p.token == token
+                        && self
+                            .grok_connections
+                            .get(&p.id)
+                            .is_none_or(|c| c.protocol == protocol)
                         && base_url(&p.base_url, self.settings.port).is_ok_and(|u| {
                             u.as_str().trim_end_matches('/') == url.as_str().trim_end_matches('/')
                         })
@@ -538,13 +559,26 @@ impl Store {
                     Edit::SaveProvider {
                         search_only: None,
                         id: None,
-                        base_url: raw,
+                        base_url: raw.clone(),
                         token,
                         quota_access_token: None,
                         name: Some(display_name),
                     },
                     running,
                 )?;
+                if let Some(p) = self.providers.last_mut() {
+                    p.base_url = raw;
+                    self.grok_connections.insert(
+                        p.id.clone(),
+                        super::provider_protocol::Connection {
+                            protocol,
+                            ..Default::default()
+                        },
+                    );
+                    if let Some(model) = model {
+                        self.agy_models.insert(p.id.clone(), model);
+                    }
+                }
                 self.selected = selected;
             }
             Edit::SaveProvider {
@@ -673,6 +707,7 @@ impl Store {
                 self.quota_access_tokens.remove(&id);
                 self.providers.retain(|p| p.id != id);
                 self.dsh_models.remove(&id);
+                self.agy_models.remove(&id);
                 self.provider_endpoints.remove(&id);
                 if self.selected.as_deref() == Some(&id) {
                     self.selected = self.providers.first().map(|p| p.id.clone());

@@ -406,13 +406,19 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 Ok(replay::RequestHints::default())
             };
-        let stream_hint = websocket
+        let stream_hint = (gateway.client_id() == super::ClientId::Agy
+            && parts.uri.path().ends_with(":streamGenerateContent"))
+            || websocket
             || hints.as_ref().is_ok_and(|h| h.stream)
             || parts
                 .headers
                 .get(header::ACCEPT)
                 .is_some_and(|h| h.as_bytes().windows(17).any(|w| w == b"text/event-stream"));
-        let mut model = hints.as_ref().ok().and_then(|h| h.model.clone());
+        let mut model = if gateway.client_id() == super::ClientId::Agy {
+            super::gemini::model(parts.uri.path())
+        } else {
+            hints.as_ref().ok().and_then(|h| h.model.clone())
+        };
         let compaction_trigger = hints.as_ref().is_ok_and(|h| h.compaction_trigger);
         let mut pinned = (mode == "manual").then(|| ids.first().cloned()).flatten();
         let mut unknown_affinity = false;
@@ -563,8 +569,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         } else {
             routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref())
         };
-        let usage_trace = if matches!(requirement, Requirement::Resource)
-            && operation != crate::usage::model::Operation::WebSearch
+        let usage_trace = if (matches!(requirement, Requirement::Resource)
+            && operation != crate::usage::model::Operation::WebSearch)
+            || (gateway.client_id() == super::ClientId::Agy
+                && parts.uri.path().ends_with(":countTokens"))
         {
             None
         } else {
@@ -1101,6 +1109,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             upstream.headers_mut().remove(header::HOST);
             upstream.headers_mut().remove(header::AUTHORIZATION);
             upstream.headers_mut().remove("x-api-key");
+            upstream.headers_mut().remove("x-goog-api-key");
             let Ok(auth) =
                 header::HeaderValue::from_str(&format!("Bearer {}", route.provider.token))
             else {
@@ -1115,7 +1124,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     return error(
                         StatusCode::BAD_GATEWAY,
                         code::GROK_AUTH,
-                        "Grok 供应商认证配置无效",
+                        "供应商认证配置无效",
                     );
                 }
             }

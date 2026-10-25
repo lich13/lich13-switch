@@ -15,6 +15,7 @@ pub enum Protocol {
     Responses,
     ChatCompletions,
     Messages,
+    GeminiNative,
 }
 impl Protocol {
     pub fn name(self) -> &'static str {
@@ -22,14 +23,19 @@ impl Protocol {
             Self::Responses => "responses",
             Self::ChatCompletions => "chat_completions",
             Self::Messages => "messages",
+            Self::GeminiNative => "gemini_native",
         }
     }
     pub fn accepts(self, path: &str) -> bool {
+        if self == Self::GeminiNative {
+            return super::gemini::accepts(path);
+        }
         let path = path.strip_prefix("/v1").unwrap_or(path);
         (match self {
             Self::Responses => path == "/responses" || path.starts_with("/responses/"),
             Self::ChatCompletions => path == "/chat/completions",
             Self::Messages => path == "/messages" || path == "/messages/count_tokens",
+            Self::GeminiNative => false,
         }) || path == "/models"
             || path.starts_with("/models/")
     }
@@ -46,7 +52,10 @@ impl Connection {
     pub fn authenticate(&self, headers: &mut hyper::HeaderMap, token: &str) -> Result<()> {
         headers.remove("authorization");
         headers.remove("x-api-key");
-        let (name, token) = if self.protocol == Protocol::Messages {
+        headers.remove("x-goog-api-key");
+        let (name, token) = if self.protocol == Protocol::GeminiNative {
+            ("x-goog-api-key", token.to_owned())
+        } else if self.protocol == Protocol::Messages {
             if !headers.contains_key("anthropic-version") {
                 headers.insert(
                     "anthropic-version",

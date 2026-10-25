@@ -61,6 +61,7 @@ pub fn default_model(client: ClientId) -> &'static str {
         ClientId::Grok => "grok-4.1-fast",
         ClientId::Claude => "claude-sonnet-4-5",
         ClientId::Dsh => "deepseek-v4-pro",
+        ClientId::Agy => "gemini-2.5-flash",
         ClientId::Codex => downgrade::DEFAULT_TEST_MODEL,
     }
 }
@@ -136,8 +137,13 @@ impl Service {
         let mut error_detail = None;
         let result = async {
             let client = client()?;
-            let mut url = url::Url::parse(&target.url("/v1/models")?)
-                .map_err(|_| failure("模型目录地址无效"))?;
+            let gemini = client_id == ClientId::Agy;
+            let mut url = url::Url::parse(&target.url(if gemini {
+                "/v1beta/models"
+            } else {
+                "/v1/models"
+            })?)
+            .map_err(|_| failure("模型目录地址无效"))?;
             let mut models = Vec::new();
             let mut cursors = std::collections::HashSet::new();
             loop {
@@ -197,6 +203,15 @@ impl Service {
                     let id = item["id"]
                         .as_str()
                         .or_else(|| item["slug"].as_str())
+                        .or_else(|| {
+                            if gemini {
+                                item["name"]
+                                    .as_str()
+                                    .map(|id| id.strip_prefix("models/").unwrap_or(id))
+                            } else {
+                                None
+                            }
+                        })
                         .or_else(|| item.as_str());
                     if let Some(id) = id.filter(|s| {
                         !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
@@ -215,10 +230,14 @@ impl Service {
                         });
                     }
                 }
-                if data["has_more"] != true {
+                if if gemini {
+                    data["nextPageToken"].as_str().is_none_or(str::is_empty)
+                } else {
+                    data["has_more"] != true
+                } {
                     break;
                 }
-                let cursor = data["last_id"]
+                let cursor = data[if gemini { "nextPageToken" } else { "last_id" }]
                     .as_str()
                     .filter(|s| !s.is_empty() && s.len() <= 256)
                     .ok_or_else(|| failure("模型目录分页游标无效"))?;
@@ -227,13 +246,13 @@ impl Service {
                 }
                 let pairs: Vec<_> = url
                     .query_pairs()
-                    .filter(|(key, _)| key != "after_id")
+                    .filter(|(key, _)| key != if gemini { "pageToken" } else { "after_id" })
                     .map(|(k, v)| (k.into_owned(), v.into_owned()))
                     .collect();
                 url.query_pairs_mut()
                     .clear()
                     .extend_pairs(pairs)
-                    .append_pair("after_id", cursor);
+                    .append_pair(if gemini { "pageToken" } else { "after_id" }, cursor);
             }
             models.sort_by(|a, b| a.id.cmp(&b.id));
             models.dedup_by(|a, b| a.id == b.id);
@@ -279,13 +298,16 @@ impl Service {
     async fn connection_inner(&self, id: &str, context: &Context) -> Result<()> {
         let target = &context.target;
         let model = target.model(&context.request.model);
+        if target.client_id == ClientId::Agy && !crate::gateway::gemini::valid_model(&model) {
+            return Err(failure("模型 ID 无效"));
+        }
         let (path, mut payload) = payload(&context.request, &model, &target.protocol);
         if let Some(metadata) = target.codex_metadata() {
             payload["client_metadata"] = metadata;
         }
         let started = Instant::now();
         let response = client()?
-            .post(target.url(path)?)
+            .post(target.url(&path)?)
             .headers(target.headers.clone())
             .json(&payload)
             .send()
@@ -333,11 +355,25 @@ impl Service {
             .as_str()
             .or_else(|| value["response"]["model"].as_str())
             .or_else(|| value["message"]["model"].as_str())
+            .or_else(|| value["modelVersion"].as_str())
             .filter(|s| s.len() <= 256)
             .map(str::to_owned);
         self.progress(id, |job, output| {
             if returned.is_some() {
                 job.returned_model = returned;
+            }
+            if let Some(parts) = value
+                .pointer("/candidates/0/content/parts")
+                .and_then(Value::as_array)
+            {
+                for part in parts {
+                    if part["thought"] != true {
+                        if let Some(text) = part["text"].as_str() {
+                            append_text(&mut output.text, text);
+                        }
+                    }
+                }
+                return;
             }
             let delta = value["delta"]
                 .as_str()
@@ -429,7 +465,8 @@ impl Service {
                         terminal |= matches!(
                             value["type"].as_str(),
                             Some("response.completed" | "response.done" | "message_stop")
-                        ) || value["choices"][0]["finish_reason"].as_str().is_some();
+                        ) || value["choices"][0]["finish_reason"].as_str().is_some()
+                            || value["candidates"][0]["finishReason"].as_str().is_some();
                     }
                 } else if let Some(data) = line.strip_prefix(b"data:") {
                     lines.push(
@@ -450,14 +487,18 @@ impl Service {
         Ok(())
     }
 }
-pub(super) fn payload(request: &Request, model: &str, protocol: &str) -> (&'static str, Value) {
+pub(super) fn payload(request: &Request, model: &str, protocol: &str) -> (String, Value) {
     let text = request
         .prompt
         .as_deref()
         .unwrap_or(DEFAULT_CONNECTION_PROMPT);
     match protocol {
+        "gemini_native" => (
+            format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
+            json!({"contents":[{"role":"user","parts":[{"text":text}]}],"generationConfig":{"maxOutputTokens":256}}),
+        ),
         "messages" => (
-            "/v1/messages",
+            "/v1/messages".into(),
             json!({"model":model,"max_tokens":256,"messages":[{"role":"user","content":[{"type":"text","text":text}]}],"stream":true}),
         ),
         "chat_completions" => {
@@ -467,15 +508,32 @@ pub(super) fn payload(request: &Request, model: &str, protocol: &str) -> (&'stat
             } else {
                 "max_completion_tokens"
             }] = json!(256);
-            ("/v1/chat/completions", body)
+            ("/v1/chat/completions".into(), body)
         }
         _ => (
-            "/v1/responses",
+            "/v1/responses".into(),
             json!({"model":model,"input":[{"role":"user","content":[{"type":"input_text","text":text}]}],"stream":true,"store":false,"max_output_tokens":256}),
         ),
     }
 }
 fn is_error(value: &Value) -> bool {
+    if value
+        .pointer("/promptFeedback/blockReason")
+        .and_then(Value::as_str)
+        .is_some_and(|r| r != "BLOCK_REASON_UNSPECIFIED")
+        || value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .is_some_and(|c| {
+                c.iter().any(|c| {
+                    c["finishReason"].as_str().is_some_and(|r| {
+                        !matches!(r, "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED")
+                    })
+                })
+            })
+    {
+        return true;
+    }
     [value, &value["response"]].iter().any(|value| {
         value.get("error").is_some_and(|e| !e.is_null())
             || matches!(

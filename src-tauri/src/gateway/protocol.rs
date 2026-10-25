@@ -190,7 +190,8 @@ impl Observation {
                     | "content_block_delta"
                     | "content_block_stop"
             )
-            || outer.get("choices").is_some();
+            || outer.get("choices").is_some()
+            || outer.get("candidates").is_some();
         if self.terminal.is_none() {
             self.capacity_error = super::upstream_error::temporary_capacity_event(outer);
             let terminal = if super::upstream_error::model_error(outer) {
@@ -239,6 +240,7 @@ impl Observation {
                         }
                     })
             });
+            let terminal = terminal.or_else(|| gemini_terminal(outer));
             if self.pending_error_response.is_some()
                 && matches!(terminal, Some(Terminal::Success | Terminal::Limited))
                 && !explicit_terminal
@@ -1624,3 +1626,37 @@ impl Observer {
 #[cfg(test)]
 #[path = "protocol_poison_tests.rs"]
 mod poison_tests;
+
+fn gemini_terminal(value: &Value) -> Option<Terminal> {
+    if value
+        .pointer("/promptFeedback/blockReason")
+        .and_then(Value::as_str)
+        .is_some_and(|r| r != "BLOCK_REASON_UNSPECIFIED")
+    {
+        return Some(Terminal::Rejected);
+    }
+    let candidates = value.get("candidates")?.as_array()?;
+    if candidates.is_empty()
+        || !candidates.iter().all(|c| {
+            c.get("finishReason")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r != "FINISH_REASON_UNSPECIFIED")
+        })
+    {
+        return None;
+    }
+    if candidates.iter().any(|c| c["finishReason"] == "MAX_TOKENS") {
+        Some(Terminal::Limited)
+    } else if candidates.iter().all(|c| c["finishReason"] == "STOP") {
+        Some(Terminal::Success)
+    } else if candidates.iter().any(|c| {
+        matches!(
+            c["finishReason"].as_str(),
+            Some("MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "OTHER")
+        )
+    }) {
+        Some(Terminal::Failure)
+    } else {
+        Some(Terminal::Rejected)
+    }
+}

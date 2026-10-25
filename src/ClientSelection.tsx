@@ -3,20 +3,24 @@ import { useCallback, useState } from "react";
 import type { ClientId } from "./types";
 import { confirmAction } from "./confirmation";
 
+export const clients: ClientId[] = ["codex", "claude", "grok", "dsh", "agy"];
 export const clientName = (client: ClientId) =>
-  client === "dsh"
-    ? "DSH"
-    : client === "claude"
-      ? "Claude Code"
-      : client === "grok"
-        ? "Grok Build"
-        : "Codex";
+  ({
+    codex: "Codex",
+    claude: "Claude Code",
+    grok: "Grok Build",
+    dsh: "DSH",
+    agy: "Antigravity CLI",
+  })[client];
 export function useClientSelection(surface: "main" | "quick" | "config") {
   const key = `lich13-switch.${surface}.client`;
   const [client, setClient] = useState<ClientId>(() => {
     try {
       const stored = localStorage.getItem(key);
-      return stored === "claude" || stored === "grok" || stored === "dsh"
+      return stored === "claude" ||
+        stored === "grok" ||
+        stored === "dsh" ||
+        stored === "agy"
         ? stored
         : "codex";
     } catch {
@@ -63,6 +67,7 @@ export default function ClientSelection({
           "claude",
           "grok",
           ...(includeDsh ? ["dsh" as const] : []),
+          "agy",
         ] as const
       ).map((id) => (
         <button

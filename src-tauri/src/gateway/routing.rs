@@ -80,6 +80,10 @@ impl Requirement {
     }
 }
 pub fn resource(method: &hyper::Method, path: &str) -> bool {
+    if super::gemini::model(path).is_some() {
+        return false;
+    }
+    let path = super::gemini::path(path);
     let path = path
         .strip_prefix("/v1/")
         .map(|p| format!("/{p}"))

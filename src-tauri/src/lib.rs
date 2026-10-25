@@ -1,3 +1,4 @@
+mod agy_launch;
 use crate::errors::code;
 mod auth_cache;
 mod claude_profile;
@@ -59,6 +60,7 @@ struct Runtime {
     claude: gateway::Gateway,
     grok: gateway::Gateway,
     dsh: gateway::Gateway,
+    agy: gateway::Gateway,
     login: Mutex<login::Session>,
     claude_login: Mutex<claude_profile::login::Session>,
     quitting: AtomicBool,
@@ -89,6 +91,7 @@ impl Runtime {
             gateway::ClientId::Claude => &self.claude,
             gateway::ClientId::Grok => &self.grok,
             gateway::ClientId::Dsh => &self.dsh,
+            gateway::ClientId::Agy => &self.agy,
         }
     }
     fn home(&self, client: gateway::ClientId) -> Result<PathBuf> {
@@ -98,6 +101,7 @@ impl Runtime {
             gateway::ClientId::Claude => PathBuf::from(core.preferences().claude_home),
             gateway::ClientId::Grok => PathBuf::from(core.preferences().grok_home),
             gateway::ClientId::Dsh => PathBuf::from(core.preferences().dsh_home),
+            gateway::ClientId::Agy => self.data.join("agy/runtime"),
         })
     }
     async fn stop_gateways(&self) -> Result<()> {
@@ -106,7 +110,8 @@ impl Runtime {
         let b = self.claude.stop_for_exit().await;
         let c = self.grok.stop_for_exit().await;
         let d = self.dsh.stop_for_exit().await;
-        a.and(b).and(c).and(d).map(|_| ())
+        let e = self.agy.stop_for_exit().await;
+        a.and(b).and(c).and(d).and(e).map(|_| ())
     }
 }
 struct SmokeSnapshot {
@@ -544,6 +549,7 @@ fn set_quota_refresh(
     r.claude.set_quota_interval(seconds);
     r.grok.set_quota_interval(seconds);
     r.dsh.set_quota_interval(seconds);
+    r.agy.set_quota_interval(seconds);
     publish(&app, state.clone());
     Ok(state)
 }
@@ -1270,6 +1276,7 @@ async fn frontend_ready(
             gateway::ClientId::Claude,
             gateway::ClientId::Grok,
             gateway::ClientId::Dsh,
+            gateway::ClientId::Agy,
         ] {
             if (client == gateway::ClientId::Codex
                 && official::blocks_gateway(&r.data, &r.home(client)?))
@@ -1463,6 +1470,9 @@ fn tray_is_dark() -> bool {
         == 0
 }
 pub fn run() {
+    if agy_launch::early() {
+        return;
+    }
     let args: Vec<_> = std::env::args().collect();
     let smoke = args
         .iter()
@@ -1521,6 +1531,7 @@ pub fn run() {
             let claude = gateway.companion(data.join("claude"))?;
             let grok = gateway.grok_companion(data.join("grok"))?;
             let dsh = gateway.dsh_companion(data.join("dsh"))?;
+            let agy = gateway.agy_companion(data.join("agy"))?;
             let startup = startup::Service::new(&data);
             let start_silently = smoke.is_none() && startup::silent(&args);
             app.manage(quick::Panel::new(&data)?);
@@ -1542,6 +1553,7 @@ pub fn run() {
             claude.set_usage(usage.clone());
             grok.set_usage(usage.clone());
             dsh.set_usage(usage.clone());
+            agy.set_usage(usage.clone());
             let codex_import_error = if smoke.is_none() { gateway.import_initial(&core.home()).err() } else { None };
             let claude_import_error = if smoke.is_none() {
                 let home=std::path::PathBuf::from(core.preferences().claude_home);
@@ -1560,13 +1572,15 @@ pub fn run() {
             gateway.set_quota_interval(core.preferences().quota_refresh_seconds);
             grok.set_quota_interval(core.preferences().quota_refresh_seconds);
             dsh.set_quota_interval(core.preferences().quota_refresh_seconds);
+            agy.set_quota_interval(core.preferences().quota_refresh_seconds);
             claude.set_quota_interval(core.preferences().quota_refresh_seconds);
             let diagnostics = events::Service::new(&data);
             gateway.set_diagnostics(diagnostics.clone());
             claude.set_diagnostics(diagnostics.clone());
             grok.set_diagnostics(diagnostics.clone());
             dsh.set_diagnostics(diagnostics.clone());
-            let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), grok.clone(), dsh.clone()])?;
+            agy.set_diagnostics(diagnostics.clone());
+            let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), grok.clone(), dsh.clone(), agy.clone()])?;
             let runtime = Arc::new(Runtime {
                 usage,
                 diagnostics,
@@ -1578,6 +1592,7 @@ pub fn run() {
                 claude,
                 grok,
                 dsh,
+                agy,
                 login: Mutex::new(Default::default()),
                 claude_login: Mutex::new(Default::default()),
                 quitting: AtomicBool::new(false),
@@ -1605,8 +1620,9 @@ pub fn run() {
             usage::commands::connect(app.handle(), &runtime);
             runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
             runtime.dsh.observe_home(&runtime.home(gateway::ClientId::Dsh)?);
+            runtime.agy.observe_home(&runtime.home(gateway::ClientId::Agy)?);
             if runtime.smoke.is_none() {
-                for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
+                for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone(), runtime.agy.clone()] {
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = g.backfill_models().await {
                             g.report_model_error(e);
@@ -1617,6 +1633,7 @@ pub fn run() {
             runtime.gateway.report_diagnostics();
             runtime.grok.report_diagnostics();
             runtime.dsh.report_diagnostics();
+            runtime.agy.report_diagnostics();
             runtime.claude.report_diagnostics();
             if runtime.smoke.is_none() {
                 let handle = app.handle().clone();
@@ -1645,7 +1662,7 @@ pub fn run() {
                     }
                 });
             }
-            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
+            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone(), runtime.agy.clone()] {
                 let probes = g.clone();
                 tauri::async_runtime::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -1825,7 +1842,7 @@ pub fn run() {
                             }
                         }
                     }
-                    for client in [gateway::ClientId::Codex, gateway::ClientId::Claude, gateway::ClientId::Grok, gateway::ClientId::Dsh] {
+                    for client in [gateway::ClientId::Codex, gateway::ClientId::Claude, gateway::ClientId::Grok, gateway::ClientId::Dsh, gateway::ClientId::Agy] {
                         if let Ok(doc) = runtime.home(client).and_then(|home| runtime.gateway(client).read_config(&home)) {
                             let stamp = (doc.path.clone(), doc.revision.clone(), doc.guarded);
                             if config_versions.get(&client) != Some(&stamp) {
@@ -1935,6 +1952,9 @@ pub fn run() {
             notifications::test_notification,
             notifications::open_notification_settings,
             open_main,
+            agy_launch::get_agy_launch,
+            agy_launch::choose_agy_directory,
+            agy_launch::launch_agy,
             quick::get_quick,
             quick::set_quick,
             quick::hide_quick,

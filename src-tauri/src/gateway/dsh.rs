@@ -488,6 +488,7 @@ fn api(protocol: Protocol) -> &'static str {
         Protocol::Responses => "openai-responses",
         Protocol::ChatCompletions => "openai-completions",
         Protocol::Messages => "anthropic-messages",
+        Protocol::GeminiNative => "gemini-native",
     }
 }
 fn env_value(raw: &str) -> Result<Option<String>> {

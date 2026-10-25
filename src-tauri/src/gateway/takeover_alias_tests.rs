@@ -13,7 +13,7 @@ const BASE: &str = "https://provider.example.invalid/v1";
 fn seed(client: ClientId, home: &Path) {
     fs::create_dir_all(home).unwrap();
     let text = match client {
-            ClientId::Dsh => panic!("DSH profile path is covered separately"),
+            ClientId::Dsh | ClientId::Agy => panic!("DSH profile path is covered separately"),
         ClientId::Codex => format!("# keep fixture\nmodel_provider = 'custom'\n[model_providers.custom]\nbase_url = '{BASE}'\nexperimental_bearer_token = '{UPSTREAM}'\nwire_api = 'responses'\n"),
         ClientId::Claude => serde_json::to_string_pretty(&json!({"fixture":"keep", "env":{"ANTHROPIC_BASE_URL":BASE,"ANTHROPIC_AUTH_TOKEN":UPSTREAM}})).unwrap(),
         ClientId::Grok => format!("# keep fixture\n[models]\ndefault = 'fixture-model'\n[model.fixture-model]\nmodel = 'fixture-model'\napi_backend = 'responses'\nbase_url = '{BASE}'\napi_key = '{UPSTREAM}'\n"),
@@ -23,7 +23,7 @@ fn seed(client: ClientId, home: &Path) {
 
 fn old_address(client: ClientId, port: u16) -> String {
     let path = match client {
-        ClientId::Dsh => panic!("DSH profile path is covered separately"),
+        ClientId::Dsh | ClientId::Agy => panic!("DSH profile path is covered separately"),
         ClientId::Codex => "/codex/v1",
         ClientId::Claude => "/claude",
         ClientId::Grok => "/grok/v1",
@@ -176,7 +176,7 @@ fn interrupted_alias_restore_is_repeatable_without_losing_the_original() {
 fn gateway_for(client: ClientId, data: &Path) -> (Gateway, Gateway) {
     let root = Gateway::new(data.to_owned()).unwrap();
     let gateway = match client {
-        ClientId::Dsh => panic!("DSH profile path is covered separately"),
+        ClientId::Dsh | ClientId::Agy => panic!("DSH profile path is covered separately"),
         ClientId::Codex => root.clone(),
         ClientId::Claude => root.companion(data.join("claude")).unwrap(),
         ClientId::Grok => root.grok_companion(data.join("grok")).unwrap(),

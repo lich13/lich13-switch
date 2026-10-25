@@ -215,8 +215,10 @@ fn valid_config(c: &Config) -> Result<()> {
     let mut keys = BTreeSet::new();
     if c.provider_mappings.len() > 4096
         || c.provider_mappings.iter().any(|rule| {
-            !matches!(rule.client.as_str(), "codex" | "claude" | "grok" | "dsh")
-                || rule.provider.is_empty()
+            !matches!(
+                rule.client.as_str(),
+                "codex" | "claude" | "grok" | "dsh" | "agy"
+            ) || rule.provider.is_empty()
                 || rule.provider.len() > 128
                 || !rule
                     .provider

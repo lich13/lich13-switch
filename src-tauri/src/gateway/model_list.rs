@@ -306,6 +306,7 @@ impl Gateway {
                 }
                 ClientId::Grok => "Grok 选择器使用配置中的模型表；网关按请求模型名转发",
                 ClientId::Dsh => "修改后请同步模型列表，将变更写入 profile",
+                ClientId::Agy => "请选择启动模型",
             },
             models,
             providers,

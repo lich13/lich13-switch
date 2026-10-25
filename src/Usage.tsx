@@ -135,9 +135,12 @@ export default function Usage({
     rowsSequence = useRef(0),
     stateSequence = useRef(0),
     detailSequence = useRef(0);
-  useEffect(() => () => {
-    detailSequence.current++;
-  }, []);
+  useEffect(
+    () => () => {
+      detailSequence.current++;
+    },
+    [],
+  );
   const pending = useRef(new Map<string, Promise<unknown>>());
   const request = useCallback(
     <K extends CommandName>(
@@ -257,6 +260,7 @@ export default function Usage({
       command("get_gateway", { clientId: "claude" }),
       command("get_gateway", { clientId: "grok" }),
       command("get_gateway", { clientId: "dsh" }),
+      command("get_gateway", { clientId: "agy" }),
     ])
       .then((g) => {
         if (!gone)
@@ -433,6 +437,7 @@ export default function Usage({
           <option value="claude">Claude Code</option>
           <option value="grok">Grok Build</option>
           <option value="dsh">DeepSeek Harness</option>
+          <option value="agy">Antigravity CLI</option>
         </select>
         <select
           aria-label="用量供应商"

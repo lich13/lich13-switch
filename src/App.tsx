@@ -1,3 +1,4 @@
+import QuickPlatformSettings from "./QuickPlatformSettings";
 import { flushTestPrompt } from "./provider-test-prompt";
 import { subscriptions } from "./subscriptions";
 import { confirmAction } from "./confirmation";
@@ -1179,6 +1180,7 @@ function SettingsForm({
         </label>
         <NotificationPermission />
       </div>
+      <QuickPlatformSettings />
       <StartupSettings />
       <PowerSettings />
       <div className="settings-update-row">

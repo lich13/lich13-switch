@@ -123,7 +123,7 @@ export default function ProviderTesting({
   const kind: ProviderTestKind =
     tab === "fingerprint" ? "fingerprint" : "connection";
   const testing = tab === "connection" || tab === "fingerprint";
-  const fingerprint = !provider.searchOnly;
+  const fingerprint = !provider.searchOnly && gateway.clientId !== "agy";
   const platform = state?.platform;
   const sampleCount =
     platform?.engine === "lmDetector"
@@ -150,25 +150,28 @@ export default function ProviderTesting({
   const fail = useCallback((e: unknown) => setError(errorOf(e).message), []);
   const stateSequence = useRef(0);
   const mounted = useRef(false);
-  const refresh = useCallback(async (resetDetection = false) => {
-    const sequence = ++stateSequence.current;
-    try {
-      const current = await command("provider_test_state", {
-        clientId: gateway.clientId,
-        providerId: provider.id,
-      });
-      if (!mounted.current || sequence !== stateSequence.current) return;
-      setState(current);
-      if (resetDetection) {
-        setDetection(structuredClone(current.detection));
-        setDetectionSaved(JSON.stringify(current.detection));
-        setDetectionRevision(current.revision);
+  const refresh = useCallback(
+    async (resetDetection = false) => {
+      const sequence = ++stateSequence.current;
+      try {
+        const current = await command("provider_test_state", {
+          clientId: gateway.clientId,
+          providerId: provider.id,
+        });
+        if (!mounted.current || sequence !== stateSequence.current) return;
+        setState(current);
+        if (resetDetection) {
+          setDetection(structuredClone(current.detection));
+          setDetectionSaved(JSON.stringify(current.detection));
+          setDetectionRevision(current.revision);
+        }
+        return current;
+      } catch (error) {
+        if (mounted.current && sequence === stateSequence.current) throw error;
       }
-      return current;
-    } catch (error) {
-      if (mounted.current && sequence === stateSequence.current) throw error;
-    }
-  }, [gateway.clientId, provider.id]);
+    },
+    [gateway.clientId, provider.id],
+  );
   useEffect(() => {
     mounted.current = true;
     void refresh().catch(fail);

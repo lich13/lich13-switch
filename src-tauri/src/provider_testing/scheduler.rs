@@ -87,6 +87,9 @@ impl Service {
         mut config: Detection,
         expected: &str,
     ) -> Result<()> {
+        if client == ClientId::Agy && config.enabled {
+            return Err(failure("Antigravity 支持连接测试"));
+        }
         config.model = config.model.trim().into();
         if !["smart", "fixed"].contains(&config.mode.as_str())
             || !(1..=525600).contains(&config.interval_minutes)

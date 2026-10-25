@@ -111,6 +111,21 @@ pub fn validate(client: ClientId, text: &str) -> Result<()> {
         }
         Ok(())
     };
+    if client == ClientId::Agy {
+        check("/model", Value::is_string, "model")?;
+        check("/modelProvider", Value::is_string, "modelProvider")?;
+        check(
+            "/customModelsConfig",
+            Value::is_object,
+            "customModelsConfig",
+        )?;
+        check(
+            "/customModelsConfig/customModels",
+            Value::is_object,
+            "customModels",
+        )?;
+        return Ok(());
+    }
     for key in ["model", "language"] {
         check(&format!("/{key}"), Value::is_string, key)?;
     }
@@ -155,7 +170,7 @@ pub fn validate(client: ClientId, text: &str) -> Result<()> {
     Ok(())
 }
 fn backup(client: ClientId, data: &Path) -> std::path::PathBuf {
-    data.join(if client != ClientId::Claude {
+    data.join(if !matches!(client, ClientId::Claude | ClientId::Agy) {
         "previous-config.toml"
     } else {
         "previous-settings.json"
@@ -166,7 +181,7 @@ pub fn read(client: ClientId, home: &Path, data: &Path, guarded: bool) -> Result
     let raw = storage::read_optional(&path)?;
     let revision = storage::revision(raw.as_deref());
     let text = String::from_utf8(raw.unwrap_or_else(|| {
-        if client == ClientId::Claude {
+        if matches!(client, ClientId::Claude | ClientId::Agy) {
             b"{}\n".to_vec()
         } else {
             Vec::new()

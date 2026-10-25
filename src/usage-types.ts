@@ -286,7 +286,7 @@ export type UsageState = {
   error: string | null;
 };
 export type ProviderPriceMapping = {
-  client: "codex" | "claude" | "grok" | "dsh";
+  client: "codex" | "claude" | "grok" | "dsh" | "agy";
   provider: string;
   enabled: boolean;
   matchOn: "request" | "response";
@@ -336,25 +336,17 @@ export const tokenTotal = (t: Tokens) =>
         0,
       );
 export const clientName = (c: string) =>
-  c === "dsh"
-    ? "DSH"
-    : c === "codex"
-      ? "Codex"
-      : c === "claude"
-        ? "Claude Code"
-        : c === "grok"
-          ? "Grok Build"
-          : c;
-export function speed(a: Attempt, estimated: boolean) {
-  const ms = estimated
-    ? a.durationMs
-    : a.firstTokenMs == null
-      ? 0
-      : a.durationMs - a.firstTokenMs;
-  return a.tokens.output != null && a.tokens.output > 0 && ms > 0
-    ? `${((a.tokens.output / ms) * 1000).toFixed(1)}${estimated ? "（估算）" : ""}`
-    : "—";
-}
+  c === "agy"
+    ? "Antigravity CLI"
+    : c === "dsh"
+      ? "DSH"
+      : c === "codex"
+        ? "Codex"
+        : c === "claude"
+          ? "Claude Code"
+          : c === "grok"
+            ? "Grok Build"
+            : c;
 
 export function averageFirstToken(
   t: Pick<Totals, "firstTokenSumMs" | "firstTokenSamples"> | null | undefined,

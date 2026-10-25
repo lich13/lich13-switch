@@ -12,12 +12,15 @@ pub const QUICK_DEFAULT_HEIGHT: f64 = 720.;
 pub struct Preferences {
     pub pinned: bool,
     pub tab: String,
+    #[serde(default)]
+    pub hidden_clients: Vec<crate::gateway::ClientId>,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             pinned: false,
             tab: "providers".into(),
+            hidden_clients: Vec::new(),
         }
     }
 }
@@ -202,7 +205,7 @@ fn position(window: &tauri::WebviewWindow, anchor: tauri::Rect, height: f64) -> 
 #[tauri::command]
 pub fn get_quick(app: tauri::AppHandle, panel: tauri::State<'_, Panel>) -> serde_json::Value {
     let prefs = panel.preferences.lock().unwrap().clone();
-    serde_json::json!({"pinned": prefs.pinned, "tab": prefs.tab, "visible": app.get_webview_window("quick").is_some_and(|w| w.is_visible().unwrap_or(false))})
+    serde_json::json!({"pinned": prefs.pinned, "tab": prefs.tab, "hiddenClients": prefs.hidden_clients, "visible": app.get_webview_window("quick").is_some_and(|w| w.is_visible().unwrap_or(false))})
 }
 #[tauri::command]
 pub fn set_quick(
@@ -210,6 +213,7 @@ pub fn set_quick(
     panel: tauri::State<'_, Panel>,
     pinned: Option<bool>,
     tab: Option<String>,
+    hidden_clients: Option<Vec<crate::gateway::ClientId>>,
 ) -> Result<Preferences> {
     let mut prefs = panel.preferences.lock().unwrap();
     let mut next = prefs.clone();
@@ -221,6 +225,14 @@ pub fn set_quick(
             return Err(AppError::new(code::PANEL, "无效快捷页面"));
         }
         next.tab = tab;
+    }
+    if let Some(hidden) = hidden_clients {
+        next.hidden_clients = hidden.into_iter().fold(Vec::new(), |mut ids, id| {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            ids
+        });
     }
     storage::atomic_write(
         &panel.path,
@@ -297,5 +309,35 @@ mod tests {
         let (x, y, w, h) = bounds(anchor, (0., 24., 760., 480.), 1., 720.);
         assert_eq!(h, 480.);
         assert!(x >= 0. && x + w <= 760. && y >= 24. && y + h <= 504.);
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+    #[test]
+    fn legacy_preferences_default_visible_and_hidden_platforms_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("quick.json"),
+            r#"{"pinned":true,"tab":"providers"}"#,
+        )
+        .unwrap();
+        let panel = Panel::new(dir.path()).unwrap();
+        let mut prefs = panel.preferences.lock().unwrap().clone();
+        assert!(prefs.hidden_clients.is_empty());
+        prefs.hidden_clients = vec![
+            crate::gateway::ClientId::Agy,
+            crate::gateway::ClientId::Codex,
+        ];
+        std::fs::write(
+            dir.path().join("quick.json"),
+            serde_json::to_vec(&prefs).unwrap(),
+        )
+        .unwrap();
+        let reopened = Panel::new(dir.path()).unwrap();
+        let loaded = reopened.preferences.lock().unwrap();
+        assert!(loaded.pinned);
+        assert_eq!(loaded.hidden_clients, prefs.hidden_clients);
     }
 }

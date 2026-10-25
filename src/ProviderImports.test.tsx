@@ -171,6 +171,8 @@ it("keeps the queued preview after a save conflict and retries with the refreshe
   expect(notify).not.toHaveBeenCalled();
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
     id: first.id,
+    clientId: "codex",
+    protocol: "responses",
     expectedRevision: "before-import",
   });
   await waitFor(() =>
@@ -182,6 +184,8 @@ it("keeps the queued preview after a save conflict and retries with the refreshe
   expect(within(dialog).getByText(second.name)).toBeInTheDocument();
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
     id: first.id,
+    clientId: "codex",
+    protocol: "responses",
     expectedRevision: "after-external-change",
   });
   expect(notify).toHaveBeenCalledExactlyOnceWith("已添加供应商");
@@ -226,6 +230,8 @@ it("opens the local confirmation directly without a receiver setting", async () 
   );
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
     id: first.id,
+    clientId: "codex",
+    protocol: "responses",
     expectedRevision: revision,
   });
 });
@@ -250,4 +256,55 @@ it("shows unsupported local links as errors and only allows cancellation", async
   await waitFor(() =>
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
+});
+
+it("imports unknown sources into the chosen platform and keeps compatible protocols", async () => {
+  pending = [
+    {
+      ...queued(first),
+      provider: {
+        clientId: null,
+        protocol: "messages",
+        sourceApp: "future",
+        name: first.name,
+        baseUrl: first.baseUrl,
+      },
+    },
+  ];
+  const user = userEvent.setup();
+  render(<ProviderImports notify={() => {}} />);
+  const dialog = await waitForPreview(first.name);
+  expect(within(dialog).getByRole("button", { name: "导入" })).toBeDisabled();
+  await user.selectOptions(screen.getByLabelText("平台"), "grok");
+  expect(screen.getByLabelText("协议")).toHaveValue("messages");
+  await user.selectOptions(screen.getByLabelText("协议"), "chat_completions");
+  await user.selectOptions(screen.getByLabelText("平台"), "dsh");
+  expect(screen.getByLabelText("协议")).toHaveValue("chat_completions");
+  await user.selectOptions(screen.getByLabelText("平台"), "agy");
+  expect(screen.getByLabelText("协议")).toHaveValue("gemini_native");
+  expect(
+    within(screen.getByLabelText("协议")).queryByRole("option", {
+      name: "Messages",
+    }),
+  ).toBeNull();
+  expect(within(dialog).getByText(first.baseUrl)).toBeVisible();
+  await user.click(within(dialog).getByRole("button", { name: "导入" }));
+  expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
+    id: first.id,
+    clientId: "agy",
+    protocol: "gemini_native",
+    expectedRevision: revision,
+  });
+});
+it("defaults an incompatible source protocol to the destination protocol", async () => {
+  pending = [
+    {
+      ...queued(first),
+      provider: { ...queued(first).provider!, protocol: "gemini_native" },
+    },
+  ];
+  render(<ProviderImports notify={() => {}} />);
+  await waitForPreview(first.name);
+  expect(screen.getByLabelText("平台")).toHaveValue("codex");
+  expect(screen.getByLabelText("协议")).toHaveValue("responses");
 });

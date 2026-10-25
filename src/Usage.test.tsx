@@ -1478,6 +1478,7 @@ describe("usage navigation", () => {
     expect(calls("configure_pricing")).toHaveLength(0);
 
     mock.confirm.mockResolvedValue(true);
+    await import("./EventLog");
     await user.click(within(navigation).getByRole("button", { name: "日志" }));
     await screen.findByRole("button", { name: "清空日志" });
     await waitFor(() =>
@@ -1498,25 +1499,38 @@ it("accepts only the latest detail selection and invalidates pending reads on cl
   totalRows = 2;
   const original = mock.command.getMockImplementation()!;
   const pending: ((value: UsageRecord) => void)[] = [];
-  mock.command.mockImplementation((name, args) => name === "get_usage_detail"
-    ? new Promise<UsageRecord>((resolve) => { pending.push(resolve); })
-    : original(name, args));
+  mock.command.mockImplementation((name, args) =>
+    name === "get_usage_detail"
+      ? new Promise<UsageRecord>((resolve) => {
+          pending.push(resolve);
+        })
+      : original(name, args),
+  );
   const view = await renderUsage();
   const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
   fireEvent.click(rows[0]);
   fireEvent.click(rows[1]);
-  const detail = (index: number) => record({ ...records[index], sessionId: `fixture-detail-${index}` });
-  await act(async () => { pending[1](detail(1)); });
+  const detail = (index: number) =>
+    record({ ...records[index], sessionId: `fixture-detail-${index}` });
+  await act(async () => {
+    pending[1](detail(1));
+  });
   expect(screen.getByRole("dialog")).toHaveTextContent("fixture-second");
-  await act(async () => { pending[0](detail(0)); });
+  await act(async () => {
+    pending[0](detail(0));
+  });
   expect(screen.getByRole("dialog")).toHaveTextContent("fixture-second");
   expect(screen.getByRole("dialog")).not.toHaveTextContent("fixture-first");
   fireEvent.click(rows[0]);
   cancelDialog(screen.getByRole("dialog"));
-  await act(async () => { pending[2](detail(0)); });
+  await act(async () => {
+    pending[2](detail(0));
+  });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   fireEvent.click(rows[0]);
   view.unmount();
-  await act(async () => { pending[3](detail(0)); });
+  await act(async () => {
+    pending[3](detail(0));
+  });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

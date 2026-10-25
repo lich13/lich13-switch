@@ -55,6 +55,7 @@ export type QuickPreferences = {
   pinned: boolean;
   tab: "providers" | "accounts";
   visible?: boolean;
+  hiddenClients?: ClientId[];
 };
 export type NotificationState = {
   permission: string;
@@ -265,7 +266,14 @@ export type ProviderTestModels = {
 
 export type PendingImport = {
   id: string;
-  provider: { clientId: ClientId; name: string; baseUrl: string } | null;
+  provider: {
+    clientId: ClientId | null;
+    protocol?: GrokProtocol | null;
+    sourceApp?: string | null;
+    model?: string | null;
+    name: string;
+    baseUrl: string;
+  } | null;
   importError: string | null;
   error: string | null;
 };
@@ -503,9 +511,16 @@ export type CommandMap = {
     },
     void
   >;
+  get_agy_launch: Call<None, { installed: boolean; model: string | null }>;
+  choose_agy_directory: Call<None, string | null>;
+  launch_agy: Call<{ model: string; directory: string } & Revision, void>;
   get_quick: Call<None, QuickPreferences>;
   set_quick: Call<
-    { pinned?: boolean; tab?: "providers" | "accounts" },
+    {
+      pinned?: boolean;
+      tab?: "providers" | "accounts";
+      hiddenClients?: ClientId[];
+    },
     QuickPreferences
   >;
   hide_quick: Call<None, void>;
@@ -665,6 +680,8 @@ export type CommandMap = {
   get_provider_imports: Call<None, PendingImport[]>;
   confirm_provider_import: Call<
     {
+      clientId: ClientId;
+      protocol: GrokProtocol;
       id: string;
       expectedRevision: string;
     },

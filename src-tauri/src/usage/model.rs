@@ -290,7 +290,10 @@ pub fn response_id(value: &Value) -> Option<&str> {
         cursor += 1;
         let kind = node.get("type").and_then(Value::as_str).unwrap_or("");
         let object = node.get("object").and_then(Value::as_str).unwrap_or("");
-        let explicit = node.get("response_id").and_then(Value::as_str);
+        let explicit = node
+            .get("response_id")
+            .or_else(|| node.get("responseId"))
+            .and_then(Value::as_str);
         let id = explicit.or_else(|| {
             (kind.is_empty()
                 || kind == "message"
@@ -457,7 +460,31 @@ impl Meter {
                     self.tokens.input = self.raw_input_tokens;
                 }
             }
-            if let Some(model) = model_id(v["model"].as_str()) {
+            if let Some(u) = v.get("usageMetadata").filter(|u| u.is_object()) {
+                let input = count(u, &["promptTokenCount"]);
+                let cache = count(u, &["cachedContentTokenCount"]);
+                let answer = count(u, &["candidatesTokenCount"]);
+                let thoughts = count(u, &["thoughtsTokenCount"]);
+                let parsed = Tokens {
+                    inclusive_input: input,
+                    input: input.map(|n| n.saturating_sub(cache.unwrap_or(0))),
+                    cache_read: cache,
+                    output: answer.map(|n| n.saturating_add(thoughts.unwrap_or(0))),
+                    reasoning: thoughts,
+                    ..Default::default()
+                };
+                self.raw_input_tokens = input.or(self.raw_input_tokens);
+                self.inclusive_input = input.or(self.inclusive_input);
+                self.input_basis = Some("inclusive".into());
+                self.output_reported = answer.map(|_| true).or(self.output_reported);
+                self.tokens.merge(&parsed);
+                if cache.zip(input).is_some_and(|(c, i)| c > i) {
+                    self.parse_incomplete = true;
+                }
+            }
+            if let Some(model) =
+                model_id(v["model"].as_str().or_else(|| v["modelVersion"].as_str()))
+            {
                 self.model = Some(model);
             }
             if let Some(tier) = v["service_tier"].as_str().filter(|s| {
@@ -498,30 +525,45 @@ impl Meter {
             self.response_id = Some(safe_id(id));
         }
         let nonempty = |v: &Value| v.as_str().is_some_and(|s| !s.is_empty());
-        let generated = match event {
-            "response.output_text.delta"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_summary_text.delta"
-            | "response.function_call_arguments.delta" => nonempty(&outer["delta"]),
-            "content_block_delta" => ["text", "thinking", "partial_json"]
-                .iter()
-                .any(|key| nonempty(&outer["delta"][key])),
-            "error" | "response.failed" => false,
-            _ => outer["choices"].as_array().is_some_and(|choices| {
-                choices.iter().any(|choice| {
-                    let delta = &choice["delta"];
-                    ["content", "reasoning_content", "reasoning"]
-                        .iter()
-                        .any(|key| nonempty(&delta[key]))
-                        || nonempty(&delta["function_call"]["arguments"])
-                        || delta["tool_calls"].as_array().is_some_and(|tools| {
-                            tools
+        let generated = (outer
+            .get("candidates")
+            .and_then(Value::as_array)
+            .is_some_and(|candidates| {
+                candidates.iter().any(|c| {
+                    c.pointer("/content/parts")
+                        .and_then(Value::as_array)
+                        .is_some_and(|parts| {
+                            parts
                                 .iter()
-                                .any(|tool| nonempty(&tool["function"]["arguments"]))
+                                .any(|p| nonempty(&p["text"]) || p.get("functionCall").is_some())
                         })
                 })
-            }),
-        } && outer.get("error").is_none_or(Value::is_null);
+            })
+            || match event {
+                "response.output_text.delta"
+                | "response.reasoning_text.delta"
+                | "response.reasoning_summary_text.delta"
+                | "response.function_call_arguments.delta" => nonempty(&outer["delta"]),
+                "content_block_delta" => ["text", "thinking", "partial_json"]
+                    .iter()
+                    .any(|key| nonempty(&outer["delta"][key])),
+                "error" | "response.failed" => false,
+                _ => outer["choices"].as_array().is_some_and(|choices| {
+                    choices.iter().any(|choice| {
+                        let delta = &choice["delta"];
+                        ["content", "reasoning_content", "reasoning"]
+                            .iter()
+                            .any(|key| nonempty(&delta[key]))
+                            || nonempty(&delta["function_call"]["arguments"])
+                            || delta["tool_calls"].as_array().is_some_and(|tools| {
+                                tools
+                                    .iter()
+                                    .any(|tool| nonempty(&tool["function"]["arguments"]))
+                            })
+                    })
+                }),
+            })
+            && outer.get("error").is_none_or(Value::is_null);
         if generated && self.first_token_ms.is_none() {
             self.first_token_ms = Some(elapsed);
         }

@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.25.32"
+version = "0.26.0"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -80,7 +80,7 @@ tokio-tungstenite = "0.29"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Memory"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Console"] }
 winreg = "0.55"
 windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom"] }
 

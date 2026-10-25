@@ -24,7 +24,10 @@ pub const APP_ID: &str = "com.lich13.gpt-switch";
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preview {
-    pub client_id: gateway::ClientId,
+    pub client_id: Option<gateway::ClientId>,
+    pub protocol: Option<gateway::provider_protocol::Protocol>,
+    pub source_app: Option<String>,
+    pub model: Option<String>,
     pub id: String,
     pub name: String,
     pub base_url: String,
@@ -77,19 +80,35 @@ fn parse(raw: &str) -> Result<Parsed> {
             return Err(invalid("导入链接含重复字段"));
         }
     }
-    if fields.get("resource").map(String::as_str) != Some("provider")
-        || !matches!(
-            fields.get("app").map(String::as_str),
-            Some("codex" | "claude")
-        )
-    {
-        return Err(invalid("仅支持 Codex 或 Claude Code 供应商导入"));
+    if fields.get("resource").map(String::as_str) != Some("provider") {
+        return Err(invalid("仅支持供应商导入链接"));
     }
-    let client_id = if fields.get("app").map(String::as_str) == Some("claude") {
-        gateway::ClientId::Claude
-    } else {
-        gateway::ClientId::Codex
+    let source_app = fields.get("app").cloned();
+    let client_id = match source_app.as_deref() {
+        Some("codex") => Some(gateway::ClientId::Codex),
+        Some("claude") => Some(gateway::ClientId::Claude),
+        Some("grok") => Some(gateway::ClientId::Grok),
+        Some("dsh") => Some(gateway::ClientId::Dsh),
+        Some("agy" | "antigravity") => Some(gateway::ClientId::Agy),
+        _ => None,
     };
+    use gateway::provider_protocol::Protocol;
+    let protocol = match fields.get("apiFormat").map(String::as_str) {
+        Some("openai_responses" | "responses") => Some(Protocol::Responses),
+        Some("openai_chat" | "chat_completions") => Some(Protocol::ChatCompletions),
+        Some("anthropic" | "messages") => Some(Protocol::Messages),
+        Some("gemini_native") => Some(Protocol::GeminiNative),
+        Some(_) => None,
+        None if source_app.as_deref() == Some("gemini") => Some(Protocol::GeminiNative),
+        None => client_id.map(gateway::ClientId::default_protocol),
+    };
+    let model = fields.get("model").filter(|m| !m.is_empty()).cloned();
+    if model
+        .as_ref()
+        .is_some_and(|m| m.len() > 256 || m.chars().any(char::is_control))
+    {
+        return Err(invalid("无效的模型名称"));
+    }
     let base = fields
         .get("endpoint")
         .map(|s| s.trim())
@@ -121,7 +140,7 @@ fn parse(raw: &str) -> Result<Parsed> {
     }
     let fingerprint = crate::storage::digest(
         format!(
-            "{client_id:?}\0{}\0{key}",
+            "{source_app:?}\0{protocol:?}\0{model:?}\0{}\0{key}",
             endpoint.as_str().trim_end_matches('/')
         )
         .as_bytes(),
@@ -129,6 +148,9 @@ fn parse(raw: &str) -> Result<Parsed> {
     Ok(Parsed {
         preview: Preview {
             client_id,
+            protocol,
+            source_app,
+            model,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_owned(),
             base_url: base.to_owned(),
@@ -272,17 +294,25 @@ pub fn confirm_provider_import(
     r: tauri::State<'_, Arc<Runtime>>,
     id: String,
     expected_revision: String,
+    client_id: gateway::ClientId,
+    protocol: gateway::provider_protocol::Protocol,
 ) -> Result<()> {
     main_only(&window)?;
     let raw = crate::lock(&r.imports)?.claim(&id)?;
     let outcome: Result<()> = (|| {
         let p = parse(&raw)?;
-        let home = r.home(p.preview.client_id)?;
-        r.gateway(p.preview.client_id).edit(
+        let home = r.home(client_id)?;
+        r.gateway(client_id).edit(
             gateway::Edit::ImportLink {
                 base_url: p.preview.base_url,
                 token: p.key,
                 display_name: p.preview.name,
+                protocol,
+                model: if client_id == gateway::ClientId::Agy {
+                    p.preview.model
+                } else {
+                    None
+                },
             },
             &expected_revision,
             &home,
@@ -316,7 +346,7 @@ mod tests {
     fn client_identity_is_part_of_import_deduplication() {
         let codex = parse("ccswitch://v1/import?resource=provider&app=codex&endpoint=https%3A%2F%2Fexample.invalid%2Fsite&apiKey=fixture-only").unwrap();
         let claude = parse("ccswitch://v1/import?resource=provider&app=claude&endpoint=https%3A%2F%2Fexample.invalid%2Fsite&apiKey=fixture-only").unwrap();
-        assert_eq!(claude.preview.client_id, gateway::ClientId::Claude);
+        assert_eq!(claude.preview.client_id, Some(gateway::ClientId::Claude));
         assert_eq!(claude.preview.base_url, "https://example.invalid/site");
         assert_ne!(codex.fingerprint, claude.fingerprint);
         assert!(!serde_json::to_string(&claude.preview)
@@ -324,6 +354,23 @@ mod tests {
             .contains("fixture-only"));
     }
 
+    #[test]
+    fn source_defaults_do_not_restrict_import_targets() {
+        use gateway::{provider_protocol::Protocol, ClientId};
+        let agy = parse(&URL.replace("app=codex", "app=agy")).unwrap();
+        assert_eq!(agy.preview.client_id, Some(ClientId::Agy));
+        assert_eq!(agy.preview.protocol, Some(Protocol::GeminiNative));
+        assert_eq!(agy.preview.model.as_deref(), Some("ignored"));
+        let gemini = parse(&URL.replace("app=codex", "app=gemini")).unwrap();
+        assert_eq!(gemini.preview.client_id, None);
+        assert_eq!(gemini.preview.protocol, Some(Protocol::GeminiNative));
+        let unknown = parse(&URL.replace("app=codex", "app=future&apiFormat=openai_chat")).unwrap();
+        assert_eq!(unknown.preview.client_id, None);
+        assert_eq!(unknown.preview.protocol, Some(Protocol::ChatCompletions));
+        assert!(!serde_json::to_string(&unknown.preview)
+            .unwrap()
+            .contains("fixture-only"));
+    }
     #[test]
     fn decode_redact_and_preserve_path() {
         let p = parse(URL).unwrap();
@@ -393,7 +440,6 @@ mod tests {
     #[test]
     fn invalid_resources_and_secrets_never_enter_errors() {
         for u in [
-            URL.replace("app=codex", "app=unsupported"),
             URL.replace("resource=provider", "resource=skill"),
             format!("{URL}&apiKey=again"),
             URL.replace(

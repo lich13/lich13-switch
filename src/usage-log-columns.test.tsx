@@ -68,9 +68,9 @@ describe("request log columns", () => {
         true,
       ),
     ).toBe(true);
-    expect(logSpeed(attempt)).toBe(30);
-    expect(logSpeed({ ...attempt, stream: false })).toBeNull();
-    expect(logSpeed({ ...attempt, durationMs: 500 })).toBeNull();
+    expect(logSpeed(attempt)).toBe(24);
+    expect(logSpeed({ ...attempt, stream: false })).toBe(24);
+    expect(logSpeed({ ...attempt, durationMs: 500 })).toBe(120);
     expect(logSpeed({ ...attempt, outputReported: false })).toBeNull();
     expect(
       logSpeed({
@@ -78,7 +78,7 @@ describe("request log columns", () => {
         usageStatus: "session_supplemented",
         parseReasons: ["prompt_cache_total_mismatch"],
       }),
-    ).toBeNull();
+    ).toBe(24);
     expect(cacheHitRate(tokens)).toBeCloseTo(100 / 3);
     expect(cacheHitRate({ ...tokens, inclusiveInput: 0 })).toBeNull();
     expect(
@@ -201,9 +201,19 @@ describe("request log columns", () => {
     expect(within(row).getByLabelText("推理")).toHaveTextContent("20");
     expect(within(row).getByLabelText("HTTP")).toHaveTextContent("200");
     expect(within(row).getByLabelText("命中率")).toBeInTheDocument();
-    for (const label of ["输入", "输出", "缓存读", "缓存写", "推理", "命中率"]) {
+    for (const label of [
+      "输入",
+      "输出",
+      "缓存读",
+      "缓存写",
+      "推理",
+      "命中率",
+    ]) {
       const metric = within(row).getByLabelText(label);
-      expect(metric.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+      expect(metric.querySelector("svg")).toHaveAttribute(
+        "aria-hidden",
+        "true",
+      );
       expect(within(metric).queryByText(label)).not.toBeInTheDocument();
     }
     rerender(
@@ -271,8 +281,8 @@ describe("request log columns", () => {
     },
   );
   it.each([
-    ["proxy", { firstTokenMs: null }, ["首字", "输出 TPS"]],
-    ["proxy", { stream: false }, ["首字", "输出 TPS"]],
+    ["proxy", { firstTokenMs: null }, ["首字"]],
+    ["proxy", { stream: false }, ["首字"]],
     ["grok", {}, ["首字", "总耗时", "输出 TPS"]],
   ] as const)(
     "keeps missing or inapplicable metrics muted for %s with %j",
@@ -305,4 +315,26 @@ describe("request log columns", () => {
       }
     },
   );
+});
+
+it("matches output tokens over total request time without a TTFT dependency", () => {
+  for (const firstTokenMs of [null, 10000, 80000]) {
+    expect(
+      logSpeed({
+        ...attempt,
+        tokens: { ...tokens, input: null, output: 120 },
+        durationMs: 70000,
+        firstTokenMs,
+      })?.toFixed(1),
+    ).toBe("1.7");
+  }
+  for (const output of [null, 0, -1, NaN, Infinity]) {
+    expect(logSpeed({ ...attempt, tokens: { ...tokens, output } })).toBeNull();
+  }
+  for (const durationMs of [0, -1, NaN, Infinity]) {
+    expect(logSpeed({ ...attempt, durationMs })).toBeNull();
+  }
+  expect(
+    logSpeed({ ...attempt, tokens: { ...tokens, imageOutput: 10 } }),
+  ).toBeNull();
 });

@@ -416,7 +416,7 @@ export default function UsageLogTable({
                     tabIndex={0}
                     title={
                       speed == null
-                        ? "仅流式且用量和生成时长完整时计算"
+                        ? "需要有效的输出 Token 和请求总耗时"
                         : `${speed} tok/s`
                     }
                   >

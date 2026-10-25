@@ -1,5 +1,5 @@
 import { ErrorCodes } from "./error-codes";
-export type ClientId = "codex" | "claude" | "grok" | "dsh";
+export type ClientId = "codex" | "claude" | "grok" | "dsh" | "agy";
 export type Preferences = {
   codexHome: string;
   claudeHome?: string;
@@ -132,7 +132,11 @@ export type Health = {
     wsCloseCode: number | null;
   } | null;
 };
-export type GrokProtocol = "responses" | "chat_completions" | "messages";
+export type GrokProtocol =
+  | "responses"
+  | "chat_completions"
+  | "messages"
+  | "gemini_native";
 export type Provider = {
   protocol?: GrokProtocol | null;
   id: string;

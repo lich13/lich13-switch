@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn migrate(value: &mut Value, gateways: &[Gateway; 4]) -> Result<bool> {
+pub(super) fn migrate(value: &mut Value, gateways: &[Gateway]) -> Result<bool> {
     if value["schema"] == 3 {
         return Ok(false);
     }
@@ -42,7 +42,7 @@ pub(super) fn migrate(value: &mut Value, gateways: &[Gateway; 4]) -> Result<bool
     Ok(true)
 }
 
-fn migrate_v1(value: &mut Value, gateways: &[Gateway; 4]) -> Result<bool> {
+fn migrate_v1(value: &mut Value, gateways: &[Gateway]) -> Result<bool> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| failure("测试状态无法读取，已保留原文件"))?;

@@ -12,6 +12,8 @@ async fn settle(g: &Gateway) {
 
 fn import_link(base_url: &str, token: &str, display_name: &str) -> Edit {
     Edit::ImportLink {
+        protocol: crate::gateway::provider_protocol::Protocol::Responses,
+        model: None,
         base_url: base_url.into(),
         token: token.into(),
         display_name: display_name.into(),

@@ -4,6 +4,8 @@ import { gatewayPreview } from "./gateway-preview";
 import { providerTestingPreview } from "./provider-testing-preview";
 import type { ViewState, ConfigDocument, LoginState } from "./types";
 import { densePreview } from "./preview-fixtures";
+const previewParams = new URLSearchParams(location.search);
+const previewTheme = previewParams.get("theme");
 const callbacks = new Map<string, Set<(p: never) => void>>();
 export function subscribe<T>(event: string, fn: (p: T) => void) {
   if (!callbacks.has(event)) callbacks.set(event, new Set());
@@ -52,7 +54,10 @@ export const demo: ViewState = {
     grokHome: "~/.grok",
     codexHome: "~/.codex",
     cliPath: "",
-    theme: "system",
+    theme:
+      previewTheme === "light" || previewTheme === "dark"
+        ? previewTheme
+        : "system",
     quotaRefreshSeconds: 60,
     systemNotifications: true,
   },
@@ -124,6 +129,11 @@ let claudeDoc: ConfigDocument = {
       2,
     ) + "\n",
 };
+let agyDoc: ConfigDocument = {
+  ...doc,
+  clientId: "agy",
+  text: '{\n  "modelProvider": "gemini",\n  "model": "gemini-fixture"\n}\n',
+};
 const previousConfig: Record<string, string> = {};
 let login: LoginState = {
   phase: "idle",
@@ -137,8 +147,16 @@ let startup = {
   launchOnBoot: false,
   revision: "preview-startup",
 };
-let quick = { pinned: false, tab: "providers", visible: true };
-const importPreview = new URLSearchParams(location.search).get("importPreview");
+let quick = {
+  pinned: false,
+  tab: "providers",
+  visible: true,
+  hiddenClients:
+    previewParams.get("hiddenClients") === "all"
+      ? ["codex", "claude", "grok", "dsh", "agy"]
+      : [],
+};
+const importPreview = previewParams.get("importPreview");
 let imports = importPreview
   ? [
       {
@@ -146,7 +164,7 @@ let imports = importPreview
         importError: null,
         error: null,
         provider: {
-          clientId: "codex",
+          clientId: importPreview === "unknown" ? null : "codex",
           name:
             importPreview === "long"
               ? "研发团队使用的跨区域供应商与长名称展示验证".repeat(3)
@@ -242,6 +260,10 @@ export async function run(
   if (name === "open_github" || name === "open_update_release") return;
   if (usageCommands.includes(name)) return usagePreview(name, args, emit);
   if (powerCommands.includes(name)) return powerPreview(name, args, emit);
+  if (name === "get_agy_launch")
+    return { installed: true, model: "gemini-fixture" };
+  if (name === "choose_agy_directory") return "/fixture/project";
+  if (name === "launch_agy") return;
   if (name === "get_quick") return { ...quick };
   if (name === "set_quick") {
     quick = { ...quick, ...args };
@@ -481,13 +503,19 @@ export async function run(
           ? claudeDoc
           : args.clientId === "grok"
             ? grokDoc
-            : doc),
+            : args.clientId === "agy"
+              ? agyDoc
+              : doc),
       };
     case "read_previous_config":
       if (!previousConfig[String(args.clientId)])
         throw new Error("没有可恢复的配置");
       return previousConfig[String(args.clientId)];
     case "validate_config":
+      if (args.clientId === "agy") {
+        JSON.parse(String(args.text));
+        return;
+      }
       if (args.clientId === "claude") {
         (await import("./claude-settings")).tree(String(args.text));
         return;
@@ -502,7 +530,9 @@ export async function run(
           ? claudeDoc
           : args.clientId === "grok"
             ? grokDoc
-            : doc;
+            : args.clientId === "agy"
+              ? agyDoc
+              : doc;
       if (args.expectedRevision !== current.revision)
         throw { code: "CONFLICT", message: "配置已被外部修改，草稿已保留" };
       previousConfig[current.clientId] = current.text;
@@ -514,6 +544,7 @@ export async function run(
       };
       if (args.clientId === "claude") claudeDoc = next;
       else if (args.clientId === "grok") grokDoc = next;
+      else if (args.clientId === "agy") agyDoc = next;
       else {
         doc = next;
         demo.configRevision = doc.revision;

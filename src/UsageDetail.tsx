@@ -11,6 +11,7 @@ import { preciseDate, promptTokens, missingReason } from "./usage-format";
 import {
   interruption,
   interruptionLabel,
+  logSpeed,
   unpricedReason,
 } from "./usage-log-columns";
 import {
@@ -317,6 +318,7 @@ function AttemptDetails({
   source: string;
   metadata?: [string, React.ReactNode][];
 }) {
+  const tps = source === "proxy" ? logSpeed(a) : null;
   const first =
     source === "proxy" && a.stream && (a.operation ?? "model") === "model"
       ? a.firstTokenMs
@@ -735,6 +737,7 @@ function AttemptDetails({
               </span>
             ),
           ],
+          ["输出 TPS", tps == null ? "—" : `${tps.toFixed(1)} tok/s`],
           ["传输", a.transport],
           ["流式", a.stream ? "是" : "否"],
         ]}

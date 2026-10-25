@@ -265,10 +265,6 @@ fn failed_ownership_save_emits_routing_error_without_thread_handoff() {
     let boundary = digest(BOUNDARY);
     seed_boundary(&registry, &session, &boundary);
 
-    let owner_path = dir.path().join("gateway/conversation-owners.json");
-    std::fs::remove_file(&owner_path).unwrap();
-    std::fs::create_dir(&owner_path).unwrap();
-
     let log = RoutingLog::new(&gateway).unwrap();
     log.context(
         OLD,
@@ -281,6 +277,12 @@ fn failed_ownership_save_emits_routing_error_without_thread_handoff() {
     let lease = registry
         .prepare(session, Some(&boundary), true, &ids(&[NEW, OLD]))
         .expect("fixture handoff lease");
+    // Fail the completion write only after the claim has durably settled.
+    registry.flush();
+    let owner_path = dir.path().join("gateway/conversation-owners.json");
+    std::fs::remove_file(&owner_path).unwrap();
+    std::fs::create_dir(&owner_path).unwrap();
+
     lease.attach_routing_log(log);
     lease.complete(NEW, None);
     drop(lease);

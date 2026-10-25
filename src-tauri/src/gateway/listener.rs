@@ -293,9 +293,15 @@ pub fn token_matches(actual: &[u8], expected: &[u8]) -> bool {
 pub fn authorized(headers: &hyper::HeaderMap, token: &str) -> bool {
     let bearer = headers.get_all(hyper::header::AUTHORIZATION);
     let api = headers.get_all("x-api-key");
+    let google = headers.get_all("x-goog-api-key");
+    let google_count = google.iter().count();
     let bearer_count = bearer.iter().count();
     let api_count = api.iter().count();
-    if bearer_count > 1 || api_count > 1 || bearer_count + api_count == 0 {
+    if bearer_count > 1
+        || api_count > 1
+        || google_count > 1
+        || bearer_count + api_count + google_count == 0
+    {
         return false;
     }
     let bearer_matches = bearer.iter().next().is_none_or(|value| {
@@ -319,7 +325,12 @@ pub fn authorized(headers: &hyper::HeaderMap, token: &str) -> bool {
         .iter()
         .next()
         .is_none_or(|value| token_matches(value.as_bytes(), token.as_bytes()));
-    bearer_matches && api_matches
+    bearer_matches
+        && api_matches
+        && google
+            .iter()
+            .next()
+            .is_none_or(|v| token_matches(v.as_bytes(), token.as_bytes()))
 }
 
 /// Legacy prefixes are aliases; unprefixed routes use an exact local token.
@@ -338,6 +349,8 @@ pub fn route(
         (Some(ClientId::Grok), "/grok")
     } else if path == "/v1"
         || path.starts_with("/v1/")
+        || path.starts_with("/v1beta/")
+        || path.starts_with("/v1alpha/")
         || path.trim_end_matches('/') == "/alpha/search"
     {
         (None, "")
@@ -366,6 +379,11 @@ pub fn route(
         }
     }
     let client = matched.ok_or(RouteError::Unauthorized)?;
+    if ((path.starts_with("/v1beta/") || path.starts_with("/v1alpha/")) && client != ClientId::Agy)
+        || (client == ClientId::Agy && !super::gemini::accepts(path))
+    {
+        return Err(RouteError::NotFound);
+    }
     if path.trim_end_matches('/') == "/alpha/search" && client != ClientId::Codex {
         return Err(RouteError::NotFound);
     }

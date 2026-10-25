@@ -1,7 +1,9 @@
 import { subscriptions } from "./subscriptions";
 import { useCallback, useEffect, useState } from "react";
 import { command } from "./bridge";
-import { errorOf } from "./types";
+import { errorOf, type ClientId, type GrokProtocol } from "./types";
+import { clients, clientName } from "./ClientSelection";
+import { clientProtocols, protocolNames } from "./client-protocols";
 import Modal from "./Modal";
 import type { PendingImport as Pending } from "./bridge-contracts";
 
@@ -14,6 +16,8 @@ export default function ProviderImports({
 }) {
   const [queue, setQueue] = useState<Pending[]>([]),
     [active, setActive] = useState<Pending | null>(null),
+    [clientId, setClientId] = useState<ClientId | "">(""),
+    [protocol, setProtocol] = useState<GrokProtocol | "">(""),
     [revision, setRevision] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -45,14 +49,25 @@ export default function ProviderImports({
     if (!active && available && !blocked && queue[0]) {
       setRevision("");
       setError(queue[0].error ?? "");
+      setClientId(queue[0].provider?.clientId ?? "");
+      const provider = queue[0].provider;
+      const choices = provider?.clientId
+        ? clientProtocols[provider.clientId]
+        : [];
+      setProtocol(
+        provider?.protocol &&
+          (!choices.length || choices.includes(provider.protocol))
+          ? provider.protocol
+          : (choices[0] ?? ""),
+      );
       setActive(queue[0]);
     }
   }, [queue, active, available, blocked]);
   useEffect(() => {
     setRevision("");
-    if (active?.provider) {
+    if (active?.provider && clientId) {
       let disposed = false;
-      void command("get_gateway", { clientId: active.provider.clientId })
+      void command("get_gateway", { clientId })
         .then((s) => {
           if (!disposed) setRevision(s.revision);
         })
@@ -63,7 +78,7 @@ export default function ProviderImports({
         disposed = true;
       };
     }
-  }, [active]);
+  }, [active, clientId]);
   const dismiss = () => {
     if (!active) return;
     setQueue((q) => q.filter((p) => p.id !== active.id));
@@ -89,9 +104,61 @@ export default function ProviderImports({
       {active.provider && (
         <dl className="import-preview">
           <div>
-            <dt>客户端</dt>
+            <dt>
+              <label htmlFor="import-client">平台</label>
+            </dt>
             <dd>
-              {active.provider.clientId === "claude" ? "Claude Code" : "Codex"}
+              <select
+                id="import-client"
+                value={clientId}
+                disabled={busy}
+                onChange={(e) => {
+                  const next = e.target.value as ClientId;
+                  setClientId(next);
+                  setRevision("");
+                  setError("");
+                  if (!protocol || !clientProtocols[next].includes(protocol))
+                    setProtocol(clientProtocols[next][0]);
+                }}
+              >
+                <option value="" disabled>
+                  选择平台
+                </option>
+                {clients.map((id) => (
+                  <option key={id} value={id}>
+                    {clientName(id)}
+                  </option>
+                ))}
+              </select>
+            </dd>
+          </div>
+          <div>
+            <dt>
+              <label htmlFor="import-protocol">协议</label>
+            </dt>
+            <dd>
+              <select
+                id="import-protocol"
+                value={protocol}
+                disabled={busy || !clientId}
+                onChange={(e) => setProtocol(e.target.value as GrokProtocol)}
+              >
+                <option value="" disabled>
+                  选择协议
+                </option>
+                {protocol &&
+                  clientId &&
+                  !clientProtocols[clientId].includes(protocol) && (
+                    <option value={protocol} disabled>
+                      {protocolNames[protocol]}（不兼容）
+                    </option>
+                  )}
+                {(clientId ? clientProtocols[clientId] : []).map((p) => (
+                  <option key={p} value={p}>
+                    {protocolNames[p]}
+                  </option>
+                ))}
+              </select>
             </dd>
           </div>
           <div>
@@ -119,13 +186,22 @@ export default function ProviderImports({
         </button>
         <button
           className="primary"
-          disabled={busy || !active.provider || !revision}
+          disabled={
+            busy ||
+            !active.provider ||
+            !revision ||
+            !clientId ||
+            !protocol ||
+            !clientProtocols[clientId].includes(protocol)
+          }
           onClick={() => {
-            if (busy) return;
+            if (busy || !clientId || !protocol) return;
             setBusy(true);
             setError("");
             void command("confirm_provider_import", {
               id: active.id,
+              clientId,
+              protocol,
               expectedRevision: revision,
             })
               .then(() => {
@@ -136,7 +212,7 @@ export default function ProviderImports({
                 setError(errorOf(e).message);
                 if (active.provider) {
                   const state = await command("get_gateway", {
-                    clientId: active.provider.clientId,
+                    clientId,
                   }).catch(() => null);
                   if (state) setRevision(state.revision);
                 }

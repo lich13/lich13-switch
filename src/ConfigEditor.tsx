@@ -263,7 +263,9 @@ function EditorContent({
   }, [dirty, busy]);
   const extensions = useMemo(
     () => [
-      clientId === "claude" ? json() : StreamLanguage.define(toml),
+      clientId === "claude" || clientId === "agy"
+        ? json()
+        : StreamLanguage.define(toml),
       lintGutter(),
       keymap.of([
         {
@@ -275,7 +277,9 @@ function EditorContent({
         },
       ]),
       EditorView.lineWrapping,
-      ...(clientId === "claude" && !revealed ? [maskedJson] : []),
+      ...((clientId === "claude" || clientId === "agy") && !revealed
+        ? [maskedJson]
+        : []),
       linter(
         async (view) => {
           try {
@@ -393,7 +397,9 @@ function EditorContent({
       </div>
       <div className="editor-toolbar">
         <span title={doc?.path}>
-          {clientId === "claude" ? "settings.json" : "config.toml"}
+          {clientId === "claude" || clientId === "agy"
+            ? "settings.json"
+            : "config.toml"}
         </span>
         <div className="inline">
           {dirty && <span className="status amber">未保存</span>}
@@ -498,7 +504,11 @@ function EditorContent({
             theme={theme}
             height="100%"
             extensions={extensions}
-            aria-label={clientId === "claude" ? "JSON 编辑器" : "TOML 编辑器"}
+            aria-label={
+              clientId === "claude" || clientId === "agy"
+                ? "JSON 编辑器"
+                : "TOML 编辑器"
+            }
             basicSetup={{
               foldGutter: true,
               autocompletion: false,

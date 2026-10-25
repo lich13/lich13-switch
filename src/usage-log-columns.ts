@@ -87,21 +87,21 @@ export function cacheHitRate(t: Tokens) {
     : null;
 }
 export function logSpeed(a: Attempt) {
+  const output = a.tokens.output;
   if (
-    !a.stream ||
-    a.tokens.input == null ||
-    a.tokens.output == null ||
-    a.firstTokenMs == null ||
-    a.durationMs <= a.firstTokenMs ||
-    a.usageStatus === "parse_incomplete" ||
-    !!a.parseReasons?.length ||
-    interruption(a) === "partial" ||
-    (a.outputReported ??
-      (a.end?.terminalReceived || (a.tokens.output ?? 0) > 0)) === false
+    output == null ||
+    !Number.isFinite(output) ||
+    output <= 0 ||
+    !Number.isFinite(a.durationMs) ||
+    a.durationMs <= 0 ||
+    (a.tokens.imageOutput ?? 0) > 0 ||
+    a.price?.basis?.unit === "image" ||
+    a.outputReported === false
   )
     return null;
-  return (a.tokens.output * 1000) / (a.durationMs - a.firstTokenMs);
+  return (output * 1000) / a.durationMs;
 }
+
 export const unpricedReason = (a: Attempt) =>
   (a.responseSpeed ?? a.requestedSpeed) === "fast"
     ? "当前价源缺少 fast 对应价格"
