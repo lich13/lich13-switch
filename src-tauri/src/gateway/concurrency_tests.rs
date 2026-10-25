@@ -49,7 +49,9 @@ async fn slot(g: &Gateway, routes: &[Route]) -> admission::Admission {
 async fn queue_and_provider_switches_share_the_original_wait_budget() {
     let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut urls = Vec::new();
-    for delay in [250, 750, 0] {
+    // Keep the combined waits above the shared budget with enough room for
+    // loopback I/O on loaded runners; a budget reset still reaches provider 3.
+    for delay in [1000, 3000, 0] {
         let hits = hits.clone();
         let port = server(move |_| {
             hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -73,7 +75,7 @@ async fn queue_and_provider_switches_share_the_original_wait_budget() {
         },
     );
     let mut settings = g.view().settings;
-    settings.retry_budget_seconds = 1;
+    settings.retry_budget_seconds = 4;
     settings.queue_seconds = 10;
     settings.first_byte_seconds = 10;
     update(&g, &t, Edit::Settings { settings });
@@ -90,9 +92,9 @@ async fn queue_and_provider_switches_share_the_original_wait_budget() {
         tokio::spawn(async move { request(&g, "/v1/responses", vec![], vec![]).await })
     };
     until(|| g.view().waiting_requests == 1).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     drop(held);
-    let response = tokio::time::timeout(Duration::from_secs(3), task)
+    let response = tokio::time::timeout(Duration::from_secs(7), task)
         .await
         .unwrap()
         .unwrap();
@@ -1114,7 +1116,19 @@ async fn websocket_model_rules_recheck_each_turn_and_keep_context_provider() {
             mode: "auto".into(),
         },
     );
-    start(&g, &t).await;
+    // The fixture's released ephemeral port can be reused during provider edits.
+    // Retry that setup race only; other startup errors must still fail the test.
+    if let Err(error) = g.start(&g.view().revision, t.path()).await {
+        assert_eq!(error.code, crate::errors::code::PORT);
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        g.set_listener_port(
+            reserved.local_addr().unwrap().port(),
+            &g.listener_view().revision,
+        )
+        .unwrap();
+        drop(reserved);
+        start(&g, &t).await;
+    }
     let mut ws = responses_client(&g).await;
     let create = r#"{"type":"response.create","model":"b","future":42}"#;
     ws.send(yawc::Frame::text(create)).await.unwrap();

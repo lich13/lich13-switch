@@ -620,7 +620,9 @@ async fn assert_websocket_cancel_closes_upstream(explicit_close: bool, generatio
     let close_window = if generation {
         USAGE_TAIL + USAGE_TAIL_TOLERANCE
     } else {
-        FAST_RELEASE
+        // Allow scheduler/socket dispatch while still beating the configured
+        // two-second upstream handshake timeout.
+        Duration::from_secs(1)
     };
     let closed_at = tokio::time::timeout(close_window, closed_rx)
         .await

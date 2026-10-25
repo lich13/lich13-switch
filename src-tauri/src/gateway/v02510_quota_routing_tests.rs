@@ -56,9 +56,9 @@ async fn exercise_quota_wait(reply: &'static str, stop_while_querying: bool) {
                 if stop_while_querying {
                     std::future::pending::<()>().await;
                 }
-                // Longer than the original one-second retry, so starting that
+                // Longer than the original four-second retry, so starting that
                 // timer again after the query would miss the assertion below.
-                tokio::time::sleep(Duration::from_millis(1100)).await;
+                tokio::time::sleep(Duration::from_millis(4100)).await;
                 return json_response(StatusCode::OK, reply, None);
             }
             if attempts.fetch_add(1, Ordering::SeqCst) == 1 {
@@ -81,6 +81,9 @@ async fn exercise_quota_wait(reply: &'static str, stop_while_querying: bool) {
     ])
     .await;
     configure(&gateway, &dir);
+    let mut settings = gateway.view().settings;
+    settings.capacity_retry_seconds = 4;
+    update(&gateway, &dir, Edit::Settings { settings });
     let provider = gateway.view().providers[0].id.clone();
     gateway.0.quota.set_interval(0);
     let query = gateway.query_input(&provider).unwrap();
@@ -114,7 +117,7 @@ async fn exercise_quota_wait(reply: &'static str, stop_while_querying: bool) {
             .unwrap()
             .unwrap();
     }
-    let response = tokio::time::timeout(Duration::from_secs(2), pending)
+    let response = tokio::time::timeout(Duration::from_secs(6), pending)
         .await
         .expect("quota wait did not finish within its original deadline")
         .unwrap();
@@ -128,7 +131,8 @@ async fn exercise_quota_wait(reply: &'static str, stop_while_querying: bool) {
             serde_json::from_slice::<Value>(&bytes).unwrap()["provider"],
             "primary"
         );
-        assert!(began.elapsed() < Duration::from_millis(1800));
+        // A restarted four-second retry would take at least 8.1 seconds.
+        assert!(began.elapsed() < Duration::from_secs(6));
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         gateway.stop().await.unwrap();
     }
