@@ -655,7 +655,7 @@ it("keeps one icon-bearing testing entry per provider and removes global testing
   expect(menu.queryByRole("button", { name: "模型指纹测试" })).not.toBeInTheDocument();
 });
 
-it.each(["codex", "claude", "grok", "dsh"] as const)("%s keeps connection values and client onboarding without metadata or file exchange", async (clientId) => {
+it.each(["codex", "claude", "grok", "dsh"] as const)("%s omits the connection summary and keeps client onboarding without file exchange", async (clientId) => {
   localStorage.setItem("lich13-switch.main.client", clientId);
   state.clientId = clientId;
   state.running = false;
@@ -667,15 +667,14 @@ it.each(["codex", "claude", "grok", "dsh"] as const)("%s keeps connection values
   state.dshProfiles = clientId === "dsh" ? [{ profile: "fixture", current: { ...state.current, model: "fixture-profile-model" } }] : [];
   mock.command.mockImplementation(async (name) => name === "get_gateway" ? structuredClone(state) : null);
   const { container } = render(<Gateway notify={() => {}} quotaRefreshSeconds={0} />);
-  await screen.findByText("fixture-current-model");
-  const current = container.querySelector(".gateway-current")!;
-  expect(current).toHaveTextContent("本地网关");
-  expect(current).toHaveTextContent("http://127.0.0.1:43721/v1");
-  expect(current.querySelector("small")).toBeNull();
-  expect(current).not.toHaveTextContent("fixture-source");
-  expect(current).not.toHaveTextContent("fixture-credential-source");
-  expect(current).not.toHaveTextContent("chat_completions");
-  if (clientId === "dsh") expect(current).toHaveTextContent("fixture-profile-model");
+  await screen.findByRole("button", { name: "添加" });
+  expect(container.querySelector(".gateway-current")).toBeNull();
+  expect(screen.queryByLabelText("当前客户端配置")).not.toBeInTheDocument();
+  expect(screen.queryByText("fixture-current-model")).not.toBeInTheDocument();
+  expect(screen.queryByText("fixture-source")).not.toBeInTheDocument();
+  expect(screen.queryByText("fixture-credential-source")).not.toBeInTheDocument();
+  expect(screen.queryByText("各 profile 当前配置")).not.toBeInTheDocument();
+  expect(screen.queryByText("fixture-profile-model")).not.toBeInTheDocument();
   if (clientId === "grok" || clientId === "dsh") expect(screen.getByRole("button", { name: "导入并接入" })).toBeInTheDocument();
   expect(screen.queryByRole("group", { name: "供应商导入导出" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /^(导入|导出)$/ })).not.toBeInTheDocument();
@@ -686,10 +685,10 @@ it("keeps a gateway event that arrives before the initial read", async () => {
   let resolve!: (value: GatewayState) => void;
   mock.command.mockImplementation((name) => name === "get_gateway" ? new Promise<GatewayState>((done) => { resolve = done; }) : Promise.resolve(null));
   render(<Gateway notify={() => {}} quotaRefreshSeconds={0} />);
-  const latest = { ...state, current: { kind: "gateway" as const, modelSource: null, warning: null, model: "fixture-latest-model" } };
+  const latest = { ...state, running: true };
   await act(async () => { mock.listeners.get("gateway-state")!(latest); });
-  await screen.findByText("fixture-latest-model");
-  await act(async () => { resolve({ ...state, current: { kind: "gateway", modelSource: null, warning: null, model: "fixture-stale-model" } }); });
-  expect(screen.getByText("fixture-latest-model")).toBeInTheDocument();
-  expect(screen.queryByText("fixture-stale-model")).not.toBeInTheDocument();
+  await screen.findByRole("button", { name: "停用" });
+  await act(async () => { resolve({ ...state, running: false }); });
+  expect(screen.getByRole("button", { name: "停用" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "启用" })).not.toBeInTheDocument();
 });

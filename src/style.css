@@ -3534,26 +3534,6 @@ button.exchange-button:active:not(:disabled) {
   width: 150px;
 }
 
-.current-connection {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  min-width: 0;
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-.gateway-current {
-  padding: 12px 0;
-  border-top: 1px solid var(--line);
-}
-.gateway-current > details {
-  margin-top: 8px;
-}
-.dsh-results .current-connection {
-  flex: 1;
-  min-width: 180px;
-}
-
 .dsh-config-page .config-heading {
   padding: 0;
   margin-bottom: 12px;

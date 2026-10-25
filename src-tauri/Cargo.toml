@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.25.31"
+version = "0.25.32"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -16,6 +16,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 lmfpd = { path = "vendor/lmfpd" }
 tauri = { version = "~2.11", features = ["tray-icon", "image-png"] }
+# Tauri 2.11 needs the pre-2.12 runtime and menu macro interfaces.
+tauri-macros = "~2.6.3"
+tauri-runtime = "~2.11.3"
+tauri-runtime-wry = { version = "~2.11.4", default-features = false }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
@@ -58,7 +62,8 @@ sysinfo = "0.33"
 plist = "1"
 rusqlite = { version = "0.37", features = ["bundled", "functions"] }
 rust_decimal = { version = "1", features = ["serde-str"] }
-yaml-edit = "0.3.2"
+# 0.3.5 breaks the existing DSH empty-array/comment round-trip fixtures.
+yaml-edit = "=0.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

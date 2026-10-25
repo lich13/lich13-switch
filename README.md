@@ -53,29 +53,44 @@ Codex、Claude Code 与 Grok Build 独立供应商管理、本地 API 网关，�
 
 Node.js 版本见 [.nvmrc](.nvmrc)，pnpm 版本见 [package.json](package.json) 的 `packageManager`，Rust 版本与组件见 [rust-toolchain.toml](rust-toolchain.toml)。CI 使用同一来源；另需 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。
 
+项目设置 `pmOnFail: ignore`，让前端锁文件保持 GitHub 依赖图可识别的单文档格式；pnpm 不再自行切换版本。本机通过 Corepack 使用 `packageManager` 指定的版本，或先安装并核对完全相同的 pnpm 版本。CI 的 `pnpm/action-setup` 继续从 `packageManager` 安装固定版本。
+
 ```sh
-pnpm install --frozen-lockfile
-pnpm icons
-pnpm test
-pnpm build
+corepack pnpm --version
+corepack pnpm install --frozen-lockfile
+corepack pnpm icons
+corepack pnpm test
+corepack pnpm build
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-pnpm tauri dev
+corepack pnpm tauri dev
 ```
 
 `pnpm dev` 是标明“预览”的模拟界面，真实凭据只能在桌面应用中操作。`--smoke-test <绝对输出路径>` 使用独立临时账号和配置，验证 WebView、托盘、账号切换、网关监听与认证、两字段切换、退出恢复和 auth 不变后退出，不接触真实 Codex 目录。
 
 `pnpm icons` 从原创 SVG 生成 9 档 PNG、黑白托盘图标、ICNS 和 ICO。发布通过 CI 构建 macOS Apple Silicon DMG 与 Windows x64 NSIS 安装包及校验和；真实 OAuth 和操作系统托盘交互验收与自动冒烟测试分别记录。
 
-依赖审计使用 `cargo audit --file src-tauri/Cargo.lock` 和 `pnpm audit`。v0.25.3 核验时，Rust 没有漏洞类告警，但保留以下 7 条维护／健全性警告；定向检查没有可兼容更新，不添加忽略列表掩盖它们。
+## 依赖维护
+
+Dependabot 每周一 09:00（Asia/Taipei）检查 Cargo、前端和 GitHub Actions，普通更新冷却 7 天。Cargo 覆盖直接与间接依赖，以 `lockfile-only` 在现有约束内维护主锁文件，每次最多 1 个普通 PR；本地 `lmfpd` 的依赖也通过主锁文件审计。前端普通更新允许 minor／patch，按 React 全家桶、其他运行依赖、开发工具分成 3 组，最多 3 个 PR；React 与 React DOM 的运行版本必须一致，对应类型包一起评估。Actions 合为一组，最多 1 个普通 PR，继续固定提交 SHA。
+
+漏洞告警和自动安全修复在 GitHub 仓库设置中独立启用；安全更新使用独立组，不等待普通更新窗口或冷却期。普通更新的版本限制不屏蔽安全修复。保持人工合并，并启用合并后自动删除分支。
+
+每月集中核对 Rust、Node、pnpm、审计工具、Tauri 关联组件及延期升级；安全修复优先处理。更新 Rust 锁文件使用 `cargo update --manifest-path src-tauri/Cargo.toml`，前端使用 `corepack pnpm update`，随后执行冻结安装、受影响测试、构建和安全检查。固定工具版本需要显式更新，并核对本机与 CI 一致；Tauri JS API、CLI 和 Rust 组件作为兼容组合评估，不能仅放宽单个包的约束。前端锁文件继续保持单文档，推送后确认 GitHub 依赖清单包含实际运行、开发和间接依赖。
+
+Tauri 2.11 的运行时保持 2.11 系列、宏组件保持 2.6 系列，避免新组件的监视器返回类型及菜单宏与主包接口不匹配；升级 Tauri 主包时一起评估这些约束。`yaml-edit` 固定为 0.3.2，0.3.5 会使现有 DSH 空数组、注释和恢复往返测试失败；后续升级须先通过这些原有夹具，保留文件与外部修改保护。
+
+没有安全或功能必要时，延期迁移 jsdom、图标库、测试断言库，以及 Rust 的 sha1／sha2、toml／toml_edit、reqwest、rusqlite、sysinfo、yawc 等兼容线。需要调整约束才能修复安全问题时先评估兼容性，不新增漏洞忽略。依赖 PR 失败时一次读取全部失败检查，先处理共同原因；只有修复或新证据出现后再重跑，必要时拆分失败组定位。已被吸收或明确延期的 PR 经核对后关闭，分支仅在确认没有额外提交时删除。
+
+依赖审计使用 `cargo audit --file src-tauri/Cargo.lock` 和 `corepack pnpm audit`。v0.25.32 的 Rust 锁文件已移除 Tokio I/O 健全性告警、撤回的 `clipboard-win` 版本和 5 条 `unic-*` 维护告警；仍保留以下 5 条上游维护／健全性警告，不通过忽略列表隐藏。
 
 | 间接依赖 | 告警与约束 |
 | --- | --- |
 | `proc-macro-error 1.0.4` | RUSTSEC-2024-0370，未维护；由 GTK 3 的宏依赖引入，不在 macOS／Windows 依赖树中。 |
 | `glib 0.18.5` | RUSTSEC-2024-0429，迭代器健全性问题；由 Tauri 的 Linux GTK 3 链约束，不在 macOS／Windows 依赖树中。不能只替换为不兼容的 GLib 大版本。 |
-| `unic-char-property`／`unic-char-range` | RUSTSEC-2025-0081／RUSTSEC-2025-0075，未维护；由 `tauri-utils → urlpattern → unic-ucd-ident` 引入。 |
-| `unic-common`／`unic-ucd-version` | RUSTSEC-2025-0080／RUSTSEC-2025-0098，未维护；由同一链中的 `unic-ucd-version` 引入。 |
-| `unic-ucd-ident` | RUSTSEC-2025-0100，未维护；需上游兼容迁移后再移除，不能通过增添另一个版本消除现有引用。 |
+| `zbus_names 4.3.5` | RUSTSEC-2026-0371，未维护；由 Linux 单实例插件的 D-Bus 链引入，不在 macOS／Windows 依赖树中，等待上游兼容迁移。 |
+| `zvariant 5.15.1` | RUSTSEC-2026-0370，未维护；由同一 D-Bus 链引入，不在 macOS／Windows 依赖树中，等待上游兼容迁移。 |
+| `zvariant_derive 5.15.1` | RUSTSEC-2026-0372，未维护；由同一 D-Bus 链引入，不在 macOS／Windows 依赖树中，等待上游兼容迁移。 |
 
 MIT License。独立项目，与 OpenAI 无隶属关系。

@@ -3,7 +3,6 @@ import ConnectionTestIcon from "./ConnectionTestIcon";
 import Advanced from "./GatewayAdvanced";
 import DshProfile, { connectDsh } from "./DshProfile";
 import { preferredDshProfile } from "./dsh-profile";
-import CurrentConnection from "./CurrentConnection";
 import GatewayModels from "./GatewayModels";
 import GrokImport from "./GrokImport";
 import GatewayDialog from "./GatewayProviderDialog";
@@ -616,28 +615,6 @@ function GatewayContent({
               );
             }}
           </SortableProviders>
-        </div>
-        <div className="gateway-current" aria-label="当前客户端配置">
-          <CurrentConnection
-            current={state.current}
-            providers={state.providers}
-          />
-          {state.clientId === "dsh" && !!state.dshProfiles?.length && (
-            <details>
-              <summary>各 profile 当前配置</summary>
-              <ul className="dsh-results">
-                {state.dshProfiles.map(({ profile, current }) => (
-                  <li key={profile}>
-                    <strong>{profile}</strong>
-                    <CurrentConnection
-                      current={current}
-                      providers={state.providers}
-                    />
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
         </div>
         <details className="advanced">
           <summary>高级设置</summary>
