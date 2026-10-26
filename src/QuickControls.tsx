@@ -21,7 +21,7 @@ export default function QuickControls({
 }) {
   const [state, setState] = useState<State | null>(null),
     [powerBusy, setPowerBusy] = useState(false),
-    [quitBusy, setQuitBusy] = useState(false),
+    [quitBusy, setQuitBusy] = useState<"codex" | "claude" | null>(null),
     [readError, setReadError] = useState("");
   const lock = useRef(false),
     quitting = useRef(false);
@@ -75,12 +75,12 @@ export default function QuickControls({
       setPowerBusy(false);
     }
   };
-  const quit = async () => {
+  const quit = async (target: "codex" | "claude") => {
     if (quitting.current) return;
     quitting.current = true;
-    setQuitBusy(true);
+    setQuitBusy(target);
     try {
-      const r = await command("force_quit_agent_clients");
+      const r = await command("force_quit_agent_clients", { target });
       notify(
         `已退出 ${r.terminated} 个进程${r.failed ? `，${r.failed} 个未能退出` : ""}${r.terminalCleanupFailed ? "；部分终端未能安全恢复，请重新打开对应终端" : ""}`,
       );
@@ -88,7 +88,7 @@ export default function QuickControls({
       error(errorOf(e).message);
     } finally {
       quitting.current = false;
-      setQuitBusy(false);
+      setQuitBusy(null);
     }
   };
   return (
@@ -111,14 +111,24 @@ export default function QuickControls({
           {readError && <span role="alert">{readError}</span>}
         </div>
       )}
-      <button
-        className="quick-force"
-        disabled={quitBusy}
-        onClick={() => void quit()}
-      >
-        <SquarePower size={14} />
-        {quitBusy ? "正在退出…" : "退出 ChatGPT / Codex / Claude Code"}
-      </button>
+      <div className="quick-quit-actions">
+        {(
+          [
+            ["codex", "ChatGPT / Codex"],
+            ["claude", "Claude Code"],
+          ] as const
+        ).map(([target, label]) => (
+          <button
+            key={target}
+            className="quick-force"
+            disabled={quitBusy !== null}
+            onClick={() => void quit(target)}
+          >
+            <SquarePower size={14} />
+            {quitBusy === target ? "正在退出…" : `退出 ${label}`}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

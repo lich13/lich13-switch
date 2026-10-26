@@ -263,7 +263,161 @@ fn sse_and_json_apply_limit_headers_only_after_an_error_envelope() {
         );
     }
     let success = json!({"type":"response.completed","response":{"status":"completed"}});
-    let (details, wait) = policy::details_with_headers(&success, &headers);
+    let (details, wait) = policy::details_with_headers(&success, &headers, &[]);
     assert_eq!(details.error_basis, None);
     assert_eq!(wait, None);
+}
+
+fn custom(
+    kind: super::failure_rules::MatchKind,
+    value: &str,
+    category: B,
+) -> super::failure_rules::Rule {
+    super::failure_rules::Rule {
+        id: uuid::Uuid::new_v4().to_string(),
+        match_kind: kind,
+        value: value.into(),
+        category,
+    }
+}
+#[test]
+fn custom_rules_fill_only_ambiguous_evidence_and_code_precedes_keyword() {
+    use super::failure_rules::MatchKind::*;
+    let rules = [
+        custom(Code, "fixture_throttled", B::Concurrency),
+        custom(Keyword, "fixture window", B::Billing),
+    ];
+    let parse = |body: Value, headers: &HeaderMap| {
+        policy::http_with_rules(429, headers, &serde_json::to_vec(&body).unwrap(), &rules).0
+    };
+    let body = json!({"error":{"code":"fixture_throttled","message":"fixture window"}});
+    assert_eq!(
+        parse(body.clone(), &HeaderMap::new()).error_basis,
+        Some(B::Concurrency)
+    );
+    assert_eq!(
+        parse(
+            json!({"error":{"code":"insufficient_quota","message":"fixture window"}}),
+            &HeaderMap::new()
+        )
+        .error_basis,
+        Some(B::Billing)
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("x-ratelimit-remaining-tokens", "0".parse().unwrap());
+    let limited = json!({"error":{"code":"fixture_throttled","type":"rate_limit_error","message":"too many requests; fixture window"}});
+    assert_eq!(parse(limited, &headers).error_basis, Some(B::Tpm));
+    let success = json!({"type":"response.completed","response":{"output":"fixture window","status":"completed"}});
+    assert_eq!(
+        policy::details_with_rules(&success, false, &rules),
+        crate::events::Details::default()
+    );
+    let concrete =
+        json!({"error":{"code":"fixture_throttled","message":"content policy violation"}});
+    assert_eq!(
+        parse(concrete, &HeaderMap::new()).error_basis,
+        Some(B::SafetyRejection)
+    );
+    let rules = [custom(Code, "usage_limit_exceeded", B::Concurrency)];
+    let value =
+        json!({"error":{"code":"usage_limit_exceeded","message":"content policy violation"}});
+    assert_eq!(
+        policy::details_with_rules(&value, false, &rules).custom_rule_id,
+        None
+    );
+    let value = json!({"error":{"code":"fixture_throttled","status":"PERMISSION_DENIED","message":"fixture"}});
+    assert_eq!(
+        policy::details_with_rules(
+            &value,
+            false,
+            &[custom(Code, "fixture_throttled", B::Concurrency)]
+        )
+        .custom_rule_id,
+        None
+    );
+}
+#[test]
+fn custom_conflicts_keep_original_and_streams_share_the_snapshot() {
+    use super::failure_rules::MatchKind::*;
+    let conflict = [
+        custom(Keyword, "fixture", B::Concurrency),
+        custom(Keyword, "window", B::Billing),
+    ];
+    let value = json!({"type":"error","error":{"code":"fixture_throttled","message":"fixture window","type":"rate_limit_error"}});
+    let result = policy::details_with_rules(&value, false, &conflict);
+    assert_eq!(result.rule_conflict, Some(true));
+    assert_eq!(result.custom_rule_id, None);
+    let rules = [custom(Code, "fixture_throttled", B::Concurrency)];
+    let mut stream = super::protocol::Protocol::new(true);
+    stream.attach_failure_rules(&rules);
+    stream.response(200, true, "identity");
+    stream.feed(format!("data: {value}\n\n").as_bytes());
+    assert_eq!(stream.observation.error.error_basis, Some(B::Concurrency));
+    assert_eq!(stream.observation.first_event_capacity_error, Some(true));
+    let mut ws = super::protocol::Protocol::new(true);
+    ws.attach_failure_rules(&rules);
+    ws.value(&value);
+    assert_eq!(
+        ws.observation.error.error_basis,
+        stream.observation.error.error_basis
+    );
+    assert_eq!(
+        ws.observation.error.custom_rule_id,
+        Some(rules[0].id.clone())
+    );
+}
+#[test]
+fn custom_rule_edits_are_isolated_persisted_and_preserve_settings() {
+    use super::failure_rules::MatchKind::*;
+    let dir = tempfile::tempdir().unwrap();
+    let codex = super::Gateway::new(dir.path().join("codex")).unwrap();
+    let claude = super::Gateway::new(dir.path().join("claude")).unwrap();
+    let before = codex.view();
+    let rule = custom(Code, "fixture_custom", B::Capacity);
+    codex
+        .edit(
+            super::Edit::UpsertFailureRule { rule: rule.clone() },
+            &before.revision,
+            dir.path(),
+        )
+        .unwrap();
+    assert_eq!(
+        codex.view().settings.custom_failure_rules.as_slice(),
+        std::slice::from_ref(&rule)
+    );
+    assert!(claude.view().settings.custom_failure_rules.is_empty());
+    assert_eq!(codex.view().settings.port, before.settings.port);
+    assert!(codex
+        .edit(
+            super::Edit::DeleteFailureRule {
+                id: rule.id.clone()
+            },
+            &before.revision,
+            dir.path()
+        )
+        .is_err());
+    let loaded = super::Gateway::new(dir.path().join("codex")).unwrap();
+    assert_eq!(loaded.view().settings.custom_failure_rules, [rule]);
+    let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+    legacy.as_object_mut().unwrap().remove("customFailureRules");
+    assert!(serde_json::from_value::<Settings>(legacy)
+        .unwrap()
+        .custom_failure_rules
+        .is_empty());
+}
+#[test]
+fn every_catalog_code_uses_the_same_classifier_and_categories_are_complete() {
+    let catalog = super::failure_rules::catalog();
+    assert_eq!(catalog.len(), 20);
+    for entry in super::failure_rules::CODES {
+        let value = json!({"error":{"code":entry.value}});
+        assert_eq!(
+            classify(429, value).error_basis,
+            Some(entry.category),
+            "{}",
+            entry.value
+        );
+        assert!(catalog.iter().any(|c| c.category == entry.category
+            && c.codes.iter().any(|code| code.value == entry.value)));
+    }
 }

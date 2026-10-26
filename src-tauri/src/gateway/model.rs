@@ -45,6 +45,8 @@ pub(super) const USAGE_TAIL_DEADLINE: std::time::Duration = std::time::Duration:
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default)]
+    pub custom_failure_rules: Vec<super::failure_rules::Rule>,
     pub port: u16,
     pub max_retries: usize,
     pub failure_threshold: u32,
@@ -103,6 +105,7 @@ fn default_max_waiting() -> usize {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            custom_failure_rules: Vec::new(),
             port: super::client::DEFAULT_SHARED_PORT,
             max_retries: DEFAULT_MAX_RETRIES,
             failure_threshold: DEFAULT_FAILURE_THRESHOLD,
@@ -128,6 +131,7 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        super::failure_rules::validate(&self.custom_failure_rules)?;
         if self.port == 0
             || self.max_retries > 15
             || self.failure_threshold == 0
@@ -340,6 +344,12 @@ pub enum Edit {
     },
     Mode {
         mode: String,
+    },
+    UpsertFailureRule {
+        rule: super::failure_rules::Rule,
+    },
+    DeleteFailureRule {
+        id: String,
     },
     Settings {
         settings: Settings,
@@ -837,6 +847,18 @@ impl Store {
                     return Err(AppError::new(code::MODE, "模式无效"));
                 }
                 self.mode = mode;
+            }
+            Edit::UpsertFailureRule { rule } => {
+                let rules = &mut self.settings.custom_failure_rules;
+                if let Some(existing) = rules.iter_mut().find(|r| r.id == rule.id) {
+                    *existing = rule;
+                } else {
+                    rules.push(rule);
+                }
+                super::failure_rules::validate(rules)?;
+            }
+            Edit::DeleteFailureRule { id } => {
+                self.settings.custom_failure_rules.retain(|r| r.id != id);
             }
             Edit::Settings { settings } => {
                 settings.validate()?;

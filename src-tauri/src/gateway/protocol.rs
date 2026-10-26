@@ -6,6 +6,7 @@ use std::io::Write;
 
 #[derive(Default, Clone, Debug)]
 pub struct Observation {
+    pub failure_rules: Vec<super::failure_rules::Rule>,
     pub meter: crate::usage::model::Meter,
     pub error: crate::events::Details,
     limit_headers: hyper::HeaderMap,
@@ -166,8 +167,11 @@ impl Observation {
         if self.meter.model.is_some() {
             self.model = self.meter.model.clone();
         }
-        let (details, retry) =
-            super::failure_policy::details_with_headers(outer, &self.limit_headers);
+        let (details, retry) = super::failure_policy::details_with_headers(
+            outer,
+            &self.limit_headers,
+            &self.failure_rules,
+        );
         let has_error = details != crate::events::Details::default();
         if has_error || matches!(event, "error" | "response.failed") || status == "failed" {
             self.fault_sequence = self.fault_sequence.saturating_add(1);
@@ -194,34 +198,35 @@ impl Observation {
             || outer.get("choices").is_some()
             || outer.get("candidates").is_some();
         if self.terminal.is_none() {
-            self.capacity_error = super::failure_policy::temporary_capacity_event(outer);
-            let terminal = if super::failure_policy::model_error(outer) {
-                Some(Terminal::ModelUnavailable)
-            } else {
-                match event {
-                    "response.completed" | "response.done" | "message_stop" => {
-                        Some(Terminal::Success)
-                    }
-                    "response.cancelled" | "response.canceled" => Some(Terminal::Cancelled),
-                    "response.failed" => Some(error_terminal(value)),
-                    "response.incomplete" => Some(incomplete_terminal(value)),
-                    "message" if value.get("stop_reason").is_some_and(|v| !v.is_null()) => {
-                        Some(Terminal::Success)
-                    }
-                    _ => match status {
-                        "completed" => Some(Terminal::Success),
-                        "failed" => Some(error_terminal(value)),
-                        "incomplete" => Some(incomplete_terminal(value)),
-                        "cancelled" => Some(Terminal::Cancelled),
-                        _ if event == "error" => Some(error_terminal(value)),
-                        _ if value.get("error").is_some_and(|e| !e.is_null()) => {
-                            Some(error_terminal(value))
+            self.capacity_error = super::failure_policy::temporary(&self.error);
+            let terminal =
+                if self.error.error_basis == Some(crate::events::ErrorBasis::ModelUnavailable) {
+                    Some(Terminal::ModelUnavailable)
+                } else {
+                    match event {
+                        "response.completed" | "response.done" | "message_stop" => {
+                            Some(Terminal::Success)
                         }
-                        _ if has_error => Some(error_terminal(outer)),
-                        _ => None,
-                    },
-                }
-            };
+                        "response.cancelled" | "response.canceled" => Some(Terminal::Cancelled),
+                        "response.failed" => Some(rule_terminal(value, &self.error)),
+                        "response.incomplete" => Some(incomplete_terminal(value)),
+                        "message" if value.get("stop_reason").is_some_and(|v| !v.is_null()) => {
+                            Some(Terminal::Success)
+                        }
+                        _ => match status {
+                            "completed" => Some(Terminal::Success),
+                            "failed" => Some(rule_terminal(value, &self.error)),
+                            "incomplete" => Some(incomplete_terminal(value)),
+                            "cancelled" => Some(Terminal::Cancelled),
+                            _ if event == "error" => Some(rule_terminal(value, &self.error)),
+                            _ if value.get("error").is_some_and(|e| !e.is_null()) => {
+                                Some(rule_terminal(value, &self.error))
+                            }
+                            _ if has_error => Some(rule_terminal(outer, &self.error)),
+                            _ => None,
+                        },
+                    }
+                };
             // A chat completion finishes only once all reported choices finish.
             let choices = outer.get("choices").and_then(Value::as_array);
             let terminal = terminal.or_else(|| {
@@ -336,6 +341,17 @@ fn safe_incomplete_reason(value: &Value) -> Option<String> {
         })
 }
 
+fn rule_terminal(value: &Value, details: &crate::events::Details) -> Terminal {
+    if details.custom_rule_id.is_none() {
+        return error_terminal(value);
+    }
+    use crate::events::ErrorBasis::*;
+    match details.error_basis {
+        Some(ModelUnavailable) => Terminal::ModelUnavailable,
+        Some(InvalidRequest | RequestTooLarge | SafetyRejection) => Terminal::Rejected,
+        _ => Terminal::Failure,
+    }
+}
 fn error_terminal(value: &Value) -> Terminal {
     if super::failure_policy::model_error(value) {
         return Terminal::ModelUnavailable;
@@ -430,17 +446,18 @@ impl Sink {
                     map.insert("type".into(), Value::String(self.event.clone()));
                 }
             }
-            if first {
-                self.observation.first_event_model_error =
-                    Some(super::failure_policy::model_error(&v));
-                self.observation.first_event_capacity_error =
-                    Some(super::failure_policy::temporary_capacity_event(&v));
-                self.observation.first_event_account_error =
-                    Some(super::failure_policy::hard_rejection(
-                        &super::failure_policy::details_value(&v, false),
-                    ));
-            }
             self.observation.value_projected(&v, true);
+            if first {
+                self.observation.first_event_model_error = Some(
+                    self.observation.error.error_basis
+                        == Some(crate::events::ErrorBasis::ModelUnavailable),
+                );
+                self.observation.first_event_capacity_error =
+                    Some(super::failure_policy::temporary(&self.observation.error));
+                self.observation.first_event_account_error = Some(
+                    super::failure_policy::hard_rejection(&self.observation.error),
+                );
+            }
             if first {
                 self.observation.first_event_service_error = Some(
                     self.observation.terminal == Some(Terminal::Failure)
@@ -718,6 +735,12 @@ impl Protocol {
             routing_tail_failure: false,
             fault_reports: std::sync::Mutex::default(),
             failover_generation: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    pub(super) fn attach_failure_rules(&mut self, rules: &[super::failure_rules::Rule]) {
+        self.observation.failure_rules = rules.to_vec();
+        if let Some(observer) = &mut self.observer {
+            observer.sink().observation.failure_rules = rules.to_vec();
         }
     }
     pub(super) fn attach_wait_budget(&mut self, budget: &super::wait_budget::WaitBudget) {
@@ -1133,6 +1156,7 @@ impl Protocol {
         self.status = Some(status);
         self.stream = stream;
         let mut observer = Observer::new(stream, encoding);
+        observer.sink().observation.failure_rules = self.observation.failure_rules.clone();
         observer.sink().observation.meter.anthropic = self.observation.meter.anthropic;
         observer.sink().observation.meter.requested_speed =
             self.observation.meter.requested_speed.clone();
@@ -1153,6 +1177,13 @@ impl Protocol {
         self.record_usage();
     }
     pub fn terminal(&self) -> Option<Terminal> {
+        if self
+            .wait_budget
+            .as_ref()
+            .is_some_and(|(budget, deadline)| budget.is_cancelled(*deadline))
+        {
+            return Some(Terminal::Cancelled);
+        }
         if self.status.is_some_and(|s| s >= 400) {
             return Some(Terminal::Rejected);
         }
@@ -1171,6 +1202,15 @@ impl Protocol {
         self.transport_failure
     }
     pub fn finish(&mut self, status: Option<u16>, reason: &str) {
+        let reason = if self
+            .wait_budget
+            .as_ref()
+            .is_some_and(|(budget, deadline)| budget.is_cancelled(*deadline))
+        {
+            code::CANCELLED
+        } else {
+            reason
+        };
         self.routing_fault |= !matches!(reason, code::OK | code::CLIENT_DISCONNECTED | "UNSETTLED");
         if self.finished {
             if matches!(
@@ -1295,6 +1335,14 @@ impl Protocol {
             self.end_reason = Some(reason.into());
         }
         let cause = match reason {
+            code::CANCELLED
+                if self
+                    .wait_budget
+                    .as_ref()
+                    .is_some_and(|(budget, deadline)| budget.is_cancelled(*deadline)) =>
+            {
+                EndCause::ClientCancelled
+            }
             _ if self.terminal_received => match self.observation.terminal {
                 Some(Terminal::Success | Terminal::Limited) => EndCause::Completed,
                 Some(Terminal::Cancelled) => EndCause::ClientCancelled,
@@ -1512,7 +1560,9 @@ impl Protocol {
 impl Drop for Protocol {
     fn drop(&mut self) {
         if let Some((budget, deadline)) = &self.wait_budget {
-            if budget.expired(*deadline) && !self.finished {
+            if budget.is_cancelled(*deadline) && !self.finished {
+                self.finish(None, code::CANCELLED);
+            } else if budget.expired(*deadline) && !self.finished {
                 self.timeout("retry_budget", budget.seconds);
                 self.finish(None, code::FIRST_BYTE_TIMEOUT);
             }

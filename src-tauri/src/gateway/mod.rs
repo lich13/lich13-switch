@@ -46,6 +46,7 @@ pub(crate) mod failover;
 mod failure_policy;
 #[cfg(test)]
 mod failure_policy_tests;
+pub mod failure_rules;
 #[cfg(test)]
 mod first_byte_timeout_tests;
 #[cfg(test)]
@@ -186,6 +187,7 @@ pub struct View {
     pub settings: Settings,
     pub active_connections: usize,
     pub waiting_requests: usize,
+    pub pending_requests: Vec<wait_budget::PendingRequest>,
     pub capacity_retries: Vec<admission::CapacityRetry>,
     pub websocket_retries: Vec<admission::CapacityRetry>,
     pub transient_retries: Vec<admission::CapacityRetry>,
@@ -221,6 +223,7 @@ struct Shared {
     clients: Mutex<HashMap<String, HttpClient>>,
     data: PathBuf,
     spool: storage::PrivateTempDir,
+    pending_requests: wait_budget::Registry,
     active: AtomicUsize,
     events: broadcast::Sender<()>,
     quota: quota::Service,
@@ -289,6 +292,10 @@ fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
 impl Gateway {
+    pub fn cancel_wait(&self, request_id: &str) -> bool {
+        self.0.pending_requests.cancel(request_id)
+    }
+
     fn claude_official(&self) -> bool {
         self.0.client == ClientId::Claude
             && self
@@ -513,6 +520,7 @@ impl Gateway {
             model_list: model_list::Service::new(data.join("model-list.json")),
             data,
             spool,
+            pending_requests: wait_budget::Registry::new(events.clone()),
             active: AtomicUsize::new(0),
             events,
             quota: quota::Service::new(),
@@ -940,6 +948,7 @@ impl Gateway {
                 .collect(),
             active_connections: self.0.active.load(Ordering::Relaxed),
             waiting_requests: waiting,
+            pending_requests: self.0.pending_requests.view(),
             capacity_retries: self.0.admission.capacity_retries(),
             websocket_retries: self.0.admission.websocket_retries(),
             transient_retries: self.0.admission.transient_retries(),

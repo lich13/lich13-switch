@@ -2684,6 +2684,7 @@ select:focus-visible {
   gap: 8px;
   color: var(--muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 .event-filters select,
 .event-filters input {
@@ -2705,8 +2706,8 @@ select:focus-visible {
   border-radius: 10px;
 }
 .event-table {
-  width: max(100%, 760px);
-  min-width: 760px;
+  width: 100%;
+  min-width: 0;
   border-collapse: collapse;
   font-size: 12px;
   table-layout: fixed;
@@ -2909,7 +2910,7 @@ select:focus-visible {
   text-align: left;
 }
 .event-table {
-  min-width: 670px;
+  min-width: 0;
 }
 
 /* Global Claude profile controls share the existing compact toolbar. */
@@ -3695,4 +3696,260 @@ button.exchange-button:active:not(:disabled) {
 }
 .gateway-settings > form {
   margin-top: 12px;
+}
+
+/* Compact gateway controls and exception evidence. */
+.quick-quit-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.quick-quit-actions button {
+  font-size: 13px;
+  min-height: 36px;
+  padding: 4px 0;
+  white-space: nowrap;
+}
+.quick-long-waits {
+  max-height: 244px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 8px 0;
+}
+.quick-wait-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 8px;
+  padding: 9px 10px;
+  font-size: 13px;
+}
+.quick-wait-row + .quick-wait-row {
+  border-top: 1px solid var(--line);
+}
+.quick-wait-row button {
+  height: 32px;
+  align-self: center;
+  font-size: 13px;
+}
+.quick-wait-identity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.quick-wait-identity > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quick-wait-identity strong {
+  font-weight: 500;
+}
+.quick-wait-identity span {
+  color: var(--muted);
+}
+.quick-wait-timing {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.event-table {
+  font-size: 13px;
+}
+.event-table td,
+.event-table th {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.event-table th:nth-child(1) {
+  width: 74px;
+}
+.event-table th:nth-child(2) {
+  width: 118px;
+}
+.event-table th:nth-child(3) {
+  width: 76px;
+}
+.event-table th:nth-child(4) {
+  width: auto;
+}
+.event-table th:nth-child(5) {
+  width: 104px;
+}
+.event-table time,
+.event-status {
+  font-variant-numeric: tabular-nums;
+}
+.event-table time > span {
+  display: block;
+}
+.event-table .event-code {
+  font-size: 13px;
+  color: var(--ink);
+}
+.event-summary-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  line-height: 16px;
+}
+.event-primary-code {
+  font:
+    500 13px/16px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.event-code.error .event-primary-code {
+  color: var(--danger);
+}
+.event-code.warning .event-primary-code {
+  color: var(--warning);
+}
+.event-message-text {
+  color: var(--muted);
+  font-family: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.event-count {
+  font-size: 12px;
+}
+.event-add-rule {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+.failure-category {
+  border-bottom: 1px solid var(--line);
+}
+.failure-category > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.failure-category > summary > span:first-child::before {
+  content: "›";
+  display: inline-block;
+  width: 14px;
+  color: var(--muted);
+}
+.failure-category[open] > summary > span:first-child::before {
+  content: "⌄";
+}
+.failure-action {
+  color: var(--muted);
+  text-align: right;
+}
+.failure-conditions {
+  padding: 2px 0 12px 14px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.failure-conditions dl {
+  margin: 7px 0;
+}
+.failure-conditions dl > div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
+}
+.failure-conditions dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.failure-conditions dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.failure-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+}
+.failure-conditions code {
+  font:
+    13px/1.6 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  overflow-wrap: anywhere;
+}
+.failure-keywords + .failure-keywords {
+  margin-top: 8px;
+}
+.keyword-or {
+  color: var(--muted);
+}
+.failure-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+}
+.custom-failure-rule {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.custom-failure-rule > code {
+  flex: 1;
+  min-width: 0;
+}
+.custom-failure-rule > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.failure-rule-dialog form {
+  display: grid;
+  gap: 14px;
+}
+.failure-rule-dialog label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+.failure-rule-dialog input,
+.failure-rule-dialog select {
+  width: 100%;
+  min-height: 36px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.failure-rule-dialog input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (max-width: 800px) {
+  .event-page {
+    padding: 14px;
+  }
+  .event-table th:nth-child(1) {
+    width: 66px;
+  }
+  .event-table th:nth-child(2) {
+    width: 96px;
+  }
+  .event-table th:nth-child(5) {
+    width: 88px;
+  }
+  .event-table td,
+  .event-table th {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
 }

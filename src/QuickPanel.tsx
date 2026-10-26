@@ -1,3 +1,4 @@
+import QuickWaits from "./QuickWaits";
 import { subscriptions } from "./subscriptions";
 import type { GatewayEdit } from "./bridge-contracts";
 import ClientSelection, {
@@ -336,6 +337,15 @@ function QuickContent({
                   <div className="quick-waiting">
                     等待 {gateway?.waitingRequests}
                   </div>
+                )}
+                {gateway && (
+                  <QuickWaits
+                    gateway={gateway}
+                    clientId={clientId}
+                    visible={visible}
+                    notify={setNotice}
+                    error={setError}
+                  />
                 )}
                 {!gateway ? (
                   <div className="quick-empty">正在读取供应商…</div>

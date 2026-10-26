@@ -60,22 +60,24 @@ beforeEach(() => {
   mock.confirm.mockReset();
   mock.confirm.mockResolvedValue(true);
   eventRecords = [record];
-  mock.command.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
-    if (name === "get_gateway") {
-      return {
-        clientId: args.clientId,
-        providers: [{ id: "provider-1", name: "Fixture Provider" }],
-      };
-    }
-    if (name === "get_app_events") {
-      const filter = args.filter as { page?: number } | undefined;
-      return page(Number(filter?.page ?? 1));
-    }
-    if (name === "get_app_event") {
-      return eventRecords.find((item) => item.id === args.id) ?? record;
-    }
-    return undefined;
-  });
+  mock.command.mockImplementation(
+    async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === "get_gateway") {
+        return {
+          clientId: args.clientId,
+          providers: [{ id: "provider-1", name: "Fixture Provider" }],
+        };
+      }
+      if (name === "get_app_events") {
+        const filter = args.filter as { page?: number } | undefined;
+        return page(Number(filter?.page ?? 1));
+      }
+      if (name === "get_app_event") {
+        return eventRecords.find((item) => item.id === args.id) ?? record;
+      }
+      return undefined;
+    },
+  );
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
     value: "visible",
@@ -90,21 +92,40 @@ describe("event log", () => {
   it("filters by client, provider, level, reason and time range", async () => {
     const user = userEvent.setup();
     render(<EventLog />);
-    expect(await screen.findByRole("button", { name: /模型不支持/ })).toBeInTheDocument();
-    expect(screen.getByText("HTTP 404")).toBeInTheDocument();
-    expect(screen.queryByText("MODEL_UNAVAILABLE")).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /模型不支持/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("404")).toBeInTheDocument();
+    expect(screen.getByText("MODEL_UNAVAILABLE")).toBeInTheDocument();
     expect(
       within(screen.getByRole("table"))
         .getAllByRole("columnheader")
         .map((header) => header.textContent),
     ).toEqual(["时间", "客户端 / 供应商", "状态", "错误摘要", "处理结果"]);
-    expect(await screen.findByRole("option", { name: "Fixture Provider" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("option", { name: "Fixture Provider" }),
+    ).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "客户端" }), "codex");
-    await user.selectOptions(screen.getByRole("combobox", { name: "供应商" }), "provider-1");
-    await user.selectOptions(screen.getByRole("combobox", { name: "级别" }), "warning");
-    await user.selectOptions(screen.getByRole("combobox", { name: "原因" }), "model_unavailable");
-    await user.selectOptions(screen.getByRole("combobox", { name: "状态码" }), "client_error");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "客户端" }),
+      "codex",
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "供应商" }),
+      "provider-1",
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "级别" }),
+      "warning",
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "原因" }),
+      "model_unavailable",
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "状态码" }),
+      "client_error",
+    );
     fireEvent.change(screen.getByLabelText("开始时间"), {
       target: { value: "2026-10-05T10:00" },
     });
@@ -192,9 +213,9 @@ describe("event log", () => {
         .getAllByRole("columnheader")
         .map((header) => header.textContent),
     ).toEqual(["时间", "客户端 / 供应商", "状态", "错误摘要", "处理结果"]);
-    expect(within(table).getAllByText("普通错误")).toHaveLength(2);
-    expect(within(table).getByText("熔断错误")).toBeInTheDocument();
-    expect(within(table).getByText("状态记录")).toBeInTheDocument();
+    expect(within(table).queryByText("普通错误")).not.toBeInTheDocument();
+    expect(within(table).queryByText("熔断错误")).not.toBeInTheDocument();
+    expect(within(table).queryByText("状态记录")).not.toBeInTheDocument();
   });
 
   it.each([
@@ -238,7 +259,7 @@ describe("event log", () => {
       const summary = within(table).getAllByRole("button")[0];
 
       expect(summary).toHaveTextContent(expectedLabel);
-      expect(summary).toHaveTextContent("HTTP 502");
+      expect(summary).toHaveTextContent("502");
       expect(summary).toHaveTextContent("连续失败 3/3");
     },
   );
@@ -260,7 +281,9 @@ describe("event log", () => {
     expect(eventCalls().length).toBe(before + 1);
 
     act(() => mock.listeners.get("app-visibility")?.(true));
-    await waitFor(() => expect(eventCalls().length).toBeGreaterThan(before + 1));
+    await waitFor(() =>
+      expect(eventCalls().length).toBeGreaterThan(before + 1),
+    );
   });
 
   it("opens detail, closes on Escape and returns focus to the reason button", async () => {
@@ -270,12 +293,16 @@ describe("event log", () => {
     await user.click(reason);
     const dialog = await screen.findByRole("dialog", { name: "模型不支持" });
     expect(dialog).toHaveTextContent("Fixture Provider");
-    expect(within(dialog).getByText("HTTP 404")).toBeInTheDocument();
+    expect(within(dialog).getByText("404")).toBeInTheDocument();
     expect(within(dialog).getByText("MODEL_UNAVAILABLE")).toBeInTheDocument();
     expect(within(dialog).getByText("fixture-model")).toBeInTheDocument();
 
     fireEvent(dialog, new Event("cancel", { bubbles: true, cancelable: true }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "模型不支持" })).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "模型不支持" }),
+      ).not.toBeInTheDocument(),
+    );
     expect(document.activeElement).toBe(reason);
   });
 
@@ -317,12 +344,18 @@ describe("event log", () => {
     await user.click(reason);
     const dialog = await screen.findByRole("dialog", { name: "上游服务异常" });
 
-    expect(within(dialog).getByText(/HTTP 502/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/502/)).toBeInTheDocument();
     expect(within(dialog).getByText("overloaded_error")).toBeInTheDocument();
     expect(within(dialog).getByText("server_error")).toBeInTheDocument();
-    expect(within(dialog).getByText("上游暂时不可用；请求内容已隐去")).toBeInTheDocument();
-    expect(within(dialog).getByText("状态码").nextElementSibling).toHaveTextContent("HTTP 502 · WS 1006");
-    expect(within(dialog).getByText(/计入熔断/).nextElementSibling).toHaveTextContent("是");
+    expect(
+      within(dialog).getByText("上游暂时不可用；请求内容已隐去"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("状态码").nextElementSibling,
+    ).toHaveTextContent("502 · WS 1006");
+    expect(
+      within(dialog).getByText(/计入熔断/).nextElementSibling,
+    ).toHaveTextContent("是");
   });
 
   it("filters legacy recovered records from the visible journal", async () => {
@@ -341,8 +374,12 @@ describe("event log", () => {
     render(<EventLog />);
     await screen.findByRole("button", { name: /模型不支持/ });
 
-    expect(screen.queryByRole("button", { name: /供应商恢复/ })).not.toBeInTheDocument();
-    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(2);
+    expect(
+      screen.queryByRole("button", { name: /供应商恢复/ }),
+    ).not.toBeInTheDocument();
+    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(
+      2,
+    );
   });
 
   it("clears the journal only after confirmation", async () => {
@@ -351,6 +388,8 @@ describe("event log", () => {
     await screen.findByRole("button", { name: /模型不支持/ });
     await user.click(screen.getByRole("button", { name: "清空日志" }));
     expect(mock.confirm).toHaveBeenCalledWith("清空全部异常日志？");
-    await waitFor(() => expect(mock.command).toHaveBeenCalledWith("clear_app_events"));
+    await waitFor(() =>
+      expect(mock.command).toHaveBeenCalledWith("clear_app_events"),
+    );
   });
 });

@@ -678,3 +678,350 @@ async fn websocket_eof_during_generation_closes_upstream_socket() {
 mod usage_tail_tests;
 #[path = "usage_tail_v02513_tests.rs"]
 mod usage_tail_v02513_tests;
+
+async fn read_panel_cancel(stream: &mut TcpStream) -> Vec<u8> {
+    tokio::time::timeout(WAIT, async {
+        let mut bytes = Vec::new();
+        loop {
+            let mut chunk = [0; 2048];
+            let read = stream.read(&mut chunk).await.unwrap();
+            bytes.extend_from_slice(&chunk[..read]);
+            if read == 0 || String::from_utf8_lossy(&bytes).contains("CANCELLED") {
+                return bytes;
+            }
+        }
+    })
+    .await
+    .expect("cancel response was not received")
+}
+
+#[tokio::test]
+async fn panel_cancel_before_headers_returns_499_and_settles_neutrally() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (dir, gateway) = fixture(vec![format!(
+        "http://{}/v1",
+        upstream.local_addr().unwrap()
+    )])
+    .await;
+    let (usage, _) = attach_observers(&dir, &gateway);
+    let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
+    let (mut socket, _) = upstream.accept().await.unwrap();
+    read_http_request(&mut socket).await.unwrap();
+    let pending = gateway.view().pending_requests;
+    assert_eq!(pending.len(), 1);
+    assert!(gateway.cancel_wait(&pending[0].request_id));
+    assert!(!gateway.cancel_wait(&pending[0].request_id));
+    let response = read_panel_cancel(&mut downstream).await;
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.contains("499"));
+    assert!(response.contains("CANCELLED"));
+    tokio::time::timeout(WAIT, wait_for_disconnect(socket))
+        .await
+        .unwrap();
+    assert_neutral_health(&gateway).await;
+    let record = wait_for_usage_record(&usage).await;
+    assert_eq!(
+        record
+            .final_attempt()
+            .unwrap()
+            .end
+            .as_ref()
+            .map(|end| end.cause),
+        Some(EndCause::ClientCancelled)
+    );
+    assert!(matches!(
+        record.failover_evidence.as_ref().and_then(|f| f.exit),
+        Some(super::failover::Exit::Cancelled)
+    ));
+    assert!(gateway.view().pending_requests.is_empty());
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn panel_cancel_queued_request_does_not_cancel_its_active_neighbor() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (dir, gateway) = fixture(vec![format!(
+        "http://{}/v1",
+        upstream.local_addr().unwrap()
+    )])
+    .await;
+    edit(
+        &gateway,
+        &dir,
+        Edit::ConcurrencyProvider {
+            id: gateway.view().providers[0].id.clone(),
+            max_concurrency: 1,
+        },
+    );
+    let first = downstream_http(&gateway, REQUEST_BODY).await;
+    let (mut socket, _) = upstream.accept().await.unwrap();
+    read_http_request(&mut socket).await.unwrap();
+    let first_id = gateway.view().pending_requests[0].request_id.clone();
+    let mut second = downstream_http(&gateway, REQUEST_BODY).await;
+    let mut changes = gateway.subscribe();
+    let id = tokio::time::timeout(WAIT, async {
+        loop {
+            if gateway.view().waiting_requests == 1 {
+                break gateway
+                    .view()
+                    .pending_requests
+                    .into_iter()
+                    .find(|p| p.request_id != first_id)
+                    .unwrap()
+                    .request_id;
+            }
+            let _ = changes.recv().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(gateway.cancel_wait(&id));
+    let response = read_panel_cancel(&mut second).await;
+    assert!(String::from_utf8_lossy(&response).contains("CANCELLED"));
+    assert!(gateway
+        .view()
+        .pending_requests
+        .iter()
+        .any(|p| p.request_id == first_id));
+    assert_eq!(gateway.view().waiting_requests, 0);
+    drop(first);
+    drop(socket);
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn panel_cancel_websocket_turn_keeps_connection_for_next_turn() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (_dir, gateway) = fixture(vec![format!(
+        "http://{}/v1",
+        upstream.local_addr().unwrap()
+    )])
+    .await;
+    let mut client = downstream_websocket(&gateway).await;
+    client.send(yawc::Frame::text(CREATE)).await.unwrap();
+    let (socket, _) = upstream.accept().await.unwrap();
+    let mut server = tokio_tungstenite::accept_async(socket).await.unwrap();
+    server.next().await.unwrap().unwrap();
+    let id = gateway.view().pending_requests[0].request_id.clone();
+    assert!(gateway.cancel_wait(&id));
+    let cancelled = tokio::time::timeout(WAIT, client.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(cancelled.payload()).contains("response.cancelled"));
+    client.send(yawc::Frame::text(CREATE)).await.unwrap();
+    let (socket, _) = tokio::time::timeout(WAIT, upstream.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut server2 = tokio_tungstenite::accept_async(socket).await.unwrap();
+    server2.next().await.unwrap().unwrap();
+    assert!(!gateway.cancel_wait(&id));
+    assert_eq!(gateway.view().pending_requests.len(), 1);
+    drop(server);
+    drop(server2);
+    drop(client);
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn panel_cancel_sse_before_effective_output_ends_stream_without_failure() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (dir, gateway) = fixture(vec![format!(
+        "http://{}/v1",
+        upstream.local_addr().unwrap()
+    )])
+    .await;
+    let (usage, _) = attach_observers(&dir, &gateway);
+    let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
+    let (mut socket, _) = upstream.accept().await.unwrap();
+    read_http_request(&mut socket).await.unwrap();
+    let event = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-waiting\",\"status\":\"in_progress\"}}\n\n";
+    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+    socket
+        .write_all(format!("{:x}\r\n", event.len()).as_bytes())
+        .await
+        .unwrap();
+    socket.write_all(event).await.unwrap();
+    socket.write_all(b"\r\n").await.unwrap();
+    let mut prefix = vec![0; 4096];
+    let count = tokio::time::timeout(WAIT, downstream.read(&mut prefix))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(count > 0);
+    let id = gateway.view().pending_requests[0].request_id.clone();
+    assert!(gateway.cancel_wait(&id));
+    let mut tail = Vec::new();
+    let _ = tokio::time::timeout(WAIT, downstream.read_to_end(&mut tail))
+        .await
+        .unwrap();
+    let record = wait_for_usage_record(&usage).await;
+    assert_eq!(
+        record
+            .final_attempt()
+            .unwrap()
+            .end
+            .as_ref()
+            .map(|end| end.cause),
+        Some(EndCause::ClientCancelled)
+    );
+    assert_neutral_health(&gateway).await;
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn panel_cancel_capacity_backoff_releases_waiter_and_does_not_resend() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (dir, gateway) = fixture(vec![format!(
+        "http://{}/v1",
+        upstream.local_addr().unwrap()
+    )])
+    .await;
+    let mut settings = gateway.view().settings;
+    settings.rate_limit_seconds = 60;
+    edit(&gateway, &dir, Edit::Settings { settings });
+    let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
+    let (mut socket, _) = upstream.accept().await.unwrap();
+    read_http_request(&mut socket).await.unwrap();
+    let body = r#"{"error":{"code":"model_capacity_exceeded"}}"#;
+    socket.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    drop(socket);
+    let mut changes = gateway.subscribe();
+    tokio::time::timeout(WAIT, async {
+        while gateway.view().waiting_requests == 0 {
+            let _ = changes.recv().await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = gateway.view();
+    assert!(gateway.cancel_wait(&before.pending_requests[0].request_id));
+    let response = read_panel_cancel(&mut downstream).await;
+    assert!(String::from_utf8_lossy(&response).contains("CANCELLED"));
+    assert_eq!(gateway.view().waiting_requests, 0);
+    assert_eq!(
+        gateway.view().providers[0].health.failures,
+        before.providers[0].health.failures
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), upstream.accept())
+            .await
+            .is_err()
+    );
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn panel_cancel_websocket_admission_keeps_neighbor_running() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (dir, gateway) = fixture(vec![format!(
+        "http://{}/v1",
+        upstream.local_addr().unwrap()
+    )])
+    .await;
+    edit(
+        &gateway,
+        &dir,
+        Edit::ConcurrencyProvider {
+            id: gateway.view().providers[0].id.clone(),
+            max_concurrency: 1,
+        },
+    );
+    let first = downstream_http(&gateway, REQUEST_BODY).await;
+    let (mut socket, _) = upstream.accept().await.unwrap();
+    read_http_request(&mut socket).await.unwrap();
+    let first_id = gateway.view().pending_requests[0].request_id.clone();
+    let mut changes = gateway.subscribe();
+    let mut client = downstream_websocket(&gateway).await;
+    client.send(yawc::Frame::text(CREATE)).await.unwrap();
+    tokio::time::timeout(WAIT, async {
+        while gateway.view().waiting_requests == 0 {
+            let _ = changes.recv().await;
+        }
+    })
+    .await
+    .unwrap();
+    let id = gateway
+        .view()
+        .pending_requests
+        .iter()
+        .find(|p| p.request_id != first_id)
+        .unwrap()
+        .request_id
+        .clone();
+    assert!(gateway.cancel_wait(&id));
+    let frame = tokio::time::timeout(WAIT, client.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(frame.payload()).contains("response.cancelled"));
+    assert_eq!(gateway.view().waiting_requests, 0);
+    assert!(gateway
+        .view()
+        .pending_requests
+        .iter()
+        .any(|p| p.request_id == first_id));
+    drop(client);
+    drop(first);
+    drop(socket);
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn panel_cancel_websocket_backoff_preserves_operation_id_and_releases_wait() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (dir, gateway) = fixture(vec![format!(
+        "http://{}/v1",
+        upstream.local_addr().unwrap()
+    )])
+    .await;
+    let mut settings = gateway.view().settings;
+    settings.capacity_retry_seconds = 60;
+    edit(&gateway, &dir, Edit::Settings { settings });
+    let mut client = downstream_websocket(&gateway).await;
+    client.send(yawc::Frame::text(CREATE)).await.unwrap();
+    let (socket, _) = upstream.accept().await.unwrap();
+    let mut server = tokio_tungstenite::accept_async(socket).await.unwrap();
+    server.next().await.unwrap().unwrap();
+    let id = gateway.view().pending_requests[0].request_id.clone();
+    let mut changes = gateway.subscribe();
+    server
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"type":"error","error":{"code":"model_capacity_exceeded","message":"capacity"}}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, async {
+        while !gateway
+            .view()
+            .pending_requests
+            .iter()
+            .any(|p| p.phase == "ws_wait")
+        {
+            let _ = changes.recv().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(gateway.view().pending_requests[0].request_id, id);
+    let failures = gateway.view().providers[0].health.failures;
+    assert!(gateway.cancel_wait(&id));
+    let frame = tokio::time::timeout(WAIT, client.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(frame.payload()).contains("response.cancelled"));
+    assert!(gateway.view().pending_requests.is_empty());
+    assert_eq!(gateway.view().waiting_requests, 0);
+    assert_eq!(gateway.view().providers[0].health.failures, failures);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), upstream.accept())
+            .await
+            .is_err()
+    );
+    drop(server);
+    drop(client);
+    gateway.stop().await.unwrap();
+}

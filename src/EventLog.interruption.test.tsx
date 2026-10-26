@@ -94,7 +94,7 @@ it("shows reset evidence as an ordinary interruption without claiming cancellati
   const row = await screen.findByRole("button", {
     name: "请求交付提前结束",
   });
-  expect(row).toHaveTextContent("普通错误");
+  expect(row).not.toHaveTextContent("普通错误");
   expect(row).toHaveTextContent("DOWNSTREAM_PEER_RESET");
   expect(row).toHaveTextContent("未确认客户端主动取消");
   expect(row).not.toHaveTextContent("熔断错误");
@@ -148,7 +148,7 @@ it("renders an explicit cancellation as a status record", async () => {
   const row = await screen.findByRole("button", {
     name: "请求交付提前结束",
   });
-  expect(row).toHaveTextContent("状态记录");
+  expect(row).not.toHaveTextContent("状态记录");
   await user.click(row);
 
   const dialog = await screen.findByRole("dialog", {
@@ -189,7 +189,7 @@ it("keeps legacy interruption records readable when delivery details are absent"
   const row = await screen.findByRole("button", {
     name: "请求交付提前结束",
   });
-  expect(row).toHaveTextContent("普通错误");
+  expect(row).not.toHaveTextContent("普通错误");
   await user.click(row);
 
   const dialog = await screen.findByRole("dialog", {

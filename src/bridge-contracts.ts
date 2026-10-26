@@ -447,6 +447,11 @@ export type GatewayEdit =
     }
   | { op: "reorder"; ids: string[] }
   | { op: "mode" | "connection"; mode: string }
+  | {
+      op: "upsertFailureRule";
+      rule: import("./failure-policy-types").FailureRule;
+    }
+  | { op: "deleteFailureRule"; id: string }
   | { op: "settings"; settings: GatewaySettings };
 type Call<A, R> = { args: A; result: R };
 type None = Record<string, never>;
@@ -525,6 +530,11 @@ export type CommandMap = {
   >;
   hide_quick: Call<None, void>;
   resize_quick: Call<{ height: number }, void>;
+  get_failure_policy_catalog: Call<
+    None,
+    import("./failure-policy-types").FailureCategory[]
+  >;
+  cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
   get_gateway: Call<Client, GatewayState>;
   get_gateway_listener: Call<None, GatewayListener>;
   set_gateway_listener: Call<{ port: number } & Revision, GatewayListener>;
@@ -596,7 +606,7 @@ export type CommandMap = {
   install_power_helper: Call<None, PowerState>;
   remove_power_helper: Call<None, PowerState>;
   force_quit_agent_clients: Call<
-    None,
+    { target: "codex" | "claude" },
     { terminated: number; failed: number; terminalCleanupFailed?: number }
   >;
   get_startup_error: Call<None, AppError | null>;

@@ -363,7 +363,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             );
         }
     };
-    let request_budget = super::wait_budget::WaitBudget::new(settings.retry_budget_seconds);
+    let request_budget = super::wait_budget::WaitBudget::tracked(
+        settings.retry_budget_seconds,
+        &gateway.0.pending_requests,
+    );
     request_budget.begin();
     let forwarding = async {
         let content_type = parts
@@ -560,6 +563,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             gateway.usage_operation(model.as_deref(), operation)
         };
         let mut failover = super::failover::Tracker::new(usage_trace.clone());
+        failover.attach_wait_budget(&request_budget);
         if gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses {
             failover.diagnostics(&gateway);
             if let Some(log) = failover.routing() {
@@ -578,6 +582,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let mut capacity_protected = false;
         let mut previous_provider: Option<String> = None;
         let mut last_category = code::NO_PROVIDER;
+        request_budget.describe(pinned.as_deref(), model.as_deref(), "admission");
         let mut wait_budget = Budget::new(settings.queue_seconds);
         wait_budget.track(
             &gateway.0.admission,
@@ -624,6 +629,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         .as_deref()
                         .or_else(|| last_error.as_ref().and_then(|e| e.provider_id.as_deref()))
                         .and_then(|id| routes.get(id));
+                    request_budget.describe(None, model.as_deref(), "capacity");
                     let waited = gateway
                         .wait_capacity_checked(
                             &capacity_sources,
@@ -1170,6 +1176,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let started = Instant::now();
             let mut protocol = super::protocol::Protocol::new(stream_hint);
             protocol.attach_wait_budget(&request_budget);
+            protocol.attach_failure_rules(&settings.custom_failure_rules);
+            request_budget.describe(Some(&route.provider.id), model.as_deref(), "headers");
             protocol.attach_rpm(admission.take_completion());
             protocol.set_operation(operation);
             protocol.diagnostics(&gateway, &route.provider.id, model.as_deref());
@@ -1522,8 +1530,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                     _ => Vec::new(),
                 };
-                let (classified, server_retry) =
-                    super::failure_policy::http(status.as_u16(), &response_parts.headers, &decoded);
+                let (classified, server_retry) = super::failure_policy::http_with_rules(
+                    status.as_u16(),
+                    &response_parts.headers,
+                    &decoded,
+                    &settings.custom_failure_rules,
+                );
                 let mut cooldown = cooldown.max(server_retry);
                 let compact_error = ownership.as_ref().is_some_and(|lease| {
                     lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
@@ -1692,6 +1704,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     // Keep the original spool, model, and response cursor untouched.
                     drop(admission);
                     let _waiting_since = Instant::now();
+                    request_budget.describe(None, model.as_deref(), "retry");
                     match gateway
                         .0
                         .admission
@@ -2148,6 +2161,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 for (index, (frame, terminal, business)) in prefix.into_iter().enumerate() {
                     tokio::select! {
                         biased;
+                        _ = request_budget.cancelled() => { protocol.finish(Some(status.as_u16()), code::CANCELLED); permits.neutral(&cfg); let _ = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await; return; }
                         _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); return; }
                         result = send_frame(&sender, Ok(frame), terminal, ended && !failed && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; break; } }
                     }
@@ -2207,6 +2221,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     let limit = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
                     let next = tokio::select! {
                         biased;
+                        _ = request_budget.cancelled() => {
+                            protocol.finish(Some(status.as_u16()), code::CANCELLED);
+                            permits.neutral(&cfg);
+                            disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await;
+                            break;
+                        }
                         _ = request_budget.wait() => {
                             protocol.timeout("retry_budget", cfg.retry_budget_seconds);
                             protocol.finish(Some(status.as_u16()), code::FIRST_BYTE_TIMEOUT);
@@ -2243,7 +2263,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             if !disconnected {
                                 tokio::select! {
                                     biased;
-
+                                    _ = request_budget.cancelled() => { protocol.finish(Some(status.as_u16()), code::CANCELLED); permits.neutral(&cfg); disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await; break; }
                                     _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
                                     result = send_frame(&sender, Ok(frame), protocol.terminal_observed(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; } }
                                 }
@@ -2409,8 +2429,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     };
     tokio::select! {
         biased;
+        _ = request_budget.cancelled() => error(StatusCode::from_u16(499).unwrap(), code::CANCELLED, "已手动中止等待"),
         _ = request_budget.wait() => error(StatusCode::GATEWAY_TIMEOUT, code::FIRST_BYTE_TIMEOUT, "等待与重试预算已耗尽"),
-        response = forwarding => response,
+        response = forwarding => if request_budget.cancel_requested() {
+            error(StatusCode::from_u16(499).unwrap(), code::CANCELLED, "已手动中止等待")
+        } else { response },
     }
 }
 pub(super) async fn stopping(stop: &mut Option<watch::Receiver<bool>>) {

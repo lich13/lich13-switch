@@ -193,7 +193,7 @@ fn quitting_claude_code_preserves_desktop_and_other_users() {
         ],
         ..Fake::default()
     };
-    let result = run(&mut fake, 1).unwrap();
+    let result = run(&mut fake, 1, Target::Claude).unwrap();
     assert_eq!(result.terminated, 2);
     assert!(fake.calls.iter().all(|(pid, _)| [2, 3].contains(pid)));
 }
@@ -215,7 +215,7 @@ fn exact_targets_preserve_other_users_own_children_and_changed_identities() {
         changed: HashSet::from([4]),
         ..Fake::default()
     };
-    let out = run(&mut f, 1).unwrap();
+    let out = run(&mut f, 1, Target::Codex).unwrap();
     assert_eq!((out.terminated, out.failed), (2, 1));
     assert_eq!(
         f.calls,
@@ -239,7 +239,7 @@ fn graceful_exit_avoids_kill_and_signal_acceptance_does_not_mean_exit() {
         stuck: HashSet::from([3]),
         ..Fake::default()
     };
-    let out = run(&mut f, 1).unwrap();
+    let out = run(&mut f, 1, Target::Codex).unwrap();
     assert_eq!((out.terminated, out.failed), (1, 1));
     assert!(f.calls.contains(&(2, Termination::Graceful)));
     assert!(!f.calls.contains(&(2, Termination::Force)));
@@ -272,7 +272,7 @@ fn terminal_recovery_brackets_shutdown_and_reports_cleanup_failures() {
         ..Fake::default()
     };
 
-    let out = run(&mut f, 1).unwrap();
+    let out = run(&mut f, 1, Target::Codex).unwrap();
 
     assert_eq!(
         (out.terminated, out.failed, out.terminal_cleanup_failed),
@@ -284,4 +284,32 @@ fn terminal_recovery_brackets_shutdown_and_reports_cleanup_failures() {
         f.terminal_events,
         ["prepare", "graceful", "wait", "wait", "cleanup"]
     );
+}
+
+#[test]
+fn platform_targets_exclude_the_other_platform_and_its_subtree() {
+    for target in [Target::Codex, Target::Claude] {
+        let mut claude = entry(3, Some(2), "/fixture/.local/bin/claude", false);
+        claude.claude_code = true;
+        let mut fake = Fake {
+            items: vec![
+                entry(1, None, "/app/switch", false),
+                entry(2, None, "/bin/codex", false),
+                claude,
+                entry(4, Some(3), "/bin/helper", false),
+                entry(5, Some(2), "/bin/helper", false),
+            ],
+            ..Fake::default()
+        };
+        run(&mut fake, 1, target).unwrap();
+        let expected: &[u32] = if target == Target::Codex {
+            &[2, 5]
+        } else {
+            &[3, 4]
+        };
+        assert!(fake.calls.iter().all(|(pid, _)| expected.contains(pid)));
+        assert!(expected
+            .iter()
+            .all(|pid| fake.calls.iter().any(|(p, _)| p == pid)));
+    }
 }

@@ -123,7 +123,7 @@ it("normalizes a numeric upstream code in the summary and keeps local code as a 
   eventRecords = [numericUpstream];
   const firstView = render(<EventLog />);
 
-  const summary = (await screen.findByText("上游容量暂时不足 · 429")).closest(
+  const summary = (await screen.findByTitle("429 · 上游容量暂时不足")).closest(
     "button",
   )!;
   expect(summary).toHaveTextContent("429");
@@ -142,7 +142,7 @@ it("normalizes a numeric upstream code in the summary and keeps local code as a 
   firstView.unmount();
   render(<EventLog />);
   expect(
-    await screen.findByText("连接失败 · CONNECTION_FAILED", { exact: true }),
+    await screen.findByTitle("CONNECTION_FAILED · 连接失败", { exact: true }),
   ).toBeInTheDocument();
 });
 
@@ -180,7 +180,7 @@ it("keeps HTTP status and WebSocket close code as separate detail values", async
   await user.click(await screen.findByRole("button", { name: "供应商熔断" }));
   const dialog = await screen.findByRole("dialog", { name: "供应商熔断" });
   expect(
-    within(dialog).getByText("HTTP 502 · WS 1006", { exact: true }),
+    within(dialog).getByText("502 · WS 1006", { exact: true }),
   ).toBeInTheDocument();
   expect(
     within(dialog).getByText("上游错误码").nextElementSibling,
@@ -232,7 +232,7 @@ it("shows recorded circuit cause and deadline evidence in the detail drawer", as
   );
   expect(
     within(dialog).getByText("熔断原因").nextElementSibling,
-  ).toHaveTextContent("HTTP 502");
+  ).toHaveTextContent("502");
   expect(
     within(dialog).getByText("熔断原因").nextElementSibling,
   ).toHaveTextContent("上游服务异常");

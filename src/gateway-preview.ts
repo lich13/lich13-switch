@@ -1,3 +1,4 @@
+import type { FailureCategory, FailureRule } from "./failure-policy-types";
 import type {
   GatewayModels,
   DshFileView,
@@ -25,6 +26,7 @@ export const gatewayDemo: GatewayState = {
   configState: "provider",
   configError: null,
   settings: {
+    customFailureRules: [],
     port: 43721,
     maxRetries: 3,
     failureThreshold: 4,
@@ -233,6 +235,15 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           : args.clientId === "grok"
             ? grokGatewayDemo
             : gatewayDemo;
+  if (name === "get_failure_policy_catalog") return failureCatalogPreview;
+  if (name === "cancel_gateway_wait") {
+    const found =
+      s.pendingRequests?.some((r) => r.requestId === args.requestId) ?? false;
+    s.pendingRequests = s.pendingRequests?.filter(
+      (r) => r.requestId !== args.requestId,
+    );
+    return found;
+  }
   if (["get_models_dev", "update_models_dev"].includes(name)) return modelIndex;
   if (name === "search_models_dev")
     return {
@@ -624,6 +635,19 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     const e = args.edit as Record<string, unknown>,
       id = String(e.id),
       p = s.providers.find((p) => p.id === id);
+    if (e.op === "upsertFailureRule") {
+      const rule = e.rule as FailureRule;
+      s.settings.customFailureRules = [
+        ...(s.settings.customFailureRules ?? []).filter(
+          (r) => r.id !== rule.id,
+        ),
+        rule,
+      ];
+    }
+    if (e.op === "deleteFailureRule")
+      s.settings.customFailureRules = s.settings.customFailureRules?.filter(
+        (r) => r.id !== e.id,
+      );
     if (e.op === "mode") s.mode = e.mode as "auto" | "manual";
     if (e.op === "select") {
       s.selected = id;
@@ -719,4 +743,515 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     s.revision = crypto.randomUUID();
   }
   return structuredClone(s);
+}
+
+export const failureCatalogPreview: FailureCategory[] = [
+  {
+    category: "rpm",
+    label: "请求频率 RPM",
+    group: "限流与容量",
+    action: "按请求窗口等待",
+    codes: [
+      {
+        value: "requests_per_minute_limit_exceeded",
+        category: "rpm",
+        platform: "通用兼容",
+      },
+    ],
+    keywords: [
+      {
+        allOf: [["requests per minute limit exceeded", "每分钟请求数超限"]],
+        exact: false,
+      },
+    ],
+    conditions: [
+      "x-ratelimit-remaining-requests = 0",
+      "Gemini QuotaFailure：quotaId / quotaMetric 含 requests 与 perminute",
+    ],
+    statuses: [],
+  },
+  {
+    category: "concurrency",
+    label: "并发与连接数",
+    group: "限流与容量",
+    action: "退避后重新准入",
+    codes: [
+      {
+        value: "concurrency_limit_exceeded",
+        category: "concurrency",
+        platform: "通用兼容",
+      },
+    ],
+    keywords: [{ allOf: [["concurrent requests", "并发上限"]], exact: false }],
+    conditions: [],
+    statuses: [],
+  },
+  {
+    category: "billing",
+    label: "余额与消费硬上限",
+    group: "额度与认证",
+    action: "跳过候选，冷却后探测",
+    codes: [
+      {
+        value: "organization_spend_limit_exceeded",
+        category: "billing",
+        platform: "OpenAI",
+      },
+    ],
+    keywords: [{ allOf: [["余额不足", "insufficient balance"]], exact: false }],
+    conditions: [],
+    statuses: ["402"],
+  },
+  {
+    category: "service_error",
+    label: "服务异常",
+    group: "服务与网络故障",
+    action: "有限重试与熔断",
+    codes: [
+      {
+        value: "server_error",
+        category: "service_error",
+        platform: "通用兼容",
+      },
+    ],
+    keywords: [],
+    conditions: [],
+    statuses: ["500", "502–599"],
+  },
+];
+failureCatalogPreview.push(
+  ...[
+    {
+      category: "rps",
+      label: "请求频率 RPS",
+      group: "限流与容量",
+      action: "按请求窗口等待",
+      codes: [
+        {
+          value: "requests_per_second_limit_exceeded",
+          category: "rps",
+          platform: "通用兼容",
+        },
+        {
+          value: "rps_limit_exceeded",
+          category: "rps",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "tpm",
+      label: "Token 速率",
+      group: "限流与容量",
+      action: "按 Token 窗口等待",
+      codes: [
+        {
+          value: "tokens_per_minute_limit_exceeded",
+          category: "tpm",
+          platform: "通用兼容",
+        },
+        {
+          value: "tpm_limit_exceeded",
+          category: "tpm",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "input_tokens",
+      label: "输入 Token 速率",
+      group: "限流与容量",
+      action: "按输入窗口等待",
+      codes: [
+        {
+          value: "input_token_rate_limit_exceeded",
+          category: "input_tokens",
+          platform: "通用兼容",
+        },
+        {
+          value: "itpm_limit_exceeded",
+          category: "input_tokens",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "output_tokens",
+      label: "输出 Token 速率",
+      group: "限流与容量",
+      action: "按输出窗口等待",
+      codes: [
+        {
+          value: "output_token_rate_limit_exceeded",
+          category: "output_tokens",
+          platform: "通用兼容",
+        },
+        {
+          value: "otpm_limit_exceeded",
+          category: "output_tokens",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "acceleration",
+      label: "突发与增长过快",
+      group: "限流与容量",
+      action: "渐进退避",
+      codes: [
+        {
+          value: "slow_down",
+          category: "acceleration",
+          platform: "通用兼容",
+        },
+        {
+          value: "acceleration_limit_exceeded",
+          category: "acceleration",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "spending_rate",
+      label: "短时消费速率",
+      group: "限流与容量",
+      action: "按短时窗口等待",
+      codes: [
+        {
+          value: "spend_rate_limit_exceeded",
+          category: "spending_rate",
+          platform: "通用兼容",
+        },
+        {
+          value: "spending_rate_limit_exceeded",
+          category: "spending_rate",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "capacity",
+      label: "容量不足",
+      group: "限流与容量",
+      action: "已有会话优先原供应商",
+      codes: [
+        {
+          value: "overloaded_error",
+          category: "capacity",
+          platform: "Claude",
+        },
+        {
+          value: "server_is_overloaded",
+          category: "capacity",
+          platform: "通用兼容",
+        },
+        {
+          value: "model_capacity_exceeded",
+          category: "capacity",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "unknown_rate_limit",
+      label: "未分类限流",
+      group: "限流与容量",
+      action: "在总预算内退避",
+      codes: [
+        {
+          value: "RESOURCE_EXHAUSTED",
+          category: "unknown_rate_limit",
+          platform: "Gemini",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "usage_limit",
+      label: "待核验用量限制",
+      group: "限流与容量",
+      action: "核验额度并等待",
+      codes: [
+        {
+          value: "usage_limit_exceeded",
+          category: "usage_limit",
+          platform: "通用兼容",
+        },
+        {
+          value: "usage_limit_reached",
+          category: "usage_limit",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "quota_exhausted",
+      label: "周期额度耗尽",
+      group: "额度与认证",
+      action: "跳过候选，到期按需探测",
+      codes: [
+        {
+          value: "enforced_spend_limit_reached",
+          category: "quota_exhausted",
+          platform: "Claude",
+        },
+        {
+          value: "quota_exceeded",
+          category: "quota_exhausted",
+          platform: "通用兼容",
+        },
+        {
+          value: "api_key_quota_exhausted",
+          category: "quota_exhausted",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "authentication",
+      label: "认证失败",
+      group: "额度与认证",
+      action: "跳过供应商，检查凭据",
+      codes: [
+        {
+          value: "invalid_api_key",
+          category: "authentication",
+          platform: "OpenAI",
+        },
+        {
+          value: "api_key_expired",
+          category: "authentication",
+          platform: "通用兼容",
+        },
+        {
+          value: "api_key_revoked",
+          category: "authentication",
+          platform: "通用兼容",
+        },
+        {
+          value: "api_key_disabled",
+          category: "authentication",
+          platform: "通用兼容",
+        },
+        {
+          value: "authentication_error",
+          category: "authentication",
+          platform: "Claude",
+        },
+        {
+          value: "account_disabled",
+          category: "authentication",
+          platform: "通用兼容",
+        },
+        {
+          value: "account_deactivated",
+          category: "authentication",
+          platform: "通用兼容",
+        },
+        {
+          value: "account_suspended",
+          category: "authentication",
+          platform: "通用兼容",
+        },
+        {
+          value: "UNAUTHENTICATED",
+          category: "authentication",
+          platform: "Gemini",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "permission",
+      label: "权限与访问限制",
+      group: "额度与认证",
+      action: "隔离受影响范围",
+      codes: [
+        {
+          value: "permission_denied",
+          category: "permission",
+          platform: "通用兼容",
+        },
+        {
+          value: "permission_error",
+          category: "permission",
+          platform: "Claude",
+        },
+        {
+          value: "ip_not_authorized",
+          category: "permission",
+          platform: "通用兼容",
+        },
+        {
+          value: "unsupported_country_region_territory",
+          category: "permission",
+          platform: "通用兼容",
+        },
+        {
+          value: "PERMISSION_DENIED",
+          category: "permission",
+          platform: "Gemini",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "model_unavailable",
+      label: "模型不可用",
+      group: "额度与认证",
+      action: "仅隔离对应模型",
+      codes: [],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "invalid_request",
+      label: "请求或协议错误",
+      group: "服务与网络故障",
+      action: "返回原因",
+      codes: [
+        {
+          value: "invalid_request",
+          category: "invalid_request",
+          platform: "通用兼容",
+        },
+        {
+          value: "invalid_request_error",
+          category: "invalid_request",
+          platform: "通用兼容",
+        },
+        {
+          value: "unsupported_endpoint",
+          category: "invalid_request",
+          platform: "通用兼容",
+        },
+        {
+          value: "unsupported_protocol",
+          category: "invalid_request",
+          platform: "通用兼容",
+        },
+        {
+          value: "conflict",
+          category: "invalid_request",
+          platform: "通用兼容",
+        },
+        {
+          value: "INVALID_ARGUMENT",
+          category: "invalid_request",
+          platform: "Gemini",
+        },
+        {
+          value: "FAILED_PRECONDITION",
+          category: "invalid_request",
+          platform: "Gemini",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "request_too_large",
+      label: "单次请求超限",
+      group: "服务与网络故障",
+      action: "返回原因，不缩减请求",
+      codes: [
+        {
+          value: "context_length_exceeded",
+          category: "request_too_large",
+          platform: "OpenAI",
+        },
+        {
+          value: "request_too_large",
+          category: "request_too_large",
+          platform: "Claude",
+        },
+        {
+          value: "max_tokens_exceeded",
+          category: "request_too_large",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+    {
+      category: "safety_rejection",
+      label: "安全拒绝",
+      group: "服务与网络故障",
+      action: "返回原因，不换商绕过",
+      codes: [
+        {
+          value: "content_filter",
+          category: "safety_rejection",
+          platform: "通用兼容",
+        },
+        {
+          value: "content_policy_violation",
+          category: "safety_rejection",
+          platform: "OpenAI",
+        },
+        {
+          value: "safety_error",
+          category: "safety_rejection",
+          platform: "通用兼容",
+        },
+        {
+          value: "cyber_policy",
+          category: "safety_rejection",
+          platform: "通用兼容",
+        },
+      ],
+      keywords: [],
+      conditions: [],
+      statuses: [],
+    },
+  ],
+);
+if (densePreview) {
+  gatewayDemo.pendingRequests = Array.from({ length: 4 }, (_, i) => ({
+    requestId: `fixture-wait-${i}`,
+    providerId: i % 2 ? "backup" : "primary",
+    model: "fixture-model-long-context-preview",
+    startedAt: Math.floor(Date.now() / 1000) - 90 - i * 12,
+    elapsedSeconds: 90 + i * 12,
+    remainingSeconds: 210 - i * 12,
+    phase: ["headers", "capacity", "retry", "ws_wait"][i],
+  }));
+  gatewayDemo.waitingRequests = 4;
 }

@@ -525,6 +525,7 @@ async fn upstream_native(
     uri: &Uri,
     original: &HeaderMap,
     settings: &Settings,
+    rules: &[super::failure_rules::Rule],
 ) -> Result<Peer, AttemptFailure> {
     let mut request = Request::new(replay::empty());
     *request.method_mut() = hyper::Method::GET;
@@ -636,11 +637,16 @@ async fn upstream_native(
         let (response_parts, response_body) = response.into_parts();
         let prefix = response_prefix(response_body, 128 * 1024, settings).await;
         let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
-        let (details, policy_retry) =
-            super::failure_policy::http(status.as_u16(), &response_parts.headers, &decoded);
+        let (details, policy_retry) = super::failure_policy::http_with_rules(
+            status.as_u16(),
+            &response_parts.headers,
+            &decoded,
+            rules,
+        );
         let retry = retry.max(policy_retry);
         let global_rejection = super::failure_policy::hard_rejection(&details);
-        let model_unavailable = super::failure_policy::model_http(status.as_u16(), &decoded);
+        let model_unavailable =
+            details.error_basis == Some(crate::events::ErrorBasis::ModelUnavailable);
         let capacity =
             !model_unavailable && !global_rejection && super::failure_policy::temporary(&details);
         return Err(AttemptFailure {
@@ -763,15 +769,19 @@ fn policy_rejection(frame: &Frame) -> bool {
             .is_some_and(|code| code == "cyber_policy")
     })
 }
-fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
+fn first_event_failure(
+    frame: &Frame,
+    rules: &[super::failure_rules::Rule],
+) -> Option<AttemptFailure> {
     if policy_rejection(frame) {
         return None;
     }
     let v = value(frame)?;
     let mut observation = super::protocol::Observation::default();
+    observation.failure_rules = rules.to_vec();
     observation.value(&v);
-    let details = super::failure_policy::details_value(&v, false);
-    let temporary = super::failure_policy::temporary_capacity_event(&v);
+    let details = super::failure_policy::details_with_rules(&v, false, rules);
+    let temporary = super::failure_policy::temporary(&details);
     if !observation.compaction_incompatible
         && !temporary
         && !super::failure_policy::hard_rejection(&details)
@@ -788,9 +798,9 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
         retry: super::failure_policy::retry_after_value(&v),
         capacity,
         unsupported: false,
-        model_unavailable: super::failure_policy::model_error(&v),
+        model_unavailable: details.error_basis == Some(crate::events::ErrorBasis::ModelUnavailable),
         context_incompatible: super::compaction::incompatible(&v),
-        model_payload: (super::failure_policy::model_error(&v)
+        model_payload: (details.error_basis == Some(crate::events::ErrorBasis::ModelUnavailable)
             || super::compaction::incompatible(&v))
         .then(|| frame.payload().to_vec()),
         details: Box::new(details),
@@ -840,14 +850,18 @@ async fn session(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<(), Failure> {
-    let request_budget = super::wait_budget::WaitBudget::new(cfg.retry_budget_seconds);
+    let request_budget =
+        super::wait_budget::WaitBudget::tracked(cfg.retry_budget_seconds, &g.0.pending_requests);
     let forwarding = async {
         let mut next_turn = None;
         let mut current_ids = ids;
         let mut current_routes = routes;
         let mut current_cfg = cfg.clone();
         loop {
-            match session_once(
+            let outcome = tokio::select! {
+                biased;
+                _ = request_budget.cancelled() => Err(TURN_CANCELLED),
+                result = session_once(
                 g,
                 client,
                 &current_cfg,
@@ -858,9 +872,9 @@ async fn session(
                 uri.clone(),
                 &mut next_turn,
                 &request_budget,
-            )
-            .await
-            {
+            ) => result,
+            };
+            match outcome {
                 Err((1999, "compaction handoff")) => {
                     current_cfg = g
                         .request_state()
@@ -875,6 +889,7 @@ async fn session(
                         .collect();
                 }
                 Err(TURN_CANCELLED) => {
+                    request_budget.acknowledge_cancel();
                     request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
                 }
@@ -1032,6 +1047,13 @@ async fn session_once(
             break frame;
         }
     };
+    let mut turn_rules = g
+        .request_state()
+        .map_err(|_| (1011, code::STORE))?
+        .store
+        .settings
+        .custom_failure_rules
+        .clone();
     let mut turn_received_at = crate::usage::model::now();
     let mut pinned = manual.then(|| ids.first().cloned()).flatten();
     let mut unknown_affinity = false;
@@ -1054,6 +1076,7 @@ async fn session_once(
         }
     }
     let mut current_model = turn_model(g, &first, None, None)?;
+    request_budget.describe(pinned.as_deref(), current_model.as_deref(), "admission");
     let requirement = Requirement::model(current_model.as_deref());
     let first_hints =
         value(&first).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
@@ -1132,6 +1155,7 @@ async fn session_once(
         },
     );
     let mut failover = super::failover::Tracker::new(usage_trace.clone());
+    failover.attach_wait_budget(request_budget);
     if !manual && g.client_id() == super::ClientId::Codex {
         failover.diagnostics(g);
         if let Some(log) = failover.routing() {
@@ -1450,6 +1474,12 @@ async fn session_once(
         previous_provider = Some(admission.route.provider.id.clone());
         let mut attempt_protocol = super::protocol::Protocol::new(true);
         attempt_protocol.attach_wait_budget(request_budget);
+        attempt_protocol.attach_failure_rules(&turn_rules);
+        request_budget.describe(
+            Some(&admission.route.provider.id),
+            current_model.as_deref(),
+            "headers",
+        );
         attempt_protocol.attach_rpm(admission.take_completion());
         attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
@@ -1499,7 +1529,7 @@ async fn session_once(
             Some(client.closed.clone()),
         );
         let result = while_connecting(client, async {
-            upstream_native(&admission.route, &uri, &headers, cfg)
+            upstream_native(&admission.route, &uri, &headers, cfg, &turn_rules)
                 .await
                 .map(Upstream::Native)
         })
@@ -1939,6 +1969,11 @@ async fn session_once(
                     delay,
                 );
             }
+            request_budget.describe(
+                Some(&route.provider.id),
+                current_model.as_deref(),
+                "ws_wait",
+            );
             let waited = if alternative {
                 Ok(Ok(false))
             } else {
@@ -2127,6 +2162,12 @@ async fn session_once(
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
             next.attach_wait_budget(request_budget);
+            next.attach_failure_rules(&turn_rules);
+            request_budget.describe(
+                Some(&route.provider.id),
+                current_model.as_deref(),
+                "headers",
+            );
             next.attach_rpm(admission.take_completion());
             next.diagnostics(g, &route.provider.id, current_model.as_deref());
             next.attach_ownership(ownership.clone(), &route.provider.id);
@@ -2169,7 +2210,7 @@ async fn session_once(
             protocol = Some(next);
             turn = Some(admission);
             let opened = while_connecting(client, async {
-                upstream_native(&route, &uri, &headers, cfg)
+                upstream_native(&route, &uri, &headers, cfg, &turn_rules)
                     .await
                     .map(Upstream::Native)
             })
@@ -2347,6 +2388,13 @@ async fn session_once(
         if turn.is_none() {
             if let Some(frame) = pending.take() {
                 request_budget.begin_at(pending_started);
+                turn_rules = g
+                    .request_state()
+                    .map_err(|_| (1011, code::STORE))?
+                    .store
+                    .settings
+                    .custom_failure_rules
+                    .clone();
                 turn_received_at = pending_received_at;
                 if let Some(previous) = protocol.take().filter(|p| p.succeeded()) {
                     previous_usage = Some((previous, tokio::time::Instant::now() + USAGE_TAIL));
@@ -2358,6 +2406,7 @@ async fn session_once(
                     Some(&route.provider.id),
                 )?;
                 let requirement = Requirement::model(model.as_deref());
+                request_budget.describe(Some(&route.provider.id), model.as_deref(), "admission");
                 let hints = value(&frame)
                     .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
                 let enabled = {
@@ -2548,6 +2597,7 @@ async fn session_once(
                     },
                 );
                 failover = super::failover::Tracker::new(usage_trace.clone());
+                failover.attach_wait_budget(request_budget);
                 if !manual && g.client_id() == super::ClientId::Codex {
                     failover.diagnostics(g);
                     if let Some(log) = failover.routing() {
@@ -2655,6 +2705,12 @@ async fn session_once(
                 replay_frame = frame.clone();
                 let mut next_protocol = super::protocol::Protocol::new(true);
                 next_protocol.attach_wait_budget(request_budget);
+                next_protocol.attach_failure_rules(&turn_rules);
+                request_budget.describe(
+                    Some(&route.provider.id),
+                    current_model.as_deref(),
+                    "headers",
+                );
                 next_protocol.attach_rpm(turn.as_mut().and_then(|a| a.take_completion()));
                 next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
@@ -2702,8 +2758,11 @@ async fn session_once(
                 receive_started = tokio::time::Instant::now();
                 {
                     if matches!(upstream, Upstream::Disconnected) {
-                        match while_connecting(client, upstream_native(&route, &uri, &headers, cfg))
-                            .await?
+                        match while_connecting(
+                            client,
+                            upstream_native(&route, &uri, &headers, cfg, &turn_rules),
+                        )
+                        .await?
                         {
                             Ok(peer) => upstream = Upstream::Native(peer),
                             Err(failure) => {
@@ -2938,7 +2997,7 @@ async fn session_once(
                         if ordinary_attempts <= cfg.max_retries {
                             if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), code::CLIENT_ERROR); }
                             if let Some(mut admission) = turn.take() {
-                                let details = value(&frame).map(|v| super::failure_policy::details_value(&v, false)).unwrap_or_default();
+                                let details = value(&frame).map(|v| super::failure_policy::details_with_rules(&v, false, &turn_rules)).unwrap_or_default();
                                 let emit = || admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::TryingNext, Some(101), attempts, crate::events::Details { counted_failure: Some(false), ..details });
                                 if let Some(u) = &protocol { u.report_failure(emit); } else { emit(); }
                                 admission.permits.neutral(cfg);
@@ -2957,7 +3016,7 @@ async fn session_once(
                 // Re-evaluate the same failure queue used by HTTP, retaining the
                 // compaction claim and the exact original response.create frame.
                 if turn.is_some() && !received {
-                    if let Some(mut failure) = first_event_failure(&frame).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable || f.details.error_basis == Some(crate::events::ErrorBasis::ServiceError)) {
+                    if let Some(mut failure) = first_event_failure(&frame, &turn_rules).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable || f.details.error_basis == Some(crate::events::ErrorBasis::ServiceError)) {
                         failover.failure(failure.classification());
                         let wait_same = failure.capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
                         owner_capacity_wait = if wait_same { turn.as_ref().map(|admission| CapacitySource { provider_id: route.provider.id.clone(), reset_generation: admission.reset_generation }) } else { None };
@@ -2997,6 +3056,7 @@ async fn session_once(
                 }
                 if let Some(v) = value(&frame) {
                     if let Some(u)=&mut protocol { u.value(&v); }
+                    if request_budget.cancel_requested() { return Err(TURN_CANCELLED); }
                     if let Some(id) = v.pointer("/response/id").or_else(|| v.get("response_id")).and_then(|v| v.as_str()) { g.0.endpoints.remember(&route.provider, id); g.remember_model(id, &route.provider.id, current_model.as_deref()); }
                     let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
@@ -3006,8 +3066,8 @@ async fn session_once(
                             if let Some(u)=protocol.as_mut() {
                                 u.finish(Some(101), code::UPSTREAM_ERROR);
                                 terminal_error = !matches!(u.terminal(), Some(super::protocol::Terminal::Success | super::protocol::Terminal::Limited | super::protocol::Terminal::Cancelled));
-                                if route.client_id == super::ClientId::Codex && first_event_failure(&frame).is_some_and(|failure| failure.capacity) {
-                                    if let Some(failure) = first_event_failure(&frame) { u.report_failure(|| record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts)); }
+                                if route.client_id == super::ClientId::Codex && first_event_failure(&frame, &turn_rules).is_some_and(|failure| failure.capacity) {
+                                    if let Some(failure) = first_event_failure(&frame, &turn_rules) { u.report_failure(|| record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts)); }
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
                                     super::health_settlement::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);

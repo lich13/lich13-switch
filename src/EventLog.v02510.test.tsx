@@ -92,7 +92,7 @@ it("renders historical v0.25.10 downstream status records with HTTP and byte evi
   const row = await screen.findByRole("button", {
     name: "请求交付提前结束",
   });
-  expect(row).toHaveTextContent("状态记录");
+  expect(row).not.toHaveTextContent("状态记录");
   expect(row).toHaveTextContent("DOWNSTREAM_CLOSED");
   expect(row).toHaveTextContent("未确认客户端主动取消");
   expect(row).not.toHaveTextContent("客户端已取消");
@@ -106,7 +106,7 @@ it("renders historical v0.25.10 downstream status records with HTTP and byte evi
   );
   expect(
     within(dialog).getByText("状态码").nextElementSibling,
-  ).toHaveTextContent("HTTP 200");
+  ).toHaveTextContent("200");
   expect(
     within(dialog).getByText("本地分类").nextElementSibling,
   ).toHaveTextContent("DOWNSTREAM_CLOSED");
@@ -200,7 +200,7 @@ it("keeps legacy interruption records readable without delivery details", async 
   const row = await screen.findByRole("button", {
     name: "请求交付提前结束",
   });
-  expect(row).toHaveTextContent("普通错误");
+  expect(row).not.toHaveTextContent("普通错误");
   await user.click(row);
 
   const dialog = await screen.findByRole("dialog", {
@@ -235,7 +235,7 @@ it("shows fresh exhausted evidence as status and does not retain the capacity co
   ];
   render(<EventLog />);
   const row = await screen.findByRole("button", { name: "额度已耗尽" });
-  expect(row).toHaveTextContent("状态记录");
+  expect(row).not.toHaveTextContent("状态记录");
   expect(row).toHaveTextContent("本次查询确认额度耗尽");
   expect(row.textContent?.match(/USAGE_LIMIT_EXCEEDED/g)).toHaveLength(1);
   await userEvent.setup().click(row);

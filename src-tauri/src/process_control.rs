@@ -1,7 +1,7 @@
 //! Bounded process shutdown. Native tests may target only their own child PIDs.
 use crate::errors::code;
 use crate::storage::{AppError, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -61,13 +61,24 @@ pub struct Outcome {
 fn is_zero(value: &usize) -> bool {
     *value == 0
 }
-fn root(entry: &Entry) -> bool {
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Target {
+    Codex,
+    Claude,
+}
+fn root(entry: &Entry, target: Target) -> bool {
     let filename = entry
         .executable
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    matches!(filename, "codex" | "codex.exe") || entry.official_app || entry.claude_code
+    match target {
+        Target::Codex => {
+            !entry.claude_code && (matches!(filename, "codex" | "codex.exe") || entry.official_app)
+        }
+        Target::Claude => entry.claude_code,
+    }
 }
 
 fn claude_code(executable: &Path, command: &[std::ffi::OsString]) -> bool {
@@ -113,7 +124,7 @@ fn claude_code(executable: &Path, command: &[std::ffi::OsString]) -> bool {
     let script = normalized(Path::new(script));
     package(&script) && script.ends_with("/cli.js")
 }
-fn run(backend: &mut dyn Processes, own_pid: u32) -> Result<Outcome> {
+fn run(backend: &mut dyn Processes, own_pid: u32, target: Target) -> Result<Outcome> {
     let inventory = backend.inventory();
     let own = inventory
         .iter()
@@ -125,10 +136,14 @@ fn run(backend: &mut dyn Processes, own_pid: u32) -> Result<Outcome> {
         .map(|p| (p.pid, p))
         .collect();
     // Protect ourselves and our child processes even if a filename happens to match.
+    let other = match target {
+        Target::Codex => Target::Claude,
+        Target::Claude => Target::Codex,
+    };
     let mut protected = HashSet::from([own_pid]);
     let mut chosen: HashSet<u32> = eligible
         .values()
-        .filter(|p| root(p))
+        .filter(|p| root(p, target))
         .map(|p| p.pid)
         .collect();
     for _ in 0..inventory.len() {
@@ -137,7 +152,7 @@ fn run(backend: &mut dyn Processes, own_pid: u32) -> Result<Outcome> {
             if p.parent.is_some_and(|id| protected.contains(&id)) {
                 changed |= protected.insert(p.pid);
             }
-            if p.parent.is_some_and(|id| chosen.contains(&id)) {
+            if !root(p, other) && p.parent.is_some_and(|id| chosen.contains(&id)) {
                 changed |= chosen.insert(p.pid);
             }
         }
@@ -342,7 +357,7 @@ impl Processes for Native {
         failures
     }
 }
-pub fn force_quit() -> Result<Outcome> {
+pub fn force_quit(target: Target) -> Result<Outcome> {
     run(
         &mut Native {
             system: System::new(),
@@ -350,6 +365,7 @@ pub fn force_quit() -> Result<Outcome> {
             terminals: Vec::new(),
         },
         std::process::id(),
+        target,
     )
 }
 #[cfg(test)]

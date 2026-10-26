@@ -101,6 +101,10 @@ pub enum RpmWaitReason {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Details {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_rule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_conflict: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_basis: Option<ErrorBasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_check: Option<QuotaCheck>,
@@ -368,6 +372,10 @@ pub fn safe_message(value: &str) -> Option<String> {
 }
 impl Details {
     pub fn sanitized(mut self) -> Self {
+        self.custom_rule_id = self
+            .custom_rule_id
+            .take()
+            .and_then(|v| uuid::Uuid::parse_str(&v).ok().map(|id| id.to_string()));
         if let Some(routing) = &mut self.routing {
             routing.attempt_id = routing
                 .attempt_id

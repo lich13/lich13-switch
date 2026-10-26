@@ -78,6 +78,7 @@ pub(super) struct Tracker {
     failure_generation: u64,
     reported_generation: std::cell::Cell<u64>,
     unreported: bool,
+    wait_budget: Option<super::wait_budget::WaitBudget>,
 }
 impl Tracker {
     pub(super) fn new(trace: Option<crate::usage::Trace>) -> Self {
@@ -88,7 +89,11 @@ impl Tracker {
             failure_generation: 0,
             reported_generation: std::cell::Cell::new(0),
             unreported: false,
+            wait_budget: None,
         }
+    }
+    pub fn attach_wait_budget(&mut self, budget: &super::wait_budget::WaitBudget) {
+        self.wait_budget = Some(budget.clone());
     }
     pub fn diagnostics(&mut self, gateway: &Gateway) {
         self.routing = super::routing_log::RoutingLog::new(gateway);
@@ -240,5 +245,17 @@ impl Tracker {
             Exit::AdmissionRejected
         });
         self.publish();
+    }
+}
+
+impl Drop for Tracker {
+    fn drop(&mut self) {
+        if self
+            .wait_budget
+            .as_ref()
+            .is_some_and(|b| b.cancel_requested())
+        {
+            self.finish(Exit::Cancelled);
+        }
     }
 }

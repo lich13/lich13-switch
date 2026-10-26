@@ -153,7 +153,7 @@ it("uses the existing fallback labels for unknown diagnostic enum values", async
   expect(
     within(dialog).getByText("查询依据").nextElementSibling,
   ).toHaveTextContent("未识别依据");
-  expect(
-    within(dialog).getByText("阶段").nextElementSibling,
-  ).toHaveTextContent("未提供");
+  expect(within(dialog).getByText("阶段").nextElementSibling).toHaveTextContent(
+    "未提供",
+  );
 });

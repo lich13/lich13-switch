@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 
 const mock = vi.hoisted(() => ({
@@ -52,7 +58,8 @@ it.each(["missing", "needsRepair"])(
     const notify = vi.fn();
     const error = vi.fn();
     mock.command.mockImplementation((name: string) => {
-      if (name === "get_clamshell_state") return Promise.resolve({ ...original, helper });
+      if (name === "get_clamshell_state")
+        return Promise.resolve({ ...original, helper });
       if (name === "set_clamshell_awake") return pending.promise;
       throw new Error(`Unexpected fixture command: ${name}`);
     });
@@ -62,8 +69,15 @@ it.each(["missing", "needsRepair"])(
     fireEvent.click(toggle);
     expect(toggle).toBeDisabled();
     expect(toggle).not.toBeChecked();
-    expect(mock.command.mock.calls.filter(([name]) => name === "set_clamshell_awake")).toEqual([
-      ["set_clamshell_awake", { enabled: true, expectedRevision: "fixture-before" }],
+    expect(
+      mock.command.mock.calls.filter(
+        ([name]) => name === "set_clamshell_awake",
+      ),
+    ).toEqual([
+      [
+        "set_clamshell_awake",
+        { enabled: true, expectedRevision: "fixture-before" },
+      ],
     ]);
     expect(notify).not.toHaveBeenCalled();
     await act(async () => pending.resolve(enabled));
@@ -82,27 +96,32 @@ it.each([
   ["POWER_AUTH", "已取消系统授权"],
   ["POWER_HELPER", "助手修复失败"],
   ["FIXTURE_UNKNOWN", "助手事务失败"],
-])("%s leaves the switch unchanged and reports the backend error once", async (code, message) => {
-  const notify = vi.fn();
-  const error = vi.fn();
-  mock.command.mockImplementation((name: string) => {
-    if (name === "get_clamshell_state") return Promise.resolve({ ...original, helper: "needsRepair" });
-    if (name === "set_clamshell_awake") return Promise.reject({ code, message });
-    throw new Error(`Unexpected fixture command: ${name}`);
-  });
-  render(<QuickControls visible notify={notify} error={error} />);
-  const toggle = await screen.findByRole("switch", { name: "合盖不休眠" });
-  fireEvent.click(toggle);
-  await waitFor(() => expect(error).toHaveBeenCalledExactlyOnceWith(message));
-  await waitFor(() => expect(toggle).toBeEnabled());
-  expect(toggle).not.toBeChecked();
-  expect(notify).not.toHaveBeenCalled();
-  expect(mock.command.mock.calls.map(([name]) => name)).toEqual([
-    "get_clamshell_state",
-    "set_clamshell_awake",
-    "get_clamshell_state",
-  ]);
-});
+])(
+  "%s leaves the switch unchanged and reports the backend error once",
+  async (code, message) => {
+    const notify = vi.fn();
+    const error = vi.fn();
+    mock.command.mockImplementation((name: string) => {
+      if (name === "get_clamshell_state")
+        return Promise.resolve({ ...original, helper: "needsRepair" });
+      if (name === "set_clamshell_awake")
+        return Promise.reject({ code, message });
+      throw new Error(`Unexpected fixture command: ${name}`);
+    });
+    render(<QuickControls visible notify={notify} error={error} />);
+    const toggle = await screen.findByRole("switch", { name: "合盖不休眠" });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(error).toHaveBeenCalledExactlyOnceWith(message));
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).not.toBeChecked();
+    expect(notify).not.toHaveBeenCalled();
+    expect(mock.command.mock.calls.map(([name]) => name)).toEqual([
+      "get_clamshell_state",
+      "set_clamshell_awake",
+      "get_clamshell_state",
+    ]);
+  },
+);
 
 it("refreshes external changes after a repair conflict without replaying the toggle", async () => {
   const pending = deferred<typeof enabled>();
@@ -117,20 +136,39 @@ it("refreshes external changes after a repair conflict without replaying the tog
   render(<QuickControls visible notify={notify} error={error} />);
   const toggle = await screen.findByRole("switch", { name: "合盖不休眠" });
   fireEvent.click(toggle);
-  current = { ...original, enabled: true, ownership: "external", revision: "fixture-external" };
+  current = {
+    ...original,
+    enabled: true,
+    ownership: "external",
+    revision: "fixture-external",
+  };
   await act(async () => {
-    mock.listeners.get("clamshell-state")?.({ ...current, externalChanged: true });
-    pending.reject({ code: "CONFLICT", message: "修复期间电源状态已变化，请重新操作" });
+    mock.listeners.get("clamshell-state")?.({
+      ...current,
+      externalChanged: true,
+    });
+    pending.reject({
+      code: "CONFLICT",
+      message: "修复期间电源状态已变化，请重新操作",
+    });
   });
   expect(toggle).toBeChecked();
   expect(toggle).toBeEnabled();
-  expect(error).toHaveBeenCalledExactlyOnceWith("修复期间电源状态已变化，请重新操作");
+  expect(error).toHaveBeenCalledExactlyOnceWith(
+    "修复期间电源状态已变化，请重新操作",
+  );
   expect(notify).not.toHaveBeenCalled();
-  expect(mock.command.mock.calls.filter(([name]) => name === "set_clamshell_awake")).toHaveLength(1);
+  expect(
+    mock.command.mock.calls.filter(([name]) => name === "set_clamshell_awake"),
+  ).toHaveLength(1);
 });
 
 it("uses the last confirmed revision and helper result when disabling application ownership", async () => {
-  const restored = { ...original, batterySleep: 9, revision: "fixture-restored" };
+  const restored = {
+    ...original,
+    batterySleep: 9,
+    revision: "fixture-restored",
+  };
   const notify = vi.fn();
   mock.command.mockImplementation((name: string) => {
     if (name === "get_clamshell_state") return Promise.resolve(enabled);
@@ -147,4 +185,27 @@ it("uses the last confirmed revision and helper result when disabling applicatio
     expectedRevision: "fixture-after",
   });
   expect(notify).toHaveBeenCalledExactlyOnceWith("已恢复电池休眠设置");
+});
+
+it("quits only the chosen platform and blocks duplicate operations", async () => {
+  const pending = deferred<{ terminated: number; failed: number }>();
+  mock.command.mockImplementation((name: string) =>
+    name === "get_clamshell_state"
+      ? Promise.resolve(original)
+      : pending.promise,
+  );
+  render(<QuickControls visible notify={vi.fn()} error={vi.fn()} />);
+  const codex = screen.getByRole("button", { name: "退出 ChatGPT / Codex" });
+  const claude = screen.getByRole("button", { name: "退出 Claude Code" });
+  fireEvent.click(claude);
+  expect(mock.command).toHaveBeenCalledWith("force_quit_agent_clients", {
+    target: "claude",
+  });
+  expect(codex).toBeDisabled();
+  expect(claude).toBeDisabled();
+  await act(async () => pending.resolve({ terminated: 1, failed: 0 }));
+  fireEvent.click(codex);
+  expect(mock.command).toHaveBeenCalledWith("force_quit_agent_clients", {
+    target: "codex",
+  });
 });

@@ -1,3 +1,4 @@
+import FailureRuleDialog from "./FailureRuleDialog";
 import {
   limitLabel,
   rpmWaitLabel,
@@ -96,6 +97,8 @@ export type EventRecord = {
   status: number | null;
   attempt: number | null;
   details?: {
+    customRuleId?: string | null;
+    ruleConflict?: boolean | null;
     routing?: RoutingDetails | null;
     errorBasis?: string | null;
     quotaCheck?: QuotaCheck | null;
@@ -185,7 +188,7 @@ function displayName(name: string, id: string) {
 }
 
 function statusText(status: number | null) {
-  return status === null ? "—" : "HTTP " + status;
+  return status === null ? "—" : String(status);
 }
 
 function statusTone(status: number | null) {
@@ -283,41 +286,43 @@ function circuitTrigger(r: EventRecord) {
       return "触发条件未记录";
   }
 }
-function summary(r: EventRecord) {
-  if (r.reason === "thread_routing" && r.details?.routing) {
-    const routing = r.details.routing;
-    return [
-      r.details.upstreamReason ||
-        r.details.message ||
-        (routing.failure ? routingFailure(routing.failure) : null),
-      routingOutcome(routing.outcome),
-    ]
+function primaryCode(r: EventRecord) {
+  return (
+    r.details?.upstreamCode ??
+    r.details?.upstreamReason ??
+    r.details?.upstreamType ??
+    r.details?.localCode ??
+    normalizedCode(r)
+  );
+}
+function summaryMessage(r: EventRecord) {
+  if (r.reason === "circuit_open")
+    return [reasonText(r), circuitCause(r), circuitTrigger(r)]
       .filter(Boolean)
       .join(" · ");
-  }
-  if (r.reason === "circuit_open")
+  if (r.reason === "thread_routing" && r.details?.routing)
     return [
-      reasonText(r),
-      r.details?.healthScope === "model" ? r.model : null,
-      circuitCause(r),
-      circuitTrigger(r),
+      r.details.message ||
+        (r.details.routing.failure
+          ? routingFailure(r.details.routing.failure)
+          : reasonText(r)),
+      routingOutcome(r.details.routing.outcome),
     ]
       .filter(Boolean)
       .join(" · ");
   return [
-    r.details?.message || r.details?.upstreamReason || reasonText(r),
-    r.details?.upstreamCode ?? r.details?.localCode ?? normalizedCode(r),
-    r.details?.upstreamReason,
-    ...(r.details?.delivery?.terminalReceived &&
-    !r.details.delivery.terminalHandedOff
-      ? [reasonText(r)]
-      : []),
+    r.details?.message || reasonText(r),
+    r.details?.upstreamReason !== primaryCode(r)
+      ? r.details?.upstreamReason
+      : null,
     r.details?.quotaCheck ? quotaCheckLabel(r.details.quotaCheck) : null,
   ]
-    .filter(
-      (value, index, values) =>
-        Boolean(value) && values.indexOf(value) === index,
-    )
+    .filter((v, i, all) => v && all.indexOf(v) === i)
+    .join(" · ");
+}
+function summary(r: EventRecord) {
+  return [primaryCode(r), summaryMessage(r)]
+    .filter((v, i, all) => v && all.indexOf(v) === i)
     .join(" · ");
 }
 function actionText(r: EventRecord) {
@@ -689,7 +694,11 @@ export default function EventLog({
                 <tr key={r.id}>
                   <td>
                     <time title={new Date(r.lastAt * 1000).toISOString()}>
-                      {time(r.lastAt)}
+                      {time(r.lastAt)
+                        .split(" ")
+                        .map((part, i) => (
+                          <span key={i}>{part}</span>
+                        ))}
                     </time>
                   </td>
                   <td>
@@ -731,10 +740,14 @@ export default function EventLog({
                           });
                       }}
                     >
-                      <span className={"event-category " + category(r)}>
-                        {categories[category(r)]}
+                      <span className="event-summary-text">
+                        <code className="event-primary-code">
+                          {primaryCode(r)}
+                        </code>
+                        <span className="event-message-text">
+                          {summaryMessage(r)}
+                        </span>
                       </span>
-                      <span className="event-summary-text">{summary(r)}</span>
                       {r.count > 1 && (
                         <span className="event-count">
                           ×{r.count.toLocaleString()}
@@ -800,6 +813,7 @@ function EventDetail({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const [addingRule, setAddingRule] = useState(false);
   useEffect(() => {
     const focus = document.activeElement as HTMLElement | null;
     const dialog = ref.current;
@@ -828,6 +842,17 @@ function EventDetail({
       }}
     >
       <div className="event-drawer-inner">
+        {addingRule && r.clientId && (
+          <FailureRuleDialog
+            clientId={r.clientId}
+            initial={{
+              value: r.details?.upstreamCode ?? "",
+              matchKind: r.details?.upstreamCode ? "code" : "keyword",
+              category: r.details?.errorBasis ?? "",
+            }}
+            close={() => setAddingRule(false)}
+          />
+        )}
         <header>
           <h2 ref={heading} id="event-title" tabIndex={-1}>
             {reasonText(r)}
@@ -840,6 +865,17 @@ function EventDetail({
             <X size={18} />
           </button>
         </header>
+        {r.clientId &&
+          (r.details?.upstreamCode ||
+            r.details?.message ||
+            r.details?.upstreamType) && (
+            <button
+              className="secondary event-add-rule"
+              onClick={() => setAddingRule(true)}
+            >
+              加入故障规则
+            </button>
+          )}
         <dl>
           {[
             ["类别", categories[category(r)]],
@@ -895,6 +931,10 @@ function EventDetail({
             ["客户端", client(r.clientId)],
             ["供应商", provider],
             ["处理结果", actionText(r)],
+            ...(r.details?.customRuleId ? [["分类依据", "自定义规则"]] : []),
+            ...(r.details?.ruleConflict
+              ? [["规则冲突", "多个规则指向不同类别，保留原分类"]]
+              : []),
             ...(r.reason === "circuit_open"
               ? [
                   ["熔断原因", circuitCause(r)],

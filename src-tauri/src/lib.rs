@@ -908,6 +908,18 @@ fn get_gateway(
     r.gateway(client_id).try_view()
 }
 #[tauri::command]
+fn get_failure_policy_catalog() -> Vec<gateway::failure_rules::Category> {
+    gateway::failure_rules::catalog()
+}
+#[tauri::command]
+fn cancel_gateway_wait(
+    client_id: gateway::ClientId,
+    request_id: String,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> bool {
+    r.gateway(client_id).cancel_wait(&request_id)
+}
+#[tauri::command]
 fn get_gateway_listener(r: tauri::State<'_, Arc<Runtime>>) -> Result<gateway::ListenerView> {
     r.gateway.try_listener_view()
 }
@@ -1960,6 +1972,8 @@ pub fn run() {
             quick::hide_quick,
             quick::resize_quick,
             get_gateway,
+            cancel_gateway_wait,
+            get_failure_policy_catalog,
             get_gateway_listener,
             set_gateway_listener,
             preview_grok_import,

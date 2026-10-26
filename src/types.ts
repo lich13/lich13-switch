@@ -93,6 +93,7 @@ export const errorOf = (e: unknown): AppError =>
       };
 
 export type GatewaySettings = {
+  customFailureRules?: import("./failure-policy-types").FailureRule[];
   port: number;
   maxRetries: number;
   failureThreshold: number;
@@ -236,6 +237,15 @@ export type GatewayState = {
   settings: GatewaySettings;
   activeConnections: number;
   waitingRequests: number;
+  pendingRequests?: {
+    requestId: string;
+    providerId: string | null;
+    model: string | null;
+    startedAt: number;
+    elapsedSeconds: number;
+    remainingSeconds: number;
+    phase: string;
+  }[];
   capacityRetries: {
     providerId: string;
     retryIn: number;

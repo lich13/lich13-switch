@@ -1,3 +1,4 @@
+import FailurePolicyCatalog from "./FailurePolicyCatalog";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   errorOf,
@@ -38,7 +39,10 @@ export default function Advanced({
     }
   }, [settings, revision, editing]);
   const formId = useId();
-  const basic: [keyof GatewaySettings, string][] = [
+  const basic: [
+    Exclude<keyof GatewaySettings, "customFailureRules">,
+    string,
+  ][] = [
     ["port", "共享本地端口"],
     ["endpointProbeSeconds", "端点测速间隔 / 秒"],
     ["queueSeconds", "排队等待 / 秒"],
@@ -46,7 +50,7 @@ export default function Advanced({
     ...(clientId === "codex"
       ? [
           ["threadIdleReleaseSeconds", "线程空闲释放 / 秒"] as [
-            keyof GatewaySettings,
+            Exclude<keyof GatewaySettings, "customFailureRules">,
             string,
           ],
         ]
@@ -54,16 +58,10 @@ export default function Advanced({
   ];
   const groups: {
     name: string;
-    rules: [string, string][];
-    fields: [keyof GatewaySettings, string][];
+    fields: [Exclude<keyof GatewaySettings, "customFailureRules">, string][];
   }[] = [
     {
       name: "限流与容量",
-      rules: [
-        ["RPM / RPS、Token 限流", "按对应窗口等待"],
-        ["并发、突发、短时消费限制", "退避后重新准入"],
-        ["容量不足、未分类 429", "已有会话优先原供应商"],
-      ],
       fields: [
         ["rateLimitSeconds", "限流基础等待 / 秒"],
         ["capacityRetrySeconds", "容量错误等待 / 秒"],
@@ -71,20 +69,10 @@ export default function Advanced({
     },
     {
       name: "额度与认证",
-      rules: [
-        ["周期额度耗尽", "到重置时间按需探测"],
-        ["余额、硬额度、认证失败", "跳过当前候选，冷却后探测"],
-        ["模型无权使用", "仅隔离对应模型"],
-      ],
       fields: [["hardFailureCooldownSeconds", "额度／认证冷却 / 秒"]],
     },
     {
       name: "服务与网络故障",
-      rules: [
-        ["服务异常、连接失败", "有限重试与熔断"],
-        ["参数错误、单次超限、安全拒绝", "返回原因"],
-        ["请求已发出的首字超时、已输出内容", "不自动重放"],
-      ],
       fields: [
         ["maxRetries", "最大重试次数"],
         ["retryBudgetSeconds", "等待与重试预算 / 秒"],
@@ -100,7 +88,7 @@ export default function Advanced({
         ...(clientId === "codex"
           ? [
               ["websocketRetrySeconds", "WebSocket 断开等待 / 秒"] as [
-                keyof GatewaySettings,
+                Exclude<keyof GatewaySettings, "customFailureRules">,
                 string,
               ],
             ]
@@ -108,7 +96,9 @@ export default function Advanced({
       ],
     },
   ];
-  const fields = (items: [keyof GatewaySettings, string][]) => (
+  const fields = (
+    items: [Exclude<keyof GatewaySettings, "customFailureRules">, string][],
+  ) => (
     <div className="settings-grid">
       {items.map(([key, label]) => (
         <label key={key}>
@@ -170,14 +160,12 @@ export default function Advanced({
         {groups.map((group) => (
           <fieldset className="failure-policy-group" key={group.name}>
             <legend>{group.name}</legend>
-            <dl className="failure-policy-rules">
-              {group.rules.map(([kind, action]) => (
-                <div key={kind}>
-                  <dt>{kind}</dt>
-                  <dd>{action}</dd>
-                </div>
-              ))}
-            </dl>
+            <FailurePolicyCatalog
+              group={group.name}
+              clientId={clientId}
+              rules={settings.customFailureRules ?? []}
+              revision={revision}
+            />
             {fields(group.fields)}
           </fieldset>
         ))}
@@ -192,7 +180,10 @@ export default function Advanced({
         onSubmit={(e) => {
           e.preventDefault();
           setError("");
-          void save(draft, baseRevision.current)
+          void save(
+            { ...draft, customFailureRules: settings.customFailureRules ?? [] },
+            baseRevision.current,
+          )
             .then(() => {
               setEditing(false);
               onDirtyChange?.(false);

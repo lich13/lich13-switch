@@ -341,6 +341,12 @@ export async function run(
     else emit("gateway-state", result);
     return result;
   }
+  if (name === "get_failure_policy_catalog") return gatewayPreview(name, args);
+  if (name === "cancel_gateway_wait") {
+    const result = gatewayPreview(name, args);
+    emit("gateway-state", gatewayPreview("get_gateway", args));
+    return result;
+  }
   switch (name) {
     case "preview_account_import":
       return {
@@ -648,7 +654,9 @@ let demoEvents = [
     status: 404,
     attempt: 1,
     details: {
-      upstreamCode: "model_not_found",
+      upstreamCode: densePreview
+        ? "model_not_found_for_requested_deployment_in_current_region"
+        : "model_not_found",
       upstreamType: "invalid_request_error",
       parameter: "model",
       message: "指定模型不存在或当前渠道不支持",

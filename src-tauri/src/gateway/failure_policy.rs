@@ -157,90 +157,20 @@ fn explicit_type(error: &Value) -> Option<ErrorBasis> {
 }
 
 fn code_kind(code: &str) -> Option<ErrorBasis> {
-    use ErrorBasis::*;
     let code = code.to_ascii_lowercase();
-    Some(match code.as_str() {
-        "credit_balance_exhausted"
-        | "organization_spend_limit_exceeded"
-        | "project_spend_limit_exceeded"
-        | "organization_usage_limit_exceeded"
-        | "insufficient_quota"
-        | "insufficient_balance"
-        | "insufficient_account_balance"
-        | "account_balance_insufficient"
-        | "insufficient_user_quota"
-        | "balance_exhausted"
-        | "balance_not_enough"
-        | "credits_exhausted"
-        | "credit_limit_exceeded"
-        | "credit_balance_too_low"
-        | "billing_hard_limit_reached"
-        | "billing_error" => Billing,
-        "enforced_spend_limit_reached" | "quota_exceeded" | "api_key_quota_exhausted" => {
-            QuotaExhausted
-        }
-        "invalid_api_key"
-        | "api_key_expired"
-        | "api_key_revoked"
-        | "api_key_disabled"
-        | "authentication_error"
-        | "account_disabled"
-        | "account_deactivated"
-        | "account_suspended" => Authentication,
-        "permission_denied"
-        | "permission_error"
-        | "ip_not_authorized"
-        | "unsupported_country_region_territory" => Permission,
-        "tokens_per_minute_limit_exceeded" | "tpm_limit_exceeded" => Tpm,
-        "input_token_rate_limit_exceeded" | "itpm_limit_exceeded" => InputTokens,
-        "output_token_rate_limit_exceeded" | "otpm_limit_exceeded" => OutputTokens,
-        "requests_per_second_limit_exceeded" | "rps_limit_exceeded" => Rps,
-        "rpm_limit_exceeded"
-        | "group_rpm_exceeded"
-        | "user_rpm_exceeded"
-        | "requests_per_minute_limit_exceeded" => Rpm,
-        "concurrency_limit_exceeded"
-        | "too_many_concurrent_requests"
-        | "connection_limit_exceeded" => Concurrency,
-        "slow_down" | "acceleration_limit_exceeded" => Acceleration,
-        "spend_rate_limit_exceeded" | "spending_rate_limit_exceeded" => SpendingRate,
-        "usage_limit_exceeded" | "usage_limit_reached" => UsageLimit,
-        "overloaded_error" | "server_is_overloaded" | "model_capacity_exceeded" => Capacity,
-        "context_length_exceeded" | "request_too_large" | "max_tokens_exceeded" => RequestTooLarge,
-        "invalid_request"
-        | "invalid_request_error"
-        | "unsupported_endpoint"
-        | "unsupported_protocol"
-        | "conflict" => InvalidRequest,
-        "api_error" | "server_error" | "internal_error" | "internal_server_error" => ServiceError,
-        "content_filter" | "content_policy_violation" | "safety_error" | "cyber_policy" => {
-            SafetyRejection
-        }
-        _ if is_permanent_reason(Some(&code)) => QuotaExhausted,
-        _ if model_message(&code) => ModelUnavailable,
-        _ => return None,
-    })
+    super::failure_rules::CODES
+        .iter()
+        .find(|r| r.value == code)
+        .map(|r| r.category)
+        .or_else(|| is_permanent_reason(Some(&code)).then_some(ErrorBasis::QuotaExhausted))
+        .or_else(|| model_message(&code).then_some(ErrorBasis::ModelUnavailable))
 }
 
 fn positive_message(text: &str) -> bool {
     crate::events::safe_message(text).is_some()
-        && ![
-            "documentation:",
-            "example:",
-            "describes the",
-            "not exceeded",
-            "not exhausted",
-            "not reached",
-            "not yet",
-            "未达到",
-            "未耗尽",
-            "尚未",
-            "没有超",
-            "未超",
-            "并未",
-        ]
-        .iter()
-        .any(|p| text.to_lowercase().contains(p))
+        && !super::failure_rules::QUOTA_NEGATIVES
+            .iter()
+            .any(|p| text.to_lowercase().contains(p))
 }
 
 fn message_kind(text: &str) -> Option<ErrorBasis> {
@@ -250,25 +180,12 @@ fn message_kind(text: &str) -> Option<ErrorBasis> {
     }
     let s = text.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| s.contains(w));
-    if has(&[
-        "request too large",
-        "request_too_large",
-        "context_length_exceeded",
-        "request exceeds the token limit",
-        "maximum context length",
-        "请求体过大",
-        "上下文长度超限",
-    ]) || (has(&["tokens", "token"]) && has(&["request too large", "single request exceeds"]))
+    if has(super::failure_rules::MSG_0)
+        || (has(super::failure_rules::MSG_1) && has(super::failure_rules::MSG_2))
     {
         return Some(RequestTooLarge);
     }
-    if has(&[
-        "content_policy_violation",
-        "content policy",
-        "safety policy",
-        "cyber_policy",
-        "安全策略拒绝",
-    ]) {
+    if has(super::failure_rules::MSG_3) {
         return Some(SafetyRejection);
     }
     if model_message(text) {
@@ -277,125 +194,49 @@ fn message_kind(text: &str) -> Option<ErrorBasis> {
     if quota_message(text) {
         return Some(QuotaExhausted);
     }
-    if has(&[
-        "spend rate",
-        "spending rate",
-        "spend-based rate",
-        "rolling 10-minute",
-        "短时消费",
-        "消费速率",
-    ]) {
+    if has(super::failure_rules::MSG_4) {
         return Some(SpendingRate);
     }
-    if has(&[
-        "specified api usage limits",
-        "specified workspace api usage limits",
-        "monthly api usage threshold",
-    ]) {
+    if has(super::failure_rules::MSG_5) {
         return Some(QuotaExhausted);
     }
-    if has(&[
-        "invalid_api_key",
-        "invalid api key",
-        "incorrect api key",
-        "api_key_expired",
-        "api_key_revoked",
-        "authentication_error",
-        "account_disabled",
-        "account_deactivated",
-        "account_suspended",
-        "account has been disabled",
-        "密钥无效",
-        "密钥已过期",
-        "密钥已撤销",
-        "账号已禁用",
-        "账户已禁用",
-    ]) {
+    if has(super::failure_rules::MSG_6) {
         return Some(Authentication);
     }
     if hard_message(text) {
         return Some(Billing);
     }
-    if has(&[
-        "ip not authorized",
-        "ip allowlist",
-        "country, region, or territory not supported",
-        "project has been denied access",
-    ]) {
+    if has(super::failure_rules::MSG_7) {
         return Some(Permission);
     }
-    if has(&["input tokens per minute", "input token rate", "itpm"]) {
+    if has(super::failure_rules::MSG_8) {
         return Some(InputTokens);
     }
-    if has(&["output tokens per minute", "output token rate", "otpm"]) {
+    if has(super::failure_rules::MSG_9) {
         return Some(OutputTokens);
     }
-    if has(&[
-        "tokens per minute",
-        "tokens-per-minute",
-        "tokens_per_minute",
-        "tpm",
-        "每分钟 token",
-        "每分钟token",
-    ]) {
+    if has(super::failure_rules::MSG_10) {
         return Some(Tpm);
     }
-    if has(&[
-        "concurrent requests",
-        "concurrency limit",
-        "concurrent connections",
-        "too many connections",
-        "并发数",
-        "并发限制",
-        "并发上限",
-    ]) {
+    if has(super::failure_rules::MSG_11) {
         return Some(Concurrency);
     }
-    if has(&[
-        "requests per second",
-        "requests-per-second",
-        "rps_limit",
-        "每秒请求",
-    ]) {
+    if has(super::failure_rules::MSG_12) {
         return Some(Rps);
     }
     if rpm_message(text) {
         return Some(Rpm);
     }
-    if has(&[
-        "slow_down",
-        "acceleration limit",
-        "traffic increased too quickly",
-        "流量增长过快",
-    ]) {
+    if has(super::failure_rules::MSG_13) {
         return Some(Acceleration);
     }
-    if s.trim() == "capacity"
-        || has(&[
-            "at capacity",
-            "overload",
-            "model_capacity",
-            "server_is_overloaded",
-            "容量",
-            "繁忙",
-            "负载过高",
-        ])
-    {
+    if s.trim() == "capacity" || has(super::failure_rules::MSG_14) {
         return Some(Capacity);
     }
-    if has(&["usage_limit"]) {
+    if has(super::failure_rules::MSG_15) {
         return Some(UsageLimit);
     }
-    if has(&[
-        "too many requests",
-        "rate limit",
-        "rate_limit",
-        "resource_exhausted",
-        "限流",
-        "请求过多",
-        "请求太多",
-        "请求频率过高",
-    ]) {
+    if has(super::failure_rules::MSG_16) {
         return Some(UnknownRateLimit);
     }
     None
@@ -518,18 +359,12 @@ fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
                     Some(ErrorBasis::InvalidRequest)
                 }
                 Some(500 | 502..=599) => Some(ErrorBasis::ServiceError),
-                _ => match status.as_str() {
-                    Some("RESOURCE_EXHAUSTED") => Some(ErrorBasis::UnknownRateLimit),
-                    Some("UNAUTHENTICATED") => Some(ErrorBasis::Authentication),
-                    Some("PERMISSION_DENIED") => Some(ErrorBasis::Permission),
-                    Some("INVALID_ARGUMENT" | "FAILED_PRECONDITION") => {
-                        Some(ErrorBasis::InvalidRequest)
-                    }
-                    Some("INTERNAL" | "UNAVAILABLE" | "DEADLINE_EXCEEDED") => {
-                        Some(ErrorBasis::ServiceError)
-                    }
-                    _ => None,
-                },
+                _ => status.as_str().and_then(|value| {
+                    super::failure_rules::STATUS_CODES
+                        .iter()
+                        .find(|c| c.value == value)
+                        .map(|c| c.category)
+                }),
             }
         });
     let scope = if quota.is_some() && (explicit.is_none() || quota.map(|q| q.0) == explicit) {
@@ -587,10 +422,19 @@ fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
     (basis, scope)
 }
 
+#[cfg(test)]
 pub(super) fn http(
     status: u16,
     headers: &hyper::HeaderMap,
     body: &[u8],
+) -> (Details, Option<Duration>) {
+    http_with_rules(status, headers, body, &[])
+}
+pub(super) fn http_with_rules(
+    status: u16,
+    headers: &hyper::HeaderMap,
+    body: &[u8],
+    rules: &[super::failure_rules::Rule],
 ) -> (Details, Option<Duration>) {
     let mut d = if status >= 400 {
         details_http(body)
@@ -626,6 +470,15 @@ pub(super) fn http(
         }
     }
     refine_headers(&mut d, headers, structured.is_some());
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        if let Some(error) = envelope(&value, status >= 400, 0) {
+            apply_custom(&mut d, error, headers, rules);
+        }
+    } else if status >= 400 {
+        if let Ok(message) = std::str::from_utf8(body) {
+            apply_custom(&mut d, &Value::String(message.into()), headers, rules);
+        }
+    }
     let retry = retry_after_http(body).max(retry_headers(headers, &d));
     (d, retry)
 }
@@ -640,22 +493,15 @@ fn refine_headers(d: &mut Details, headers: &hyper::HeaderMap, structured: bool)
                 .and_then(|s| s.parse::<u64>().ok())
                 == Some(0)
         };
-        if exhausted("anthropic-ratelimit-input-tokens-remaining") {
-            d.error_basis = Some(ErrorBasis::InputTokens);
-        } else if exhausted("anthropic-ratelimit-output-tokens-remaining") {
-            d.error_basis = Some(ErrorBasis::OutputTokens);
-        } else if exhausted("x-ratelimit-remaining-tokens")
-            || exhausted("anthropic-ratelimit-tokens-remaining")
-            || exhausted("x-ratelimit-remaining-project-tokens")
-        {
-            d.error_basis = Some(ErrorBasis::Tpm);
-        } else if exhausted("x-ratelimit-remaining-requests")
-            || exhausted("anthropic-ratelimit-requests-remaining")
-        {
-            d.error_basis = Some(ErrorBasis::Rpm);
-            d.health_scope = Some(HealthScope::Provider);
-        } else {
+        let Some((_, basis)) = super::failure_rules::LIMIT_HEADERS
+            .iter()
+            .find(|(name, _)| exhausted(name))
+        else {
             return;
+        };
+        d.error_basis = Some(*basis);
+        if matches!(basis, ErrorBasis::Rpm | ErrorBasis::Rps) {
+            d.health_scope = Some(HealthScope::Provider);
         }
         if !matches!(d.error_basis, Some(ErrorBasis::Rpm | ErrorBasis::Rps)) {
             d.health_scope = None;
@@ -666,6 +512,7 @@ fn refine_headers(d: &mut Details, headers: &hyper::HeaderMap, structured: bool)
 pub(super) fn details_with_headers(
     value: &Value,
     headers: &hyper::HeaderMap,
+    rules: &[super::failure_rules::Rule],
 ) -> (Details, Option<Duration>) {
     let mut details = details_value(value, false);
     let Some(error) = envelope(value, false, 0) else {
@@ -677,6 +524,7 @@ pub(super) fn details_with_headers(
         .is_some()
         || quota_details(error).is_some();
     refine_headers(&mut details, headers, structured);
+    apply_custom(&mut details, error, headers, rules);
     let wait = retry_after_fields(error).max(retry_headers(headers, &details));
     (details, wait)
 }
@@ -818,67 +666,9 @@ pub fn model_message(message: &str) -> bool {
         return false;
     }
     let s = message.trim().to_lowercase();
-    [
-        "model_not_found",
-        "unsupported_model",
-        "model_not_supported",
-        "model_not_available",
-        "model_unavailable",
-        "model_access_denied",
-        "model_permission_denied",
-        "invalid_model",
-        "no_available_model",
-        "model_not_exist",
-        "model_not_exists",
-    ]
-    .contains(&s.as_str())
-        || (s.contains("model")
-            && [
-                "does not exist",
-                "not found",
-                "not supported",
-                "unsupported",
-                "do not have access",
-                "does not have access",
-                "access denied",
-                "don't have access",
-                "no access to",
-                "not allowed",
-                "not permitted",
-                "not available for",
-                "not available to",
-                "is not available",
-                "no available channel",
-                "no available provider",
-                "no endpoints found",
-                "no channel",
-                "not enabled",
-                "not authorized",
-                "not entitled",
-            ]
-            .iter()
-            .any(|p| s.contains(p)))
-        || (s.contains("模型")
-            && [
-                "不存在",
-                "未找到",
-                "不支持",
-                "无权",
-                "没有权限",
-                "未授权",
-                "无权限",
-                "无可用渠道",
-                "没有可用渠道",
-                "不可用渠道",
-                "无可用通道",
-                "无可用上游",
-                "暂不可用",
-                "未开通",
-                "未启用",
-                "不允许",
-            ]
-            .iter()
-            .any(|p| s.contains(p)))
+    super::failure_rules::MODEL_CODES.contains(&s.as_str())
+        || (s.contains("model") && super::failure_rules::MODEL_EN.iter().any(|p| s.contains(p)))
+        || (s.contains("模型") && super::failure_rules::MODEL_ZH.iter().any(|p| s.contains(p)))
 }
 // Explicit wrappers only: never recurse into arbitrary user content.
 fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
@@ -1013,16 +803,9 @@ fn known_reason(error: &Value) -> Option<String> {
 }
 pub(super) fn is_permanent_reason(reason: Option<&str>) -> bool {
     reason.is_some_and(|value| {
-        [
-            "DAILY_LIMIT_EXCEEDED",
-            "WEEKLY_LIMIT_EXCEEDED",
-            "MONTHLY_LIMIT_EXCEEDED",
-            "USER_PLATFORM_DAILY_QUOTA_EXHAUSTED",
-            "USER_PLATFORM_WEEKLY_QUOTA_EXHAUSTED",
-            "USER_PLATFORM_MONTHLY_QUOTA_EXHAUSTED",
-        ]
-        .iter()
-        .any(|known| value.eq_ignore_ascii_case(known))
+        super::failure_rules::PERMANENT_CODES
+            .iter()
+            .any(|known| value.eq_ignore_ascii_case(known))
     })
 }
 fn is_model(error: &Value) -> bool {
@@ -1048,6 +831,7 @@ pub fn model_error(value: &Value) -> bool {
     envelope(value, false, 0)
         .is_some_and(|e| classification(e).0 == Some(ErrorBasis::ModelUnavailable))
 }
+#[cfg(test)]
 pub fn temporary_capacity_event(value: &Value) -> bool {
     temporary(&details_value(value, false))
 }
@@ -1179,52 +963,9 @@ fn hard_message(text: &str) -> bool {
         return true;
     }
     let text = text.to_ascii_lowercase();
-    [
-        "insufficient_quota",
-        "insufficient_balance",
-        "insufficient_account_balance",
-        "account_balance_insufficient",
-        "api_key_quota_exhausted",
-        "insufficient_user_quota",
-        "balance_exhausted",
-        "balance_not_enough",
-        "credits_exhausted",
-        "credit_limit_exceeded",
-        "insufficient account balance",
-        "insufficient credit balance",
-        "account balance is insufficient",
-        "credit balance exhausted",
-        "balance has been exhausted",
-        "run out of credits",
-        "out of credit",
-        "api key quota exhausted",
-        "api key quota exceeded",
-        "credit_balance_too_low",
-        "billing_hard_limit_reached",
-        "account_disabled",
-        "account_deactivated",
-        "insufficient credits",
-        "insufficient balance",
-        "credit balance is too low",
-        "account has been disabled",
-        "余额不足",
-        "余额已耗尽",
-        "余额耗尽",
-        "余额用尽",
-        "余额已用完",
-        "账户欠费",
-        "账号欠费",
-        "账户额度已耗尽",
-        "账户额度已用完",
-        "api key 额度已用完",
-        "api key额度已用完",
-        "令牌额度已用完",
-        "令牌额度不足",
-        "账号已禁用",
-        "账户已禁用",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
+    super::failure_rules::BILLING_WORDS
+        .iter()
+        .any(|marker| text.contains(marker))
 }
 
 fn quota_message(text: &str) -> bool {
@@ -1245,91 +986,30 @@ fn quota_message(text: &str) -> bool {
         return true;
     }
     let text = text.to_lowercase();
-    if [
-        "documentation:",
-        "example:",
-        "describes the",
-        "not exceeded",
-        "not exhausted",
-        "not reached",
-        "not yet",
-        "未达到",
-        "未耗尽",
-        "尚未",
-        "没有超",
-        "未超",
-        "并未",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
+    if super::failure_rules::QUOTA_NEGATIVES
+        .iter()
+        .any(|s| text.contains(s))
     {
         return false;
     }
-    [
-        "daily usage limit exceeded",
-        "weekly usage limit exceeded",
-        "monthly usage limit exceeded",
-        "daily quota exhausted",
-        "weekly quota exhausted",
-        "monthly quota exhausted",
-        "daily quota exceeded",
-        "weekly quota exceeded",
-        "monthly quota exceeded",
-        "日额度已耗尽",
-        "日额度已用尽",
-        "日额度已用完",
-        "每日额度已耗尽",
-        "每日用量已达上限",
-        "日用量已达上限",
-        "每周额度已耗尽",
-        "每月额度已耗尽",
-        "周额度已耗尽",
-        "周额度已用尽",
-        "每周用量已达上限",
-        "月额度已耗尽",
-        "月额度已用尽",
-        "每月用量已达上限",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
+    super::failure_rules::QUOTA_WORDS
+        .iter()
+        .any(|s| text.contains(s))
 }
 fn rpm_message(text: &str) -> bool {
     if crate::events::safe_message(text).is_none() {
         return false;
     }
     let s = text.to_ascii_lowercase();
-    if [
-        "not an rpm",
-        "not a requests",
-        "not exceeded",
-        "not reached",
-        "not been reached",
-        "not yet",
-        "documentation:",
-        "example:",
-        "未达到",
-        "尚未",
-        "没有超",
-        "未超",
-    ]
-    .iter()
-    .any(|negative| s.contains(negative))
+    if super::failure_rules::RPM_NEGATIVES
+        .iter()
+        .any(|negative| s.contains(negative))
     {
         return false;
     }
-    [
-        "group_rpm_exceeded",
-        "user_rpm_exceeded",
-        "requests-per-minute limit exceeded",
-        "requests per minute limit exceeded",
-        "requests per minute limit reached",
-        "rpm limit exceeded",
-        "rpm_limit_exceeded",
-        "每分钟请求数超限",
-        "每分钟请求次数已达上限",
-    ]
-    .iter()
-    .any(|m| s.contains(m))
+    super::failure_rules::RPM_WORDS
+        .iter()
+        .any(|m| s.contains(m))
         || minute_limit_message(s.trim())
 }
 
@@ -1397,4 +1077,111 @@ fn global_fault(text: &str) -> bool {
         ]
         .iter()
         .any(|s| lower.contains(s))
+}
+
+fn vague(basis: ErrorBasis) -> bool {
+    matches!(
+        basis,
+        ErrorBasis::Unknown | ErrorBasis::UnknownRateLimit | ErrorBasis::UsageLimit
+    )
+}
+fn apply_custom(
+    details: &mut Details,
+    error: &Value,
+    headers: &hyper::HeaderMap,
+    rules: &[super::failure_rules::Rule],
+) {
+    use super::failure_rules::MatchKind;
+    if rules.is_empty() {
+        return;
+    }
+    let specific = structured_codes(error)
+        .filter_map(code_kind)
+        .chain(explicit_type(error))
+        .chain(quota_details(error).map(|q| q.0))
+        .chain(strings(error).filter_map(message_kind))
+        .any(|b| !vague(b))
+        || is_model(error)
+        || error
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| {
+                super::failure_rules::STATUS_CODES
+                    .iter()
+                    .any(|code| code.value == status && !vague(code.category))
+            });
+    let header_evidence = temporary(details)
+        && super::failure_rules::LIMIT_HEADERS.iter().any(|(name, _)| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                == Some(0)
+        });
+    if specific || header_evidence {
+        return;
+    }
+    let codes: Vec<_> = [
+        details.upstream_code.as_deref(),
+        details.upstream_reason.as_deref(),
+        details.upstream_type.as_deref(),
+        error.get("status").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(structured_codes(error))
+    .collect();
+    let message = details.message.as_deref().unwrap_or("").to_lowercase();
+    for kind in [MatchKind::Code, MatchKind::Keyword] {
+        let matched: Vec<_> = rules
+            .iter()
+            .filter(|r| {
+                r.match_kind == kind
+                    && match kind {
+                        MatchKind::Code => {
+                            codes.iter().any(|code| code.eq_ignore_ascii_case(&r.value))
+                        }
+                        MatchKind::Keyword => {
+                            !message.is_empty()
+                                && positive_message(&message)
+                                && message.contains(&r.value.to_lowercase())
+                        }
+                    }
+            })
+            .collect();
+        let Some(first) = matched.first() else {
+            continue;
+        };
+        if matched.iter().any(|r| r.category != first.category) {
+            details.rule_conflict = Some(true);
+            return;
+        }
+        details.error_basis = Some(first.category);
+        details.custom_rule_id = Some(first.id.clone());
+        details.health_scope = match first.category {
+            ErrorBasis::InvalidRequest
+            | ErrorBasis::RequestTooLarge
+            | ErrorBasis::SafetyRejection => Some(HealthScope::Request),
+            ErrorBasis::ModelUnavailable => Some(HealthScope::Model),
+            ErrorBasis::Rpm
+            | ErrorBasis::Rps
+            | ErrorBasis::QuotaExhausted
+            | ErrorBasis::Billing
+            | ErrorBasis::Authentication
+            | ErrorBasis::Permission => Some(HealthScope::Provider),
+            _ => None,
+        };
+        return;
+    }
+}
+pub(super) fn details_with_rules(
+    value: &Value,
+    http_error: bool,
+    rules: &[super::failure_rules::Rule],
+) -> Details {
+    let mut details = details_value(value, http_error);
+    if let Some(error) = envelope(value, http_error, 0) {
+        apply_custom(&mut details, error, &hyper::HeaderMap::new(), rules);
+    }
+    details
 }

@@ -1,18 +1,143 @@
-//! One deadline covers admission, retries and first effective output. Completing
-//! output removes the deadline; the transports keep their independent idle limit.
-use std::time::Duration;
-use tokio::{sync::watch, time::Instant};
+//! One deadline and cancellation boundary cover a request up to effective output.
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    sync::{broadcast, watch},
+    time::Instant,
+};
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRequest {
+    pub request_id: String,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+    pub started_at: u64,
+    pub elapsed_seconds: u64,
+    pub remaining_seconds: u64,
+    pub phase: String,
+}
+struct Pending {
+    view: PendingRequest,
+    started: Instant,
+    deadline: Instant,
+}
+#[derive(Default)]
+struct State {
+    active: Option<Pending>,
+    cancelled: Option<Instant>,
+}
+struct Shared {
+    state: Mutex<State>,
+    changes: watch::Sender<()>,
+    registry: Option<Registry>,
+}
+#[derive(Clone)]
+pub(super) struct Registry(Arc<RegistryInner>);
+struct RegistryInner {
+    requests: Mutex<HashMap<String, Weak<Shared>>>,
+    events: broadcast::Sender<()>,
+}
+impl Registry {
+    pub fn new(events: broadcast::Sender<()>) -> Self {
+        Self(Arc::new(RegistryInner {
+            requests: Mutex::new(HashMap::new()),
+            events,
+        }))
+    }
+    fn remove(&self, id: &str) {
+        self.0.requests.lock().unwrap().remove(id);
+        let _ = self.0.events.send(());
+    }
+    pub fn view(&self) -> Vec<PendingRequest> {
+        let entries: Vec<_> = self
+            .0
+            .requests
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        let mut result: Vec<_> = entries
+            .iter()
+            .filter_map(|shared| {
+                let state = shared.state.lock().unwrap();
+                let active = state.active.as_ref()?;
+                let mut view = active.view.clone();
+                view.elapsed_seconds = active.started.elapsed().as_secs();
+                view.remaining_seconds = active
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .div_ceil(1000) as u64;
+                Some(view)
+            })
+            .collect();
+        result.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then(a.request_id.cmp(&b.request_id))
+        });
+        result
+    }
+    pub fn cancel(&self, id: &str) -> bool {
+        let shared = self
+            .0
+            .requests
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(Weak::upgrade);
+        let Some(shared) = shared else {
+            return false;
+        };
+        let mut state = shared.state.lock().unwrap();
+        if !state
+            .active
+            .as_ref()
+            .is_some_and(|p| p.view.request_id == id && p.deadline > Instant::now())
+        {
+            return false;
+        }
+        state.cancelled = state.active.take().map(|p| p.deadline);
+        drop(state);
+        self.remove(id);
+        shared.changes.send_replace(());
+        true
+    }
+}
+impl Drop for Shared {
+    fn drop(&mut self) {
+        if let (Some(registry), Some(active)) =
+            (&self.registry, &self.state.get_mut().unwrap().active)
+        {
+            registry.remove(&active.view.request_id);
+        }
+    }
+}
 #[derive(Clone)]
 pub(super) struct WaitBudget {
-    state: watch::Sender<Option<Instant>>,
+    shared: Arc<Shared>,
     pub seconds: u64,
 }
-
 impl WaitBudget {
+    #[cfg(test)]
     pub fn new(seconds: u64) -> Self {
+        Self::with_registry(seconds, None)
+    }
+    pub fn tracked(seconds: u64, registry: &Registry) -> Self {
+        Self::with_registry(seconds, Some(registry.clone()))
+    }
+    fn with_registry(seconds: u64, registry: Option<Registry>) -> Self {
         Self {
-            state: watch::channel(None).0,
+            shared: Arc::new(Shared {
+                state: Mutex::new(State::default()),
+                changes: watch::channel(()).0,
+                registry,
+            }),
             seconds,
         }
     }
@@ -20,36 +145,114 @@ impl WaitBudget {
         self.begin_at(Instant::now());
     }
     pub fn begin_at(&self, started: Instant) {
-        self.state
-            .send_replace(Some(started + Duration::from_secs(self.seconds)));
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut state = self.shared.state.lock().unwrap();
+        if let (Some(registry), Some(old)) = (&self.shared.registry, state.active.take()) {
+            registry.remove(&old.view.request_id);
+        }
+        state.cancelled = None;
+        state.active = Some(Pending {
+            view: PendingRequest {
+                request_id: id.clone(),
+                provider_id: None,
+                model: None,
+                started_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_sub(started.elapsed().as_secs()),
+                elapsed_seconds: 0,
+                remaining_seconds: self.seconds,
+                phase: "admission".into(),
+            },
+            started,
+            deadline: started + Duration::from_secs(self.seconds),
+        });
+        if let Some(registry) = &self.shared.registry {
+            registry
+                .0
+                .requests
+                .lock()
+                .unwrap()
+                .insert(id, Arc::downgrade(&self.shared));
+            let _ = registry.0.events.send(());
+        }
+        drop(state);
+        self.shared.changes.send_replace(());
+    }
+    pub fn describe(&self, provider: Option<&str>, model: Option<&str>, phase: &str) {
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(active) = &mut state.active {
+            if let Some(provider) = provider {
+                active.view.provider_id = Some(provider.into());
+            }
+            if let Some(model) = model {
+                active.view.model = crate::events::safe_message(model);
+            }
+            active.view.phase = phase.into();
+        }
+        drop(state);
+        if let Some(registry) = &self.shared.registry {
+            let _ = registry.0.events.send(());
+        }
     }
     pub fn deadline(&self) -> Option<Instant> {
-        *self.state.borrow()
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .map(|p| p.deadline)
     }
     pub fn complete(&self, deadline: Option<Instant>) {
-        self.state.send_if_modified(|current| {
-            if current.is_some() && *current == deadline {
-                *current = None;
-                true
-            } else {
-                false
+        let mut state = self.shared.state.lock().unwrap();
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|p| Some(p.deadline) == deadline)
+        {
+            if let (Some(registry), Some(active)) = (&self.shared.registry, state.active.take()) {
+                registry.remove(&active.view.request_id);
             }
-        });
+        }
+        drop(state);
+        self.shared.changes.send_replace(());
+    }
+    pub fn is_cancelled(&self, deadline: Option<Instant>) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state.cancelled.is_some() && state.cancelled == deadline
+    }
+    pub fn cancel_requested(&self) -> bool {
+        self.shared.state.lock().unwrap().cancelled.is_some()
+    }
+    pub fn acknowledge_cancel(&self) {
+        self.shared.state.lock().unwrap().cancelled = None;
     }
     pub fn expired(&self, deadline: Option<Instant>) -> bool {
         deadline.is_some_and(|d| self.deadline() == Some(d) && Instant::now() >= d)
     }
-    pub async fn wait(&self) {
-        let mut changes = self.state.subscribe();
+    pub async fn cancelled(&self) {
+        let mut changes = self.shared.changes.subscribe();
         loop {
-            let deadline = *changes.borrow_and_update();
-            if let Some(deadline) = deadline {
+            changes.borrow_and_update();
+            if self.shared.state.lock().unwrap().cancelled.is_some() {
+                return;
+            }
+            if changes.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+    pub async fn wait(&self) {
+        let mut changes = self.shared.changes.subscribe();
+        loop {
+            changes.borrow_and_update();
+            if let Some(deadline) = self.deadline() {
                 tokio::select! {
                     biased;
                     _ = changes.changed() => {},
-                    _ = tokio::time::sleep_until(deadline) => {
-                        if self.expired(Some(deadline)) { return; }
-                    }
+                    _ = tokio::time::sleep_until(deadline) => { if self.expired(Some(deadline)) { return; } }
                 }
             } else if changes.changed().await.is_err() {
                 return;
@@ -106,5 +309,91 @@ mod tests {
         tokio::time::advance(Duration::from_secs(300)).await;
         assert!(budget.expired(current));
         budget.wait().await;
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn cancel_is_per_request_and_old_ids_cannot_cancel_a_new_round() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let first = WaitBudget::tracked(300, &registry);
+        let second = WaitBudget::tracked(300, &registry);
+        first.begin();
+        second.begin();
+        first.describe(Some("fixture-one"), Some("fixture-model"), "headers");
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let row = registry
+            .view()
+            .into_iter()
+            .find(|p| p.provider_id.as_deref() == Some("fixture-one"))
+            .unwrap();
+        assert_eq!((row.elapsed_seconds, row.remaining_seconds), (61, 239));
+        let deadline = first.deadline();
+        assert!(registry.cancel(&row.request_id));
+        first.cancelled().await;
+        assert!(first.is_cancelled(deadline));
+        assert!(second.deadline().is_some());
+        assert_eq!(registry.view().len(), 1);
+        first.acknowledge_cancel();
+        first.begin();
+        assert!(!registry.cancel(&row.request_id));
+        assert_eq!(registry.view().len(), 2);
+        drop(first);
+        drop(second);
+        assert!(registry.view().is_empty());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn output_and_expiry_reject_cancel_and_registries_are_isolated() {
+        let a = Registry::new(broadcast::channel(16).0);
+        let b = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(300, &a);
+        budget.begin();
+        let id = a.view()[0].request_id.clone();
+        assert!(!b.cancel(&id));
+        budget.complete(budget.deadline());
+        assert!(!a.cancel(&id));
+        budget.begin();
+        let id = a.view()[0].request_id.clone();
+        tokio::time::advance(Duration::from_secs(300)).await;
+        assert!(!a.cancel(&id));
+    }
+    #[test]
+    fn output_and_cancel_have_one_atomic_winner() {
+        for _ in 0..24 {
+            let registry = Registry::new(broadcast::channel(16).0);
+            let budget = WaitBudget::tracked(300, &registry);
+            budget.begin();
+            let id = registry.view()[0].request_id.clone();
+            let deadline = budget.deadline();
+            std::thread::scope(|scope| {
+                let task = scope.spawn(|| registry.cancel(&id));
+                budget.complete(deadline);
+                assert_eq!(task.join().unwrap(), budget.is_cancelled(deadline));
+            });
+            assert!(registry.view().is_empty());
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_output_race_keeps_protocol_cancelled() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(300, &registry);
+        budget.begin();
+        let mut protocol = crate::gateway::protocol::Protocol::new(true);
+        protocol.attach_wait_budget(&budget);
+        let id = registry.view()[0].request_id.clone();
+        assert!(registry.cancel(&id));
+        protocol.value(
+            &serde_json::json!({"type":"response.completed","response":{"id":"fixture","status":"completed"}}),
+        );
+        protocol.finish(Some(200), crate::errors::code::OK);
+        assert_eq!(
+            protocol.terminal(),
+            Some(crate::gateway::protocol::Terminal::Cancelled)
+        );
+        assert!(!protocol.succeeded());
+        assert!(!protocol.transport_failure());
+        assert!(registry.view().is_empty());
     }
 }
