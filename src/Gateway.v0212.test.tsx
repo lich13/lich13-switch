@@ -10,10 +10,12 @@ const mock = vi.hoisted(() => ({
 
 vi.mock("./bridge", () => ({
   command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: GatewayState) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
+  subscribe: vi.fn(
+    async (name: string, listener: (value: GatewayState) => void) => {
+      mock.listeners.set(name, listener);
+      return () => mock.listeners.delete(name);
+    },
+  ),
 }));
 
 import Gateway from "./Gateway";
@@ -31,8 +33,12 @@ beforeEach(() => {
       if (name === "get_gateway") return structuredClone(state);
       if (name === "query_provider_quota") return undefined;
       if (name === "update_gateway") {
-        const edit = args.edit as { op?: string; settings?: GatewayState["settings"] };
-        if (edit.op === "settings" && edit.settings) state.settings = edit.settings;
+        const edit = args.edit as {
+          op?: string;
+          settings?: GatewayState["settings"];
+        };
+        if (edit.op === "settings" && edit.settings)
+          state.settings = edit.settings;
         return structuredClone(state);
       }
       return undefined;
@@ -71,10 +77,14 @@ it("renders handoff waiting as neutral, non-clickable provider state", async () 
     const item = row as HTMLElement;
     const status = within(item).getByText(label);
     expect(status.tagName).toBe("SPAN");
-    expect(within(item).queryByRole("button", { name: label })).not.toBeInTheDocument();
+    expect(
+      within(item).queryByRole("button", { name: label }),
+    ).not.toBeInTheDocument();
     await user.click(status);
   }
-  expect(mock.command.mock.calls.some(([name]) => name === "open_main")).toBe(false);
+  expect(mock.command.mock.calls.some(([name]) => name === "open_main")).toBe(
+    false,
+  );
 });
 
 it("adds active requests and reserved threads in concurrency controls and exposes both counts", async () => {
@@ -97,7 +107,9 @@ it("adds active requests and reserved threads in concurrency controls and expose
   const reserved = within(popover).getByText("线程预留");
   expect(active.nextElementSibling).toHaveTextContent("2");
   expect(reserved.nextElementSibling).toHaveTextContent("3");
-  expect(mock.command.mock.calls.some(([name]) => name === "open_main")).toBe(false);
+  expect(mock.command.mock.calls.some(([name]) => name === "open_main")).toBe(
+    false,
+  );
 });
 
 it("uses the waiting budget label and preserves explicitly saved timeout values", async () => {
@@ -112,12 +124,23 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
   render(<Gateway notify={() => {}} />);
   await screen.findByRole("button", { name: "添加" });
   await user.click(screen.getByText("高级设置", { selector: "summary" }));
+  await user.click(screen.getByText("故障策略", { selector: "summary" }));
 
-  expect(screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" })).toHaveValue(300);
-  expect(screen.getByRole("spinbutton", { name: "首字节 / 秒" })).toHaveValue(600);
-  expect(screen.getByRole("spinbutton", { name: "流静默 / 秒" })).toHaveValue(600);
-  expect(screen.getByRole("spinbutton", { name: "等待与重试预算 / 秒" })).toHaveValue(37);
-  expect(screen.queryByRole("spinbutton", { name: "非流式总时限 / 秒" })).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" }),
+  ).toHaveValue(300);
+  expect(screen.getByRole("spinbutton", { name: "首字节 / 秒" })).toHaveValue(
+    600,
+  );
+  expect(screen.getByRole("spinbutton", { name: "流静默 / 秒" })).toHaveValue(
+    600,
+  );
+  expect(
+    screen.getByRole("spinbutton", { name: "等待与重试预算 / 秒" }),
+  ).toHaveValue(37);
+  expect(
+    screen.queryByRole("spinbutton", { name: "非流式总时限 / 秒" }),
+  ).not.toBeInTheDocument();
 
   const idle = screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" });
   await user.clear(idle);

@@ -1,6 +1,10 @@
 import { subscriptions } from "./subscriptions";
 import type { GatewayEdit } from "./bridge-contracts";
-import { useClientSelection, clientName, clients } from "./ClientSelection";
+import ClientSelection, {
+  useClientSelection,
+  clientName,
+  clients,
+} from "./ClientSelection";
 import { saveGatewayEdit, type EditRevision } from "./gateway-edit";
 import type { ClientId } from "./types";
 import { useEffect, useState } from "react";
@@ -243,20 +247,12 @@ function QuickContent({
       <div className="quick-scroll">
         <div>
           {prefs.tab === "providers" && visibleClients.length > 0 && (
-            <select
-              data-client-switch
-              className="quick-client-select"
-              aria-label="客户端"
-              value={clientVisible ? clientId : visibleClients[0]}
+            <ClientSelection
+              client={clientVisible ? clientId : visibleClients[0]}
+              visibleClients={visibleClients}
               disabled={busy}
-              onChange={(e) => onClientChange(e.target.value as ClientId)}
-            >
-              {visibleClients.map((id) => (
-                <option key={id} value={id}>
-                  {clientName(id)}
-                </option>
-              ))}
-            </select>
+              select={onClientChange}
+            />
           )}
           {(error || gateway?.error || accounts?.error) && (
             <div className="quick-feedback error" role="alert">

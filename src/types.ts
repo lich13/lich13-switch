@@ -100,6 +100,7 @@ export type GatewaySettings = {
   successThreshold: number;
   cooldownSeconds: number;
   rateLimitSeconds: number;
+  hardFailureCooldownSeconds?: number;
   capacityRetrySeconds: number;
   websocketRetrySeconds: number;
   threadIdleReleaseSeconds?: number;

@@ -1,6 +1,6 @@
 // 覆盖原生 WebSocket 重连和输出后的重放保护。
 use super::*;
-use crate::gateway::upstream_error;
+use crate::gateway::failure_policy;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -517,36 +517,36 @@ fn model_error_classification_handles_http_envelopes_and_excludes_auth_or_capaci
         for body in &errors {
             let bytes = serde_json::to_vec(body).unwrap();
             assert!(
-                upstream_error::model_http(status, &bytes),
+                failure_policy::model_http(status, &bytes),
                 "status={status} body={body}"
             );
         }
     }
 
-    assert!(upstream_error::model_error(&json!({
+    assert!(failure_policy::model_error(&json!({
         "data": {"error": {"message": "no available channel for model exact-model"}}
     })));
-    assert!(upstream_error::model_http(
+    assert!(failure_policy::model_http(
         503,
         "中文模型无可用渠道".as_bytes()
     ));
-    assert!(!upstream_error::model_http(
+    assert!(!failure_policy::model_http(
         200,
         &serde_json::to_vec(&errors[0]).unwrap()
     ));
-    assert!(!upstream_error::model_http(
+    assert!(failure_policy::model_http(
         429,
         &serde_json::to_vec(&errors[0]).unwrap()
     ));
-    assert!(!upstream_error::model_http(
+    assert!(!failure_policy::model_http(
         503,
         br#"{"error":{"code":"overloaded_error","message":"model unavailable"}}"#,
     ));
-    assert!(!upstream_error::model_http(
+    assert!(!failure_policy::model_http(
         503,
         br#"{"error":{"message":"model is at capacity"}}"#,
     ));
-    assert!(!upstream_error::model_http(
+    assert!(!failure_policy::model_http(
         403,
         br#"{"error":{"code":"invalid_api_key","message":"authentication failed for model exact-model"}}"#,
     ));
@@ -615,7 +615,7 @@ async fn http_200_application_failures_do_not_accumulate_circuit_failures() {
             "id": "fixture-response",
             "model": "fixture-model",
             "status": "failed",
-            "error": {"code": "server_error", "message": "fixture application failure"}
+            "error": {"code": "fixture_application_error", "message": "fixture application failure"}
         }
     });
     let body = serde_json::to_vec(&payload).unwrap();

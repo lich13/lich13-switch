@@ -948,7 +948,7 @@ fn localized_platform_rpm_limits_are_classified_only_in_error_envelopes() {
     ];
     for message in messages {
         let error = json!({"error": {"message": message}});
-        let details = super::super::upstream_error::details_value(&error, true);
+        let details = super::super::failure_policy::details_value(&error, true);
         assert_eq!(
             details.error_basis,
             Some(crate::events::ErrorBasis::Rpm),
@@ -958,7 +958,7 @@ fn localized_platform_rpm_limits_are_classified_only_in_error_envelopes() {
 
     for code in ["GROUP_RPM_EXCEEDED", "USER_RPM_EXCEEDED"] {
         let error = json!({"error": {"code": code}});
-        let details = super::super::upstream_error::details_value(&error, true);
+        let details = super::super::failure_policy::details_value(&error, true);
         assert_eq!(
             details.error_basis,
             Some(crate::events::ErrorBasis::Rpm),
@@ -979,7 +979,7 @@ fn localized_platform_rpm_limits_are_classified_only_in_error_envelopes() {
         "You have reached the request limit: maximum 10 requests in 4294967296 minutes",
     ] {
         let error = json!({"error": {"message": message}});
-        let details = super::super::upstream_error::details_value(&error, true);
+        let details = super::super::failure_policy::details_value(&error, true);
         assert_ne!(
             details.error_basis,
             Some(crate::events::ErrorBasis::Rpm),
@@ -988,7 +988,7 @@ fn localized_platform_rpm_limits_are_classified_only_in_error_envelopes() {
     }
 
     let success = json!({"success": true, "message": messages[0]});
-    let details = super::super::upstream_error::details_value(&success, true);
+    let details = super::super::failure_policy::details_value(&success, true);
     assert_ne!(details.error_basis, Some(crate::events::ErrorBasis::Rpm));
 }
 

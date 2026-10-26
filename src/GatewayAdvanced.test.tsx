@@ -10,13 +10,16 @@ const mock = vi.hoisted(() => ({
 
 vi.mock("./bridge", () => ({
   command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (state: GatewayState) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
+  subscribe: vi.fn(
+    async (name: string, listener: (state: GatewayState) => void) => {
+      mock.listeners.set(name, listener);
+      return () => mock.listeners.delete(name);
+    },
+  ),
 }));
 
 import Gateway from "./Gateway";
+import Advanced from "./GatewayAdvanced";
 import QuotaRefreshSettings from "./QuotaRefreshSettings";
 import { claudeGatewayDemo, gatewayDemo } from "./gateway-preview";
 
@@ -29,37 +32,109 @@ beforeEach(() => {
   claudeState = structuredClone(claudeGatewayDemo);
   mock.command.mockReset();
   mock.listeners.clear();
-  mock.command.mockImplementation(async (name: string, args: Record<string, unknown> = {}) => {
-    if (name === "get_gateway") {
-      return structuredClone(args.clientId === "claude" ? claudeState : codexState);
-    }
-    if (name === "update_gateway") {
-      const edit = args.edit as { op?: string; settings?: GatewaySettings };
-      if (edit.op === "settings" && edit.settings) {
-        if (args.clientId === "claude") {
-          claudeState = { ...claudeState, settings: edit.settings, revision: "saved-claude" };
-          return structuredClone(claudeState);
-        }
-        codexState = { ...codexState, settings: edit.settings, revision: "saved-codex" };
-        return structuredClone(codexState);
+  mock.command.mockImplementation(
+    async (name: string, args: Record<string, unknown> = {}) => {
+      if (name === "get_gateway") {
+        return structuredClone(
+          args.clientId === "claude" ? claudeState : codexState,
+        );
       }
-    }
-    return undefined;
-  });
+      if (name === "update_gateway") {
+        const edit = args.edit as { op?: string; settings?: GatewaySettings };
+        if (edit.op === "settings" && edit.settings) {
+          if (args.clientId === "claude") {
+            claudeState = {
+              ...claudeState,
+              settings: edit.settings,
+              revision: "saved-claude",
+            };
+            return structuredClone(claudeState);
+          }
+          codexState = {
+            ...codexState,
+            settings: edit.settings,
+            revision: "saved-codex",
+          };
+          return structuredClone(codexState);
+        }
+      }
+      return undefined;
+    },
+  );
 });
 
 describe("gateway advanced settings", () => {
+  it("keeps both sections in one draft and retries a conflict without losing edits", async () => {
+    const user = userEvent.setup();
+    const save = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("版本冲突"))
+      .mockResolvedValueOnce(undefined);
+    const props = {
+      clientId: "codex" as const,
+      settings: codexState.settings,
+      revision: "original",
+      busy: false,
+      save,
+    };
+    const { rerender } = render(<Advanced {...props} />);
+    await user.click(screen.getByText("故障策略"));
+    const cooldown = screen.getByRole("spinbutton", {
+      name: "额度／认证冷却 / 秒",
+    });
+    expect(cooldown).toHaveValue(300);
+    await user.clear(cooldown);
+    await user.type(cooldown, "420");
+    await user.click(screen.getByText("高级设置"));
+    const queue = screen.getByRole("spinbutton", { name: "排队等待 / 秒" });
+    await user.clear(queue);
+    await user.type(queue, "70");
+    rerender(
+      <Advanced
+        {...props}
+        settings={{ ...props.settings, queueSeconds: 999 }}
+        revision="external"
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "保存参数" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("版本冲突");
+    expect(save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        hardFailureCooldownSeconds: 420,
+        queueSeconds: 70,
+      }),
+      "original",
+    );
+    expect(cooldown).toHaveValue(420);
+    expect(queue).toHaveValue(70);
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() =>
+      expect(save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          hardFailureCooldownSeconds: 420,
+          queueSeconds: 70,
+        }),
+        null,
+      ),
+    );
+  });
   it("shows the Codex WebSocket retry default and persists edits", async () => {
     localStorage.setItem("lich13-switch.main.client", "codex");
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
-    await user.click(screen.getByText("高级设置"));
+    await user.click(screen.getByText("故障策略"));
 
-    expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
-    const retry = screen.getByRole("spinbutton", { name: "WebSocket 断开等待 / 秒" });
+    expect(
+      screen.queryByRole("checkbox", { name: "压缩后接管" }),
+    ).not.toBeInTheDocument();
+    const retry = screen.getByRole("spinbutton", {
+      name: "WebSocket 断开等待 / 秒",
+    });
     expect(retry).toHaveValue(300);
-    const transient = screen.getByRole("spinbutton", { name: "5xx 连续失败阈值" });
+    const transient = screen.getByRole("spinbutton", {
+      name: "5xx 连续失败阈值",
+    });
     expect(transient).toHaveValue(6);
     expect(transient).toHaveAttribute("min", "1");
     expect(transient).toHaveAttribute("max", "1000");
@@ -84,8 +159,12 @@ describe("gateway advanced settings", () => {
         }),
       );
     });
-    const update = mock.command.mock.calls.find(([name]) => name === "update_gateway");
-    expect(update?.[1].edit.settings).not.toHaveProperty("handoffAfterCompaction");
+    const update = mock.command.mock.calls.find(
+      ([name]) => name === "update_gateway",
+    );
+    expect(update?.[1].edit.settings).not.toHaveProperty(
+      "handoffAfterCompaction",
+    );
   });
 
   it("does not expose WebSocket retry settings to Claude", async () => {
@@ -93,11 +172,17 @@ describe("gateway advanced settings", () => {
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
-    await user.click(screen.getByText("高级设置"));
+    await user.click(screen.getByText("故障策略"));
 
-    expect(screen.queryByLabelText("WebSocket 断开等待 / 秒")).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
-    const transient = screen.getByRole("spinbutton", { name: "5xx 连续失败阈值" });
+    expect(
+      screen.queryByLabelText("WebSocket 断开等待 / 秒"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "压缩后接管" }),
+    ).not.toBeInTheDocument();
+    const transient = screen.getByRole("spinbutton", {
+      name: "5xx 连续失败阈值",
+    });
     expect(transient).toHaveValue(6);
     await user.clear(transient);
     await user.type(transient, "8");
@@ -156,15 +241,18 @@ describe("quota refresh settings", () => {
     expect(mock.command).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["9", "86401", "10.5"])("rejects invalid enabled interval %s before submitting", async (value) => {
-    const user = userEvent.setup();
-    render(<QuotaRefreshSettings seconds={60} />);
-    const interval = screen.getByRole("spinbutton", { name: "额度刷新间隔" });
-    await user.clear(interval);
-    await user.type(interval, value);
-    await user.click(screen.getByRole("button", { name: "保存刷新设置" }));
+  it.each(["9", "86401", "10.5"])(
+    "rejects invalid enabled interval %s before submitting",
+    async (value) => {
+      const user = userEvent.setup();
+      render(<QuotaRefreshSettings seconds={60} />);
+      const interval = screen.getByRole("spinbutton", { name: "额度刷新间隔" });
+      await user.clear(interval);
+      await user.type(interval, value);
+      await user.click(screen.getByRole("button", { name: "保存刷新设置" }));
 
-    expect(interval).toBeInvalid();
-    expect(mock.command).not.toHaveBeenCalled();
-  });
+      expect(interval).toBeInvalid();
+      expect(mock.command).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -726,6 +726,9 @@ describe("quota and notification settings", () => {
     await screen.findByRole("heading", { name: "账号", level: 1 });
     await user.click(screen.getByRole("button", { name: /^设置/ }));
     const notifications = screen.getByRole("checkbox", { name: "系统提醒" });
+    const save = screen.getByRole("button", { name: "保存设置" });
+    const power = screen.getByText("电源助手").closest("fieldset")!;
+    expect(save.nextElementSibling).toBe(power);
     expect(notifications).toBeChecked();
     await user.click(notifications);
     expect(notifications).not.toBeChecked();

@@ -15,16 +15,11 @@ export function providerRuntimeStatus(
 ): string {
   const fault = providerFault(p);
   const limit = limitLabel(fault);
-  if (
-    limit &&
-    (fault?.errorBasis === "quota_exhausted" || limit.endsWith("已用尽"))
-  )
-    return limit;
   const capacity = state.capacityRetries?.find(
     (w) => w.providerId === p.id && w.existingOwner,
   );
   if (capacity)
-    return `${fault?.errorBasis === "rpm" ? "上游 RPM 限制" : "临时限流"} · 原供应商等待${capacity.retryIn}秒${p.quotaChecking ? " · 正在核验额度" : ""}`;
+    return `${limit || "临时限流"} · 原供应商等待${capacity.retryIn}秒${p.quotaChecking ? " · 正在核验额度" : ""}`;
   if (
     p.health.state !== "closed" ||
     p.modelHealth?.some((m) => m.health.state !== "closed")
@@ -93,7 +88,6 @@ export function providerStatus(p: Provider): string {
     }
   }
   const seconds = Math.max(0, h.retryIn);
-  if (reason.endsWith("已用尽") || reason === "额度已耗尽") return reason;
   if (h.probeInFlight)
     return ["恢复探测中", reason].filter(Boolean).join(" · ");
   if (h.state === "open")
@@ -102,9 +96,10 @@ export function providerStatus(p: Provider): string {
       .join(" · ");
   if (
     h.cooldownReason === "capacity_retry" ||
-    h.cooldownReason === "rate_limit"
+    h.cooldownReason === "rate_limit" ||
+    h.cooldownReason === "hard_rejection"
   )
-    return `${h.cause?.errorBasis === "rpm" ? "上游 RPM 限制" : h.cause?.status === 429 || h.cooldownReason === "rate_limit" ? "限流 429" : "容量不足"} · 等待${seconds}秒`;
+    return `${limitLabel(h.cause) || (h.cause?.status === 429 || h.cooldownReason === "rate_limit" ? "限流 429" : "容量不足")} · ${seconds ? `等待${seconds}秒` : "待请求探测"}`;
   if (
     h.cooldownReason === "single_provider_protected" ||
     h.cooldownReason === "retry_after"

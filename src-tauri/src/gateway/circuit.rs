@@ -90,6 +90,7 @@ struct State {
     retry_reason: Option<&'static str>,
     retry_probe: bool,
     retry_generation: u64,
+    rate_streak: u32,
     protected_single_provider: bool,
     protection: Option<Duration>,
     revision: u64,
@@ -112,6 +113,7 @@ impl Default for State {
             retry_reason: None,
             retry_probe: false,
             retry_generation: 0,
+            rate_streak: 0,
             protected_single_provider: false,
             protection: None,
             revision: 0,
@@ -193,6 +195,7 @@ pub enum Outcome {
     Failure(Option<Duration>),
     RateLimited(Option<Duration>),
     CapacityLimited(Option<Duration>),
+    HardRejected(Option<Duration>),
     Neutral,
 }
 pub struct Permit {
@@ -203,6 +206,7 @@ pub struct Permit {
     retry_probe: bool,
     complete: bool,
     failure_event: Option<crate::events::Record>,
+    prepared_delay: Option<Duration>,
 }
 impl Circuit {
     pub(super) fn protection(&self) -> Option<Duration> {
@@ -277,6 +281,7 @@ impl Circuit {
             retry_probe,
             complete: false,
             failure_event: None,
+            prepared_delay: None,
         })
     }
     pub fn set_single_provider_protection(&self, protection: Option<Duration>) {
@@ -315,6 +320,38 @@ impl Circuit {
     }
 }
 impl Permit {
+    pub(super) fn prepare_delay(
+        &mut self,
+        cfg: &Settings,
+        details: &crate::events::Details,
+    ) -> Option<Duration> {
+        let server = details.wait_seconds.map(Duration::from_secs);
+        self.prepared_delay = if super::failure_policy::hard_rejection(details) {
+            Some(
+                server
+                    .filter(|d| !d.is_zero())
+                    .unwrap_or(Duration::from_secs(cfg.hard_failure_cooldown_seconds)),
+            )
+        } else if details.error_basis == Some(crate::events::ErrorBasis::Capacity) {
+            Some(
+                server
+                    .unwrap_or_default()
+                    .max(Duration::from_secs(cfg.capacity_retry_seconds)),
+            )
+        } else if super::failure_policy::temporary(details) {
+            let streak = self.circuit.0.lock().unwrap().rate_streak.saturating_add(1);
+            let bytes = uuid::Uuid::new_v4().into_bytes();
+            Some(super::failure_policy::rate_delay(
+                cfg.rate_limit_seconds,
+                streak,
+                server,
+                u16::from_le_bytes([bytes[0], bytes[1]]),
+            ))
+        } else {
+            None
+        };
+        self.prepared_delay
+    }
     pub fn set_failure_event(&mut self, event: crate::events::Record) {
         self.failure_event = Some(event);
     }
@@ -338,28 +375,43 @@ impl Permit {
         match outcome {
             Outcome::Neutral => (),
             Outcome::RateLimited(retry) => {
-                let base = retry.unwrap_or(Duration::from_secs(cfg.rate_limit_seconds));
-                let delay = if protected_single_provider {
-                    base.max(Duration::from_secs(cfg.capacity_retry_seconds))
-                } else {
-                    base
-                };
-                s.cooldown(
-                    delay,
-                    if protected_single_provider {
-                        "capacity_retry"
-                    } else {
-                        "rate_limit"
-                    },
-                );
+                s.rate_streak = s.rate_streak.saturating_add(1);
+                let bytes = uuid::Uuid::new_v4().into_bytes();
+                let delay = self.prepared_delay.unwrap_or_else(|| {
+                    super::failure_policy::rate_delay(
+                        cfg.rate_limit_seconds,
+                        s.rate_streak,
+                        retry,
+                        u16::from_le_bytes([bytes[0], bytes[1]]),
+                    )
+                });
+                s.cooldown(delay, "rate_limit");
                 s.protected_single_provider |= protected_single_provider;
+            }
+            Outcome::HardRejected(retry) => {
+                s.cooldown(
+                    self.prepared_delay
+                        .or(retry)
+                        .filter(|d| !d.is_zero())
+                        .unwrap_or(Duration::from_secs(cfg.hard_failure_cooldown_seconds)),
+                    "hard_rejection",
+                );
+                s.phase = CircuitState::Closed;
+                s.until = None;
+                s.samples.clear();
+                s.failures = 0;
+                s.successes = 0;
+                s.total = 0;
+                s.failed = 0;
             }
             Outcome::CapacityLimited(retry) => {
                 // Capacity cooldown is separate from the normal 429/fault
                 // policy. Even when the upstream sends a shorter hint, keep
                 // the Codex capacity retry floor so another request does not
                 // immediately stampede the same unavailable model.
-                let delay = retry
+                let delay = self
+                    .prepared_delay
+                    .or(retry)
                     .unwrap_or_default()
                     .max(Duration::from_secs(cfg.capacity_retry_seconds));
                 s.cooldown(delay, "capacity_retry");
@@ -369,6 +421,7 @@ impl Permit {
                 if self.retry_probe && self.retry_generation == s.retry_generation {
                     s.retry_until = None;
                     s.retry_reason = None;
+                    s.rate_streak = 0;
                 }
                 // An earlier request completing successfully cannot erase a
                 // newer cooldown or release its recovery probe.
@@ -397,7 +450,9 @@ impl Permit {
                     use crate::errors::code;
                     use crate::events::{Phase, Reason};
                     (event.reason == Reason::UpstreamService
-                        && event.status.is_some_and(is_server_error))
+                        && (event.status.is_some_and(is_server_error)
+                            || event.details.error_basis
+                                == Some(crate::events::ErrorBasis::ServiceError)))
                         || (event.reason == Reason::Network
                             && event.status.is_none()
                             && matches!(
@@ -529,8 +584,9 @@ impl Drop for Permit {
         }
     }
 }
+#[cfg(test)]
 pub fn retryable(status: u16) -> bool {
-    status >= 400 && ![400, 405, 406, 413, 414, 415, 422].contains(&status)
+    super::failure_policy::retryable_status(status)
 }
 pub fn is_server_error(status: u16) -> bool {
     (500..=599).contains(&status)
@@ -550,9 +606,9 @@ pub(super) fn retry_seconds(value: &str) -> Option<Duration> {
         return None;
     }
     let seconds = whole.parse::<u64>().ok()?;
-    if seconds >= 86_400 {
-        return Some(Duration::from_secs(86_400));
-    }
+    // Keep server deadlines beyond one day. Bound only values that cannot be
+    // represented by the monotonic clock; never replace them with an earlier retry.
+    std::time::Instant::now().checked_add(Duration::from_secs(seconds))?;
     let mut nanos = fraction
         .bytes()
         .take(9)
@@ -564,16 +620,14 @@ pub(super) fn retry_seconds(value: &str) -> Option<Duration> {
     Some(Duration::from_secs(seconds) + Duration::from_nanos(nanos as u64))
 }
 pub fn retry_after(value: &str) -> Option<Duration> {
-    retry_seconds(value.trim())
-        .or_else(|| {
-            Some(
-                httpdate::parse_http_date(value)
-                    .ok()?
-                    .duration_since(std::time::SystemTime::now())
-                    .unwrap_or_default(),
-            )
-        })
-        .map(|d| d.min(Duration::from_secs(86400)))
+    retry_seconds(value.trim()).or_else(|| {
+        Some(
+            httpdate::parse_http_date(value)
+                .ok()?
+                .duration_since(std::time::SystemTime::now())
+                .unwrap_or_default(),
+        )
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -622,10 +676,10 @@ mod tests {
     }
     #[test]
     fn classification_and_retry_after() {
-        for s in [400, 405, 406, 413, 414, 415, 422] {
+        for s in [400, 404, 405, 406, 409, 413, 414, 415, 422, 501] {
             assert!(!retryable(s));
         }
-        for s in [401, 403, 408, 429, 500, 501, 502, 503, 504, 507, 599] {
+        for s in [401, 403, 408, 429, 500, 502, 503, 504, 507, 599] {
             assert!(retryable(s));
         }
         let c = Circuit::default();
@@ -641,14 +695,38 @@ mod tests {
 mod cooldown_tests {
     use super::*;
     #[test]
-    fn rate_limit_uses_exact_hint_and_does_not_poison_fault_statistics() {
+    fn hard_rejection_allows_only_one_on_demand_probe_and_recools_on_failure() {
+        let c = Circuit::default();
+        let cfg = Settings::default();
+        let earlier = c.acquire(false).unwrap();
+        c.acquire(false)
+            .unwrap()
+            .finish(Outcome::HardRejected(None), &cfg);
+        assert_eq!(c.health().retry_in, 300);
+        assert_eq!(c.health().failures, 0);
+        assert!(c.acquire(true).is_none());
+        earlier.finish(Outcome::Success, &cfg);
+        assert!(!c.health().available);
+        c.0.lock().unwrap().retry_until = Some(Instant::now());
+        let probe = c.acquire(false).unwrap();
+        assert!(c.acquire(false).is_none());
+        assert!(c.acquire(true).is_none());
+        probe.finish(Outcome::HardRejected(None), &cfg);
+        assert_eq!(c.health().retry_in, 300);
+        c.0.lock().unwrap().retry_until = Some(Instant::now());
+        c.acquire(false).unwrap().finish(Outcome::Success, &cfg);
+        assert!(c.health().available);
+        assert!(c.health().cooldown_reason.is_none());
+    }
+    #[test]
+    fn rate_limit_respects_local_floor_and_does_not_poison_fault_statistics() {
         let c = Circuit::default();
         let cfg = Settings::default();
         let stale = c.acquire(false).unwrap();
         c.acquire(false)
             .unwrap()
             .finish(Outcome::RateLimited(Some(Duration::from_secs(2))), &cfg);
-        assert_eq!(c.health().retry_in, 2);
+        assert!((5..=6).contains(&c.health().retry_in));
         assert_eq!(c.health().failures, 0);
         assert_eq!(c.health().requests, 0);
         assert_eq!(c.health().state, CircuitState::Closed);
@@ -671,12 +749,14 @@ mod cooldown_tests {
         c.acquire(false)
             .unwrap()
             .finish(Outcome::RateLimited(None), &cfg);
-        assert_eq!(c.health().retry_in, 5);
+        assert!((5..=6).contains(&c.health().retry_in));
         c.reset();
         c.acquire(false)
             .unwrap()
             .finish(Outcome::RateLimited(retry_after("0")), &cfg);
-        assert!(c.health().available);
+        assert!(!c.health().available);
+        assert!((5..=6).contains(&c.health().retry_in));
+        c.reset();
         c.acquire(false)
             .unwrap()
             .finish(Outcome::Failure(Some(Duration::from_secs(120))), &cfg);

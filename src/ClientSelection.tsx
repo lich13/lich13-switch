@@ -53,33 +53,30 @@ export default function ClientSelection({
   select,
   disabled = false,
   includeDsh = true,
+  visibleClients = clients,
 }: {
   client: ClientId;
   select: (id: ClientId) => void;
   disabled?: boolean;
   includeDsh?: boolean;
+  visibleClients?: readonly ClientId[];
 }) {
   return (
     <nav className="segmented client-selection" aria-label="客户端">
-      {(
-        [
-          "codex",
-          "claude",
-          "grok",
-          ...(includeDsh ? ["dsh" as const] : []),
-          "agy",
-        ] as const
-      ).map((id) => (
-        <button
-          key={id}
-          data-client-switch
-          disabled={disabled}
-          aria-pressed={id === client}
-          onClick={() => select(id)}
-        >
-          {clientName(id)}
-        </button>
-      ))}
+      {visibleClients
+        .filter((id) => includeDsh || id !== "dsh")
+        .map((id) => (
+          <button
+            key={id}
+            type="button"
+            data-client-switch
+            disabled={disabled}
+            aria-pressed={id === client}
+            onClick={() => select(id)}
+          >
+            {clientName(id)}
+          </button>
+        ))}
     </nav>
   );
 }

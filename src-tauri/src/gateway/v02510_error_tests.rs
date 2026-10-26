@@ -1,9 +1,9 @@
 //! v0.25.10 upstream error classification boundaries.
 //!
 //! Fixtures are synthetic and contain no credentials or user content.  These
-//! tests stay at the bounded `upstream_error` API so routing tests can assert
+//! tests stay at the bounded `failure_policy` API so routing tests can assert
 //! the same evidence without opening arbitrary response text.
-use super::upstream_error;
+use super::failure_policy;
 use crate::events::{Details, ErrorBasis, HealthScope};
 use serde_json::{json, Value};
 
@@ -26,7 +26,7 @@ fn daily_usage_limit_is_permanent_for_403_and_429_and_retains_reason_code() {
             Some("DAILY_LIMIT_EXCEEDED"),
             "daily usage limit exceeded",
         );
-        let details = upstream_error::details_value(&value, true);
+        let details = failure_policy::details_value(&value, true);
         let expected_code = status.to_string();
 
         assert_eq!(
@@ -39,7 +39,7 @@ fn daily_usage_limit_is_permanent_for_403_and_429_and_retains_reason_code() {
         );
         assert_eq!(details.error_basis, Some(ErrorBasis::QuotaExhausted));
         assert_eq!(details.health_scope, Some(HealthScope::Provider));
-        assert!(upstream_error::permanent_rejection(
+        assert!(failure_policy::permanent_rejection(
             value.to_string().as_bytes()
         ));
     }
@@ -48,13 +48,13 @@ fn daily_usage_limit_is_permanent_for_403_and_429_and_retains_reason_code() {
 #[test]
 fn daily_quota_exhausted_message_is_permanent_without_promoting_free_form_text() {
     let value = error_body(json!(429), None, "daily quota exhausted");
-    let details = upstream_error::details_value(&value, true);
+    let details = failure_policy::details_value(&value, true);
 
     assert_eq!(details.upstream_code.as_deref(), Some("429"));
     assert_eq!(details.upstream_reason, None);
     assert_eq!(details.error_basis, Some(ErrorBasis::QuotaExhausted));
     assert_eq!(details.health_scope, Some(HealthScope::Provider));
-    assert!(upstream_error::permanent_rejection(
+    assert!(failure_policy::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
@@ -84,7 +84,7 @@ fn daily_weekly_and_monthly_quota_reasons_messages_and_chinese_are_permanent() {
 
     for (reason, message) in fixtures {
         let value = error_body(json!(429), reason, message);
-        let details = upstream_error::details_value(&value, true);
+        let details = failure_policy::details_value(&value, true);
 
         assert_eq!(
             details.error_basis,
@@ -97,7 +97,7 @@ fn daily_weekly_and_monthly_quota_reasons_messages_and_chinese_are_permanent() {
             "{message}"
         );
         assert!(
-            upstream_error::permanent_rejection(value.to_string().as_bytes()),
+            failure_policy::permanent_rejection(value.to_string().as_bytes()),
             "{message}"
         );
         if let Some(reason) = reason {
@@ -115,7 +115,7 @@ fn usage_limit_exceeded_stays_temporary_and_preserves_its_reason_code() {
         Some("USAGE_LIMIT_EXCEEDED"),
         "try again after the short window",
     );
-    let details = upstream_error::details_value(&value, true);
+    let details = failure_policy::details_value(&value, true);
 
     assert_eq!(details.upstream_code.as_deref(), Some("429"));
     assert_eq!(
@@ -124,8 +124,8 @@ fn usage_limit_exceeded_stays_temporary_and_preserves_its_reason_code() {
     );
     assert_eq!(details.error_basis, Some(ErrorBasis::UsageLimit));
     assert_eq!(details.health_scope, None);
-    assert!(upstream_error::temporary_capacity_event(&value));
-    assert!(!upstream_error::permanent_rejection(
+    assert!(failure_policy::temporary_capacity_event(&value));
+    assert!(!failure_policy::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
@@ -138,12 +138,16 @@ fn negative_and_descriptive_daily_quota_text_does_not_become_permanent() {
         "documentation: daily quota exhausted describes the provider policy",
     ] {
         let value = error_body(json!(429), None, message);
-        let details = upstream_error::details_value(&value, true);
+        let details = failure_policy::details_value(&value, true);
 
-        assert_eq!(details.error_basis, None, "{message}");
+        assert_eq!(
+            details.error_basis,
+            Some(ErrorBasis::UnknownRateLimit),
+            "{message}"
+        );
         assert_eq!(details.health_scope, None, "{message}");
         assert!(
-            !upstream_error::permanent_rejection(value.to_string().as_bytes()),
+            !failure_policy::permanent_rejection(value.to_string().as_bytes()),
             "{message}"
         );
     }
@@ -161,11 +165,11 @@ fn successful_content_never_classifies_embedded_quota_text() {
     });
 
     assert_eq!(
-        upstream_error::details_value(&value, false),
+        failure_policy::details_value(&value, false),
         Details::default()
     );
-    assert!(!upstream_error::temporary_capacity_event(&value));
-    assert!(!upstream_error::permanent_rejection(
+    assert!(!failure_policy::temporary_capacity_event(&value));
+    assert!(!failure_policy::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
@@ -178,19 +182,19 @@ fn oversized_and_sensitive_error_text_never_classify_or_echo_content() {
             "message": "request body contains daily quota exhausted and fixture-secret"
         }
     });
-    let details = upstream_error::details_value(&sensitive, true);
-    assert_eq!(details.error_basis, None);
+    let details = failure_policy::details_value(&sensitive, true);
+    assert_eq!(details.error_basis, Some(ErrorBasis::UnknownRateLimit));
     assert_eq!(details.health_scope, None);
     assert_eq!(details.message, None);
-    assert!(!upstream_error::permanent_rejection(
+    assert!(!failure_policy::permanent_rejection(
         sensitive.to_string().as_bytes()
     ));
 
     let mut oversized =
         br#"{"error":{"code":429,"message":"daily quota exhausted"},"padding":""}"#.to_vec();
     oversized.extend(std::iter::repeat_n(b'x', 128 * 1024));
-    assert_eq!(upstream_error::details_http(&oversized), Details::default());
-    assert!(!upstream_error::permanent_rejection(&oversized));
+    assert_eq!(failure_policy::details_http(&oversized), Details::default());
+    assert!(!failure_policy::permanent_rejection(&oversized));
 }
 
 #[test]
@@ -202,7 +206,7 @@ fn rpm_descriptions_and_negations_do_not_override_ambiguous_usage_evidence() {
     ] {
         let value = error_body(json!(429), Some("USAGE_LIMIT_EXCEEDED"), message);
         assert_eq!(
-            upstream_error::details_value(&value, true).error_basis,
+            failure_policy::details_value(&value, true).error_basis,
             Some(ErrorBasis::UsageLimit),
             "{message}"
         );
@@ -210,7 +214,7 @@ fn rpm_descriptions_and_negations_do_not_override_ambiguous_usage_evidence() {
     for message in ["requests per minute limit exceeded", "RPM limit exceeded"] {
         let value = error_body(json!(429), None, message);
         assert_eq!(
-            upstream_error::details_value(&value, true).error_basis,
+            failure_policy::details_value(&value, true).error_basis,
             Some(ErrorBasis::Rpm),
             "{message}"
         );
@@ -231,7 +235,7 @@ fn retry_after_accepts_decimal_and_http_date_without_rounding_ahead_of_the_deadl
     );
     assert_eq!(
         circuit::retry_after("86401.1"),
-        Some(Duration::from_secs(86400))
+        Some(Duration::from_millis(86_401_100))
     );
     for invalid in ["-1", "NaN", "Infinity", "1.2.3", "1.", "+2"] {
         assert_eq!(circuit::retry_after(invalid), None, "{invalid}");
@@ -243,7 +247,7 @@ fn retry_after_accepts_decimal_and_http_date_without_rounding_ahead_of_the_deadl
         "code":"rate_limit_exceeded","retry_after_seconds":1.25,
         "resets_in_seconds":"2.5"}});
     assert_eq!(
-        upstream_error::retry_after_value(&event),
+        failure_policy::retry_after_value(&event),
         Some(Duration::from_millis(2500))
     );
 }

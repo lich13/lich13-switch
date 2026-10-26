@@ -401,11 +401,11 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
         chinese_balance.as_slice(),
     ] {
         assert!(
-            super::upstream_error::permanent_rejection(body),
+            super::failure_policy::permanent_rejection(body),
             "expected explicit balance or key marker in {:?}",
             std::str::from_utf8(body).unwrap()
         );
-        let details = super::upstream_error::details_http(body);
+        let details = super::failure_policy::details_http(body);
         assert_eq!(
             details.health_scope,
             Some(crate::events::HealthScope::Provider)
@@ -417,11 +417,11 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
         br#"{"errorKey":"USAGE_LIMIT_EXCEEDED","errorMessage":"fixture quota"}"#.as_slice(),
     ] {
         assert!(
-            !super::upstream_error::permanent_rejection(body),
+            !super::failure_policy::permanent_rejection(body),
             "usage-limit marker should remain temporary: {:?}",
             std::str::from_utf8(body).unwrap()
         );
-        let details = super::upstream_error::details_http(body);
+        let details = super::failure_policy::details_http(body);
         assert_eq!(details.health_scope, None);
         assert_eq!(
             details.upstream_code.as_deref(),
@@ -429,8 +429,8 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
         );
     }
 
-    let temporary = super::upstream_error::details_http(V022_TEMPORARY_429);
-    assert!(!super::upstream_error::permanent_rejection(
+    let temporary = super::failure_policy::details_http(V022_TEMPORARY_429);
+    assert!(!super::failure_policy::permanent_rejection(
         V022_TEMPORARY_429
     ));
     assert_eq!(temporary.health_scope, None);
@@ -788,7 +788,11 @@ async fn v022_invalid_api_key_marks_provider_scope() {
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let provider = &gateway.view().providers[0];
-    assert!(provider.health.failures >= 1);
+    assert_eq!(provider.health.failures, 0);
+    assert_eq!(
+        provider.health.cooldown_reason.as_deref(),
+        Some("hard_rejection")
+    );
     assert!(provider.model_health.is_empty());
     gateway.stop().await.unwrap();
 }

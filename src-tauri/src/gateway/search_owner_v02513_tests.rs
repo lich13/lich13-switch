@@ -1122,10 +1122,15 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
     let record = rows
         .iter()
         .find(|r| {
-            r.final_attempt()
-                .is_some_and(|a| a.operation == Operation::WebSearch)
+            r.attempts.len() == 2
+                && r.final_attempt()
+                    .is_some_and(|a| a.operation == Operation::WebSearch)
         })
         .unwrap();
+    assert!(rows.iter().any(|r| r.attempts.len() == 1
+        && r.final_attempt()
+            .is_some_and(|a| a.operation == Operation::WebSearch
+                && a.provider.as_deref() == Some(ids[0].as_str()))));
     assert_eq!(record.attempts.len(), 2);
     assert_eq!(
         record.attempts[0].provider.as_deref(),
@@ -1135,7 +1140,7 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
         record.attempts[1].provider.as_deref(),
         Some(ids[0].as_str())
     );
-    assert_eq!(owner_hits.load(Ordering::SeqCst), 3);
+    assert_eq!(owner_hits.load(Ordering::SeqCst), 2);
     assert_eq!(fallback_hits.load(Ordering::SeqCst), 2);
     assert_eq!(gateway.0.compaction.owner(&digest), Some(ids[1].clone()));
     assert!(gateway.0.compaction.boundary_matches(
@@ -1144,6 +1149,47 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
     ));
     assert_eq!(gateway.0.admission.reserved(&ids[0]), 0);
     assert_eq!(gateway.0.admission.reserved(&ids[1]), 1);
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn search_safety_rejection_never_uses_a_backup() {
+    let owner = super::v022_server(|request| async move {
+        if !request.uri().path().ends_with("/alpha/search") {
+            return super::v022_json_response(StatusCode::OK, super::v022_seed_response());
+        }
+        super::v022_json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error":{"code":"content_policy_violation"}}).to_string(),
+        )
+    })
+    .await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let backup = super::v022_server(move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        async { super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE)) }
+    })
+    .await;
+    let (dir, gateway) = super::v022_fixture(vec![
+        format!("http://127.0.0.1:{owner}/v1"),
+        format!("http://127.0.0.1:{backup}/v1"),
+    ])
+    .await;
+    let ids = super::v022_ids(&gateway);
+    super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1]));
+    configure_search_owner(&gateway, &dir, &ids[0]);
+    let thread = "fixture-search-safety";
+    seed_owner(&dir, &gateway, thread, &ids[0]).await;
+    let response = search_request(
+        &gateway,
+        "/v1/alpha/search",
+        &[("thread-id", thread)],
+        SEARCH_REQUEST,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
     gateway.stop().await.unwrap();
 }
 

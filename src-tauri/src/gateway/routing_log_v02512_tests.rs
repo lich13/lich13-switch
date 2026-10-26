@@ -448,7 +448,7 @@ async fn queued_protocol_failure_settles_the_current_routing_generation_silently
     protocol.response(502, false, "identity");
     protocol.associate_failure(generation);
     protocol.feed(
-        br#"{"error":{"type":"server_error","code":"fixture_upstream_error","message":"synthetic fixture failure"}}"#,
+        br#"{"error":{"type":"server_error","code":"fixture_failure_policy","message":"synthetic fixture failure"}}"#,
     );
     protocol.finish(Some(502), crate::errors::code::HTTP);
     let report = protocol.report_failure(|| {

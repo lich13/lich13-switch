@@ -527,9 +527,18 @@ async fn exhausted_candidates_return_failure_within_the_retry_budget() {
     })
     .await;
     let fixture = Fixture::new(&[upstream.url("/v1"), upstream.url("/other/v1")], false).await;
+    let mut settings = fixture.gateway.view().settings;
+    settings.retry_budget_seconds = 1;
+    fixture
+        .gateway
+        .edit(
+            Edit::Settings { settings },
+            &fixture.gateway.view().revision,
+            fixture.home.path(),
+        )
+        .unwrap();
     let response = fixture.request(models::FLASH, false).await;
-    assert_eq!(response.status(), 429);
-    assert_eq!(response.headers()["retry-after"], "1");
+    assert_eq!(response.status(), 504);
     response.bytes().await.unwrap();
     assert_eq!(*calls.lock().unwrap(), 2);
     fixture.gateway.stop().await.unwrap();

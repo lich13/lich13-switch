@@ -290,18 +290,7 @@ impl AttemptFailure {
         }
     }
     fn hard_rejection(&self) -> bool {
-        if self.details.health_scope == Some(crate::events::HealthScope::Provider) {
-            return true;
-        }
-        [
-            &self.details.upstream_code,
-            &self.details.upstream_reason,
-            &self.details.upstream_type,
-            &self.details.message,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| super::upstream_error::permanent_rejection(value.as_bytes()))
+        super::failure_policy::hard_rejection(&self.details)
     }
     fn transport_failure(&self) -> bool {
         self.status.is_none()
@@ -320,9 +309,9 @@ impl AttemptFailure {
             )
     }
     fn retryable(&self) -> bool {
-        (self.hard_rejection() && self.status.is_some_and(|s| s >= 400))
-            || self.transport_failure()
-            || self.status.is_some_and(circuit::retryable)
+        self.transport_failure()
+            || self.model_unavailable
+            || super::failure_policy::decision(self.status, &self.details).retryable
     }
 }
 fn local_failure(code: &str) -> Box<crate::events::Details> {
@@ -341,51 +330,28 @@ fn record_failure(
     attempt: usize,
 ) -> super::health_settlement::Reported {
     use crate::events::Reason;
-    let reason = if failure.context_incompatible {
+    let reason = if failure.context_incompatible || failure.unsupported {
         Reason::ProtocolError
     } else if failure.model_unavailable {
         Reason::ModelUnavailable
-    } else if failure.capacity {
-        Reason::Capacity
-    } else if failure.details.error_basis == Some(crate::events::ErrorBasis::QuotaExhausted)
-        || (failure.hard_rejection() && failure.status == Some(429))
-    {
-        Reason::UpstreamService
-    } else if failure.status == Some(429) {
-        Reason::RateLimit
-    } else if matches!(failure.status, Some(401 | 403)) {
-        Reason::Authentication
     } else if failure.transport_failure() {
         Reason::Network
-    } else if failure.status.is_some_and(|s| s < 400) || failure.unsupported {
-        Reason::ProtocolError
     } else {
-        Reason::UpstreamService
+        super::failure_policy::decision(failure.status, &failure.details).reason
     };
     let mut details = (*failure.details).clone();
-    if details.error_basis == Some(crate::events::ErrorBasis::Rpm) {
-        let delay = failure.retry.unwrap_or_else(|| {
-            Duration::from_secs(
-                g.0.inner
-                    .lock()
-                    .unwrap()
-                    .store
-                    .settings
-                    .capacity_retry_seconds,
-            )
-        });
-        g.0.admission.rpm_backoff(&route.provider.id, delay);
-    }
+    details.wait_seconds = failure
+        .retry
+        .map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
     details
         .phase
         .get_or_insert(crate::events::Phase::WsHandshake);
     details.counted_failure = Some(
         !failure.context_incompatible
             && !failure.model_unavailable
-            && !failure.capacity
             && !failure.unsupported
-            && (failure.status != Some(429) || failure.hard_rejection())
-            && (failure.retryable() || failure.hard_rejection()),
+            && (failure.transport_failure()
+                || super::failure_policy::decision(failure.status, &details).counted_failure),
     );
     permits.report(
         g,
@@ -667,16 +633,16 @@ async fn upstream_native(
             .and_then(|h| h.to_str().ok())
             .unwrap_or("identity")
             .to_owned();
-        let prefix = response_prefix(response.into_body(), 128 * 1024, settings).await;
+        let (response_parts, response_body) = response.into_parts();
+        let prefix = response_prefix(response_body, 128 * 1024, settings).await;
         let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
-        let retry = retry.max(super::upstream_error::retry_after_http(&decoded));
-        let details = super::upstream_error::details_http(&decoded);
-        let global_rejection = details.health_scope == Some(crate::events::HealthScope::Provider);
-        let model_unavailable = super::upstream_error::model_http(status.as_u16(), &decoded);
-        let capacity = !model_unavailable
-            && !global_rejection
-            && route.client_id == super::ClientId::Codex
-            && forward::capacity_message(status, &decoded);
+        let (details, policy_retry) =
+            super::failure_policy::http(status.as_u16(), &response_parts.headers, &decoded);
+        let retry = retry.max(policy_retry);
+        let global_rejection = super::failure_policy::hard_rejection(&details);
+        let model_unavailable = super::failure_policy::model_http(status.as_u16(), &decoded);
+        let capacity =
+            !model_unavailable && !global_rejection && super::failure_policy::temporary(&details);
         return Err(AttemptFailure {
             status: Some(status.as_u16()),
             retry,
@@ -804,11 +770,11 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
     let v = value(frame)?;
     let mut observation = super::protocol::Observation::default();
     observation.value(&v);
-    let details = super::upstream_error::details_value(&v, false);
-    let temporary = super::upstream_error::temporary_capacity_event(&v);
+    let details = super::failure_policy::details_value(&v, false);
+    let temporary = super::failure_policy::temporary_capacity_event(&v);
     if !observation.compaction_incompatible
         && !temporary
-        && details.health_scope != Some(crate::events::HealthScope::Provider)
+        && !super::failure_policy::hard_rejection(&details)
         && !matches!(
             observation.terminal,
             Some(super::protocol::Terminal::Failure | super::protocol::Terminal::ModelUnavailable)
@@ -816,45 +782,15 @@ fn first_event_failure(frame: &Frame) -> Option<AttemptFailure> {
     {
         return None;
     }
-    let error = v
-        .pointer("/response/error")
-        .or_else(|| v.get("error"))
-        .unwrap_or(&v);
-    let code = error
-        .get("code")
-        .or_else(|| error.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let status = v
-        .get("status")
-        .or_else(|| error.get("status"))
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u16::try_from(v).ok())
-        .unwrap_or(502);
-    let capacity = details.health_scope != Some(crate::events::HealthScope::Provider)
-        && (temporary
-            || matches!(
-                code,
-                "rate_limit_exceeded"
-                    | "rate_limit_error"
-                    | "overloaded_error"
-                    | "model_capacity_exceeded"
-                    | "server_is_overloaded"
-                    | "slow_down"
-                    | "usage_limit_reached"
-            )
-            || forward::capacity_message(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-                frame.payload(),
-            ));
+    let capacity = temporary;
     Some(AttemptFailure {
         status: Some(101),
-        retry: super::upstream_error::retry_after_value(&v),
+        retry: super::failure_policy::retry_after_value(&v),
         capacity,
         unsupported: false,
-        model_unavailable: super::upstream_error::model_error(&v),
+        model_unavailable: super::failure_policy::model_error(&v),
         context_incompatible: super::compaction::incompatible(&v),
-        model_payload: (super::upstream_error::model_error(&v)
+        model_payload: (super::failure_policy::model_error(&v)
             || super::compaction::incompatible(&v))
         .then(|| frame.payload().to_vec()),
         details: Box::new(details),
@@ -1793,6 +1729,11 @@ async fn session_once(
                     admission.permits.neutral(cfg);
                 }
 
+                if failure.capacity {
+                    failure.retry = failure.retry.max(Some(Duration::from_secs(
+                        admission.route.health_for(&requirement).retry_in,
+                    )));
+                }
                 if !retryable {
                     failover.finish(super::failover::Exit::PermanentRejection);
                     return Err((1008, "upstream rejected websocket handshake"));
@@ -1977,10 +1918,8 @@ async fn session_once(
                 }
                 return Err((1013, "all eligible providers failed"));
             }
-            let delay = if retry_immediately {
+            let delay = if retry_immediately || retry_capacity {
                 0
-            } else if retry_capacity {
-                cfg.capacity_retry_seconds
             } else {
                 cfg.websocket_retry_seconds
             }
@@ -2999,7 +2938,7 @@ async fn session_once(
                         if ordinary_attempts <= cfg.max_retries {
                             if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), code::CLIENT_ERROR); }
                             if let Some(mut admission) = turn.take() {
-                                let details = value(&frame).map(|v| super::upstream_error::details_value(&v, false)).unwrap_or_default();
+                                let details = value(&frame).map(|v| super::failure_policy::details_value(&v, false)).unwrap_or_default();
                                 let emit = || admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::TryingNext, Some(101), attempts, crate::events::Details { counted_failure: Some(false), ..details });
                                 if let Some(u) = &protocol { u.report_failure(emit); } else { emit(); }
                                 admission.permits.neutral(cfg);
@@ -3017,8 +2956,8 @@ async fn session_once(
                 // A structured rejection before the first output is replay-safe.
                 // Re-evaluate the same failure queue used by HTTP, retaining the
                 // compaction claim and the exact original response.create frame.
-                if route.client_id != super::ClientId::Claude && turn.is_some() && !received {
-                    if let Some(mut failure) = first_event_failure(&frame).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable) {
+                if turn.is_some() && !received {
+                    if let Some(mut failure) = first_event_failure(&frame).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable || f.details.error_basis == Some(crate::events::ErrorBasis::ServiceError)) {
                         failover.failure(failure.classification());
                         let wait_same = failure.capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
                         owner_capacity_wait = if wait_same { turn.as_ref().map(|admission| CapacitySource { provider_id: route.provider.id.clone(), reset_generation: admission.reset_generation }) } else { None };

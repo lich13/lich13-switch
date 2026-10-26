@@ -1151,16 +1151,16 @@ async fn v024_http_first_sse_account_rejection_fails_over_with_bounded_evidence(
     assert_eq!(result["provider"], "ordinary");
     assert_eq!(
         rejection_event.details.counted_failure,
-        Some(true),
-        "the HTTP 200 first-event account rejection must be counted as a provider failure"
+        Some(false),
+        "account cooldown must remain separate from ordinary circuit failures"
     );
     assert_eq!(
         rejection_event.details.health_scope,
         Some(crate::events::HealthScope::Provider)
     );
     assert_eq!(
-        first_provider.health.failures, 1,
-        "the first provider circuit must record the rejected account"
+        first_provider.health.failures, 0,
+        "account rejection must not add ordinary circuit failures"
     );
     v024_assert_failover_evidence(
         &failover_record,

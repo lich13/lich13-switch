@@ -61,6 +61,7 @@ fn default_settings_match_current_serialization() {
             "cooldownSeconds": 60,
             "rateLimitSeconds": 5,
             "capacityRetrySeconds": 60,
+            "hardFailureCooldownSeconds": 300,
             "websocketRetrySeconds": 300,
             "threadIdleReleaseSeconds": 300,
             "endpointProbeSeconds": 300,
@@ -74,6 +75,98 @@ fn default_settings_match_current_serialization() {
             "maxWaiting": 100
         })
     );
+}
+
+#[test]
+fn http_json_sse_and_websocket_share_classification_scope_and_settlement() {
+    use crate::events::{Action, Reason};
+    for (code, scope, cooldown) in [
+        (
+            "insufficient_quota",
+            HealthScope::Provider,
+            "hard_rejection",
+        ),
+        ("invalid_api_key", HealthScope::Provider, "hard_rejection"),
+        ("tpm_limit_exceeded", HealthScope::Model, "rate_limit"),
+        (
+            "concurrency_limit_exceeded",
+            HealthScope::Model,
+            "rate_limit",
+        ),
+        (
+            "model_capacity_exceeded",
+            HealthScope::Model,
+            "capacity_retry",
+        ),
+    ] {
+        let event = json!({"type":"error","error":{"code":code}});
+        for transport in ["http", "json", "sse", "websocket"] {
+            let (_data, gateway, route) = fixture();
+            let mut permits = permits(&route);
+            let mut protocol = Protocol::new(transport != "json");
+            if transport == "http" {
+                let (d, wait) = super::failure_policy::http(
+                    429,
+                    &hyper::HeaderMap::new(),
+                    event.to_string().as_bytes(),
+                );
+                permits.report(
+                    &gateway,
+                    &route,
+                    Some(MODEL),
+                    Reason::UpstreamService,
+                    Action::Returned,
+                    Some(429),
+                    1,
+                    d,
+                );
+                permits.failure(&settings(), wait);
+            } else {
+                if transport == "sse" {
+                    protocol.response(200, true, "identity");
+                    protocol.feed(format!("event: error\ndata: {event}\n\n").as_bytes());
+                } else {
+                    protocol.value(&event);
+                }
+                settlement::observe_protocol(
+                    &protocol,
+                    &mut permits,
+                    &settings(),
+                    &gateway,
+                    &route,
+                    Some(MODEL),
+                    Some(200),
+                    1,
+                );
+            }
+            let provider = route.provider_circuit.health();
+            let model = route.model_circuits.circuit(MODEL).health();
+            let (affected, other) = if scope == HealthScope::Provider {
+                (&provider, &model)
+            } else {
+                (&model, &provider)
+            };
+            assert_eq!(
+                affected.cooldown_reason.as_deref(),
+                Some(cooldown),
+                "{code}/{transport}"
+            );
+            assert_eq!(affected.failures, 0, "{code}/{transport}");
+            assert!(other.available, "{code}/{transport}");
+            assert!(
+                route
+                    .model_circuits
+                    .circuit("other-model")
+                    .health()
+                    .available
+            );
+            assert_eq!(
+                gateway.0.admission.rpm_status(&route.provider.id, 100).1,
+                0,
+                "token/concurrency/capacity/billing cannot become RPM backoff"
+            );
+        }
+    }
 }
 
 #[test]
@@ -174,7 +267,7 @@ fn transport_failures_only_count_the_selected_health_scope() {
 }
 
 #[test]
-fn application_failure_on_http_200_is_neutral_for_health() {
+fn explicit_service_failure_on_http_200_counts_only_model_health() {
     let (_data, gateway, route) = fixture();
     let provider = route.provider_circuit.clone();
     let model = route.model_circuits.circuit(MODEL);
@@ -205,8 +298,8 @@ fn application_failure_on_http_200_is_neutral_for_health() {
 
     assert_eq!(provider.health().requests, 0);
     assert_eq!(provider.health().failures, 0);
-    assert_eq!(model.health().requests, 0);
-    assert_eq!(model.health().failures, 0);
+    assert_eq!(model.health().requests, 1);
+    assert_eq!(model.health().failures, 1);
 }
 
 #[test]

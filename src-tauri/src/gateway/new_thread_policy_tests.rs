@@ -381,7 +381,7 @@ fn concurrent_first_admission_binds_one_provider_and_rejects_the_other() {
 
 #[test]
 fn upstream_numeric_error_codes_are_retained_as_strings_and_local_codes_are_distinct() {
-    let upstream = super::upstream_error::details_value(
+    let upstream = super::failure_policy::details_value(
         &json!({"error":{"code":42901,"message":"rate limited"}}),
         true,
     );

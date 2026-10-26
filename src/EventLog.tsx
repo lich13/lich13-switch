@@ -325,7 +325,11 @@ function actionText(r: EventRecord) {
     return r.details?.circuit?.retryAt != null && r.details.waitSeconds != null
       ? `等待 ${r.details.waitSeconds} 秒后可探测`
       : "等待时间未记录";
-  return `${r.details?.countedFailure === false ? "未计入熔断，" : ""}${r.details?.waitSeconds ? `${r.action === "retrying_same" ? "原供应商" : ""}等待 ${r.details.waitSeconds} 秒${r.action === "reconnecting" ? "重连" : "重试"}` : actions[r.action]}`;
+  const prefix = r.details?.countedFailure === false ? "未计入熔断，" : "";
+  const wait = r.details?.waitSeconds;
+  if (wait && ["trying_next", "returned", "stopped"].includes(r.action))
+    return `${prefix}${actions[r.action]} · 当前${r.details?.healthScope === "model" ? "模型" : "供应商"}冷却 ${wait} 秒`;
+  return `${prefix}${wait ? `${r.action === "retrying_same" ? "原供应商" : ""}等待 ${wait} 秒${r.action === "reconnecting" ? "重连" : "重试"}` : actions[r.action]}`;
 }
 function wireStatus(r: EventRecord) {
   return (

@@ -38,8 +38,8 @@ fn retry_after_floor_and_legacy_settings() {
     for (hint, seconds) in [
         (None, 60),
         (circuit::retry_after("bad"), 60),
-        (circuit::retry_after("0"), 60),
-        (circuit::retry_after("5"), 60),
+        (circuit::retry_after("0"), 0),
+        (circuit::retry_after("5"), 5),
         (circuit::retry_after("120"), 120),
     ] {
         assert_eq!(
@@ -66,6 +66,51 @@ fn retry_after_floor_and_legacy_settings() {
         .validate()
         .is_err());
     }
+}
+
+#[tokio::test]
+async fn server_deadline_beyond_one_day_ends_at_budget_without_resending_or_holding_slots() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let upstream = server(move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        async {
+            Response::builder()
+                .status(429)
+                .header("retry-after", "172800")
+                .body(full(r#"{"error":{"code":"concurrency_limit_exceeded"}}"#))
+                .unwrap()
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
+    configure(&g, &t, 3);
+    let mut settings = g.view().settings;
+    settings.retry_budget_seconds = 1;
+    update(&g, &t, Edit::Settings { settings });
+    start(&g, &t).await;
+    let response = request(
+        &g,
+        "/v1/responses",
+        br#"{"model":"fixture-model"}"#.to_vec(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(response.status(), 504);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(g.view().providers[0].active_requests, 0);
+    assert_eq!(g.view().waiting_requests, 0);
+    let view = g.view();
+    let health = &view.providers[0]
+        .model_health
+        .iter()
+        .find(|m| m.model == "fixture-model")
+        .unwrap()
+        .health;
+    assert!(health.retry_in >= 172_798);
+    assert_eq!(health.failures, 0);
+    assert_eq!(view.providers[0].rpm_retry_in, 0);
+    g.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -126,7 +171,11 @@ async fn capacity_retries_exceed_old_budget_and_preserve_the_permanent_last_erro
         g.view().providers[0].health.state,
         circuit::CircuitState::Closed
     );
-    assert!(g.view().providers[0].health.protected_single_provider);
+    assert_eq!(
+        g.view().providers[0].health.cooldown_reason.as_deref(),
+        Some("hard_rejection")
+    );
+    assert_eq!(g.view().providers[0].health.failures, 0);
     assert!(g.view().capacity_retries.is_empty());
     assert_eq!(g.view().providers[0].active_requests, 0);
     g.stop().await.unwrap();
@@ -535,7 +584,7 @@ async fn manual_and_known_or_unknown_context_retry_original_provider_until_recov
                 if attempt <= 3 {
                     Response::builder()
                         .status(429)
-                        .body(full("limited"))
+                        .body(full("model is at capacity"))
                         .unwrap()
                 } else {
                     Response::new(full("recovered"))
@@ -621,7 +670,7 @@ async fn manual_and_known_or_unknown_context_retry_original_provider_until_recov
 }
 
 #[tokio::test]
-async fn claude_rate_limit_keeps_original_cooldown_and_no_capacity_retry() {
+async fn claude_capacity_uses_shared_cooldown_and_wait_budget() {
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
     let upstream = server(move |_| {
@@ -645,6 +694,10 @@ async fn claude_rate_limit_keeps_original_cooldown_and_no_capacity_retry() {
         &home,
     )
     .unwrap();
+    let mut settings = g.view().settings;
+    settings.retry_budget_seconds = 1;
+    g.edit(Edit::Settings { settings }, &g.view().revision, &home)
+        .unwrap();
     g.start(&g.view().revision, &home).await.unwrap();
     let r = request(
         &g,
@@ -653,7 +706,7 @@ async fn claude_rate_limit_keeps_original_cooldown_and_no_capacity_retry() {
         vec![("content-type", "application/json")],
     )
     .await;
-    assert_eq!(r.status(), 429);
+    assert_eq!(r.status(), 504);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let provider = &g.view().providers[0];
     let model = provider
@@ -661,8 +714,11 @@ async fn claude_rate_limit_keeps_original_cooldown_and_no_capacity_retry() {
         .iter()
         .find(|entry| entry.model == "claude-test")
         .expect("known model must have isolated health");
-    assert_eq!(model.health.cooldown_reason.as_deref(), Some("rate_limit"));
-    assert!(model.health.retry_in <= 2);
+    assert_eq!(
+        model.health.cooldown_reason.as_deref(),
+        Some("capacity_retry")
+    );
+    assert!(model.health.retry_in >= 58);
     assert_eq!(provider.health.cooldown_reason, None);
     assert!(!provider.health.protected_single_provider);
     assert!(g.view().capacity_retries.is_empty());
@@ -816,7 +872,7 @@ async fn responses_ws_capacity_wait_cancels_and_exceeds_old_budget_until_stopped
         async {
             Response::builder()
                 .status(429)
-                .body(full("limited"))
+                .body(full("model is at capacity"))
                 .unwrap()
         }
     })

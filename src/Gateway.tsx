@@ -630,8 +630,18 @@ function GatewayContent({
             }}
           </SortableProviders>
         </div>
-        <details className="advanced">
-          <summary>高级设置</summary>
+        <Advanced
+          clientId={clientId}
+          onDirtyChange={markAdvanced}
+          settings={state.settings}
+          listener={state.listener}
+          revision={state.revision}
+          busy={busy}
+          save={async (settings, revision) => {
+            await action(() => edit({ op: "settings", settings }, revision));
+            notify("网关参数已保存");
+          }}
+        >
           <div className="gateway-diagnostics">
             <code>{state.address}</code>
             <span>{state.running ? "运行中" : "已关闭"}</span>
@@ -654,19 +664,7 @@ function GatewayContent({
             seconds={quotaRefreshSeconds}
             onDirtyChange={markQuota}
           />
-          <Advanced
-            clientId={clientId}
-            onDirtyChange={markAdvanced}
-            settings={state.settings}
-            listener={state.listener}
-            revision={state.revision}
-            busy={busy}
-            save={async (settings, revision) => {
-              await action(() => edit({ op: "settings", settings }, revision));
-              notify("网关参数已保存");
-            }}
-          />
-        </details>
+        </Advanced>
       </>
       {dialog?.kind === "dsh" && (
         <DshProfile

@@ -60,6 +60,10 @@ pub(super) fn observe_protocol(
         if let Some(reason) = reason {
             let mut details = protocol.observation.error.clone();
             details.phase = Some(crate::events::Phase::Stream);
+            details.wait_seconds = protocol
+                .observation
+                .retry_after
+                .map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
             details.counted_failure =
                 Some(reason == Reason::Network || reason == Reason::UpstreamService);
             protocol.report_failure(|| {
@@ -85,6 +89,19 @@ pub(super) fn settle_protocol(
     status: Option<u16>,
 ) {
     use super::protocol::Terminal;
+    if !matches!(
+        protocol.terminal(),
+        None | Some(Terminal::Success | Terminal::Limited)
+    ) && protocol.observation.error.error_basis.is_some()
+    {
+        permits.policy(
+            cfg,
+            status,
+            &protocol.observation.error,
+            protocol.observation.retry_after,
+        );
+        return;
+    }
     match protocol.terminal() {
         Some(Terminal::Success | Terminal::Limited) => permits.success(cfg),
         Some(Terminal::Failure)
@@ -101,6 +118,7 @@ pub(super) struct Permits {
     provider: Option<Permit>,
     model: Option<Permit>,
     scope: crate::events::HealthScope,
+    failure: Option<(Option<u16>, crate::events::Details)>,
 }
 impl Permits {
     #[allow(clippy::too_many_arguments)]
@@ -109,17 +127,26 @@ impl Permits {
         g: &Gateway,
         route: &Route,
         model: Option<&str>,
-        reason: Reason,
+        mut reason: Reason,
         action: Action,
         status: Option<u16>,
         attempt: usize,
         mut details: crate::events::Details,
     ) -> Reported {
         use crate::events::{HealthScope, Phase};
+        if details.error_basis.is_some() {
+            let policy = super::failure_policy::decision(status, &details);
+            details.counted_failure = Some(policy.counted_failure);
+            reason = policy.reason;
+            if !policy.hard && !policy.temporary && !policy.counted_failure {
+                details.wait_seconds = None;
+            }
+        }
         self.scope = details.health_scope.unwrap_or_else(|| {
-            if reason == Reason::Network
+            if (reason == Reason::Network
                 && status.is_none()
-                && matches!(details.phase, Some(Phase::Connect | Phase::WsHandshake))
+                && matches!(details.phase, Some(Phase::Connect | Phase::WsHandshake)))
+                || (self.model.is_none() && super::failure_policy::temporary(&details))
             {
                 HealthScope::Provider
             } else if self.model.is_some() {
@@ -128,19 +155,32 @@ impl Permits {
                 HealthScope::Request
             }
         });
-        if details.error_basis == Some(crate::events::ErrorBasis::Rpm) {
+        let target = match self.scope {
+            HealthScope::Provider => &mut self.provider,
+            _ => &mut self.model,
+        };
+        if let Some(permit) = target {
+            let cfg = g.0.inner.lock().unwrap().store.settings.clone();
+            if let Some(delay) = permit.prepare_delay(&cfg, &details) {
+                details.wait_seconds =
+                    Some(delay.as_millis().div_ceil(1000).min(u128::from(u64::MAX)) as u64);
+            }
+        }
+        if self.scope == HealthScope::Provider
+            && matches!(
+                details.error_basis,
+                Some(crate::events::ErrorBasis::Rpm | crate::events::ErrorBasis::Rps)
+            )
+        {
             details.rpm_wait_reason = Some(crate::events::RpmWaitReason::UpstreamBackoff);
-            let delay = std::time::Duration::from_secs(details.wait_seconds.unwrap_or_else(|| {
-                g.0.inner
-                    .lock()
-                    .unwrap()
-                    .store
-                    .settings
-                    .capacity_retry_seconds
-            }));
+            let delay =
+                std::time::Duration::from_secs(details.wait_seconds.unwrap_or_else(|| {
+                    g.0.inner.lock().unwrap().store.settings.rate_limit_seconds
+                }));
             g.0.admission.rpm_backoff(&route.provider.id, delay);
         }
         details.health_scope = Some(self.scope);
+        self.failure = Some((status, details.clone()));
         if self.scope == HealthScope::Request {
             details.counted_failure = Some(false);
         }
@@ -177,6 +217,17 @@ impl Permits {
 
     fn settle(&mut self, cfg: &Settings, outcome: Outcome) {
         use crate::events::HealthScope;
+        let outcome = match (&self.failure, outcome) {
+            (
+                Some((status, details)),
+                Outcome::Failure(retry)
+                | Outcome::RateLimited(retry)
+                | Outcome::CapacityLimited(retry),
+            ) if details.error_basis.is_some() => {
+                super::failure_policy::outcome(*status, details, retry)
+            }
+            (_, outcome) => outcome,
+        };
         match self.scope {
             HealthScope::Provider => {
                 if let Some(p) = self.provider.take() {
@@ -203,6 +254,34 @@ impl Permits {
     pub(super) fn rate_limited(&mut self, cfg: &Settings, retry: Option<Duration>) {
         self.settle(cfg, Outcome::RateLimited(retry));
     }
+    pub(super) fn policy(
+        &mut self,
+        cfg: &Settings,
+        status: Option<u16>,
+        details: &crate::events::Details,
+        retry: Option<Duration>,
+    ) {
+        if self.failure.is_none() {
+            self.scope = details.health_scope.unwrap_or_else(|| {
+                if self.model.is_none() && super::failure_policy::temporary(details) {
+                    crate::events::HealthScope::Provider
+                } else {
+                    self.scope
+                }
+            });
+            let mut timing = details.clone();
+            timing.wait_seconds = retry.map(|d| d.as_secs() + u64::from(d.subsec_nanos() > 0));
+            let target = if self.scope == crate::events::HealthScope::Provider {
+                &mut self.provider
+            } else {
+                &mut self.model
+            };
+            if let Some(permit) = target {
+                permit.prepare_delay(cfg, &timing);
+            }
+        }
+        self.settle(cfg, super::failure_policy::outcome(status, details, retry));
+    }
     pub(super) fn acquire_for(
         route: &Route,
         manual: bool,
@@ -222,6 +301,7 @@ impl Permits {
             provider: Some(provider),
             model,
             scope,
+            failure: None,
         })
     }
     pub(super) fn success(&mut self, cfg: &Settings) {

@@ -959,7 +959,7 @@ async fn native_ws_second_provider_success_preserves_failover_and_later_turns() 
 }
 
 #[tokio::test]
-async fn native_ws_later_round_handshake_failure_keeps_its_real_upstream_error() {
+async fn native_ws_later_round_handshake_failure_keeps_its_real_failure_policy() {
     let (server_port, seen) = native_server_rejecting_second_handshake().await;
     let (dir, gateway) = fixture(vec![format!("http://127.0.0.1:{server_port}/v1")]).await;
     configure_auto(&gateway, &dir, 0);

@@ -26,7 +26,8 @@ beforeEach(() => {
   mock.listeners.clear();
   mock.command.mockImplementation(
     async (name: string, args?: { clientId?: ClientId }) => {
-      if (name.startsWith("provider_test_")) return providerTestingPreview(name, args ?? {});
+      if (name.startsWith("provider_test_"))
+        return providerTestingPreview(name, args ?? {});
       if (name === "get_gateway" || name === "update_gateway")
         return structuredClone(
           args?.clientId === "claude" ? claudeState : state,
@@ -36,46 +37,83 @@ beforeEach(() => {
 });
 afterEach(() => localStorage.clear());
 describe("gateway controls", () => {
-  it.each(["codex", "claude"] as const)("%s preserves a conflicting provider draft and retries only with a fresh version", async (client) => {
-    localStorage.setItem("lich13-switch.main.client", client);
-    const user = userEvent.setup();
-    let current = client === "claude" ? claudeState : state;
-    current.running = true;
-    current.mode = "auto";
-    mock.command.mockImplementation(async (name, args) => {
-      if (name === "get_gateway") return structuredClone(current);
-      if (name === "update_gateway") {
-        if (args.expectedRevision !== current.revision) throw { code: "CONFLICT", message: "网关设置已变化，请使用最新状态重试" };
-        return structuredClone(current);
-      }
-    });
-    render(<Gateway notify={() => {}} />);
-    // Explicit UI selection also covers independent client preferences.
-    await screen.findByRole("button", { name: "添加" });
-    await user.click(screen.getByRole("button", { name: "添加" }));
-    const address = screen.getByLabelText(client === "codex" ? "base_url" : "ANTHROPIC_BASE_URL");
-    const key = screen.getByLabelText(client === "codex" ? "experimental_bearer_token" : "ANTHROPIC_AUTH_TOKEN");
-    await user.type(address, "https://new.invalid/v1");
-    await user.type(key, "fixture-key");
-    const original = current.revision;
-    // Runtime events keep the same semantic version and cannot erase input.
-    act(() => mock.listeners.get("gateway-state")!({ ...current, lastSuccessful: "backup", waitingRequests: 2 }));
-    expect(key).toHaveValue("fixture-key");
-    current = { ...current, revision: "external-edit" };
-    act(() => mock.listeners.get("gateway-state")!(current));
-    await user.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("网关设置已变化");
-    expect(mock.command).toHaveBeenCalledWith("update_gateway", expect.objectContaining({ expectedRevision: original }));
-    expect(key).toHaveValue("fixture-key");
-    const writes = () => mock.command.mock.calls.filter(([name]) => name === "update_gateway");
-    expect(writes()).toHaveLength(1);
-    // The authoritative version can change again without delivering a frontend event.
-    current = { ...current, revision: "latest-on-retry" };
-    await user.click(screen.getByRole("button", { name: "重试" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "添加供应商" })).not.toBeInTheDocument());
-    expect(writes()).toHaveLength(2);
-    expect(writes()[1][1]).toMatchObject({ clientId: client, expectedRevision: "latest-on-retry", edit: { op: "saveProvider", token: "fixture-key", baseUrl: "https://new.invalid/v1" } });
-  });
+  it.each(["codex", "claude"] as const)(
+    "%s preserves a conflicting provider draft and retries only with a fresh version",
+    async (client) => {
+      localStorage.setItem("lich13-switch.main.client", client);
+      const user = userEvent.setup();
+      let current = client === "claude" ? claudeState : state;
+      current.running = true;
+      current.mode = "auto";
+      mock.command.mockImplementation(async (name, args) => {
+        if (name === "get_gateway") return structuredClone(current);
+        if (name === "update_gateway") {
+          if (args.expectedRevision !== current.revision)
+            throw {
+              code: "CONFLICT",
+              message: "网关设置已变化，请使用最新状态重试",
+            };
+          return structuredClone(current);
+        }
+      });
+      render(<Gateway notify={() => {}} />);
+      // Explicit UI selection also covers independent client preferences.
+      await screen.findByRole("button", { name: "添加" });
+      await user.click(screen.getByRole("button", { name: "添加" }));
+      const address = screen.getByLabelText(
+        client === "codex" ? "base_url" : "ANTHROPIC_BASE_URL",
+      );
+      const key = screen.getByLabelText(
+        client === "codex"
+          ? "experimental_bearer_token"
+          : "ANTHROPIC_AUTH_TOKEN",
+      );
+      await user.type(address, "https://new.invalid/v1");
+      await user.type(key, "fixture-key");
+      const original = current.revision;
+      // Runtime events keep the same semantic version and cannot erase input.
+      act(() =>
+        mock.listeners.get("gateway-state")!({
+          ...current,
+          lastSuccessful: "backup",
+          waitingRequests: 2,
+        }),
+      );
+      expect(key).toHaveValue("fixture-key");
+      current = { ...current, revision: "external-edit" };
+      act(() => mock.listeners.get("gateway-state")!(current));
+      await user.click(screen.getByRole("button", { name: "保存" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "网关设置已变化",
+      );
+      expect(mock.command).toHaveBeenCalledWith(
+        "update_gateway",
+        expect.objectContaining({ expectedRevision: original }),
+      );
+      expect(key).toHaveValue("fixture-key");
+      const writes = () =>
+        mock.command.mock.calls.filter(([name]) => name === "update_gateway");
+      expect(writes()).toHaveLength(1);
+      // The authoritative version can change again without delivering a frontend event.
+      current = { ...current, revision: "latest-on-retry" };
+      await user.click(screen.getByRole("button", { name: "重试" }));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "添加供应商" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(writes()).toHaveLength(2);
+      expect(writes()[1][1]).toMatchObject({
+        clientId: client,
+        expectedRevision: "latest-on-retry",
+        edit: {
+          op: "saveProvider",
+          token: "fixture-key",
+          baseUrl: "https://new.invalid/v1",
+        },
+      });
+    },
+  );
 
   it("retries advanced settings without losing typed parameters", async () => {
     const user = userEvent.setup();
@@ -83,24 +121,44 @@ describe("gateway controls", () => {
     mock.command.mockImplementation(async (name, args) => {
       if (name === "get_gateway") return structuredClone(current);
       if (name === "update_gateway") {
-        if (args.expectedRevision !== current.revision) throw { code: "CONFLICT", message: "设置已变化" };
-        current = { ...current, settings: args.edit.settings, revision: "saved" };
+        if (args.expectedRevision !== current.revision)
+          throw { code: "CONFLICT", message: "设置已变化" };
+        current = {
+          ...current,
+          settings: args.edit.settings,
+          revision: "saved",
+        };
         return structuredClone(current);
       }
     });
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
-    await user.click(screen.getByText("高级设置"));
+    await user.click(screen.getByText("故障策略"));
     const input = screen.getByLabelText("容量错误等待 / 秒");
     await user.clear(input);
     await user.type(input, "120");
     current = { ...current, revision: "external" };
     act(() => mock.listeners.get("gateway-state")!(current));
     await user.click(screen.getByRole("button", { name: "保存参数" }));
-    expect((await screen.findAllByRole("alert")).some(e => e.textContent?.includes("设置已变化"))).toBe(true);
+    expect(
+      (await screen.findAllByRole("alert")).some((e) =>
+        e.textContent?.includes("设置已变化"),
+      ),
+    ).toBe(true);
     expect(input).toHaveValue(120);
     await user.click(screen.getByRole("button", { name: "重试" }));
-    await waitFor(() => expect(mock.command).toHaveBeenCalledWith("update_gateway", expect.objectContaining({ expectedRevision: "external", edit: { op: "settings", settings: expect.objectContaining({ capacityRetrySeconds: 120 }) } })));
+    await waitFor(() =>
+      expect(mock.command).toHaveBeenCalledWith(
+        "update_gateway",
+        expect.objectContaining({
+          expectedRevision: "external",
+          edit: {
+            op: "settings",
+            settings: expect.objectContaining({ capacityRetrySeconds: 120 }),
+          },
+        }),
+      ),
+    );
   });
   it("resets a provider from the row and edits its name by double click", async () => {
     const user = userEvent.setup();
@@ -186,7 +244,9 @@ describe("gateway controls", () => {
     const row = name.closest("[data-provider-id]");
     expect(row).not.toBeNull();
     const quota = within(row as HTMLElement).getByLabelText(`${p.name} 额度`);
-    expect(name.compareDocumentPosition(quota) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      name.compareDocumentPosition(quota) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(within(quota).getByText("Pro")).toHaveClass("quota-subscription");
   });
 
@@ -200,14 +260,30 @@ describe("gateway controls", () => {
         onFocusHandled={handled}
       />,
     );
-    expect(await screen.findByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", {
+        name: `${state.providers[0].name} · 白名单`,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
+    ).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
     rerender(
-      <Gateway notify={() => {}} focusProvider={null} onFocusHandled={handled} />,
+      <Gateway
+        notify={() => {}}
+        focusProvider={null}
+        onFocusHandled={handled}
+      />,
     );
-    expect(screen.getByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", {
+        name: `${state.providers[0].name} · 白名单`,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
+    ).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
   });
 
@@ -219,8 +295,14 @@ describe("gateway controls", () => {
         focusProvider={{ id: providerId, sequence: 1 }}
       />,
     );
-    expect(await screen.findByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", {
+        name: `${state.providers[0].name} · 白名单`,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
+    ).not.toBeInTheDocument();
     // App confirms discarding before emitting this new navigation sequence.
     rerender(
       <Gateway
@@ -228,8 +310,14 @@ describe("gateway controls", () => {
         focusProvider={{ id: providerId, sequence: 2 }}
       />,
     );
-    expect(await screen.findByRole("dialog", { name: `${state.providers[0].name} · 白名单` })).toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", {
+        name: `${state.providers[0].name} · 白名单`,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
+    ).not.toBeInTheDocument();
     expect(
       mock.command.mock.calls.some(([name]) => name === "update_gateway"),
     ).toBe(false);
@@ -237,15 +325,39 @@ describe("gateway controls", () => {
 
   it("waits for the requested client before consuming connection-test navigation", async () => {
     const handled = vi.fn();
-    const { rerender } = render(<Gateway notify={() => {}} onFocusHandled={handled} />);
-    await screen.findByRole("button", { name: `${state.providers[0].name} 名称` });
+    const { rerender } = render(
+      <Gateway notify={() => {}} onFocusHandled={handled} />,
+    );
+    await screen.findByRole("button", {
+      name: `${state.providers[0].name} 名称`,
+    });
     const target = claudeState.providers[0];
-    rerender(<Gateway notify={() => {}} focusProvider={{ id: target.id, clientId: "claude", action: "testing", sequence: 3 }} onFocusHandled={handled} />);
-    const dialog = await screen.findByRole("dialog", { name: `${target.name} · 测试` });
-    expect(within(dialog).getByRole("tab", { name: "连接测试" })).toHaveAttribute("aria-selected", "true");
+    rerender(
+      <Gateway
+        notify={() => {}}
+        focusProvider={{
+          id: target.id,
+          clientId: "claude",
+          action: "testing",
+          sequence: 3,
+        }}
+        onFocusHandled={handled}
+      />,
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: `${target.name} · 测试`,
+    });
+    expect(
+      within(dialog).getByRole("tab", { name: "连接测试" }),
+    ).toHaveAttribute("aria-selected", "true");
     expect(handled).toHaveBeenCalledTimes(1);
-    expect(mock.command).toHaveBeenCalledWith("provider_test_state", { clientId: "claude", providerId: target.id });
-    expect(mock.command.mock.calls.some(([name]) => name === "provider_test_start")).toBe(false);
+    expect(mock.command).toHaveBeenCalledWith("provider_test_state", {
+      clientId: "claude",
+      providerId: target.id,
+    });
+    expect(
+      mock.command.mock.calls.some(([name]) => name === "provider_test_start"),
+    ).toBe(false);
   });
 
   it("accepts an optional display name without adding model settings", async () => {
@@ -358,7 +470,9 @@ it("keeps model choices and manual entries when discovery fails and events refre
   expect(screen.getByRole("checkbox", { name: "custom-model" })).toBeChecked();
   discoveryFailed = true;
   await user.click(screen.getByRole("button", { name: "刷新模型列表" }));
-  const dialog = screen.getByRole("dialog", { name: `${state.providers[0].name} · 白名单` });
+  const dialog = screen.getByRole("dialog", {
+    name: `${state.providers[0].name} · 白名单`,
+  });
   expect(await within(dialog).findByRole("status")).toHaveTextContent(
     "模型列表读取失败",
   );
@@ -429,11 +543,11 @@ it("refreshes authoritative configuration after a cap conflict, preserves input 
 });
 
 describe("client isolation", () => {
-  it("edits bounded capacity waiting only for Codex and preserves the draft during events", async () => {
+  it("edits bounded capacity waiting for every client and preserves the draft during events", async () => {
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
     await screen.findByLabelText(`${state.providers[0].name} 操作`);
-    await user.click(screen.getByText("高级设置", { selector: "summary" }));
+    await user.click(screen.getByText("故障策略", { selector: "summary" }));
     const input = screen.getByRole("spinbutton", { name: "容量错误等待 / 秒" });
     expect(input).toHaveValue(60);
     expect(input).toHaveAttribute("min", "1");
@@ -457,10 +571,10 @@ describe("client isolation", () => {
     );
     await user.click(screen.getByRole("button", { name: "Claude Code" }));
     await screen.findByLabelText(`${claudeState.providers[0].name} 操作`);
-    await user.click(screen.getByText("高级设置", { selector: "summary" }));
+    await user.click(screen.getByText("故障策略", { selector: "summary" }));
     expect(
-      screen.queryByRole("spinbutton", { name: "容量错误等待 / 秒" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("spinbutton", { name: "容量错误等待 / 秒" }),
+    ).toHaveValue(claudeState.settings.capacityRetrySeconds);
   });
   it("queries each selected client and ignores the other client's gateway events", async () => {
     const user = userEvent.setup();
@@ -580,9 +694,9 @@ describe("client isolation", () => {
     );
     await screen.findByLabelText(`${claudeState.providers[0].name} 操作`);
     await user.click(screen.getByText("高级设置", { selector: "summary" }));
-    expect(screen.getByRole("spinbutton", { name: "共享本地端口" })).toHaveValue(
-      claudeState.settings.port,
-    );
+    expect(
+      screen.getByRole("spinbutton", { name: "共享本地端口" }),
+    ).toHaveValue(claudeState.settings.port);
     expect(
       mock.command.mock.calls.some(([name]) => name === "update_gateway"),
     ).toBe(false);
@@ -592,9 +706,9 @@ describe("client isolation", () => {
       screen.queryByRole("dialog", { name: "确认操作" }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByText("高级设置", { selector: "summary" }));
-    expect(screen.getByRole("spinbutton", { name: "共享本地端口" })).toHaveValue(
-      state.settings.port,
-    );
+    expect(
+      screen.getByRole("spinbutton", { name: "共享本地端口" }),
+    ).toHaveValue(state.settings.port);
   });
 
   it("restores Claude selection and saves only its two credential fields with the Claude revision", async () => {
@@ -646,49 +760,95 @@ it("keeps one icon-bearing testing entry per provider and removes global testing
   const user = userEvent.setup();
   render(<Gateway notify={() => {}} />);
   await screen.findByRole("button", { name: "添加" });
-  expect(screen.queryByRole("button", { name: "测试与检测" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "测试与检测" }),
+  ).not.toBeInTheDocument();
   const operations = screen.getByLabelText(`${state.providers[0].name} 操作`);
   await user.click(operations);
   const menu = within(operations.closest("details")!);
   const entry = menu.getByRole("button", { name: "连接测试" });
   expect(entry.querySelector("svg")).not.toBeNull();
-  expect(menu.queryByRole("button", { name: "模型指纹测试" })).not.toBeInTheDocument();
+  expect(
+    menu.queryByRole("button", { name: "模型指纹测试" }),
+  ).not.toBeInTheDocument();
 });
 
-it.each(["codex", "claude", "grok", "dsh"] as const)("%s omits the connection summary and keeps client onboarding without file exchange", async (clientId) => {
-  localStorage.setItem("lich13-switch.main.client", clientId);
-  state.clientId = clientId;
-  state.running = false;
-  state.grokManaged = false;
-  state.current = {
-    kind: "gateway", modelSource: null, warning: null, model: "fixture-current-model", address: "http://127.0.0.1:43721/v1",
-    protocol: "chat_completions", addressSource: "fixture-source", credentialSource: "fixture-credential-source",
-  };
-  state.dshProfiles = clientId === "dsh" ? [{ profile: "fixture", current: { ...state.current, model: "fixture-profile-model" } }] : [];
-  mock.command.mockImplementation(async (name) => name === "get_gateway" ? structuredClone(state) : null);
-  const { container } = render(<Gateway notify={() => {}} quotaRefreshSeconds={0} />);
-  await screen.findByRole("button", { name: "添加" });
-  expect(container.querySelector(".gateway-current")).toBeNull();
-  expect(screen.queryByLabelText("当前客户端配置")).not.toBeInTheDocument();
-  expect(screen.queryByText("fixture-current-model")).not.toBeInTheDocument();
-  expect(screen.queryByText("fixture-source")).not.toBeInTheDocument();
-  expect(screen.queryByText("fixture-credential-source")).not.toBeInTheDocument();
-  expect(screen.queryByText("各 profile 当前配置")).not.toBeInTheDocument();
-  expect(screen.queryByText("fixture-profile-model")).not.toBeInTheDocument();
-  if (clientId === "grok" || clientId === "dsh") expect(screen.getByRole("button", { name: "导入并接入" })).toBeInTheDocument();
-  expect(screen.queryByRole("group", { name: "供应商导入导出" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: /^(导入|导出)$/ })).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "添加" })).toBeInTheDocument();
-});
+it.each(["codex", "claude", "grok", "dsh"] as const)(
+  "%s omits the connection summary and keeps client onboarding without file exchange",
+  async (clientId) => {
+    localStorage.setItem("lich13-switch.main.client", clientId);
+    state.clientId = clientId;
+    state.running = false;
+    state.grokManaged = false;
+    state.current = {
+      kind: "gateway",
+      modelSource: null,
+      warning: null,
+      model: "fixture-current-model",
+      address: "http://127.0.0.1:43721/v1",
+      protocol: "chat_completions",
+      addressSource: "fixture-source",
+      credentialSource: "fixture-credential-source",
+    };
+    state.dshProfiles =
+      clientId === "dsh"
+        ? [
+            {
+              profile: "fixture",
+              current: { ...state.current, model: "fixture-profile-model" },
+            },
+          ]
+        : [];
+    mock.command.mockImplementation(async (name) =>
+      name === "get_gateway" ? structuredClone(state) : null,
+    );
+    const { container } = render(
+      <Gateway notify={() => {}} quotaRefreshSeconds={0} />,
+    );
+    await screen.findByRole("button", { name: "添加" });
+    expect(container.querySelector(".gateway-current")).toBeNull();
+    expect(screen.queryByLabelText("当前客户端配置")).not.toBeInTheDocument();
+    expect(screen.queryByText("fixture-current-model")).not.toBeInTheDocument();
+    expect(screen.queryByText("fixture-source")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("fixture-credential-source"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("各 profile 当前配置")).not.toBeInTheDocument();
+    expect(screen.queryByText("fixture-profile-model")).not.toBeInTheDocument();
+    if (clientId === "grok" || clientId === "dsh")
+      expect(
+        screen.getByRole("button", { name: "导入并接入" }),
+      ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "供应商导入导出" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^(导入|导出)$/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加" })).toBeInTheDocument();
+  },
+);
 
 it("keeps a gateway event that arrives before the initial read", async () => {
   let resolve!: (value: GatewayState) => void;
-  mock.command.mockImplementation((name) => name === "get_gateway" ? new Promise<GatewayState>((done) => { resolve = done; }) : Promise.resolve(null));
+  mock.command.mockImplementation((name) =>
+    name === "get_gateway"
+      ? new Promise<GatewayState>((done) => {
+          resolve = done;
+        })
+      : Promise.resolve(null),
+  );
   render(<Gateway notify={() => {}} quotaRefreshSeconds={0} />);
   const latest = { ...state, running: true };
-  await act(async () => { mock.listeners.get("gateway-state")!(latest); });
+  await act(async () => {
+    mock.listeners.get("gateway-state")!(latest);
+  });
   await screen.findByRole("button", { name: "停用" });
-  await act(async () => { resolve({ ...state, running: false }); });
+  await act(async () => {
+    resolve({ ...state, running: false });
+  });
   expect(screen.getByRole("button", { name: "停用" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "启用" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "启用" }),
+  ).not.toBeInTheDocument();
 });

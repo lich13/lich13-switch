@@ -273,3 +273,29 @@ it("falls back for unknown limit and quota enums", async () => {
   expect(dialog).toHaveTextContent("未识别依据");
   expect(dialog).toHaveTextContent("额度查询结果未知");
 });
+
+it("shows actual failover separately from the rejected supplier cooldown", async () => {
+  eventRecords = [
+    {
+      ...structuredClone(baseRecord),
+      reason: "upstream_service",
+      action: "trying_next",
+      status: 429,
+      details: {
+        errorBasis: "billing",
+        healthScope: "provider",
+        countedFailure: false,
+        waitSeconds: 300,
+      },
+    },
+  ];
+  render(<EventLog />);
+  const row = await screen.findByRole("button", { name: "余额或消费额度不足" });
+  await userEvent.setup().click(row);
+  const dialog = await screen.findByRole("dialog", {
+    name: "余额或消费额度不足",
+  });
+  expect(dialog).toHaveTextContent("尝试下一供应商");
+  expect(dialog).toHaveTextContent("当前供应商冷却 300 秒");
+  expect(dialog).not.toHaveTextContent("等待 300 秒重试");
+});

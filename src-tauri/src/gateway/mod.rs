@@ -43,6 +43,9 @@ mod connector;
 mod diagnostic_test_support;
 mod endpoints;
 pub(crate) mod failover;
+mod failure_policy;
+#[cfg(test)]
+mod failure_policy_tests;
 #[cfg(test)]
 mod first_byte_timeout_tests;
 #[cfg(test)]
@@ -83,7 +86,6 @@ pub(crate) mod testing;
 mod thread_capacity;
 #[cfg(test)]
 mod token_reveal_tests;
-mod upstream_error;
 #[cfg(test)]
 mod upstream_reason_v0257_tests;
 #[cfg(test)]

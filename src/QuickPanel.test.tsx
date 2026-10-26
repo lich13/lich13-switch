@@ -404,8 +404,7 @@ it("switches and remembers the quick client independently and routes actions usi
   const user = userEvent.setup();
   const view = render(<QuickPanel />);
   await screen.findByText(gatewayDemo.providers[0].name);
-  const selector = screen.getByRole("combobox", { name: "客户端" });
-  await user.selectOptions(selector, "claude");
+  await user.click(screen.getByRole("button", { name: "Claude Code" }));
   await screen.findByText(claudeGatewayDemo.providers[0].name);
   expect(mock.command).toHaveBeenCalledWith("get_gateway", {
     clientId: "claude",
@@ -455,8 +454,9 @@ it("switches and remembers the quick client independently and routes actions usi
   view.unmount();
   render(<QuickPanel />);
   await screen.findByText(claudeGatewayDemo.providers[0].name);
-  expect(screen.getByRole("combobox", { name: "客户端" })).toHaveValue(
-    "claude",
+  expect(screen.getByRole("button", { name: "Claude Code" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
   expect(localStorage.getItem("lich13-switch.main.client")).toBe("codex");
 });
@@ -470,10 +470,7 @@ it("protects an unsaved quick concurrency draft until a client switch is confirm
   const cap = screen.getByRole("spinbutton", { name: "上限（0 不限）" });
   await user.clear(cap);
   await user.type(cap, "12");
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "客户端" }),
-    "claude",
-  );
+  await user.click(screen.getByRole("button", { name: "Claude Code" }));
   await user.click(
     within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
       "button",
@@ -487,10 +484,7 @@ it("protects an unsaved quick concurrency draft until a client switch is confirm
   expect(mock.command).not.toHaveBeenCalledWith("get_gateway", {
     clientId: "claude",
   });
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "客户端" }),
-    "claude",
-  );
+  await user.click(screen.getByRole("button", { name: "Claude Code" }));
   await user.click(
     within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
       "button",
@@ -550,7 +544,7 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
   );
   const user = userEvent.setup();
   render(<QuickPanel />);
-  await screen.findByRole("combobox", { name: "客户端" });
+  await screen.findByRole("navigation", { name: "客户端" });
   hiddenClients = ["codex"];
   act(() =>
     mock.listeners.get("quick-state")?.({
@@ -560,13 +554,14 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
     }),
   );
   await waitFor(() =>
-    expect(screen.getByRole("combobox", { name: "客户端" })).toHaveValue(
-      "claude",
+    expect(screen.getByRole("button", { name: "Claude Code" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
     ),
   );
   await waitFor(() =>
     expect(
-      screen.queryByRole("option", { name: "Codex" }),
+      screen.queryByRole("button", { name: "Codex" }),
     ).not.toBeInTheDocument(),
   );
   hiddenClients = ["codex", "claude", "grok", "dsh", "agy"];
@@ -579,7 +574,7 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
   );
   await screen.findByText("未显示平台");
   expect(
-    screen.queryByRole("combobox", { name: "客户端" }),
+    screen.queryByRole("navigation", { name: "客户端" }),
   ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "设置平台" }));
   expect(mock.command).toHaveBeenCalledWith("open_main", { page: "settings" });

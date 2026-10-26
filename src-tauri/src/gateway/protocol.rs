@@ -8,6 +8,7 @@ use std::io::Write;
 pub struct Observation {
     pub meter: crate::usage::model::Meter,
     pub error: crate::events::Details,
+    limit_headers: hyper::HeaderMap,
     pub response_id: Option<String>,
     pub model: Option<String>,
     pub incomplete: bool,
@@ -19,6 +20,7 @@ pub struct Observation {
     pub first_event_model_error: Option<bool>,
     pub first_event_capacity_error: Option<bool>,
     pub first_event_account_error: Option<bool>,
+    pub first_event_service_error: Option<bool>,
     pub retry_after: Option<std::time::Duration>,
     pub capacity_error: bool,
     pub search_content: bool,
@@ -164,16 +166,15 @@ impl Observation {
         if self.meter.model.is_some() {
             self.model = self.meter.model.clone();
         }
-        let details = super::upstream_error::details_value(outer, false);
+        let (details, retry) =
+            super::failure_policy::details_with_headers(outer, &self.limit_headers);
         let has_error = details != crate::events::Details::default();
         if has_error || matches!(event, "error" | "response.failed") || status == "failed" {
             self.fault_sequence = self.fault_sequence.saturating_add(1);
         }
         if has_error {
             self.error = details;
-            self.retry_after = self
-                .retry_after
-                .max(super::upstream_error::retry_after_value(outer));
+            self.retry_after = self.retry_after.max(retry);
         }
         if let Some(id) = response_id {
             self.response_id = Some(id.into());
@@ -193,8 +194,8 @@ impl Observation {
             || outer.get("choices").is_some()
             || outer.get("candidates").is_some();
         if self.terminal.is_none() {
-            self.capacity_error = super::upstream_error::temporary_capacity_event(outer);
-            let terminal = if super::upstream_error::model_error(outer) {
+            self.capacity_error = super::failure_policy::temporary_capacity_event(outer);
+            let terminal = if super::failure_policy::model_error(outer) {
                 Some(Terminal::ModelUnavailable)
             } else {
                 match event {
@@ -255,7 +256,7 @@ impl Observation {
                 && self.responses_seen
                 && self.response_id.is_some()
                 && !self.capacity_error
-                && self.error.health_scope != Some(crate::events::HealthScope::Provider)
+                && !super::failure_policy::hard_rejection(&self.error)
             {
                 // Some Responses streams report an error before a final response
                 // envelope. Do not settle usage, health or the WS turn yet.
@@ -336,7 +337,7 @@ fn safe_incomplete_reason(value: &Value) -> Option<String> {
 }
 
 fn error_terminal(value: &Value) -> Terminal {
-    if super::upstream_error::model_error(value) {
+    if super::failure_policy::model_error(value) {
         return Terminal::ModelUnavailable;
     }
     let e = value.get("error").unwrap_or(value);
@@ -419,6 +420,7 @@ impl Sink {
             self.observation.first_event_model_error = Some(false);
             self.observation.first_event_capacity_error = Some(false);
             self.observation.first_event_account_error = Some(false);
+            self.observation.first_event_service_error = Some(false);
         }
         if self.data_len <= 16 && self.data_prefix.trim_ascii() == b"[DONE]" {
             self.observation.done();
@@ -430,15 +432,22 @@ impl Sink {
             }
             if first {
                 self.observation.first_event_model_error =
-                    Some(super::upstream_error::model_error(&v));
+                    Some(super::failure_policy::model_error(&v));
                 self.observation.first_event_capacity_error =
-                    Some(super::upstream_error::temporary_capacity_event(&v));
-                self.observation.first_event_account_error = Some(
-                    super::upstream_error::details_value(&v, false).health_scope
-                        == Some(crate::events::HealthScope::Provider),
-                );
+                    Some(super::failure_policy::temporary_capacity_event(&v));
+                self.observation.first_event_account_error =
+                    Some(super::failure_policy::hard_rejection(
+                        &super::failure_policy::details_value(&v, false),
+                    ));
             }
             self.observation.value_projected(&v, true);
+            if first {
+                self.observation.first_event_service_error = Some(
+                    self.observation.terminal == Some(Terminal::Failure)
+                        && self.observation.error.error_basis
+                            == Some(crate::events::ErrorBasis::ServiceError),
+                );
+            }
         } else {
             self.observation.incomplete = true;
         }
@@ -856,6 +865,10 @@ impl Protocol {
         }
     }
     pub fn response_headers(&mut self, headers: &hyper::HeaderMap) {
+        self.observation.limit_headers = super::failure_policy::limit_headers(headers);
+        if let Some(observer) = &mut self.observer {
+            observer.sink().observation.limit_headers = self.observation.limit_headers.clone();
+        }
         self.transfer.upstream_client_request_hash = headers
             .get("x-client-request-id")
             .filter(|v| !v.is_empty() && v.len() <= 512)

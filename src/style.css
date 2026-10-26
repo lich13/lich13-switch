@@ -2381,7 +2381,9 @@ select:focus-visible {
   white-space: nowrap;
 }
 .quick-scroll .client-selection {
-  width: max-content;
+  width: auto;
+  max-width: calc(100% - 24px);
+  flex-wrap: wrap;
   margin: 0 12px 12px;
 }
 @media (max-width: 800px) {
@@ -3606,12 +3608,6 @@ button.exchange-button:active:not(:disabled) {
   height: 36px;
   font-weight: 400;
 }
-.quick-client-select {
-  display: block;
-  width: calc(100% - 20px);
-  height: 36px;
-  margin: 8px 10px;
-}
 .quick-platform-settings {
   border: 0;
   margin: 20px 0;
@@ -3668,4 +3664,35 @@ button.exchange-button:active:not(:disabled) {
 }
 .agy-launch-form .modal-actions {
   margin-top: 8px;
+}
+
+.failure-policy-group {
+  border: 0;
+  margin: 16px 0 0;
+  padding: 0;
+  min-width: 0;
+}
+.failure-policy-group legend {
+  font-weight: 600;
+}
+.failure-policy-rules {
+  margin: 12px 0;
+  font-size: 13px;
+}
+.failure-policy-rules > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.failure-policy-rules dt {
+  flex: 1 1 200px;
+}
+.failure-policy-rules dd {
+  margin: 0;
+  color: var(--muted);
+}
+.gateway-settings > form {
+  margin-top: 12px;
 }

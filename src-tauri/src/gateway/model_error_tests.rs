@@ -1,5 +1,5 @@
 use super::*;
-use crate::gateway::{protocol::Terminal, upstream_error};
+use crate::gateway::{failure_policy, protocol::Terminal};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::Response;
@@ -74,7 +74,7 @@ async fn http_200_application_failure_does_not_trip_provider_circuit() {
             .header("content-type", "application/json")
             .body(full(
                 serde_json::json!({
-                    "error": {"code": "server_error", "message": "fixture application failure"}
+                    "error": {"code": "fixture_application_error", "message": "fixture application failure"}
                 })
                 .to_string(),
             ))
@@ -98,6 +98,63 @@ async fn http_200_application_failure_does_not_trip_provider_circuit() {
         circuit::CircuitState::Closed
     );
     g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_service_errors_in_json_and_first_sse_event_use_ordinary_failover() {
+    for stream in [false, true] {
+        let first = server(move |_| async move {
+            let event = r#"{"type":"error","error":{"code":"server_error"}}"#;
+            Response::builder()
+                .header(
+                    "content-type",
+                    if stream {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    },
+                )
+                .body(full(if stream {
+                    format!("data: {event}\n\n")
+                } else {
+                    event.into()
+                }))
+                .unwrap()
+        })
+        .await;
+        let second = server(|_| async { Response::new(full("backup-ok")) }).await;
+        let (t, g) = fixture(vec![
+            format!("http://127.0.0.1:{first}/v1"),
+            format!("http://127.0.0.1:{second}/v1"),
+        ])
+        .await;
+        auto(&g, &t, 1);
+        start(&g, &t).await;
+        let response = request(
+            &g,
+            "/v1/responses",
+            br#"{"model":"fixture-model"}"#.to_vec(),
+            vec![("content-type", "application/json")],
+        )
+        .await;
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "backup-ok"
+        );
+        let provider = &g.view().providers[0];
+        assert_eq!(provider.health.failures, 0);
+        assert_eq!(
+            provider
+                .model_health
+                .iter()
+                .find(|m| m.model == "fixture-model")
+                .unwrap()
+                .health
+                .failures,
+            1
+        );
+        g.stop().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -144,23 +201,23 @@ async fn model_errors_from_400_403_404_503_fail_over_without_circuit_breaking() 
 
 #[test]
 fn model_http_classification_excludes_capacity_and_rate_limit_phrases() {
-    assert!(upstream_error::model_http(
+    assert!(failure_policy::model_http(
         404,
         br#"{"error":{"code":"model_not_found","message":"missing"}}"#,
     ));
-    assert!(upstream_error::model_http(
+    assert!(failure_policy::model_http(
         503,
         br#"{"error":{"message":"no available channel for model exact-model"}}"#,
     ));
-    assert!(upstream_error::model_http(
+    assert!(failure_policy::model_http(
         403,
         "中文模型无可用渠道".as_bytes()
     ));
-    assert!(!upstream_error::model_http(
+    assert!(!failure_policy::model_http(
         503,
         br#"{"error":{"message":"model is at capacity"}}"#,
     ));
-    assert!(!upstream_error::model_http(
+    assert!(failure_policy::model_http(
         429,
         br#"{"error":{"code":"model_not_found"}}"#,
     ));
@@ -372,7 +429,7 @@ async fn rate_limit_authentication_and_network_keep_distinct_health_policies() {
         .expect("known model must have isolated health");
     assert_eq!(
         rate_health.health.cooldown_reason.as_deref(),
-        Some("capacity_retry")
+        Some("rate_limit")
     );
     g.stop().await.unwrap();
 
@@ -399,7 +456,11 @@ async fn rate_limit_authentication_and_network_keep_distinct_health_policies() {
         response.into_body().collect().await.unwrap().to_bytes(),
         "auth-backup"
     );
-    assert!(g.view().providers[0].health.failures >= 1);
+    assert_eq!(g.view().providers[0].health.failures, 0);
+    assert_eq!(
+        g.view().providers[0].health.cooldown_reason.as_deref(),
+        Some("hard_rejection")
+    );
     g.stop().await.unwrap();
 
     let network_backup = server(|_| async { Response::new(full("network-backup")) }).await;

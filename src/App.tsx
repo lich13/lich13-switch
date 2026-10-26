@@ -1182,6 +1182,14 @@ function SettingsForm({
       </div>
       <QuickPlatformSettings />
       <StartupSettings />
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      <button className="primary full" disabled={busy}>
+        保存设置
+      </button>
       <PowerSettings />
       <div className="settings-update-row">
         <button
@@ -1211,14 +1219,6 @@ function SettingsForm({
           </span>
         )}
       </div>
-      {error && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-      <button className="primary full" disabled={busy}>
-        保存设置
-      </button>
     </form>
   );
 }

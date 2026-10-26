@@ -153,16 +153,15 @@ async fn http_200_sse_created_before_capacity_error_is_forwarded_without_retry()
 }
 
 #[tokio::test]
-async fn ordinary_http_200_sse_error_is_neutral_and_permanent_balance_rejection_counts_as_failure_without_waiting(
-) {
-    for (event, expected_failures) in [
+async fn ordinary_http_200_sse_error_is_neutral_and_balance_rejection_cools_without_waiting() {
+    for (event, expected_cooldown) in [
         (
             r#"{"type":"error","error":{"code":"fixture_application_error","message":"fixture application failure"}}"#,
-            0,
+            None,
         ),
         (
             r#"{"type":"error","error":{"code":"insufficient_quota","message":"insufficient balance","status":429}}"#,
-            1,
+            Some("hard_rejection"),
         ),
     ] {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -196,7 +195,11 @@ async fn ordinary_http_200_sse_error_is_neutral_and_permanent_balance_rejection_
         let expected_body = format!("event: error\ndata: {event}\n\n");
         assert_eq!(bytes.as_ref(), expected_body.as_bytes());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(g.view().providers[0].health.failures, expected_failures);
+        assert_eq!(g.view().providers[0].health.failures, 0);
+        assert_eq!(
+            g.view().providers[0].health.cooldown_reason.as_deref(),
+            expected_cooldown
+        );
         assert!(g.view().capacity_retries.is_empty());
         g.stop().await.unwrap();
     }

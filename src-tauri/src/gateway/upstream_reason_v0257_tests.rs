@@ -2,13 +2,13 @@
 //!
 //! All payloads below are synthetic fixtures.  These tests exercise only the
 //! bounded error envelope and never use production responses or credentials.
-use super::upstream_error;
+use super::failure_policy;
 use crate::events::{Details, HealthScope};
 use serde_json::json;
 
 #[test]
 fn daily_limit_reason_wins_over_429_capacity_and_stays_provider_scoped() {
-    let details = upstream_error::details_value(
+    let details = failure_policy::details_value(
         &json!({
             "error": {
                 "type": "error",
@@ -26,7 +26,7 @@ fn daily_limit_reason_wins_over_429_capacity_and_stays_provider_scoped() {
         Some("DAILY_LIMIT_EXCEEDED")
     );
     assert_eq!(details.health_scope, Some(HealthScope::Provider));
-    assert!(!upstream_error::temporary_capacity_event(&json!({
+    assert!(!failure_policy::temporary_capacity_event(&json!({
         "error": {
             "type": "error",
             "code": 429,
@@ -34,7 +34,7 @@ fn daily_limit_reason_wins_over_429_capacity_and_stays_provider_scoped() {
             "message": "model is at capacity"
         }
     })));
-    assert!(upstream_error::permanent_rejection(
+    assert!(failure_policy::permanent_rejection(
         br#"{"error":{"code":429,"reason":"DAILY_LIMIT_EXCEEDED"}}"#
     ));
 }
@@ -51,7 +51,7 @@ fn usage_limit_reason_remains_a_temporary_capacity_event() {
             }
         }
     });
-    let details = upstream_error::details_value(&value, false);
+    let details = failure_policy::details_value(&value, false);
 
     assert_eq!(details.upstream_code.as_deref(), Some("429"));
     assert_eq!(
@@ -59,15 +59,15 @@ fn usage_limit_reason_remains_a_temporary_capacity_event() {
         Some("USAGE_LIMIT_EXCEEDED")
     );
     assert_eq!(details.health_scope, None);
-    assert!(upstream_error::temporary_capacity_event(&value));
-    assert!(!upstream_error::permanent_rejection(
+    assert!(failure_policy::temporary_capacity_event(&value));
+    assert!(!failure_policy::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
 
 #[test]
 fn wrapped_error_key_and_numeric_code_are_retained_without_opening_arbitrary_content() {
-    let details = upstream_error::details_value(
+    let details = failure_policy::details_value(
         &json!({
             "data": {
                 "error": {
@@ -95,7 +95,7 @@ fn wrapped_error_key_and_numeric_code_are_retained_without_opening_arbitrary_con
 #[test]
 fn text_error_extracts_code_and_quoted_reason_but_redacts_reason_from_message() {
     let body = br#"error: code=429 reason="rate_limit_exceeded" message="fixture secret""#;
-    let details = upstream_error::details_http(body);
+    let details = failure_policy::details_http(body);
 
     assert_eq!(details.upstream_code.as_deref(), Some("429"));
     assert_eq!(
@@ -110,14 +110,14 @@ fn text_error_extracts_code_and_quoted_reason_but_redacts_reason_from_message() 
 
 #[test]
 fn text_error_explicit_message_field_can_carry_the_daily_limit_reason() {
-    let details = upstream_error::details_http(
+    let details = failure_policy::details_http(
         br#"error: code=429 message="DAILY_LIMIT_EXCEEDED" detail="fixture""#,
     );
     assert_eq!(
         details.upstream_reason.as_deref(),
         Some("DAILY_LIMIT_EXCEEDED")
     );
-    assert!(upstream_error::permanent_rejection(
+    assert!(failure_policy::permanent_rejection(
         br#"error: code=429 message="DAILY_LIMIT_EXCEEDED""#
     ));
 }
@@ -133,12 +133,12 @@ fn successful_content_unknown_reason_and_user_text_never_become_upstream_reason(
         }
     });
     assert_eq!(
-        upstream_error::details_value(&success, false),
+        failure_policy::details_value(&success, false),
         Details::default()
     );
-    assert!(!upstream_error::temporary_capacity_event(&success));
+    assert!(!failure_policy::temporary_capacity_event(&success));
 
-    let unknown = upstream_error::details_value(
+    let unknown = failure_policy::details_value(
         &json!({
             "error": {
                 "type": "error",
@@ -152,7 +152,7 @@ fn successful_content_unknown_reason_and_user_text_never_become_upstream_reason(
     assert_eq!(unknown.upstream_code.as_deref(), Some("429"));
     assert_eq!(unknown.upstream_reason, None);
 
-    let user_text = upstream_error::details_value(
+    let user_text = failure_policy::details_value(
         &json!({
             "error": {
                 "type": "error",
@@ -173,6 +173,6 @@ fn oversized_error_body_is_ignored_before_classification_or_logging() {
     body.extend(std::iter::repeat_n(b'x', 128 * 1024));
     body.extend_from_slice(b"\"");
 
-    assert_eq!(upstream_error::details_http(&body), Details::default());
-    assert!(!upstream_error::permanent_rejection(&body));
+    assert_eq!(failure_policy::details_http(&body), Details::default());
+    assert!(!failure_policy::permanent_rejection(&body));
 }
