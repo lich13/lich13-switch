@@ -79,6 +79,9 @@ describe("gateway advanced settings", () => {
     };
     const { rerender } = render(<Advanced {...props} />);
     await user.click(screen.getByText("故障策略"));
+    await user.click(
+      screen.getByText("全部规则与参数", { selector: "summary" }),
+    );
     const cooldown = screen.getByRole("spinbutton", {
       name: "额度／认证冷却 / 秒",
     });
@@ -124,6 +127,9 @@ describe("gateway advanced settings", () => {
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
     await user.click(screen.getByText("故障策略"));
+    await user.click(
+      screen.getByText("全部规则与参数", { selector: "summary" }),
+    );
 
     expect(
       screen.queryByRole("checkbox", { name: "压缩后接管" }),
@@ -173,6 +179,9 @@ describe("gateway advanced settings", () => {
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
     await user.click(screen.getByText("故障策略"));
+    await user.click(
+      screen.getByText("全部规则与参数", { selector: "summary" }),
+    );
 
     expect(
       screen.queryByLabelText("WebSocket 断开等待 / 秒"),

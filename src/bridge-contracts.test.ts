@@ -8,6 +8,18 @@ import type { UsageRecord } from "./usage-types";
 function commandTypeExamples() {
   const state = command("get_state");
   expectTypeOf(state).toEqualTypeOf<Promise<ViewState>>();
+  const match = command("match_failure_policy", {
+    clientId: "codex",
+    input: { code: "fixture_error", status: 429 },
+  });
+  expectTypeOf(match).toEqualTypeOf<
+    Promise<import("./failure-policy-types").FailureMatch>
+  >();
+  void command("match_failure_policy", {
+    clientId: "codex",
+    // @ts-expect-error HTTP status must be a number.
+    input: { status: "429" },
+  });
 
   const config = command("read_config");
   expectTypeOf(config).toEqualTypeOf<Promise<ConfigDocument>>();

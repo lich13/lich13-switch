@@ -88,6 +88,43 @@ function eventCalls() {
   return mock.command.mock.calls.filter(([name]) => name === "get_app_events");
 }
 
+it("opens a policy from either the row or drawer with the original error fields", async () => {
+  const user = userEvent.setup();
+  const open = vi.fn();
+  eventRecords = [
+    {
+      ...record,
+      clientId: "claude",
+      details: {
+        upstreamCode: "fixture_failure",
+        upstreamType: "rate_limit_error",
+        upstreamReason: "RATE_LIMIT_EXCEEDED",
+        parameter: "model",
+        message: "fixture failure message",
+        errorBasis: "rpm",
+      },
+    },
+  ];
+  render(<EventLog onOpenPolicy={open} />);
+  await user.click(await screen.findByRole("button", { name: "查看策略" }));
+  expect(open).toHaveBeenLastCalledWith({
+    clientId: "claude",
+    recordedCategory: "rpm",
+    input: {
+      code: "fixture_failure",
+      message: "fixture failure message",
+      status: 404,
+      upstreamType: "rate_limit_error",
+      upstreamReason: "RATE_LIMIT_EXCEEDED",
+      parameter: "model",
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "上游 RPM 限制" }));
+  const drawer = await screen.findByRole("dialog");
+  await user.click(within(drawer).getByRole("button", { name: "查看策略" }));
+  expect(open).toHaveBeenCalledTimes(2);
+});
+
 describe("event log", () => {
   it("filters by client, provider, level, reason and time range", async () => {
     const user = userEvent.setup();

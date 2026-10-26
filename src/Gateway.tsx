@@ -2,6 +2,7 @@ import AgyLaunch from "./AgyLaunch";
 import ProviderTesting from "./ProviderTesting";
 import ConnectionTestIcon from "./ConnectionTestIcon";
 import Advanced from "./GatewayAdvanced";
+import type { FailureFocus } from "./failure-policy-types";
 import DshProfile, { connectDsh } from "./DshProfile";
 import { preferredDshProfile } from "./dsh-profile";
 import GatewayModels from "./GatewayModels";
@@ -64,6 +65,8 @@ type Dialog =
   | { kind: "quota"; item: Provider }
   | null;
 type GatewayProps = {
+  focusFailure?: FailureFocus | null;
+  onFailureHandled?: () => void;
   quotaRefreshSeconds?: number;
   notify: (s: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
@@ -90,11 +93,17 @@ export default function Gateway(props: GatewayProps) {
       // App has already confirmed discarding drafts for explicit navigation.
       select(props.focusProvider.clientId ?? "codex");
   }, [props.focusProvider?.sequence]);
+  useEffect(() => {
+    if (props.focusFailure) select(props.focusFailure.clientId);
+  }, [props.focusFailure]);
   return (
     <GatewayContent
       key={clientId}
       {...props}
       clientId={clientId}
+      focusFailure={
+        props.focusFailure?.clientId === clientId ? props.focusFailure : null
+      }
       focusProvider={
         props.focusProvider &&
         (props.focusProvider.clientId ?? "codex") === clientId
@@ -116,7 +125,11 @@ function GatewayContent({
   onDirtyChange,
   onFocusHandled,
   focusProvider,
+  focusFailure,
+  onFailureHandled,
 }: {
+  focusFailure?: FailureFocus | null;
+  onFailureHandled?: () => void;
   quotaRefreshSeconds?: number;
   clientId: ClientId;
   onClientChange: (id: ClientId) => void;
@@ -631,6 +644,8 @@ function GatewayContent({
           </SortableProviders>
         </div>
         <Advanced
+          focusFailure={focusFailure}
+          onFailureHandled={onFailureHandled}
           clientId={clientId}
           onDirtyChange={markAdvanced}
           settings={state.settings}

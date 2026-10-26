@@ -1,4 +1,6 @@
 import FailurePolicyCatalog from "./FailurePolicyCatalog";
+import FailurePolicySearch from "./FailurePolicySearch";
+import type { FailureFocus } from "./failure-policy-types";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   errorOf,
@@ -17,8 +19,12 @@ export default function Advanced({
   busy,
   save,
   children,
+  focusFailure,
+  onFailureHandled,
 }: {
   children?: ReactNode;
+  focusFailure?: FailureFocus | null;
+  onFailureHandled?: () => void;
   clientId: ClientId;
   onDirtyChange?: (dirty: boolean) => void;
   settings: GatewaySettings;
@@ -31,6 +37,15 @@ export default function Advanced({
     [error, setError] = useState("");
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const [editing, setEditing] = useState(false);
+  const [allOpen, setAllOpen] = useState(false);
+  const policySection = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (focusFailure && policySection.current) {
+      policySection.current.open = true;
+      setAllOpen(false);
+      policySection.current.scrollIntoView?.({ block: "start" });
+    }
+  }, [focusFailure]);
   const baseRevision = useRef<EditRevision>(revision);
   useEffect(() => {
     if (!editing) {
@@ -139,8 +154,11 @@ export default function Advanced({
               draft[key] ?? (key === "transientFailureThreshold" ? 6 : 300)
             }
             onInvalid={(e) => {
-              const section = e.currentTarget.closest("details");
-              if (section) section.open = true;
+              let section = e.currentTarget.closest("details");
+              while (section) {
+                section.open = true;
+                section = section.parentElement?.closest("details") ?? null;
+              }
             }}
             onChange={(e) => {
               if (!editing) baseRevision.current = revision;
@@ -155,20 +173,43 @@ export default function Advanced({
   );
   return (
     <section className="gateway-settings">
-      <details className="advanced">
+      <details className="advanced" ref={policySection}>
         <summary>故障策略</summary>
-        {groups.map((group) => (
-          <fieldset className="failure-policy-group" key={group.name}>
-            <legend>{group.name}</legend>
-            <FailurePolicyCatalog
-              group={group.name}
-              clientId={clientId}
-              rules={settings.customFailureRules ?? []}
-              revision={revision}
-            />
-            {fields(group.fields)}
-          </fieldset>
-        ))}
+        <FailurePolicySearch
+          clientId={clientId}
+          rules={settings.customFailureRules ?? []}
+          revision={revision}
+          focus={focusFailure}
+          consumed={onFailureHandled}
+          allOpen={allOpen}
+          fields={(keys) =>
+            fields(
+              groups
+                .flatMap((g) => g.fields)
+                .filter(([key]) => keys.includes(key)),
+            )
+          }
+        />
+        <details
+          className="failure-all"
+          open={allOpen}
+          onToggle={(e) => setAllOpen(e.currentTarget.open)}
+        >
+          <summary>全部规则与参数</summary>
+          {allOpen &&
+            groups.map((group) => (
+              <fieldset className="failure-policy-group" key={group.name}>
+                <legend>{group.name}</legend>
+                <FailurePolicyCatalog
+                  group={group.name}
+                  clientId={clientId}
+                  rules={settings.customFailureRules ?? []}
+                  revision={revision}
+                />
+                {fields(group.fields)}
+              </fieldset>
+            ))}
+        </details>
       </details>
       <details className="advanced">
         <summary>高级设置</summary>

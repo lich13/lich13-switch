@@ -7,11 +7,17 @@ import FailureRuleDialog from "./FailureRuleDialog";
 
 export default function FailurePolicyCatalog({
   group,
+  category,
+  catalog: providedCatalog,
+  summaryLabel,
   clientId,
   rules,
   revision,
 }: {
-  group: string;
+  group?: string;
+  category?: string;
+  catalog?: FailureCategory[];
+  summaryLabel?: string;
   clientId: ClientId;
   rules: FailureRule[];
   revision: string;
@@ -21,6 +27,7 @@ export default function FailurePolicyCatalog({
   const [editing, setEditing] = useState<Partial<FailureRule> | null>(null),
     [deleting, setDeleting] = useState("");
   useEffect(() => {
+    if (providedCatalog) return;
     let active = true;
     void command("get_failure_policy_catalog")
       .then((items) => {
@@ -32,7 +39,7 @@ export default function FailurePolicyCatalog({
     return () => {
       active = false;
     };
-  }, []);
+  }, [providedCatalog]);
   return (
     <div className="failure-catalog">
       {error && (
@@ -40,13 +47,19 @@ export default function FailurePolicyCatalog({
           {error}
         </div>
       )}
-      {catalog
-        .filter((c) => c.group === group)
+      {(providedCatalog ?? catalog)
+        .filter(
+          (c) =>
+            (!group || c.group === group) &&
+            (!category || c.category === category),
+        )
         .map((c) => (
           <details className="failure-category" key={c.category}>
             <summary>
-              <span>{c.label}</span>
-              <span className="failure-action">{c.action}</span>
+              <span>{summaryLabel ?? c.label}</span>
+              {!summaryLabel && (
+                <span className="failure-action">{c.action}</span>
+              )}
             </summary>
             <div className="failure-conditions">
               {c.protocols?.length ? (

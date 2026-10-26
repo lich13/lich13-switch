@@ -134,6 +134,9 @@ describe("gateway controls", () => {
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
     await user.click(screen.getByText("故障策略"));
+    await user.click(
+      screen.getByText("全部规则与参数", { selector: "summary" }),
+    );
     const input = screen.getByLabelText("容量错误等待 / 秒");
     await user.clear(input);
     await user.type(input, "120");
@@ -548,6 +551,9 @@ describe("client isolation", () => {
     render(<Gateway notify={() => {}} />);
     await screen.findByLabelText(`${state.providers[0].name} 操作`);
     await user.click(screen.getByText("故障策略", { selector: "summary" }));
+    await user.click(
+      screen.getByText("全部规则与参数", { selector: "summary" }),
+    );
     const input = screen.getByRole("spinbutton", { name: "容量错误等待 / 秒" });
     expect(input).toHaveValue(60);
     expect(input).toHaveAttribute("min", "1");
@@ -572,6 +578,9 @@ describe("client isolation", () => {
     await user.click(screen.getByRole("button", { name: "Claude Code" }));
     await screen.findByLabelText(`${claudeState.providers[0].name} 操作`);
     await user.click(screen.getByText("故障策略", { selector: "summary" }));
+    await user.click(
+      screen.getByText("全部规则与参数", { selector: "summary" }),
+    );
     expect(
       screen.getByRole("spinbutton", { name: "容量错误等待 / 秒" }),
     ).toHaveValue(claudeState.settings.capacityRetrySeconds);

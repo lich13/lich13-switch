@@ -1,3 +1,41 @@
+import type { ClientId, GatewaySettings } from "./types";
+
+export type FailureInput = {
+  code?: string | null;
+  message?: string | null;
+  status?: number | null;
+  upstreamType?: string | null;
+  upstreamReason?: string | null;
+  parameter?: string | null;
+};
+export type FailureParameter = Exclude<
+  keyof GatewaySettings,
+  "customFailureRules"
+>;
+export type FailureMatch = {
+  category: string | null;
+  source:
+    | "builtin_code"
+    | "builtin_type"
+    | "builtin_message"
+    | "builtin_condition"
+    | "custom_code"
+    | "custom_keyword"
+    | "status"
+    | null;
+  evidence: string;
+  action: string | null;
+  customRuleId: string | null;
+  conflict: boolean;
+  parameters: FailureParameter[];
+  commonParameters: FailureParameter[];
+};
+export type FailureFocus = {
+  clientId: ClientId;
+  input: FailureInput;
+  recordedCategory?: string | null;
+};
+
 export type FailureRule = {
   id: string;
   matchKind: "code" | "keyword";

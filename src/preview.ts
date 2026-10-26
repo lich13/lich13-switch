@@ -341,7 +341,8 @@ export async function run(
     else emit("gateway-state", result);
     return result;
   }
-  if (name === "get_failure_policy_catalog") return gatewayPreview(name, args);
+  if (name === "get_failure_policy_catalog" || name === "match_failure_policy")
+    return gatewayPreview(name, args);
   if (name === "cancel_gateway_wait") {
     const result = gatewayPreview(name, args);
     emit("gateway-state", gatewayPreview("get_gateway", args));

@@ -1,4 +1,5 @@
 import FailureRuleDialog from "./FailureRuleDialog";
+import type { FailureFocus } from "./failure-policy-types";
 import {
   limitLabel,
   rpmWaitLabel,
@@ -350,7 +351,9 @@ function wireStatus(r: EventRecord) {
 export default function EventLog({
   focus,
   consumed,
+  onOpenPolicy,
 }: {
+  onOpenPolicy?: (focus: FailureFocus) => void;
   focus?: {
     id: string;
     clientId: ClientId;
@@ -389,6 +392,28 @@ export default function EventLog({
   const visible = documentVisible && nativeVisible;
   const sequence = useRef(0);
   const detailSequence = useRef(0);
+  const openPolicy = async (record: EventRecord) => {
+    const request = ++detailSequence.current;
+    try {
+      const event =
+        (await command("get_app_event", { id: record.id })) ?? record;
+      if (request !== detailSequence.current || !event.clientId) return;
+      onOpenPolicy?.({
+        clientId: event.clientId,
+        recordedCategory: event.details?.errorBasis,
+        input: {
+          code: event.details?.upstreamCode,
+          message: event.details?.message,
+          status: event.status,
+          upstreamType: event.details?.upstreamType,
+          upstreamReason: event.details?.upstreamReason,
+          parameter: event.details?.parameter,
+        },
+      });
+    } catch (e) {
+      if (request === detailSequence.current) setError(errorOf(e).message);
+    }
+  };
   useEffect(
     () => () => {
       detailSequence.current++;
@@ -720,40 +745,53 @@ export default function EventLog({
                     </span>
                   </td>
                   <td>
-                    <button
-                      className={"event-code " + r.level}
-                      aria-label={reasonText(r)}
-                      title={summary(r)}
-                      onClick={(e) => {
-                        e.currentTarget.focus({ preventScroll: true });
-                        const request = ++detailSequence.current;
-                        void command("get_app_event", {
-                          id: r.id,
-                        })
-                          .then((value) => {
-                            if (request === detailSequence.current)
-                              setSelected(value || r);
+                    <div className="event-error-cell">
+                      <button
+                        className={"event-code " + r.level}
+                        aria-label={reasonText(r)}
+                        title={summary(r)}
+                        onClick={(e) => {
+                          e.currentTarget.focus({ preventScroll: true });
+                          const request = ++detailSequence.current;
+                          void command("get_app_event", {
+                            id: r.id,
                           })
-                          .catch((e) => {
-                            if (request === detailSequence.current)
-                              setError(errorOf(e).message);
-                          });
-                      }}
-                    >
-                      <span className="event-summary-text">
-                        <code className="event-primary-code">
-                          {primaryCode(r)}
-                        </code>
-                        <span className="event-message-text">
-                          {summaryMessage(r)}
+                            .then((value) => {
+                              if (request === detailSequence.current)
+                                setSelected(value || r);
+                            })
+                            .catch((e) => {
+                              if (request === detailSequence.current)
+                                setError(errorOf(e).message);
+                            });
+                        }}
+                      >
+                        <span className="event-summary-text">
+                          <code className="event-primary-code">
+                            {primaryCode(r)}
+                          </code>
+                          <span className="event-message-text">
+                            {summaryMessage(r)}
+                          </span>
                         </span>
-                      </span>
-                      {r.count > 1 && (
-                        <span className="event-count">
-                          ×{r.count.toLocaleString()}
-                        </span>
-                      )}
-                    </button>
+                        {r.count > 1 && (
+                          <span className="event-count">
+                            ×{r.count.toLocaleString()}
+                          </span>
+                        )}
+                      </button>
+                      {onOpenPolicy &&
+                        r.clientId &&
+                        (r.level !== "info" || r.details?.errorBasis) && (
+                          <button
+                            type="button"
+                            className="text-button event-policy-link"
+                            onClick={() => void openPolicy(r)}
+                          >
+                            查看策略
+                          </button>
+                        )}
+                    </div>
                   </td>
                   <td>
                     <span className="event-action-text" title={actionText(r)}>
@@ -790,6 +828,9 @@ export default function EventLog({
       </div>
       {selected && (
         <EventDetail
+          onOpenPolicy={
+            onOpenPolicy ? () => void openPolicy(selected) : undefined
+          }
           event={selected}
           provider={name(selected)}
           onClose={() => {
@@ -806,7 +847,9 @@ function EventDetail({
   event: r,
   provider,
   onClose,
+  onOpenPolicy,
 }: {
+  onOpenPolicy?: () => void;
   event: EventRecord;
   provider: string;
   onClose: () => void;
@@ -865,17 +908,29 @@ function EventDetail({
             <X size={18} />
           </button>
         </header>
-        {r.clientId &&
-          (r.details?.upstreamCode ||
-            r.details?.message ||
-            r.details?.upstreamType) && (
-            <button
-              className="secondary event-add-rule"
-              onClick={() => setAddingRule(true)}
-            >
-              加入故障规则
-            </button>
-          )}
+        <div className="event-rule-actions">
+          {onOpenPolicy &&
+            r.clientId &&
+            (r.level !== "info" || r.details?.errorBasis) && (
+              <button
+                className="secondary event-add-rule"
+                onClick={onOpenPolicy}
+              >
+                查看策略
+              </button>
+            )}
+          {r.clientId &&
+            (r.details?.upstreamCode ||
+              r.details?.message ||
+              r.details?.upstreamType) && (
+              <button
+                className="secondary event-add-rule"
+                onClick={() => setAddingRule(true)}
+              >
+                加入故障规则
+              </button>
+            )}
+        </div>
         <dl>
           {[
             ["类别", categories[category(r)]],

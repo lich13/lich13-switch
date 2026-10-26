@@ -37,7 +37,11 @@ vi.mock("@uiw/react-codemirror", () => ({
   ),
 }));
 import App from "./App";
-import { gatewayDemo } from "./gateway-preview";
+import {
+  gatewayDemo,
+  failureCatalogPreview,
+  claudeGatewayDemo,
+} from "./gateway-preview";
 import { providerTestingPreview } from "./provider-testing-preview";
 let state: ViewState;
 let doc: ConfigDocument;
@@ -753,4 +757,72 @@ it("shows association errors recorded before frontend event subscriptions", asyn
   expect(
     await screen.findByText("系统需要确认 CC Switch 链接关联"),
   ).toBeInTheDocument();
+});
+
+it("navigates from an error log to its client's policy and consumes the navigation", async () => {
+  localStorage.setItem("lich13-switch.main.client", "codex");
+  const original = mocks.command.getMockImplementation()!;
+  const event = {
+    id: "fixture-log",
+    firstAt: 1,
+    lastAt: 1,
+    count: 1,
+    clientId: "claude",
+    providerId: null,
+    model: null,
+    reason: "capacity",
+    action: "waiting",
+    level: "warning",
+    status: 503,
+    attempt: 1,
+    details: {
+      message: "Selected model is at capacity.",
+      errorBasis: "capacity",
+    },
+  };
+  mocks.command.mockImplementation(
+    async (name: string, args: Record<string, unknown>) => {
+      if (name === "get_app_events")
+        return { items: [event], total: 1, page: 1, error: null };
+      if (name === "get_app_event") return event;
+      if (name === "get_gateway")
+        return args.clientId === "claude" ? claudeGatewayDemo : gatewayDemo;
+      if (name === "get_failure_policy_catalog") return failureCatalogPreview;
+      if (name === "match_failure_policy")
+        return {
+          category: "capacity",
+          source: "builtin_message",
+          evidence: "at capacity",
+          action: "已有会话优先原供应商",
+          customRuleId: null,
+          conflict: false,
+          parameters: ["capacityRetrySeconds"],
+          commonParameters: ["retryBudgetSeconds"],
+        };
+      return original(name, args);
+    },
+  );
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "日志" }));
+  await user.click(await screen.findByRole("button", { name: "查看策略" }));
+  await waitFor(() =>
+    expect(screen.getByLabelText("报错信息")).toHaveValue(
+      "Selected model is at capacity.",
+    ),
+  );
+  expect(screen.getByText("故障策略").closest("details")).toHaveAttribute(
+    "open",
+  );
+  await screen.findByRole("spinbutton", { name: "容量错误等待 / 秒" });
+  expect(mocks.command).toHaveBeenCalledWith(
+    "match_failure_policy",
+    expect.objectContaining({
+      clientId: "claude",
+      input: expect.objectContaining({ status: 503 }),
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "账号" }));
+  await user.click(screen.getByRole("button", { name: "网关" }));
+  expect(await screen.findByLabelText("报错信息")).toHaveValue("");
 });

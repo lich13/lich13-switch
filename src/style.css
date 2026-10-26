@@ -3826,6 +3826,107 @@ button.exchange-button:active:not(:disabled) {
   margin: 12px 0 0;
   font-size: 13px;
 }
+.event-error-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.event-error-cell .event-code {
+  flex: 1;
+  min-width: 0;
+}
+.event-policy-link {
+  flex: none;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.event-rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.failure-search {
+  margin-top: 16px;
+  font-size: 13px;
+}
+.failure-search-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 12px;
+}
+.failure-search-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.failure-search-inputs input,
+.failure-search-inputs textarea {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+}
+.failure-search-message {
+  grid-column: 1 / -1;
+}
+.failure-search-message textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+.failure-match {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.failure-match h3,
+.failure-match h4 {
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+.failure-match h4 {
+  margin-top: 16px;
+}
+.failure-match-evidence {
+  margin: 0 0 12px;
+}
+.failure-match-evidence > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  margin: 8px 0;
+}
+.failure-match-evidence dt {
+  color: var(--muted);
+}
+.failure-match-evidence dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.failure-match-evidence code {
+  font:
+    13px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.failure-all,
+.failure-common {
+  margin-top: 16px;
+}
+.failure-all > summary,
+.failure-common > summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+.failure-recorded {
+  margin: 12px 0;
+}
+@media (max-width: 580px) {
+  .failure-search-inputs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .failure-category {
   border-bottom: 1px solid var(--line);
 }

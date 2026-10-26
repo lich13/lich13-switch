@@ -912,6 +912,14 @@ fn get_failure_policy_catalog() -> Vec<gateway::failure_rules::Category> {
     gateway::failure_rules::catalog()
 }
 #[tauri::command]
+fn match_failure_policy(
+    client_id: gateway::ClientId,
+    input: gateway::failure_match::Input,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::failure_match::Match> {
+    r.gateway(client_id).match_failure_policy(input)
+}
+#[tauri::command]
 fn cancel_gateway_wait(
     client_id: gateway::ClientId,
     request_id: String,
@@ -1974,6 +1982,7 @@ pub fn run() {
             get_gateway,
             cancel_gateway_wait,
             get_failure_policy_catalog,
+            match_failure_policy,
             get_gateway_listener,
             set_gateway_listener,
             preview_grok_import,

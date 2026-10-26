@@ -534,6 +534,10 @@ export type CommandMap = {
     None,
     import("./failure-policy-types").FailureCategory[]
   >;
+  match_failure_policy: Call<
+    Client & { input: import("./failure-policy-types").FailureInput },
+    import("./failure-policy-types").FailureMatch
+  >;
   cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
   get_gateway: Call<Client, GatewayState>;
   get_gateway_listener: Call<None, GatewayListener>;

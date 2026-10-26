@@ -1,4 +1,9 @@
-import type { FailureCategory, FailureRule } from "./failure-policy-types";
+import type {
+  FailureCategory,
+  FailureRule,
+  FailureInput,
+  FailureMatch,
+} from "./failure-policy-types";
 import type {
   GatewayModels,
   DshFileView,
@@ -236,6 +241,67 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
             ? grokGatewayDemo
             : gatewayDemo;
   if (name === "get_failure_policy_catalog") return failureCatalogPreview;
+  if (name === "match_failure_policy") {
+    // Development samples only. Native lookups use the Rust classifier.
+    const input = args.input as FailureInput;
+    const code = input.code?.trim().toLowerCase();
+    const capacity = input.message?.toLowerCase().includes("at capacity");
+    const category =
+      failureCatalogPreview.find((c) =>
+        c.codes.some((v) => v.value === code),
+      ) ??
+      failureCatalogPreview.find(
+        (c) =>
+          c.category ===
+          (capacity
+            ? input.status === 400
+              ? "invalid_request"
+              : "capacity"
+            : input.status === 429
+              ? "unknown_rate_limit"
+              : input.status === 503
+                ? "service_error"
+                : ""),
+      );
+    const result: FailureMatch = {
+      category: category?.category ?? null,
+      source: category
+        ? code
+          ? "builtin_code"
+          : capacity && input.status !== 400
+            ? "builtin_message"
+            : "status"
+        : null,
+      evidence:
+        code ||
+        (capacity && input.status !== 400
+          ? "at capacity"
+          : input.status
+            ? `HTTP ${input.status}`
+            : ""),
+      action: category?.action ?? null,
+      customRuleId: null,
+      conflict: false,
+      parameters:
+        category?.category === "capacity"
+          ? ["capacityRetrySeconds"]
+          : category?.group === "限流与容量"
+            ? ["rateLimitSeconds"]
+            : category?.group === "额度与认证"
+              ? ["hardFailureCooldownSeconds"]
+              : category?.category === "service_error"
+                ? ["maxRetries", "transientFailureThreshold", "cooldownSeconds"]
+                : [],
+      commonParameters:
+        category &&
+        !["invalid_request", "safety_rejection", "request_too_large"].includes(
+          category.category,
+        )
+          ? ["retryBudgetSeconds"]
+          : [],
+    };
+    return result;
+  }
   if (name === "cancel_gateway_wait") {
     const found =
       s.pendingRequests?.some((r) => r.requestId === args.requestId) ?? false;

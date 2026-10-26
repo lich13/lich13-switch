@@ -125,6 +125,7 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
   await screen.findByRole("button", { name: "添加" });
   await user.click(screen.getByText("高级设置", { selector: "summary" }));
   await user.click(screen.getByText("故障策略", { selector: "summary" }));
+  await user.click(screen.getByText("全部规则与参数", { selector: "summary" }));
 
   expect(
     screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" }),
