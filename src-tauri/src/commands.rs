@@ -104,6 +104,13 @@ pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::ClassifiedRe
     r.diagnostics.detail(&id)
 }
 #[tauri::command]
+pub async fn get_app_event_raw(r: R<'_>, id: String) -> Result<Option<crate::event_raw::View>> {
+    let service = r.diagnostics.clone();
+    tauri::async_runtime::spawn_blocking(move || service.raw(&id))
+        .await
+        .map_err(|_| AppError::new(code::LOG_READ, "错误原文读取失败"))?
+}
+#[tauri::command]
 pub async fn clear_app_events(r: R<'_>) -> Result<()> {
     r.diagnostics.clear().await
 }

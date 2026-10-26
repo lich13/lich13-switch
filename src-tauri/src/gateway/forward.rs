@@ -1551,7 +1551,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             .unwrap_or("identity");
                         replay::decode_prefix(&encoded, encoding, 128 * 1024).unwrap_or_default()
                     }
-                    _ => Vec::new(),
+                    _ => {
+                        protocol.finish(Some(status.as_u16()), code::STREAM_INTERRUPTED);
+                        Vec::new()
+                    }
                 };
                 let (classified, server_retry) = super::failure_policy::http_with_rules(
                     status.as_u16(),
@@ -1559,7 +1562,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     &decoded,
                     &settings.custom_failure_rules,
                 );
-                let mut cooldown = cooldown.max(server_retry);
+                let mut cooldown = cooldown
+                    .max(server_retry)
+                    .max(protocol.observation.retry_after);
                 let compact_error = ownership.as_ref().is_some_and(|lease| {
                     lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
                 }) && protocol.observation.compaction_incompatible;
@@ -1575,7 +1580,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 let model_error = protocol.observation.terminal
                     == Some(super::protocol::Terminal::ModelUnavailable)
                     || super::failure_policy::model_http(status.as_u16(), &decoded);
-                let mut details = classified;
+                let mut details = if protocol.observation.error.raw.is_some() {
+                    protocol.observation.error.clone()
+                } else {
+                    classified
+                };
                 if details == crate::events::Details::default() {
                     details = protocol.observation.error.clone();
                 }
@@ -1817,7 +1826,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         if let Some(bytes) = frame.data_ref() {
                             prefix_bytes += bytes.len();
                             protocol.feed(bytes);
-                            if !stream && !json && !bytes.is_empty() {
+                            if !stream
+                                && !json
+                                && !bytes.is_empty()
+                                && !protocol.possible_bare_capacity()
+                            {
                                 protocol.effective_output();
                             }
                             if !dedicated_search && !bytes.is_empty() {
@@ -1835,7 +1848,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         }
                         if ended
                             || prefix_bytes >= 2 * 1024 * 1024
-                            || (!stream && !json)
+                            || (!stream && !json && !protocol.possible_bare_capacity())
                             || (stream
                                 && if dedicated_search {
                                     protocol.search_content_observed()

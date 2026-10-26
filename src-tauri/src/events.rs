@@ -1,4 +1,4 @@
-//! Exception-only journal. Only bounded, sanitized error details cross this boundary.
+//! Exception journal; complete upstream errors live in separately loaded attachments.
 use crate::errors::code;
 #[path = "event_details.rs"]
 mod details;
@@ -20,7 +20,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, oneshot};
-const LIMIT: u64 = 5 * 1024 * 1024;
 const RETENTION: u64 = 7 * 86400;
 const MERGE: u64 = 300;
 fn now() -> u64 {
@@ -406,6 +405,12 @@ impl Record {
         other_details.last_progress_ms = None;
         details.delivery = None;
         other_details.delivery = None;
+        if let Some(raw) = &mut details.raw_error {
+            raw.id.clear();
+        }
+        if let Some(raw) = &mut other_details.raw_error {
+            raw.id.clear();
+        }
         self.client_id == other.client_id
             && self.provider_id == other.provider_id
             && self.model == other.model
@@ -466,6 +471,7 @@ pub struct Service {
     sender: mpsc::SyncSender<Job>,
     journal: Arc<Mutex<Journal>>,
     events: broadcast::Sender<Change>,
+    raw_directory: Arc<std::path::PathBuf>,
 }
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -517,7 +523,7 @@ fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
 }
 fn load(path: &Path) -> Journal {
     let mut j = Journal::default();
-    match storage::read_bounded(path, LIMIT) {
+    match storage::read_bounded(path, u64::MAX) {
         Ok(Some(bytes)) => {
             for line in bytes.split(|b| *b == b'\n').filter(|b| !b.is_empty()) {
                 match serde_json::from_slice::<Record>(line) {
@@ -546,20 +552,12 @@ fn load(path: &Path) -> Journal {
 fn persist(j: &mut Journal, path: &Path) -> Result<()> {
     let cutoff = now().saturating_sub(RETENTION);
     j.records.retain(|r| r.last_at >= cutoff);
-    let mut lines: VecDeque<Vec<u8>> = j
+    let lines: VecDeque<Vec<u8>> = j
         .records
         .iter()
         .filter_map(|r| serde_json::to_vec(r).ok())
         .collect();
-    let mut size: usize = lines.iter().map(|l| l.len() + 1).sum();
-    while size > LIMIT as usize {
-        if let Some(l) = lines.pop_front() {
-            size -= l.len() + 1;
-            j.records.pop_front();
-        } else {
-            break;
-        }
-    }
+    let size: usize = lines.iter().map(|l| l.len() + 1).sum();
     let retained: std::collections::HashSet<_> = j.records.iter().map(|r| r.id.as_str()).collect();
     j.aliases
         .retain(|(_, target)| retained.contains(target.as_str()));
@@ -568,134 +566,193 @@ fn persist(j: &mut Journal, path: &Path) -> Result<()> {
         bytes.extend(line);
         bytes.push(b'\n');
     }
-    storage::atomic_write_bounded(path, &bytes, None, LIMIT)
+    storage::atomic_write_bounded(path, &bytes, None, u64::MAX)
 }
 impl Service {
     pub fn new(data: &Path) -> Self {
         let path = data.join("diagnostics.jsonl");
+        let raw_directory = Arc::new(data.join("diagnostic-errors"));
+        let raw_path = raw_directory.clone();
         let journal = Arc::new(Mutex::new(load(&path)));
         let (events, _) = broadcast::channel(128);
         let (sender, receiver) = mpsc::sync_channel(256);
         let j = journal.clone();
         let events_copy = events.clone();
-        std::thread::spawn(move || loop {
-            let job = match receiver.recv_timeout(std::time::Duration::from_secs(3600)) {
-                Ok(v) => v,
-                Err(mpsc::RecvTimeoutError::Timeout) => Job::Prune,
-                Err(_) => break,
-            };
-            let mut journal = j.lock().unwrap().clone();
-            // Only Clear promises rollback after a failed write. Append keeps
-            // its in-memory evidence so the next write can retry it.
-            let previous = matches!(&job, Job::Clear(_))
-                .then(|| (journal.records.clone(), journal.aliases.clone()));
-            let mut changed = None;
-            let mut notify = false;
-            let mut done = None;
-            match job {
-                Job::Append(r) => {
-                    let mut r = *r;
-                    if let Some((_, target)) = journal
-                        .aliases
-                        .iter()
-                        .rev()
-                        .find(|(id, _)| r.details.cause_id.as_ref() == Some(id))
-                    {
-                        r.details.cause_id = Some(target.clone());
+        std::thread::spawn(move || {
+            // Retention also runs after restart, before processing queued writes.
+            {
+                let mut initial = j.lock().unwrap();
+                if initial.error.is_none() && path.exists() {
+                    if persist(&mut initial, &path).is_err() {
+                        initial.error = Some("日志写入失败，请检查文件权限与空间".into());
+                    } else if prune_raw(&raw_path, &initial).is_err() {
+                        initial.error = Some("日志原文清理失败，请重试".into());
                     }
-                    if matches!(r.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
-                        && r.details
-                            .cause_id
-                            .as_ref()
-                            .is_none_or(|id| !journal.records.iter().any(|old| &old.id == id))
-                    {
-                        // A repeated cause may already have been merged into an earlier row.
-                        r.details.cause_id = journal
-                            .records
+                }
+            }
+            loop {
+                let job = match receiver.recv_timeout(std::time::Duration::from_secs(3600)) {
+                    Ok(v) => v,
+                    Err(mpsc::RecvTimeoutError::Timeout) => Job::Prune,
+                    Err(_) => break,
+                };
+                let mut journal = j.lock().unwrap().clone();
+                // Only Clear promises rollback after a failed write. Append keeps
+                // its in-memory evidence so the next write can retry it.
+                let previous = matches!(&job, Job::Clear(_))
+                    .then(|| (journal.records.clone(), journal.aliases.clone()));
+                let mut changed = None;
+                let mut notify = false;
+                let mut done = None;
+                let cleanup = matches!(&job, Job::Clear(_) | Job::Prune);
+                match job {
+                    Job::Append(r) => {
+                        let mut r = *r;
+                        if let Some(raw) = r.details.raw.take() {
+                            let mut reference = raw.reference(&r.id);
+                            if raw.save(&raw_path, &r.id).is_err() {
+                                reference.incomplete = Some("错误原文保存失败".into());
+                                journal.error =
+                                    Some("错误原文保存失败，请检查文件权限与空间".into());
+                            }
+                            r.details.raw_error = Some(reference);
+                            // Only the list preview is shortened. Matching and the drawer read the attachment.
+                            for value in [
+                                &mut r.details.message,
+                                &mut r.details.upstream_code,
+                                &mut r.details.upstream_reason,
+                                &mut r.details.upstream_type,
+                                &mut r.details.parameter,
+                            ]
+                            .into_iter()
+                            .flatten()
+                            {
+                                *value = value.chars().take(512).collect();
+                            }
+                        }
+                        if let Some((_, target)) = journal
+                            .aliases
                             .iter()
                             .rev()
-                            .find(|old| {
-                                !matches!(
-                                    old.reason,
-                                    Reason::CircuitOpen | Reason::FailoverExhausted
-                                ) && (r.reason != Reason::CircuitOpen
-                                    || old.details.counted_failure == Some(true))
-                                    && old.client_id == r.client_id
-                                    && old.provider_id == r.provider_id
-                                    && old.model == r.model
-                                    && old.status == r.status
-                                    && old.details.upstream_code == r.details.upstream_code
-                                    && old.details.upstream_reason == r.details.upstream_reason
-                                    && old.details.error_basis == r.details.error_basis
-                                    && old.details.quota_check == r.details.quota_check
-                                    && old.details.rpm_wait_reason == r.details.rpm_wait_reason
-                                    && old.details.local_code == r.details.local_code
-                                    && old.details.message == r.details.message
-                                    && old.details.phase == r.details.phase
-                            })
-                            .map(|cause| cause.id.clone());
-                    }
-                    notify = r.reason.notifiable(r.action);
-                    if let Some(old) = journal.records.iter_mut().rev().find(|old| {
-                        old.same(&r) && r.last_at.saturating_sub(old.first_at) < r.merge_seconds()
-                    }) {
-                        old.last_at = r.last_at;
-                        old.count = old.count.saturating_add(1);
-                        old.status = r.status;
-                        old.action = r.action;
-                        old.attempt = r.attempt;
-                        if r.reason == Reason::RequestInterrupted {
-                            old.details.delivery = r.details.delivery;
-                            old.details.last_progress_ms = r.details.last_progress_ms;
+                            .find(|(id, _)| r.details.cause_id.as_ref() == Some(id))
+                        {
+                            r.details.cause_id = Some(target.clone());
                         }
-                        changed = Some(old.clone());
-                        let target = old.id.clone();
-                        journal.aliases.push_back((r.id, target));
-                        while journal.aliases.len() > 4096 {
-                            journal.aliases.pop_front();
+                        if matches!(r.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
+                            && r.details
+                                .cause_id
+                                .as_ref()
+                                .is_none_or(|id| !journal.records.iter().any(|old| &old.id == id))
+                        {
+                            // A repeated cause may already have been merged into an earlier row.
+                            r.details.cause_id = journal
+                                .records
+                                .iter()
+                                .rev()
+                                .find(|old| {
+                                    !matches!(
+                                        old.reason,
+                                        Reason::CircuitOpen | Reason::FailoverExhausted
+                                    ) && (r.reason != Reason::CircuitOpen
+                                        || old.details.counted_failure == Some(true))
+                                        && old.client_id == r.client_id
+                                        && old.provider_id == r.provider_id
+                                        && old.model == r.model
+                                        && old.status == r.status
+                                        && old.details.upstream_code == r.details.upstream_code
+                                        && old.details.upstream_reason == r.details.upstream_reason
+                                        && old.details.error_basis == r.details.error_basis
+                                        && old.details.quota_check == r.details.quota_check
+                                        && old.details.rpm_wait_reason == r.details.rpm_wait_reason
+                                        && old.details.local_code == r.details.local_code
+                                        && old.details.message == r.details.message
+                                        && old.details.phase == r.details.phase
+                                })
+                                .map(|cause| cause.id.clone());
                         }
-                    } else {
-                        changed = Some(r.clone());
-                        journal.records.push_back(r);
+                        notify = r.reason.notifiable(r.action);
+                        if let Some(old) = journal.records.iter_mut().rev().find(|old| {
+                            old.same(&r)
+                                && r.last_at.saturating_sub(old.first_at) < r.merge_seconds()
+                        }) {
+                            if let Some(raw) = &r.details.raw_error {
+                                if old
+                                    .details
+                                    .raw_error
+                                    .as_ref()
+                                    .is_none_or(|previous| previous.id != raw.id)
+                                {
+                                    let _ = std::fs::remove_file(
+                                        raw_path.join(format!("{}.error", raw.id)),
+                                    );
+                                }
+                            }
+                            old.last_at = r.last_at;
+                            old.count = old.count.saturating_add(1);
+                            old.status = r.status;
+                            old.action = r.action;
+                            old.attempt = r.attempt;
+                            if r.reason == Reason::RequestInterrupted {
+                                old.details.delivery = r.details.delivery;
+                                old.details.last_progress_ms = r.details.last_progress_ms;
+                            }
+                            changed = Some(old.clone());
+                            let target = old.id.clone();
+                            journal.aliases.push_back((r.id, target));
+                            while journal.aliases.len() > 4096 {
+                                journal.aliases.pop_front();
+                            }
+                        } else {
+                            changed = Some(r.clone());
+                            journal.records.push_back(r);
+                        }
                     }
-                }
-                Job::Clear(tx) => {
-                    journal.records.clear();
-                    journal.aliases.clear();
-                    journal.error = None;
-                    done = Some(tx);
-                }
-                Job::NotificationAccepted(id) => {
-                    if let Some(r) = journal.records.iter_mut().find(|r| r.id == id) {
-                        r.notified_at = now();
-                        changed = Some(r.clone());
+                    Job::Clear(tx) => {
+                        journal.records.clear();
+                        journal.aliases.clear();
+                        journal.error = None;
+                        done = Some(tx);
                     }
+                    Job::NotificationAccepted(id) => {
+                        if let Some(r) = journal.records.iter_mut().find(|r| r.id == id) {
+                            r.notified_at = now();
+                            changed = Some(r.clone());
+                        }
+                    }
+                    Job::Prune => (),
                 }
-                Job::Prune => (),
-            }
-            let result = persist(&mut journal, &path);
-            if result.is_err() {
-                if let Some((records, aliases)) = previous {
-                    journal.records = records;
-                    journal.aliases = aliases;
+                let before_retention = journal.records.len();
+                let result = persist(&mut journal, &path);
+                if result.is_err() {
+                    if let Some((records, aliases)) = previous {
+                        journal.records = records;
+                        journal.aliases = aliases;
+                    }
+                    journal.error = Some("日志写入失败，请检查文件权限与空间".into());
                 }
-                journal.error = Some("日志写入失败，请检查文件权限与空间".into());
-            }
-            let error = journal.error.clone();
-            *j.lock().unwrap() = journal;
-            let _ = events_copy.send(Change {
-                record: changed,
-                error,
-                notify,
-            });
-            if let Some(tx) = done {
-                let _ = tx.send(result);
+                if (cleanup || journal.records.len() != before_retention)
+                    && result.is_ok()
+                    && prune_raw(&raw_path, &journal).is_err()
+                {
+                    journal.error = Some("日志原文清理失败，请重试".into());
+                }
+                let error = journal.error.clone();
+                *j.lock().unwrap() = journal;
+                let _ = events_copy.send(Change {
+                    record: changed,
+                    error,
+                    notify,
+                });
+                if let Some(tx) = done {
+                    let _ = tx.send(result);
+                }
             }
         });
         Self {
             sender,
             journal,
             events,
+            raw_directory,
         }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
@@ -787,6 +844,14 @@ impl Service {
                 category: classify(r, &causes),
             })
     }
+    pub fn raw(&self, id: &str) -> Result<Option<crate::event_raw::View>> {
+        let reference = self
+            .detail(id)
+            .and_then(|record| record.record.details.raw_error);
+        reference
+            .map(|reference| crate::event_raw::read(&self.raw_directory, &reference.id))
+            .transpose()
+    }
     pub async fn clear(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -795,6 +860,33 @@ impl Service {
         rx.await
             .map_err(|_| AppError::new(code::LOG_WRITE, "日志清空失败"))?
     }
+}
+
+fn prune_raw(directory: &Path, journal: &Journal) -> std::io::Result<()> {
+    let retained: HashSet<_> = journal
+        .records
+        .iter()
+        .filter_map(|r| r.details.raw_error.as_ref().map(|r| r.id.as_str()))
+        .collect();
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".error")) else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(id).is_ok()
+            && !retained.contains(id)
+            && entry.file_type()?.is_file()
+        {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -104,7 +104,7 @@ it("keeps legacy failover_exhausted events readable and filterable under the gen
   await user.click(row);
   const dialog = await screen.findByRole("dialog", { name: "请求未完成" });
   expect(
-    within(dialog).getByText("错误码").nextElementSibling,
+    within(dialog).getByText("网关诊断码").nextElementSibling,
   ).toHaveTextContent("FAILOVER_EXHAUSTED");
   expect(
     within(dialog).getByText("错误摘要").nextElementSibling,
@@ -139,7 +139,7 @@ it("uses the existing fallback labels for unknown diagnostic enum values", async
   await user.click(await screen.findByRole("button", { name: "上游限流" }));
   const dialog = await screen.findByRole("dialog", { name: "上游限流" });
   expect(
-    within(dialog).getByText("分类依据").nextElementSibling,
+    within(dialog).getByText("网关分类").nextElementSibling,
   ).toHaveTextContent("未识别分类");
   expect(
     within(dialog).getByText("RPM 等待原因").nextElementSibling,

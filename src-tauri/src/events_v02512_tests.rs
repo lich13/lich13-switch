@@ -24,6 +24,11 @@ async fn clear_write_failure_restores_rows_aliases_and_stable_page_order() {
         );
         record.first_at = super::now();
         record.last_at = record.first_at;
+        record.details.raw = Some(Arc::new(crate::event_raw::Raw::bytes(
+            b"fixture complete error",
+            vec![],
+            None,
+        )));
         service.emit(record);
         events.recv().await.unwrap();
     }
@@ -45,9 +50,88 @@ async fn clear_write_failure_restores_rows_aliases_and_stable_page_order() {
         ids
     );
     assert!(restored.error.is_some());
+    for id in &ids {
+        assert_eq!(
+            service.raw(id).unwrap().unwrap().body,
+            "fixture complete error"
+        );
+    }
     std::fs::remove_dir(&path).unwrap();
     service.clear().await.unwrap();
     assert_eq!(service.query(Filter::default()).total, 0);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("diagnostic-errors"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn raw_write_failure_is_visible_and_restart_prunes_expired_attachments() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("diagnostic-errors");
+    std::fs::write(&path, b"fixture blocker").unwrap();
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    let mut record = Record::new(
+        Some(ClientId::Codex),
+        Some(PROVIDER),
+        Some(MODEL),
+        Reason::Capacity,
+        Action::Waiting,
+        Some(200),
+        Some(1),
+    );
+    record.details.raw = Some(Arc::new(crate::event_raw::Raw::bytes(
+        b"fixture error",
+        vec![],
+        None,
+    )));
+    let id = record.id.clone();
+    service.emit(record.clone());
+    let change = changes.recv().await.unwrap();
+    assert!(change.error.unwrap().contains("原文保存失败"));
+    assert!(service
+        .detail(&id)
+        .unwrap()
+        .details
+        .raw_error
+        .as_ref()
+        .unwrap()
+        .incomplete
+        .is_some());
+    assert!(service.raw(&id).is_err());
+    drop(service);
+
+    std::fs::remove_file(&path).unwrap();
+    let raw = record.details.raw.take().unwrap();
+    raw.save(&path, &id).unwrap();
+    record.details.raw_error = Some(raw.reference(&id));
+    record.last_at = super::now() - super::RETENTION - 1;
+    record.first_at = record.last_at;
+    std::fs::write(
+        dir.path().join("diagnostics.jsonl"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(path.join("unrelated.txt"), b"fixture").unwrap();
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    // A queued write observes completion of startup retention without sleeps.
+    service.emit(Record::new(
+        None,
+        None,
+        None,
+        Reason::Network,
+        Action::Returned,
+        None,
+        None,
+    ));
+    changes.recv().await.unwrap();
+    assert!(!path.join(format!("{id}.error")).exists());
+    assert!(path.join("unrelated.txt").exists());
+    assert!(service.detail(&id).is_none());
 }
 
 #[test]
@@ -58,6 +142,7 @@ fn emit_checked_returns_false_and_reports_a_full_bounded_queue() {
         sender,
         journal: Arc::new(Mutex::new(Journal::default())),
         events,
+        raw_directory: Arc::new(std::env::temp_dir().join("unused-event-fixture")),
     };
 
     let accepted = Record::new(

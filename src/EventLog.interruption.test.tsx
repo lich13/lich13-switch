@@ -107,7 +107,7 @@ it("shows reset evidence as an ordinary interruption without claiming cancellati
     "普通错误",
   );
   expect(
-    within(dialog).getByText("本地分类").nextElementSibling,
+    within(dialog).getByText("网关诊断码").nextElementSibling,
   ).toHaveTextContent("DOWNSTREAM_PEER_RESET");
   expect(
     within(dialog).getByText("错误摘要").nextElementSibling,
@@ -158,7 +158,7 @@ it("renders an explicit cancellation as a status record", async () => {
     "状态记录",
   );
   expect(
-    within(dialog).getByText("本地分类").nextElementSibling,
+    within(dialog).getByText("网关诊断码").nextElementSibling,
   ).toHaveTextContent("CANCELLED");
   expect(
     within(dialog).getByText("错误摘要").nextElementSibling,

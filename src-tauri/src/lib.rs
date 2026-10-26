@@ -8,6 +8,7 @@ mod commands;
 mod configuration;
 mod core;
 mod errors;
+mod event_raw;
 mod events;
 mod exchange_template;
 #[cfg(test)]
@@ -950,12 +951,38 @@ fn get_failure_policy_catalog() -> Vec<gateway::failure_rules::Category> {
     gateway::failure_rules::catalog()
 }
 #[tauri::command]
-fn match_failure_policy(
+async fn match_failure_policy(
     client_id: gateway::ClientId,
-    input: gateway::failure_match::Input,
+    mut input: gateway::failure_match::Input,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::failure_match::Match> {
-    r.gateway(client_id).match_failure_policy(input)
+    let diagnostics = r.diagnostics.clone();
+    let gateway = r.gateway(client_id).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(id) = input.event_id.as_deref() {
+            let event = diagnostics
+                .detail(id)
+                .ok_or_else(|| AppError::new(code::LOG_READ, "日志已过期或不存在"))?;
+            if event.record.client_id != Some(client_id) {
+                return Err(AppError::new(code::LOG_READ, "日志客户端不匹配"));
+            }
+            input.status = event.record.status;
+            if let Some(raw) = diagnostics.raw(id)? {
+                if raw.base64 {
+                    return Err(AppError::new(
+                        code::LOG_READ,
+                        "错误响应不是文本，请在日志中复制原始数据",
+                    ));
+                }
+                input.raw_response = Some(raw.body);
+                input.headers = Some(raw.headers);
+                input.event = raw.event;
+            }
+        }
+        gateway.match_failure_policy(input)
+    })
+    .await
+    .map_err(|_| AppError::new(code::LOG_READ, "错误策略查询失败"))?
 }
 #[tauri::command]
 fn cancel_gateway_wait(
@@ -2000,6 +2027,7 @@ pub fn run() {
             commands::get_startup_error,
             commands::get_app_events,
             commands::get_app_event,
+            commands::get_app_event_raw,
             commands::clear_app_events,
             claude_profile::commands::get_claude_profile,
             claude_profile::commands::switch_claude_profile,

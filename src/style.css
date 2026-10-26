@@ -4054,3 +4054,19 @@ button.exchange-button:active:not(:disabled) {
     padding-right: 6px;
   }
 }
+.failure-candidates {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+}
+.failure-candidates button {
+  text-align: left;
+  white-space: normal;
+}
+.event-raw pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow: auto;
+  font-size: 13px;
+}

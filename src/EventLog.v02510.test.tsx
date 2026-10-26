@@ -52,11 +52,19 @@ const baseRecord: EventRecord = {
 };
 
 let eventRecords: EventRecord[];
+let rawResponse: {
+  headers: { name: string; value: string; base64: boolean }[];
+  event: string | null;
+  body: string;
+  base64: boolean;
+  incomplete: string | null;
+} | null;
 
 beforeEach(() => {
   mock.command.mockReset();
   mock.listeners.clear();
   eventRecords = [structuredClone(baseRecord)];
+  rawResponse = null;
   mock.command.mockImplementation(
     async (name: string, args: Record<string, unknown> = {}) => {
       if (name === "get_gateway") {
@@ -76,6 +84,7 @@ beforeEach(() => {
       if (name === "get_app_event") {
         return eventRecords.find((item) => item.id === args.id) ?? null;
       }
+      if (name === "get_app_event_raw") return rawResponse;
       return undefined;
     },
   );
@@ -83,6 +92,67 @@ beforeEach(() => {
     configurable: true,
     value: "visible",
   });
+});
+
+it("loads and copies the complete error, and opens policy by event ID without the shortened preview", async () => {
+  const user = userEvent.setup();
+  const write = vi.spyOn(navigator.clipboard, "writeText");
+  const openPolicy = vi.fn();
+  const record: EventRecord = {
+    ...structuredClone(baseRecord),
+    reason: "capacity",
+    level: "warning",
+    details: {
+      message: "short preview",
+      errorBasis: "capacity",
+      rawError: {
+        id: "fixture-raw",
+        digest: "fixture-digest",
+        incomplete: null,
+      },
+    },
+  };
+  eventRecords = [record];
+  rawResponse = {
+    headers: [{ name: "x-fixture", value: "complete header", base64: false }],
+    event: "error",
+    body: `event: error\r\ndata: ${"fixture ".repeat(1000)} 'quoted fixture' selected model is at capacity. please try a different model.\r\n\r\n`,
+    base64: false,
+    incomplete: null,
+  };
+  render(<EventLog onOpenPolicy={openPolicy} />);
+  const errorButton = await screen.findByRole("button", {
+    name: "临时容量限制",
+  });
+  expect(
+    within(errorButton.closest("tr")!)
+      .getByText("200")
+      .closest(".event-status"),
+  ).not.toHaveClass("success");
+  await user.click(errorButton);
+  const dialog = await screen.findByRole("dialog");
+  await user.click(
+    await within(dialog).findByRole("button", { name: "复制完整错误" }),
+  );
+  expect(write).toHaveBeenCalledWith(
+    `x-fixture: complete header\n\n${rawResponse.body}`,
+  );
+  expect(mock.command).toHaveBeenCalledWith("get_app_event_raw", {
+    id: record.id,
+  });
+  await user.click(within(dialog).getByRole("button", { name: "查看策略" }));
+  expect(openPolicy).toHaveBeenCalledWith(
+    expect.objectContaining({
+      clientId: "codex",
+      recordedCategory: "capacity",
+      input: expect.objectContaining({
+        eventId: record.id,
+        status: 200,
+        message: undefined,
+        code: undefined,
+      }),
+    }),
+  );
 });
 
 it("renders historical v0.25.10 downstream status records with HTTP and byte evidence", async () => {
@@ -105,10 +175,10 @@ it("renders historical v0.25.10 downstream status records with HTTP and byte evi
     "状态记录",
   );
   expect(
-    within(dialog).getByText("状态码").nextElementSibling,
+    within(dialog).getByText("HTTP 状态").nextElementSibling,
   ).toHaveTextContent("200");
   expect(
-    within(dialog).getByText("本地分类").nextElementSibling,
+    within(dialog).getByText("网关诊断码").nextElementSibling,
   ).toHaveTextContent("DOWNSTREAM_CLOSED");
   expect(
     within(dialog).getByText("错误摘要").nextElementSibling,

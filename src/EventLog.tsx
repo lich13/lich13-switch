@@ -1,5 +1,5 @@
 import FailureRuleDialog from "./FailureRuleDialog";
-import type { FailureFocus } from "./failure-policy-types";
+import type { FailureFocus, ErrorResponse } from "./failure-policy-types";
 import {
   limitLabel,
   rpmWaitLabel,
@@ -98,6 +98,11 @@ export type EventRecord = {
   status: number | null;
   attempt: number | null;
   details?: {
+    rawError?: {
+      id: string;
+      digest: string;
+      incomplete?: string | null;
+    } | null;
     customRuleId?: string | null;
     ruleConflict?: boolean | null;
     routing?: RoutingDetails | null;
@@ -402,12 +407,21 @@ export default function EventLog({
         clientId: event.clientId,
         recordedCategory: event.details?.errorBasis,
         input: {
-          code: event.details?.upstreamCode,
-          message: event.details?.message,
+          eventId: event.details?.rawError ? event.id : undefined,
+          code: event.details?.rawError
+            ? undefined
+            : event.details?.upstreamCode,
+          message: event.details?.rawError ? undefined : event.details?.message,
           status: event.status,
-          upstreamType: event.details?.upstreamType,
-          upstreamReason: event.details?.upstreamReason,
-          parameter: event.details?.parameter,
+          upstreamType: event.details?.rawError
+            ? undefined
+            : event.details?.upstreamType,
+          upstreamReason: event.details?.rawError
+            ? undefined
+            : event.details?.upstreamReason,
+          parameter: event.details?.rawError
+            ? undefined
+            : event.details?.parameter,
         },
       });
     } catch (e) {
@@ -732,7 +746,14 @@ export default function EventLog({
                   </td>
                   <td>
                     <span
-                      className={"event-status " + statusTone(r.status)}
+                      className={
+                        "event-status " +
+                        (r.details?.errorBasis || r.level !== "info"
+                          ? r.level === "error"
+                            ? "server"
+                            : "client"
+                          : statusTone(r.status))
+                      }
                       title={wireStatus(r)}
                     >
                       {r.status != null && <span>{statusText(r.status)}</span>}
@@ -856,6 +877,24 @@ function EventDetail({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const [raw, setRaw] = useState<ErrorResponse | null>(null);
+  const [rawError, setRawError] = useState("");
+  useEffect(() => {
+    let active = true;
+    setRaw(null);
+    setRawError("");
+    if (r.details?.rawError)
+      void command("get_app_event_raw", { id: r.id })
+        .then((value) => {
+          if (active) setRaw(value);
+        })
+        .catch((error) => {
+          if (active) setRawError(errorOf(error).message);
+        });
+    return () => {
+      active = false;
+    };
+  }, [r.id, r.details?.rawError]);
   const [addingRule, setAddingRule] = useState(false);
   useEffect(() => {
     const focus = document.activeElement as HTMLElement | null;
@@ -931,10 +970,50 @@ function EventDetail({
               </button>
             )}
         </div>
+        {rawError && (
+          <div role="alert" className="form-error">
+            {rawError}
+          </div>
+        )}
+        {r.details?.rawError?.incomplete && (
+          <div role="alert">{r.details.rawError.incomplete}</div>
+        )}
+        {raw && (
+          <section aria-label="完整错误响应" className="event-raw">
+            <h3>完整错误响应{raw.base64 ? "（Base64）" : ""}</h3>
+            {raw.incomplete && <div role="alert">{raw.incomplete}</div>}
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                const headers = raw.headers
+                  .map((header) => `${header.name}: ${header.value}`)
+                  .join("\n");
+                void navigator.clipboard
+                  .writeText(`${headers}${headers ? "\n\n" : ""}${raw.body}`)
+                  .catch((error) => setRawError(errorOf(error).message));
+              }}
+            >
+              复制完整错误
+            </button>
+            {!!raw.headers.length && (
+              <details>
+                <summary>响应头</summary>
+                <pre>
+                  {raw.headers
+                    .map((header) => `${header.name}: ${header.value}`)
+                    .join("\n")}
+                </pre>
+              </details>
+            )}
+            {raw.event && <p>事件：{raw.event}</p>}
+            <pre>{raw.body}</pre>
+          </section>
+        )}
         <dl>
           {[
             ["类别", categories[category(r)]],
-            ["状态码", wireStatus(r)],
+            ["HTTP 状态", wireStatus(r)],
             [
               "影响范围",
               r.details?.healthScope === "model"
@@ -947,9 +1026,11 @@ function EventDetail({
             ],
             ["上游错误码", r.details?.upstreamCode ?? "—"],
             ["上游原因", r.details?.upstreamReason ?? "未提供"],
-            ...(r.details?.errorBasis
-              ? [["分类依据", limitLabel(r.details) || "未识别分类"]]
-              : []),
+            [
+              "网关分类",
+              limitLabel(r.details) ||
+                (r.details?.errorBasis ? "未识别分类" : reasonText(r)),
+            ],
             ...(r.details?.rpmWaitReason
               ? [["RPM 等待原因", rpmWaitLabel(r.details.rpmWaitReason)]]
               : []),
@@ -969,7 +1050,7 @@ function EventDetail({
                   ["检查时间", time(r.details.quotaCheck.checkedAt)],
                 ]
               : []),
-            ["本地分类", r.details?.localCode ?? "—"],
+            ["网关诊断码", r.details?.localCode ?? normalizedCode(r)],
             ["上游错误类型", r.details?.upstreamType ?? "未提供"],
             ["错误摘要", r.details?.message ?? reasonText(r)],
             ["参数", r.details?.parameter ?? "未提供"],
@@ -982,7 +1063,6 @@ function EventDetail({
                   ? "是"
                   : "否",
             ],
-            ["错误码", normalizedCode(r)],
             ["客户端", client(r.clientId)],
             ["供应商", provider],
             ["处理结果", actionText(r)],

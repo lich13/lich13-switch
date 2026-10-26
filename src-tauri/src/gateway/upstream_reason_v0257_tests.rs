@@ -93,7 +93,7 @@ fn wrapped_error_key_and_numeric_code_are_retained_without_opening_arbitrary_con
 }
 
 #[test]
-fn text_error_extracts_code_and_quoted_reason_but_redacts_reason_from_message() {
+fn text_error_extracts_code_and_keeps_the_complete_quoted_message() {
     let body = br#"error: code=429 reason="rate_limit_exceeded" message="fixture secret""#;
     let details = failure_policy::details_http(body);
 
@@ -103,9 +103,7 @@ fn text_error_extracts_code_and_quoted_reason_but_redacts_reason_from_message() 
         Some("rate_limit_exceeded")
     );
     let message = details.message.expect("bounded text error message");
-    assert!(message.contains("[已隐去]"));
-    assert!(!message.contains("rate_limit_exceeded"));
-    assert!(!message.contains("fixture secret"));
+    assert_eq!(message.as_bytes(), body);
 }
 
 #[test]
@@ -150,7 +148,10 @@ fn successful_content_unknown_reason_and_user_text_never_become_upstream_reason(
         true,
     );
     assert_eq!(unknown.upstream_code.as_deref(), Some("429"));
-    assert_eq!(unknown.upstream_reason, None);
+    assert_eq!(
+        unknown.upstream_reason.as_deref(),
+        Some("PRIVATE_REASON_FIXTURE")
+    );
 
     let user_text = failure_policy::details_value(
         &json!({
@@ -164,15 +165,21 @@ fn successful_content_unknown_reason_and_user_text_never_become_upstream_reason(
     );
     assert_eq!(user_text.upstream_reason, None);
     assert_eq!(user_text.health_scope, None);
-    assert_eq!(user_text.message, None);
+    assert_eq!(
+        user_text.message.as_deref(),
+        Some("user content reason=DAILY_LIMIT_EXCEEDED content=fixture-secret")
+    );
 }
 
 #[test]
-fn oversized_error_body_is_ignored_before_classification_or_logging() {
+fn large_error_body_is_preserved_for_classification_and_logging() {
     let mut body = b"error: code=429 reason=DAILY_LIMIT_EXCEEDED message=".to_vec();
     body.extend(std::iter::repeat_n(b'x', 128 * 1024));
     body.extend_from_slice(b"\"");
 
-    assert_eq!(failure_policy::details_http(&body), Details::default());
-    assert!(!failure_policy::permanent_rejection(&body));
+    assert_eq!(
+        failure_policy::details_http(&body).message.as_deref(),
+        std::str::from_utf8(&body).ok()
+    );
+    assert!(failure_policy::permanent_rejection(&body));
 }

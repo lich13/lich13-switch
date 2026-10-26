@@ -583,8 +583,10 @@ async fn manual_and_known_or_unknown_context_retry_original_provider_until_recov
                 released.await.unwrap();
                 if attempt <= 3 {
                     Response::builder()
-                        .status(429)
-                        .body(full("model is at capacity"))
+                        .status(200)
+                        .body(full(
+                            "selected model is at capacity. please try a different model.",
+                        ))
                         .unwrap()
                 } else {
                     Response::new(full("recovered"))

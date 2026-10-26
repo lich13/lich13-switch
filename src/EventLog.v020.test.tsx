@@ -186,7 +186,7 @@ it("keeps HTTP status and WebSocket close code as separate detail values", async
     within(dialog).getByText("上游错误码").nextElementSibling,
   ).toHaveTextContent("overloaded_error");
   expect(
-    within(dialog).getByText("本地分类").nextElementSibling,
+    within(dialog).getByText("网关诊断码").nextElementSibling,
   ).toHaveTextContent("UPSTREAM_RESPONSE_ERROR");
   expect(
     within(dialog).getByText("影响范围").nextElementSibling,

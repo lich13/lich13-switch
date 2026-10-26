@@ -53,7 +53,7 @@ async fn cancelled_usage_tail(
                     Some(Ok(frame)) if frame.opcode() != OpCode::Close => {
                         if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
                             protocol.websocket_progress(frame.payload().len());
-                            if let Some(value) = value(&frame) { protocol.value(&value); }
+                            if let Some(value) = value(&frame) { protocol.value_raw(&value, frame.payload()); }
                         }
                     }
                     Some(Ok(frame)) => {
@@ -115,8 +115,7 @@ struct Peer {
     closed: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     activity: std::sync::Arc<super::wire_progress::Activity>,
-    // Only bounded request identifiers from the upstream handshake, not its
-    // authentication or other response headers. Reused turns share these IDs.
+    // Retain handshake headers for complete error diagnostics on reused turns.
     response_identifiers: HeaderMap,
 }
 impl Peer {
@@ -638,14 +637,21 @@ async fn upstream_native(
             .unwrap_or("identity")
             .to_owned();
         let (response_parts, response_body) = response.into_parts();
-        let prefix = response_prefix(response_body, 128 * 1024, settings).await;
-        let decoded = replay::decode_prefix(&prefix, &encoding, 128 * 1024).unwrap_or_default();
-        let (details, policy_retry) = super::failure_policy::http_with_rules(
+        let (details, policy_retry) = response_error(
+            response_body,
             status.as_u16(),
             &response_parts.headers,
-            &decoded,
+            &encoding,
+            settings,
             rules,
-        );
+        )
+        .await;
+        let decoded = details
+            .raw
+            .as_ref()
+            .and_then(|raw| raw.text().ok())
+            .unwrap_or_default()
+            .into_bytes();
         let retry = retry.max(policy_retry);
         let global_rejection = super::failure_policy::hard_rejection(&details);
         let model_unavailable =
@@ -693,21 +699,7 @@ async fn upstream_native(
         .get(header::SEC_WEBSOCKET_EXTENSIONS)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    let response_identifiers = [
-        "x-request-id",
-        "request-id",
-        "openai-request-id",
-        "x-client-request-id",
-    ]
-    .into_iter()
-    .filter_map(|name| {
-        response
-            .headers()
-            .get(name)
-            .filter(|value| !value.is_empty() && value.len() <= 512)
-            .map(|value| (header::HeaderName::from_static(name), value.clone()))
-    })
-    .collect();
+    let response_identifiers = response.headers().clone();
     let io = hyper::upgrade::on(&mut response)
         .await
         .map_err(|_| AttemptFailure {
@@ -747,24 +739,44 @@ async fn upstream_native(
     peer.response_identifiers = response_identifiers;
     Ok(peer)
 }
-async fn response_prefix(mut body: Incoming, limit: usize, settings: &Settings) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(limit.min(4096));
+async fn response_error(
+    mut body: Incoming,
+    status: u16,
+    headers: &HeaderMap,
+    encoding: &str,
+    settings: &Settings,
+    rules: &[super::failure_rules::Rule],
+) -> (crate::events::Details, Option<Duration>) {
+    let mut protocol = super::protocol::Protocol::new(false);
+    protocol.attach_failure_rules(rules);
+    protocol.response(status, false, encoding);
+    protocol.response_headers(headers);
     let mut deadline =
         tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds);
-    while bytes.len() < limit {
-        let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, body.frame()).await else {
-            break;
-        };
-        if let Ok(data) = frame.into_data() {
-            let count = data.len().min(limit - bytes.len());
-            bytes.extend_from_slice(&data[..count]);
-            if count != 0 {
-                deadline = tokio::time::Instant::now() + Duration::from_secs(settings.idle_seconds);
+    let complete = loop {
+        match tokio::time::timeout_at(deadline, body.frame()).await {
+            Ok(None) => break true,
+            Ok(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    protocol.feed(&data);
+                    deadline =
+                        tokio::time::Instant::now() + Duration::from_secs(settings.idle_seconds);
+                }
             }
+            _ => break false,
+        }
+    };
+    protocol.finish(Some(status), code::HTTP);
+    let mut details = protocol.observation.error.clone();
+    if !complete {
+        if let Some(raw) = &mut details.raw {
+            std::sync::Arc::make_mut(raw).incomplete =
+                Some("上游响应提前结束，错误原文不完整".into());
         }
     }
-    bytes
+    (details, protocol.observation.retry_after)
 }
+
 fn policy_rejection(frame: &Frame) -> bool {
     value(frame).is_some_and(|v| {
         v.pointer("/response/error/code")
@@ -775,6 +787,7 @@ fn policy_rejection(frame: &Frame) -> bool {
 fn first_event_failure(
     frame: &Frame,
     rules: &[super::failure_rules::Rule],
+    headers: &HeaderMap,
 ) -> Option<AttemptFailure> {
     if policy_rejection(frame) {
         return None;
@@ -783,7 +796,12 @@ fn first_event_failure(
     let mut observation = super::protocol::Observation::default();
     observation.failure_rules = rules.to_vec();
     observation.value(&v);
-    let details = super::failure_policy::details_with_rules(&v, false, rules);
+    let (mut details, retry) = super::failure_policy::details_with_headers(&v, headers, rules);
+    details.raw = Some(std::sync::Arc::new(crate::event_raw::Raw::bytes(
+        frame.payload(),
+        crate::event_raw::headers(headers),
+        None,
+    )));
     let temporary = super::failure_policy::temporary(&details);
     if !observation.compaction_incompatible
         && !temporary
@@ -798,7 +816,7 @@ fn first_event_failure(
     let capacity = temporary;
     Some(AttemptFailure {
         status: Some(101),
-        retry: super::failure_policy::retry_after_value(&v),
+        retry,
         capacity,
         unsupported: false,
         model_unavailable: details.error_basis == Some(crate::events::ErrorBasis::ModelUnavailable),
@@ -951,7 +969,19 @@ fn disconnect_turn(
     if details.message.is_none() {
         details.message = close
             .and_then(|frame| std::str::from_utf8(frame.payload().get(2..)?).ok())
-            .and_then(crate::events::safe_message);
+            .map(str::to_owned);
+    }
+    if details.raw.is_none() {
+        if let Some(frame) = close {
+            details.raw = Some(std::sync::Arc::new(crate::event_raw::Raw::bytes(
+                frame.payload(),
+                observed
+                    .as_ref()
+                    .map(|u| u.observation.raw_headers.clone())
+                    .unwrap_or_default(),
+                Some("websocket.close".into()),
+            )));
+        }
     }
     details.counted_failure = Some(transport);
     details.wait_seconds = retry.then_some(cfg.websocket_retry_seconds);
@@ -3018,6 +3048,7 @@ async fn session_once(
                     return Err((1013, "upstream disconnected before completion"));
                 }
                 let frame = event.unwrap()?;
+                let error_headers = match &upstream { Upstream::Native(peer) => peer.response_identifiers.clone(), _ => HeaderMap::new() };
                 if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
                     if let Some(u) = &mut protocol { u.websocket_progress(frame.payload().len()); }
                 }
@@ -3028,7 +3059,7 @@ async fn session_once(
                     let usage_only = matches!(v.get("type").and_then(|v| v.as_str()), Some("usage" | "usage.updated" | "response.usage" | "response.usage.updated"));
                     let belongs_to_previous = protocol.as_ref().and_then(|u| u.observation.response_id.as_ref()).map_or(usage_only, |id| Some(id) != observed.response_id.as_ref());
                     if let Some((previous, _)) = previous_usage.as_mut().filter(|(previous, _)| belongs_to_previous && observed.response_id.is_some() && previous.observation.response_id == observed.response_id) {
-                        previous.value(&v);
+                        previous.value_raw(&v, frame.payload());
                         let sending = tokio::time::Instant::now();
                         if let Err(error) = client.send(frame).await {
                             cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, true).await;
@@ -3042,7 +3073,7 @@ async fn session_once(
                     if let Some(old) = ownership.as_ref().and_then(|lease| lease.owner.as_ref()).and_then(|id| g.route(id)).filter(|old| old.provider.queued && !old.provider.search_only && Requirement::model(current_model.as_deref()).allows(old.provider.allowed_models.as_deref())) {
                         let old = g.endpoint_route(old, conversation.as_deref(), None, false).await.map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
                         if ordinary_attempts <= cfg.max_retries {
-                            if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), code::CLIENT_ERROR); }
+                            if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value_raw(&v, frame.payload()); } u.finish(Some(101), code::CLIENT_ERROR); }
                             if let Some(mut admission) = turn.take() {
                                 let details = value(&frame).map(|v| super::failure_policy::details_with_rules(&v, false, &turn_rules)).unwrap_or_default();
                                 let emit = || admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::TryingNext, Some(101), attempts, crate::events::Details { counted_failure: Some(false), ..details });
@@ -3063,14 +3094,14 @@ async fn session_once(
                 // Re-evaluate the same failure queue used by HTTP, retaining the
                 // compaction claim and the exact original response.create frame.
                 if turn.is_some() && !received {
-                    if let Some(mut failure) = first_event_failure(&frame, &turn_rules).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable || f.details.error_basis == Some(crate::events::ErrorBasis::ServiceError)) {
+                    if let Some(mut failure) = first_event_failure(&frame, &turn_rules, &error_headers).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable || f.details.error_basis == Some(crate::events::ErrorBasis::ServiceError)) {
                         failover.failure(failure.classification());
                         let wait_same = failure.capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
                         owner_capacity_wait = if wait_same { turn.as_ref().map(|admission| CapacitySource { provider_id: route.provider.id.clone(), reset_generation: admission.reset_generation }) } else { None };
                         if wait_same { failure.details.wait_seconds = Some(forward::capacity_delay(cfg, failure.retry).as_secs()); }
                         turn_failed.insert(route.provider.id.clone());
                         if failure.hard_rejection() { hard_denied.insert((route.provider.id.clone(), route.provider.version.clone())); }
-                        if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value(&v); } u.finish(Some(101), code::UPSTREAM_ERROR); }
+                        if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value_raw(&v, frame.payload()); } u.finish(Some(101), code::UPSTREAM_ERROR); }
                         if let Some(mut admission) = turn.take() {
                             last_error = Some(failover.report_failure(protocol.as_ref(), || record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, if wait_same { crate::events::Action::RetryingSame } else { super::routing::fallback_action(
                                             g, &route.provider.id,
@@ -3102,7 +3133,7 @@ async fn session_once(
                     deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
                 }
                 if let Some(v) = value(&frame) {
-                    if let Some(u)=&mut protocol { u.value(&v); }
+                    if let Some(u)=&mut protocol { u.value_raw(&v, frame.payload()); }
                     if request_budget.cancel_requested() { return Err(TURN_CANCELLED); }
                     if let Some(id) = v.pointer("/response/id").or_else(|| v.get("response_id")).and_then(|v| v.as_str()) { g.0.endpoints.remember(&route.provider, id); g.remember_model(id, &route.provider.id, current_model.as_deref()); }
                     let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -3113,8 +3144,8 @@ async fn session_once(
                             if let Some(u)=protocol.as_mut() {
                                 u.finish(Some(101), code::UPSTREAM_ERROR);
                                 terminal_error = !matches!(u.terminal(), Some(super::protocol::Terminal::Success | super::protocol::Terminal::Limited | super::protocol::Terminal::Cancelled));
-                                if route.client_id == super::ClientId::Codex && first_event_failure(&frame, &turn_rules).is_some_and(|failure| failure.capacity) {
-                                    if let Some(failure) = first_event_failure(&frame, &turn_rules) { u.report_failure(|| record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts)); }
+                                if route.client_id == super::ClientId::Codex && first_event_failure(&frame, &turn_rules, &error_headers).is_some_and(|failure| failure.capacity) {
+                                    if let Some(failure) = first_event_failure(&frame, &turn_rules, &error_headers) { u.report_failure(|| record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts)); }
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
                                     super::health_settlement::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);

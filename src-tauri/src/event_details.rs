@@ -100,6 +100,10 @@ pub enum RpmWaitReason {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Details {
+    #[serde(skip)]
+    pub raw: Option<std::sync::Arc<crate::event_raw::Raw>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_error: Option<crate::event_raw::Reference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_rule_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -406,25 +410,10 @@ impl Details {
         });
         self.timeout_seconds = self.timeout_seconds.filter(|v| (1..=86400).contains(v));
         self.last_progress_ms = self.last_progress_ms.map(|v| v.min(86_400_000));
-        self.upstream_code = code(self.upstream_code);
-        self.upstream_reason = self
-            .upstream_reason
-            .as_deref()
-            .and_then(safe_upstream_reason);
         self.local_code = code(self.local_code);
-        self.upstream_type = code(self.upstream_type);
-        self.parameter = self.parameter.filter(|v| {
-            [
-                "model",
-                "input",
-                "messages",
-                "previous_response_id",
-                "stream",
-                "max_tokens",
-            ]
-            .contains(&v.as_str())
-        });
-        self.message = self.message.as_deref().and_then(safe_message);
+        self.raw_error = self
+            .raw_error
+            .filter(|r| uuid::Uuid::parse_str(&r.id).is_ok());
         self.cause_id = self
             .cause_id
             .and_then(|v| uuid::Uuid::parse_str(&v).ok().map(|id| id.to_string()));
@@ -498,7 +487,7 @@ mod v016_tests {
             ..Default::default()
         }
         .sanitized();
-        assert!(bad.upstream_code.is_none());
-        assert!(bad.parameter.is_none());
+        assert_eq!(bad.upstream_code.as_deref(), Some("Bearer fixture"));
+        assert_eq!(bad.parameter.as_deref(), Some("/tmp/fixture"));
     }
 }

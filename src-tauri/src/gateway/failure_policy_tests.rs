@@ -14,6 +14,127 @@ fn classify(status: u16, value: Value) -> crate::events::Details {
 }
 
 #[test]
+fn http_200_capacity_and_unknown_failures_use_complete_error_envelopes() {
+    const MESSAGE: &str = "selected model is at capacity. please try a different model.";
+    let values = [
+        json!({"message": MESSAGE}),
+        json!(MESSAGE),
+        json!({"error":{"code":429,"message":MESSAGE}}),
+        json!({"error":{"code":"rate_limit_exceeded","message":MESSAGE.to_uppercase()}}),
+        json!({"error":{"type":"invalid_request_error","message":MESSAGE}}),
+        json!({"success":false,"message":MESSAGE}),
+        json!({"data":{"result":{"error":{"message":MESSAGE}}}}),
+    ];
+    for value in values {
+        let details = classify(200, value.clone());
+        assert_eq!(details.error_basis, Some(B::Capacity), "{value}");
+        assert!(!policy::decision(Some(200), &details).counted_failure);
+        for stream in [false, true] {
+            let mut protocol = super::protocol::Protocol::new(stream);
+            protocol.response(200, stream, "identity");
+            let text = if stream {
+                format!("data: {value}\n\n")
+            } else {
+                value.to_string()
+            };
+            for part in text.as_bytes().chunks(3) {
+                protocol.feed(part);
+            }
+            protocol.finish(Some(200), crate::errors::code::OK);
+            assert_eq!(
+                protocol.observation.error.error_basis,
+                Some(B::Capacity),
+                "{value}"
+            );
+            assert!(!protocol.succeeded());
+            assert!(protocol.observation.error.raw.is_some());
+        }
+    }
+    for value in [
+        json!({"success":false}),
+        json!({"error":{"message":"fixture unknown"}}),
+    ] {
+        assert_eq!(classify(200, value).error_basis, Some(B::ServiceError));
+    }
+    for value in [
+        json!({"success":true,"message":MESSAGE}),
+        json!({"choices":[{"message":{"content":MESSAGE},"finish_reason":"stop"}]}),
+        json!({"type":"response.completed","response":{"status":"completed","output":[{"text":MESSAGE}]}}),
+    ] {
+        assert_eq!(classify(200, value).error_basis, None);
+    }
+    let message = format!("{} prompt: 'quoted fixture' {}", "x".repeat(4096), MESSAGE);
+    let mut protocol = super::protocol::Protocol::new(true);
+    protocol.response(200, true, "identity");
+    protocol.feed(format!("event: error\ndata: {}\n\n", json!({"message":message})).as_bytes());
+    assert_eq!(
+        protocol.observation.error.message.as_deref(),
+        Some(message.as_str())
+    );
+    assert_eq!(protocol.observation.error.error_basis, Some(B::Capacity));
+}
+
+#[test]
+fn complete_sse_and_websocket_errors_keep_wire_text_and_headers() {
+    const MESSAGE: &str = "selected model is at capacity. please try a different model.";
+    let mut headers = HeaderMap::new();
+    headers.append("x-fixture", "first".parse().unwrap());
+    headers.append("x-fixture", "second".parse().unwrap());
+    headers.insert("retry-after", "11".parse().unwrap());
+    for data in [json!({"message": MESSAGE}).to_string(), MESSAGE.into()] {
+        let wire =
+            format!("id: fixture-id\r\n: fixture comment\r\nevent: error\r\ndata: {data}\r\n\r\n");
+        let mut protocol = super::protocol::Protocol::new(true);
+        protocol.response_headers(&headers);
+        protocol.response(200, true, "identity");
+        for chunk in wire.as_bytes().chunks(1) {
+            protocol.feed(chunk);
+        }
+        protocol.finish(Some(200), crate::errors::code::OK);
+        let raw = protocol.observation.error.raw.as_ref().unwrap();
+        assert_eq!(raw.text().unwrap(), wire);
+        assert_eq!(raw.headers, crate::event_raw::headers(&headers));
+        assert_eq!(
+            protocol.observation.retry_after,
+            Some(Duration::from_secs(11))
+        );
+        assert_eq!(protocol.observation.error.error_basis, Some(B::Capacity));
+        let matched = super::failure_match::lookup(
+            &super::failure_match::Input {
+                status: Some(200),
+                raw_response: Some(wire),
+                event: raw.event.clone(),
+                headers: Some(raw.headers.clone()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(matched.category, Some(B::Capacity));
+    }
+    let wire = format!("{{ \"type\": \"error\", \"error\": {{\"message\":\"{MESSAGE}\"}} }}");
+    let mut protocol = super::protocol::Protocol::new(true);
+    protocol.response_headers(&headers);
+    protocol.value_raw(&serde_json::from_str(&wire).unwrap(), wire.as_bytes());
+    assert_eq!(
+        protocol
+            .observation
+            .error
+            .raw
+            .as_ref()
+            .unwrap()
+            .text()
+            .unwrap(),
+        wire
+    );
+    assert_eq!(protocol.observation.error.error_basis, Some(B::Capacity));
+    assert_eq!(
+        protocol.observation.retry_after,
+        Some(Duration::from_secs(11))
+    );
+}
+
+#[test]
 fn explicit_reasons_override_generic_status_messages_and_retry_hints() {
     for (code, basis, hard) in [
         ("credit_balance_exhausted", B::Billing, true),

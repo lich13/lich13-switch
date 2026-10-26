@@ -1,10 +1,9 @@
 //! Shared classification, retry timing and health decisions for HTTP, SSE and WebSocket.
-//! Inspect bounded error envelopes only; never scan successful output for keywords.
+//! Inspect explicit error envelopes only; never scan successful output for keywords.
 use super::failure_match::Source;
 use crate::events::{Details, ErrorBasis, HealthScope, Reason};
 use serde_json::Value;
 use std::time::Duration;
-const LIMIT: usize = 128 * 1024;
 
 #[derive(Clone, Copy)]
 pub(super) struct Decision {
@@ -168,10 +167,24 @@ fn code_kind(code: &str) -> Option<ErrorBasis> {
 }
 
 fn positive_message(text: &str) -> bool {
-    crate::events::safe_message(text).is_some()
-        && !super::failure_rules::QUOTA_NEGATIVES
-            .iter()
-            .any(|p| text.to_lowercase().contains(p))
+    !super::failure_rules::QUOTA_NEGATIVES
+        .iter()
+        .any(|p| text.to_lowercase().contains(p))
+}
+
+/// Some compatible providers return this rejection without an error envelope.
+/// Match the entire response, never quoted model output or an arbitrary substring.
+pub(super) fn bare_capacity(text: &str) -> bool {
+    let normalized = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    matches!(
+        normalized.trim_end_matches('.'),
+        "selected model is at capacity"
+            | "selected model is at capacity. please try a different model"
+    )
 }
 
 fn message_kind(text: &str) -> Option<ErrorBasis> {
@@ -502,6 +515,14 @@ pub(super) fn http_with_rules(
         }
     }
     let retry = retry_after_http(body).max(retry_headers(headers, &d));
+    if status < 400
+        && d.error_basis.is_none()
+        && serde_json::from_slice::<Value>(body)
+            .ok()
+            .is_some_and(|v| envelope(&v, false, 0).is_some())
+    {
+        d.error_basis = Some(ErrorBasis::ServiceError);
+    }
     (d, retry)
 }
 
@@ -547,6 +568,7 @@ pub(super) fn details_with_headers(
         || quota_details(error).is_some();
     refine_headers(&mut details, headers, structured);
     apply_custom(&mut details, error, headers, rules);
+    details.error_basis.get_or_insert(ErrorBasis::ServiceError);
     let wait = retry_after_fields(error).max(retry_headers(headers, &details));
     (details, wait)
 }
@@ -684,7 +706,7 @@ pub fn capacity_message(message: &str) -> bool {
     .any(|p| s.contains(p))
 }
 pub fn model_message(message: &str) -> bool {
-    if message.len() > LIMIT || !positive_message(message) || capacity_message(message) {
+    if !positive_message(message) || capacity_message(message) {
         return false;
     }
     let s = message.trim().to_lowercase();
@@ -693,7 +715,7 @@ pub fn model_message(message: &str) -> bool {
         || (s.contains("模型") && super::failure_rules::MODEL_ZH.iter().any(|p| s.contains(p)))
 }
 // Explicit wrappers only: never recurse into arbitrary user content.
-fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
+pub(super) fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
     if depth > 5
         || v.get("success") == Some(&Value::Bool(true))
         || v.get("status")
@@ -706,14 +728,7 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
         .get("error")
         .filter(|e| !e.is_null() && **e != Value::Bool(false))
     {
-        return envelope(error, true, depth + 1);
-    }
-    for key in ["response", "data", "result"] {
-        if let Some(inner) = v.get(key).filter(|x| x.is_object()) {
-            if let Some(error) = envelope(inner, http_error, depth + 1) {
-                return Some(error);
-            }
-        }
+        return envelope(error, true, depth + 1).or(Some(error));
     }
     let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
     let explicit = kind == "error"
@@ -721,6 +736,34 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
         || kind.ends_with("_error")
         || v.get("success") == Some(&Value::Bool(false))
         || v.get("status").is_some_and(|s| s == "failed");
+    for key in ["response", "data", "result"] {
+        if let Some(inner) = v.get(key).filter(|x| x.is_object()) {
+            if let Some(error) = envelope(inner, http_error || explicit, depth + 1) {
+                return Some(error);
+            }
+        }
+    }
+    let bare = ![
+        "output",
+        "choices",
+        "candidates",
+        "content",
+        "response",
+        "result",
+        "data",
+    ]
+    .iter()
+    .any(|key| v.get(key).is_some())
+        && v.as_str()
+            .or_else(|| v.get("message").and_then(Value::as_str))
+            .is_some_and(bare_capacity);
+    let known_code = !["output", "choices", "candidates", "content"]
+        .iter()
+        .any(|key| v.get(key).is_some())
+        && structured_codes(v).any(|code| code_kind(code).is_some());
+    if explicit || bare || known_code {
+        return Some(v);
+    }
     if (http_error || explicit)
         && (v.is_string()
             || [
@@ -741,30 +784,23 @@ fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
     }
 }
 fn strings(error: &Value) -> impl Iterator<Item = &str> {
-    error
-        .as_str()
+    error.as_str().into_iter().chain(
+        [
+            "code",
+            "type",
+            "reason",
+            "message",
+            "detail",
+            "errorKey",
+            "errorMessage",
+        ]
         .into_iter()
-        .chain(
-            [
-                "code",
-                "type",
-                "reason",
-                "message",
-                "detail",
-                "errorKey",
-                "errorMessage",
-            ]
-            .into_iter()
-            .filter_map(move |k| error.get(k).and_then(Value::as_str)),
-        )
-        .filter(|s| s.len() <= LIMIT)
+        .filter_map(move |k| error.get(k).and_then(Value::as_str)),
+    )
 }
 
-// Read only named error fields, before free-form message redaction removes quotes.
+// Read named fields from explicit textual error envelopes.
 fn text_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    if text.len() > LIMIT {
-        return None;
-    }
     let lower = text.to_ascii_lowercase();
     for (at, _) in lower.match_indices(&name.to_ascii_lowercase()) {
         if at > 0
@@ -857,8 +893,9 @@ pub fn model_error(value: &Value) -> bool {
 pub fn temporary_capacity_event(value: &Value) -> bool {
     temporary(&details_value(value, false))
 }
-/// Explicit retry/reset fields from a bounded error envelope. Free-form text
+/// Explicit retry/reset fields from an error envelope. Free-form text
 /// and successful response content are never interpreted as timing evidence.
+#[cfg(test)]
 pub(super) fn retry_after_value(value: &Value) -> Option<std::time::Duration> {
     retry_after_fields(envelope(value, false, 0)?)
 }
@@ -904,14 +941,11 @@ fn retry_after_fields(error: &Value) -> Option<std::time::Duration> {
     relative.max(absolute.map(Duration::from_secs)).max(nested)
 }
 pub(super) fn retry_after_http(bytes: &[u8]) -> Option<std::time::Duration> {
-    if bytes.len() > LIMIT {
-        return None;
-    }
     let value = serde_json::from_slice::<Value>(bytes).ok()?;
     retry_after_fields(envelope(&value, true, 0)?)
 }
 pub fn model_http(status: u16, bytes: &[u8]) -> bool {
-    if status < 400 || bytes.len() > LIMIT {
+    if status < 400 {
         return false;
     }
     match serde_json::from_slice::<Value>(bytes) {
@@ -927,8 +961,11 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
     let (basis, scope) = classification(error);
     Details {
         error_basis: basis,
-        upstream_reason: structured_codes(error)
-            .find_map(crate::events::safe_upstream_reason)
+        upstream_reason: error
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| structured_codes(error).find_map(crate::events::safe_upstream_reason))
             .or_else(|| known_reason(error)),
         health_scope: scope,
         upstream_code: error
@@ -956,9 +993,6 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
     .sanitized()
 }
 pub fn details_http(bytes: &[u8]) -> Details {
-    if bytes.len() > LIMIT {
-        return Details::default();
-    }
     match serde_json::from_slice::<Value>(bytes) {
         Ok(v) => details_value(&v, true),
         Err(_) => std::str::from_utf8(bytes).map_or_else(
@@ -971,16 +1005,10 @@ pub fn details_http(bytes: &[u8]) -> Details {
 /// Status 429 alone is deliberately insufficient to classify a permanent denial.
 #[cfg(test)]
 pub(super) fn permanent_rejection(body: &[u8]) -> bool {
-    if body.len() > LIMIT {
-        return false;
-    }
     hard_rejection(&details_http(body))
 }
 
 fn hard_message(text: &str) -> bool {
-    if text.len() > LIMIT || crate::events::safe_message(text).is_none() {
-        return false;
-    }
     if quota_message(text) {
         return true;
     }
@@ -991,9 +1019,6 @@ fn hard_message(text: &str) -> bool {
 }
 
 fn quota_message(text: &str) -> bool {
-    if crate::events::safe_message(text).is_none() {
-        return false;
-    }
     if is_permanent_reason(Some(text.trim())) {
         return true;
     }
@@ -1019,9 +1044,6 @@ fn quota_message(text: &str) -> bool {
         .any(|s| text.contains(s))
 }
 fn rpm_message(text: &str) -> bool {
-    if crate::events::safe_message(text).is_none() {
-        return false;
-    }
     let s = text.to_ascii_lowercase();
     if super::failure_rules::RPM_NEGATIVES
         .iter()
@@ -1204,26 +1226,24 @@ pub(super) fn details_with_rules(
     let mut details = details_value(value, http_error);
     if let Some(error) = envelope(value, http_error, 0) {
         apply_custom(&mut details, error, &hyper::HeaderMap::new(), rules);
+        if !http_error {
+            details.error_basis.get_or_insert(ErrorBasis::ServiceError);
+        }
     }
     details
 }
 
-pub(super) fn inspect_match(
+pub(super) fn inspect_match_headers(
     value: &Value,
     status: Option<u16>,
+    headers: &hyper::HeaderMap,
     rules: &[super::failure_rules::Rule],
 ) -> (Details, Option<Source>, String) {
     let mut details = match status {
         Some(status) => {
-            http_with_rules(
-                status,
-                &hyper::HeaderMap::new(),
-                &serde_json::to_vec(value).unwrap(),
-                rules,
-            )
-            .0
+            http_with_rules(status, headers, &serde_json::to_vec(value).unwrap(), rules).0
         }
-        None => details_with_rules(value, false, rules),
+        None => details_with_headers(value, headers, rules).0,
     };
     // The live decision treats retryable HTTP failures without a finer basis as service failures.
     if details.error_basis.is_none() && decision(status, &details).counted_failure {
@@ -1251,7 +1271,7 @@ pub(super) fn inspect_match(
     let evidence = match source {
         Source::BuiltinCode => error
             .and_then(|e| structured_codes(e).find(|c| code_kind(c) == Some(basis)))
-            .and_then(crate::events::safe_message)
+            .map(str::to_owned)
             .unwrap_or_else(|| "内置错误码条件".into()),
         Source::BuiltinType => details
             .upstream_type

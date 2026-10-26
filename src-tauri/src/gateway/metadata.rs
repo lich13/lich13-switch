@@ -201,6 +201,7 @@ fn retained(key: &str) -> bool {
             | "model"
             | "type"
             | "status"
+            | "success"
             | "service_tier"
             | "speed"
             | "stop_reason"

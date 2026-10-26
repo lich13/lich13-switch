@@ -388,7 +388,7 @@ describe("event log", () => {
       within(dialog).getByText("上游暂时不可用；请求内容已隐去"),
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByText("状态码").nextElementSibling,
+      within(dialog).getByText("HTTP 状态").nextElementSibling,
     ).toHaveTextContent("502 · WS 1006");
     expect(
       within(dialog).getByText(/计入熔断/).nextElementSibling,

@@ -8,6 +8,72 @@ use crate::events::ErrorBasis as B;
 use serde_json::json;
 
 const CAPACITY: &str = "Selected model is at capacity. Please try a different model.";
+#[test]
+fn unified_status_search_lists_branches_without_claiming_success_is_failure() {
+    for status in ["429", "200"] {
+        let found = lookup(
+            &Input {
+                query: Some(status.into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(found.parsed.status, status.parse().ok());
+        assert!(found
+            .candidates
+            .iter()
+            .any(|c| c.category == B::Capacity && c.parameters == [P::CapacityRetrySeconds]));
+        assert!(found.candidates.iter().any(|c| c.category == B::Billing));
+        assert!(found.candidates.iter().any(|c| c.category == B::Rpm));
+        assert_eq!(
+            found.category,
+            (status == "429").then_some(B::UnknownRateLimit)
+        );
+    }
+    let found = lookup(
+        &Input {
+            query: Some(CAPACITY.to_lowercase()),
+            status: Some(200),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(found.category, Some(B::Capacity));
+    assert_eq!(found.parameters, [P::CapacityRetrySeconds]);
+    let found = lookup(
+        &Input {
+            query: Some(r#"{"error":{"code":429,"message":"fixture failure"}}"#.into()),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(found.parsed.status, None);
+    assert_eq!(found.parsed.code.as_deref(), Some("429"));
+    let found = lookup(
+        &Input {
+            query: Some(r#"{"code":429}"#.into()),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(found.parsed.status, None);
+    assert_eq!(found.parsed.code.as_deref(), Some("429"));
+    assert_eq!(found.category, None);
+    let found = lookup(
+        &Input {
+            query: Some(r#"{"success":false,"message":"unknown fixture rejection"}"#.into()),
+            status: Some(200),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(found.category, Some(B::ServiceError));
+}
 fn input(code: Option<&str>, message: Option<&str>, status: Option<u16>) -> Input {
     Input {
         code: code.map(str::to_owned),
@@ -15,6 +81,17 @@ fn input(code: Option<&str>, message: Option<&str>, status: Option<u16>) -> Inpu
         status,
         ..Default::default()
     }
+}
+
+#[test]
+fn structured_corrections_apply_to_the_nested_error_without_changing_transport_status() {
+    let found = lookup(&Input {
+        query: Some(json!({"success":false,"data":{"error":{"code":"model_capacity_exceeded","message":"fixture"}}}).to_string()),
+        code: Some("insufficient_quota".into()), status: Some(200), ..Default::default()
+    }, &[]).unwrap();
+    assert_eq!(found.parsed.status, Some(200));
+    assert_eq!(found.parsed.code.as_deref(), Some("insufficient_quota"));
+    assert_eq!(found.category, Some(B::Billing));
 }
 fn rule(kind: MatchKind, value: &str, category: B) -> Rule {
     Rule {
@@ -155,7 +232,7 @@ fn log_fields_and_fixed_policy_do_not_invent_cooldown_controls() {
     assert_eq!(service.source, Some(Source::Status));
     assert!(service.parameters.contains(&P::TransientFailureThreshold));
     assert!(lookup(&input(None, None, Some(600)), &[]).is_err());
-    assert!(lookup(&input(None, Some(&"x".repeat(128 * 1024)), None), &[]).is_err());
+    assert!(lookup(&input(None, Some(&"x".repeat(128 * 1024)), None), &[]).is_ok());
 }
 
 #[test]

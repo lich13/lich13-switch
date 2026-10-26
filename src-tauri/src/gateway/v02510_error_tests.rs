@@ -175,26 +175,17 @@ fn successful_content_never_classifies_embedded_quota_text() {
 }
 
 #[test]
-fn oversized_and_sensitive_error_text_never_classify_or_echo_content() {
-    let sensitive = json!({
-        "error": {
-            "code": 429,
-            "message": "request body contains daily quota exhausted and fixture-secret"
-        }
-    });
-    let details = failure_policy::details_value(&sensitive, true);
-    assert_eq!(details.error_basis, Some(ErrorBasis::UnknownRateLimit));
-    assert_eq!(details.health_scope, None);
-    assert_eq!(details.message, None);
-    assert!(!failure_policy::permanent_rejection(
-        sensitive.to_string().as_bytes()
-    ));
-
-    let mut oversized =
-        br#"{"error":{"code":429,"message":"daily quota exhausted"},"padding":""}"#.to_vec();
-    oversized.extend(std::iter::repeat_n(b'x', 128 * 1024));
-    assert_eq!(failure_policy::details_http(&oversized), Details::default());
-    assert!(!failure_policy::permanent_rejection(&oversized));
+fn error_text_is_classified_and_preserved_without_content_redaction() {
+    let message = "request body contains daily quota exhausted and fixture-secret";
+    let value = json!({"error":{"code":429,"message":message}});
+    let details = failure_policy::details_value(&value, true);
+    assert_eq!(details.error_basis, Some(ErrorBasis::QuotaExhausted));
+    assert_eq!(details.message.as_deref(), Some(message));
+    let message = format!("{} daily quota exhausted", "fixture ".repeat(20000));
+    let bytes = serde_json::to_vec(&json!({"error":{"code":429,"message":message}})).unwrap();
+    let details = failure_policy::details_http(&bytes);
+    assert_eq!(details.message.as_deref(), Some(message.as_str()));
+    assert_eq!(details.error_basis, Some(ErrorBasis::QuotaExhausted));
 }
 
 #[test]

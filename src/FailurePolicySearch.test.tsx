@@ -52,10 +52,41 @@ const searchProps = {
   fields: () => null,
 };
 
-it("debounces separate inputs, accepts either one, and clears without another lookup", async () => {
+it("opens candidate parameters without changing the actual classification", async () => {
+  const user = userEvent.setup();
+  mock.command.mockImplementation(async (name: string) =>
+    name === "match_failure_policy"
+      ? {
+          ...unmatched,
+          category: "unknown_rate_limit",
+          parsed: { status: 429 },
+          candidates: [
+            {
+              category: "capacity",
+              label: "容量不足",
+              action: "已有会话优先原供应商",
+              parameters: ["capacityRetrySeconds"],
+              commonParameters: [],
+            },
+          ],
+        }
+      : failureCatalogPreview,
+  );
+  const fields = vi.fn(() => <span>容量参数</span>);
+  render(<Search {...searchProps} fields={fields} />);
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
+    target: { value: "429" },
+  });
+  await user.click(await screen.findByRole("button", { name: /容量不足 ·/ }));
+  expect(screen.getByText(/当前判定：/)).toHaveTextContent("未分类限流");
+  expect(screen.getByText("候选策略：容量不足")).toBeInTheDocument();
+  expect(fields).toHaveBeenCalledWith(["capacityRetrySeconds"]);
+});
+
+it("debounces unified search, accepts codes and text, and clears without lookup", async () => {
   vi.useFakeTimers();
   render(<Search {...searchProps} />);
-  fireEvent.change(screen.getByLabelText("错误码"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "model_capacity_exceeded" },
   });
   await act(async () => {
@@ -71,8 +102,7 @@ it("debounces separate inputs, accepts either one, and clears without another lo
   expect(mock.command).toHaveBeenLastCalledWith("match_failure_policy", {
     clientId: "codex",
     input: {
-      code: "model_capacity_exceeded",
-      message: undefined,
+      query: "model_capacity_exceeded",
       status: null,
     },
   });
@@ -85,7 +115,7 @@ it("debounces separate inputs, accepts either one, and clears without another lo
     vi.advanceTimersByTime(300);
   });
   expect(mock.command).toHaveBeenCalledTimes(count);
-  fireEvent.change(screen.getByLabelText("报错信息"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "Selected model is at capacity." },
   });
   await act(async () => {
@@ -94,12 +124,11 @@ it("debounces separate inputs, accepts either one, and clears without another lo
   expect(mock.command).toHaveBeenLastCalledWith("match_failure_policy", {
     clientId: "codex",
     input: {
-      code: undefined,
-      message: "Selected model is at capacity.",
+      query: "Selected model is at capacity.",
       status: null,
     },
   });
-  fireEvent.change(screen.getByLabelText("HTTP 状态（可选）"), {
+  fireEvent.change(screen.getByLabelText("HTTP 状态"), {
     target: { value: "99" },
   });
   expect(screen.getByRole("alert")).toHaveTextContent("100–599");
@@ -114,13 +143,13 @@ it("ignores responses after input changes, client changes, clear and unmount", a
       : Promise.resolve(failureCatalogPreview),
   );
   const { rerender, unmount } = render(<Search {...searchProps} />);
-  fireEvent.change(screen.getByLabelText("报错信息"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "first" },
   });
   await act(async () => {
     vi.advanceTimersByTime(300);
   });
-  fireEvent.change(screen.getByLabelText("报错信息"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "second" },
   });
   await act(async () => {
@@ -145,7 +174,7 @@ it("ignores responses after input changes, client changes, clear and unmount", a
   expect(
     screen.queryByRole("region", { name: "匹配结果" }),
   ).not.toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("报错信息"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "third" },
   });
   await act(async () => {
@@ -174,7 +203,7 @@ it("shows relevant controls only and preserves edits across searches and conflic
   );
   await user.click(screen.getByText("故障策略"));
   expect(screen.queryByLabelText("容量错误等待 / 秒")).not.toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("报错信息"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "at capacity" },
   });
   const field = await screen.findByRole("spinbutton", {
@@ -187,7 +216,7 @@ it("shows relevant controls only and preserves edits across searches and conflic
     category: "rpm",
     parameters: ["rateLimitSeconds"],
   });
-  fireEvent.change(screen.getByLabelText("报错信息"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "requests per minute" },
   });
   const rate = await screen.findByRole("spinbutton", {
@@ -241,8 +270,8 @@ it("preserves recorded classification, pre-fills log fields, and opens rule crea
       consumed={consumed}
     />,
   );
-  expect(screen.getByLabelText("错误码")).toHaveValue("fixture_unknown");
-  expect(screen.getByLabelText("HTTP 状态（可选）")).toHaveValue("429");
+  expect(screen.getByLabelText("上游错误码")).toHaveValue("fixture_unknown");
+  expect(screen.getByLabelText("HTTP 状态")).toHaveValue("429");
   expect(await screen.findByText("未匹配到规则")).toBeInTheDocument();
   expect(screen.getByText("日志记录分类：请求频率 RPM")).toBeInTheDocument();
   expect(consumed).toHaveBeenCalledOnce();
@@ -270,7 +299,7 @@ it("displays conflicts and fixed policies without irrelevant editable parameters
       : failureCatalogPreview,
   );
   render(<Search {...searchProps} />);
-  fireEvent.change(screen.getByLabelText("报错信息"), {
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "fixture conflict" },
   });
   expect(

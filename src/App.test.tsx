@@ -807,7 +807,7 @@ it("navigates from an error log to its client's policy and consumes the navigati
   await user.click(await screen.findByRole("button", { name: "日志" }));
   await user.click(await screen.findByRole("button", { name: "查看策略" }));
   await waitFor(() =>
-    expect(screen.getByLabelText("报错信息")).toHaveValue(
+    expect(screen.getByLabelText("搜索错误")).toHaveValue(
       "Selected model is at capacity.",
     ),
   );
@@ -824,5 +824,5 @@ it("navigates from an error log to its client's policy and consumes the navigati
   );
   await user.click(screen.getByRole("button", { name: "账号" }));
   await user.click(screen.getByRole("button", { name: "网关" }));
-  expect(await screen.findByLabelText("报错信息")).toHaveValue("");
+  expect(await screen.findByLabelText("搜索错误")).toHaveValue("");
 });

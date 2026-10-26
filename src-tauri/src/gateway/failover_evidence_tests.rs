@@ -85,7 +85,10 @@ fn retry_after_ignores_negative_unstructured_and_invalid_timestamps() {
 
     let mut oversized = br#"{"error":{"code":"rate_limit_exceeded","retry_after":17}}"#.to_vec();
     oversized.resize(MAX_RETRY_BODY + 1, b' ');
-    assert_eq!(failure_policy::retry_after_http(&oversized), None);
+    assert_eq!(
+        failure_policy::retry_after_http(&oversized),
+        Some(Duration::from_secs(17))
+    );
 }
 
 #[test]

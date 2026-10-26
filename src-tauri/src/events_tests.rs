@@ -30,6 +30,57 @@ fn record(model: &str, reason: Reason) -> Record {
     )
 }
 
+#[tokio::test]
+async fn complete_errors_survive_restart_and_size_growth_and_do_not_merge_different_bodies() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = Service::new(temp.path());
+    let mut rx = service.subscribe();
+    let text = format!(
+        "{} 'quoted fixture' https://example.invalid/model?detail=429\nend",
+        "fixture ".repeat(700_000)
+    );
+    let mut event = record("fixture-raw", Reason::ProtocolError);
+    let id = event.id.clone();
+    event.status = Some(200);
+    event.details.message = Some(text.clone());
+    event.details.raw = Some(std::sync::Arc::new(crate::event_raw::Raw::bytes(
+        text.as_bytes(),
+        vec![crate::event_raw::Header {
+            name: "x-fixture".into(),
+            value: "keep all".into(),
+            base64: false,
+        }],
+        None,
+    )));
+    emit(&service, &mut rx, event.clone()).await;
+    assert_eq!(service.raw(&id).unwrap().unwrap().body, text);
+    let mut second = event.clone();
+    second.id = uuid::Uuid::new_v4().to_string();
+    let different = format!("{text} different");
+    second.details.raw = Some(std::sync::Arc::new(crate::event_raw::Raw::bytes(
+        different.as_bytes(),
+        event.details.raw.as_ref().unwrap().headers.clone(),
+        None,
+    )));
+    emit(&service, &mut rx, second).await;
+    assert_eq!(service.query(Filter::default()).total, 2);
+    drop(service);
+    let restored = Service::new(temp.path());
+    assert_eq!(restored.raw(&id).unwrap().unwrap().body, text);
+    assert_eq!(
+        restored.raw(&id).unwrap().unwrap().headers[0].value,
+        "keep all"
+    );
+    restored.clear().await.unwrap();
+    assert!(restored.raw(&id).unwrap().is_none());
+    assert_eq!(
+        fs::read_dir(temp.path().join("diagnostic-errors"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
 async fn next(rx: &mut tokio::sync::broadcast::Receiver<Change>) -> Change {
     tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
@@ -161,7 +212,7 @@ fn seven_day_retention_and_damaged_tail_keep_valid_records() {
 }
 
 #[test]
-fn files_over_5_mib_are_not_loaded_and_report_a_read_error() {
+fn damaged_large_files_report_corruption_without_a_size_limit() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("diagnostics.jsonl");
     fs::write(path, vec![b'x'; 5 * 1024 * 1024 + 1]).unwrap();
@@ -171,7 +222,7 @@ fn files_over_5_mib_are_not_loaded_and_report_a_read_error() {
     assert!(page
         .error
         .as_deref()
-        .is_some_and(|message| message.contains("读取失败")));
+        .is_some_and(|message| message.contains("损坏记录")));
 }
 
 #[tokio::test]

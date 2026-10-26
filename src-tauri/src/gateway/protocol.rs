@@ -10,6 +10,8 @@ pub struct Observation {
     pub meter: crate::usage::model::Meter,
     pub error: crate::events::Details,
     limit_headers: hyper::HeaderMap,
+    pub(super) raw_headers: Vec<crate::event_raw::Header>,
+    http_status: Option<u16>,
     pub response_id: Option<String>,
     pub model: Option<String>,
     pub incomplete: bool,
@@ -110,7 +112,15 @@ pub fn identifier(v: Option<&Value>) -> Option<String> {
 }
 impl Observation {
     pub fn value(&mut self, outer: &Value) {
+        let sequence = self.fault_sequence;
         self.value_projected(outer, false);
+        if self.fault_sequence != sequence {
+            self.error.raw = Some(std::sync::Arc::new(crate::event_raw::Raw::bytes(
+                &serde_json::to_vec(outer).unwrap_or_default(),
+                self.raw_headers.clone(),
+                None,
+            )));
+        }
     }
     fn value_projected(&mut self, outer: &Value, projected: bool) {
         let value = outer
@@ -167,11 +177,20 @@ impl Observation {
         if self.meter.model.is_some() {
             self.model = self.meter.model.clone();
         }
-        let (details, retry) = super::failure_policy::details_with_headers(
-            outer,
-            &self.limit_headers,
-            &self.failure_rules,
-        );
+        let (details, retry) = if let Some(status) = self.http_status.filter(|s| *s >= 400) {
+            super::failure_policy::http_with_rules(
+                status,
+                &self.limit_headers,
+                &serde_json::to_vec(outer).unwrap_or_default(),
+                &self.failure_rules,
+            )
+        } else {
+            super::failure_policy::details_with_headers(
+                outer,
+                &self.limit_headers,
+                &self.failure_rules,
+            )
+        };
         let has_error = details != crate::events::Details::default();
         if has_error || matches!(event, "error" | "response.failed") || status == "failed" {
             self.fault_sequence = self.fault_sequence.saturating_add(1);
@@ -342,6 +361,9 @@ fn safe_incomplete_reason(value: &Value) -> Option<String> {
 }
 
 fn rule_terminal(value: &Value, details: &crate::events::Details) -> Terminal {
+    if super::failure_policy::temporary(details) {
+        return Terminal::Failure;
+    }
     if details.custom_rule_id.is_none() {
         return error_terminal(value);
     }
@@ -398,6 +420,8 @@ struct Sink {
     data_len: usize,
     skip_space: bool,
     after_cr: bool,
+    raw: crate::event_raw::Capture,
+    raw_wire: crate::event_raw::Capture,
 }
 impl Sink {
     fn new(stream: bool) -> Self {
@@ -412,9 +436,12 @@ impl Sink {
             data_len: 0,
             skip_space: false,
             after_cr: false,
+            raw: crate::event_raw::Capture::default(),
+            raw_wire: crate::event_raw::Capture::default(),
         }
     }
     fn data(&mut self, bytes: &[u8]) {
+        self.raw.feed(bytes);
         self.data_prefix.extend(
             bytes
                 .iter()
@@ -426,9 +453,18 @@ impl Sink {
     fn event(&mut self) {
         if self.data_len == 0 {
             self.event.clear();
+            self.raw_wire = crate::event_raw::Capture::default();
             return;
         }
         let json = std::mem::take(&mut self.json);
+        let raw = std::mem::take(&mut self.raw).finish(
+            self.observation.raw_headers.clone(),
+            (!self.event.is_empty()).then(|| self.event.clone()),
+        );
+        let wire = std::mem::take(&mut self.raw_wire).finish(
+            self.observation.raw_headers.clone(),
+            Some(self.event.clone()),
+        );
         let first = self.observation.first_event_model_error.is_none();
         if first {
             // A complete non-JSON SSE event must also release the response
@@ -440,13 +476,36 @@ impl Sink {
         }
         if self.data_len <= 16 && self.data_prefix.trim_ascii() == b"[DONE]" {
             self.observation.done();
-        } else if let Some(mut v) = json.finish() {
+        } else if let Some(mut v) = json.finish().or_else(|| {
+            raw.text()
+                .ok()
+                .filter(|text| {
+                    matches!(self.event.as_str(), "error" | "response.failed")
+                        || super::failure_policy::bare_capacity(text)
+                })
+                .map(|text| serde_json::json!({"type":"error", "message":text}))
+        }) {
+            if matches!(self.event.as_str(), "error" | "response.failed")
+                || v.get("error").is_some()
+                || v.get("success") == Some(&Value::Bool(false))
+                || super::failure_policy::details_with_rules(&v, false, &[])
+                    .error_basis
+                    .is_some()
+            {
+                if let Some(full) = raw.value() {
+                    v = full;
+                }
+            }
             if v.get("type").is_none() && !self.event.is_empty() {
                 if let Some(map) = v.as_object_mut() {
                     map.insert("type".into(), Value::String(self.event.clone()));
                 }
             }
+            let sequence = self.observation.fault_sequence;
             self.observation.value_projected(&v, true);
+            if self.observation.fault_sequence != sequence {
+                self.observation.error.raw = Some(std::sync::Arc::new(wire));
+            }
             if first {
                 self.observation.first_event_model_error = Some(
                     self.observation.error.error_basis
@@ -489,14 +548,62 @@ impl Sink {
     }
     fn finish(&mut self) {
         if self.stream {
+            let sequence = self.observation.fault_sequence;
+            if self.after_cr {
+                self.after_cr = false;
+                self.line_end();
+            }
             if self.line_kind != 0 || !self.field.is_empty() {
                 self.line_end();
             }
             self.event();
-        } else if let Some(v) = std::mem::take(&mut self.json).finish() {
-            self.observation.value_projected(&v, true);
+            if self.observation.fault_sequence != sequence {
+                if let Some(raw) = &mut self.observation.error.raw {
+                    std::sync::Arc::make_mut(raw).incomplete = Some("流式错误事件未收完整".into());
+                }
+            }
         } else {
-            self.observation.incomplete = true;
+            let raw =
+                std::mem::take(&mut self.raw).finish(self.observation.raw_headers.clone(), None);
+            let projected = std::mem::take(&mut self.json).finish();
+            let value = if self.observation.http_status.is_some_and(|s| s >= 400) {
+                raw.value().or_else(|| raw.text().ok().map(Value::String))
+            } else {
+                projected
+                    .and_then(|v| {
+                        if v.get("error").is_some()
+                            || v.get("success") == Some(&Value::Bool(false))
+                            || super::failure_policy::details_with_rules(&v, false, &[])
+                                .error_basis
+                                .is_some()
+                        {
+                            raw.value().or(Some(v))
+                        } else {
+                            Some(v)
+                        }
+                    })
+                    .or_else(|| {
+                        raw.text()
+                            .ok()
+                            .filter(|s| super::failure_policy::bare_capacity(s))
+                            .map(Value::String)
+                    })
+            };
+            if let Some(v) = value {
+                self.observation.value_projected(&v, true);
+                if self.observation.http_status.is_some_and(|s| s >= 400)
+                    || super::failure_policy::details_with_rules(&v, false, &[])
+                        .error_basis
+                        .is_some()
+                {
+                    self.observation.error.raw = Some(std::sync::Arc::new(raw));
+                }
+            } else {
+                self.observation.incomplete = true;
+                if self.observation.http_status.is_some_and(|s| s >= 400) {
+                    self.observation.error.raw = Some(std::sync::Arc::new(raw));
+                }
+            }
         }
         self.observation.finish_pending();
     }
@@ -504,6 +611,7 @@ impl Sink {
 impl Write for Sink {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if !self.stream {
+            self.raw.feed(bytes);
             self.json.feed(bytes);
             return Ok(bytes.len());
         }
@@ -511,11 +619,14 @@ impl Write for Sink {
             if self.after_cr {
                 self.after_cr = false;
                 if b == b'\n' {
+                    self.raw_wire.feed(&[b]);
+                    self.line_end();
                     continue;
                 }
-            }
-            if b == b'\r' {
                 self.line_end();
+            }
+            self.raw_wire.feed(&[b]);
+            if b == b'\r' {
                 self.after_cr = true;
                 continue;
             }
@@ -567,6 +678,7 @@ enum Decoder {
 pub struct Observer {
     decoder: Decoder,
     failed: bool,
+    encoded: Option<crate::event_raw::Capture>,
 }
 
 /// Health observation and bounded usage metadata share decoding, never terminal policy.
@@ -906,8 +1018,10 @@ impl Protocol {
     }
     pub fn response_headers(&mut self, headers: &hyper::HeaderMap) {
         self.observation.limit_headers = super::failure_policy::limit_headers(headers);
+        self.observation.raw_headers = crate::event_raw::headers(headers);
         if let Some(observer) = &mut self.observer {
             observer.sink().observation.limit_headers = self.observation.limit_headers.clone();
+            observer.sink().observation.raw_headers = self.observation.raw_headers.clone();
         }
         self.transfer.upstream_client_request_hash = headers
             .get("x-client-request-id")
@@ -1173,6 +1287,9 @@ impl Protocol {
         self.status = Some(status);
         self.stream = stream;
         let mut observer = Observer::new(stream, encoding);
+        observer.sink().observation.http_status = Some(status);
+        observer.sink().observation.raw_headers = self.observation.raw_headers.clone();
+        observer.sink().observation.limit_headers = self.observation.limit_headers.clone();
         observer.sink().observation.failure_rules = self.observation.failure_rules.clone();
         observer.sink().observation.meter.anthropic = self.observation.meter.anthropic;
         observer.sink().observation.meter.requested_speed =
@@ -1188,8 +1305,38 @@ impl Protocol {
         self.terminal_received |= self.observation.terminal.is_some();
         self.record_usage();
     }
+    pub fn possible_bare_capacity(&mut self) -> bool {
+        let Some(observer) = &mut self.observer else {
+            return false;
+        };
+        let prefix = observer.sink().raw.prefix();
+        let Ok(text) = std::str::from_utf8(prefix) else {
+            return false;
+        };
+        let text = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let expected = "selected model is at capacity. please try a different model.";
+        expected.starts_with(&text) || super::failure_policy::bare_capacity(&text)
+    }
+    #[cfg(test)]
     pub fn value(&mut self, value: &Value) {
         self.observation.value(value);
+        self.terminal_received |= self.observation.terminal.is_some();
+        self.record_usage();
+    }
+    pub fn value_raw(&mut self, value: &Value, bytes: &[u8]) {
+        let sequence = self.observation.fault_sequence;
+        self.observation.value_projected(value, false);
+        if self.observation.fault_sequence != sequence {
+            self.observation.error.raw = Some(std::sync::Arc::new(crate::event_raw::Raw::bytes(
+                bytes,
+                self.observation.raw_headers.clone(),
+                None,
+            )));
+        }
         self.terminal_received |= self.observation.terminal.is_some();
         self.record_usage();
     }
@@ -1268,6 +1415,19 @@ impl Protocol {
         self.status = self.status.or(status);
         if let Some(o) = &mut self.observer {
             self.observation = o.snapshot(true);
+        }
+        if matches!(
+            reason,
+            code::STREAM_INTERRUPTED
+                | code::STREAM_TIMEOUT
+                | code::FIRST_BYTE_TIMEOUT
+                | code::CANCELLED
+                | code::GATEWAY_STOPPED
+        ) {
+            if let Some(raw) = &mut self.observation.error.raw {
+                std::sync::Arc::make_mut(raw).incomplete =
+                    Some("上游响应未收完整，保存已收到的错误内容".into());
+            }
         }
         self.observation.finish_pending();
         self.observation.error.timeout_phase = self.transfer.timeout_phase.clone();
@@ -1658,7 +1818,15 @@ impl Observer {
                 Decoder::Plain(sink)
             }
         };
-        Self { decoder, failed }
+        Self {
+            decoder,
+            failed,
+            encoded: (!matches!(
+                encoding.trim().to_ascii_lowercase().as_str(),
+                "" | "identity"
+            ))
+            .then(crate::event_raw::Capture::default),
+        }
     }
     fn sink(&mut self) -> &mut Sink {
         match &mut self.decoder {
@@ -1670,6 +1838,9 @@ impl Observer {
         }
     }
     pub fn feed(&mut self, bytes: &[u8]) {
+        if let Some(encoded) = &mut self.encoded {
+            encoded.feed(bytes);
+        }
         if self.failed {
             return;
         }
@@ -1700,6 +1871,22 @@ impl Observer {
         }
         let mut result = self.sink().observation.clone();
         result.incomplete |= self.failed;
+        if self.failed {
+            if finish {
+                if let Some(encoded) = self.encoded.take() {
+                    let mut raw = encoded.finish(self.sink().observation.raw_headers.clone(), None);
+                    raw.incomplete = Some("响应解码失败，保存已收到的原始响应".into());
+                    result.error.raw = Some(std::sync::Arc::new(raw));
+                }
+            }
+            if let Some(raw) = &mut result.error.raw {
+                std::sync::Arc::make_mut(raw).incomplete =
+                    Some("响应解码失败，错误原文可能不完整".into());
+            }
+        }
+        if finish {
+            self.encoded = None;
+        }
         result
     }
 }

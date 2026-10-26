@@ -1,6 +1,11 @@
 import type { ClientId, GatewaySettings } from "./types";
 
 export type FailureInput = {
+  query?: string | null;
+  rawResponse?: string | null;
+  event?: string | null;
+  eventId?: string | null;
+  headers?: ErrorResponseHeader[] | null;
   code?: string | null;
   message?: string | null;
   status?: number | null;
@@ -13,6 +18,8 @@ export type FailureParameter = Exclude<
   "customFailureRules"
 >;
 export type FailureMatch = {
+  parsed?: FailureInput;
+  candidates?: FailureCandidate[];
   category: string | null;
   source:
     | "builtin_code"
@@ -53,4 +60,24 @@ export type FailureCategory = {
   excludedKeywords?: string[];
   conditions: string[];
   statuses: string[];
+};
+
+export type FailureCandidate = {
+  category: string;
+  label: string;
+  action: string;
+  parameters: FailureParameter[];
+  commonParameters: FailureParameter[];
+};
+export type ErrorResponseHeader = {
+  name: string;
+  value: string;
+  base64: boolean;
+};
+export type ErrorResponse = {
+  headers: ErrorResponseHeader[];
+  event: string | null;
+  body: string;
+  base64: boolean;
+  incomplete: string | null;
 };

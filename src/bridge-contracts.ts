@@ -637,6 +637,10 @@ export type CommandMap = {
     EventPage
   >;
   get_app_event: Call<{ id: string }, EventRecord | null>;
+  get_app_event_raw: Call<
+    { id: string },
+    import("./failure-policy-types").ErrorResponse | null
+  >;
   clear_app_events: Call<None, void>;
   preview_account_import: Call<None, AccountImportPreview | null>;
   commit_account_import: Call<

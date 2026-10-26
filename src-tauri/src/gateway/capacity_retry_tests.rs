@@ -7,10 +7,151 @@ const CREATE: &str = r#"{ "type":"response.create", "model":"fixture-model", "in
 const CREATED: &str =
     r#"{"type":"response.created","response":{"id":"fixture-response","model":"fixture-model"}}"#;
 const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-response","model":"fixture-model","status":"completed"}}"#;
-const CAPACITY_EVENT: &str = r#"{"type":"error","error":{"code":"rate_limit_exceeded","message":"Selected model is at capacity","status":429}}"#;
+const CAPACITY_EVENT: &str = r#"{"type":"error","error":{"code":"rate_limit_exceeded","message":"selected model is at capacity. please try a different model.","status":429}}"#;
 // These cases assert retry counts, content and health; this only bounds a hung
 // loopback request, including scheduler and socket overhead on Windows runners.
 const REQUEST_WAIT: Duration = Duration::from_secs(30);
+
+#[tokio::test]
+async fn http_200_capacity_and_unknown_rejection_use_the_safe_backup_before_delivery() {
+    for message in [
+        "selected model is at capacity. please try a different model.",
+        "fixture unknown service rejection",
+    ] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let first_hits = hits.clone();
+        let first = server(move |_| {
+            first_hits.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(full(
+                        serde_json::json!({"success":false,"message":message}).to_string(),
+                    ))
+                    .unwrap()
+            }
+        })
+        .await;
+        let second = server(move |_| async {
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(full(COMPLETED))
+                .unwrap()
+        })
+        .await;
+        let (t, g) = fixture(vec![
+            format!("http://127.0.0.1:{first}/v1"),
+            format!("http://127.0.0.1:{second}/v1"),
+        ])
+        .await;
+        configure(&g, &t, 1);
+        let diagnostics = crate::events::Service::new(t.path());
+        g.set_diagnostics(diagnostics.clone());
+        start(&g, &t).await;
+        let response = tokio::time::timeout(
+            REQUEST_WAIT,
+            request(
+                &g,
+                "/v1/responses",
+                br#"{"model":"fixture-model","input":[{"role":"user","content":"fixture"}]}"#
+                    .to_vec(),
+                vec![("content-type", "application/json")],
+            ),
+        )
+        .await
+        .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("response.completed"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(g.view().providers[1].rpm_used, 1);
+        let capacity = message.starts_with("selected model");
+        let basis = if capacity {
+            crate::events::ErrorBasis::Capacity
+        } else {
+            crate::events::ErrorBasis::ServiceError
+        };
+        until(|| {
+            diagnostics
+                .query(crate::events::Filter::default())
+                .items
+                .iter()
+                .any(|r| r.details.error_basis == Some(basis))
+        })
+        .await;
+        let events = diagnostics.query(crate::events::Filter::default());
+        let error = events
+            .items
+            .iter()
+            .find(|r| r.details.error_basis == Some(basis))
+            .unwrap();
+        assert_eq!(error.status, Some(200));
+        assert_eq!(error.details.counted_failure, Some(!capacity));
+        assert_eq!(
+            error.reason,
+            if capacity {
+                crate::events::Reason::Capacity
+            } else {
+                crate::events::Reason::UpstreamService
+            }
+        );
+        let raw = diagnostics.raw(&error.id).unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw.body).unwrap()["message"],
+            message
+        );
+        let matched = g
+            .match_failure_policy(super::super::failure_match::Input {
+                status: error.status,
+                raw_response: Some(raw.body),
+                headers: Some(raw.headers),
+                event: raw.event,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(matched.category, Some(basis));
+        g.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn full_capacity_prompt_http_200_json_plain_and_compressed_recover_without_service_failures()
+{
+    use std::io::Write;
+    const MESSAGE: &str = "selected model is at capacity. please try a different model.";
+    for (content, mime, encoding) in [
+        (MESSAGE.to_owned(), "text/plain", "identity"),
+        (MESSAGE.to_uppercase(), "text/plain", "gzip"),
+        (serde_json::json!({"message":MESSAGE}).to_string(), "application/json", "identity"),
+        (serde_json::json!({"success":false,"error":{"message":MESSAGE,"code":"rate_limit_exceeded"}}).to_string(), "application/json", "gzip"),
+    ] {
+        let bytes = if encoding == "gzip" {
+            let mut compressed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            compressed.write_all(content.as_bytes()).unwrap(); compressed.finish().unwrap()
+        } else { content.into_bytes() };
+        let hits = Arc::new(AtomicUsize::new(0)); let count = hits.clone();
+        let upstream = server(move |_| {
+            let n = count.fetch_add(1, Ordering::SeqCst); let bytes = bytes.clone();
+            async move {
+                if n == 0 { Response::builder().status(200).header("content-type", mime).header("content-encoding", encoding).body(full(bytes)).unwrap() }
+                else { Response::builder().header("content-type","application/json").body(full(COMPLETED)).unwrap() }
+            }
+        }).await;
+        let (t,g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
+        configure(&g, &t, 0); start(&g,&t).await;
+        let response = tokio::time::timeout(REQUEST_WAIT, request(&g,"/v1/responses",
+            br#"{"model":"fixture-model","input":[{"role":"user","content":"fixture"}]}"#.to_vec(), vec![("content-type","application/json")])).await.unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&body).unwrap().contains("response.completed"), "{mime} {encoding}");
+        assert_eq!(hits.load(Ordering::SeqCst),2);
+        assert_eq!(g.view().providers[0].health.failures,0);
+        assert_eq!(g.view().providers[0].rpm_used,2);
+        assert!(g.view().capacity_retries.is_empty());
+        g.stop().await.unwrap();
+    }
+}
 
 fn configure(g: &Gateway, t: &tempfile::TempDir, retries: usize) {
     update(
@@ -63,9 +204,10 @@ async fn until(condition: impl Fn() -> bool) {
 
 fn capacity_response() -> Response<WireBody> {
     Response::builder()
-        .status(429)
+        .status(200)
+        .header("content-type", "application/json")
         .header("retry-after", "0")
-        .body(full("Selected model is at capacity"))
+        .body(full(CAPACITY_EVENT))
         .unwrap()
 }
 
