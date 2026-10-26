@@ -724,6 +724,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             if matches_model {
                 candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
             }
+            wait_budget.capacity_owner = None;
             if dedicated_search && search_fallback {
                 // Search backups do not inherit generation intake policies.
             } else if let Some(owner) = retry_owner.take() {
@@ -732,7 +733,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 candidates = if attempted > 0 || !hard_denied.is_empty() {
                     lease.candidates_after_failure(candidates, &requirement)
                 } else {
-                    lease.candidates_for(candidates, &requirement)
+                    lease.candidates_for_admission(candidates, &requirement, &mut wait_budget)
                 };
             } else if gateway.client_id() == super::ClientId::Codex
                 && mode == "auto"
@@ -1001,7 +1002,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         "没有符合线程接管策略的供应商",
                     );
                 }
-                Err(Rejected::Unavailable) => {
+                Err(Rejected::Unavailable | Rejected::Reconnect) => {
                     if capacity_pending {
                         ids.clear();
                         continue;
@@ -1096,8 +1097,24 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 None
             };
             let mapped_length = mapped.as_ref().map(|b| b.len());
-            let mut upstream =
-                Request::new(mapped.map(replay::full).unwrap_or_else(|| replay.body()));
+            let mut request_body = mapped.map(replay::full).unwrap_or_else(|| replay.body());
+            if operation == crate::usage::model::Operation::Compaction {
+                let budget = request_budget.clone();
+                let identity = budget.deadline();
+                let mut dispatched = false;
+                request_body = request_body
+                    .map_frame(move |frame| {
+                        // Hyper polls the upload only after acquiring a connection.
+                        // Queueing and connection setup retain their original budget.
+                        if !dispatched {
+                            dispatched = true;
+                            budget.compaction_execution(identity, true);
+                        }
+                        frame
+                    })
+                    .boxed_unsync();
+            }
+            let mut upstream = Request::new(request_body);
             *upstream.method_mut() = parts.method.clone();
             *upstream.uri_mut() = uri;
             *upstream.headers_mut() = parts.headers.clone();
@@ -1257,7 +1274,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds)
             };
-            let response = tokio::time::timeout_at(deadline, route.client.request(upstream)).await;
+            let response = request_budget
+                .response(
+                    deadline,
+                    operation == crate::usage::model::Operation::Compaction,
+                    route.client.request(upstream),
+                )
+                .await;
             let mut response = match response {
                 Ok(Ok(response)) => response,
                 Ok(Err(e)) => {
@@ -1782,7 +1805,14 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let mut failed = false;
             let mut failure_kind = code::FIRST_BYTE_TIMEOUT;
             loop {
-                match tokio::time::timeout_at(first_deadline, body.frame()).await {
+                match request_budget
+                    .response(
+                        first_deadline,
+                        operation == crate::usage::model::Operation::Compaction,
+                        body.frame(),
+                    )
+                    .await
+                {
                     Ok(Some(Ok(frame))) => {
                         if let Some(bytes) = frame.data_ref() {
                             prefix_bytes += bytes.len();
@@ -2235,7 +2265,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         }
                         _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
                         _ = sender.closed(), if !disconnected => { disconnected = true; continue; }
-                        frame = tokio::time::timeout_at(limit, body.frame()) => frame,
+                        frame = request_budget.response(limit, operation == crate::usage::model::Operation::Compaction, body.frame()) => frame,
                     };
                     match next {
                         Ok(Some(Ok(frame))) => {

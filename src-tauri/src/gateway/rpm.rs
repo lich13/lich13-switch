@@ -55,7 +55,7 @@ impl Stamp {
     }
 }
 #[derive(Clone, Default)]
-struct Provider {
+pub(super) struct Provider {
     starts: VecDeque<Stamp>,
     completed: VecDeque<Stamp>,
     // None means still observing. Some means an uncertain end, protected to a deadline.
@@ -101,6 +101,35 @@ pub(super) enum Settlement {
     Uncertain,
 }
 impl Ledger {
+    pub(super) fn checkpoint(&self, id: &str) -> Option<Provider> {
+        self.providers.get(id).cloned()
+    }
+    pub(super) fn restore(&mut self, id: &str, previous: Option<Provider>) {
+        if let Some(previous) = previous {
+            self.providers.insert(id.into(), previous);
+        } else {
+            self.providers.remove(id);
+        }
+    }
+    /// Pending sends and observing responses have no time-based release.
+    /// Their reservation/settlement signals wake the scheduler instead.
+    pub(super) fn next_change(&self, id: &str) -> Option<Instant> {
+        let now = Instant::now();
+        self.legacy_until
+            .map(|s| s.at)
+            .into_iter()
+            .chain(self.providers.get(id).into_iter().flat_map(|p| {
+                p.starts
+                    .iter()
+                    .chain(p.completed.iter())
+                    .map(|s| s.at + WINDOW)
+                    .chain(p.inflight.values().filter_map(|s| s.map(|s| s.at)))
+                    .chain(p.backoff.map(|s| s.at))
+                    .chain(p.initialize.map(|s| s.at))
+            }))
+            .filter(|at| *at > now)
+            .min()
+    }
     pub(super) fn load(path: &Path) -> (Self, bool) {
         let raw = match storage::read_optional(path) {
             Ok(None) => return (Self::default(), false),

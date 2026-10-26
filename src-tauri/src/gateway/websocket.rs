@@ -376,6 +376,7 @@ fn creates(frame: &Frame) -> bool {
 }
 fn rejected(reason: Rejected) -> Failure {
     match reason {
+        Rejected::Reconnect => (1999, "compaction handoff"),
         Rejected::Policy => (1008, code::NO_ELIGIBLE_PROVIDER),
         Rejected::Model => (1008, "MODEL_NOT_ALLOWED or MODEL_UNDETERMINED"),
         Rejected::Stopped => (1012, "gateway stopped"),
@@ -478,7 +479,9 @@ async fn take_slot(
     )
     .await?
     .map_err(|reason| {
-        failover.rejected(&reason);
+        if reason != Rejected::Reconnect {
+            failover.rejected(&reason);
+        }
         if matches!(reason, Rejected::Model) {
             (1008, requirement.code())
         } else {
@@ -1290,13 +1293,14 @@ async fn session_once(
         if matches_model {
             candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
         }
+        budget.capacity_owner = None;
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
             candidates = if attempts > 0 || !hard_denied.is_empty() {
                 lease.candidates_after_failure(candidates, &requirement)
             } else {
-                lease.candidates_for(candidates, &requirement)
+                lease.candidates_for_admission(candidates, &requirement, &mut budget)
             };
         } else if g.client_id() == super::ClientId::Codex
             && !manual
@@ -1517,6 +1521,9 @@ async fn session_once(
                     })
             }),
         );
+        if first_hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+            attempt_protocol.set_operation(crate::usage::model::Operation::Compaction);
+        }
         if !manual {
             attempt_protocol.routing_evidence(first_hints.as_ref());
         }
@@ -1839,6 +1846,9 @@ async fn session_once(
         pinned.is_some(),
     )? {
         return Err((1013, code::CONVERSATION_OWNERSHIP));
+    }
+    if let Some(u) = &protocol {
+        u.begin_compaction_execution();
     }
     if let Upstream::Native(peer) = &mut upstream {
         if let Err(e) = peer.send(first).await {
@@ -2196,6 +2206,9 @@ async fn session_once(
                     )
                 }),
             );
+            if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+                next.set_operation(crate::usage::model::Operation::Compaction);
+            }
             if !manual {
                 next.routing_evidence(hints.as_ref());
             }
@@ -2359,6 +2372,9 @@ async fn session_once(
             receive_started = tokio::time::Instant::now();
             if !admit_ownership(g, ownership.as_deref(), &route, &requirement, !movable)? {
                 return Err((1013, code::CONVERSATION_OWNERSHIP));
+            }
+            if let Some(u) = &protocol {
+                u.begin_compaction_execution();
             }
             if let Err(error) = send_to_upstream(&mut upstream, replay_frame.clone()).await {
                 retry_pending = disconnect_turn(
@@ -2588,6 +2604,27 @@ async fn session_once(
                     let (intake, owner) = lease.admission_policy();
                     budget.set_intake(intake, owner);
                 }
+                let mut admission_routes = vec![route.clone()];
+                if let Some(lease) = ownership.as_ref().filter(|_| {
+                    !manual
+                        && !connection_request_only
+                        && hints
+                            .as_ref()
+                            .is_some_and(|h| h.previous_response_id.is_none())
+                }) {
+                    let candidates = g
+                        .routing_ids(None)
+                        .iter()
+                        .filter_map(|id| g.route(id))
+                        .filter(|r| {
+                            r.accepts_protocol(uri.path())
+                                && requirement.allows(r.provider.allowed_models.as_deref())
+                        })
+                        .collect();
+                    admission_routes =
+                        lease.candidates_for_admission(candidates, &requirement, &mut budget);
+                    budget.reconnect_from = Some(route.provider.id.clone());
+                }
                 usage_trace = g.usage_operation(
                     model.as_deref(),
                     if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
@@ -2654,7 +2691,7 @@ async fn session_once(
                 let acquired = take_slot(
                     g,
                     client,
-                    std::slice::from_ref(&route),
+                    &admission_routes,
                     manual,
                     cfg,
                     &mut budget,
@@ -2664,6 +2701,10 @@ async fn session_once(
                 )
                 .await;
                 match acquired {
+                    Err((1999, "compaction handoff")) => {
+                        *next_turn = Some(frame);
+                        return Err((1999, "compaction handoff"));
+                    }
                     Ok(mut admission) => {
                         if !admit_ownership(
                             g,
@@ -2741,6 +2782,9 @@ async fn session_once(
                         )
                     }),
                 );
+                if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+                    next_protocol.set_operation(crate::usage::model::Operation::Compaction);
+                }
                 if !manual {
                     next_protocol.routing_evidence(hints.as_ref());
                 }
@@ -2902,6 +2946,9 @@ async fn session_once(
                             .is_some_and(|h| h.previous_response_id.is_some()),
                     )? {
                         return Err((1013, code::CONVERSATION_OWNERSHIP));
+                    }
+                    if let Some(u) = &protocol {
+                        u.begin_compaction_execution();
                     }
                     if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                         retry_pending = disconnect_turn(
@@ -3137,7 +3184,7 @@ async fn session_once(
                     return Err(e);
                 }
             },
-            _ = tokio::time::sleep_until(deadline), if turn.is_some() => {
+            _ = tokio::time::sleep_until(deadline), if turn.is_some() && !request_budget.executing_compaction() => {
                 let mut partial_progress = None;
                 if let Upstream::Native(peer) = &upstream {
                     if let Some(at) = peer.activity.read_at().filter(|at| *at >= receive_started) {

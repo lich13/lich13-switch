@@ -118,6 +118,13 @@ impl Retention {
         });
         len != self.entries.len()
     }
+    pub fn next_expiry(&self) -> Option<Duration> {
+        self.entries
+            .values()
+            .filter(|e| e.retained && e.active == 0 && e.pending == 0)
+            .map(|e| Duration::from_secs(self.seconds).saturating_sub(e.idle.elapsed()))
+            .min()
+    }
     pub fn begin(&mut self, thread: &str, owner: Option<&str>) -> u64 {
         self.prune();
         self.next += 1;

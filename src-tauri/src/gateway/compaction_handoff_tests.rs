@@ -485,3 +485,224 @@ async fn terminal_then_client_disconnect_keeps_completed_without_usage_tail() {
     assert_eq!(g.view().providers[0].active_requests, 0);
     g.stop().await.unwrap();
 }
+
+fn history() -> Vec<u8> {
+    json!({"model":"fixture-model","input":[
+        {"role":"user","content":"fixture question"},
+        {"role":"assistant","content":"fixture answer"},
+        {"role":"user","content":"fixture followup"}
+    ]})
+    .to_string()
+    .into_bytes()
+}
+async fn hold(g: &Gateway, id: &str) -> admission::Admission {
+    g.0.admission
+        .acquire(
+            &[g.route(id).unwrap()],
+            false,
+            100,
+            &mut admission::Budget::new(3),
+        )
+        .await
+        .unwrap()
+}
+fn one_slot(g: &Gateway, t: &tempfile::TempDir) {
+    let mut settings = g.view().settings;
+    settings.thread_idle_release_seconds = 1;
+    update(g, t, Edit::Settings { settings });
+    for provider in g.view().providers {
+        update(
+            g,
+            t,
+            Edit::ConcurrencyProvider {
+                id: provider.id,
+                max_concurrency: 1,
+            },
+        );
+    }
+}
+#[tokio::test]
+async fn established_full_owner_uses_next_provider_only_after_capacity_release_and_success() {
+    let (a, _) = endpoint("old", false).await;
+    let (b, _) = endpoint("new", false).await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{a}"),
+        format!("http://127.0.0.1:{b}"),
+    ])
+    .await;
+    automatic(&g, &t);
+    one_slot(&g, &t);
+    start(&g, &t).await;
+    let session = "fixture-full-owner";
+    call(
+        &g,
+        session,
+        "/v1/responses",
+        br#"{"model":"fixture-model","input":"fixture"}"#.to_vec(),
+    )
+    .await;
+    let key = crate::storage::digest(session.as_bytes());
+    let ids = g.routing_ids(None);
+    let stale =
+        g.0.compaction
+            .prepare(key.clone(), None, false, &ids)
+            .unwrap();
+    let old = hold(&g, &ids[0]).await;
+    let new = hold(&g, &ids[1]).await;
+    let task = {
+        let g = g.clone();
+        tokio::spawn(async move { call(&g, session, "/v1/responses", history()).await })
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while g.view().waiting_requests != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(g.0.compaction.owner(&key), Some(ids[0].clone()));
+    assert!(!task.is_finished());
+    drop(new);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()["provider"],
+        "new"
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while g.0.compaction.owner(&key) != Some(ids[1].clone()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    stale.complete(&ids[0], None);
+    assert_eq!(g.0.compaction.owner(&key), Some(ids[1].clone()));
+    drop(old);
+    assert_eq!(
+        call(&g, session, "/v1/responses", history()).await["provider"],
+        "new"
+    );
+    assert!(g.view().providers.iter().all(|p| p.health.failures == 0));
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_owner_failed_receiver_and_unknown_history_do_not_move_ownership() {
+    let (a, _) = endpoint("old", false).await;
+    let b = server(|_| async {
+        Response::builder()
+            .status(400)
+            .body(full(r#"{"error":{"message":"fixture rejected"}}"#))
+            .unwrap()
+    })
+    .await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{a}"),
+        format!("http://127.0.0.1:{b}"),
+    ])
+    .await;
+    automatic(&g, &t);
+    one_slot(&g, &t);
+    let mut settings = g.view().settings;
+    settings.queue_seconds = 1;
+    settings.max_retries = 0;
+    update(&g, &t, Edit::Settings { settings });
+    start(&g, &t).await;
+    let session = "fixture-failed-receiver";
+    call(
+        &g,
+        session,
+        "/v1/responses",
+        br#"{"model":"fixture-model","input":"fixture"}"#.to_vec(),
+    )
+    .await;
+    let ids = g.routing_ids(None);
+    let key = crate::storage::digest(session.as_bytes());
+    let old = hold(&g, &ids[0]).await;
+    let failed = request(
+        &g,
+        "/v1/responses",
+        history(),
+        vec![
+            ("session_id", session),
+            ("content-type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(failed.status(), 400);
+    failed.into_body().collect().await.unwrap();
+    assert_eq!(g.0.compaction.owner(&key), Some(ids[0].clone()));
+    let unknown = request(
+        &g,
+        "/v1/responses",
+        br#"{"model":"fixture-model","input":{"unknown":true}}"#.to_vec(),
+        vec![
+            ("session_id", session),
+            ("content-type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(unknown.status(), 429);
+    assert_eq!(g.0.compaction.owner(&key), Some(ids[0].clone()));
+    drop(old);
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn websocket_existing_connection_reselects_before_sending_when_owner_is_full() {
+    use futures_util::SinkExt;
+    let (a, old_seen) = native_endpoint("old").await;
+    let (b, new_seen) = native_endpoint("new").await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{a}"),
+        format!("http://127.0.0.1:{b}"),
+    ])
+    .await;
+    automatic(&g, &t);
+    one_slot(&g, &t);
+    start(&g, &t).await;
+    let token = g.0.inner.lock().unwrap().store.local_token.clone();
+    let mut peer = yawc::WebSocket::connect(
+        format!("ws://127.0.0.1:{}/v1/responses", g.view().settings.port)
+            .parse()
+            .unwrap(),
+    )
+    .with_request(
+        yawc::HttpRequest::builder()
+            .header("authorization", format!("Bearer {token}"))
+            .header("session_id", "fixture-native-capacity"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ws_turn(
+            &mut peer,
+            r#"{"type":"response.create","model":"fixture-model","input":"fixture"}"#.into()
+        )
+        .await["response"]["provider"],
+        "old"
+    );
+    let ids = g.routing_ids(None);
+    let old = hold(&g, &ids[0]).await;
+    let mut payload: Value = serde_json::from_slice(&history()).unwrap();
+    payload["type"] = json!("response.create");
+    assert_eq!(
+        ws_turn(&mut peer, payload.to_string()).await["response"]["provider"],
+        "new"
+    );
+    assert_eq!(old_seen.lock().unwrap().len(), 1);
+    assert_eq!(new_seen.lock().unwrap().len(), 1);
+    let key = crate::storage::digest(b"fixture-native-capacity");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while g.0.compaction.owner(&key) != Some(ids[1].clone()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(old);
+    let _ = peer.close().await;
+    g.stop().await.unwrap();
+}

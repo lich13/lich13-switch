@@ -7,6 +7,7 @@ const phases: Record<string, string> = {
   capacity: "容量等待",
   retry: "等待重试",
   ws_wait: "等待重连",
+  compaction: "压缩中",
 };
 export default function QuickWaits({
   gateway,
@@ -75,16 +76,22 @@ export default function QuickWaits({
             </time>
             <span>{phases[r.phase] ?? r.phase}</span>
             <span>
-              剩余{" "}
-              {Math.max(
-                0,
-                r.remainingSeconds -
-                  Math.max(
+              {r.remainingSeconds == null ? (
+                `已用 ${Math.max(r.elapsedSeconds, Math.floor(now / 1000) - r.startedAt)} 秒`
+              ) : (
+                <>
+                  剩余{" "}
+                  {Math.max(
                     0,
-                    Math.floor(now / 1000) - r.startedAt - r.elapsedSeconds,
-                  ),
-              )}{" "}
-              秒
+                    r.remainingSeconds -
+                      Math.max(
+                        0,
+                        Math.floor(now / 1000) - r.startedAt - r.elapsedSeconds,
+                      ),
+                  )}{" "}
+                  秒
+                </>
+              )}
             </span>
           </div>
         </div>

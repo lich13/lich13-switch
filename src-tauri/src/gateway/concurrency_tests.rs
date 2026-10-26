@@ -1168,3 +1168,61 @@ async fn websocket_model_rules_recheck_each_turn_and_keep_context_provider() {
     drop(ra);
     g.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn capacity_fallback_rechecks_owner_recovery_and_does_not_bypass_its_rpm() {
+    let (t, g) = fixture(vec![
+        "https://primary.example.invalid".into(),
+        "https://secondary.example.invalid".into(),
+    ])
+    .await;
+    update(
+        &g,
+        &t,
+        Edit::Mode {
+            mode: "auto".into(),
+        },
+    );
+    limit(&g, &t, 0, 1);
+    limit(&g, &t, 1, 1);
+    start(&g, &t).await;
+    let candidates = routes(&g);
+    let owner = slot(&g, &candidates[..1]).await;
+    let backup = slot(&g, &candidates[1..]).await;
+    let task = {
+        let g = g.clone();
+        let candidates = candidates.clone();
+        tokio::spawn(async move {
+            let mut budget = Budget::new(3);
+            budget.capacity_owner = Some(candidates[0].provider.id.clone());
+            g.0.admission
+                .acquire(&candidates, false, 100, &mut budget)
+                .await
+                .unwrap()
+        })
+    };
+    until(|| g.view().waiting_requests == 1).await;
+    drop(owner);
+    let admitted = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.route.provider.id, candidates[0].provider.id);
+    drop(admitted);
+    drop(backup);
+    rpm_limit(&g, &t, 0, 1);
+    let mut owner = slot(&g, &routes(&g)[..1]).await;
+    owner.commit_rpm().unwrap();
+    let mut budget = Budget::new(3);
+    budget.capacity_owner = Some(candidates[0].provider.id.clone());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(100),
+        g.0.admission.acquire(&routes(&g), false, 100, &mut budget)
+    )
+    .await
+    .is_err());
+    assert_eq!(g.view().providers[1].active_requests, 0);
+    assert_eq!(g.view().waiting_requests, 0);
+    drop(owner);
+    g.stop().await.unwrap();
+}

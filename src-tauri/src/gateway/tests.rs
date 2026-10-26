@@ -1350,3 +1350,6 @@ mod v017;
 
 #[path = "compaction_handoff_tests.rs"]
 mod v019_compaction;
+
+#[path = "compaction_execution_tests.rs"]
+mod compaction_execution;

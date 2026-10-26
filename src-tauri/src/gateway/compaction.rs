@@ -434,6 +434,7 @@ pub struct Lease {
     failure_fallback: std::sync::atomic::AtomicBool,
     strict: bool,
     confirmed: bool,
+    capacity_fallback: bool,
     intake: Intake,
     // Request-only authority is immutable, including after failures or a
     // concurrent handoff. It must never be upgraded by successful delivery.
@@ -640,6 +641,7 @@ impl Registry {
                 failure_fallback: std::sync::atomic::AtomicBool::new(false),
                 strict: true,
                 confirmed: true,
+                capacity_fallback: false,
                 intake: Intake::Ordinary,
                 request_only: true,
                 owner_search: false,
@@ -750,6 +752,7 @@ impl Registry {
             failure_fallback: std::sync::atomic::AtomicBool::new(false),
             strict: false,
             confirmed: true,
+            capacity_fallback: false,
             intake: if entry_establishing && first_turn {
                 Intake::NewThread
             } else if compacted {
@@ -820,6 +823,13 @@ impl Registry {
         let inner = Arc::get_mut(&mut lease)?;
         inner.strict = true;
         inner.confirmed = hints.is_some_and(|h| h.turn != super::replay::TurnEvidence::Unknown);
+        inner.capacity_fallback = can_handoff
+            && pinned.is_none()
+            && !inner.fresh
+            && !inner.handoff
+            && !inner.request_only
+            && hints.is_some_and(|h| h.capacity_replay_safe);
+
         inner.intake = if inner.handoff {
             Intake::Compacted
         } else {
@@ -955,6 +965,7 @@ impl Registry {
             failure_fallback: std::sync::atomic::AtomicBool::new(false),
             strict: true,
             confirmed: true,
+            capacity_fallback: false,
             intake: Intake::Ordinary,
             request_only: true,
             owner_search: true,
@@ -1298,6 +1309,15 @@ impl Lease {
                 ));
             }
         }
+        if self.capacity_fallback
+            && self.owner.as_deref() != Some(provider.id.as_str())
+            && !accepts(current, self.intake)
+        {
+            return Err(AppError::new(
+                code::NO_ELIGIBLE_PROVIDER,
+                "供应商不再接收当前线程请求",
+            ));
+        }
         if self.request_only
             && !pinned
             && !entry.is_some_and(|e| !e.establishing && e.provider == provider.id)
@@ -1362,6 +1382,38 @@ impl Lease {
         requirement: &super::routing::Requirement,
     ) -> Vec<super::Route> {
         self.candidates_for_observed(routes, requirement, true)
+    }
+    /// Broaden only the initial, unsent request. Admission atomically decides
+    /// whether local capacity permits leaving the healthy current owner.
+    pub fn candidates_for_admission(
+        &self,
+        routes: Vec<super::Route>,
+        requirement: &super::routing::Requirement,
+        budget: &mut super::admission::Budget,
+    ) -> Vec<super::Route> {
+        budget.capacity_owner = None;
+        let selected = self.candidates_for(routes.clone(), requirement);
+        let Some(owner) = self.admission_policy().1.filter(|_| self.capacity_fallback) else {
+            return selected;
+        };
+        if selected.len() != 1
+            || selected[0].provider.id != owner
+            || !selected[0].health_for(requirement).available
+        {
+            return selected;
+        }
+        let mut candidates = selected;
+        candidates.extend(
+            routes
+                .into_iter()
+                .skip_while(|r| r.provider.id != owner)
+                .skip(1)
+                .filter(|r| accepts(&r.provider, self.intake)),
+        );
+        if candidates.len() > 1 {
+            budget.capacity_owner = Some(owner);
+        }
+        candidates
     }
     fn candidates_for_observed(
         &self,

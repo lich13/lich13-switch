@@ -584,8 +584,11 @@ impl Service {
                 Err(mpsc::RecvTimeoutError::Timeout) => Job::Prune,
                 Err(_) => break,
             };
-            let previous = j.lock().unwrap().clone();
-            let mut journal = previous.clone();
+            let mut journal = j.lock().unwrap().clone();
+            // Only Clear promises rollback after a failed write. Append keeps
+            // its in-memory evidence so the next write can retry it.
+            let previous = matches!(&job, Job::Clear(_))
+                .then(|| (journal.records.clone(), journal.aliases.clone()));
             let mut changed = None;
             let mut notify = false;
             let mut done = None;
@@ -672,16 +675,17 @@ impl Service {
             }
             let result = persist(&mut journal, &path);
             if result.is_err() {
-                if done.is_some() {
-                    journal.records = previous.records;
-                    journal.aliases = previous.aliases;
+                if let Some((records, aliases)) = previous {
+                    journal.records = records;
+                    journal.aliases = aliases;
                 }
                 journal.error = Some("日志写入失败，请检查文件权限与空间".into());
             }
-            *j.lock().unwrap() = journal.clone();
+            let error = journal.error.clone();
+            *j.lock().unwrap() = journal;
             let _ = events_copy.send(Change {
                 record: changed,
-                error: journal.error.clone(),
+                error,
                 notify,
             });
             if let Some(tx) = done {
@@ -744,16 +748,20 @@ impl Service {
                     && f.reason.is_none_or(|v| r.reason == v)
                     && f.status_group.is_none_or(|v| v.matches(r.status))
             })
-            .map(|r| ClassifiedRecord {
-                record: r.clone(),
-                category: classify(r, &causes),
-            })
             .collect();
         rows.sort_by_key(|r| std::cmp::Reverse(r.last_at));
         let total = rows.len();
         let page = f.page.unwrap_or(1).max(1).min(total.div_ceil(50).max(1));
         Page {
-            items: rows.into_iter().skip((page - 1) * 50).take(50).collect(),
+            items: rows
+                .into_iter()
+                .skip((page - 1) * 50)
+                .take(50)
+                .map(|r| ClassifiedRecord {
+                    record: r.clone(),
+                    category: classify(r, &causes),
+                })
+                .collect(),
             total,
             page,
             error: j.error.clone(),

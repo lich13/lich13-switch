@@ -243,7 +243,7 @@ export type GatewayState = {
     model: string | null;
     startedAt: number;
     elapsedSeconds: number;
-    remainingSeconds: number;
+    remainingSeconds: number | null;
     phase: string;
   }[];
   capacityRetries: {

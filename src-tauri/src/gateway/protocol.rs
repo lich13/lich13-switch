@@ -747,8 +747,25 @@ impl Protocol {
         self.wait_budget = Some((budget.clone(), budget.deadline()));
     }
     pub(super) fn effective_output(&self) {
+        if self.compaction_operation && !self.succeeded() {
+            return;
+        }
         if let Some((budget, deadline)) = &self.wait_budget {
             budget.complete(*deadline);
+        }
+    }
+    pub(super) fn begin_compaction_execution(&self) {
+        if self.compaction_operation {
+            if let Some((budget, deadline)) = &self.wait_budget {
+                budget.compaction_execution(*deadline, true);
+            }
+        }
+    }
+    fn end_compaction_execution(&self) {
+        if self.compaction_operation {
+            if let Some((budget, deadline)) = &self.wait_budget {
+                budget.compaction_execution(*deadline, false);
+            }
         }
     }
     pub(super) fn attach_rpm(&mut self, completion: Option<super::admission::Completion>) {
@@ -1202,6 +1219,7 @@ impl Protocol {
         self.transport_failure
     }
     pub fn finish(&mut self, status: Option<u16>, reason: &str) {
+        self.end_compaction_execution();
         let reason = if self
             .wait_budget
             .as_ref()

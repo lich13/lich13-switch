@@ -251,6 +251,8 @@ fn retained(key: &str) -> bool {
             | "item"
             | "encrypted_content"
             | "previous_response_id"
+            | "conversation"
+            | "conversation_id"
             | "stream"
             | "generate"
             | "stream_id"
@@ -494,7 +496,9 @@ impl Projector {
             } else {
                 Value::Null
             }
-        } else if content(&role) || role == "input" {
+        } else if content(&role)
+            || matches!(role.as_str(), "input" | "conversation" | "conversation_id")
+        {
             Value::String(if nonempty { "x" } else { "" }.into())
         } else if large {
             Value::Null

@@ -17,13 +17,14 @@ pub struct PendingRequest {
     pub model: Option<String>,
     pub started_at: u64,
     pub elapsed_seconds: u64,
-    pub remaining_seconds: u64,
+    pub remaining_seconds: Option<u64>,
     pub phase: String,
 }
 struct Pending {
     view: PendingRequest,
     started: Instant,
     deadline: Instant,
+    compaction_execution: bool,
 }
 #[derive(Default)]
 struct State {
@@ -68,11 +69,13 @@ impl Registry {
                 let active = state.active.as_ref()?;
                 let mut view = active.view.clone();
                 view.elapsed_seconds = active.started.elapsed().as_secs();
-                view.remaining_seconds = active
-                    .deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_millis()
-                    .div_ceil(1000) as u64;
+                view.remaining_seconds = (!active.compaction_execution).then(|| {
+                    active
+                        .deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis()
+                        .div_ceil(1000) as u64
+                });
                 Some(view)
             })
             .collect();
@@ -95,11 +98,9 @@ impl Registry {
             return false;
         };
         let mut state = shared.state.lock().unwrap();
-        if !state
-            .active
-            .as_ref()
-            .is_some_and(|p| p.view.request_id == id && p.deadline > Instant::now())
-        {
+        if !state.active.as_ref().is_some_and(|p| {
+            p.view.request_id == id && (p.compaction_execution || p.deadline > Instant::now())
+        }) {
             return false;
         }
         state.cancelled = state.active.take().map(|p| p.deadline);
@@ -162,11 +163,12 @@ impl WaitBudget {
                     .as_secs()
                     .saturating_sub(started.elapsed().as_secs()),
                 elapsed_seconds: 0,
-                remaining_seconds: self.seconds,
+                remaining_seconds: Some(self.seconds),
                 phase: "admission".into(),
             },
             started,
             deadline: started + Duration::from_secs(self.seconds),
+            compaction_execution: false,
         });
         if let Some(registry) = &self.shared.registry {
             registry
@@ -190,8 +192,10 @@ impl WaitBudget {
                 active.view.model = crate::events::safe_message(model);
             }
             active.view.phase = phase.into();
+            active.compaction_execution = false;
         }
         drop(state);
+        self.shared.changes.send_replace(());
         if let Some(registry) = &self.shared.registry {
             let _ = registry.0.events.send(());
         }
@@ -204,6 +208,57 @@ impl WaitBudget {
             .active
             .as_ref()
             .map(|p| p.deadline)
+    }
+    pub fn compaction_execution(&self, deadline: Option<Instant>, executing: bool) {
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(active) = state
+            .active
+            .as_mut()
+            .filter(|p| Some(p.deadline) == deadline)
+        {
+            active.compaction_execution = executing;
+            if executing {
+                active.view.phase = "compaction".into();
+            }
+        }
+        drop(state);
+        self.shared.changes.send_replace(());
+        if let Some(registry) = &self.shared.registry {
+            let _ = registry.0.events.send(());
+        }
+    }
+    pub fn executing_compaction(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .is_some_and(|p| p.compaction_execution)
+    }
+    pub async fn response<T>(
+        &self,
+        deadline: Instant,
+        compaction: bool,
+        future: impl std::future::Future<Output = T>,
+    ) -> Result<T, tokio::time::error::Elapsed> {
+        if !compaction {
+            return tokio::time::timeout_at(deadline, future).await;
+        }
+        let mut changes = self.shared.changes.subscribe();
+        tokio::pin!(future);
+        loop {
+            changes.borrow_and_update();
+            if self.executing_compaction() {
+                return Ok(future.await);
+            }
+            tokio::select! {
+                biased;
+                result = &mut future => return Ok(result),
+                _ = changes.changed() => {},
+                elapsed = tokio::time::timeout_at(deadline, std::future::pending()) => return elapsed,
+            }
+        }
     }
     pub fn complete(&self, deadline: Option<Instant>) {
         let mut state = self.shared.state.lock().unwrap();
@@ -230,7 +285,17 @@ impl WaitBudget {
         self.shared.state.lock().unwrap().cancelled = None;
     }
     pub fn expired(&self, deadline: Option<Instant>) -> bool {
-        deadline.is_some_and(|d| self.deadline() == Some(d) && Instant::now() >= d)
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .is_some_and(|p| {
+                !p.compaction_execution
+                    && Some(p.deadline) == deadline
+                    && Instant::now() >= p.deadline
+            })
     }
     pub async fn cancelled(&self) {
         let mut changes = self.shared.changes.subscribe();
@@ -248,7 +313,7 @@ impl WaitBudget {
         let mut changes = self.shared.changes.subscribe();
         loop {
             changes.borrow_and_update();
-            if let Some(deadline) = self.deadline() {
+            if let Some(deadline) = self.deadline().filter(|_| !self.executing_compaction()) {
                 tokio::select! {
                     biased;
                     _ = changes.changed() => {},
@@ -266,6 +331,84 @@ mod tests {
     use super::*;
     use crate::gateway::protocol::Protocol;
     use serde_json::json;
+
+    #[tokio::test(start_paused = true)]
+    async fn compaction_can_be_silent_beyond_300_seconds_and_cancelled_without_resetting_budget() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(300, &registry);
+        budget.begin();
+        let identity = budget.deadline();
+        let mut protocol = Protocol::new(true);
+        protocol.attach_wait_budget(&budget);
+        protocol.set_operation(crate::usage::model::Operation::Compaction);
+        protocol.begin_compaction_execution();
+        tokio::time::advance(Duration::from_secs(601)).await;
+        assert!(!budget.expired(identity));
+        assert!(tokio::time::timeout(Duration::from_secs(1), budget.wait())
+            .await
+            .is_err());
+        protocol.value(&json!({"type":"response.output_text.delta","delta":"fixture"}));
+        let row = registry.view().pop().unwrap();
+        assert_eq!(row.remaining_seconds, None);
+        assert_eq!(row.phase, "compaction");
+        assert!(registry.cancel(&row.request_id));
+        budget.cancelled().await;
+        protocol.finish(None, crate::errors::code::CANCELLED);
+        assert!(budget.is_cancelled(identity));
+        budget.complete(identity);
+        assert!(registry.view().is_empty());
+
+        budget.begin();
+        let identity = budget.deadline();
+        budget.compaction_execution(identity, true);
+        tokio::time::advance(Duration::from_secs(301)).await;
+        budget.describe(None, None, "retry");
+        assert_eq!(budget.deadline(), identity);
+        assert!(budget.expired(identity));
+        budget.wait().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_deadline_switches_only_after_dispatch_and_old_tail_cannot_end_new_compaction()
+    {
+        let budget = WaitBudget::new(300);
+        budget.begin();
+        let identity = budget.deadline();
+        let response = budget
+            .response(Instant::now() + Duration::from_secs(1), true, async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                budget.compaction_execution(identity, true);
+                tokio::time::sleep(Duration::from_secs(601)).await;
+                42
+            })
+            .await;
+        assert_eq!(response.unwrap(), 42);
+        budget.complete(identity);
+        budget.begin();
+        let current = budget.deadline();
+        budget.compaction_execution(current, true);
+        budget.compaction_execution(identity, false);
+        budget.complete(identity);
+        assert!(budget.executing_compaction());
+        budget.complete(current);
+        budget.begin();
+        let mut ordinary = Protocol::new(true);
+        ordinary.attach_wait_budget(&budget);
+        let hints = crate::gateway::replay::RequestHints::from_value(json!({
+            "input":[{"type":"compaction","encrypted_content":"fixture"},{"role":"user","content":"fixture"}]
+        }), false).unwrap();
+        ordinary.routing_evidence(Some(&hints));
+        ordinary.begin_compaction_execution();
+        assert!(!budget.executing_compaction());
+        assert!(budget
+            .response(
+                Instant::now() + Duration::from_secs(1),
+                false,
+                std::future::pending::<()>()
+            )
+            .await
+            .is_err());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn heartbeats_do_not_extend_shared_budget_and_effective_output_removes_deadline() {
@@ -329,7 +472,10 @@ mod cancellation_tests {
             .into_iter()
             .find(|p| p.provider_id.as_deref() == Some("fixture-one"))
             .unwrap();
-        assert_eq!((row.elapsed_seconds, row.remaining_seconds), (61, 239));
+        assert_eq!(
+            (row.elapsed_seconds, row.remaining_seconds),
+            (61, Some(239))
+        );
         let deadline = first.deadline();
         assert!(registry.cancel(&row.request_id));
         first.cancelled().await;

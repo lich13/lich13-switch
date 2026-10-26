@@ -127,6 +127,14 @@ impl Service {
         if ids.is_empty() {
             return Ok(());
         }
+        // In-flight queries may finish through their Arc, but can no longer
+        // retain a deleted provider in the cache or pass Gateway's live check.
+        self.entries.lock().unwrap().retain(|key, _| {
+            !ids.iter().any(|id| {
+                key.strip_prefix(id)
+                    .is_some_and(|tail| tail.starts_with(':'))
+            })
+        });
         let mut disk = self.disk.lock().unwrap();
         // Keep a damaged file for recovery rather than replacing it with an empty cache.
         if disk.1 {
@@ -137,6 +145,12 @@ impl Service {
         self.write(&next)?;
         disk.0 = next;
         Ok(())
+    }
+    pub fn discard_version(&self, id: &str, version: &str) {
+        self.entries
+            .lock()
+            .unwrap()
+            .remove(&format!("{id}:{version}"));
     }
     pub async fn query_with_connection(
         &self,
@@ -482,6 +496,45 @@ mod v02514_tests {
         ClientId, Gateway,
     };
     use super::*;
+    #[test]
+    fn deleting_provider_evicts_all_versions_and_late_stale_query_cannot_keep_an_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path().join("models.json"));
+        let entry = Arc::new(AsyncMutex::new(Entry {
+            view: service.cached("fixture", "v1"),
+            completed: None,
+        }));
+        let stale = Arc::downgrade(&entry);
+        service
+            .entries
+            .lock()
+            .unwrap()
+            .insert("fixture:v1".into(), entry.clone());
+        service
+            .entries
+            .lock()
+            .unwrap()
+            .insert("fixture:v2".into(), entry.clone());
+        service.entries.lock().unwrap().insert(
+            "fixture-other:v1".into(),
+            Arc::new(AsyncMutex::new(Entry {
+                view: service.cached("fixture-other", "v1"),
+                completed: None,
+            })),
+        );
+        service.remove(&["fixture".into()]).unwrap();
+        assert_eq!(service.entries.lock().unwrap().len(), 1);
+        // A query captured before deletion may acquire its memory entry afterwards.
+        service
+            .entries
+            .lock()
+            .unwrap()
+            .insert("fixture:v1".into(), entry.clone());
+        service.discard_version("fixture", "v1");
+        drop(entry);
+        assert!(stale.upgrade().is_none());
+        assert_eq!(service.entries.lock().unwrap().len(), 1);
+    }
     #[test]
     fn corrupt_and_oversized_cache_is_preserved_until_success_and_reopens() {
         let dir = tempfile::tempdir().unwrap();

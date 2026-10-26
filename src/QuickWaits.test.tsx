@@ -15,6 +15,42 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(Date.now());
 });
 afterEach(() => vi.restoreAllMocks());
+it("keeps long compaction cancellable and shows elapsed time without a countdown", async () => {
+  const start = Math.floor(Date.now() / 1000);
+  mock.command.mockResolvedValueOnce(true);
+  render(
+    <QuickWaits
+      gateway={{
+        ...gatewayDemo,
+        pendingRequests: [
+          {
+            requestId: "fixture-compaction",
+            providerId: null,
+            model: "fixture-model",
+            startedAt: start - 601,
+            elapsedSeconds: 601,
+            remainingSeconds: null,
+            phase: "compaction",
+          },
+        ],
+      }}
+      clientId="codex"
+      visible
+      notify={vi.fn()}
+      error={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("压缩中")).toBeInTheDocument();
+  expect(screen.getByText("已用 601 秒")).toBeInTheDocument();
+  expect(screen.queryByText(/剩余/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "中止" }));
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
+      clientId: "codex",
+      requestId: "fixture-compaction",
+    }),
+  );
+});
 it("shows only long waits and cancels the selected request on its platform", async () => {
   const start = Math.floor(Date.now() / 1000);
   const gateway = {

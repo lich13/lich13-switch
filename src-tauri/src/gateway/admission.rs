@@ -165,11 +165,10 @@ impl Completion {
         };
         let mut s = self.scheduler.0.state.lock().unwrap();
         s.rpm.prune();
-        let mut next = s.rpm.clone();
-        next.settle(&self.id, &token, result);
-        if !s.rpm_error && next.save(&s.rpm_path).is_ok() {
-            s.rpm = next;
-        } else {
+        let previous = s.rpm.checkpoint(&self.id);
+        s.rpm.settle(&self.id, &token, result);
+        if s.rpm_error || s.rpm.save(&s.rpm_path).is_err() {
+            s.rpm.restore(&self.id, previous);
             s.rpm_error = true;
         }
         drop(s);
@@ -200,6 +199,7 @@ pub struct Admission {
 }
 #[derive(Debug, PartialEq)]
 pub enum Rejected {
+    Reconnect,
     Stopped,
     Unavailable,
     Full,
@@ -213,6 +213,8 @@ pub enum Rejected {
 pub struct Budget {
     pub thread: Option<Arc<ThreadRequest>>,
     pub handoff_owner: Option<String>,
+    pub capacity_owner: Option<String>,
+    pub reconnect_from: Option<String>,
     remaining: Duration,
     protected_capacity: bool,
     fixed_provider: bool,
@@ -257,9 +259,10 @@ impl RpmReservation {
             self.scheduler.signal();
             return Err(reason);
         }
-        let mut next = s.rpm.clone();
-        let token = next.commit(&self.id, limit);
-        if token.is_some() && (s.rpm_error || next.save(&s.rpm_path).is_err()) && limit > 0 {
+        let previous = s.rpm.checkpoint(&self.id);
+        let token = s.rpm.commit(&self.id, limit);
+        if token.is_some() && (s.rpm_error || s.rpm.save(&s.rpm_path).is_err()) && limit > 0 {
+            s.rpm.restore(&self.id, previous);
             s.rpm_error = true;
             Self::release_pending(&mut s, &self.id);
             self.committed = true;
@@ -267,7 +270,6 @@ impl RpmReservation {
             self.scheduler.signal();
             return Err(Rejected::RateLedger);
         }
-        s.rpm = next;
         Self::release_pending(&mut s, &self.id);
         self.committed = true;
         self.completion = token.map(|token| Completion {
@@ -332,18 +334,24 @@ impl Budget {
         self.fixed_provider = false;
         self.intake = None;
         self.handoff_owner = None;
+        self.capacity_owner = None;
+        self.reconnect_from = None;
     }
     pub fn protect_capacity(&mut self) {
         self.protected_capacity = true;
     }
     pub fn pin_provider(&mut self) {
         self.fixed_provider = true;
+        self.capacity_owner = None;
+        self.reconnect_from = None;
         self.intake = None;
     }
     pub fn new(seconds: u64) -> Self {
         Self {
             thread: None,
             handoff_owner: None,
+            capacity_owner: None,
+            reconnect_from: None,
             remaining: Duration::from_secs(seconds),
             protected_capacity: false,
             fixed_provider: false,
@@ -830,7 +838,8 @@ impl Scheduler {
         let mut cooling;
         let mut rate_retry;
         let mut ledger_error;
-        let result = loop {
+        let result = 'admission: loop {
+            let next_wake;
             let notified = self.0.wake.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -909,7 +918,49 @@ impl Scheduler {
                         )
                     });
                 }
+                if let Some(owner) = &budget.capacity_owner {
+                    eligible.retain(|r| {
+                        r.provider.id == *owner
+                            || s.order
+                                .get(&r.provider.id)
+                                .zip(s.order.get(owner))
+                                .is_some_and(|(candidate, owner)| candidate > owner)
+                    });
+                    let Some(route) = eligible.iter().find(|r| r.provider.id == *owner) else {
+                        break Err(Rejected::Unavailable);
+                    };
+                    s.rpm.prune();
+                    let rpm_limit = s.rpm_limits.get(owner).copied().unwrap_or_default();
+                    let rpm_blocked = (s.rpm_error && rpm_limit > 0)
+                        || s.rpm
+                            .gate(
+                                owner,
+                                rpm_limit,
+                                s.rpm_pending.get(owner).copied().unwrap_or_default(),
+                            )
+                            .is_some();
+                    if !route.health_for(requirement).available
+                        || rpm_blocked
+                        || Self::available(&s, owner, request, manual)
+                    {
+                        eligible.retain(|r| r.provider.id == *owner);
+                    }
+                }
                 let mut any_ready = false;
+                let now = Instant::now();
+                next_wake = eligible
+                    .iter()
+                    .filter_map(|route| {
+                        let health = route.health_for(requirement);
+                        (health.retry_in > 0).then(|| now + Duration::from_secs(health.retry_in))
+                    })
+                    .chain(
+                        eligible
+                            .iter()
+                            .filter_map(|r| s.rpm.next_change(&r.provider.id)),
+                    )
+                    .chain(s.retention.next_expiry().map(|delay| now + delay))
+                    .min();
                 let mut retry_in = u64::MAX;
                 rate_retry = None;
                 let ticket = waiting.as_ref().map(|w| w.ticket);
@@ -1013,6 +1064,15 @@ impl Scheduler {
                         ) {
                             rate_retry = Some(delay.as_millis().div_ceil(1000).max(1) as u64);
                             break 'selection;
+                        }
+                        if budget
+                            .reconnect_from
+                            .as_ref()
+                            .is_some_and(|current| current != id)
+                        {
+                            // Re-enter connection selection before reserving a
+                            // slot or RPM; the next admission rechecks all gates.
+                            break 'admission Err(Rejected::Reconnect);
                         }
                         if let Some(permits) = Permits::acquire_for(route, manual, requirement) {
                             match self.reserve_rpm(
@@ -1165,8 +1225,10 @@ impl Scheduler {
             tokio::select! {
                 _ = notified => {},
                 _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else if ledger_error { Rejected::RateLedger } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
-                // Circuit cooldowns may expire without a separate request or UI event.
-                _ = tokio::time::sleep(Duration::from_millis(200)) => {},
+                _ = async {
+                    if let Some(at) = next_wake { tokio::time::sleep_until(at).await; }
+                    else { std::future::pending::<()>().await; }
+                } => {},
             }
             if waiting_for_rpm {
                 let elapsed = wait_started.elapsed();

@@ -1985,6 +1985,7 @@ impl Gateway {
             .iter()
             .any(|p| p.id == id && p.version == version)
         {
+            self.0.catalog.discard_version(id, &version);
             return Err(AppError::new(
                 code::STALE,
                 "供应商配置已变化，已丢弃旧模型列表",

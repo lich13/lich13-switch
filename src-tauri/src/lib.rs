@@ -285,6 +285,44 @@ fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     publish(app, state.clone());
     Ok(state)
 }
+fn coalesce_gateway_events(events: &mut tokio::sync::broadcast::Receiver<()>) {
+    // Drain only the backlog observed now. A busy producer cannot postpone
+    // publishing the latest view or the periodic final zero indefinitely.
+    let pending = events.len();
+    for _ in 0..pending {
+        match events.try_recv() {
+            Ok(()) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => (),
+            Err(_) => break,
+        }
+    }
+}
+#[cfg(test)]
+mod gateway_broadcast_tests {
+    #[tokio::test]
+    async fn coalesced_burst_publishes_latest_and_leaves_future_notification_live() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let mut final_state = 0;
+        for n in 1..=32 {
+            final_state = n;
+            tx.send(()).unwrap();
+        }
+        let _ = rx.recv().await;
+        super::coalesce_gateway_events(&mut rx);
+        assert_eq!(final_state, 32);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        tx.send(()).unwrap();
+        rx.recv().await.unwrap();
+        drop(tx);
+        super::coalesce_gateway_events(&mut rx);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+        ));
+    }
+}
 fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
     match gateway.try_view() {
         Ok(view) => {
@@ -1721,6 +1759,7 @@ pub fn run() {
                                 if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
                                     break;
                                 }
+                                coalesce_gateway_events(&mut events);
                                 waiting = g.has_health_wait();
                             }
                             _ = clock.tick() => {

@@ -74,6 +74,8 @@ pub struct RequestHints {
     #[serde(skip)]
     pub turn: TurnEvidence,
     #[serde(skip)]
+    pub capacity_replay_safe: bool,
+    #[serde(skip)]
     pub auxiliary: bool,
     #[serde(skip)]
     pub routing_evidence: crate::usage::model::RoutingEvidence,
@@ -160,6 +162,45 @@ impl RequestHints {
         } else {
             TurnEvidence::Unknown
         };
+        // History evidence alone can coexist with unknown or provider-local
+        // references. Capacity spillover requires every input item to be known.
+        hints.capacity_replay_safe = hints.turn == TurnEvidence::History
+            && hints.previous_response_id.is_none()
+            && !hints.compaction_trigger
+            && !hints.auxiliary
+            && ["conversation", "conversation_id"]
+                .iter()
+                .all(|key| value.get(key).is_none_or(serde_json::Value::is_null))
+            && value
+                .get("input")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| {
+                    !items.is_empty()
+                        && items.iter().all(|item| {
+                            let kind = match item.get("type") {
+                                None => "message",
+                                Some(serde_json::Value::String(kind)) => kind,
+                                _ => return false,
+                            };
+                            match kind {
+                                "message" | "input_message" => matches!(
+                                    item.get("role").and_then(serde_json::Value::as_str),
+                                    Some("user" | "assistant" | "system" | "developer")
+                                ),
+                                "additional_tools" => {
+                                    item.get("role").and_then(serde_json::Value::as_str)
+                                        == Some("developer")
+                                }
+                                "function_call"
+                                | "function_call_output"
+                                | "reasoning"
+                                | "compaction"
+                                | "context_compaction"
+                                | "tool_result" => true,
+                                _ => false,
+                            }
+                        })
+                });
         use crate::usage::model::{RoutingEvidence, RoutingInput};
         hints.routing_evidence = RoutingEvidence {
             input: if hints.auxiliary {
@@ -480,6 +521,56 @@ impl Replay {
                 let mut bytes = Vec::new();
                 reader.take(limit as u64).read_to_end(&mut bytes).await?;
                 Ok(bytes)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn cross_provider_capacity_requires_known_history_and_no_server_local_references() {
+        let base = json!({"input":[{"role":"assistant","content":"fixture"},{"role":"user","content":"fixture"}]});
+        for projected in [false, true] {
+            for (value, safe) in [
+                (base.clone(), true),
+                (
+                    json!({"input":[{"role":"assistant","content":"fixture"},{"type":"item_reference","id":"fixture"}]}),
+                    false,
+                ),
+                (
+                    json!({"input":[{"role":"assistant","content":"fixture"},{"type":12,"role":"user"}]}),
+                    false,
+                ),
+                (
+                    json!({"input":[{"role":"assistant","content":"fixture"},{"type":"future"}]}),
+                    false,
+                ),
+                (
+                    json!({"input":base["input"],"conversation":"fixture"}),
+                    false,
+                ),
+                (
+                    json!({"input":base["input"],"previous_response_id":"fixture"}),
+                    false,
+                ),
+                (json!({"input":"fixture"}), false),
+            ] {
+                let value = if projected {
+                    let mut projector = super::super::metadata::Projector::default();
+                    projector.feed(value.to_string().as_bytes());
+                    projector.finish().unwrap()
+                } else {
+                    value
+                };
+                assert_eq!(
+                    RequestHints::from_value(value, projected)
+                        .unwrap()
+                        .capacity_replay_safe,
+                    safe
+                );
             }
         }
     }
