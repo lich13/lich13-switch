@@ -5,12 +5,16 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mock = vi.hoisted(() => ({ command: vi.fn() }));
 vi.mock("./bridge", () => ({ command: mock.command }));
 import QuickWaits from "./QuickWaits";
 import { gatewayDemo } from "./gateway-preview";
-beforeEach(() => mock.command.mockReset());
+beforeEach(() => {
+  mock.command.mockReset();
+  vi.spyOn(Date, "now").mockReturnValue(Date.now());
+});
+afterEach(() => vi.restoreAllMocks());
 it("shows only long waits and cancels the selected request on its platform", async () => {
   const start = Math.floor(Date.now() / 1000);
   const gateway = {
