@@ -1,6 +1,6 @@
 [package]
 name = "lich13-switch"
-version = "0.26.5"
+version = "0.26.6"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -57,7 +57,7 @@ mime = "0.3"
 multer = "3"
 flate2 = "1"
 brotli = "8"
-zstd = "0.13"
+zstd = "0.14.3"
 yawc = { version = "0.4.2", default-features = false, features = ["zlib", "rustls-ring"] }
 auto-launch = "0.5"
 sysinfo = "0.33"
