@@ -253,7 +253,7 @@ pub fn read(directory: &Path, id: &str) -> storage::Result<View> {
 mod tests {
     use super::*;
     #[test]
-    fn spilled_json_remains_complete_and_missing_storage_reports_read_failure() {
+    fn spilled_json_remains_complete_and_reopen_respects_platform_file_lifetime() {
         let value = serde_json::json!({"error":{"message":"fixture".repeat(MEMORY / 7 + 1)}});
         let bytes = serde_json::to_vec(&value).unwrap();
         let raw = Raw::bytes(&bytes, vec![], None);
@@ -267,11 +267,21 @@ mod tests {
             panic!("spilled body");
         };
         std::fs::remove_file(file.path()).unwrap();
-        assert!(missing.text().is_err());
-        assert!(missing.value().is_none());
-        assert_eq!(
-            missing.reference("fixture").incomplete.as_deref(),
-            Some("错误原文读取失败，内容不完整")
-        );
+        #[cfg(unix)]
+        {
+            assert!(missing.text().is_err());
+            assert!(missing.value().is_none());
+            assert_eq!(
+                missing.reference("fixture").incomplete.as_deref(),
+                Some("错误原文读取失败，内容不完整")
+            );
+        }
+        #[cfg(windows)]
+        {
+            // tempfile reopens the live Windows handle even after unlinking its name.
+            assert_eq!(missing.text().unwrap().as_bytes(), bytes);
+            assert_eq!(missing.value().unwrap(), value);
+            assert!(missing.reference("fixture").incomplete.is_none());
+        }
     }
 }
