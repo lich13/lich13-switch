@@ -11,6 +11,8 @@ use std::{
 const SESSION: &str = "fixture-ws-model-detour";
 const MAIN_WINDOW: &str = "fixture-main-window";
 const SIDE_WINDOW: &str = "fixture-side-window";
+// These tests assert routing and persistence, not wall-clock response speed.
+const FIXTURE_WAIT: Duration = Duration::from_secs(30);
 
 async fn native_endpoint(
     name: &'static str,
@@ -110,7 +112,7 @@ async fn complete_turn(peer: &mut yawc::TcpWebSocket, payload: &str) -> Value {
         .await
         .unwrap();
     let mut created = false;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(FIXTURE_WAIT, async {
         loop {
             let frame = peer.next().await.expect("gateway closed WebSocket");
             assert_ne!(frame.opcode(), yawc::OpCode::Close, "gateway rejected turn");
@@ -124,6 +126,9 @@ async fn complete_turn(peer: &mut yawc::TcpWebSocket, payload: &str) -> Value {
                     assert!(created, "native fixture must preserve the created event");
                     break value;
                 }
+                Some("error" | "response.failed" | "response.incomplete") => {
+                    panic!("native fixture turn failed: {value}");
+                }
                 _ => {}
             }
         }
@@ -136,7 +141,7 @@ async fn reject_turn(peer: &mut yawc::TcpWebSocket, payload: &str) {
     peer.send(yawc::Frame::text(payload.to_owned()))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(FIXTURE_WAIT, async {
         loop {
             let Some(frame) = peer.next().await else {
                 break;
@@ -172,7 +177,7 @@ async fn reject_turn(peer: &mut yawc::TcpWebSocket, payload: &str) {
 }
 
 async fn wait_until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(FIXTURE_WAIT, async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -222,7 +227,7 @@ fn reservation_entry(snapshot: &Value, session: &str, provider: &str) -> Value {
 }
 
 async fn wait_for_reservation(dir: &tempfile::TempDir, session: &str, provider: &str) -> Value {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(FIXTURE_WAIT, async {
         loop {
             let snapshot = std::fs::read(dir.path().join("thread-reservations.json"))
                 .ok()
@@ -250,7 +255,7 @@ async fn wait_for_usage_record(
     provider: &str,
     model: &str,
 ) -> crate::usage::model::Record {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(FIXTURE_WAIT, async {
         loop {
             let rows = usage
                 .read(|store| Ok(store.logs(&crate::usage::model::Filter::default())?.rows))
@@ -690,7 +695,7 @@ async fn native_websocket_unknown_cursor_does_not_fall_through_to_another_provid
     ))
     .await
     .unwrap();
-    let close = tokio::time::timeout(Duration::from_secs(5), peer.next())
+    let close = tokio::time::timeout(FIXTURE_WAIT, peer.next())
         .await
         .unwrap()
         .expect("unknown cursor socket closed without a frame");

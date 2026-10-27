@@ -241,8 +241,8 @@ fn legacy_line(record: &Record) -> Vec<u8> {
     bytes
 }
 
-#[test]
-fn legacy_jsonl_is_classified_without_rewriting_old_records() {
+#[tokio::test]
+async fn legacy_jsonl_queries_classify_without_persisting_categories() {
     let temp = tempfile::tempdir().unwrap();
     let mut cause = event(
         "fixture-legacy-model",
@@ -268,9 +268,25 @@ fn legacy_jsonl_is_classified_without_rewriting_old_records() {
     let mut legacy = legacy_line(&cause);
     legacy.extend(legacy_line(&opened));
     fs::write(&path, &legacy).unwrap();
-    let before = fs::read(&path).unwrap();
-
     let service = Service::new(temp.path());
+    // Startup retention may normalize the index independently of a read query.
+    // Drain that work before checking that classification itself never writes.
+    let mut changes = service.subscribe();
+    service.sender.send(super::Job::Prune).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), changes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let before = fs::read(&path).unwrap();
+    let saved: Vec<serde_json::Value> = before
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(saved.len(), 2);
+    assert!(saved.iter().all(|record| record.get("category").is_none()));
+    assert_eq!(saved[0]["id"], cause.id);
+    assert_eq!(saved[1]["details"]["causeId"], cause.id);
     let circuit_rows = service.query(Filter {
         category: Some(Category::CircuitError),
         ..Filter::default()
