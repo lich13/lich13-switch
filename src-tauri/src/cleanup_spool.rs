@@ -71,7 +71,13 @@ pub fn clean(data: &Path) -> usize {
         return 0;
     }
     let mut removed = 0;
-    for root in [data.to_path_buf(), data.join("claude"), data.join("grok")] {
+    for root in [
+        data.to_path_buf(),
+        data.join("claude"),
+        data.join("grok"),
+        data.join("dsh"),
+        data.join("agy"),
+    ] {
         if !owned(&root, true) {
             continue;
         }

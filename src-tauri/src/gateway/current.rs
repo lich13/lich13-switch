@@ -1,6 +1,7 @@
 //! Read effective selection without applying takeover-specific restrictions.
 use super::{grok_config, grok_layers, model::Store, takeover::Pair, ClientId};
 use serde::Serialize;
+#[cfg(test)]
 use std::path::Path;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -122,6 +123,7 @@ pub(super) fn pair(client: ClientId, pair: &Pair, store: &Store, ports: &[u16]) 
         .unwrap_or_default();
     Current::new(Kind::Unmatched { host })
 }
+#[cfg(test)]
 pub fn grok(
     home: &Path,
     store: &Store,
@@ -132,6 +134,14 @@ pub fn grok(
         Ok(value) => value,
         Err(e) => return Current::unknown(&e.message),
     };
+    grok_effective(&effective, store, ports, resolve)
+}
+pub(super) fn grok_effective(
+    effective: &grok_layers::Effective,
+    store: &Store,
+    ports: &[u16],
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Current {
     let mut result = if let Some(error) = &effective.selection_error {
         Current::unknown(error)
     } else {
@@ -186,7 +196,7 @@ pub fn grok(
             }
         }
     };
-    result.model_source = effective.model_source;
+    result.model_source = effective.model_source.clone();
     result
 }
 

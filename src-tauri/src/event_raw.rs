@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     io::{self, Read, Write},
     path::Path,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 const MEMORY: usize = 2 * 1024 * 1024;
@@ -99,19 +99,13 @@ impl Capture {
         } else {
             Body::Memory(Arc::new(self.memory))
         };
-        let mut raw = Raw {
+        Raw {
             headers,
             event,
             incomplete: self.problem,
             body,
-            digest: String::new(),
-        };
-        let mut hash = Sha256::new();
-        if raw.copy_to(&mut hash).is_err() {
-            raw.incomplete = Some("错误原文读取失败，内容不完整".into());
+            digest: Arc::new(OnceLock::new()),
         }
-        raw.digest = format!("{:x}", hash.finalize());
-        raw
     }
 }
 #[derive(Clone, Debug)]
@@ -125,14 +119,14 @@ pub struct Raw {
     pub event: Option<String>,
     pub incomplete: Option<String>,
     body: Body,
-    digest: String,
+    digest: Arc<OnceLock<std::result::Result<String, ()>>>,
 }
 impl PartialEq for Raw {
     fn eq(&self, other: &Self) -> bool {
-        self.digest == other.digest
-            && self.headers == other.headers
+        self.headers == other.headers
             && self.event == other.event
             && self.incomplete == other.incomplete
+            && matches!((self.digest(), other.digest()), (Ok(a), Ok(b)) if a == b)
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -166,7 +160,7 @@ impl Raw {
     fn reader(&self) -> io::Result<Box<dyn Read + '_>> {
         match &self.body {
             Body::Memory(bytes) => Ok(Box::new(io::Cursor::new(bytes.as_slice()))),
-            Body::Disk(file) => Ok(Box::new(file.reopen()?)),
+            Body::Disk(file) => Ok(Box::new(io::BufReader::new(file.reopen()?))),
         }
     }
     fn copy_to(&self, writer: &mut impl Write) -> io::Result<u64> {
@@ -180,15 +174,29 @@ impl Raw {
         self.reader()?.read_to_string(&mut text)?;
         Ok(text)
     }
+    fn digest(&self) -> &std::result::Result<String, ()> {
+        self.digest.get_or_init(|| {
+            let mut hash = Sha256::new();
+            self.copy_to(&mut hash).map_err(|_| ())?;
+            Ok(format!("{:x}", hash.finalize()))
+        })
+    }
+    fn incomplete(&self) -> Option<String> {
+        if self.digest().is_err() {
+            Some("错误原文读取失败，内容不完整".into())
+        } else {
+            self.incomplete.clone()
+        }
+    }
     pub fn reference(&self, id: &str) -> Reference {
         let mut hash = Sha256::new();
-        hash.update(self.digest.as_bytes());
+        hash.update(self.digest().as_deref().unwrap_or_default().as_bytes());
         hash.update(serde_json::to_vec(&self.headers).unwrap_or_default());
         hash.update(self.event.as_deref().unwrap_or_default().as_bytes());
         Reference {
             id: id.into(),
             digest: format!("{:x}", hash.finalize()),
-            incomplete: self.incomplete.clone(),
+            incomplete: self.incomplete(),
         }
     }
     pub fn save(&self, directory: &Path, id: &str) -> storage::Result<()> {
@@ -197,7 +205,7 @@ impl Raw {
         let meta = Meta {
             headers: self.headers.clone(),
             event: self.event.clone(),
-            incomplete: self.incomplete.clone(),
+            incomplete: self.incomplete(),
         };
         let write = || -> io::Result<()> {
             serde_json::to_writer(&mut file, &meta)?;
@@ -239,4 +247,31 @@ pub fn read(directory: &Path, id: &str) -> storage::Result<View> {
     read().map_err(|_| {
         storage::AppError::new(crate::errors::code::LOG_READ, "错误原文读取失败或已过期")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn spilled_json_remains_complete_and_missing_storage_reports_read_failure() {
+        let value = serde_json::json!({"error":{"message":"fixture".repeat(MEMORY / 7 + 1)}});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let raw = Raw::bytes(&bytes, vec![], None);
+        assert_eq!(raw.value().unwrap(), value);
+        assert_eq!(raw.text().unwrap().as_bytes(), bytes);
+        let reference = raw.reference("fixture");
+        assert!(reference.incomplete.is_none());
+        assert_eq!(reference.digest, raw.clone().reference("other").digest);
+        let missing = Raw::bytes(&bytes, vec![], None);
+        let Body::Disk(file) = &missing.body else {
+            panic!("spilled body");
+        };
+        std::fs::remove_file(file.path()).unwrap();
+        assert!(missing.text().is_err());
+        assert!(missing.value().is_none());
+        assert_eq!(
+            missing.reference("fixture").incomplete.as_deref(),
+            Some("错误原文读取失败，内容不完整")
+        );
+    }
 }

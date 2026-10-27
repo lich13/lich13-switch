@@ -52,17 +52,60 @@ fn unpack(raw: &[u8]) -> Result<Bundle> {
     }
     let bundle: Bundle =
         serde_json::from_slice(&bytes).map_err(|_| failure("指纹资源包格式无效"))?;
+    validate(&bundle.revision, &bundle.algorithm)?;
+    Ok(bundle)
+}
+fn validate(revision: &str, algorithm: &Value) -> Result<()> {
     let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
-    if bundle.algorithm != manifest["algorithm"]
-        || bundle.revision.len() != 40
-        || !bundle.revision.bytes().all(|b| b.is_ascii_hexdigit())
+    if algorithm != &manifest["algorithm"]
+        || revision.len() != 40
+        || !revision.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err(failure("上游指纹算法已变化，请升级应用"));
     }
-    Ok(bundle)
+    Ok(())
 }
 fn metadata(bundle: &Bundle, updated: bool) -> Value {
-    json!({"version":{"revision":bundle.revision,"built_at":bundle.bank["built_at"]},"source":if updated {"cache"} else {"builtin"},"models":bundle.bank["models"].as_array().into_iter().flatten().map(|m|json!({"id":m["id"],"name":m["display_name"]})).collect::<Vec<_>>(),"updating":false,"error":null})
+    metadata_fields(&bundle.revision, &bundle.bank, updated)
+}
+fn metadata_fields(revision: &str, bank: &Value, updated: bool) -> Value {
+    json!({"version":{"revision":revision,"built_at":bank["built_at"]},"source":if updated {"cache"} else {"builtin"},"models":bank["models"].as_array().into_iter().flatten().map(|m|json!({"id":m["id"],"name":m["display_name"]})).collect::<Vec<_>>(),"updating":false,"error":null})
+}
+fn unpack_metadata(raw: &[u8], updated: bool) -> Result<Value> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        revision: String,
+        bank: Value,
+        algorithm: Value,
+        // Full detector/tokenizer validation remains in the detection loader.
+        #[serde(rename = "detector")]
+        _detector: serde::de::IgnoredAny,
+        #[serde(rename = "tokenizer")]
+        _tokenizer: serde::de::IgnoredAny,
+    }
+    if raw.len() as u64 > LIMIT {
+        return Err(failure("指纹资源包过大"));
+    }
+    let mut reader = std::io::BufReader::new(GzDecoder::new(raw).take(LIMIT + 1));
+    let parsed = serde_json::from_reader::<_, Metadata>(&mut reader);
+    if reader.get_ref().limit() == 0 {
+        return Err(failure("指纹资源包过大"));
+    }
+    let Metadata {
+        revision,
+        bank,
+        algorithm,
+        _detector: _,
+        _tokenizer: _,
+    } = parsed.map_err(|e| {
+        failure(if e.is_io() {
+            "指纹资源包无法解压"
+        } else {
+            "指纹资源包格式无效"
+        })
+    })?;
+    validate(&revision, &algorithm)?;
+    Ok(metadata_fields(&revision, &bank, updated))
 }
 fn bytes(directory: &Path) -> Result<(Vec<u8>, bool)> {
     let saved = storage::read_bounded(&directory.join(CACHE), LIMIT)?;
@@ -77,7 +120,7 @@ fn bytes(directory: &Path) -> Result<(Vec<u8>, bool)> {
     }
 }
 pub fn initial_status(directory: &Path) -> Value {
-    match bytes(directory).and_then(|(raw, updated)| unpack(&raw).map(|b| metadata(&b, updated))) {
+    match bytes(directory).and_then(|(raw, updated)| unpack_metadata(&raw, updated)) {
         Ok(value) => value,
         Err(error) => json!({"models":[],"error":error.message,"updating":false}),
     }
@@ -512,6 +555,34 @@ mod tests {
         release.notify_one();
         assert_eq!(task.await.unwrap().unwrap()["result"], "up-to-date");
         assert_eq!(status(&lock(&service.0.data))["updating"], false);
+    }
+
+    #[test]
+    fn streamed_metadata_matches_loader_and_rejects_incomplete_or_oversize_bundles() {
+        let bundle = unpack(BUNDLE).unwrap();
+        for updated in [false, true] {
+            assert_eq!(
+                unpack_metadata(BUNDLE, updated).unwrap(),
+                metadata(&bundle, updated)
+            );
+        }
+        let mut corrupt = BUNDLE.to_vec();
+        let end = corrupt.len() - 5;
+        corrupt[end] ^= 1;
+        assert!(unpack_metadata(&corrupt, false).is_err());
+        assert!(unpack_metadata(&BUNDLE[..BUNDLE.len() - 8], false).is_err());
+        let mut invalid = unpack(BUNDLE).unwrap();
+        invalid.algorithm = json!({});
+        assert!(unpack_metadata(&pack(&invalid), false).is_err());
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+        gzip.write_all(&serde_json::to_vec(&bundle).unwrap())
+            .unwrap();
+        std::io::copy(&mut std::io::repeat(b' ').take(LIMIT), &mut gzip).unwrap();
+        let oversized = gzip.finish().unwrap();
+        assert_eq!(
+            unpack_metadata(&oversized, false).unwrap_err().message,
+            "指纹资源包过大"
+        );
     }
     #[test]
     fn pinned_sdk_matches_upstream_scoring_fixtures() {

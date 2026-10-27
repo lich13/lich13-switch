@@ -437,3 +437,82 @@ fn accounting_payload_does_not_change_protocol_observation() {
     assert_eq!(actual.expects_terminal, expected.expects_terminal);
     assert_eq!(actual.incomplete, expected.incomplete);
 }
+
+#[test]
+fn false_error_is_success_and_explicit_failures_remain_failures_across_transports() {
+    let cases = [
+        (
+            json!({"error":false,"choices":[{"finish_reason":"stop"}]}),
+            Terminal::Success,
+        ),
+        (
+            json!({"response":{"error":false,"status":"completed"},"type":"response.completed"}),
+            Terminal::Success,
+        ),
+        (
+            json!({"error":false,"success":false,"message":"fixture failure"}),
+            Terminal::Failure,
+        ),
+        (
+            json!({"error":{"message":"fixture failure"}}),
+            Terminal::Failure,
+        ),
+    ];
+    for (value, terminal) in cases {
+        let raw = serde_json::to_vec(&value).unwrap();
+        let mut websocket = Protocol::new(true);
+        websocket.value_raw(&value, &raw);
+        assert_eq!(websocket.terminal(), Some(terminal));
+        if terminal == Terminal::Success {
+            assert_eq!(websocket.observation.error, Default::default());
+        }
+        for stream in [false, true] {
+            let wire = if stream {
+                format!("data: {value}\r\n\r\n").into_bytes()
+            } else {
+                raw.clone()
+            };
+            for encoding in ["identity", "gzip", "deflate", "zstd"] {
+                let wire = encoded(encoding, &wire);
+                for size in [1, 31, 4096] {
+                    let mut protocol = Protocol::new(stream);
+                    protocol.response(200, stream, encoding);
+                    for chunk in wire.chunks(size) {
+                        protocol.feed(chunk);
+                    }
+                    protocol.finish(Some(200), "OK");
+                    assert_eq!(
+                        protocol.terminal(),
+                        Some(terminal),
+                        "{stream} {encoding} {size} {value}"
+                    );
+                    if terminal == Terminal::Success {
+                        assert!(protocol.observation.error.error_basis.is_none());
+                        assert!(protocol.observation.error.raw.is_none());
+                        assert!(protocol.observation.error.message.is_none());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sse_error_wire_is_exact_at_every_crlf_boundary() {
+    for ending in ["\r\n", "\n", "\r"] {
+        let normal = format!("data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"fixture\"}}}}{ending}{ending}");
+        let error = format!(": fixture comment{ending}event: error{ending}data: {{\"error\":{ending}data: {{\"message\":\"fixture failure\"}}}}{ending}{ending}");
+        let wire = format!("{normal}{error}");
+        for size in [1, 2, 3, 11, 4096] {
+            let mut observer = Observer::new(true, "identity");
+            for chunk in wire.as_bytes().chunks(size) {
+                observer.feed(chunk);
+            }
+            let observation = observer.snapshot(true);
+            assert_eq!(
+                observation.error.raw.as_ref().unwrap().text().unwrap(),
+                error
+            );
+        }
+    }
+}

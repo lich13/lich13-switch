@@ -492,8 +492,6 @@ export default function EventLog({
   useEffect(() => {
     let disposed = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
-    let timer: number;
-
     const accept = (s: GatewayState) =>
       setProviders((old) => {
         const next = { ...old };
@@ -518,22 +516,30 @@ export default function EventLog({
 
     watch("gateway-state", accept);
     watch("app-visibility", setNativeVisible);
-    watch("app-event", () => {
-      if (visible) {
-        window.clearTimeout(timer);
-        timer = window.setTimeout(() => void load(), 250);
-      }
-    });
-
     const visibility = () =>
       setDocumentVisible(document.visibilityState !== "hidden");
     document.addEventListener("visibilitychange", visibility);
 
     return () => {
       disposed = true;
-      window.clearTimeout(timer);
       events.dispose();
       document.removeEventListener("visibilitychange", visibility);
+    };
+  }, []);
+
+  useEffect(() => {
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    let timer: number;
+    events.watch("app-event", () => {
+      if (visible) {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => void load(), 250);
+      }
+    });
+
+    return () => {
+      window.clearTimeout(timer);
+      events.dispose();
     };
   }, [visible, load]);
 

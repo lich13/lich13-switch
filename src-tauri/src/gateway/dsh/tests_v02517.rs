@@ -543,3 +543,78 @@ async fn exhausted_candidates_return_failure_within_the_retry_budget() {
     assert_eq!(*calls.lock().unwrap(), 2);
     fixture.gateway.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn identical_model_mapping_preserves_body_bytes_and_content_encoding() {
+    use std::io::Write;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = seen.clone();
+    let upstream = server(move |request| {
+        let seen = recorded.clone();
+        async move {
+            let encoding = request
+                .headers()
+                .get("content-encoding")
+                .map(|v| v.to_str().unwrap().to_owned());
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            seen.lock().unwrap().push((encoding, body.to_vec()));
+            success()
+        }
+    })
+    .await;
+    let fixture = Fixture::new(&[upstream.url("/v1")], true).await;
+    let provider = fixture.gateway.view().providers[0].id.clone();
+    fixture
+        .gateway
+        .edit(
+            Edit::DshModelsProvider {
+                id: provider,
+                mapping: ModelMapping(BTreeMap::from([(
+                    models::FLASH.into(),
+                    Some(models::FLASH.into()),
+                )])),
+            },
+            &fixture.gateway.view().revision,
+            fixture.home.path(),
+        )
+        .unwrap();
+    let raw = format!("{{ \"model\" : \"{}\", \"messages\":[{{\"role\":\"user\",\"content\":\"fixture\"}}], \"future\":9007199254740993 }}",models::FLASH).into_bytes();
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&raw).unwrap();
+    let compressed = gzip.finish().unwrap();
+    let token = fixture
+        .gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .store
+        .local_token
+        .clone();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .unwrap();
+    for (encoding, body) in [(None, raw), (Some("gzip"), compressed)] {
+        let mut request = client
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                fixture.gateway.listener_view().port
+            ))
+            .bearer_auth(&token)
+            .header("content-type", "application/json")
+            .body(body.clone());
+        if let Some(encoding) = encoding {
+            request = request.header("content-encoding", encoding);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().last().unwrap(),
+            &(encoding.map(str::to_owned), body)
+        );
+    }
+    fixture.gateway.stop().await.unwrap();
+}

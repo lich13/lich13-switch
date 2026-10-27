@@ -1072,7 +1072,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .as_ref()
                 .and_then(|mapping| model.as_deref().and_then(|m| mapping.resolve(m)))
                 .map(str::to_owned);
-            let mapped = if let Some(upstream_model) = &upstream_model {
+            let mapped = if let Some(upstream_model) = upstream_model
+                .as_ref()
+                .filter(|upstream| Some(upstream.as_str()) != model.as_deref())
+            {
                 match replay
                     .mapped_model(
                         parts

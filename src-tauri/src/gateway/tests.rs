@@ -1353,3 +1353,44 @@ mod v019_compaction;
 
 #[path = "compaction_execution_tests.rs"]
 mod compaction_execution;
+
+#[test]
+fn view_reads_without_routing_lock_and_retries_only_once_on_configuration_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(temp.path().to_path_buf()).unwrap();
+    let reads = std::cell::Cell::new(0);
+    let view = gateway
+        .try_view_read(|gateway, view, home, store| {
+            let mut state = gateway
+                .0
+                .inner
+                .try_lock()
+                .expect("config reads must release routing lock");
+            if reads.get() == 0 {
+                state.store.mode = "auto".into();
+            }
+            reads.set(reads.get() + 1);
+            drop(state);
+            gateway.read_view_config(view, home, store);
+        })
+        .unwrap();
+    assert_eq!(reads.get(), 2);
+    assert_eq!(view.mode, "auto");
+    assert_eq!(view.revision, gateway.view().revision);
+    reads.set(0);
+    let error = gateway
+        .try_view_read(|gateway, _, _, _| {
+            let mut state = gateway.0.inner.try_lock().unwrap();
+            state.store.mode = if state.store.mode == "auto" {
+                "manual"
+            } else {
+                "auto"
+            }
+            .into();
+            reads.set(reads.get() + 1);
+        })
+        .err()
+        .unwrap();
+    assert_eq!(error.code, code::CONFLICT);
+    assert_eq!(reads.get(), 2);
+}

@@ -196,9 +196,8 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
 }
 
 // Report only identifiable overrides, never their values.
-pub fn warning(home: &std::path::Path) -> Option<String> {
-    let bytes = crate::storage::read_optional(&home.join("settings.json")).ok()??;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
+pub fn warning(bytes: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
     let mut keys = Vec::new();
     for key in [
         "ANTHROPIC_API_KEY",

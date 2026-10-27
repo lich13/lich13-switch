@@ -169,19 +169,7 @@ pub async fn latest() -> Result<Info> {
     if !response.status().is_success() {
         return Err(AppError::new(code::UPDATE, "GitHub 更新检查失败"));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-    {
-        return Err(AppError::new(code::UPDATE, "更新信息过大"));
-    }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|_| AppError::new(code::UPDATE, "无法读取更新信息"))?;
-    if body.len() > MAX_RESPONSE_BYTES {
-        return Err(AppError::new(code::UPDATE, "更新信息过大"));
-    }
+    let body = response_body(response).await?;
     let release: Release = serde_json::from_slice(&body)
         .map_err(|_| AppError::new(code::UPDATE, "更新信息格式无效"))?;
     Ok(build_info(
@@ -189,6 +177,27 @@ pub async fn latest() -> Result<Info> {
         std::env::consts::OS,
         release,
     ))
+}
+
+async fn response_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::new(code::UPDATE, "更新信息过大"));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| AppError::new(code::UPDATE, "无法读取更新信息"))?
+    {
+        if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
+            return Err(AppError::new(code::UPDATE, "更新信息过大"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 pub fn open_repository() -> Result<()> {
@@ -202,6 +211,67 @@ pub fn open_releases() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn chunked_update_limit_is_enforced_before_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..33 {
+                if socket.write_all(b"10000\r\n").await.is_err() {
+                    return;
+                }
+                if socket.write_all(&chunk).await.is_err() {
+                    return;
+                }
+                if socket.write_all(b"\r\n").await.is_err() {
+                    return;
+                }
+            }
+            // Deliberately never terminate the response: the client must stop at the limit.
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.content_length(), None);
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(5), response_body(response))
+                .await
+                .unwrap()
+                .unwrap_err();
+        assert_eq!(error.message, "更新信息过大");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn update_body_accepts_exact_limit_and_rejects_declared_oversize() {
+        for size in [MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES + 1] {
+            let response: reqwest::Response = hyper::Response::builder()
+                .header("content-length", size.to_string())
+                .body(vec![b' '; size])
+                .unwrap()
+                .into();
+            let result = response_body(response).await;
+            if size == MAX_RESPONSE_BYTES {
+                assert_eq!(result.unwrap().len(), size);
+            } else {
+                assert_eq!(result.unwrap_err().message, "更新信息过大");
+            }
+        }
+    }
 
     #[test]
     fn compares_release_versions_without_prefix_or_suffix() {

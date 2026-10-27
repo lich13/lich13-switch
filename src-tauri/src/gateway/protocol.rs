@@ -178,10 +178,10 @@ impl Observation {
             self.model = self.meter.model.clone();
         }
         let (details, retry) = if let Some(status) = self.http_status.filter(|s| *s >= 400) {
-            super::failure_policy::http_with_rules(
+            super::failure_policy::http_value_with_rules(
                 status,
                 &self.limit_headers,
-                &serde_json::to_vec(outer).unwrap_or_default(),
+                outer,
                 &self.failure_rules,
             )
         } else {
@@ -238,9 +238,6 @@ impl Observation {
                             "incomplete" => Some(incomplete_terminal(value)),
                             "cancelled" => Some(Terminal::Cancelled),
                             _ if event == "error" => Some(rule_terminal(value, &self.error)),
-                            _ if value.get("error").is_some_and(|e| !e.is_null()) => {
-                                Some(rule_terminal(value, &self.error))
-                            }
                             _ if has_error => Some(rule_terminal(outer, &self.error)),
                             _ => None,
                         },
@@ -486,11 +483,7 @@ impl Sink {
                 .map(|text| serde_json::json!({"type":"error", "message":text}))
         }) {
             if matches!(self.event.as_str(), "error" | "response.failed")
-                || v.get("error").is_some()
-                || v.get("success") == Some(&Value::Bool(false))
-                || super::failure_policy::details_with_rules(&v, false, &[])
-                    .error_basis
-                    .is_some()
+                || super::failure_policy::has_error(&v)
             {
                 if let Some(full) = raw.value() {
                     v = full;
@@ -571,12 +564,7 @@ impl Sink {
             } else {
                 projected
                     .and_then(|v| {
-                        if v.get("error").is_some()
-                            || v.get("success") == Some(&Value::Bool(false))
-                            || super::failure_policy::details_with_rules(&v, false, &[])
-                                .error_basis
-                                .is_some()
-                        {
+                        if super::failure_policy::has_error(&v) {
                             raw.value().or(Some(v))
                         } else {
                             Some(v)
@@ -592,9 +580,7 @@ impl Sink {
             if let Some(v) = value {
                 self.observation.value_projected(&v, true);
                 if self.observation.http_status.is_some_and(|s| s >= 400)
-                    || super::failure_policy::details_with_rules(&v, false, &[])
-                        .error_basis
-                        .is_some()
+                    || super::failure_policy::has_error(&v)
                 {
                     self.observation.error.raw = Some(std::sync::Arc::new(raw));
                 }
@@ -615,22 +601,32 @@ impl Write for Sink {
             self.json.feed(bytes);
             return Ok(bytes.len());
         }
-        for &b in bytes {
+        let mut offset = 0;
+        let mut wire_start = 0;
+        while offset < bytes.len() {
+            let b = bytes[offset];
             if self.after_cr {
                 self.after_cr = false;
                 if b == b'\n' {
-                    self.raw_wire.feed(&[b]);
+                    offset += 1;
+                    self.raw_wire.feed(&bytes[wire_start..offset]);
+                    wire_start = offset;
                     self.line_end();
                     continue;
                 }
+                self.raw_wire.feed(&bytes[wire_start..offset]);
+                wire_start = offset;
                 self.line_end();
             }
-            self.raw_wire.feed(&[b]);
             if b == b'\r' {
                 self.after_cr = true;
+                offset += 1;
                 continue;
             }
             if b == b'\n' {
+                offset += 1;
+                self.raw_wire.feed(&bytes[wire_start..offset]);
+                wire_start = offset;
                 self.line_end();
                 continue;
             }
@@ -651,17 +647,24 @@ impl Write for Sink {
                     }
                 }
                 1 => {
-                    if self.skip_space && b == b' ' {
-                        self.skip_space = false;
+                    let skip = self.skip_space && b == b' ';
+                    self.skip_space = false;
+                    if !skip {
+                        let end = bytes[offset..]
+                            .iter()
+                            .position(|b| matches!(b, b'\r' | b'\n'))
+                            .map_or(bytes.len(), |n| offset + n);
+                        self.data(&bytes[offset..end]);
+                        offset = end;
                         continue;
                     }
-                    self.skip_space = false;
-                    self.data(&[b]);
                 }
                 2 if self.field.len() < 256 => self.field.push(b),
                 _ => {}
             }
+            offset += 1;
         }
+        self.raw_wire.feed(&bytes[wire_start..]);
         Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {

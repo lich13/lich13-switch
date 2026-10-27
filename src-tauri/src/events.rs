@@ -552,21 +552,16 @@ fn load(path: &Path) -> Journal {
 fn persist(j: &mut Journal, path: &Path) -> Result<()> {
     let cutoff = now().saturating_sub(RETENTION);
     j.records.retain(|r| r.last_at >= cutoff);
-    let lines: VecDeque<Vec<u8>> = j
-        .records
-        .iter()
-        .filter_map(|r| serde_json::to_vec(r).ok())
-        .collect();
-    let size: usize = lines.iter().map(|l| l.len() + 1).sum();
     let retained: std::collections::HashSet<_> = j.records.iter().map(|r| r.id.as_str()).collect();
     j.aliases
         .retain(|(_, target)| retained.contains(target.as_str()));
-    let mut bytes = Vec::with_capacity(size);
-    for line in lines {
-        bytes.extend(line);
-        bytes.push(b'\n');
-    }
-    storage::atomic_write_bounded(path, &bytes, None, u64::MAX)
+    storage::atomic_write_stream(path, |writer| {
+        for record in &j.records {
+            serde_json::to_writer(&mut *writer, record)?;
+            writer.write_all(b"\n")?;
+        }
+        Ok(())
+    })
 }
 impl Service {
     pub fn new(data: &Path) -> Self {
@@ -590,136 +585,163 @@ impl Service {
                     }
                 }
             }
+            let mut pending = None;
             loop {
-                let job = match receiver.recv_timeout(std::time::Duration::from_secs(3600)) {
-                    Ok(v) => v,
-                    Err(mpsc::RecvTimeoutError::Timeout) => Job::Prune,
-                    Err(_) => break,
+                let job = match pending.take() {
+                    Some(job) => job,
+                    None => match receiver.recv_timeout(std::time::Duration::from_secs(3600)) {
+                        Ok(v) => v,
+                        Err(mpsc::RecvTimeoutError::Timeout) => Job::Prune,
+                        Err(_) => break,
+                    },
                 };
                 let mut journal = j.lock().unwrap().clone();
                 // Only Clear promises rollback after a failed write. Append keeps
                 // its in-memory evidence so the next write can retry it.
-                let previous = matches!(&job, Job::Clear(_))
-                    .then(|| (journal.records.clone(), journal.aliases.clone()));
-                let mut changed = None;
-                let mut notify = false;
+                let previous = matches!(&job, Job::Clear(_)).then(|| {
+                    (
+                        std::mem::take(&mut journal.records),
+                        std::mem::take(&mut journal.aliases),
+                    )
+                });
                 let mut done = None;
                 let cleanup = matches!(&job, Job::Clear(_) | Job::Prune);
-                match job {
-                    Job::Append(r) => {
-                        let mut r = *r;
-                        if let Some(raw) = r.details.raw.take() {
-                            let mut reference = raw.reference(&r.id);
-                            if raw.save(&raw_path, &r.id).is_err() {
-                                reference.incomplete = Some("错误原文保存失败".into());
-                                journal.error =
-                                    Some("错误原文保存失败，请检查文件权限与空间".into());
+                let append = matches!(&job, Job::Append(_));
+                let mut jobs = vec![job];
+                if append {
+                    while jobs.len() < 64 {
+                        match receiver.try_recv() {
+                            Ok(job @ Job::Append(_)) => jobs.push(job),
+                            Ok(barrier) => {
+                                pending = Some(barrier);
+                                break;
                             }
-                            r.details.raw_error = Some(reference);
-                            // Only the list preview is shortened. Matching and the drawer read the attachment.
-                            for value in [
-                                &mut r.details.message,
-                                &mut r.details.upstream_code,
-                                &mut r.details.upstream_reason,
-                                &mut r.details.upstream_type,
-                                &mut r.details.parameter,
-                            ]
-                            .into_iter()
-                            .flatten()
-                            {
-                                *value = value.chars().take(512).collect();
-                            }
+                            Err(_) => break,
                         }
-                        if let Some((_, target)) = journal
-                            .aliases
-                            .iter()
-                            .rev()
-                            .find(|(id, _)| r.details.cause_id.as_ref() == Some(id))
-                        {
-                            r.details.cause_id = Some(target.clone());
-                        }
-                        if matches!(r.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
-                            && r.details
-                                .cause_id
-                                .as_ref()
-                                .is_none_or(|id| !journal.records.iter().any(|old| &old.id == id))
-                        {
-                            // A repeated cause may already have been merged into an earlier row.
-                            r.details.cause_id = journal
-                                .records
-                                .iter()
-                                .rev()
-                                .find(|old| {
-                                    !matches!(
-                                        old.reason,
-                                        Reason::CircuitOpen | Reason::FailoverExhausted
-                                    ) && (r.reason != Reason::CircuitOpen
-                                        || old.details.counted_failure == Some(true))
-                                        && old.client_id == r.client_id
-                                        && old.provider_id == r.provider_id
-                                        && old.model == r.model
-                                        && old.status == r.status
-                                        && old.details.upstream_code == r.details.upstream_code
-                                        && old.details.upstream_reason == r.details.upstream_reason
-                                        && old.details.error_basis == r.details.error_basis
-                                        && old.details.quota_check == r.details.quota_check
-                                        && old.details.rpm_wait_reason == r.details.rpm_wait_reason
-                                        && old.details.local_code == r.details.local_code
-                                        && old.details.message == r.details.message
-                                        && old.details.phase == r.details.phase
-                                })
-                                .map(|cause| cause.id.clone());
-                        }
-                        notify = r.reason.notifiable(r.action);
-                        if let Some(old) = journal.records.iter_mut().rev().find(|old| {
-                            old.same(&r)
-                                && r.last_at.saturating_sub(old.first_at) < r.merge_seconds()
-                        }) {
-                            if let Some(raw) = &r.details.raw_error {
-                                if old
-                                    .details
-                                    .raw_error
-                                    .as_ref()
-                                    .is_none_or(|previous| previous.id != raw.id)
+                    }
+                }
+                let mut changes = Vec::with_capacity(jobs.len());
+                for job in jobs {
+                    let mut changed = None;
+                    let mut notify = false;
+                    match job {
+                        Job::Append(r) => {
+                            let mut r = *r;
+                            if let Some(raw) = r.details.raw.take() {
+                                let mut reference = raw.reference(&r.id);
+                                if raw.save(&raw_path, &r.id).is_err() {
+                                    reference.incomplete = Some("错误原文保存失败".into());
+                                    journal.error =
+                                        Some("错误原文保存失败，请检查文件权限与空间".into());
+                                }
+                                r.details.raw_error = Some(reference);
+                                // Only the list preview is shortened. Matching and the drawer read the attachment.
+                                for value in [
+                                    &mut r.details.message,
+                                    &mut r.details.upstream_code,
+                                    &mut r.details.upstream_reason,
+                                    &mut r.details.upstream_type,
+                                    &mut r.details.parameter,
+                                ]
+                                .into_iter()
+                                .flatten()
                                 {
-                                    let _ = std::fs::remove_file(
-                                        raw_path.join(format!("{}.error", raw.id)),
-                                    );
+                                    *value = value.chars().take(512).collect();
                                 }
                             }
-                            old.last_at = r.last_at;
-                            old.count = old.count.saturating_add(1);
-                            old.status = r.status;
-                            old.action = r.action;
-                            old.attempt = r.attempt;
-                            if r.reason == Reason::RequestInterrupted {
-                                old.details.delivery = r.details.delivery;
-                                old.details.last_progress_ms = r.details.last_progress_ms;
+                            if let Some((_, target)) = journal
+                                .aliases
+                                .iter()
+                                .rev()
+                                .find(|(id, _)| r.details.cause_id.as_ref() == Some(id))
+                            {
+                                r.details.cause_id = Some(target.clone());
                             }
-                            changed = Some(old.clone());
-                            let target = old.id.clone();
-                            journal.aliases.push_back((r.id, target));
-                            while journal.aliases.len() > 4096 {
-                                journal.aliases.pop_front();
+                            if matches!(r.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
+                                && r.details.cause_id.as_ref().is_none_or(|id| {
+                                    !journal.records.iter().any(|old| &old.id == id)
+                                })
+                            {
+                                // A repeated cause may already have been merged into an earlier row.
+                                r.details.cause_id = journal
+                                    .records
+                                    .iter()
+                                    .rev()
+                                    .find(|old| {
+                                        !matches!(
+                                            old.reason,
+                                            Reason::CircuitOpen | Reason::FailoverExhausted
+                                        ) && (r.reason != Reason::CircuitOpen
+                                            || old.details.counted_failure == Some(true))
+                                            && old.client_id == r.client_id
+                                            && old.provider_id == r.provider_id
+                                            && old.model == r.model
+                                            && old.status == r.status
+                                            && old.details.upstream_code == r.details.upstream_code
+                                            && old.details.upstream_reason
+                                                == r.details.upstream_reason
+                                            && old.details.error_basis == r.details.error_basis
+                                            && old.details.quota_check == r.details.quota_check
+                                            && old.details.rpm_wait_reason
+                                                == r.details.rpm_wait_reason
+                                            && old.details.local_code == r.details.local_code
+                                            && old.details.message == r.details.message
+                                            && old.details.phase == r.details.phase
+                                    })
+                                    .map(|cause| cause.id.clone());
                             }
-                        } else {
-                            changed = Some(r.clone());
-                            journal.records.push_back(r);
+                            notify = r.reason.notifiable(r.action);
+                            if let Some(old) = journal.records.iter_mut().rev().find(|old| {
+                                old.same(&r)
+                                    && r.last_at.saturating_sub(old.first_at) < r.merge_seconds()
+                            }) {
+                                if let Some(raw) = &r.details.raw_error {
+                                    if old
+                                        .details
+                                        .raw_error
+                                        .as_ref()
+                                        .is_none_or(|previous| previous.id != raw.id)
+                                    {
+                                        let _ = std::fs::remove_file(
+                                            raw_path.join(format!("{}.error", raw.id)),
+                                        );
+                                    }
+                                }
+                                old.last_at = r.last_at;
+                                old.count = old.count.saturating_add(1);
+                                old.status = r.status;
+                                old.action = r.action;
+                                old.attempt = r.attempt;
+                                if r.reason == Reason::RequestInterrupted {
+                                    old.details.delivery = r.details.delivery;
+                                    old.details.last_progress_ms = r.details.last_progress_ms;
+                                }
+                                changed = Some(old.clone());
+                                let target = old.id.clone();
+                                journal.aliases.push_back((r.id, target));
+                                while journal.aliases.len() > 4096 {
+                                    journal.aliases.pop_front();
+                                }
+                            } else {
+                                changed = Some(r.clone());
+                                journal.records.push_back(r);
+                            }
                         }
-                    }
-                    Job::Clear(tx) => {
-                        journal.records.clear();
-                        journal.aliases.clear();
-                        journal.error = None;
-                        done = Some(tx);
-                    }
-                    Job::NotificationAccepted(id) => {
-                        if let Some(r) = journal.records.iter_mut().find(|r| r.id == id) {
-                            r.notified_at = now();
-                            changed = Some(r.clone());
+                        Job::Clear(tx) => {
+                            journal.records.clear();
+                            journal.aliases.clear();
+                            journal.error = None;
+                            done = Some(tx);
                         }
+                        Job::NotificationAccepted(id) => {
+                            if let Some(r) = journal.records.iter_mut().find(|r| r.id == id) {
+                                r.notified_at = now();
+                                changed = Some(r.clone());
+                            }
+                        }
+                        Job::Prune => (),
                     }
-                    Job::Prune => (),
+                    changes.push((changed, notify));
                 }
                 let before_retention = journal.records.len();
                 let result = persist(&mut journal, &path);
@@ -738,11 +760,13 @@ impl Service {
                 }
                 let error = journal.error.clone();
                 *j.lock().unwrap() = journal;
-                let _ = events_copy.send(Change {
-                    record: changed,
-                    error,
-                    notify,
-                });
+                for (record, notify) in changes {
+                    let _ = events_copy.send(Change {
+                        record,
+                        error: error.clone(),
+                        notify,
+                    });
+                }
                 if let Some(tx) = done {
                     let _ = tx.send(result);
                 }

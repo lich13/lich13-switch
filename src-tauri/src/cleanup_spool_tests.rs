@@ -21,11 +21,13 @@ fn old_spool(parent: &Path) -> storage::PrivateTempDir {
 }
 
 #[test]
-fn cleans_empty_and_private_file_spools_for_all_three_clients() {
+fn cleans_empty_and_private_file_spools_for_all_five_clients() {
     let fixture = tempdir().unwrap();
     let data = private_root(fixture.path(), "data");
     let claude = private_root(&data, "claude");
     let grok = private_root(&data, "grok");
+    let dsh = private_root(&data, "dsh");
+    let agy = private_root(&data, "agy");
 
     let codex_spool = old_spool(&data);
     let codex_file = private_file_named(codex_spool.path(), ".tmpA1b2C3");
@@ -33,7 +35,13 @@ fn cleans_empty_and_private_file_spools_for_all_three_clients() {
     let grok_spool = old_spool(&grok);
     let grok_file = private_file_named(grok_spool.path(), ".tmpD4e5F6");
 
-    assert_eq!(super::clean(&data), 3);
+    let dsh_spool = old_spool(&dsh);
+    let agy_spool = old_spool(&agy);
+    private_file_named(dsh_spool.path(), ".tmpG7h8I9");
+    private_file_named(agy_spool.path(), ".tmpJ1k2L3");
+    assert_eq!(super::clean(&data), 5);
+    assert!(!dsh_spool.path().exists());
+    assert!(!agy_spool.path().exists());
     assert!(!codex_spool.path().exists());
     assert!(!claude_spool.path().exists());
     assert!(!grok_spool.path().exists());

@@ -229,6 +229,65 @@ pub fn atomic_write_bounded(
     Ok(())
 }
 
+/// Replace an unbounded journal without holding its serialized contents in RAM.
+/// Configuration transactions continue to use the bounded CAS writer above.
+pub fn atomic_write_stream(
+    path: &Path,
+    write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) -> Result<()> {
+    use std::io::{BufReader, BufWriter};
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::new(code::PATH, "目标路径无效"))?;
+    if !parent.exists() {
+        private_dir(parent)?;
+    }
+    let mut temp = private_tempfile(parent)?;
+    {
+        let mut writer = BufWriter::new(temp.as_file_mut());
+        write(&mut writer).map_err(io_error)?;
+        writer.flush().map_err(io_error)?;
+    }
+    #[cfg(test)]
+    faults::check(faults::Point::ShortWrite)?;
+    #[cfg(test)]
+    faults::check(faults::Point::FileSync)?;
+    temp.as_file().sync_all().map_err(io_error)?;
+    let hash = |file: fs::File| -> Result<_> {
+        let mut digest = Sha256::new();
+        std::io::copy(&mut BufReader::new(file), &mut digest).map_err(io_error)?;
+        Ok(digest.finalize())
+    };
+    let expected = hash(temp.reopen().map_err(io_error)?)?;
+    let open = || -> Result<Option<fs::File>> {
+        match fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
+                code::SYMLINK,
+                "目标文件是符号链接，请选择实际文件所在目录",
+            )),
+            Ok(m) if !m.is_file() => Err(AppError::new(
+                code::FILE_TYPE,
+                "文件不是普通文件或超过允许大小",
+            )),
+            Ok(_) => fs::File::open(path).map(Some).map_err(io_error),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_error(e)),
+        }
+    };
+    open()?;
+    #[cfg(test)]
+    faults::check(faults::Point::Replace)?;
+    temp.persist(path).map_err(|e| io_error(e.error))?;
+    sync_parent(path)?;
+    if open()?.map(hash).transpose()?.as_ref() != Some(&expected) {
+        return Err(AppError::new(
+            code::VERIFY,
+            "文件写入后发生变化，请重新读取确认",
+        ));
+    }
+    Ok(())
+}
+
 /// A successfully refreshed public cache may replace an oversized old cache
 /// without reading that old file into memory. Other writes retain normal CAS.
 pub fn replace_cache_bounded(path: &Path, bytes: &[u8], limit: u64) -> Result<()> {

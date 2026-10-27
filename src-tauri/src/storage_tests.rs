@@ -138,3 +138,38 @@ fn preserve_corrupt_does_not_follow_backup_symlink() {
     assert_eq!(fs::read(&target).unwrap(), b"symlink target fixture");
     assert_eq!(fs::read(&source).unwrap(), bytes);
 }
+
+#[test]
+fn streamed_atomic_write_keeps_previous_bytes_on_staging_failure_and_private_permissions() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("journal.fixture");
+    for point in [
+        faults::Point::ShortWrite,
+        faults::Point::FileSync,
+        faults::Point::Replace,
+    ] {
+        fs::write(&path, b"previous").unwrap();
+        let _fault = faults::inject(point);
+        assert!(atomic_write_stream(&path, |writer| writer.write_all(b"replacement")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"previous");
+    }
+    atomic_write_stream(&path, |writer| writer.write_all(b"replacement")).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"replacement");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = temp.path().join("link.fixture");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(
+            atomic_write_stream(&link, |writer| writer.write_all(b"bad"))
+                .unwrap_err()
+                .code,
+            code::SYMLINK
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+    }
+}

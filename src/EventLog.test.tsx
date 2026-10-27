@@ -430,3 +430,31 @@ describe("event log", () => {
     );
   });
 });
+
+it("queries providers only on mount and keeps event names through filtering and paging", async () => {
+  const user = userEvent.setup();
+  render(<EventLog />);
+  await screen.findByRole("button", { name: /模型不支持/ });
+  const gateways = () =>
+    mock.command.mock.calls.filter(([name]) => name === "get_gateway");
+  expect(gateways()).toHaveLength(5);
+  const initial = eventCalls().length;
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "客户端" }),
+    "codex",
+  );
+  await waitFor(() => expect(eventCalls()).toHaveLength(initial + 1));
+  await user.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(eventCalls()).toHaveLength(initial + 2));
+  expect(gateways()).toHaveLength(5);
+  act(() =>
+    mock.listeners.get("gateway-state")?.({
+      clientId: "codex",
+      providers: [{ id: "provider-1", name: "Renamed fixture" }],
+    }),
+  );
+  expect(
+    await screen.findByRole("option", { name: "Renamed fixture" }),
+  ).toBeInTheDocument();
+  expect(eventCalls()).toHaveLength(initial + 2);
+});

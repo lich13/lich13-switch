@@ -36,20 +36,31 @@ pub struct ProfileCurrent {
     pub profile: String,
     pub current: Current,
 }
-pub fn profile_states(
+pub fn status(
     home: &Path,
     store: &Store,
     ports: &[u16],
     resolve: &impl Fn(&str) -> Option<String>,
-) -> Vec<ProfileCurrent> {
-    profiles(home)
+) -> (Current, Vec<ProfileCurrent>) {
+    let selections: Vec<_> = profiles(home)
         .unwrap_or_default()
         .into_iter()
-        .map(|profile| ProfileCurrent {
-            current: profile_current(home, &profile, store, ports, resolve),
-            profile,
+        .map(|profile| {
+            let selection = read_current(home, &profile, store, ports, resolve);
+            (profile, selection)
         })
-        .collect()
+        .collect();
+    let current = combined_current(&selections);
+    let profiles = selections
+        .into_iter()
+        .map(|(profile, selection)| ProfileCurrent {
+            profile,
+            current: selection
+                .map(|s| s.current)
+                .unwrap_or_else(|e| Current::unknown(&e.message)),
+        })
+        .collect();
+    (current, profiles)
 }
 
 pub(super) fn read_current(
@@ -246,17 +257,20 @@ pub(super) fn read_provider(
     })
 }
 
+#[cfg(test)]
 pub fn current(
     home: &Path,
     store: &Store,
     ports: &[u16],
     resolve: &impl Fn(&str) -> Option<String>,
 ) -> Current {
-    let profiles = match profiles(home) {
-        Ok(profiles) if !profiles.is_empty() => profiles,
-        _ => return Current::unknown("尚无可用 DSH profile"),
+    status(home, store, ports, resolve).0
+}
+fn combined_current(selections: &[(String, Result<Selection>)]) -> Current {
+    let Some((_, initial)) = selections.first() else {
+        return Current::unknown("尚无可用 DSH profile");
     };
-    let initial = match read_current(home, &profiles[0], store, ports, resolve) {
+    let initial = match initial {
         Ok(selection) => selection,
         Err(error) => return Current::unknown(&error.message),
     };
@@ -270,18 +284,18 @@ pub fn current(
     };
     let mut result = initial.current.clone();
     let mut mixed = false;
-    for profile in &profiles[1..] {
-        let selection = match read_current(home, profile, store, ports, resolve) {
+    for (_, selection) in &selections[1..] {
+        let selection = match selection {
             Ok(selection) => selection,
             Err(error) => return Current::unknown(&error.message),
         };
-        let different = signature(&initial) != signature(&selection);
-        let other = selection.current;
+        let different = signature(initial) != signature(selection);
+        let other = &selection.current;
         if matches!(result.state, Kind::Unknown { .. }) {
             return result;
         }
         if matches!(other.state, Kind::Unknown { .. }) {
-            return other;
+            return other.clone();
         }
         if different || other.state != result.state {
             mixed = true;
@@ -294,14 +308,14 @@ pub fn current(
             .as_ref()
             .is_some_and(|w| w.contains("home patch"))
         {
-            result.warning = other.warning;
+            result.warning = other.warning.clone();
         }
     }
     if mixed {
         result = Current::new(Kind::Mixed);
     }
-    if profiles.len() > 1 {
-        result.model_source = Some(format!("{} 个 profile", profiles.len()));
+    if selections.len() > 1 {
+        result.model_source = Some(format!("{} 个 profile", selections.len()));
     }
     result
 }

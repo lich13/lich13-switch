@@ -207,19 +207,22 @@ pub(crate) fn manages_auth(data: &Path, home: &Path) -> bool {
 }
 pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
     let raw = storage::read_optional(&client.config(home))?;
+    read_raw(client, raw.as_deref())
+}
+pub(super) fn read_raw(client: ClientId, raw: Option<&[u8]>) -> Result<(String, Pair)> {
     if raw.is_none() && client == ClientId::Codex {
         return Err(AppError::new(
             code::CUSTOM,
             "缺少 config.toml，请先在配置编辑器中设置 custom",
         ));
     }
-    let text = std::str::from_utf8(raw.as_deref().unwrap_or(if client == ClientId::Claude {
+    let text = std::str::from_utf8(raw.unwrap_or(if client == ClientId::Claude {
         b"{}"
     } else {
         b""
     }))
     .map_err(|_| AppError::new(code::CONFIG, "配置不是 UTF-8"))?;
-    Ok((storage::revision(raw.as_deref()), pair_for(client, text)?))
+    Ok((storage::revision(raw), pair_for(client, text)?))
 }
 pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
     match client {

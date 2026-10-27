@@ -775,86 +775,31 @@ impl Gateway {
     pub fn listener_view(&self) -> ListenerView {
         self.try_listener_view().expect("healthy test listener")
     }
-    pub fn try_view(&self) -> Result<View> {
+    fn view_snapshot(&self) -> Result<(View, Option<PathBuf>, Store)> {
         let listener = self.0.registry.listener.view()?;
         let s = self.request_state()?;
         let (occupied, waiting) = self.0.admission.counts();
         let health = |key: String| s.circuits.get(&key).cloned().unwrap_or_default().health();
-        let config = s
-            .home
-            .as_ref()
-            .filter(|_| !matches!(self.0.client, ClientId::Dsh | ClientId::Agy))
-            .map(|h| takeover::read_connection(self.0.client, h, &s.store.connection));
-        let config_revision = config
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(|(r, _)| r.clone());
-        let ports = [listener.port, s.store.settings.port];
-        let mut current = match (self.0.client, s.home.as_ref()) {
-            (ClientId::Agy, _) => agy::current(s.running),
-            (ClientId::Grok, Some(home)) => {
-                current::grok(home, &s.store, &ports, &|name| std::env::var(name).ok())
-            }
-            (ClientId::Dsh, Some(home)) => {
-                dsh::current(home, &s.store, &ports, &|name| std::env::var(name).ok())
-            }
-            _ => match &config {
-                Some(Ok((_, pair))) => current::pair(self.0.client, pair, &s.store, &ports),
-                Some(Err(e)) => current::Current::unknown(&e.message),
-                None => current::Current::unknown("尚未找到客户端配置"),
-            },
-        };
-        if self.0.client == ClientId::Claude {
-            current.warning = s.home.as_ref().and_then(|h| claude_config::warning(h));
-        }
-        let (config_state, config_provider) = current.legacy();
-        Ok(View {
+        let view = View {
             listener: listener.clone(),
             grok_managed: s.store.grok_api_model.is_some(),
-            grok_models: if self.0.client == ClientId::Grok {
-                s.home
-                    .as_ref()
-                    .and_then(|home| grok_layers::read(home, &|name| std::env::var(name).ok()).ok())
-                    .and_then(|effective| {
-                        grok_import::discover(&effective.text, &|name| {
-                            effective.resolve(name, &|name| std::env::var(name).ok())
-                        })
-                        .ok()
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            },
+            grok_models: vec![],
             dsh_profile: s.store.dsh.as_ref().map(|d| d.options.clone()),
-            dsh_profiles: if self.0.client == ClientId::Dsh {
-                s.home
-                    .as_ref()
-                    .map(|home| {
-                        dsh::profile_states(home, &s.store, &ports, &|name| {
-                            std::env::var(name).ok()
-                        })
-                    })
-                    .unwrap_or_default()
-            } else {
-                vec![]
-            },
+            dsh_profiles: vec![],
             client_id: self.0.client,
-            config_revision,
-            config_provider,
-            config_state: config_state.into(),
-            config_error: match &current.state {
-                current::Kind::Unknown { reason } => Some(reason.clone()),
-                _ => None,
-            },
+            config_revision: None,
+            config_provider: None,
+            config_state: String::new(),
+            config_error: None,
             connection_mode: match &s.store.connection {
                 codex_api::Connection::Bearer => "bearer",
                 _ => "apiKey",
             }
             .into(),
-            config_warning: current.warning.clone(),
-            current,
+            config_warning: None,
+            current: current::Current::unknown("尚未找到客户端配置"),
             last_successful: s.last_successful.clone(),
-            revision: self.view_revision(&s)?,
+            revision: self.view_revision_with_listener(&s, &listener.revision),
             running: s.running,
             address: if self.0.client == ClientId::Dsh
                 && s.store
@@ -978,11 +923,112 @@ impl Gateway {
                         .retention_error()
                         .then(|| "线程名额记录不可用，请检查私有数据目录".into())
                 }),
-            recovery_pending: s.upgrade_error.is_some()
-                || self.0.data.join("gateway-recovery.json").exists()
-                || self.0.data.join("grok-import.json").exists()
-                || self.0.data.join("dsh-recovery.json").exists(),
-        })
+            recovery_pending: s.upgrade_error.is_some(),
+        };
+        // Selection readers need only connection identity and provider matching data.
+        let config = Store {
+            connection: s.store.connection.clone(),
+            providers: s.store.providers.clone(),
+            local_token: s.store.local_token.clone(),
+            settings: s.store.settings.clone(),
+            ..Store::default()
+        };
+        Ok((view, s.home.clone(), config))
+    }
+    fn read_view_config(&self, view: &mut View, home: Option<&Path>, store: &Store) {
+        let resolve = |name: &str| std::env::var(name).ok();
+        let raw = home
+            .filter(|_| matches!(self.0.client, ClientId::Grok | ClientId::Claude))
+            .map(|home| storage::read_optional(&self.0.client.config(home)));
+        let config = match &raw {
+            Some(raw) => Some(
+                raw.as_ref()
+                    .map_err(Clone::clone)
+                    .and_then(|bytes| takeover::read_raw(self.0.client, bytes.as_deref())),
+            ),
+            None => home
+                .filter(|_| self.0.client == ClientId::Codex)
+                .map(|home| takeover::read_connection(self.0.client, home, &store.connection)),
+        };
+        view.config_revision = config
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|(r, _)| r.clone());
+        let ports = [view.listener.port, store.settings.port];
+        let mut current = match (self.0.client, home) {
+            (ClientId::Agy, _) => agy::current(view.running),
+            (ClientId::Grok, Some(home)) => {
+                let effective = raw
+                    .as_ref()
+                    .expect("Grok config snapshot")
+                    .as_ref()
+                    .map_err(Clone::clone)
+                    .and_then(|raw| grok_layers::read_with_config(home, &resolve, raw));
+                match effective {
+                    Ok(effective) => {
+                        view.grok_models = grok_import::discover(&effective.text, &|name| {
+                            effective.resolve(name, &resolve)
+                        })
+                        .unwrap_or_default();
+                        current::grok_effective(&effective, store, &ports, &resolve)
+                    }
+                    Err(error) => current::Current::unknown(&error.message),
+                }
+            }
+            (ClientId::Dsh, Some(home)) => {
+                let (current, profiles) = dsh::status(home, store, &ports, &resolve);
+                view.dsh_profiles = profiles;
+                current
+            }
+            _ => match &config {
+                Some(Ok((_, pair))) => current::pair(self.0.client, pair, store, &ports),
+                Some(Err(e)) => current::Current::unknown(&e.message),
+                None => current::Current::unknown("尚未找到客户端配置"),
+            },
+        };
+        if self.0.client == ClientId::Claude {
+            current.warning = raw
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|bytes| bytes.as_deref())
+                .and_then(claude_config::warning);
+        }
+        let (state, provider) = current.legacy();
+        view.config_state = state.into();
+        view.config_provider = provider;
+        view.config_error = match &current.state {
+            current::Kind::Unknown { reason } => Some(reason.clone()),
+            _ => None,
+        };
+        view.config_warning = current.warning.clone();
+        view.current = current;
+        view.recovery_pending |= [
+            "gateway-recovery.json",
+            "grok-import.json",
+            "dsh-recovery.json",
+        ]
+        .iter()
+        .any(|name| self.0.data.join(name).exists());
+    }
+    pub fn try_view(&self) -> Result<View> {
+        self.try_view_read(Self::read_view_config)
+    }
+    fn try_view_read(
+        &self,
+        read: impl Fn(&Self, &mut View, Option<&Path>, &Store),
+    ) -> Result<View> {
+        for _ in 0..2 {
+            let (mut view, home, store) = self.view_snapshot()?;
+            read(self, &mut view, home.as_deref(), &store);
+            let state = self.request_state()?;
+            if self.view_revision(&state)? == view.revision {
+                return Ok(view);
+            }
+        }
+        Err(AppError::new(
+            code::CONFLICT,
+            "网关配置已变化，请重新读取后再操作",
+        ))
     }
     pub fn observe_home(&self, home: &Path) {
         let mut state = self.0.inner.lock().unwrap();

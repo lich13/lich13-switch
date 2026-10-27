@@ -54,6 +54,7 @@ fn merge(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::TableLik
         }
     }
 }
+#[cfg(test)]
 pub fn read(home: &Path, resolve: &impl Fn(&str) -> Option<String>) -> Result<Effective> {
     read_with_environment(home, true, resolve)
 }
@@ -61,6 +62,21 @@ pub fn read_with_environment(
     home: &Path,
     include: bool,
     resolve: &impl Fn(&str) -> Option<String>,
+) -> Result<Effective> {
+    read_effective(home, include, resolve, None)
+}
+pub(super) fn read_with_config(
+    home: &Path,
+    resolve: &impl Fn(&str) -> Option<String>,
+    config: &Option<Vec<u8>>,
+) -> Result<Effective> {
+    read_effective(home, true, resolve, Some(config))
+}
+fn read_effective(
+    home: &Path,
+    include: bool,
+    resolve: &impl Fn(&str) -> Option<String>,
+    config: Option<&Option<Vec<u8>>>,
 ) -> Result<Effective> {
     let system = if cfg!(all(unix, not(test))) {
         Some(Path::new("/etc/grok"))
@@ -87,9 +103,12 @@ pub fn read_with_environment(
         .map(super::grok_import::environment)
         .transpose()?
         .unwrap_or_default();
-    let mut result = read_at(home, system, &|name| {
-        variables.get(name).cloned().or_else(|| resolve(name))
-    })?;
+    let mut result = read_at_config(
+        home,
+        system,
+        &|name| variables.get(name).cloned().or_else(|| resolve(name)),
+        config,
+    )?;
     if include {
         result.files.push((path, storage::revision(raw.as_deref())));
     }
@@ -100,10 +119,19 @@ pub fn read_with_environment(
     result.variables = variables;
     Ok(result)
 }
+#[cfg(test)]
 pub(super) fn read_at(
     home: &Path,
     system: Option<&Path>,
     resolve: &impl Fn(&str) -> Option<String>,
+) -> Result<Effective> {
+    read_at_config(home, system, resolve, None)
+}
+fn read_at_config(
+    home: &Path,
+    system: Option<&Path>,
+    resolve: &impl Fn(&str) -> Option<String>,
+    config: Option<&Option<Vec<u8>>>,
 ) -> Result<Effective> {
     let mut result = Effective {
         text: String::new(),
@@ -144,7 +172,10 @@ pub(super) fn read_at(
                 result.model_source = Some("环境 GROK_DEFAULT_MODEL".into());
             }
         }
-        let raw = storage::read_optional(&path)?;
+        let raw = match config.filter(|_| path == home.join("config.toml")) {
+            Some(raw) => raw.clone(),
+            None => storage::read_optional(&path)?,
+        };
         result.files.push((path, storage::revision(raw.as_deref())));
         let Some(raw) = raw else {
             continue;

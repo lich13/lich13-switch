@@ -471,16 +471,26 @@ pub(super) fn http_with_rules(
     body: &[u8],
     rules: &[super::failure_rules::Rule],
 ) -> (Details, Option<Duration>) {
-    let mut d = if status >= 400 {
-        details_http(body)
-    } else {
-        serde_json::from_slice::<Value>(body)
-            .ok()
-            .map(|v| details_value(&v, false))
-            .unwrap_or_default()
-    };
-    let structured = serde_json::from_slice::<Value>(body).ok().and_then(|v| {
-        let e = envelope(&v, true, 0)?;
+    let value = serde_json::from_slice::<Value>(body).unwrap_or_else(|_| {
+        if status >= 400 {
+            std::str::from_utf8(body)
+                .map(|s| Value::String(s.into()))
+                .unwrap_or_default()
+        } else {
+            Value::Null
+        }
+    });
+    http_value_with_rules(status, headers, &value, rules)
+}
+
+pub(super) fn http_value_with_rules(
+    status: u16,
+    headers: &hyper::HeaderMap,
+    value: &Value,
+    rules: &[super::failure_rules::Rule],
+) -> (Details, Option<Duration>) {
+    let mut d = details_value(value, status >= 400);
+    let structured = envelope(value, true, 0).and_then(|e| {
         structured_codes(e)
             .find_map(code_kind)
             .or_else(|| explicit_type(e))
@@ -505,22 +515,13 @@ pub(super) fn http_with_rules(
         }
     }
     refine_headers(&mut d, headers, structured.is_some());
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        if let Some(error) = envelope(&value, status >= 400, 0) {
-            apply_custom(&mut d, error, headers, rules);
-        }
-    } else if status >= 400 {
-        if let Ok(message) = std::str::from_utf8(body) {
-            apply_custom(&mut d, &Value::String(message.into()), headers, rules);
-        }
+    if let Some(error) = envelope(value, status >= 400, 0) {
+        apply_custom(&mut d, error, headers, rules);
     }
-    let retry = retry_after_http(body).max(retry_headers(headers, &d));
-    if status < 400
-        && d.error_basis.is_none()
-        && serde_json::from_slice::<Value>(body)
-            .ok()
-            .is_some_and(|v| envelope(&v, false, 0).is_some())
-    {
+    let retry = envelope(value, true, 0)
+        .and_then(retry_after_fields)
+        .max(retry_headers(headers, &d));
+    if status < 400 && d.error_basis.is_none() && has_error(value) {
         d.error_basis = Some(ErrorBasis::ServiceError);
     }
     (d, retry)
@@ -715,6 +716,10 @@ pub fn model_message(message: &str) -> bool {
         || (s.contains("模型") && super::failure_rules::MODEL_ZH.iter().any(|p| s.contains(p)))
 }
 // Explicit wrappers only: never recurse into arbitrary user content.
+pub(super) fn has_error(value: &Value) -> bool {
+    envelope(value, false, 0).is_some()
+}
+
 pub(super) fn envelope(v: &Value, http_error: bool, depth: usize) -> Option<&Value> {
     if depth > 5
         || v.get("success") == Some(&Value::Bool(true))
@@ -940,6 +945,7 @@ fn retry_after_fields(error: &Value) -> Option<std::time::Duration> {
         .max();
     relative.max(absolute.map(Duration::from_secs)).max(nested)
 }
+#[cfg(test)]
 pub(super) fn retry_after_http(bytes: &[u8]) -> Option<std::time::Duration> {
     let value = serde_json::from_slice::<Value>(bytes).ok()?;
     retry_after_fields(envelope(&value, true, 0)?)
@@ -992,6 +998,7 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
     }
     .sanitized()
 }
+#[cfg(test)]
 pub fn details_http(bytes: &[u8]) -> Details {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(v) => details_value(&v, true),
@@ -1240,9 +1247,7 @@ pub(super) fn inspect_match_headers(
     rules: &[super::failure_rules::Rule],
 ) -> (Details, Option<Source>, String) {
     let mut details = match status {
-        Some(status) => {
-            http_with_rules(status, headers, &serde_json::to_vec(value).unwrap(), rules).0
-        }
+        Some(status) => http_value_with_rules(status, headers, value, rules).0,
         None => details_with_headers(value, headers, rules).0,
     };
     // The live decision treats retryable HTTP failures without a finer basis as service failures.

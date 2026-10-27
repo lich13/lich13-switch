@@ -16,8 +16,9 @@ pub mod models;
 pub mod official;
 mod selection;
 pub use models::ModelMapping;
+#[cfg(test)]
 pub use selection::current;
-pub use selection::{profile_states, ProfileCurrent};
+pub use selection::{status, ProfileCurrent};
 mod batch;
 pub mod editor;
 mod overlays;
@@ -1212,12 +1213,13 @@ impl Gateway {
                 }),
             make_default: snapshot.as_ref().is_none_or(|s| s.options.make_default),
             current: current.clone(),
-            states: profile_states(
+            states: status(
                 home,
                 &store,
                 &[self.0.registry.listener.view()?.port],
                 &|name| std::env::var(name).ok(),
-            ),
+            )
+            .1,
             warning: if home.join("config.yaml").is_file() && !home.join("profiles").is_dir() {
                 Some("仅发现旧 config.yaml，请先通过 DSH 升级；不会自动迁移".into())
             } else {
