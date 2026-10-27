@@ -107,7 +107,7 @@ fn files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
     }
     Ok(())
 }
-fn line(reader: &mut BufReader<File>) -> Result<Option<Vec<u8>>> {
+fn line(reader: &mut BufReader<File>) -> Result<Option<(Option<Value>, bool)>> {
     let mut projector = crate::gateway::metadata::Projector::default();
     let mut length = 0u64;
     let mut newline = false;
@@ -133,25 +133,18 @@ fn line(reader: &mut BufReader<File>) -> Result<Option<Vec<u8>>> {
         return Ok(None);
     }
     match projector.finish() {
-        Some(value) => serde_json::to_vec(&value)
-            .map(|mut bytes| {
-                if newline {
-                    bytes.push(b'\n');
-                }
-                Some(bytes)
-            })
-            .map_err(|_| failure("会话元数据无效")),
+        Some(value) => Ok(Some((Some(value), newline))),
         None if !newline => Ok(None), // A partially appended line is retried next scan.
-        None => Ok(Some(vec![b'\n'])),
+        None => Ok(Some((None, true))),
     }
 }
 fn meta(path: &Path) -> Result<(Option<String>, Option<String>, Option<i64>)> {
     let mut reader = BufReader::new(File::open(path).map_err(storage::io_error)?);
     for _ in 0..16 {
-        let Some(bytes) = line(&mut reader)? else {
+        let Some((value, _)) = line(&mut reader)? else {
             break;
         };
-        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        let Some(v) = value else {
             continue;
         };
         if v["type"] == "session_meta" {
@@ -208,8 +201,8 @@ fn has_counters(v: &Value) -> bool {
 fn parent_prefix(path: &Path, cutoff: i64) -> Result<Vec<String>> {
     let mut reader = BufReader::new(File::open(path).map_err(storage::io_error)?);
     let mut signatures = Vec::new();
-    while let Some(bytes) = line(&mut reader)? {
-        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+    while let Some((value, _)) = line(&mut reader)? {
+        let Some(v) = value else {
             continue;
         };
         if v["type"] == "event_msg"
@@ -380,14 +373,14 @@ pub fn sync(
             let mut rows = BTreeMap::<String, Record>::new();
             let batch_start = c.offset;
             while rebuild || c.offset - batch_start < 64 * 1024 * 1024 {
-                let Some(bytes) = line(&mut reader)? else {
+                let Some((value, newline)) = line(&mut reader)? else {
                     break;
                 };
-                let complete_tail = bytes.last() != Some(&b'\n');
+                let complete_tail = !newline;
                 if !complete_tail {
                     c.offset = reader.stream_position().map_err(storage::io_error)?;
                 }
-                let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+                let Some(v) = value else {
                     if rebuild {
                         return Err(failure("会话重建遇到无效完整行，已保留原数据"));
                     }

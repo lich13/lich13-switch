@@ -309,7 +309,9 @@ describe("event log", () => {
     await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => {
       const [, args] = eventCalls().at(-1)!;
-      expect(args).toEqual({ filter: { page: 2, from: null, to: null } });
+      expect(args).toEqual({
+        filter: { origin: "upstream", page: 2, from: null, to: null },
+      });
     });
 
     act(() => mock.listeners.get("app-visibility")?.(false));
@@ -423,8 +425,10 @@ describe("event log", () => {
     const user = userEvent.setup();
     render(<EventLog />);
     await screen.findByRole("button", { name: /模型不支持/ });
-    await user.click(screen.getByRole("button", { name: "清空日志" }));
-    expect(mock.confirm).toHaveBeenCalledWith("清空全部异常日志？");
+    await user.click(screen.getByRole("button", { name: "清空全部日志" }));
+    expect(mock.confirm).toHaveBeenCalledWith(
+      "清空全部日志（上游报错与网关内部）？",
+    );
     await waitFor(() =>
       expect(mock.command).toHaveBeenCalledWith("clear_app_events"),
     );
@@ -457,4 +461,136 @@ it("queries providers only on mount and keeps event names through filtering and 
     await screen.findByRole("option", { name: "Renamed fixture" }),
   ).toBeInTheDocument();
   expect(eventCalls()).toHaveLength(initial + 2);
+});
+
+it("separates origins, resets pagination, and hides policy actions for internal causes", async () => {
+  const user = userEvent.setup();
+  const internal: EventRecord = {
+    ...record,
+    id: "internal",
+    reason: "circuit_open",
+    origin: "gateway",
+    details: { upstreamCode: "overloaded_error", errorBasis: "service_error" },
+  };
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(async (name, args) => {
+    if (name === "get_app_events")
+      return {
+        items: args.filter.origin === "gateway" ? [internal] : [record],
+        total: 51,
+        page: args.filter.page,
+        error: null,
+      };
+    if (name === "get_app_event")
+      return args.id === "internal" ? internal : record;
+    return original(name, args);
+  });
+  const open = vi.fn();
+  render(<EventLog onOpenPolicy={open} />);
+  expect(
+    await screen.findByRole("button", { name: "查看策略" }),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "下一页" }));
+  await user.click(screen.getByRole("tab", { name: "网关内部" }));
+  await waitFor(() =>
+    expect(eventCalls().at(-1)?.[1]).toEqual({
+      filter: { origin: "gateway", page: 1, from: null, to: null },
+    }),
+  );
+  const detail = await screen.findByRole("button", {
+    name: "上游服务异常",
+  });
+  expect(
+    screen.queryByRole("button", { name: "查看策略" }),
+  ).not.toBeInTheDocument();
+  await user.click(detail);
+  const dialog = await screen.findByRole("dialog");
+  expect(
+    within(dialog).queryByRole("button", { name: "查看策略" }),
+  ).not.toBeInTheDocument();
+  expect(
+    within(dialog).queryByRole("button", { name: "加入故障规则" }),
+  ).not.toBeInTheDocument();
+});
+
+it("opens the internal tab and clears incompatible filters when a gateway event is focused", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<EventLog />);
+  await screen.findByRole("button", { name: /模型不支持/ });
+  await user.selectOptions(screen.getByLabelText("类别"), "ordinary_error");
+  eventRecords = [{ ...record, reason: "network", origin: "gateway" }];
+  rerender(
+    <EventLog
+      focus={{
+        id: record.id,
+        clientId: "codex",
+        providerId: null,
+        sequence: 1,
+      }}
+    />,
+  );
+  await screen.findByRole("dialog", { name: "连接失败" });
+  expect(screen.getByRole("tab", { name: "网关内部" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await waitFor(() => {
+    const args = eventCalls().at(-1)?.[1];
+    expect(args).toEqual({
+      filter: expect.objectContaining({ origin: "gateway" }),
+    });
+    expect(args.filter.category).toBeUndefined();
+  });
+});
+
+it("refreshes within 250ms even while events keep arriving", async () => {
+  vi.useFakeTimers();
+  try {
+    const { unmount } = render(<EventLog />);
+    await act(async () => {});
+    const initial = eventCalls().length;
+    for (let tick = 0; tick < 9; tick++) {
+      await act(async () => {
+        mock.listeners.get("app-event")?.({ record });
+        vi.advanceTimersByTime(100);
+      });
+    }
+    expect(eventCalls().length).toBe(initial + 3);
+    unmount();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("keeps each client's latest gateway event when initial snapshots arrive late", async () => {
+  let resolveInitial!: (value: unknown) => void;
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation((name, args) =>
+    name === "get_gateway" && args.clientId === "codex"
+      ? new Promise((resolve) => {
+          resolveInitial = resolve;
+        })
+      : original(name, args),
+  );
+  render(<EventLog />);
+  await screen.findByRole("button", { name: /模型不支持/ });
+  act(() =>
+    mock.listeners.get("gateway-state")?.({
+      clientId: "codex",
+      providers: [{ id: "provider-1", name: "Fresh Provider" }],
+    }),
+  );
+  await act(async () =>
+    resolveInitial({
+      clientId: "codex",
+      providers: [{ id: "provider-1", name: "Old Provider" }],
+    }),
+  );
+  expect(
+    screen.getByRole("cell", { name: /Fresh Provider/ }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Old Provider")).not.toBeInTheDocument();
+  expect(
+    screen.getAllByRole("option", { name: "Fixture Provider" }).length,
+  ).toBeGreaterThan(0);
 });

@@ -85,7 +85,7 @@ pub struct Search {
 }
 #[derive(Clone, Default)]
 struct State {
-    index: Option<Index>,
+    index: Option<Arc<Index>>,
     version: Option<String>,
     error: Option<String>,
     attempted: Option<Instant>,
@@ -198,7 +198,7 @@ impl Catalog {
         });
         let state = match loaded {
             Ok((index, version)) => State {
-                index,
+                index: index.map(Arc::new),
                 version,
                 ..State::default()
             },
@@ -256,7 +256,7 @@ impl Catalog {
         state.attempted = Some(Instant::now());
         match result {
             Ok((index, version)) => {
-                state.index = Some(index);
+                state.index = Some(Arc::new(index));
                 state.version = Some(version);
                 state.error = None;
             }
@@ -271,7 +271,7 @@ impl Catalog {
     }
     pub fn metadata_from(&self, id: &str, source: Option<&str>) -> Option<Metadata> {
         let state = self.state.read().unwrap();
-        let (matches, basis) = resolve_source(state.index.as_ref()?, id, false, source)?;
+        let (matches, basis) = resolve_source(state.index.as_deref()?, id, false, source)?;
         let (_, first_id, first) = *matches.first()?;
         if matches.iter().any(|(_, _, m)| {
             m.name != first.name
@@ -322,7 +322,7 @@ impl Catalog {
     }
     pub fn price_from(&self, id: &str, source: Option<&str>) -> Option<(Value, String)> {
         let state = self.state.read().unwrap();
-        let (matches, basis) = resolve_source(state.index.as_ref()?, id, true, source)?;
+        let (matches, basis) = resolve_source(state.index.as_deref()?, id, true, source)?;
         let (_, source_model, first) = *matches.first()?;
         let cost = first.cost.as_ref()?;
         if matches
@@ -739,6 +739,26 @@ mod tests {
         )
         .unwrap();
         Catalog::new(dir)
+    }
+    #[test]
+    fn frozen_prices_share_the_index_and_survive_catalog_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = |price| json!({"fixture":{"models":{"fixture-model":{"cost":{"input":price,"output":2}}}}});
+        let cat = catalog(dir.path(), source(1));
+        let frozen = cat.frozen();
+        assert!(Arc::ptr_eq(
+            cat.state.read().unwrap().index.as_ref().unwrap(),
+            frozen.state.read().unwrap().index.as_ref().unwrap()
+        ));
+        cat.state.write().unwrap().index = Some(Arc::new(crop(source(9)).unwrap()));
+        assert_eq!(
+            cat.price("fixture-model").unwrap().0["models_dev_cost"]["input"],
+            9
+        );
+        assert_eq!(
+            frozen.price("fixture-model").unwrap().0["models_dev_cost"]["input"],
+            1
+        );
     }
     #[test]
     fn identities_canonical_and_semantic_variants_do_not_mix_capabilities_or_prices() {

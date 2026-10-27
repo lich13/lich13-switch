@@ -618,6 +618,7 @@ export type CommandMap = {
   get_app_events: Call<
     {
       filter: {
+        origin?: import("./failure-policy-types").FailureOrigin | null;
         from?: number | null;
         to?: number | null;
         clientId?: ClientId | null;

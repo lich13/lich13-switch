@@ -896,12 +896,10 @@ describe("usage records", () => {
       screen.getByRole("combobox", { name: "用量供应商" }),
       "provider-final",
     );
-    fireEvent.change(screen.getByLabelText("计价模型筛选"), {
-      target: { value: "fixture-response-model" },
-    });
-    await waitFor(() =>
-      expect(lastFilter().model).toBe("fixture-response-model"),
-    );
+    expect(screen.queryByLabelText("计价模型筛选")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("用量来源")).not.toBeInTheDocument();
+    expect(lastFilter().model).toBeUndefined();
+    expect(lastFilter().source).toBeUndefined();
     await user.selectOptions(
       screen.getByRole("combobox", { name: "请求状态" }),
       "5xx",
@@ -911,7 +909,6 @@ describe("usage records", () => {
         page: 1,
         client: "codex",
         provider: "provider-final",
-        model: "fixture-response-model",
         status: "5xx",
       }),
     );
@@ -1480,7 +1477,7 @@ describe("usage navigation", () => {
     mock.confirm.mockResolvedValue(true);
     await import("./EventLog");
     await user.click(within(navigation).getByRole("button", { name: "日志" }));
-    await screen.findByRole("button", { name: "清空日志" });
+    await screen.findByRole("button", { name: "清空全部日志" });
     await waitFor(() =>
       expect(calls("get_app_events").length).toBeGreaterThan(0),
     );

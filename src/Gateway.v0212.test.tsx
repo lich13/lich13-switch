@@ -130,6 +130,7 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
   expect(
     screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" }),
   ).toHaveValue(300);
+  await user.click(screen.getByRole("tab", { name: "网关内部策略" }));
   expect(screen.getByRole("spinbutton", { name: "首字节 / 秒" })).toHaveValue(
     600,
   );

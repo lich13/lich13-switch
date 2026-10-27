@@ -1245,6 +1245,7 @@ pub(super) fn inspect_match_headers(
     status: Option<u16>,
     headers: &hyper::HeaderMap,
     rules: &[super::failure_rules::Rule],
+    catalog: &[super::failure_rules::Category],
 ) -> (Details, Option<Source>, String) {
     let mut details = match status {
         Some(status) => http_value_with_rules(status, headers, value, rules).0,
@@ -1288,11 +1289,11 @@ pub(super) fn inspect_match_headers(
                 .and_then(|e| strings(e).find(|s| message_kind(s) == Some(basis)))
                 .unwrap_or("")
                 .to_lowercase();
-            super::failure_rules::catalog()
-                .into_iter()
+            catalog
+                .iter()
                 .find(|c| c.category == basis)
                 .and_then(|c| {
-                    c.keywords.into_iter().find_map(|condition| {
+                    c.keywords.iter().find_map(|condition| {
                         let words: Option<Vec<_>> = condition
                             .all_of
                             .iter()

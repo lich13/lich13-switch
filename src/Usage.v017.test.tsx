@@ -258,63 +258,40 @@ it.each(["Escape", "blur"] as const)(
   },
 );
 
-it("applies source selection to totals and request pages and resets pagination", async () => {
+it("always uses deduplicated totals and pages and resets pages when the client changes", async () => {
   const user = userEvent.setup();
   render(<Usage />);
   await screen.findByText("fixture-model-all");
-  const source = screen.getByRole("combobox", { name: "用量来源" });
-  expect(source).toHaveValue("");
   expect(
-    within(source)
-      .getAllByRole("option")
-      .map((option) => option.textContent),
-  ).toEqual([
-    "请求统计（去重）",
-    "本网关",
-    "Codex / Claude 会话",
-    "Grok 轮次汇总（独立）",
-  ]);
+    screen.queryByRole("combobox", { name: "用量来源" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("计价模型筛选")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "下一页" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("get_usage_logs", {
       filter: expect.objectContaining({ page: 2 }),
     }),
   );
-  await user.selectOptions(source, "proxy");
-  await screen.findByText("fixture-model-proxy");
-  expect(mock.command).toHaveBeenCalledWith("get_usage_dashboard", {
-    filter: expect.objectContaining({ source: "proxy" }),
-  });
-  expect(mock.command).toHaveBeenCalledWith("get_usage_logs", {
-    filter: expect.objectContaining({ source: "proxy", page: 1 }),
-  });
-  await user.click(screen.getByRole("button", { name: "用量时间范围" }));
-  const range = screen.getByRole("dialog", { name: "选择时间范围" });
-  await user.selectOptions(
-    within(range).getByRole("combobox", { name: "用量时间范围" }),
-    "all",
+  await user.selectOptions(screen.getByLabelText("用量客户端"), "codex");
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith("get_usage_logs", {
+      filter: expect.objectContaining({ client: "codex", page: 1 }),
+    }),
   );
-  await user.click(within(range).getByRole("button", { name: "确定" }));
-  expect(
-    mock.command.mock.calls.filter(([name]) => name === "get_usage_heatmap"),
-  ).toHaveLength(0);
-  await user.selectOptions(source, "sessions");
-  await screen.findByText("fixture-model-sessions");
-  expect(mock.command).toHaveBeenCalledWith("get_usage_dashboard", {
-    filter: expect.objectContaining({ source: "sessions" }),
-  });
-  expect(mock.command).toHaveBeenCalledWith("get_usage_logs", {
-    filter: expect.objectContaining({ source: "sessions", page: 1 }),
-  });
-  await user.selectOptions(source, "");
-  await screen.findByText("fixture-model-all");
-  const latest = mock.command.mock.calls
-    .filter(([name]) => name === "get_usage_dashboard")
-    .at(-1)!;
-  expect((latest[1] as { filter: UsageFilter }).filter.source).toBeUndefined();
+  await user.click(screen.getByRole("tab", { name: "模型" }));
+  for (const [name, args] of mock.command.mock.calls) {
+    if (
+      ["get_usage_dashboard", "get_usage_logs", "get_usage_heatmap"].includes(
+        name,
+      )
+    ) {
+      expect(args.filter.source).toBeUndefined();
+      expect(args.filter.model).toBeUndefined();
+    }
+  }
 });
 
-it("does not let an older source response replace the current selection", async () => {
+it("does not let an older client response replace the current selection", async () => {
   const user = userEvent.setup();
   const original = mock.command.getMockImplementation()!;
   const pending: Array<() => void> = [];
@@ -322,7 +299,7 @@ it("does not let an older source response replace the current selection", async 
     (name: string, args: Record<string, unknown> = {}) => {
       const filter = args.filter as UsageFilter | undefined;
       if (
-        filter?.source === "sessions" &&
+        filter?.client === "codex" &&
         (name === "get_usage_dashboard" || name === "get_usage_logs")
       ) {
         return new Promise((resolve) =>
@@ -330,7 +307,7 @@ it("does not let an older source response replace the current selection", async 
             resolve(
               name === "get_usage_dashboard"
                 ? dashboard("sessions")
-                : page(filter),
+                : page({ ...filter, source: "sessions" }),
             ),
           ),
         );
@@ -340,16 +317,16 @@ it("does not let an older source response replace the current selection", async 
   );
   render(<Usage />);
   await screen.findByText("fixture-model-all");
-  const source = screen.getByRole("combobox", { name: "用量来源" });
-  await user.selectOptions(source, "sessions");
+  const client = screen.getByLabelText("用量客户端");
+  await user.selectOptions(client, "codex");
   await waitFor(() => expect(pending).toHaveLength(2));
-  await user.selectOptions(source, "proxy");
-  await screen.findByText("fixture-model-proxy");
+  await user.selectOptions(client, "claude");
+  await screen.findByText("fixture-model-all");
   await act(async () => {
     for (const resolve of pending) resolve();
   });
-  expect(source).toHaveValue("proxy");
-  expect(screen.getByText("fixture-model-proxy")).toBeInTheDocument();
+  expect(client).toHaveValue("claude");
+  expect(screen.getByText("fixture-model-all")).toBeInTheDocument();
   expect(screen.queryByText("fixture-model-sessions")).not.toBeInTheDocument();
 });
 
@@ -419,11 +396,7 @@ it("keeps the historical source limitation inside the data-sources drawer", asyn
         : original(name, args),
   );
   render(<Usage />);
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "用量来源" }),
-    "proxy",
-  );
-  await screen.findByText("fixture-model-proxy");
+  await screen.findByText("fixture-model-all");
   expect(
     screen.queryByText("部分历史汇总无法按来源拆分"),
   ).not.toBeInTheDocument();

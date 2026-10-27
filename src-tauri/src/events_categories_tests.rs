@@ -382,3 +382,70 @@ fn circuit_notification_uses_remaining_deadline_and_hides_untrusted_provider_tex
     let serialized = serde_json::to_value(&record).unwrap();
     assert!(serialized.get("notificationProvider").is_none());
 }
+
+#[tokio::test]
+async fn origins_filter_before_counting_and_paging_without_rewriting_history() {
+    use super::{ErrorBasis, Origin};
+    let temp = tempfile::tempdir().unwrap();
+    let service = Service::new(temp.path());
+    let mut changes = service.subscribe();
+    for index in 0..56 {
+        append(
+            &service,
+            &mut changes,
+            event(
+                &format!("upstream-{index}"),
+                Reason::UpstreamService,
+                Action::Returned,
+            ),
+        )
+        .await;
+    }
+    for reason in [Reason::Network, Reason::CircuitOpen] {
+        let mut record = event("internal-cause", reason, Action::Returned);
+        record.details.upstream_code = Some("overloaded_error".into());
+        record.details.error_basis = Some(ErrorBasis::ServiceError);
+        append(&service, &mut changes, record).await;
+    }
+    let mut unknown = event("legacy-unknown", Reason::ProtocolError, Action::Returned);
+    unknown.status = None;
+    append(&service, &mut changes, unknown).await;
+    let mut business = event("business-failure", Reason::Capacity, Action::Waiting);
+    business.status = Some(200);
+    business.details.error_basis = Some(ErrorBasis::Capacity);
+    let business_id = business.id.clone();
+    append(&service, &mut changes, business).await;
+    for (origin, total, page, count) in [
+        (Origin::Upstream, 57, 1, 50),
+        (Origin::Upstream, 57, 2, 7),
+        (Origin::Gateway, 3, 1, 3),
+    ] {
+        let rows = service.query(Filter {
+            origin: Some(origin),
+            page: Some(page),
+            ..Default::default()
+        });
+        assert_eq!(rows.total, total);
+        assert_eq!(rows.items.len(), count);
+        assert!(rows.items.iter().all(|r| r.origin == origin));
+    }
+    let detail = service.detail(&business_id).unwrap();
+    assert_eq!(serde_json::to_value(detail).unwrap()["origin"], "upstream");
+    let persisted = fs::read_to_string(temp.path().join("diagnostics.jsonl")).unwrap();
+    assert!(persisted
+        .lines()
+        .all(|line| serde_json::from_str::<serde_json::Value>(line)
+            .unwrap()
+            .get("origin")
+            .is_none()));
+    let restarted = Service::new(temp.path());
+    assert_eq!(
+        restarted
+            .query(Filter {
+                origin: Some(Origin::Gateway),
+                ..Default::default()
+            })
+            .total,
+        3
+    );
+}

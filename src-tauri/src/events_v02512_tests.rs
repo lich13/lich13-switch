@@ -254,3 +254,56 @@ async fn burst_preserves_each_change_merge_notification_and_clear_barrier() {
     assert_eq!(restored.query(Filter::default()).items[0].id, last.id);
     restored.clear().await.unwrap();
 }
+
+#[tokio::test]
+async fn duplicate_errors_merge_before_attachment_io_and_distinct_bodies_remain_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    let make = |body: &[u8]| {
+        let mut record = Record::new(
+            Some(ClientId::Codex),
+            Some(PROVIDER),
+            Some(MODEL),
+            Reason::Capacity,
+            Action::Waiting,
+            Some(200),
+            Some(1),
+        );
+        record.details.raw = Some(Arc::new(crate::event_raw::Raw::bytes(body, vec![], None)));
+        record
+    };
+    let first = make(b"fixture first complete error");
+    let first_id = first.id.clone();
+    service.emit(first);
+    assert!(changes.recv().await.unwrap().error.is_none());
+    let path = dir.path().join("diagnostic-errors");
+    let retained = dir.path().join("retained-errors");
+    std::fs::rename(&path, &retained).unwrap();
+    std::fs::write(&path, b"fixture write blocker").unwrap();
+    service.emit(make(b"fixture first complete error"));
+    let change = changes.recv().await.unwrap();
+    assert!(
+        change.error.is_none(),
+        "a duplicate must not write a new attachment"
+    );
+    let merged = change.record.unwrap();
+    assert_eq!(merged.id, first_id);
+    assert_eq!(merged.count, 2);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(&retained, &path).unwrap();
+    let second = make(b"fixture second complete error");
+    let second_id = second.id.clone();
+    service.emit(second);
+    assert!(changes.recv().await.unwrap().error.is_none());
+    assert_eq!(service.query(Filter::default()).total, 2);
+    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 2);
+    assert_eq!(
+        service.raw(&first_id).unwrap().unwrap().body,
+        "fixture first complete error"
+    );
+    assert_eq!(
+        service.raw(&second_id).unwrap().unwrap().body,
+        "fixture second complete error"
+    );
+}

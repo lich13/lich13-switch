@@ -270,3 +270,158 @@ fn lookup_uses_only_selected_clients_rules_and_never_writes() {
         before
     );
 }
+
+#[test]
+fn one_box_recognizes_combined_errors_and_preserves_json_business_codes() {
+    for query in [
+        "model_capacity_exceeded",
+        CAPACITY,
+        "model_capacity_exceeded: fixture busy",
+        "503 model_capacity_exceeded: fixture busy",
+        "HTTP/1.1 503 model_capacity_exceeded: fixture busy",
+        r#"503 {"error":{"code":"model_capacity_exceeded","message":"fixture busy"}}"#,
+        r#"{"success":false,"data":{"error":{"code":"model_capacity_exceeded","message":"fixture busy"}}}"#,
+    ] {
+        let found = lookup(
+            &Input {
+                query: Some(query.into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(found.category, Some(B::Capacity), "{query}");
+        assert_eq!(found.origin, Some(crate::events::Origin::Upstream));
+    }
+    for query in [
+        "fixture_unknown: fixture failure",
+        "unrecognized fixture message",
+        "fixtureunknown",
+    ] {
+        let found = lookup(
+            &Input {
+                query: Some(query.into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(found.category, None, "{query}");
+    }
+    let rules = [
+        rule(MatchKind::Keyword, "fixture window", B::Billing),
+        rule(MatchKind::Keyword, "window", B::Concurrency),
+    ];
+    let found = lookup(
+        &Input {
+            query: Some("429 fixture window".into()),
+            ..Default::default()
+        },
+        &rules,
+    )
+    .unwrap();
+    assert!(found.conflict);
+    assert_eq!(found.category, Some(B::UnknownRateLimit));
+}
+
+#[test]
+fn single_word_search_checks_keywords_without_losing_code_priority() {
+    let rules = [
+        rule(MatchKind::Keyword, "forbidden", B::Permission),
+        rule(MatchKind::Code, "fixture", B::Billing),
+        rule(MatchKind::Keyword, "fixture", B::Concurrency),
+    ];
+    for (query, expected, source) in [
+        ("forbidden", B::Permission, Source::CustomKeyword),
+        ("FORBIDDEN", B::Permission, Source::CustomKeyword),
+        ("fixture", B::Billing, Source::CustomCode),
+        ("fixture: forbidden", B::Billing, Source::CustomCode),
+        ("fixture forbidden", B::Billing, Source::CustomCode),
+        ("fixture：forbidden", B::Billing, Source::CustomCode),
+        ("overloaded", B::Capacity, Source::BuiltinMessage),
+        (
+            r#"{"error":{"message":"forbidden"}}"#,
+            B::Permission,
+            Source::CustomKeyword,
+        ),
+    ] {
+        let found = lookup(
+            &Input {
+                query: Some(query.into()),
+                ..Default::default()
+            },
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(found.category, Some(expected), "{query}");
+        assert_eq!(found.source, Some(source), "{query}");
+    }
+    // Explicit JSON codes must not be reinterpreted as messages.
+    let found = lookup(
+        &Input {
+            query: Some(r#"{"error":{"code":"forbidden"}}"#.into()),
+            ..Default::default()
+        },
+        &rules,
+    )
+    .unwrap();
+    assert!(found.custom_rule_id.is_none());
+}
+
+#[test]
+fn local_policies_use_a_separate_identity_and_do_not_reclassify_upstream_json() {
+    for (query, expected) in [
+        ("CONNECT_TIMEOUT", "connection"),
+        (
+            r#"{"error":{"type":"gpt_switch_gateway","code":"NETWORK","message":"fixture connection failed"}}"#,
+            "connection",
+        ),
+        (
+            r#"{"error":{"type":"gpt_switch_gateway","code":"CAPACITY","message":"等待队列已满"}}"#,
+            "admission",
+        ),
+        ("TLS_HANDSHAKE_FAILED: fixture failure", "tls"),
+        ("上游连接失败", "connection"),
+        ("STREAM_INTERRUPTED fixture closed", "stream"),
+        (
+            r#"{"error":{"type":"gpt_switch_gateway","code":"CONCURRENCY","message":"fixture busy"}}"#,
+            "admission",
+        ),
+        (
+            r#"503 {"error":{"type":"gpt_switch_gateway","code":"NO_PROVIDER","message":"fixture missing"}}"#,
+            "routing",
+        ),
+    ] {
+        let found = lookup(
+            &Input {
+                query: Some(query.into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            found.origin,
+            Some(crate::events::Origin::Gateway),
+            "{query}"
+        );
+        assert_eq!(found.policy_id, Some(expected), "{query}");
+        assert_eq!(found.category, None);
+    }
+    let found = lookup(
+        &Input {
+            query: Some(
+                r#"{"error":{"code":"CONNECT_TIMEOUT","message":"fixture upstream failure"}}"#
+                    .into(),
+            ),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
+    assert_ne!(found.origin, Some(crate::events::Origin::Gateway));
+    assert_eq!(found.policy_id, None);
+    let found = lookup(&Input { query: Some(r#"{"error":{"type":"gpt_switch_gateway","code":"FIXTURE_UNKNOWN","message":"fixture unknown"}}"#.into()), ..Default::default() }, &[]).unwrap();
+    assert_eq!(found.origin, Some(crate::events::Origin::Gateway));
+    assert_eq!(found.policy_id, None);
+}

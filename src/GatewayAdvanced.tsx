@@ -1,7 +1,20 @@
+import { command } from "./bridge";
 import FailurePolicyCatalog from "./FailurePolicyCatalog";
 import FailurePolicySearch from "./FailurePolicySearch";
-import type { FailureFocus } from "./failure-policy-types";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import type {
+  FailureFocus,
+  FailureCategory,
+  FailureOrigin,
+  FailureParameter,
+} from "./failure-policy-types";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   errorOf,
   type ClientId,
@@ -38,6 +51,31 @@ export default function Advanced({
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const [editing, setEditing] = useState(false);
   const [allOpen, setAllOpen] = useState(false);
+  const [catalog, setCatalog] = useState<FailureCategory[]>([]);
+  const [catalogError, setCatalogError] = useState("");
+  const [origin, setOrigin] = useState<FailureOrigin>("upstream");
+  const [highlight, setHighlight] = useState<FailureParameter[]>([]);
+  const selectedPolicy = useCallback(
+    (next: FailureOrigin, keys: FailureParameter[]) => {
+      setOrigin(next);
+      setHighlight(keys);
+      setAllOpen(true);
+    },
+    [],
+  );
+  useEffect(() => {
+    let active = true;
+    void command("get_failure_policy_catalog")
+      .then((items) => {
+        if (active) setCatalog(items ?? []);
+      })
+      .catch((e) => {
+        if (active) setCatalogError(errorOf(e).message);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   const policySection = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     if (focusFailure && policySection.current) {
@@ -60,8 +98,6 @@ export default function Advanced({
   ][] = [
     ["port", "共享本地端口"],
     ["endpointProbeSeconds", "端点测速间隔 / 秒"],
-    ["queueSeconds", "排队等待 / 秒"],
-    ["maxWaiting", "最多等待请求"],
     ...(clientId === "codex"
       ? [
           ["threadIdleReleaseSeconds", "线程空闲释放 / 秒"] as [
@@ -97,6 +133,8 @@ export default function Advanced({
         ["cooldownSeconds", "熔断等待 / 秒"],
         ["errorRate", "错误率阈值 (0–1)"],
         ["minRequests", "最小请求数"],
+        ["queueSeconds", "排队等待 / 秒"],
+        ["maxWaiting", "最多等待请求"],
         ["connectSeconds", "连接超时 / 秒"],
         ["firstByteSeconds", "首字节 / 秒"],
         ["idleSeconds", "流静默 / 秒"],
@@ -114,11 +152,19 @@ export default function Advanced({
   const fields = (
     items: [Exclude<keyof GatewaySettings, "customFailureRules">, string][],
   ) => (
-    <div className="settings-grid">
+    <div className="policy-parameters">
       {items.map(([key, label]) => (
-        <label key={key}>
-          {label}
+        <label
+          key={key}
+          className={
+            highlight.includes(key)
+              ? "policy-parameter is-relevant"
+              : "policy-parameter"
+          }
+        >
+          <span>{label.split(" / ")[0]}</span>
           <input
+            aria-label={label}
             form={formId}
             type="number"
             disabled={
@@ -167,6 +213,21 @@ export default function Advanced({
               setDraft({ ...draft, [key]: Number(e.target.value) });
             }}
           />
+          <span className="policy-unit">
+            {label.includes(" / 秒")
+              ? "秒"
+              : key === "maxWaiting"
+                ? "个"
+                : [
+                      "maxRetries",
+                      "failureThreshold",
+                      "transientFailureThreshold",
+                      "successThreshold",
+                      "minRequests",
+                    ].includes(key)
+                  ? "次"
+                  : ""}
+          </span>
         </label>
       ))}
     </div>
@@ -181,14 +242,8 @@ export default function Advanced({
           revision={revision}
           focus={focusFailure}
           consumed={onFailureHandled}
-          allOpen={allOpen}
-          fields={(keys) =>
-            fields(
-              groups
-                .flatMap((g) => g.fields)
-                .filter(([key]) => keys.includes(key)),
-            )
-          }
+          catalog={catalog}
+          onSelection={selectedPolicy}
         />
         <details
           className="failure-all"
@@ -196,19 +251,99 @@ export default function Advanced({
           onToggle={(e) => setAllOpen(e.currentTarget.open)}
         >
           <summary>全部规则与参数</summary>
-          {allOpen &&
-            groups.map((group) => (
-              <fieldset className="failure-policy-group" key={group.name}>
-                <legend>{group.name}</legend>
-                <FailurePolicyCatalog
-                  group={group.name}
-                  clientId={clientId}
-                  rules={settings.customFailureRules ?? []}
-                  revision={revision}
-                />
-                {fields(group.fields)}
-              </fieldset>
+          {catalogError && (
+            <div role="alert" className="form-error">
+              {catalogError}
+            </div>
+          )}
+          <div className="policy-tabs" role="tablist" aria-label="故障策略来源">
+            {(["upstream", "gateway"] as const).map((value) => (
+              <button
+                type="button"
+                role="tab"
+                key={value}
+                aria-selected={origin === value}
+                onClick={() => setOrigin(value)}
+              >
+                {value === "upstream" ? "上游报错策略" : "网关内部策略"}
+              </button>
             ))}
+          </div>
+          {allOpen && (
+            <>
+              <div
+                role="tabpanel"
+                aria-label={
+                  origin === "upstream" ? "上游报错策略" : "网关内部策略"
+                }
+              >
+                {origin === "upstream" ? (
+                  groups.map((group) => (
+                    <section className="failure-policy-group" key={group.name}>
+                      <h3>
+                        {group.name === "服务与网络故障"
+                          ? "服务与请求错误"
+                          : group.name}
+                      </h3>
+                      <FailurePolicyCatalog
+                        group={group.name}
+                        catalog={catalog.filter((c) => c.origin !== "gateway")}
+                        clientId={clientId}
+                        rules={settings.customFailureRules ?? []}
+                        revision={revision}
+                      />
+                      {group.name !== "服务与网络故障" && fields(group.fields)}
+                    </section>
+                  ))
+                ) : (
+                  <section className="failure-policy-group">
+                    <FailurePolicyCatalog
+                      catalog={catalog.filter((c) => c.origin === "gateway")}
+                      clientId={clientId}
+                      rules={[]}
+                      revision={revision}
+                    />
+                    {fields(
+                      groups
+                        .flatMap((g) => g.fields)
+                        .filter(([key]) =>
+                          [
+                            "queueSeconds",
+                            "maxWaiting",
+                            "connectSeconds",
+                            "firstByteSeconds",
+                            "idleSeconds",
+                            "websocketRetrySeconds",
+                          ].includes(key),
+                        ),
+                    )}
+                  </section>
+                )}
+              </div>
+              <section
+                className="failure-policy-group policy-shared"
+                aria-label="共享重试与熔断参数"
+              >
+                <h3>共享重试与熔断参数</h3>
+                {fields(
+                  groups
+                    .flatMap((g) => g.fields)
+                    .filter(([key]) =>
+                      [
+                        "maxRetries",
+                        "retryBudgetSeconds",
+                        "failureThreshold",
+                        "transientFailureThreshold",
+                        "successThreshold",
+                        "cooldownSeconds",
+                        "errorRate",
+                        "minRequests",
+                      ].includes(key),
+                    ),
+                )}
+              </section>
+            </>
+          )}
         </details>
       </details>
       <details className="advanced">

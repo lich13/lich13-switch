@@ -43,6 +43,7 @@ mod connector;
 mod diagnostic_test_support;
 mod endpoints;
 pub(crate) mod failover;
+mod failure_internal;
 pub mod failure_match;
 #[cfg(test)]
 mod failure_match_tests;

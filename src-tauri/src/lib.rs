@@ -947,8 +947,8 @@ fn get_gateway(
     r.gateway(client_id).try_view()
 }
 #[tauri::command]
-fn get_failure_policy_catalog() -> Vec<gateway::failure_rules::Category> {
-    gateway::failure_rules::catalog()
+fn get_failure_policy_catalog() -> Vec<gateway::failure_match::CatalogEntry> {
+    gateway::failure_match::catalog()
 }
 #[tauri::command]
 async fn match_failure_policy(

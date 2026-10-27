@@ -243,14 +243,61 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
   if (name === "get_failure_policy_catalog") return failureCatalogPreview;
   if (name === "match_failure_policy") {
     // Development samples only. Native lookups use the Rust classifier.
-    const input = args.input as FailureInput;
+    const input = { ...(args.input as FailureInput) };
+    let text = (input.rawResponse ?? input.query ?? "").trim();
+    const statusPrefix = text.match(
+      /^(?:HTTP\/(?:[\d.]+)\s+|HTTP\s+)?([1-5]\d{2})(?:[\s:：]+|$)/,
+    );
+    if (!input.rawResponse && statusPrefix) {
+      input.status ??= Number(statusPrefix[1]);
+      text = text.slice(statusPrefix[0].length).trim();
+    }
+    let explicit = false;
+    if (text) {
+      try {
+        let envelope = JSON.parse(text);
+        explicit = true;
+        for (let depth = 0; depth < 8; depth++) {
+          if (envelope.error) {
+            envelope = envelope.error;
+            break;
+          }
+          if (!envelope.data) break;
+          envelope = envelope.data;
+        }
+        input.code = envelope.code == null ? null : String(envelope.code);
+        input.message = envelope.message;
+        input.upstreamType = envelope.type;
+      } catch {
+        const parts = text.match(/^([A-Za-z0-9_.-]+)(?:[\s:：]+(.*))?$/s);
+        if (
+          parts &&
+          (!parts[2] ||
+            /[_ .]/.test(parts[1]) ||
+            parts[1] === parts[1].toUpperCase() ||
+            /^[:：]/.test(text.slice(parts[1].length)) ||
+            s.settings.customFailureRules?.some(
+              (rule) =>
+                rule.matchKind === "code" &&
+                rule.value.toLowerCase() === parts[1].toLowerCase(),
+            ))
+        ) {
+          input.code = parts[1];
+          input.message = parts[2] || parts[1];
+        } else input.message = text;
+      }
+    }
+    const local = input.upstreamType === "gpt_switch_gateway";
+    const catalog = failureCatalogPreview.filter((c) =>
+      c.origin === "gateway" ? local || !explicit : !local,
+    );
     const code = input.code?.trim().toLowerCase();
     const capacity = input.message?.toLowerCase().includes("at capacity");
     const category =
-      failureCatalogPreview.find((c) =>
-        c.codes.some((v) => v.value === code),
+      catalog.find((c) =>
+        c.codes.some((v) => v.value.toLowerCase() === code),
       ) ??
-      failureCatalogPreview.find(
+      catalog.find(
         (c) =>
           c.category ===
           (capacity
@@ -264,7 +311,16 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
                 : ""),
       );
     const result: FailureMatch = {
-      category: category?.category ?? null,
+      origin: local
+        ? "gateway"
+        : category
+          ? (category.origin ?? "upstream")
+          : null,
+      policyId: category?.policyId ?? null,
+      label: category?.label ?? null,
+      parsed: input,
+      category:
+        category?.origin === "gateway" ? null : (category?.category ?? null),
       source: category
         ? code
           ? "builtin_code"
@@ -283,7 +339,8 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       customRuleId: null,
       conflict: false,
       parameters:
-        category?.category === "capacity"
+        category?.parameters ??
+        (category?.category === "capacity"
           ? ["capacityRetrySeconds"]
           : category?.group === "限流与容量"
             ? ["rateLimitSeconds"]
@@ -291,9 +348,10 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
               ? ["hardFailureCooldownSeconds"]
               : category?.category === "service_error"
                 ? ["maxRetries", "transientFailureThreshold", "cooldownSeconds"]
-                : [],
+                : []),
       commonParameters:
         category &&
+        category.origin !== "gateway" &&
         !["invalid_request", "safety_rejection", "request_too_large"].includes(
           category.category,
         )
@@ -1321,3 +1379,90 @@ if (densePreview) {
   }));
   gatewayDemo.waitingRequests = 4;
 }
+
+// Internal policy samples use the same read-only catalog shape as native.
+failureCatalogPreview.push(
+  ...(
+    [
+      [
+        "connection",
+        "连接失败与连接超时",
+        "安全边界内原商重试",
+        ["CONNECTION_FAILED", "CONNECT_TIMEOUT", "NETWORK", "NETWORK_ERROR"],
+        ["connectSeconds"],
+      ],
+      [
+        "tls",
+        "TLS 与网关回环",
+        "返回错误，不按临时连接故障重试",
+        ["TLS_HANDSHAKE_FAILED", "TLS", "GATEWAY_LOOP"],
+        [],
+      ],
+      [
+        "first_byte",
+        "首字节与等待预算超时",
+        "超时后终止；已派发请求不重放",
+        ["FIRST_BYTE_TIMEOUT"],
+        ["firstByteSeconds", "retryBudgetSeconds"],
+      ],
+      [
+        "stream",
+        "流静默与交付中断",
+        "已交付内容不重放；未交付时遵守现有安全重试边界",
+        ["STREAM_TIMEOUT", "STREAM_INTERRUPTED"],
+        ["idleSeconds"],
+      ],
+      [
+        "websocket",
+        "WebSocket 断开等待",
+        "未交付且上下文安全时等待原商重连；已交付不重放",
+        ["WEBSOCKET", "WS_HANDSHAKE_TIMEOUT"],
+        ["websocketRetrySeconds"],
+      ],
+      [
+        "admission",
+        "本地准入与等待",
+        "遵守并发、RPM、队列与总等待预算",
+        [
+          "CONCURRENCY",
+          "CAPACITY",
+          "RPM_LIMIT",
+          "QUEUE",
+          "CIRCUIT_OPEN",
+          "RPM_LEDGER",
+        ],
+        ["queueSeconds", "maxWaiting"],
+      ],
+      [
+        "routing",
+        "路由与重放保护",
+        "无合格供应商或上下文不安全时返回原因",
+        ["NO_PROVIDER", "NO_ELIGIBLE_PROVIDER", "FAILOVER_EXHAUSTED"],
+        [],
+      ],
+      [
+        "lifecycle",
+        "停止与配置冲突",
+        "终止当前操作或重新读取配置后重试",
+        [
+          "STOPPED",
+          "GATEWAY_STOPPED",
+          "CANCELLED",
+          "CONFIG_CONFLICT",
+          "LOCAL_AUTH",
+        ],
+        [],
+      ],
+    ] as const
+  ).map(([id, label, action, codes, parameters]) => ({
+    origin: "gateway" as const,
+    category: id,
+    policyId: id,
+    label,
+    action,
+    group: "网关内部",
+    codes: codes.map((value) => ({ value, platform: "网关" })),
+    conditions: [],
+    parameters: [...parameters],
+  })),
+);

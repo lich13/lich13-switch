@@ -139,6 +139,12 @@ pub enum Category {
     CircuitError,
     Status,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    Upstream,
+    Gateway,
+}
 /// Query-only classification. Persisted records keep their original schema.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +152,7 @@ pub struct ClassifiedRecord {
     #[serde(flatten)]
     pub record: Record,
     pub category: Category,
+    pub origin: Origin,
 }
 impl std::ops::Deref for ClassifiedRecord {
     type Target = Record;
@@ -248,6 +255,30 @@ impl Record {
                 )
                 || routing.outcome == RoutingOutcome::SaveFailed
         })
+    }
+    pub fn origin(&self) -> Origin {
+        let response_error = matches!(
+            self.reason,
+            Reason::ModelUnavailable
+                | Reason::Authentication
+                | Reason::UpstreamService
+                | Reason::RateLimit
+                | Reason::Capacity
+                | Reason::ProtocolError
+        );
+        if response_error
+            && !(self.level == Level::Info && self.details.quota_check.is_some())
+            && (self.details.raw_error.is_some()
+                || self.details.raw.is_some()
+                || self.details.upstream_code.is_some()
+                || self.details.upstream_type.is_some()
+                || self.status.is_some_and(|s| s >= 400)
+                || (self.status.is_some() && self.details.error_basis.is_some()))
+        {
+            Origin::Upstream
+        } else {
+            Origin::Gateway
+        }
     }
     fn merge_seconds(&self) -> u64 {
         if self.reason == Reason::RequestInterrupted {
@@ -399,6 +430,15 @@ impl Record {
         )
     }
     fn same(&self, other: &Self) -> bool {
+        if self.client_id != other.client_id
+            || self.provider_id != other.provider_id
+            || self.model != other.model
+            || self.reason != other.reason
+            || self.status != other.status
+            || self.action != other.action
+        {
+            return false;
+        }
         let mut details = self.details.clone();
         let mut other_details = other.details.clone();
         details.last_progress_ms = None;
@@ -411,13 +451,7 @@ impl Record {
         if let Some(raw) = &mut other_details.raw_error {
             raw.id.clear();
         }
-        self.client_id == other.client_id
-            && self.provider_id == other.provider_id
-            && self.model == other.model
-            && self.reason == other.reason
-            && self.status == other.status
-            && self.action == other.action
-            && details == other_details
+        details == other_details
     }
 }
 fn safe_id(s: &str) -> Option<String> {
@@ -476,6 +510,7 @@ pub struct Service {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Filter {
+    pub origin: Option<Origin>,
     pub from: Option<u64>,
     pub to: Option<u64>,
     pub client_id: Option<ClientId>,
@@ -627,14 +662,9 @@ impl Service {
                     match job {
                         Job::Append(r) => {
                             let mut r = *r;
-                            if let Some(raw) = r.details.raw.take() {
-                                let mut reference = raw.reference(&r.id);
-                                if raw.save(&raw_path, &r.id).is_err() {
-                                    reference.incomplete = Some("错误原文保存失败".into());
-                                    journal.error =
-                                        Some("错误原文保存失败，请检查文件权限与空间".into());
-                                }
-                                r.details.raw_error = Some(reference);
+                            let raw = r.details.raw.take();
+                            if let Some(raw) = &raw {
+                                r.details.raw_error = Some(raw.reference(&r.id));
                                 // Only the list preview is shortened. Matching and the drawer read the attachment.
                                 for value in [
                                     &mut r.details.message,
@@ -695,18 +725,6 @@ impl Service {
                                 old.same(&r)
                                     && r.last_at.saturating_sub(old.first_at) < r.merge_seconds()
                             }) {
-                                if let Some(raw) = &r.details.raw_error {
-                                    if old
-                                        .details
-                                        .raw_error
-                                        .as_ref()
-                                        .is_none_or(|previous| previous.id != raw.id)
-                                    {
-                                        let _ = std::fs::remove_file(
-                                            raw_path.join(format!("{}.error", raw.id)),
-                                        );
-                                    }
-                                }
                                 old.last_at = r.last_at;
                                 old.count = old.count.saturating_add(1);
                                 old.status = r.status;
@@ -723,6 +741,15 @@ impl Service {
                                     journal.aliases.pop_front();
                                 }
                             } else {
+                                if let Some(raw) = raw {
+                                    if raw.save(&raw_path, &r.id).is_err() {
+                                        if let Some(reference) = &mut r.details.raw_error {
+                                            reference.incomplete = Some("错误原文保存失败".into());
+                                        }
+                                        journal.error =
+                                            Some("错误原文保存失败，请检查文件权限与空间".into());
+                                    }
+                                }
                                 changed = Some(r.clone());
                                 journal.records.push_back(r);
                             }
@@ -817,6 +844,7 @@ impl Service {
             .iter()
             .filter(|r| {
                 r.visible()
+                    && f.origin.is_none_or(|v| r.origin() == v)
                     && r.last_at >= cutoff
                     && f.from.is_none_or(|t| r.last_at >= t)
                     && f.to.is_none_or(|t| r.first_at <= t)
@@ -839,6 +867,7 @@ impl Service {
                 .skip((page - 1) * 50)
                 .take(50)
                 .map(|r| ClassifiedRecord {
+                    origin: r.origin(),
                     record: r.clone(),
                     category: classify(r, &causes),
                 })
@@ -864,6 +893,7 @@ impl Service {
             .iter()
             .find(|r| r.visible() && r.id == target && r.last_at >= cutoff)
             .map(|r| ClassifiedRecord {
+                origin: r.origin(),
                 record: r.clone(),
                 category: classify(r, &causes),
             })

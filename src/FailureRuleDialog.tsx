@@ -9,11 +9,13 @@ export default function FailureRuleDialog({
   initial,
   close,
   saved,
+  catalog: providedCatalog,
 }: {
   clientId: ClientId;
   initial?: Partial<FailureRule>;
   close: () => void;
   saved?: (state: GatewayState) => void;
+  catalog?: FailureCategory[];
 }) {
   const [rule, setRule] = useState<FailureRule>(() => ({
     id: crypto.randomUUID(),
@@ -30,12 +32,14 @@ export default function FailureRuleDialog({
   useEffect(() => {
     let active = true;
     void Promise.all([
-      command("get_failure_policy_catalog"),
+      providedCatalog
+        ? Promise.resolve(providedCatalog)
+        : command("get_failure_policy_catalog"),
       command("get_gateway", { clientId }),
     ])
       .then(([items, state]) => {
         if (!active) return;
-        setCatalog(items);
+        setCatalog(items.filter((c) => c.origin !== "gateway"));
         setRevision(state.revision);
         setReady(true);
       })
@@ -45,7 +49,7 @@ export default function FailureRuleDialog({
     return () => {
       active = false;
     };
-  }, [clientId]);
+  }, [clientId, providedCatalog]);
   return (
     <Modal
       compact

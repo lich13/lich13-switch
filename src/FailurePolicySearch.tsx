@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { command } from "./bridge";
 import { errorOf, type ClientId } from "./types";
 import type {
@@ -8,6 +8,7 @@ import type {
   FailureMatch,
   FailureParameter,
   FailureRule,
+  FailureOrigin,
 } from "./failure-policy-types";
 import FailurePolicyCatalog from "./FailurePolicyCatalog";
 import FailureRuleDialog from "./FailureRuleDialog";
@@ -16,58 +17,40 @@ const sources = {
   builtin_code: "内置错误码",
   builtin_type: "内置错误类型",
   builtin_message: "内置关键词",
-  builtin_condition: "内置判断条件",
+  builtin_condition: "判断条件",
   custom_code: "自定义错误码",
   custom_keyword: "自定义关键词",
   status: "HTTP 状态或业务状态",
 };
-
 export default function FailurePolicySearch({
   clientId,
   rules,
   revision,
   focus,
   consumed,
-  fields,
-  allOpen,
+  catalog,
+  onSelection,
 }: {
   clientId: ClientId;
   rules: FailureRule[];
   revision: string;
   focus?: FailureFocus | null;
   consumed?: () => void;
-  fields: (keys: FailureParameter[]) => ReactNode;
-  allOpen: boolean;
+  catalog: FailureCategory[];
+  onSelection?: (origin: FailureOrigin, keys: FailureParameter[]) => void;
 }) {
   const [input, setInput] = useState<FailureInput>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [status, setStatus] = useState("");
   const [recorded, setRecorded] = useState<string | null>(null);
   const [result, setResult] = useState<FailureMatch | null>(null);
-  const [catalog, setCatalog] = useState<FailureCategory[]>([]);
   const [error, setError] = useState("");
-  const [catalogError, setCatalogError] = useState("");
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [ruleChange, setRuleChange] = useState(0);
   useEffect(() => {
-    let active = true;
-    void command("get_failure_policy_catalog")
-      .then((items) => {
-        if (active) setCatalog(items ?? []);
-      })
-      .catch((e) => {
-        if (active) setCatalogError(errorOf(e).message);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-  useEffect(() => {
     if (!focus) return;
     setInput(focus.input);
     setSelected(null);
-    setStatus(focus.input.status == null ? "" : String(focus.input.status));
     setRecorded(focus.recordedCategory ?? null);
     consumed?.();
   }, [focus, consumed]);
@@ -76,30 +59,13 @@ export default function FailurePolicySearch({
     setResult(null);
     setError("");
     setLoading(false);
-    if (status && (!/^\d{3}$/.test(status) || +status < 100 || +status > 599)) {
-      setError("HTTP 状态应为 100–599");
-      return;
-    }
     if (
-      !recorded &&
-      ![
-        input.query,
-        input.rawResponse,
-        input.eventId,
-        input.code,
-        input.message,
-        input.upstreamType,
-        input.upstreamReason,
-        status,
-      ].some((v) => v?.trim())
+      !Object.values(input).some((v) => (typeof v === "string" ? v.trim() : v))
     )
       return;
     setLoading(true);
     const timer = setTimeout(() => {
-      void command("match_failure_policy", {
-        clientId,
-        input: { ...input, status: status ? +status : null },
-      })
+      void command("match_failure_policy", { clientId, input })
         .then((match) => {
           if (active) setResult(match);
         })
@@ -114,118 +80,66 @@ export default function FailurePolicySearch({
       active = false;
       clearTimeout(timer);
     };
-  }, [clientId, input, status, revision, ruleChange, recorded]);
-  const change = (
-    key: "code" | "message" | "upstreamType" | "upstreamReason" | "parameter",
-    value: string,
-  ) => {
-    setInput((old) => ({
-      ...result?.parsed,
-      ...old,
-      eventId: undefined,
-      [key]: value,
-    }));
+  }, [clientId, input, revision, ruleChange]);
+  const displayed =
+    result?.candidates?.find((c) => c.category === selected) ?? result;
+  const origin = result?.origin ?? "upstream";
+  const key = result?.policyId ?? displayed?.category;
+  const category = catalog.find(
+    (c) => c.category === key && (c.origin ?? "upstream") === origin,
+  );
+  const label = (id: string) =>
+    catalog.find((c) => c.category === id)?.label ?? id;
+  useEffect(() => {
+    if (result && (displayed?.category || result.policyId))
+      onSelection?.(result.origin ?? "upstream", [
+        ...(displayed?.parameters ?? []),
+        ...(displayed?.commonParameters ?? []),
+      ]);
+  }, [result, displayed, onSelection]);
+  const clear = () => {
+    setInput({});
     setSelected(null);
     setRecorded(null);
     setResult(null);
+    setError("");
   };
-  const displayed =
-    result?.candidates?.find((c) => c.category === selected) ?? result;
-  const category = catalog.find((c) => c.category === displayed?.category);
-  const label = (key: string) =>
-    catalog.find((c) => c.category === key)?.label ?? key;
-  const hasParameters = !!(
-    displayed?.parameters.length || displayed?.commonParameters.length
-  );
+  const shown = input.eventId && result?.parsed ? result.parsed : input;
   return (
     <div className="failure-search">
-      <label className="failure-search-message">
-        搜索错误
-        <textarea
-          rows={3}
-          value={
-            input.query ??
-            input.rawResponse ??
-            input.message ??
-            input.code ??
-            result?.parsed?.message ??
-            result?.parsed?.code ??
-            ""
-          }
-          placeholder="输入 429、错误码、报错原文或 JSON"
-          onChange={(e) => {
-            setInput({ query: e.target.value });
-            setStatus("");
-            setRecorded(null);
-            setResult(null);
-            setSelected(null);
-          }}
-        />
-      </label>
-      <details className="failure-common">
-        <summary>结构化字段</summary>
-        <div className="failure-search-inputs">
-          <label>
-            HTTP 状态
-            <input
-              inputMode="numeric"
-              value={
-                status ||
-                (result?.parsed?.status == null
-                  ? ""
-                  : String(result.parsed.status))
-              }
-              maxLength={3}
-              placeholder="例如 200 或 429"
-              onChange={(e) => {
-                setStatus(e.target.value);
-                setInput((old) => ({
-                  ...result?.parsed,
-                  ...old,
-                  eventId: undefined,
-                }));
-                setRecorded(null);
-                setSelected(null);
-              }}
-            />
-          </label>
-          {(
-            [
-              ["code", "上游错误码"],
-              ["message", "报错原文"],
-              ["upstreamType", "上游错误类型"],
-              ["upstreamReason", "上游原因"],
-              ["parameter", "参数"],
-            ] as const
-          ).map(([key, label]) => (
-            <label key={key}>
-              {label}
-              <input
-                value={input[key] ?? result?.parsed?.[key] ?? ""}
-                onChange={(e) => change(key, e.target.value)}
-              />
-            </label>
-          ))}
-        </div>
-      </details>
-      <button
-        type="button"
-        className="text-button"
-        onClick={() => {
-          setInput({});
-          setSelected(null);
-          setStatus("");
-          setRecorded(null);
-          setResult(null);
-          setError("");
-        }}
-        disabled={!Object.values(input).some(Boolean) && !status}
-      >
-        清空
-      </button>
-      {(error || catalogError) && (
+      <div className="failure-search-box">
+        <label className="failure-search-message">
+          搜索错误
+          <textarea
+            rows={2}
+            value={
+              input.query ??
+              input.rawResponse ??
+              [shown.status, shown.code, shown.message]
+                .filter((v) => v != null && v !== "")
+                .join(" ")
+            }
+            placeholder="粘贴状态码、错误码或报错信息"
+            onChange={(e) => {
+              setInput({ query: e.target.value });
+              setRecorded(null);
+              setResult(null);
+              setSelected(null);
+            }}
+          />
+        </label>
+        <button
+          type="button"
+          className="text-button"
+          onClick={clear}
+          disabled={!Object.values(input).some(Boolean)}
+        >
+          清空
+        </button>
+      </div>
+      {error && (
         <div role="alert" className="form-error">
-          {error || catalogError}
+          {error}
         </div>
       )}
       {loading && <div role="status">正在匹配…</div>}
@@ -239,10 +153,27 @@ export default function FailurePolicySearch({
               自定义规则冲突，保留当前兜底结果
             </div>
           )}
-          <div className="failure-recorded">
-            当前判定：
-            {result.category ? label(result.category) : "信息不足，尚未匹配"}
+          <div className="failure-result-heading">
+            <strong>
+              {selected
+                ? `候选策略：${label(selected)}`
+                : `当前判定：${result.label ?? (result.category ? label(result.category) : result.policyId ? label(result.policyId) : "信息不足，尚未匹配")}`}
+            </strong>
+            {result.origin && (
+              <span className="failure-origin">
+                {origin === "gateway" ? "网关内部" : "上游报错"}
+              </span>
+            )}
           </div>
+          {selected && (
+            <div className="failure-recorded">
+              当前判定：
+              {result.label ??
+                (result.category
+                  ? label(result.category)
+                  : "信息不足，尚未匹配")}
+            </div>
+          )}
           {!!result.candidates?.length && (
             <details
               className="failure-common"
@@ -250,81 +181,63 @@ export default function FailurePolicySearch({
             >
               <summary>可能原因（{result.candidates.length}）</summary>
               <div className="failure-candidates">
-                {result.candidates.map((candidate) => (
+                {result.candidates.map((c) => (
                   <button
                     type="button"
                     className="secondary"
-                    key={candidate.category}
-                    aria-pressed={selected === candidate.category}
-                    onClick={() => setSelected(candidate.category)}
+                    key={c.category}
+                    aria-pressed={selected === c.category}
+                    onClick={() => setSelected(c.category)}
                   >
-                    {candidate.label} · {candidate.action}
+                    {c.label} · {c.action}
                   </button>
                 ))}
               </div>
             </details>
           )}
-          {displayed?.category ? (
+          {displayed?.category || result.policyId ? (
             <>
-              <h3>
-                {selected ? "候选策略：" : "网关分类："}
-                {category?.label ?? label(displayed.category)}
-              </h3>
               <dl className="failure-match-evidence">
                 <div>
-                  <dt>实际命中依据</dt>
+                  <dt>命中依据</dt>
                   <dd>
                     {result.source ? sources[result.source] : "—"}
                     {result.evidence && (
                       <>
                         {" "}
-                        · <code>{result.evidence}</code>
+                        <code>{result.evidence}</code>
                       </>
                     )}
                   </dd>
                 </div>
                 <div>
-                  <dt>处理策略</dt>
-                  <dd>{displayed.action}</dd>
+                  <dt>处理方式</dt>
+                  <dd>{displayed?.action ?? "—"}</dd>
                 </div>
               </dl>
-              <FailurePolicyCatalog
-                category={displayed.category}
-                catalog={catalog}
-                summaryLabel="匹配条件"
-                clientId={clientId}
-                rules={rules}
-                revision={revision}
-              />
-              {hasParameters ? (
-                <>
-                  <h4>当前客户端共享参数</h4>
-                  {!allOpen && (
-                    <>
-                      {fields(displayed.parameters)}
-                      {!!displayed.commonParameters.length && (
-                        <details className="failure-common">
-                          <summary>通用参数</summary>
-                          {fields(displayed.commonParameters)}
-                        </details>
-                      )}
-                    </>
-                  )}
-                </>
-              ) : (
-                <p>固定处理方式，无可调参数</p>
+              {category && (
+                <FailurePolicyCatalog
+                  category={category.category}
+                  catalog={catalog}
+                  summaryLabel="匹配条件"
+                  clientId={clientId}
+                  rules={rules}
+                  revision={revision}
+                />
               )}
             </>
           ) : (
             <>
               <p>未匹配到规则</p>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setAdding(true)}
-              >
-                加入故障规则
-              </button>
+              {result.origin !== "gateway" && (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setAdding(true)}
+                >
+                  加入故障规则
+                </button>
+              )}
             </>
           )}
         </section>
@@ -332,15 +245,16 @@ export default function FailurePolicySearch({
       {adding && (
         <FailureRuleDialog
           clientId={clientId}
+          catalog={catalog}
           initial={{
-            matchKind: (input.code ?? result?.parsed?.code)?.trim()
-              ? "code"
-              : "keyword",
+            matchKind:
+              (input.code ?? result?.parsed?.code) ? "code" : "keyword",
             value: (
-              input.code?.trim() ||
+              input.code ||
               result?.parsed?.code ||
-              input.message?.trim() ||
-              input.query?.trim() ||
+              input.message ||
+              result?.parsed?.message ||
+              input.query ||
               ""
             ).slice(0, 256),
           }}

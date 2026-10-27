@@ -381,7 +381,7 @@ impl Service {
         let mut launch = vec![];
         {
             let mut data = lock(&self.0.data);
-            let mut next = data.saved.clone();
+            let mut next_timing = data.saved.detection_timing.clone();
             let live: std::collections::HashSet<_> = candidates
                 .iter()
                 .filter(|p| !p.search_only)
@@ -402,7 +402,8 @@ impl Service {
                     || live.iter().any(|id| scope_key(client, id) == *key)
             });
             for provider in candidates.iter().filter(|p| !p.search_only) {
-                let config = next
+                let config = data
+                    .saved
                     .detection
                     .get(&scope_key(client, &provider.id))
                     .cloned()
@@ -427,8 +428,7 @@ impl Service {
                 });
                 let started = running.is_some_and(|j| j.started_at.is_some());
                 let queued = running.is_some() && !started;
-                let timing = next
-                    .detection_timing
+                let timing = next_timing
                     .entry(scope_key(client, &provider.id))
                     .or_default();
                 if suspended {
@@ -504,7 +504,9 @@ impl Service {
                     launch.push((provider.id.clone(), config));
                 }
             }
-            if next.detection_timing != data.saved.detection_timing {
+            if next_timing != data.saved.detection_timing {
+                let mut next = data.saved.clone();
+                next.detection_timing = next_timing;
                 self.save(&mut data, next)?;
             }
         }

@@ -1,5 +1,9 @@
 import FailureRuleDialog from "./FailureRuleDialog";
-import type { FailureFocus, ErrorResponse } from "./failure-policy-types";
+import type {
+  FailureFocus,
+  ErrorResponse,
+  FailureOrigin,
+} from "./failure-policy-types";
 import {
   limitLabel,
   rpmWaitLabel,
@@ -84,6 +88,7 @@ const categories = {
 
 export type EventRecord = {
   id: string;
+  origin?: FailureOrigin;
   firstAt: number;
   lastAt: number;
   count: number;
@@ -244,6 +249,26 @@ function reasonText(r: EventRecord) {
   if (r.details?.healthScope === "model") return "模型熔断";
   return r.details?.healthScope === "provider" ? "供应商熔断" : "熔断";
 }
+export function eventOrigin(r: EventRecord): FailureOrigin {
+  if (r.origin) return r.origin;
+  const response = [
+    "model_unavailable",
+    "authentication",
+    "upstream_service",
+    "rate_limit",
+    "capacity",
+    "protocol_error",
+  ].includes(r.reason);
+  return response &&
+    !(r.level === "info" && r.details?.quotaCheck) &&
+    (r.details?.rawError ||
+      r.details?.upstreamCode ||
+      r.details?.upstreamType ||
+      (r.status != null && r.status >= 400) ||
+      (r.status != null && r.details?.errorBasis))
+    ? "upstream"
+    : "gateway";
+}
 function category(r: EventRecord): keyof typeof categories {
   if (r.category) return r.category;
   if (r.details?.quotaCheck && r.level === "info") return "status";
@@ -383,6 +408,7 @@ export default function EventLog({
     from: "",
     to: "",
   });
+  const [origin, setOrigin] = useState<FailureOrigin>("upstream");
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -402,7 +428,12 @@ export default function EventLog({
     try {
       const event =
         (await command("get_app_event", { id: record.id })) ?? record;
-      if (request !== detailSequence.current || !event.clientId) return;
+      if (
+        request !== detailSequence.current ||
+        !event.clientId ||
+        eventOrigin(event) !== "upstream"
+      )
+        return;
       onOpenPolicy?.({
         clientId: event.clientId,
         recordedCategory: event.details?.errorBasis,
@@ -444,11 +475,18 @@ export default function EventLog({
       ...old,
       clientId: current.clientId,
       providerId: current.providerId ?? "",
+      reason: "",
+      category: "",
+      level: "",
+      statusGroup: "",
     }));
     setPage(1);
     void command("get_app_event", { id: current.id })
       .then((record) => {
-        if (record && request === detailSequence.current) setSelected(record);
+        if (record && request === detailSequence.current) {
+          setOrigin(eventOrigin(record));
+          setSelected(record);
+        }
       })
       .catch((e) => {
         if (request === detailSequence.current) setError(errorOf(e).message);
@@ -464,6 +502,7 @@ export default function EventLog({
       const result = await command("get_app_events", {
         filter: {
           ...filter,
+          origin,
           page,
           from: filters.from
             ? Math.floor(new Date(filters.from).getTime() / 1000)
@@ -480,7 +519,7 @@ export default function EventLog({
     } catch (e) {
       if (request === sequence.current) setError(errorOf(e).message);
     }
-  }, [filters, page]);
+  }, [filters, page, origin]);
 
   useEffect(() => {
     if (visible) void load();
@@ -505,16 +544,20 @@ export default function EventLog({
         return next;
       });
 
+    const received = new Set<ClientId>();
     for (const id of ["codex", "claude", "grok", "dsh", "agy"] as const)
       void command("get_gateway", { clientId: id })
         .then((s) => {
-          if (!disposed) accept(s);
+          if (!disposed && !received.has(id)) accept(s);
         })
         .catch(() => {});
 
     const watch = events.watch;
 
-    watch("gateway-state", accept);
+    watch("gateway-state", (s) => {
+      received.add(s.clientId);
+      accept(s);
+    });
     watch("app-visibility", setNativeVisible);
     const visibility = () =>
       setDocumentVisible(document.visibilityState !== "hidden");
@@ -529,11 +572,13 @@ export default function EventLog({
 
   useEffect(() => {
     const events = subscriptions((e) => setError(errorOf(e).message));
-    let timer: number;
+    let timer: number | undefined;
     events.watch("app-event", () => {
-      if (visible) {
-        window.clearTimeout(timer);
-        timer = window.setTimeout(() => void load(), 250);
+      if (visible && timer == null) {
+        timer = window.setTimeout(() => {
+          timer = undefined;
+          void load();
+        }, 250);
       }
     });
 
@@ -583,7 +628,7 @@ export default function EventLog({
   ];
 
   const clear = async () => {
-    if (!(await confirmAction("清空全部异常日志？"))) return;
+    if (!(await confirmAction("清空全部日志（上游报错与网关内部）？"))) return;
     setBusy(true);
     try {
       await command("clear_app_events");
@@ -612,13 +657,38 @@ export default function EventLog({
           </button>
           <button
             className="icon-button"
-            aria-label="清空日志"
+            aria-label="清空全部日志"
             disabled={busy}
             onClick={() => void clear()}
           >
             <Trash2 size={16} />
           </button>
         </div>
+      </div>
+      <div className="policy-tabs" role="tablist" aria-label="日志来源">
+        {(["upstream", "gateway"] as const).map((value) => (
+          <button
+            type="button"
+            role="tab"
+            key={value}
+            aria-selected={origin === value}
+            onClick={() => {
+              setOrigin(value);
+              setPage(1);
+              setFilters((old) => ({
+                ...old,
+                reason: "",
+                category: "",
+                level: "",
+                statusGroup: "",
+              }));
+              detailSequence.current++;
+              setSelected(null);
+            }}
+          >
+            {value === "upstream" ? "上游报错" : "网关内部"}
+          </button>
+        ))}
       </div>
       <div className="event-filters">
         <label>
@@ -809,7 +879,7 @@ export default function EventLog({
                       </button>
                       {onOpenPolicy &&
                         r.clientId &&
-                        (r.level !== "info" || r.details?.errorBasis) && (
+                        eventOrigin(r) === "upstream" && (
                           <button
                             type="button"
                             className="text-button event-policy-link"
@@ -954,17 +1024,13 @@ function EventDetail({
           </button>
         </header>
         <div className="event-rule-actions">
-          {onOpenPolicy &&
+          {onOpenPolicy && r.clientId && eventOrigin(r) === "upstream" && (
+            <button className="secondary event-add-rule" onClick={onOpenPolicy}>
+              查看策略
+            </button>
+          )}
+          {eventOrigin(r) === "upstream" &&
             r.clientId &&
-            (r.level !== "info" || r.details?.errorBasis) && (
-              <button
-                className="secondary event-add-rule"
-                onClick={onOpenPolicy}
-              >
-                查看策略
-              </button>
-            )}
-          {r.clientId &&
             (r.details?.upstreamCode ||
               r.details?.message ||
               r.details?.upstreamType) && (

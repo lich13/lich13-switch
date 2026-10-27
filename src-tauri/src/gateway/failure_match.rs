@@ -1,5 +1,5 @@
 //! Read-only lookup using the same classifier as live requests.
-use super::{failure_policy, failure_rules, Gateway};
+use super::{failure_internal, failure_policy, failure_rules, Gateway};
 use crate::{
     errors::code,
     events::ErrorBasis,
@@ -50,11 +50,38 @@ pub enum Parameter {
     CooldownSeconds,
     ErrorRate,
     MinRequests,
+    ConnectSeconds,
+    FirstByteSeconds,
+    IdleSeconds,
+    WebsocketRetrySeconds,
+    QueueSeconds,
+    MaxWaiting,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum CatalogEntry {
+    Upstream(failure_rules::Category),
+    Gateway(failure_internal::Policy),
+}
+pub fn catalog() -> Vec<CatalogEntry> {
+    failure_rules::catalog()
+        .into_iter()
+        .map(CatalogEntry::Upstream)
+        .chain(
+            failure_internal::catalog()
+                .into_iter()
+                .map(CatalogEntry::Gateway),
+        )
+        .collect()
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Match {
+    pub origin: Option<crate::events::Origin>,
+    pub policy_id: Option<&'static str>,
+    pub label: Option<&'static str>,
     pub parsed: Input,
     pub candidates: Vec<Candidate>,
     pub category: Option<ErrorBasis>,
@@ -77,14 +104,44 @@ pub struct Candidate {
     pub common_parameters: Vec<Parameter>,
 }
 
+fn split_query(text: &str) -> (&str, &str) {
+    text.split_once(|c: char| c.is_whitespace() || c == ':' || c == '：')
+        .map(|(head, tail)| {
+            (
+                head,
+                tail.trim_start_matches(|c: char| {
+                    c.is_whitespace() || c == ':' || c == '：' || c == '-'
+                }),
+            )
+        })
+        .unwrap_or((text, ""))
+}
+
 impl Input {
-    fn parsed(&self) -> Result<(Self, Value, bool)> {
+    fn parsed(&self, rules: &[failure_rules::Rule]) -> Result<(Self, Value, bool)> {
         let mut parsed = self.clone();
         let query = self.query.as_deref().unwrap_or("").trim();
-        let raw = self
-            .raw_response
-            .as_deref()
-            .or_else(|| query.starts_with('{').then_some(query));
+        let text = query
+            .strip_prefix("HTTP/")
+            .and_then(|v| v.split_once(' ').map(|(_, tail)| tail))
+            .or_else(|| query.strip_prefix("HTTP "))
+            .unwrap_or(query);
+        let (head, tail) = split_query(text);
+        let status = head.parse::<u16>().ok().filter(|v| (100..=599).contains(v));
+        let text = if self.raw_response.is_none() {
+            if let Some(status) = status {
+                parsed.status.get_or_insert(status);
+                tail
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+        let raw = self.raw_response.as_deref().or_else(|| {
+            (text.starts_with('{') || text.starts_with("data:") || text.starts_with("event:"))
+                .then_some(text)
+        });
         let explicit = raw.is_some();
         let mut value = if let Some(raw) = raw {
             serde_json::from_str(raw).unwrap_or_else(|_| {
@@ -107,20 +164,30 @@ impl Input {
         } else {
             Value::Null
         };
-        if raw.is_none() && !query.is_empty() {
-            if query.len() == 3 && query.bytes().all(|b| b.is_ascii_digit()) {
-                if parsed.status.is_none() {
-                    parsed.status = query.parse().ok();
-                }
-            } else if query
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
-            {
-                if parsed.code.is_none() {
-                    parsed.code = Some(query.into());
-                }
-            } else if parsed.message.is_none() {
-                parsed.message = Some(query.into());
+        if raw.is_none() && !text.is_empty() {
+            let (head, tail) = split_query(text);
+            let code_like = !head.is_empty()
+                && head
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+                && (tail.is_empty()
+                    || head.contains('_')
+                    || head.contains('.')
+                    || head.chars().all(|c| !c.is_ascii_lowercase())
+                    || text[head.len()..].starts_with(':')
+                    || text[head.len()..].starts_with('：')
+                    || rules.iter().any(|rule| {
+                        rule.match_kind == failure_rules::MatchKind::Code
+                            && rule.value.eq_ignore_ascii_case(head)
+                    }));
+            if code_like {
+                parsed.code.get_or_insert_with(|| head.into());
+                // A lone token may be a message; the classifier still checks codes first.
+                parsed
+                    .message
+                    .get_or_insert_with(|| if tail.is_empty() { head } else { tail }.into());
+            } else {
+                parsed.message.get_or_insert_with(|| text.into());
             }
         }
         if parsed.status.is_some_and(|s| !(100..=599).contains(&s)) {
@@ -181,10 +248,59 @@ impl Input {
 }
 
 pub(super) fn lookup(input: &Input, rules: &[failure_rules::Rule]) -> Result<Match> {
-    let (mut parsed, value, explicit) = input.parsed()?;
+    let (mut parsed, value, explicit) = input.parsed(rules)?;
+    let envelope = failure_policy::envelope(&value, parsed.status.is_some_and(|s| s >= 400), 0)
+        .unwrap_or(&value);
+    let gateway_envelope =
+        envelope.get("type").and_then(Value::as_str) == Some("gpt_switch_gateway");
+    let local_code = parsed
+        .code
+        .as_deref()
+        .or_else(|| envelope.get("code").and_then(Value::as_str));
+    let message = parsed
+        .message
+        .as_deref()
+        .or_else(|| envelope.get("message").and_then(Value::as_str))
+        .unwrap_or("");
+    let lower_message = message.to_lowercase();
+    let local = failure_internal::catalog().into_iter().find(|p| {
+        (gateway_envelope || !explicit)
+            && (local_code
+                .is_some_and(|code| p.codes.iter().any(|c| c.value.eq_ignore_ascii_case(code)))
+                || (!explicit
+                    && p.conditions
+                        .iter()
+                        .any(|condition| lower_message.contains(&condition.to_lowercase()))))
+    });
+    if gateway_envelope || local.is_some() {
+        parsed.code = local_code.map(str::to_owned);
+        parsed.message = (!message.is_empty()).then(|| message.to_owned());
+        parsed.raw_response = None;
+        parsed.headers = None;
+        return Ok(Match {
+            origin: Some(crate::events::Origin::Gateway),
+            policy_id: local.as_ref().map(|p| p.policy_id),
+            label: local.as_ref().map(|p| p.label),
+            evidence: parsed
+                .code
+                .clone()
+                .or_else(|| parsed.message.clone())
+                .unwrap_or_default(),
+            parsed,
+            candidates: vec![],
+            category: None,
+            source: local.as_ref().map(|_| Source::BuiltinCondition),
+            action: local.as_ref().map(|p| p.action),
+            custom_rule_id: None,
+            conflict: false,
+            parameters: local.map(|p| p.parameters).unwrap_or_default(),
+            common_parameters: vec![],
+        });
+    }
     let headers = crate::event_raw::header_map(parsed.headers.as_deref().unwrap_or_default());
+    let catalog = failure_rules::catalog();
     let (mut details, mut source, mut evidence) =
-        failure_policy::inspect_match_headers(&value, parsed.status, &headers, rules);
+        failure_policy::inspect_match_headers(&value, parsed.status, &headers, rules, &catalog);
     // A free-form search is not proof of a failed upstream request.
     if !explicit
         && details.error_basis == Some(ErrorBasis::ServiceError)
@@ -224,8 +340,8 @@ pub(super) fn lookup(input: &Input, rules: &[failure_rules::Rule]) -> Result<Mat
         && parsed.message.is_none()
         && parsed.upstream_type.is_none()
         && parsed.upstream_reason.is_none();
-    let candidates = failure_rules::catalog()
-        .into_iter()
+    let candidates = catalog
+        .iter()
         .filter(|c| {
             broad
                 || Some(c.category) == category
@@ -259,14 +375,20 @@ pub(super) fn lookup(input: &Input, rules: &[failure_rules::Rule]) -> Result<Mat
             }
         })
         .collect();
-    let action = failure_rules::catalog()
-        .into_iter()
+    let action = catalog
+        .iter()
         .find(|c| Some(c.category) == category)
         .map(|c| c.action);
     // Do not echo the whole attachment in search results.
     parsed.raw_response = None;
     parsed.headers = None;
     Ok(Match {
+        origin: category.map(|_| crate::events::Origin::Upstream),
+        policy_id: None,
+        label: catalog
+            .iter()
+            .find(|c| Some(c.category) == category)
+            .map(|c| c.label),
         parsed,
         candidates,
         category,

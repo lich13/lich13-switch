@@ -75,10 +75,6 @@ export default function Usage({
     [live, setLive] = useState(true);
   const [client, setClient] = useState(""),
     [provider, setProvider] = useState(""),
-    [source, setSource] = useState<"" | "proxy" | "sessions" | "grok_sessions">(
-      "",
-    ),
-    [model, setModel] = useState(""),
     [operation, setOperation] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
@@ -174,13 +170,11 @@ export default function Usage({
     return {
       start,
       end,
-      source: source || undefined,
       client: client || undefined,
       provider: provider || undefined,
-      model: model || undefined,
       operation: operation || undefined,
     };
-  }, [range, from, to, live, client, provider, model, source, operation]);
+  }, [range, from, to, live, client, provider, operation]);
   const loadOverview = useCallback(async () => {
     const id = ++sequence.current;
     setBusy(true);
@@ -309,7 +303,6 @@ export default function Usage({
     try {
       const detail = await command("get_usage_detail", {
         id: r.id,
-        source: source || undefined,
       });
       if (id === detailSequence.current) setSelected(detail);
     } catch (e) {
@@ -372,11 +365,7 @@ export default function Usage({
         </div>
       </header>
       <div className="usage-metrics">
-        <Metric
-          label="估算费用"
-          value={source === "grok_sessions" ? "—" : money(t?.cost)}
-          title={source === "grok_sessions" ? "轮次汇总不估算费用" : t?.cost}
-        />
+        <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
         <Metric
           label="已报告 Token"
           value={t ? compact(tokenTotal(t.tokens)) : "—"}
@@ -397,12 +386,6 @@ export default function Usage({
           title={firstTokenTitle(t)}
         />
       </div>
-      {source === "grok_sessions" && (
-        <p className="muted">
-          Grok
-          会话按用户轮次汇总，一轮可包含多次模型调用；此来源独立统计，不与网关请求相加。
-        </p>
-      )}
       <button
         disabled={countingInterruptions}
         onClick={async () => {
@@ -450,30 +433,6 @@ export default function Usage({
               {n}
             </option>
           ))}
-        </select>
-        <input
-          aria-label="计价模型筛选"
-          list="usage-models"
-          placeholder="计价模型"
-          value={model}
-          onChange={(e) => choose(setModel, e.target.value)}
-        />
-        <datalist id="usage-models">
-          {data?.models
-            .filter((m) => m.id !== "unknown")
-            .map((m) => (
-              <option key={m.id} value={m.id} />
-            ))}
-        </datalist>
-        <select
-          aria-label="用量来源"
-          value={source}
-          onChange={(e) => choose(setSource, e.target.value as typeof source)}
-        >
-          <option value="">请求统计（去重）</option>
-          <option value="proxy">本网关</option>
-          <option value="sessions">Codex / Claude 会话</option>
-          <option value="grok_sessions">Grok 轮次汇总（独立）</option>
         </select>
         <select
           aria-label="请求类型"
@@ -523,7 +482,7 @@ export default function Usage({
       )}
       <div className="usage-tabs" role="tablist" aria-label="用量明细">
         {[
-          ["requests", source === "grok_sessions" ? "轮次日志" : "请求日志"],
+          ["requests", "请求日志"],
           ["providers", "供应商"],
           ["models", "模型"],
           ["pricing", "定价"],
@@ -587,7 +546,6 @@ export default function Usage({
                 : id
           }
           kind={tab === "providers" ? "供应商" : "模型"}
-          nativeSummary={source === "grok_sessions"}
           view={rankings[tab]}
           onChange={(v) =>
             setRankings((previous) => ({ ...previous, [tab]: v }))
@@ -926,30 +884,24 @@ function Ranking({
   groups,
   name,
   kind,
-  nativeSummary,
   view,
   onChange,
 }: {
   groups: Group[];
   name: (id: string) => string;
   kind: string;
-  nativeSummary: boolean;
   view: RankingView;
   onChange: (view: RankingView) => void;
 }) {
   const sorted = [...groups].sort((a, b) => {
     const value = (g: Group) =>
       view.sort === "cost"
-        ? nativeSummary
-          ? null
-          : Number(g.totals.cost)
+        ? Number(g.totals.cost)
         : view.sort === "tokens"
           ? tokenTotal(g.totals.tokens)
           : view.sort === "firstToken"
             ? averageFirstToken(g.totals)
-            : nativeSummary
-              ? g.totals.attempts
-              : g.totals.requests;
+            : g.totals.requests;
     const av = value(a),
       bv = value(b);
     if (av == null || bv == null)
@@ -965,7 +917,7 @@ function Ranking({
             <tr>
               <th>{kind}</th>
               {[
-                ["requests", nativeSummary ? "模型调用" : "请求"],
+                ["requests", "请求"],
                 ["tokens", "Token"],
                 ["cost", "费用"],
               ].map(([key, label]) => (
@@ -1020,16 +972,12 @@ function Ranking({
                 <tr key={id}>
                   <td title={name(id)}>{name(id)}</td>
                   <td>
-                    <NumberValue
-                      value={nativeSummary ? t.attempts : t.requests}
-                    />
+                    <NumberValue value={t.requests} />
                   </td>
                   <td>
                     <NumberValue value={tokenTotal(t.tokens)} />
                   </td>
-                  <td title={nativeSummary ? "轮次汇总不估算费用" : t.cost}>
-                    {nativeSummary ? "—" : money(t.cost)}
-                  </td>
+                  <td title={t.cost}>{money(t.cost)}</td>
                   <td>
                     {t.statusKnown
                       ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`

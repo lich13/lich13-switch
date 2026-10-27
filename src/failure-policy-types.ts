@@ -1,5 +1,6 @@
 import type { ClientId, GatewaySettings } from "./types";
 
+export type FailureOrigin = "upstream" | "gateway";
 export type FailureInput = {
   query?: string | null;
   rawResponse?: string | null;
@@ -18,6 +19,9 @@ export type FailureParameter = Exclude<
   "customFailureRules"
 >;
 export type FailureMatch = {
+  origin?: FailureOrigin | null;
+  policyId?: string | null;
+  label?: string | null;
   parsed?: FailureInput;
   candidates?: FailureCandidate[];
   category: string | null;
@@ -50,16 +54,19 @@ export type FailureRule = {
   category: string;
 };
 export type FailureCategory = {
+  origin?: FailureOrigin;
+  policyId?: string;
+  parameters?: FailureParameter[];
   category: string;
   label: string;
   group: string;
   action: string;
-  codes: { value: string; category: string; platform: string }[];
-  keywords: { allOf: string[][]; exact: boolean }[];
+  codes: { value: string; category?: string; platform: string }[];
+  keywords?: { allOf: string[][]; exact: boolean }[];
   protocols?: string[];
   excludedKeywords?: string[];
   conditions: string[];
-  statuses: string[];
+  statuses?: string[];
 };
 
 export type FailureCandidate = {

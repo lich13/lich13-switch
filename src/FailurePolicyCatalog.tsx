@@ -88,12 +88,12 @@ export default function FailurePolicyCatalog({
                   )}
                 </dl>
               )}
-              {c.keywords.length > 0 && (
+              {!!c.keywords?.length && (
                 <dl>
                   <div>
                     <dt>消息关键词</dt>
                     <dd>
-                      {c.keywords.map((condition, i) => (
+                      {c.keywords?.map((condition, i) => (
                         <div className="failure-keywords" key={i}>
                           {condition.exact && <span>完整匹配：</span>}
                           {condition.allOf.map((words, j) => (
@@ -127,7 +127,7 @@ export default function FailurePolicyCatalog({
                   </div>
                 </dl>
               )}
-              {!!c.keywords.length && !!c.excludedKeywords?.length && (
+              {!!c.keywords?.length && !!c.excludedKeywords?.length && (
                 <dl>
                   <div>
                     <dt>排除消息</dt>
@@ -139,11 +139,11 @@ export default function FailurePolicyCatalog({
                   </div>
                 </dl>
               )}
-              {c.statuses.length > 0 && (
+              {!!c.statuses?.length && (
                 <dl>
                   <div>
                     <dt>状态码兜底</dt>
-                    <dd>{c.statuses.join(" / ")}</dd>
+                    <dd>{c.statuses?.join(" / ")}</dd>
                   </div>
                 </dl>
               )}
@@ -186,19 +186,22 @@ export default function FailurePolicyCatalog({
                     </button>
                   </div>
                 ))}
-              <button
-                type="button"
-                className="text-button failure-add"
-                onClick={() => setEditing({ category: c.category })}
-              >
-                <Plus size={14} />
-                添加匹配条件
-              </button>
+              {c.origin !== "gateway" && (
+                <button
+                  type="button"
+                  className="text-button failure-add"
+                  onClick={() => setEditing({ category: c.category })}
+                >
+                  <Plus size={14} />
+                  添加匹配条件
+                </button>
+              )}
             </div>
           </details>
         ))}
       {editing && (
         <FailureRuleDialog
+          catalog={providedCatalog ?? catalog}
           clientId={clientId}
           initial={editing}
           close={() => setEditing(null)}

@@ -48,8 +48,7 @@ const searchProps = {
   clientId: "codex" as const,
   rules: [],
   revision: "r1",
-  allOpen: false,
-  fields: () => null,
+  catalog: failureCatalogPreview,
 };
 
 it("opens candidate parameters without changing the actual classification", async () => {
@@ -72,15 +71,15 @@ it("opens candidate parameters without changing the actual classification", asyn
         }
       : failureCatalogPreview,
   );
-  const fields = vi.fn(() => <span>容量参数</span>);
-  render(<Search {...searchProps} fields={fields} />);
+  const selected = vi.fn();
+  render(<Search {...searchProps} onSelection={selected} />);
   fireEvent.change(screen.getByLabelText("搜索错误"), {
     target: { value: "429" },
   });
   await user.click(await screen.findByRole("button", { name: /容量不足 ·/ }));
   expect(screen.getByText(/当前判定：/)).toHaveTextContent("未分类限流");
   expect(screen.getByText("候选策略：容量不足")).toBeInTheDocument();
-  expect(fields).toHaveBeenCalledWith(["capacityRetrySeconds"]);
+  expect(selected).toHaveBeenCalledWith("upstream", ["capacityRetrySeconds"]);
 });
 
 it("debounces unified search, accepts codes and text, and clears without lookup", async () => {
@@ -103,7 +102,6 @@ it("debounces unified search, accepts codes and text, and clears without lookup"
     clientId: "codex",
     input: {
       query: "model_capacity_exceeded",
-      status: null,
     },
   });
   fireEvent.click(screen.getByRole("button", { name: "清空" }));
@@ -125,13 +123,10 @@ it("debounces unified search, accepts codes and text, and clears without lookup"
     clientId: "codex",
     input: {
       query: "Selected model is at capacity.",
-      status: null,
     },
   });
-  fireEvent.change(screen.getByLabelText("HTTP 状态"), {
-    target: { value: "99" },
-  });
-  expect(screen.getByRole("alert")).toHaveTextContent("100–599");
+  expect(screen.getAllByRole("textbox")).toHaveLength(1);
+  expect(screen.queryByText("结构化字段")).not.toBeInTheDocument();
 });
 
 it("ignores responses after input changes, client changes, clear and unmount", async () => {
@@ -209,7 +204,7 @@ it("shows relevant controls only and preserves edits across searches and conflic
   const field = await screen.findByRole("spinbutton", {
     name: "容量错误等待 / 秒",
   });
-  expect(screen.queryByLabelText("限流基础等待 / 秒")).not.toBeInTheDocument();
+  expect(screen.getAllByLabelText("限流基础等待 / 秒")).toHaveLength(1);
   fireEvent.change(field, { target: { value: "120" } });
   mock.command.mockResolvedValueOnce({
     ...capacity,
@@ -270,8 +265,9 @@ it("preserves recorded classification, pre-fills log fields, and opens rule crea
       consumed={consumed}
     />,
   );
-  expect(screen.getByLabelText("上游错误码")).toHaveValue("fixture_unknown");
-  expect(screen.getByLabelText("HTTP 状态")).toHaveValue("429");
+  expect(screen.getByLabelText("搜索错误")).toHaveValue(
+    "429 fixture_unknown fixture failure",
+  );
   expect(await screen.findByText("未匹配到规则")).toBeInTheDocument();
   expect(screen.getByText("日志记录分类：请求频率 RPM")).toBeInTheDocument();
   expect(consumed).toHaveBeenCalledOnce();
@@ -303,7 +299,94 @@ it("displays conflicts and fixed policies without irrelevant editable parameters
     target: { value: "fixture conflict" },
   });
   expect(
-    await screen.findByText("固定处理方式，无可调参数"),
+    await screen.findByText("返回原因，不换商绕过", { selector: "dd" }),
   ).toBeInTheDocument();
   expect(screen.getByRole("alert")).toHaveTextContent("自定义规则冲突");
+});
+
+it("locates internal policies, shares one parameter form and retains the draft across tabs", async () => {
+  const user = userEvent.setup();
+  const save = vi.fn().mockResolvedValue(undefined);
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(async (name, args) =>
+    name === "match_failure_policy"
+      ? {
+          ...unmatched,
+          origin: "gateway",
+          policyId: "connection",
+          label: "连接失败与连接超时",
+          action: "安全边界内原商重试",
+          parameters: ["connectSeconds"],
+        }
+      : original(name, args),
+  );
+  render(
+    <Advanced
+      clientId="codex"
+      settings={gatewayDemo.settings}
+      revision="r1"
+      busy={false}
+      save={save}
+    />,
+  );
+  await user.click(screen.getByText("故障策略"));
+  fireEvent.change(screen.getByLabelText("搜索错误"), {
+    target: { value: "CONNECT_TIMEOUT" },
+  });
+  await screen.findByText("当前判定：连接失败与连接超时");
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "网关内部策略" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    ),
+  );
+  expect(screen.getAllByLabelText("等待与重试预算 / 秒")).toHaveLength(1);
+  fireEvent.change(screen.getByLabelText("连接超时 / 秒"), {
+    target: { value: "25" },
+  });
+  fireEvent.change(screen.getByLabelText("等待与重试预算 / 秒"), {
+    target: { value: "600" },
+  });
+  expect(
+    screen.queryByRole("button", { name: "添加匹配条件" }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "上游报错策略" }));
+  expect(screen.getAllByLabelText("等待与重试预算 / 秒")).toHaveLength(1);
+  expect(screen.getByLabelText("等待与重试预算 / 秒")).toHaveValue(600);
+  expect(screen.getByLabelText("搜索错误")).toHaveValue("CONNECT_TIMEOUT");
+  await user.click(screen.getByRole("tab", { name: "网关内部策略" }));
+  expect(screen.getByLabelText("连接超时 / 秒")).toHaveValue(25);
+  await user.click(screen.getByRole("button", { name: "保存参数" }));
+  expect(save).toHaveBeenLastCalledWith(
+    expect.objectContaining({ connectSeconds: 25, retryBudgetSeconds: 600 }),
+    "r1",
+  );
+  expect(
+    mock.command.mock.calls.filter(
+      ([name]) => name === "get_failure_policy_catalog",
+    ),
+  ).toHaveLength(1);
+});
+
+it("shows the parsed attachment preview but keeps its event ID as lookup evidence", async () => {
+  const parsed = {
+    status: 503,
+    code: "model_capacity_exceeded",
+    message: "fixture busy",
+  };
+  mock.command.mockResolvedValue({ ...capacity, parsed });
+  render(
+    <Search
+      {...searchProps}
+      focus={{ clientId: "codex", input: { eventId: "fixture-event" } }}
+    />,
+  );
+  await screen.findByText("当前判定：容量不足");
+  expect(screen.getByLabelText("搜索错误")).toHaveValue(
+    "503 model_capacity_exceeded fixture busy",
+  );
+  expect(mock.command).toHaveBeenCalledWith("match_failure_policy", {
+    clientId: "codex",
+    input: { eventId: "fixture-event" },
+  });
 });

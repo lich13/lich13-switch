@@ -315,6 +315,45 @@ describe("user workflows", () => {
     await waitFor(expectCurrentPlus);
   });
 
+  it("keeps current login progress when the initial login snapshot arrives late", async () => {
+    const user = userEvent.setup();
+    let resolveInitial!: (value: unknown) => void;
+    const original = mocks.command.getMockImplementation()!;
+    mocks.command.mockImplementation((name, args) =>
+      name === "get_login"
+        ? new Promise((resolve) => {
+            resolveInitial = resolve;
+          })
+        : original(name, args),
+    );
+    render(<App />);
+    act(() => mocks.listeners.get("switch-state")?.(state));
+    await user.click(screen.getByRole("button", { name: "添加账号" }));
+    act(() =>
+      mocks.listeners.get("login-state")?.({
+        phase: "waiting",
+        mode: "device",
+        url: null,
+        code: null,
+        message: "fixture active login",
+      }),
+    );
+    expect(screen.getByText("fixture active login")).toBeInTheDocument();
+    await act(async () =>
+      resolveInitial({
+        phase: "idle",
+        mode: "",
+        url: null,
+        code: null,
+        message: "",
+      }),
+    );
+    expect(screen.getByText("fixture active login")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "取消登录" }),
+    ).toBeInTheDocument();
+  });
+
   it("copies active device login values and keeps API-key accounts without a manual add option", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -808,7 +847,7 @@ it("navigates from an error log to its client's policy and consumes the navigati
   await user.click(await screen.findByRole("button", { name: "查看策略" }));
   await waitFor(() =>
     expect(screen.getByLabelText("搜索错误")).toHaveValue(
-      "Selected model is at capacity.",
+      "503 Selected model is at capacity.",
     ),
   );
   expect(screen.getByText("故障策略").closest("details")).toHaveAttribute(

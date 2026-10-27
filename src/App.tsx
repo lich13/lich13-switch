@@ -194,12 +194,13 @@ export default function App() {
   useEffect(() => {
     let disposed = false;
     let receivedAccountState = false;
+    let receivedLoginState = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
     void Promise.all([command("get_state"), command("get_login")])
       .then(([s, l]) => {
         if (!disposed) {
           if (!receivedAccountState) setState(s);
-          setLogin(l);
+          if (!receivedLoginState) setLogin(l);
           void command("frontend_ready").catch((e) =>
             setError(errorOf(e).message),
           );
@@ -272,7 +273,10 @@ export default function App() {
       setDirty(false);
       setFocusEvent({ ...p, sequence: Date.now() });
     });
-    events.watch("login-state", setLogin);
+    events.watch("login-state", (next) => {
+      receivedLoginState = true;
+      setLogin(next);
+    });
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const change = () => setSystemDark(media.matches);
     media.addEventListener("change", change);

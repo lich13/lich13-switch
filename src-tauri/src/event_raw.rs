@@ -71,7 +71,7 @@ impl Capture {
                 .map_err(|_| io::Error::other("error capture unavailable"))?;
             let mut writer = std::io::BufWriter::new(file);
             writer.write_all(&self.memory)?;
-            self.memory.clear();
+            self.memory = Vec::new();
             self.disk = Some(writer);
         }
         if let Some(writer) = &mut self.disk {
@@ -252,6 +252,20 @@ pub fn read(directory: &Path, id: &str) -> storage::Result<View> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spilling_keeps_all_chunks_and_releases_the_original_allocation() {
+        let mut capture = Capture::default();
+        capture.feed(&vec![b'a'; MEMORY]);
+        assert!(capture.memory.capacity() >= MEMORY);
+        capture.feed(b"fixture tail");
+        assert_eq!(capture.memory.capacity(), 0);
+        let raw = capture.finish(vec![], None);
+        let text = raw.text().unwrap();
+        assert_eq!(text.len(), MEMORY + b"fixture tail".len());
+        assert!(text.starts_with(&"a".repeat(MEMORY)));
+        assert!(text.ends_with("fixture tail"));
+        assert!(raw.reference("fixture").incomplete.is_none());
+    }
     #[test]
     fn spilled_json_remains_complete_and_reopen_respects_platform_file_lifetime() {
         let value = serde_json::json!({"error":{"message":"fixture".repeat(MEMORY / 7 + 1)}});

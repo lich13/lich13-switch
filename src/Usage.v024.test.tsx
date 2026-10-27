@@ -20,6 +20,7 @@ vi.mock("./bridge", () => ({
 }));
 
 import Usage from "./Usage";
+import Detail from "./UsageDetail";
 
 const timestamp = Date.UTC(2026, 9, 15, 2);
 const firstTokens: Tokens = {
@@ -186,93 +187,42 @@ function detailValue(dialog: HTMLElement, label: string): HTMLElement {
   return term.nextElementSibling as HTMLElement;
 }
 
-function estimatedCostValue(): HTMLElement {
-  const label = screen.getByText("估算费用", {
-    selector: ".usage-metric > span",
-  });
-  return label.nextElementSibling as HTMLElement;
-}
-
-it("filters Grok session summaries independently and labels their details", async () => {
-  const user = userEvent.setup();
-  render(<Usage />);
-
-  await screen.findByRole("table");
-  await waitFor(() =>
-    expect(estimatedCostValue()).not.toHaveTextContent(/^—$/),
+it("keeps historical Grok round details separate from request counts", async () => {
+  render(
+    <Detail
+      record={record}
+      name={() => "Fixture Provider"}
+      onClose={() => {}}
+    />,
   );
-  await user.selectOptions(screen.getByLabelText("用量客户端"), "grok");
-  await user.selectOptions(screen.getByLabelText("用量来源"), "grok_sessions");
-
-  expect(
-    screen.getByRole("option", { name: "Grok 轮次汇总（独立）" }),
-  ).toBeInTheDocument();
-  expect(screen.getByText(/Grok 会话按用户轮次汇总/)).toHaveTextContent(
-    "不与网关请求相加",
-  );
-  expect(screen.getByRole("tab", { name: "轮次日志" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  await waitFor(() => expect(estimatedCostValue()).toHaveTextContent(/^—$/));
-  expect(estimatedCostValue()).toHaveAttribute("title", "轮次汇总不估算费用");
-  await waitFor(() => {
-    expect(lastFilter("get_usage_dashboard")).toMatchObject({
-      client: "grok",
-      source: "grok_sessions",
-    });
-    expect(lastFilter("get_usage_logs")).toMatchObject({
-      client: "grok",
-      source: "grok_sessions",
-    });
-  });
-
-  const row = screen.getByRole("table").querySelector("tbody tr");
-  if (!row) throw new Error("用量列表缺少 Grok 会话 fixture");
-  const cells = row.querySelectorAll("td");
-  expect(row).toHaveAttribute(
-    "aria-label",
-    expect.stringContaining("轮次详情"),
-  );
-  expect(cells[0]).toHaveTextContent("多个模型（2）");
-  expect(cells[1]).toHaveTextContent("32");
-  expect(cells[1]).toHaveTextContent("90");
-  expect(cells[1]).toHaveTextContent("6");
-  expect(cells[1]).toHaveTextContent("8");
-  expect(cells[2]).toHaveTextContent("—");
-  await user.click(row);
   const dialog = await screen.findByRole("dialog", { name: "Grok 轮次详情" });
   expect(detailValue(dialog, "来源")).toHaveTextContent(/^Grok Build 会话$/);
   expect(detailValue(dialog, "轮次 ID")).toHaveTextContent(
     /^fixture-grok-session$/,
   );
   expect(detailValue(dialog, "模型调用")).toHaveTextContent(/^2$/);
-  const modelUsageHeading = screen.getByRole("heading", { name: "模型用量" });
-  expect(modelUsageHeading).toBeInTheDocument();
-  const modelUsage = modelUsageHeading.nextElementSibling as HTMLElement;
-  const aggregateCostLabel = within(modelUsage).getByText("估算费用", {
-    selector: "dt",
-  });
-  expect(aggregateCostLabel.nextElementSibling).toHaveTextContent(/—$/);
-  expect(mock.command).toHaveBeenCalledWith("get_usage_detail", {
-    id: "fixture-grok-session",
-    source: "grok_sessions",
-  });
+  const modelUsage = screen.getByRole("heading", { name: "模型用量" })
+    .nextElementSibling as HTMLElement;
+  expect(
+    within(modelUsage).getByText("估算费用", { selector: "dt" })
+      .nextElementSibling,
+  ).toHaveTextContent(/—$/);
 });
 
-it("ranks Grok model groups by model calls and leaves unknown fees blank", async () => {
+it("keeps Grok request rankings on deduplicated counts", async () => {
   const user = userEvent.setup();
   render(<Usage />);
 
   await screen.findByRole("table");
   await user.selectOptions(screen.getByLabelText("用量客户端"), "grok");
-  await user.selectOptions(screen.getByLabelText("用量来源"), "grok_sessions");
+  expect(screen.queryByLabelText("用量来源")).not.toBeInTheDocument();
   await waitFor(() => {
     expect(lastFilter("get_usage_dashboard")).toMatchObject({
       client: "grok",
-      source: "grok_sessions",
     });
   });
+  expect(lastFilter("get_usage_dashboard").source).toBeUndefined();
+  expect(lastFilter("get_usage_logs").source).toBeUndefined();
   await user.click(screen.getByRole("tab", { name: "模型" }));
 
   const table = await waitFor(() => {
@@ -291,7 +241,6 @@ it("ranks Grok model groups by model calls and leaves unknown fees blank", async
       return {
         model: cells[0]?.textContent?.trim(),
         count: cells[1]?.textContent?.trim(),
-        cost: cells[3]?.textContent?.trim(),
       };
     });
   const countLabel = countButton.textContent?.trim();
@@ -302,14 +251,14 @@ it("ranks Grok model groups by model calls and leaves unknown fees blank", async
   const sortedRows = rows();
 
   expect({ countLabel, initialRows, sortedRows }).toEqual({
-    countLabel: "模型调用",
+    countLabel: "请求",
     initialRows: [
-      { model: "fixture-grok-model-one", count: "2", cost: "—" },
-      { model: "fixture-grok-model-two", count: "1", cost: "—" },
+      { model: "fixture-grok-model-two", count: "1" },
+      { model: "fixture-grok-model-one", count: "0" },
     ],
     sortedRows: [
-      { model: "fixture-grok-model-two", count: "1", cost: "—" },
-      { model: "fixture-grok-model-one", count: "2", cost: "—" },
+      { model: "fixture-grok-model-one", count: "0" },
+      { model: "fixture-grok-model-two", count: "1" },
     ],
   });
 });

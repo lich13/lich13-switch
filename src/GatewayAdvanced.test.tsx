@@ -88,7 +88,7 @@ describe("gateway advanced settings", () => {
     expect(cooldown).toHaveValue(300);
     await user.clear(cooldown);
     await user.type(cooldown, "420");
-    await user.click(screen.getByText("高级设置"));
+    await user.click(screen.getByRole("tab", { name: "网关内部策略" }));
     const queue = screen.getByRole("spinbutton", { name: "排队等待 / 秒" });
     await user.clear(queue);
     await user.type(queue, "70");
@@ -108,8 +108,10 @@ describe("gateway advanced settings", () => {
       }),
       "original",
     );
-    expect(cooldown).toHaveValue(420);
-    expect(queue).toHaveValue(70);
+    await user.click(screen.getByRole("tab", { name: "上游报错策略" }));
+    expect(screen.getByLabelText("额度／认证冷却 / 秒")).toHaveValue(420);
+    await user.click(screen.getByRole("tab", { name: "网关内部策略" }));
+    expect(screen.getByLabelText("排队等待 / 秒")).toHaveValue(70);
     await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() =>
       expect(save).toHaveBeenLastCalledWith(
@@ -134,6 +136,7 @@ describe("gateway advanced settings", () => {
     expect(
       screen.queryByRole("checkbox", { name: "压缩后接管" }),
     ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "网关内部策略" }));
     const retry = screen.getByRole("spinbutton", {
       name: "WebSocket 断开等待 / 秒",
     });
