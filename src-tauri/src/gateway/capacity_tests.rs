@@ -144,7 +144,9 @@ async fn capacity_retries_exceed_old_budget_and_preserve_the_permanent_last_erro
     start(&g, &t).await;
     let original = br#"{ "model": "exact-ID", "input":["original"], "future": {"x": 7} }"#.to_vec();
     let response = tokio::time::timeout(
-        Duration::from_secs(10),
+        // This checks retry count and error preservation, not elapsed time. Six
+        // attempts include durable writes that can be slow on Windows CI.
+        Duration::from_secs(60),
         request(
             &g,
             "/v1/responses?future=keep",
