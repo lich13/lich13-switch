@@ -1,3 +1,4 @@
+import UsageBill from "./UsageBill";
 import Detail from "./UsageDetail";
 import Sources from "./UsageSources";
 import { date } from "./usage-format";
@@ -12,6 +13,7 @@ import type {
 } from "./bridge-contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Download,
   ArrowDown,
   ArrowUp,
   ChevronLeft,
@@ -69,6 +71,8 @@ export default function Usage({
 }: {
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const [billOpen, setBillOpen] = useState(false);
+  const [billResult, setBillResult] = useState("");
   const [range, setRange] = useState("today"),
     [from, setFrom] = useState(local(Date.now() - 86400000)),
     [to, setTo] = useState(local(Date.now())),
@@ -106,15 +110,15 @@ export default function Usage({
   };
   const pricingDirty = useRef(false);
   useEffect(() => {
-    onDirtyChange?.(sheet || pricingDirty.current);
+    onDirtyChange?.(sheet || billOpen || pricingDirty.current);
     return () => onDirtyChange?.(false);
-  }, [sheet, onDirtyChange]);
+  }, [sheet, billOpen, onDirtyChange]);
   const priceDirty = useCallback(
     (dirty: boolean) => {
       pricingDirty.current = dirty;
-      onDirtyChange?.(dirty || sheet);
+      onDirtyChange?.(dirty || sheet || billOpen);
     },
-    [onDirtyChange, sheet],
+    [onDirtyChange, sheet, billOpen],
   );
   const selectTab = async (next: string) => {
     if (
@@ -223,8 +227,13 @@ export default function Usage({
     }
   }, [request]);
   const load = useCallback(
-    () => Promise.all([loadOverview(), loadRows(), loadState()]),
-    [loadOverview, loadRows, loadState],
+    () =>
+      Promise.all([
+        loadOverview(),
+        ...(tab === "requests" ? [loadRows()] : []),
+        loadState(),
+      ]),
+    [loadOverview, loadRows, loadState, tab],
   );
   useEffect(() => {
     if (visible && nativeVisible) void loadOverview();
@@ -254,7 +263,6 @@ export default function Usage({
       command("get_gateway", { clientId: "claude" }),
       command("get_gateway", { clientId: "grok" }),
       command("get_gateway", { clientId: "dsh" }),
-      command("get_gateway", { clientId: "agy" }),
     ])
       .then((g) => {
         if (!gone)
@@ -344,6 +352,16 @@ export default function Usage({
             ))}
           </select>
           <button
+            disabled={busy || state?.syncing}
+            onClick={() => {
+              setBillResult("");
+              setBillOpen(true);
+            }}
+          >
+            <Download size={16} />
+            导出账单
+          </button>
+          <button
             className="icon-button"
             title="数据来源"
             aria-label="数据来源"
@@ -364,6 +382,11 @@ export default function Usage({
           </button>
         </div>
       </header>
+      {billResult && (
+        <p role="status" className="usage-bill-result">
+          {billResult}
+        </p>
+      )}
       <div className="usage-metrics">
         <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
         <Metric
@@ -420,7 +443,7 @@ export default function Usage({
           <option value="claude">Claude Code</option>
           <option value="grok">Grok Build</option>
           <option value="dsh">DeepSeek Harness</option>
-          <option value="agy">Antigravity CLI</option>
+          <option value="antigravity">Antigravity app</option>
         </select>
         <select
           aria-label="用量供应商"
@@ -559,6 +582,20 @@ export default function Usage({
           onClose={() => {
             detailSequence.current++;
             setSelected(null);
+          }}
+        />
+      )}
+      {billOpen && (
+        <UsageBill
+          start={query().start}
+          end={query().end}
+          close={() => setBillOpen(false)}
+          saved={(result) => {
+            setBillOpen(false);
+            setBillResult(
+              `已导出 ${numeric(result.requests)} 个请求、${numeric(result.attempts)} 次尝试，清理 ${numeric(result.cleaned)} 条明细${result.retained ? `，保留 ${numeric(result.retained)} 条更新记录` : ""}。${result.cleanupError ?? ""}`,
+            );
+            void load();
           }}
         />
       )}

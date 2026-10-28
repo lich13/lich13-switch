@@ -340,7 +340,7 @@ async fn refresh_failure_emits_an_ordinary_warning_without_notification() {
     let record = change
         .record
         .expect("refresh diagnostic omitted its record");
-    assert_eq!(record.client_id, Some(super::super::ClientId::Codex));
+    assert_eq!(record.client_id, Some(super::super::ClientId::Codex.into()));
     assert_eq!(record.provider_id.as_deref(), Some(provider.id.as_str()));
     assert_eq!(record.reason, crate::events::Reason::ConfigConflict);
     assert_eq!(record.action, crate::events::Action::Stopped);

@@ -120,12 +120,8 @@ impl Target {
         let incoming = path
             .parse()
             .map_err(|_| AppError::new(code::PROVIDER, "测试接口无效"))?;
-        let uri = if self.client_id == ClientId::Agy {
-            super::gemini::target(&self.base_url, &incoming)
-        } else {
-            forward::target(&self.base_url, &incoming)
-        }
-        .map_err(|_| AppError::new(code::PROVIDER, "测试接口地址无效"))?;
+        let uri = forward::target(&self.base_url, &incoming)
+            .map_err(|_| AppError::new(code::PROVIDER, "测试接口地址无效"))?;
         Ok(self.connection.query_uri(uri)?.to_string())
     }
     pub fn model(&self, requested: &str) -> String {
@@ -255,7 +251,6 @@ impl Gateway {
                 ClientId::Claude => "claude",
                 ClientId::Grok => "grok",
                 ClientId::Dsh => "dsh",
-                ClientId::Agy => "agy",
             },
             at,
         )
@@ -302,10 +297,6 @@ impl Gateway {
                 .cloned()
                 .unwrap_or_default(),
             ClientId::Codex => provider_protocol::Connection::default(),
-            ClientId::Agy => provider_protocol::Connection {
-                protocol: provider_protocol::Protocol::GeminiNative,
-                ..Default::default()
-            },
         };
         let mut headers = if self.client_id() == ClientId::Codex {
             state
@@ -319,13 +310,6 @@ impl Gateway {
                     )
                 })?
                 .headers(state.home.as_deref())?
-        } else if self.client_id() == ClientId::Agy {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::USER_AGENT,
-                header::HeaderValue::from_static("lich13-switch-provider-test"),
-            );
-            headers
         } else {
             let mut headers = HeaderMap::new();
             let user_agent = state

@@ -379,9 +379,7 @@ pub fn route(
         }
     }
     let client = matched.ok_or(RouteError::Unauthorized)?;
-    if ((path.starts_with("/v1beta/") || path.starts_with("/v1alpha/")) && client != ClientId::Agy)
-        || (client == ClientId::Agy && !super::gemini::accepts(path))
-    {
+    if path.starts_with("/v1beta/") || path.starts_with("/v1alpha/") {
         return Err(RouteError::NotFound);
     }
     if path.trim_end_matches('/') == "/alpha/search" && client != ClientId::Codex {

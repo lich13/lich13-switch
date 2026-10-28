@@ -100,7 +100,7 @@ fn notification_coalescing_keeps_client_provider_model_and_model_errors_separate
     let original = event(Reason::CircuitOpen, Action::Stopped);
     let original_key = key(&original);
     let mut other = original.clone();
-    other.client_id = Some(ClientId::Claude);
+    other.client_id = Some(ClientId::Claude.into());
     assert_ne!(key(&other), original_key);
     other = original.clone();
     other.provider_id = Some("fixture-other-provider".into());

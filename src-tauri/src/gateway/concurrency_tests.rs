@@ -734,7 +734,7 @@ pub(super) async fn response_ws_server(
                     let value: serde_json::Value = serde_json::from_slice(frame.payload()).unwrap();
                     if value["type"] == "response.create" {
                         observed.lock().unwrap().push(frame.payload().to_vec());
-                        ws.send(yawc::Frame::text("{\"type\":\"response.created\",\"response\":{\"id\":\"resp-fixture\"}}".to_string())).await.unwrap();
+                        ws.send(yawc::Frame::text("{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{\"id\":\"resp-fixture\"}}".to_string())).await.unwrap();
                         permits.acquire().await.unwrap().forget();
                         ws.send(yawc::Frame::binary(frame.into_payload())).await.unwrap();
                         ws.send(yawc::Frame::text("{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fixture\",\"unknown\":42}}".to_string())).await.unwrap();
@@ -802,7 +802,7 @@ async fn responses_websocket_releases_each_turn_preserves_compressed_payload_and
     assert!(ws_next(&mut first)
         .await
         .as_str()
-        .contains("response.created"));
+        .contains("response.output_text.delta"));
     assert_eq!(g.view().providers[0].active_requests, 1);
     let mut second = responses_client(&g).await;
     second
@@ -812,7 +812,7 @@ async fn responses_websocket_releases_each_turn_preserves_compressed_payload_and
     assert!(ws_next(&mut second)
         .await
         .as_str()
-        .contains("response.created"));
+        .contains("response.output_text.delta"));
     assert_eq!(g.view().providers[1].active_requests, 1);
     ra.add_permits(1);
     assert_eq!(ws_next(&mut first).await.payload(), payload.as_bytes());
@@ -830,7 +830,7 @@ async fn responses_websocket_releases_each_turn_preserves_compressed_payload_and
     assert!(ws_next(&mut first)
         .await
         .as_str()
-        .contains("response.created"));
+        .contains("response.output_text.delta"));
     assert_eq!(g.view().providers[0].active_requests, 1);
     ra.add_permits(1);
     assert_eq!(ws_next(&mut first).await.payload(), payload.as_bytes());

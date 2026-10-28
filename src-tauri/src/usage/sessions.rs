@@ -218,6 +218,9 @@ fn parent_prefix(path: &Path, cutoff: i64) -> Result<Vec<String>> {
     Ok(signatures)
 }
 pub trait Repository {
+    fn requires_complete_history(&self) -> bool {
+        false
+    }
     fn cursor(&self, id: &str) -> Result<Option<String>>;
     fn generation(&self, source: &str) -> Result<u64>;
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()>;
@@ -373,7 +376,13 @@ pub fn sync(
             let mut rows = BTreeMap::<String, Record>::new();
             let batch_start = c.offset;
             while rebuild || c.offset - batch_start < 64 * 1024 * 1024 {
+                let line_start = reader.stream_position().map_err(storage::io_error)?;
                 let Some((value, newline)) = line(&mut reader)? else {
+                    if store.requires_complete_history()
+                        && reader.stream_position().map_err(storage::io_error)? > line_start
+                    {
+                        return Err(failure("会话历史仍在写入，未导出、未清理，请稍后重试"));
+                    }
                     break;
                 };
                 let complete_tail = !newline;
@@ -401,6 +410,7 @@ pub fn sync(
                     for a in &mut r.attempts {
                         a.cost_multiplier = settings.multiplier.clone();
                         a.pricing_model = a.response_model.clone().or(a.requested_model.clone());
+                        a.pricing_basis = Some("estimated_import_snapshot".into());
                         a.price = (client != "grok")
                             .then(|| {
                                 pricing

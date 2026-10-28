@@ -681,7 +681,10 @@ async fn aliases_are_explicit_and_missing_prices_are_not_estimated() {
         .quote(Some("fixture-missing-output"), "1")
         .calculate(&tokens, None)
         .is_none());
-    assert!(exact.calculate(&tokens, Some("priority")).is_none());
+    assert_eq!(
+        exact.calculate(&tokens, Some("priority")).unwrap().cost,
+        "0.00006"
+    );
     assert!(exact
         .calculate(
             &Tokens {

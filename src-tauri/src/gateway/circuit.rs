@@ -506,7 +506,9 @@ impl Permit {
                     if let Some(cause) = self.failure_event.take() {
                         use crate::events::{Action, CircuitEvidence, Reason, Record};
                         let mut event = Record::new(
-                            cause.client_id,
+                            cause
+                                .client_id
+                                .and_then(crate::events::JournalClient::active),
                             cause.provider_id.as_deref(),
                             cause.model.as_deref(),
                             Reason::CircuitOpen,

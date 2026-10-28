@@ -44,7 +44,41 @@ beforeEach(() => {
   );
 });
 afterEach(() => localStorage.clear());
-it.each(["codex", "claude", "grok", "dsh", "agy"] as const)(
+it("keeps a newer hide event when the initial visibility read resolves late", async () => {
+  let finish!: (value: {
+    pinned: boolean;
+    tab: string;
+    visible: boolean;
+  }) => void;
+  const initial = new Promise<{
+    pinned: boolean;
+    tab: string;
+    visible: boolean;
+  }>((resolve) => {
+    finish = resolve;
+  });
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(
+    (name: string, args: Record<string, unknown> = {}) =>
+      name === "get_quick" ? initial : original(name, args),
+  );
+  render(<QuickPanel />);
+  await waitFor(() =>
+    expect(mock.listeners.has("panel-visibility")).toBe(true),
+  );
+  act(() => mock.listeners.get("panel-visibility")?.(false));
+  const reads = mock.command.mock.calls.filter(
+    ([name]) => name === "get_clamshell_state",
+  ).length;
+  await act(async () => {
+    finish({ pinned: false, tab: "providers", visible: true });
+    await initial;
+  });
+  expect(
+    mock.command.mock.calls.filter(([name]) => name === "get_clamshell_state"),
+  ).toHaveLength(reads);
+});
+it.each(["codex", "claude", "grok", "dsh"] as const)(
   "opens %s connection testing in the main window instead of endpoints",
   async (clientId) => {
     localStorage.setItem("lich13-switch.quick.client", clientId);
@@ -564,7 +598,7 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
       screen.queryByRole("button", { name: "Codex" }),
     ).not.toBeInTheDocument(),
   );
-  hiddenClients = ["codex", "claude", "grok", "dsh", "agy"];
+  hiddenClients = ["codex", "claude", "grok", "dsh"];
   act(() =>
     mock.listeners.get("quick-state")?.({
       pinned: false,

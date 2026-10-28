@@ -38,7 +38,7 @@ fn relay_cache_reasoning_and_ttl_keep_reported_units() {
     );
     assert_eq!(relay.tokens.input, Some(2));
     assert_eq!(relay.tokens.inclusive_input, None);
-    assert_eq!(relay.tokens.cache_write, Some(7));
+    assert_eq!(relay.tokens.cache_write, Some(1));
     assert!(relay.parse_incomplete);
     assert_eq!(relay.parse_reasons, ["cache_write_total_below_ttl_details"]);
     let mut mismatch = Meter::default();
@@ -65,7 +65,7 @@ fn relay_cache_reasoning_and_ttl_keep_reported_units() {
         1,
     );
     late.observe(&json!({"type":"message_delta","usage":{"cache_creation":{"ephemeral_1h_input_tokens":4},"output_tokens":5}}),2);
-    assert_eq!(late.tokens.cache_write, Some(7));
+    assert_eq!(late.tokens.cache_write, Some(3));
     assert!(late.parse_incomplete);
 }
 
@@ -90,7 +90,10 @@ fn speed_confirmation_is_independent_of_tier_and_requires_fast_rates() {
             json!({"input_cost_per_token_priority":"1","output_cost_per_token_priority":"2"}),
         ),
     };
-    assert!(quote.calculate(&a.tokens, a.price_tier()).is_none());
+    assert_eq!(
+        quote.calculate(&a.tokens, a.price_tier()).unwrap().cost,
+        "20"
+    );
     a.response_speed = Some("standard".into());
     assert_eq!(a.price_tier(), Some("priority"));
     assert_eq!(

@@ -1,5 +1,5 @@
 import { ErrorCodes } from "./error-codes";
-export type ClientId = "codex" | "claude" | "grok" | "dsh" | "agy";
+export type ClientId = "codex" | "claude" | "grok" | "dsh";
 export type Preferences = {
   codexHome: string;
   claudeHome?: string;
@@ -54,8 +54,9 @@ export type OfficialMode = {
   accountId: string | null;
   error: string | null;
 };
+export type ConfigClientId = ClientId | "antigravity";
 export type ConfigDocument = {
-  clientId: ClientId;
+  clientId: ConfigClientId;
   text: string;
   revision: string;
   path: string;

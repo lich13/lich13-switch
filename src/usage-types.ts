@@ -286,7 +286,7 @@ export type UsageState = {
   error: string | null;
 };
 export type ProviderPriceMapping = {
-  client: "codex" | "claude" | "grok" | "dsh" | "agy";
+  client: "codex" | "claude" | "grok" | "dsh";
   provider: string;
   enabled: boolean;
   matchOn: "request" | "response";
@@ -336,17 +336,19 @@ export const tokenTotal = (t: Tokens) =>
         0,
       );
 export const clientName = (c: string) =>
-  c === "agy"
-    ? "Antigravity CLI"
-    : c === "dsh"
-      ? "DSH"
-      : c === "codex"
-        ? "Codex"
-        : c === "claude"
-          ? "Claude Code"
-          : c === "grok"
-            ? "Grok Build"
-            : c;
+  c === "antigravity"
+    ? "Antigravity app"
+    : c === "agy"
+      ? "Antigravity CLI"
+      : c === "dsh"
+        ? "DSH"
+        : c === "codex"
+          ? "Codex"
+          : c === "claude"
+            ? "Claude Code"
+            : c === "grok"
+              ? "Grok Build"
+              : c;
 
 export function averageFirstToken(
   t: Pick<Totals, "firstTokenSumMs" | "firstTokenSamples"> | null | undefined,
@@ -364,3 +366,17 @@ export function firstTokenTitle(t: Totals | null | undefined): string {
     ? "无首字样本"
     : `${(ms / 1000).toFixed(3)}s · ${numeric(t?.firstTokenSamples)} 个有效样本`;
 }
+
+export type BillRequest = {
+  clients: string[];
+  start: number;
+  end: number;
+  timezone: string;
+};
+export type BillExport = {
+  requests: number;
+  attempts: number;
+  cleaned: number;
+  retained: number;
+  cleanupError: string | null;
+};

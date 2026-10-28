@@ -1,8 +1,22 @@
 use super::*;
 
 pub(super) fn migrate(value: &mut Value, gateways: &[Gateway]) -> Result<bool> {
+    let before = value.clone();
+    if let Some(jobs) = value.get_mut("jobs").and_then(Value::as_array_mut) {
+        jobs.retain(|job| job["clientId"] != "agy");
+    }
+    for field in [
+        "detection",
+        "detectionTiming",
+        "degraded",
+        "connectionPrompts",
+    ] {
+        if let Some(entries) = value.get_mut(field).and_then(Value::as_object_mut) {
+            entries.retain(|key, _| !key.starts_with("agy:") && !key.starts_with("Agy:"));
+        }
+    }
     if value["schema"] == 3 {
-        return Ok(false);
+        return Ok(*value != before);
     }
     migrate_v1(value, gateways)?;
     let prompts = value.get("connectionPrompts").cloned().unwrap_or(json!({}));

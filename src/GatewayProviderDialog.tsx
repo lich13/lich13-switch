@@ -203,11 +203,7 @@ export default function GatewayDialog({
             </label>
           )}
           <label>
-            {clientId === "agy"
-              ? "GOOGLE_GEMINI_BASE_URL"
-              : clientId === "claude"
-                ? "ANTHROPIC_BASE_URL"
-                : "base_url"}
+            {clientId === "claude" ? "ANTHROPIC_BASE_URL" : "base_url"}
             <input
               required
               type="url"
@@ -215,22 +211,20 @@ export default function GatewayDialog({
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               placeholder={
-                clientId === "claude" || clientId === "agy"
+                clientId === "claude"
                   ? "https://api.example.invalid"
                   : "https://api.example.com/v1"
               }
             />
           </label>
           <label>
-            {clientId === "agy"
-              ? "GEMINI_API_KEY"
-              : clientId === "claude"
-                ? "ANTHROPIC_AUTH_TOKEN"
-                : clientId === "grok" || clientId === "dsh"
-                  ? "api_key"
-                  : connectionMode === "apiKey"
-                    ? "OPENAI_API_KEY"
-                    : "experimental_bearer_token"}
+            {clientId === "claude"
+              ? "ANTHROPIC_AUTH_TOKEN"
+              : clientId === "grok" || clientId === "dsh"
+                ? "api_key"
+                : connectionMode === "apiKey"
+                  ? "OPENAI_API_KEY"
+                  : "experimental_bearer_token"}
             <span className="provider-token-input">
               <input
                 required={!dialog.item}

@@ -91,7 +91,7 @@ type ForwardFrame = (
     tokio::sync::oneshot::Sender<()>,
 );
 async fn usage_tail(
-    body: &mut Incoming,
+    body: &mut WireBody,
     protocol: &mut super::protocol::Protocol,
     shutdown: &mut Option<watch::Receiver<bool>>,
 ) {
@@ -389,19 +389,13 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 Ok(replay::RequestHints::default())
             };
-        let stream_hint = (gateway.client_id() == super::ClientId::Agy
-            && parts.uri.path().ends_with(":streamGenerateContent"))
-            || websocket
+        let stream_hint = websocket
             || hints.as_ref().is_ok_and(|h| h.stream)
             || parts
                 .headers
                 .get(header::ACCEPT)
                 .is_some_and(|h| h.as_bytes().windows(17).any(|w| w == b"text/event-stream"));
-        let mut model = if gateway.client_id() == super::ClientId::Agy {
-            super::gemini::model(parts.uri.path())
-        } else {
-            hints.as_ref().ok().and_then(|h| h.model.clone())
-        };
+        let mut model = hints.as_ref().ok().and_then(|h| h.model.clone());
         let compaction_trigger = hints.as_ref().is_ok_and(|h| h.compaction_trigger);
         let mut pinned = (mode == "manual").then(|| ids.first().cloned()).flatten();
         let mut unknown_affinity = false;
@@ -555,8 +549,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         };
         let usage_trace = if (matches!(requirement, Requirement::Resource)
             && operation != crate::usage::model::Operation::WebSearch)
-            || (gateway.client_id() == super::ClientId::Agy
-                && parts.uri.path().ends_with(":countTokens"))
         {
             None
         } else {
@@ -1796,7 +1788,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         .next()
                         .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
                 });
-            let (mut response_parts, mut body) = response.into_parts();
+            let (mut response_parts, body) = response.into_parts();
+            let mut body = body
+                .map_err(|error| Box::new(error) as BoxError)
+                .boxed_unsync();
             clean_headers(&mut response_parts.headers, false);
             let mut first_deadline = tokio::time::Instant::now()
                 + Duration::from_secs(settings.first_byte_seconds)
@@ -1804,13 +1799,16 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             if dedicated_search {
                 first_deadline = search_deadline;
             }
-            // Buffer only the first complete SSE event (or bounded JSON); preserve
+            // Buffer through initialization and heartbeats until effective output or a
+            // terminal outcome (or bounded JSON); preserve
             // the original frames and encoding exactly, including comments/trailers.
             let json = response_parts
                 .headers
                 .get(header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|v| v.to_ascii_lowercase().contains("json"));
+            let mut preinspected = false;
+            let mut inspected_bytes = 0u64;
             let mut prefix = Vec::new();
             let mut prefix_bytes = 0;
             let mut ended = false;
@@ -1849,16 +1847,62 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         if body.is_end_stream() {
                             ended = true;
                         }
+                        if !ended
+                            && (prefix_bytes >= 2 * 1024 * 1024 || prefix.len() >= 4096)
+                            && !protocol.search_content_observed()
+                            && protocol.terminal().is_none()
+                        {
+                            let frames = std::mem::take(&mut prefix);
+                            let mut observed = prefix_bytes;
+                            let captured = {
+                                let upstream = &mut body;
+                                let remainder = async_stream::try_stream! {
+                                    for (frame, _, _) in frames { yield frame; }
+                                    while let Some(frame) = upstream.frame().await { yield frame.map_err(std::io::Error::other)?; }
+                                };
+                                let mut remainder = StreamBody::new(Box::pin(remainder))
+                                    .map_err(|error: std::io::Error| error);
+                                Replay::capture_until(
+                                    &mut remainder,
+                                    gateway.0.spool.path(),
+                                    Some(Duration::from_secs(settings.idle_seconds)),
+                                    |bytes| {
+                                        if observed > 0 {
+                                            observed = observed.saturating_sub(bytes.len());
+                                        } else {
+                                            protocol.feed(bytes);
+                                        }
+                                        stream
+                                            && (protocol.search_content_observed()
+                                                || protocol.terminal().is_some())
+                                    },
+                                )
+                                .await
+                            };
+                            ended = body.is_end_stream();
+                            match captured {
+                                Ok(replay) => {
+                                    inspected_bytes = replay.length;
+                                    let mut buffered = replay.body();
+                                    let mut upstream = body;
+                                    body = StreamBody::new(async_stream::try_stream! {
+                                        while let Some(frame) = buffered.frame().await { yield frame?; }
+                                        while let Some(frame) = upstream.frame().await { yield frame?; }
+                                    }).boxed_unsync();
+                                    preinspected = true;
+                                }
+                                Err(_) => {
+                                    failed = true;
+                                    failure_kind = code::UPSTREAM_BODY;
+                                }
+                            }
+                            break;
+                        }
                         if ended
-                            || prefix_bytes >= 2 * 1024 * 1024
                             || (!stream && !json && !protocol.possible_bare_capacity())
                             || (stream
-                                && if dedicated_search {
-                                    protocol.search_content_observed()
-                                        || protocol.terminal().is_some()
-                                } else {
-                                    protocol.observation.first_event_model_error.is_some()
-                                })
+                                && (protocol.search_content_observed()
+                                    || protocol.terminal().is_some()))
                         {
                             break;
                         }
@@ -1964,11 +2008,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                 }
             }
-            let initial_model_error = if stream {
-                protocol.observation.first_event_model_error == Some(true)
-            } else {
-                ended && protocol.terminal() == Some(super::protocol::Terminal::ModelUnavailable)
-            };
+            let before_output = protocol.observation.meter.first_token_ms.is_none()
+                && !protocol.observation.search_content
+                && !protocol.observation.opaque_output;
+            let initial_model_error = before_output
+                && protocol.terminal() == Some(super::protocol::Terminal::ModelUnavailable);
             let initial_compact_error = protocol.observation.compaction_incompatible
                 && ownership.as_ref().is_some_and(|lease| {
                     lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
@@ -1982,29 +2026,21 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     retry_owner = Some(owner.clone());
                 }
             }
-            let initial_hard_rejection = if stream {
-                protocol.observation.first_event_account_error == Some(true)
-            } else {
-                ended && super::failure_policy::hard_rejection(&protocol.observation.error)
-            };
+            let policy =
+                super::failure_policy::decision(Some(status.as_u16()), &protocol.observation.error);
+            let initial_hard_rejection = before_output && policy.hard;
             if initial_hard_rejection {
                 hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
             }
-            let initial_capacity = !initial_hard_rejection
+            let initial_capacity = before_output
+                && !initial_hard_rejection
                 && !websocket
                 && !initial_model_error
-                && if stream {
-                    protocol.observation.first_event_capacity_error == Some(true)
-                } else {
-                    ended && protocol.observation.capacity_error
-                };
-            let initial_service_error = if stream {
-                protocol.observation.first_event_service_error == Some(true)
-            } else {
-                ended
-                    && protocol.observation.error.error_basis
-                        == Some(crate::events::ErrorBasis::ServiceError)
-            };
+                && policy.temporary;
+            let initial_service_error = before_output
+                && protocol.observation.error.error_basis
+                    == Some(crate::events::ErrorBasis::ServiceError);
+            let initial_other_error = before_output && !failed && protocol.explicit_failure();
             let wait_same = initial_capacity
                 && established_capacity_owner.as_deref() == Some(&route.provider.id);
             if initial_model_error
@@ -2012,6 +2048,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 || initial_compact_error
                 || initial_hard_rejection
                 || initial_service_error
+                || initial_other_error
             {
                 failover.failure(if initial_hard_rejection {
                     super::failover::Failure::AccountRejected
@@ -2019,6 +2056,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     super::failover::Failure::RateLimit
                 } else if initial_model_error {
                     super::failover::Failure::ModelUnavailable
+                } else if initial_service_error {
+                    super::failover::Failure::UpstreamService
                 } else {
                     super::failover::Failure::Protocol
                 });
@@ -2045,29 +2084,42 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     capacity_retry_after = capacity_retry_after.max(cooldown);
                 }
                 protocol.finish(Some(status.as_u16()), code::HTTP);
-                let will_retry = (dedicated_search
-                    && ids
-                        .iter()
-                        .any(|id| routes.get(id).is_some_and(|r| r.provider.search_only)))
-                    || routing::fallback_action(
-                        &gateway,
-                        &route.provider.id,
-                        ids.iter()
-                            .filter_map(|id| routes.get(id).cloned())
-                            .collect(),
-                        &requirement,
-                        parts.uri.path(),
-                        ownership.as_deref(),
-                        gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                        &wait_budget,
-                        mode != "manual"
-                            && pinned.is_none()
-                            && !unknown_affinity
-                            && ordinary_attempts <= settings.max_retries,
-                    ) == Action::TryingNext;
+                let retry_delay = if initial_service_error
+                    && !unknown_affinity
+                    && ordinary_attempts <= settings.max_retries
+                    && (pinned.as_deref() == Some(&route.provider.id)
+                        || ownership
+                            .as_ref()
+                            .is_some_and(|lease| lease.owns(&route.provider.id)))
+                {
+                    routing::transient_delay(&mut transient_retries, cooldown)
+                } else {
+                    None
+                };
+                let will_retry = policy.retryable
+                    && ((dedicated_search
+                        && ids
+                            .iter()
+                            .any(|id| routes.get(id).is_some_and(|r| r.provider.search_only)))
+                        || routing::fallback_action(
+                            &gateway,
+                            &route.provider.id,
+                            ids.iter()
+                                .filter_map(|id| routes.get(id).cloned())
+                                .collect(),
+                            &requirement,
+                            parts.uri.path(),
+                            ownership.as_deref(),
+                            gateway.client_id() == super::ClientId::Codex && !auxiliary,
+                            &wait_budget,
+                            mode != "manual"
+                                && pinned.is_none()
+                                && !unknown_affinity
+                                && ordinary_attempts <= settings.max_retries,
+                        ) == Action::TryingNext);
                 let mut details = protocol.observation.error.clone();
                 details.phase = Some(crate::events::Phase::Response);
-                details.counted_failure = Some(false);
+                details.counted_failure = Some(!initial_compact_error && policy.counted_failure);
                 details.wait_seconds =
                     cooldown.map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
                 last_error = Some(failover.report_failure(Some(&protocol), || {
@@ -2077,14 +2129,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         model.as_deref(),
                         if initial_compact_error {
                             Reason::ProtocolError
-                        } else if initial_hard_rejection {
-                            Reason::UpstreamService
-                        } else if initial_capacity {
-                            Reason::Capacity
                         } else {
-                            Reason::ModelUnavailable
+                            policy.reason
                         },
-                        if wait_same {
+                        if wait_same || retry_delay.is_some() {
                             Action::RetryingSame
                         } else if will_retry {
                             Action::TryingNext
@@ -2111,34 +2159,72 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     )));
                     capacity_retry_after = capacity_retry_after.max(cooldown);
                 }
-                // Preserve a bounded error prefix. Dropping its unread tail cancels the
-                // rejected attempt; if no alternative succeeds, return the original stream.
-                let error_idle_seconds = settings.idle_seconds;
-                let rejected = async_stream::try_stream! {
-                    for (frame, _, _) in prefix {yield frame;}
-                    loop {
-                        match tokio::time::timeout(Duration::from_secs(error_idle_seconds),body.frame()).await {
-                            Ok(Some(frame))=>yield frame.map_err(|e|Box::new(e) as BoxError)?,
-                            Ok(None)=>break,
-                            Err(_)=>Err::<(),BoxError>(std::io::Error::other("upstream error stream timeout").into())?,
-                        }
-                    }
-                };
-                last = Some(Response::from_parts(
-                    response_parts,
-                    StreamBody::new(rejected).boxed_unsync(),
+                // Rejected initialization frames are never a successful client response.
+                // The upstream payload remains available in the error log.
+                last = Some(error(
+                    StatusCode::BAD_GATEWAY,
+                    code::UPSTREAM_REJECTED,
+                    "上游业务请求失败，已结束本次重试",
                 ));
-                if initial_service_error && !will_retry {
+                if !policy.retryable && !initial_compact_error {
+                    failover.finish(super::failover::Exit::PermanentRejection);
+                    return last.take().unwrap();
+                }
+                if let Some(delay) = retry_delay {
+                    failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
+                    // Release the failed attempt before registering a bounded wait.
+                    // Keep the original spool, model, and response cursor untouched.
+                    drop(admission);
+                    let _waiting_since = Instant::now();
+                    request_budget.describe(None, model.as_deref(), "retry");
+                    match gateway
+                        .0
+                        .admission
+                        .wait_transient(
+                            CapacitySource {
+                                provider_id: route.provider.id.clone(),
+                                reset_generation,
+                            },
+                            delay,
+                            settings.max_waiting,
+                        )
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(Rejected::Stopped) => {
+                            failover.finish(super::failover::Exit::Stopped);
+                            return error(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                code::STOPPED,
+                                "网关已停止",
+                            );
+                        }
+                        Err(_) => break,
+                    }
+
+                    if gateway
+                        .routing_ids(pinned.as_deref())
+                        .contains(&route.provider.id)
+                    {
+                        ids.insert(0, route.provider.id.clone());
+                        retry_owner = Some(route.provider.id.clone());
+                    }
+                } else if !will_retry && !initial_capacity {
                     ids.clear();
                 }
                 last_category = if initial_hard_rejection || initial_service_error {
                     code::UPSTREAM_REJECTED
                 } else if initial_capacity {
                     code::CAPACITY
-                } else {
+                } else if initial_model_error {
                     code::MODEL_UNAVAILABLE
+                } else {
+                    code::UPSTREAM_REJECTED
                 };
                 continue;
+            }
+            if preinspected {
+                ended = false;
             }
             let replay_unsafe = failed && failure_kind == code::FIRST_BYTE_TIMEOUT;
             if replay_unsafe {
@@ -2286,7 +2372,11 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     match next {
                         Ok(Some(Ok(frame))) => {
                             if let Some(data) = frame.data_ref() {
-                                protocol.feed(data);
+                                let skipped = inspected_bytes.min(data.len() as u64) as usize;
+                                inspected_bytes -= skipped as u64;
+                                if skipped < data.len() {
+                                    protocol.feed(&data[skipped..]);
+                                }
                             }
                             let complete = body.is_end_stream();
                             if complete {

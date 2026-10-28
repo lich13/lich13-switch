@@ -189,7 +189,7 @@ pub fn project(
         let known = final_record && a.status.is_some();
         let success = known
             && a.status
-                .is_some_and(|s| (200..300).contains(&s) || s == 101 && r.completed);
+                .is_some_and(|s| ((200..300).contains(&s) || s == 101) && r.completed);
         let duration = if final_record {
             historical.map_or(a.duration_ms * count, |t| t.duration_ms)
         } else {

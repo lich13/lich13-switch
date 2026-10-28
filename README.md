@@ -1,6 +1,6 @@
 # lich13-switch
 
-Codex、Claude Code、Grok Build、DSH 与 Antigravity CLI 独立供应商管理、本地 API 网关，兼具 Codex 账号切换、TOML 编辑及 Claude 可视化配置，支持 macOS 和 Windows。Tauri 2 + Rust + React。首次启动网关均默认关闭；之后启动时按上次启用意图恢复，可设置登录静默启动。
+Codex、Claude Code、Grok Build、DSH 独立供应商管理、本地 API 网关，兼具 Codex 账号切换、配置编辑、Antigravity app 用量与账单导出，支持 macOS 和 Windows。Tauri 2 + Rust + React。首次启动网关均默认关闭；之后启动时按上次启用意图恢复，可设置登录静默启动。
 
 <img src="assets/icon.svg" alt="Prism Relay icon" width="100" />
 
@@ -23,7 +23,7 @@ Codex、Claude Code、Grok Build、DSH 与 Antigravity CLI 独立供应商管理
 ## 基本使用
 
 1. 在“网关”选择客户端，添加供应商，按需选择手动／自动模式和队列；首次启动网关默认关闭。
-2. 启用网关后按提示重新打开对应客户端；Antigravity CLI 使用“启动 Antigravity”选择模型与工作目录。运行中切换只影响新请求，已有连接保持原供应商。
+2. 启用网关后按提示重新打开对应客户端。运行中切换只影响新请求，已有连接保持原供应商。
 3. Codex 账号在“账号”页登录、导入、切换或导出；配置页保存前校验并保留未保存草稿。
 4. 托盘左键打开快捷面板，直接点击平台按钮切换，可在设置隐藏平台；“用量”查看采集记录与估算费用，“日志”查看异常与熔断原因。
 
@@ -39,9 +39,9 @@ Codex、Claude Code、Grok Build、DSH 与 Antigravity CLI 独立供应商管理
 | Claude Code | `127.0.0.1:43721` | `settings.json` 的连接字段；官方／API 配置档与可视化编辑 |
 | Grok Build | `127.0.0.1:43721/v1` | 独立 API 模型与原生官方模型并存；OAuth 继续由 Grok 登录和刷新 |
 | DSH | `127.0.0.1:43721/v1` | Chat Completions；profile 接入与模型映射 |
-| Antigravity CLI | `127.0.0.1:43721` | Gemini Native；固定独立目录、模型选择与终端启动 |
+| Antigravity app | — | 本地只读用量采集、账单导出、`config.json` 编辑 |
 
-五个客户端共享监听端口，通过各自的本地访问令牌分流，供应商和调度状态各自隔离。旧默认端口在成功绑定新端口后迁移，自定义端口保持不变；旧路径前缀在当前端口继续可用，缓存旧端口的客户端需重新打开。全部网关停用后可在高级设置修改共享端口。Grok 在“导入当前配置”中预览模型及凭据来源，确认后建立独立 API 模型；终端环境未被桌面应用继承时，可明确选择读取 `endpoint.env` 的简单赋值。
+四个网关客户端共享监听端口，通过各自的本地访问令牌分流，供应商和调度状态各自隔离。旧默认端口在成功绑定新端口后迁移，自定义端口保持不变；旧路径前缀在当前端口继续可用，缓存旧端口的客户端需重新打开。全部网关停用后可在高级设置修改共享端口。Grok 在“导入当前配置”中预览模型及凭据来源，确认后建立独立 API 模型；终端环境未被桌面应用继承时，可明确选择读取 `endpoint.env` 的简单赋值。
 
 账号登录、导入导出及 Claude 官方／API 文件切换表见[账号与客户端配置](docs/clients.md)。协议、配置恢复和各客户端的边界见[客户端网关与调度](docs/gateway.md)。
 

@@ -1866,6 +1866,8 @@ async fn session_once(
     let mut pending_started = tokio::time::Instant::now();
     let mut confirmed_model: Option<String> = None;
     let mut received = false;
+    let mut initial_frames: Vec<Frame> = Vec::new();
+    let mut initial_bytes = 0usize;
     let mut terminal_error = false;
     let mut receive_started = tokio::time::Instant::now();
     if !admit_ownership(
@@ -2429,6 +2431,8 @@ async fn session_once(
                 continue;
             }
             received = false;
+            initial_frames.clear();
+            initial_bytes = 0;
             deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
         }
         if turn.is_none() {
@@ -2829,6 +2833,8 @@ async fn session_once(
                 next_protocol.websocket_status(101);
                 protocol = Some(next_protocol);
                 received = false;
+                initial_frames.clear();
+                initial_bytes = 0;
                 receive_started = tokio::time::Instant::now();
                 {
                     if matches!(upstream, Upstream::Disconnected) {
@@ -3119,6 +3125,8 @@ async fn session_once(
                         }
                         drop(protocol.take());
                         if failure.capacity { ordinary_attempts = ordinary_attempts.saturating_sub(1); capacity_protected = true; }
+                        initial_frames.clear();
+                        initial_bytes = 0;
                         rejected_frame = Some(frame);
                         fallback_capacity |= failure.capacity;
                         retry_capacity = fallback_capacity;
@@ -3129,7 +3137,6 @@ async fn session_once(
                     }
                 }
                 if !frame.opcode().is_control() {
-                    received = true;
                     deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
                 }
                 if let Some(v) = value(&frame) {
@@ -3157,14 +3164,24 @@ async fn session_once(
                         if tail_deadline.is_none() { tail_deadline = Some(tokio::time::Instant::now() + USAGE_TAIL); }
                     }
                 }
-                let frame_bytes = frame.payload().len();
-                let business = !frame.opcode().is_control();
-                if business { failover.finish(super::failover::Exit::Forwarded); }
+                let business = !frame.opcode().is_control() && protocol.as_ref().is_none_or(|u| u.business_observed());
+                if !received && !business && !frame.opcode().is_control() {
+                    initial_bytes = initial_bytes.saturating_add(frame.payload().len());
+                    if initial_bytes > 2 * 1024 * 1024 || initial_frames.len() >= 4096 { return Err((1011, code::UPSTREAM_BODY)); }
+                    initial_frames.push(frame);
+                    continue;
+                }
+                if business { received = true; failover.finish(super::failover::Exit::Forwarded); }
+                let frame_bytes = frame.payload().len() + if business {initial_bytes} else {0};
+                let mut outgoing = if business {initial_bytes=0; std::mem::take(&mut initial_frames)} else {Vec::new()};
+                outgoing.push(frame);
                 let sending = tokio::time::Instant::now();
-                if let Err(error) = client.send(frame).await {
-                    if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
-                    cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, true).await;
-                    return Err(error);
+                for frame in outgoing {
+                    if let Err(error) = client.send(frame).await {
+                        if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
+                        cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, true).await;
+                        return Err(error);
+                    }
                 }
                 // Do not charge time blocked by the downstream reader to the
                 // upstream silence timer. Peer::send has its own progress limit.

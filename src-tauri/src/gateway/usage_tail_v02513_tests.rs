@@ -165,7 +165,7 @@ async fn websocket_tail_reads_delayed_usage_after_completed_zero_usage_and_waits
         assert!(first.to_text().unwrap().contains("response.create"));
         websocket
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                format!("{{\"type\":\"response.created\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}").into(),
+                format!("{{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}").into(),
             ))
             .await
             .unwrap();

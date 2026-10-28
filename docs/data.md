@@ -6,7 +6,7 @@ v0.25.14 新增模型目录缓存：各客户端数据目录的 `provider-models
 
 DSH 目录使用 profile 原有的 `cordis.patch.yml`、`.env` 和 `.credentials.yaml`；恢复事务使用私有 `dsh-recovery.json`，提交成功后删除。新事务中断或失败时回滚本项，遇外部修改保留事务；兼容旧版单 profile 快照与恢复事务。profile 配置快照独立保存，共享凭据只保留首次接入前的快照。配置编辑的 `dsh-previous` 按文件保留一份私有原文备份，不将备份中的凭据放入状态、模型文件或错误。凭据文件沿用现有私有权限保护，恢复只修改受管行并保留未知字段。用量数据库仍为 v13，不新增 SQL 计量列、固定字典或历史费用重算；推理、速度和解析依据保存在现有诊断体中，冷详情和重启读取继续保留。
 
-`gateway-listener.json` 保存五个客户端共用的端口及格式版本；旧客户端 `gateway.json` 中的端口仅用于兼容读取，运行入口以共享文件为准。Grok 明确导入期间的 `grok/grok-import.json` 保存 TOML、可选 `endpoint.env` 与供应商库的前后状态，包含凭据，采用私有权限；完成后删除，崩溃后继续恢复，遇外部修改保留现场，不能作为普通过期文件清理或分享。
+`gateway-listener.json` 保存四个客户端共用的端口及格式版本；旧客户端 `gateway.json` 中的端口仅用于兼容读取，运行入口以共享文件为准。Grok 明确导入期间的 `grok/grok-import.json` 保存 TOML、可选 `endpoint.env` 与供应商库的前后状态，包含凭据，采用私有权限；完成后删除，崩溃后继续恢复，遇外部修改保留现场，不能作为普通过期文件清理或分享。
 
 数据目录为 Tauri 的 `com.lich13.gpt-switch` 应用数据目录（macOS：`~/Library/Application Support/com.lich13.gpt-switch`；Windows：`%APPDATA%/com.lich13.gpt-switch`）。`accounts.json` 保存完整账号，`previous-auth.json`、`previous-config.toml`、`claude/previous-settings.json` 各保留一份最近写入前的文件。`startup.json` 保存启动偏好，`quick.json` 保存快捷面板标签、固定状态与 `hiddenClients`，旧设置默认显示全部平台。`gateway.json` 保存 Codex 状态，`claude/gateway.json` 保存 Claude 状态，`grok/gateway.json` 保存 Grok 状态（供应商、并发、RPM、模型白名单、访问令牌和恢复意图）；各客户端目录内的 `gateway-recovery.json` 保存版本化的连接事务与停止目标，普通 API 模式写入两文件期间的 `gateway-api-write.json` 保存短期恢复现场（完成后移除），`rpm-window.json` 只保存最近 60 秒的供应商／客户端限速时间戳，写入完成后清理过期记录。供应商 Token 仅用于其上游认证；凭据不写日志、不返回到列表或事件。文件采用当前用户权限，**未加密**，应像原 `auth.json` 一样保护。
 
@@ -24,6 +24,6 @@ DSH 目录使用 profile 原有的 `cordis.patch.yml`、`.env` 和 `.credentials
 
 LM Detector 的 `lmBank` 更新元数据保存在同一文件中：检查时间、实际更新时间使用毫秒时间戳，记录“已是最新／已更新／失败”和脱敏错误；旧文件缺少这些字段时保持未知。同版本且当前资源有效时只检查提交版本。检查失败保留资源与实际更新时间，状态保存失败明确报错。新任务报告与降智标记可带汇总／低家族混用依据和从 1 开始的证据组号，旧记录不补算。
 
-## Antigravity CLI
+## Antigravity app
 
-`agy/gateway.json` 保存独立供应商、令牌和恢复意图；`agy/runtime/antigravity-cli/settings.json` 保存受管模型配置，`agy/runtime` 持续保存 CLI 会话。供应商删除不会删除运行目录。`agy/runtime/config` 关联原生共享配置，冲突时报错，不覆盖现有目录。启动时原生入口从私有供应商库读取本地网关令牌，只通过子进程环境传入 `GEMINI_API_KEY` 和 `GOOGLE_GEMINI_BASE_URL`；终端命令、脚本、配置文件和前端启动参数不包含凭据。
+仅编辑原生 `config/config.json`，保留未知字段并以文件摘要检查外部修改。用量复用现有数据库、增量游标与去重凭据；本地接口仅执行只读查询，不保存会话文本及认证头。旧 CLI 目录保持原样，历史日志与账单仍可读，其数据不计入 app。

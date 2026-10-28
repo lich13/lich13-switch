@@ -199,7 +199,10 @@ fn price_basis(data: &Value) -> Value {
                 matches!(
                     key.as_str(),
                     "models_dev_cost" | "models_dev_fast_cost" | "models_dev_match" | "price_match"
-                ) || (key.contains("cost") || key.contains("threshold") || key.as_str() == "mode")
+                ) || (key.contains("cost")
+                    || key.contains("threshold")
+                    || key.ends_with("multiplier")
+                    || key.as_str() == "mode")
                     && (value.is_number() || value.is_string() || value.is_boolean())
             })
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -759,8 +762,9 @@ impl Quote {
             None
         };
         let data = converted.as_ref().map(|(data, _)| data).unwrap_or(original);
-        let suffix = match tier.unwrap_or("default") {
-            "default" | "standard" => "",
+        let tier = tier.unwrap_or("default").trim().to_ascii_lowercase();
+        let suffix = match tier.as_str() {
+            "default" | "standard" | "auto" => "",
             "batch" => "_batches",
             "flex" => "_flex",
             "priority" => "_priority",
@@ -768,13 +772,61 @@ impl Quote {
             "fast" => "_fast",
             _ => return None,
         };
+        let standard = self.source != "models.dev";
+        let explicit_priority = standard
+            && matches!(tier.as_str(), "fast" | "priority")
+            && data.get("fast_multiplier").is_none()
+            && [
+                "input_cost_per_token_priority",
+                "output_cost_per_token_priority",
+                "cache_read_input_token_cost_priority",
+                "cache_creation_input_token_cost_priority",
+            ]
+            .iter()
+            .any(|key| {
+                data.get(*key)
+                    .and_then(|v| decimal(&number_text(v)))
+                    .is_some_and(|n| n > Decimal::ZERO)
+            });
+        let tier_factor = if standard && !explicit_priority {
+            let field = match tier.as_str() {
+                "fast" | "priority" => "fast_multiplier",
+                "flex" => "flex_multiplier",
+                "ultrafast" => "ultrafast_multiplier",
+                _ => "",
+            };
+            data.get(field)
+                .and_then(|v| decimal(&number_text(v)))
+                .unwrap_or_else(|| match tier.as_str() {
+                    "fast" | "priority" | "ultrafast" => Decimal::from(2),
+                    "flex" => Decimal::new(5, 1),
+                    _ => Decimal::ONE,
+                })
+        } else {
+            Decimal::ONE
+        };
         let mut rates = BTreeMap::new();
         let mut cost = Decimal::ZERO;
         let mut charge = |name: &str, count: u64| -> Option<()> {
             if count == 0 {
                 return Some(());
             }
-            let (key, rate, _) = unit_rate(data, name, context, suffix)?;
+            let selected_suffix = if explicit_priority {
+                "_priority"
+            } else {
+                suffix
+            };
+            let (key, rate, _) = unit_rate(data, name, context, selected_suffix).or_else(|| {
+                standard
+                    .then(|| unit_rate(data, name, context, ""))
+                    .flatten()
+            })?;
+            let explicit = key.ends_with(selected_suffix) && !selected_suffix.is_empty();
+            let rate = if explicit || explicit_priority {
+                rate
+            } else {
+                rate.checked_mul(tier_factor)?
+            };
             rates.insert(key, rate.to_string());
             cost = cost.checked_add(rate.checked_mul(Decimal::from(count))?)?;
             Some(())
@@ -799,12 +851,35 @@ impl Quote {
         charge("input_cost_per_audio_token", t.audio_input.unwrap_or(0))?;
         charge("output_cost_per_audio_token", t.audio_output.unwrap_or(0))?;
         charge("cache_read_input_token_cost", t.cache_read.unwrap_or(0))?;
-        let long = t.cache_write_1h.unwrap_or(0);
-        charge("cache_creation_input_token_cost_above_1hr", long)?;
-        charge(
-            "cache_creation_input_token_cost",
-            t.cache_write.unwrap_or(0).checked_sub(long)?,
-        )?;
+        let short_rate = data
+            .get("cache_creation_input_token_cost")
+            .and_then(|v| decimal(&number_text(v)));
+        let long_rate = data
+            .get("cache_creation_input_token_cost_above_1hr")
+            .and_then(|v| decimal(&number_text(v)));
+        let breakdown = long_rate.is_some_and(|long| long > short_rate.unwrap_or_default());
+        if standard && !breakdown {
+            charge(
+                "cache_creation_input_token_cost",
+                t.cache_write.unwrap_or(0),
+            )?;
+        } else {
+            let aggregate = t.cache_write.unwrap_or(0);
+            let mut short = t.cache_write_5m.unwrap_or(0);
+            let mut long = t.cache_write_1h.unwrap_or(0);
+            let sum = short.saturating_add(long);
+            if aggregate > 0 && sum > aggregate {
+                // Sub2API caps contradictory TTL details at the positive total,
+                // rounding the 5m share and assigning the remainder to 1h.
+                short = ((u128::from(aggregate) * u128::from(short) + u128::from(sum) / 2)
+                    / u128::from(sum)) as u64;
+                long = aggregate - short;
+            } else if sum == 0 {
+                short = aggregate;
+            }
+            charge("cache_creation_input_token_cost_above_1hr", long)?;
+            charge("cache_creation_input_token_cost", short)?;
+        }
         if data["mode"].as_str().is_some_and(|s| {
             matches!(
                 s,
@@ -823,6 +898,7 @@ impl Quote {
             cost: cost.normalize().to_string(),
             basis: Some({
                 let mut basis = price_basis(original);
+                basis["billing_engine"] = Value::String("sub2api-0a2a29b".into());
                 if let Some((_, threshold)) = &converted {
                     basis["models_dev_context_threshold"] = serde_json::json!(threshold);
                 }
@@ -857,15 +933,24 @@ fn unit_rate(
         } else {
             context > threshold
         };
-        if reached {
+        if reached && band.is_none() {
             let multiplier = match name {
                 "input_cost_per_token" => Some("long_context_input_cost_multiplier"),
                 "output_cost_per_token" => Some("long_context_output_cost_multiplier"),
-                "cache_read_input_token_cost" => Some("long_context_cache_read_cost_multiplier"),
+                "cache_read_input_token_cost"
+                | "cache_creation_input_token_cost"
+                | "cache_creation_input_token_cost_above_1hr" => {
+                    Some("long_context_input_cost_multiplier")
+                }
                 _ => None,
             };
             if let Some(v) = multiplier.and_then(|k| data.get(k)) {
-                rate = rate.checked_mul(decimal(&number_text(v))?)?;
+                let multiplier = decimal(&number_text(v))?;
+                rate = rate.checked_mul(if multiplier > Decimal::ZERO {
+                    multiplier
+                } else {
+                    Decimal::ONE
+                })?;
                 band = Some(threshold);
             }
         }

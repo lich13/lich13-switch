@@ -137,27 +137,27 @@ async fn compaction_cancel_disconnect_and_stop_release_pending_and_concurrency()
         })
         .await;
         let (_t, g) = configured(port).await;
-        let (response, sender, connection) = request_with_reset(
-            &g,
-            "/v1/responses",
-            COMPACT.to_vec(),
-            vec![("content-type", "application/json")],
-        )
-        .await;
+        use tokio::io::AsyncWriteExt;
+        let token = g.0.inner.lock().unwrap().store.local_token.clone();
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", g.view().settings.port))
+            .await
+            .unwrap();
+        set_reset_on_drop(&socket);
+        let headers=format!("POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",COMPACT.len());
+        socket.write_all(headers.as_bytes()).await.unwrap();
+        socket.write_all(COMPACT).await.unwrap();
         let id = executing(&g).await;
         tokio::time::sleep(Duration::from_millis(1100)).await;
         match action {
             0 => {
                 assert!(g.0.pending_requests.cancel(&id));
-                let _ = response.into_body().collect().await;
-                reset_and_drop(connection, sender, ()).await;
             }
-            1 => reset_and_drop(connection, sender, response).await,
+            1 => {}
             _ => {
                 g.stop().await.unwrap();
-                reset_and_drop(connection, sender, response).await;
             }
         }
+        drop(socket);
         released(&g).await;
         if action != 2 {
             g.stop().await.unwrap();

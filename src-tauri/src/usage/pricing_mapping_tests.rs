@@ -856,7 +856,7 @@ fn source_projections_survive_daily_compaction_and_database_reopen() {
     merged_sources(&mut store);
     check_source_totals(&store);
     store.compact(BASE + 40 * DAY).unwrap();
-    assert_eq!(store.logs(&Filter::default()).unwrap().total, 0);
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
     check_source_totals(&store);
     drop(store);
     check_source_totals(&Store::open(dir.path()).unwrap());

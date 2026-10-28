@@ -219,7 +219,7 @@ async fn http_200_sse_capacity_before_output_retries_five_rounds_without_committ
         let attempt = count.fetch_add(1, Ordering::SeqCst);
         async move {
             let body = if attempt < 5 {
-                format!("event: error\ndata: {CAPACITY_EVENT}\n\n")
+                format!("event: response.created\ndata: {CREATED}\n\n: heartbeat\n\nevent: error\ndata: {CAPACITY_EVENT}\n\n")
             } else {
                 format!("event: response.created\ndata: {CREATED}\n\nevent: response.completed\ndata: {COMPLETED}\n\n")
             };
@@ -253,14 +253,14 @@ async fn http_200_sse_capacity_before_output_retries_five_rounds_without_committ
 }
 
 #[tokio::test]
-async fn http_200_sse_created_before_capacity_error_is_forwarded_without_retry() {
+async fn http_200_sse_output_before_capacity_error_is_forwarded_without_retry() {
     let hits = Arc::new(AtomicUsize::new(0));
     let count = hits.clone();
     let upstream = server(move |_| {
         count.fetch_add(1, Ordering::SeqCst);
         async {
             let body = format!(
-                "event: response.created\ndata: {CREATED}\n\nevent: error\ndata: {CAPACITY_EVENT}\n\n"
+                "event: response.created\ndata: {CREATED}\n\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\"}}\n\nevent: error\ndata: {CAPACITY_EVENT}\n\n"
             );
             Response::builder()
                 .header("content-type", "text/event-stream")
@@ -282,7 +282,7 @@ async fn http_200_sse_created_before_capacity_error_is_forwarded_without_retry()
         ),
     )
     .await
-    .expect("SSE response after response.created was retried or stalled");
+    .expect("SSE response after effective output was retried or stalled");
     assert_eq!(response.status(), 200);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let text = std::str::from_utf8(&bytes).unwrap();
@@ -332,10 +332,11 @@ async fn ordinary_http_200_sse_error_is_neutral_and_balance_rejection_cools_with
         )
         .await
         .expect("non-capacity SSE error entered an unlimited wait");
-        assert_eq!(response.status(), 200);
+        assert_eq!(response.status(), 502);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let expected_body = format!("event: error\ndata: {event}\n\n");
-        assert_eq!(bytes.as_ref(), expected_body.as_bytes());
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains(code::UPSTREAM_REJECTED));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(g.view().providers[0].health.failures, 0);
         assert_eq!(
@@ -849,7 +850,7 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
             .collect();
         assert_eq!(upstream.len(), 1, "the real handshake error stays visible");
         let terminal = upstream[0].clone();
-        assert_eq!(terminal.client_id, Some(ClientId::Codex));
+        assert_eq!(terminal.client_id, Some(ClientId::Codex.into()));
         assert_eq!(terminal.provider_id.as_deref(), Some(primary.as_str()));
         assert_eq!(terminal.model.as_deref(), Some("fixture-model"));
         assert_eq!(terminal.action, Action::Returned);
@@ -978,11 +979,20 @@ async fn websocket_handshake_capacity_can_recover_after_five_rejections_with_zer
 }
 
 #[tokio::test]
-async fn websocket_capacity_before_first_event_uses_backup_or_retries_same_provider_when_alone() {
+async fn websocket_capacity_after_initialization_before_output_uses_backup_or_retries_same_provider_when_alone(
+) {
     for with_backup in [true, false] {
         let (port, seen) = native_server(0, move |connection, mut socket, seen| async move {
             capture_request(&mut socket, &seen).await;
             if with_backup || connection <= 5 {
+                socket
+                    .send(yawc::Frame::text(CREATED.to_owned()))
+                    .await
+                    .unwrap();
+                socket
+                    .send(yawc::Frame::text(r#"{"type":"ping"}"#.to_owned()))
+                    .await
+                    .unwrap();
                 socket
                     .send(yawc::Frame::text(CAPACITY_EVENT.to_owned()))
                     .await
@@ -1050,11 +1060,12 @@ async fn websocket_capacity_before_first_event_uses_backup_or_retries_same_provi
 }
 
 #[tokio::test]
-async fn websocket_capacity_after_response_created_is_delivered_without_replay() {
+async fn websocket_capacity_after_effective_output_is_delivered_without_replay() {
+    const OUTPUT: &str = r#"{"type":"response.output_text.delta","delta":"fixture"}"#;
     let (port, seen) = native_server(0, |_connection, mut socket, seen| async move {
         capture_request(&mut socket, &seen).await;
         socket
-            .send(yawc::Frame::text(CREATED.to_owned()))
+            .send(yawc::Frame::text(OUTPUT.to_owned()))
             .await
             .unwrap();
         socket
@@ -1077,7 +1088,7 @@ async fn websocket_capacity_after_response_created_is_delivered_without_replay()
         .send(yawc::Frame::text(CREATE.to_owned()))
         .await
         .unwrap();
-    assert_eq!(next_ws(&mut client).await.unwrap().as_str(), CREATED);
+    assert_eq!(next_ws(&mut client).await.unwrap().as_str(), OUTPUT);
     assert_eq!(next_ws(&mut client).await.unwrap().as_str(), CAPACITY_EVENT);
     assert_eq!(
         next_ws(&mut client).await.unwrap().opcode(),

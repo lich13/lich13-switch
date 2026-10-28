@@ -145,6 +145,37 @@ pub enum Origin {
     Upstream,
     Gateway,
 }
+// Historical identities must not become executable gateway clients.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum JournalClient {
+    Active(ClientId),
+    Retired(RetiredClient),
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RetiredClient {
+    Agy,
+}
+impl From<ClientId> for JournalClient {
+    fn from(value: ClientId) -> Self {
+        Self::Active(value)
+    }
+}
+impl JournalClient {
+    pub fn active(self) -> Option<ClientId> {
+        match self {
+            Self::Active(c) => Some(c),
+            Self::Retired(_) => None,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Active(client) => client.name(),
+            Self::Retired(_) => "Antigravity CLI（历史）",
+        }
+    }
+}
 /// Query-only classification. Persisted records keep their original schema.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,7 +220,7 @@ pub struct Record {
     pub first_at: u64,
     pub last_at: u64,
     pub count: u32,
-    pub client_id: Option<ClientId>,
+    pub client_id: Option<JournalClient>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub reason: Reason,
@@ -304,7 +335,7 @@ impl Record {
             first_at: t,
             last_at: t,
             count: 1,
-            client_id,
+            client_id: client_id.map(Into::into),
             provider_id: provider_id.and_then(safe_id),
             model: model.and_then(safe_model),
             reason,
@@ -407,7 +438,7 @@ impl Record {
             };
             return format!(
                 "{} · {provider}：{scope}；{}；{trigger}；{wait}",
-                self.client_id.map(ClientId::name).unwrap_or("应用"),
+                self.client_id.map(JournalClient::name).unwrap_or("应用"),
                 direct.join(" · ")
             );
         }
@@ -416,7 +447,7 @@ impl Record {
         }
         format!(
             "{} · {}{}：{}；{}",
-            self.client_id.map(ClientId::name).unwrap_or("应用"),
+            self.client_id.map(JournalClient::name).unwrap_or("应用"),
             self.provider_id
                 .as_deref()
                 .map(|s| &s[..s.len().min(8)])
@@ -848,7 +879,7 @@ impl Service {
                     && r.last_at >= cutoff
                     && f.from.is_none_or(|t| r.last_at >= t)
                     && f.to.is_none_or(|t| r.first_at <= t)
-                    && f.client_id.is_none_or(|v| r.client_id == Some(v))
+                    && f.client_id.is_none_or(|v| r.client_id == Some(v.into()))
                     && f.provider_id
                         .as_ref()
                         .is_none_or(|v| r.provider_id.as_ref() == Some(v))
@@ -950,6 +981,13 @@ mod v0232_tests;
 #[cfg(test)]
 mod v016_tests {
     use super::*;
+    #[test]
+    fn retired_cli_journal_identity_is_readable_but_not_executable() {
+        let client: JournalClient = serde_json::from_str(r#""agy""#).unwrap();
+        assert_eq!(client.active(), None);
+        assert_eq!(serde_json::to_string(&client).unwrap(), r#""agy""#);
+        assert!(serde_json::from_str::<ClientId>(r#""agy""#).is_err());
+    }
     #[test]
     fn configuration_diagnostics_preserve_actual_codes_and_safe_causes() {
         for code in [

@@ -1,3 +1,4 @@
+import type { BillRequest, BillExport } from "./usage-types";
 // IPC contracts mirror the registered Rust commands. Credentials only cross
 // the explicit reveal/login commands and are never added to shared state.
 import type {
@@ -474,6 +475,8 @@ export type CommandMap = {
   import_auth_file: Call<None, ViewState | null>;
   rename_account: Call<{ id: string; name: string }, ViewState>;
   delete_account: Call<{ id: string }, ViewState>;
+  read_antigravity_config: Call<None, ConfigDocument>;
+  save_antigravity_config: Call<{ text: string } & Revision, ConfigDocument>;
   read_config: Call<{ clientId?: ClientId }, ConfigDocument>;
   read_previous_config: Call<Client, string>;
   validate_config: Call<{ clientId?: ClientId; text: string }, void>;
@@ -516,9 +519,6 @@ export type CommandMap = {
     },
     void
   >;
-  get_agy_launch: Call<None, { installed: boolean; model: string | null }>;
-  choose_agy_directory: Call<None, string | null>;
-  launch_agy: Call<{ model: string; directory: string } & Revision, void>;
   get_quick: Call<None, QuickPreferences>;
   set_quick: Call<
     {
@@ -720,6 +720,7 @@ export type CommandMap = {
   test_notification: Call<None, NotificationState>;
   open_notification_settings: Call<None, void>;
   get_usage_state: Call<None, UsageState>;
+  export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
   get_usage_dashboard: Call<{ filter: UsageFilter }, Dashboard>;
   get_usage_logs: Call<{ filter: UsageFilter }, UsagePage>;
   get_usage_detail: Call<{ id: string; source?: string }, UsageRecord>;

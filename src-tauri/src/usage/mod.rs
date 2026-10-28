@@ -1,3 +1,5 @@
+mod antigravity;
+mod billing;
 mod bodies;
 mod body_wire;
 pub mod commands;
@@ -430,7 +432,11 @@ impl Service {
         }
         result
     }
-    pub fn sync(&self, roots: &[(String, PathBuf)], rebuild: Option<&str>) -> Result<State> {
+    pub fn sync_roots(
+        &self,
+        roots: Vec<(String, Result<PathBuf>)>,
+        rebuild: Option<&str>,
+    ) -> Result<State> {
         {
             let mut busy = self.0.syncing.lock().unwrap();
             if *busy {
@@ -443,36 +449,46 @@ impl Service {
         let result = (|| {
             let pricing = self.prices()?;
             let settings = self.settings();
+            let mut first_error = None;
             for (client, root) in roots {
                 if rebuild.is_some_and(|s| s != client) {
                     continue;
                 }
-                let reader = store::Store::reader(&self.0.directory)?;
-                let repair = rebuild.is_some() || reader.needs_repair(client)?;
-                let mut sink = SessionStore {
-                    service: self.clone(),
-                    reader,
-                    client: client.clone(),
-                };
-                let mut report =
-                    match sessions::sync(&mut sink, pricing, &settings, client, root, repair) {
-                        Ok(report) => report,
-                        Err(error) => {
-                            let mut reports = self.0.report.lock().unwrap();
-                            let report = reports.entry(client.clone()).or_default();
-                            report.phase = "failed".into();
-                            report.errors = report.errors.saturating_add(1);
-                            return Err(error);
-                        }
+                let outcome = (|| {
+                    let root = root?;
+                    let reader = store::Store::reader(&self.0.directory)?;
+                    let repair = rebuild.is_some() || reader.needs_repair(&client)?;
+                    let mut sink = SessionStore {
+                        service: self.clone(),
+                        reader,
+                        client: client.clone(),
                     };
-                let (merged, pending, historical) = sink.reader.source_counts(client)?;
-                report.merged = merged;
-                report.pending = pending;
-                report.historical_before = historical;
-                self.0.report.lock().unwrap().insert(client.clone(), report);
+                    let mut report = if client == "antigravity" {
+                        antigravity::sync(&mut sink, pricing, &settings, &root)?
+                    } else {
+                        sessions::sync(&mut sink, pricing, &settings, &client, &root, repair)?
+                    };
+                    let (merged, pending, historical) = sink.reader.source_counts(&client)?;
+                    report.merged = merged;
+                    report.pending = pending;
+                    report.historical_before = historical;
+                    Ok::<_, crate::storage::AppError>(report)
+                })();
+                match outcome {
+                    Ok(report) => {
+                        self.0.report.lock().unwrap().insert(client.clone(), report);
+                    }
+                    Err(error) => {
+                        let mut reports = self.0.report.lock().unwrap();
+                        let report = reports.entry(client.clone()).or_default();
+                        report.phase = "failed".into();
+                        report.errors = report.errors.saturating_add(1);
+                        first_error.get_or_insert(error);
+                    }
+                }
             }
             self.query(|store| store.compact(now()))?;
-            Ok(())
+            first_error.map_or(Ok(()), Err)
         })();
         *self.0.syncing.lock().unwrap() = false;
         *self.0.error.lock().unwrap() = result
@@ -912,7 +928,7 @@ impl Drop for AttemptTrace {
             self.attempt.routing_outcome = routing.outcome;
         }
         let mut attempts = self.trace.0.attempts.lock().unwrap();
-        if attempts.len() >= 128 {
+        if self.trace.0.client != "claude" && attempts.len() >= 128 {
             let pair = (1..attempts.len())
                 .find_map(|j| {
                     (0..j)

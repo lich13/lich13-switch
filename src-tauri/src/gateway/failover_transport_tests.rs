@@ -303,9 +303,9 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
     g.stop().await.unwrap();
 }
 #[tokio::test]
-async fn sse_completed_then_client_disconnect_is_success_and_in_band_error_is_neutral() {
+async fn sse_completed_then_client_disconnect_is_success_and_preoutput_service_error_is_explicit() {
     let p=server(|req|async move {
-        let event=if req.uri().path().ends_with("failed") {b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\"}}}\n\n".as_slice()}
+        let event=if req.uri().query() == Some("case=failed") {b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\"}}}\n\n".as_slice()}
         else {b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fixture\",\"model\":\"gpt-fixture\"}}\n\n".as_slice()};
         Response::builder().header("content-type","text/event-stream").body(StreamBody::new(async_stream::try_stream!{
             yield Frame::data(Bytes::copy_from_slice(event));
@@ -316,19 +316,26 @@ async fn sse_completed_then_client_disconnect_is_success_and_in_band_error_is_ne
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{p}/v1")]).await;
     let mut settings = g.view().settings;
     settings.failure_threshold = 1;
+    settings.transient_failure_threshold = 1;
     update(&g, &t, Edit::Settings { settings });
     start(&g, &t).await;
-    for (path, terminal, failures, requests) in [
-        ("/v1/responses", "response.completed", 0, 1),
-        ("/v1/failed", "response.failed", 0, 1),
+    for (path, terminal, status, failures, requests) in [
+        ("/v1/responses", "response.completed", 200, 0, 1),
+        (
+            "/v1/responses?case=failed",
+            code::UPSTREAM_REJECTED,
+            502,
+            0,
+            1,
+        ),
     ] {
         let (mut r, sender, task) =
             super::tests::request_with_reset(&g, path, vec![], vec![]).await;
-        assert_eq!(r.status(), 200);
+        assert_eq!(r.status(), status);
         let frame = r.body_mut().frame().await.unwrap().unwrap();
-        let event = frame.data_ref().unwrap().strip_prefix(b"data: ").unwrap();
-        let event: serde_json::Value = serde_json::from_slice(event).unwrap();
-        assert_eq!(event["type"], terminal);
+        assert!(std::str::from_utf8(frame.data_ref().unwrap())
+            .unwrap()
+            .contains(terminal));
         super::tests::reset_and_drop(task, sender, r).await;
         // Neither terminal fixture reports usage or closes its body. Both
         // cancellation paths may therefore use the full bounded usage tail.

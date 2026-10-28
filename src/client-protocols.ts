@@ -10,5 +10,4 @@ export const clientProtocols: Record<ClientId, GrokProtocol[]> = {
   claude: ["messages"],
   grok: ["responses", "chat_completions", "messages"],
   dsh: ["chat_completions"],
-  agy: ["gemini_native"],
 };

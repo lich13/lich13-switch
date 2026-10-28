@@ -29,19 +29,17 @@ export default function ProviderPriceMappings({
     [error, setError] = useState("");
   const [providers, setProviders] = useState<
     Record<ClientId, { id: string; name: string }[]>
-  >({ codex: [], claude: [], grok: [], dsh: [], agy: [] });
+  >({ codex: [], claude: [], grok: [], dsh: [] });
   useEffect(() => {
     let disposed = false;
     void Promise.all(
-      (["codex", "claude", "grok", "dsh", "agy"] as const).map(
-        async (clientId) => {
-          const state = await command("get_gateway", { clientId });
-          return [
-            clientId,
-            state.providers.map(({ id, name }) => ({ id, name })),
-          ] as const;
-        },
-      ),
+      (["codex", "claude", "grok", "dsh"] as const).map(async (clientId) => {
+        const state = await command("get_gateway", { clientId });
+        return [
+          clientId,
+          state.providers.map(({ id, name }) => ({ id, name })),
+        ] as const;
+      }),
     )
       .then((values) => {
         if (!disposed)
@@ -136,7 +134,6 @@ export default function ProviderPriceMappings({
                     <option value="claude">Claude Code</option>
                     <option value="grok">Grok Build</option>
                     <option value="dsh">DeepSeek Harness</option>
-                    <option value="agy">Antigravity CLI</option>
                   </select>
                 </label>
                 <label className="usage-field">

@@ -96,7 +96,7 @@ it("shows reset evidence as an ordinary interruption without claiming cancellati
   });
   expect(row).not.toHaveTextContent("普通错误");
   expect(row).toHaveTextContent("DOWNSTREAM_PEER_RESET");
-  expect(row).toHaveTextContent("未确认客户端主动取消");
+  expect(row).toHaveTextContent("请求交付提前结束");
   expect(row).not.toHaveTextContent("熔断错误");
 
   await user.click(row);

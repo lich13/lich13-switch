@@ -449,7 +449,7 @@ async fn http_sse_bare_error_then_matching_completion_preserves_wire_bytes() {
 
 #[tokio::test]
 async fn http_client_close_after_pending_error_stops_upstream_without_success() {
-    const PENDING_ERROR_PREFIX: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-disconnect-pending-error\",\"model\":\"fixture-model\"}}\n\ndata: {\"type\":\"error\",\"response_id\":\"fixture-disconnect-pending-error\",\"error\":{\"code\":\"server_error\",\"message\":\"fixture-only error\"}}\n\n";
+    const PENDING_ERROR_PREFIX: &[u8] = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{\"id\":\"fixture-disconnect-pending-error\",\"model\":\"fixture-model\"}}\n\ndata: {\"type\":\"error\",\"response_id\":\"fixture-disconnect-pending-error\",\"error\":{\"code\":\"server_error\",\"message\":\"fixture-only error\"}}\n\n";
 
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let cancelled = std::sync::Arc::new(tokio::sync::Notify::new());

@@ -1038,7 +1038,7 @@ fn rebuilding_compacted_source_replaces_its_daily_history_without_deleting_other
         )
         .unwrap();
     store.compact(at).unwrap();
-    assert_eq!(store.logs(&Filter::default()).unwrap().total, 0);
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
     for _ in 0..2 {
         store
             .rebuild("codex", std::slice::from_ref(&codex), &[])
@@ -1185,7 +1185,13 @@ fn service_tier_prices_and_multiplier_use_exact_decimal_arithmetic() {
         "input_cost_per_token_priority": 3}),
         "1",
     );
-    assert!(incomplete.calculate(&tokens, Some("priority")).is_none());
+    assert_eq!(
+        incomplete
+            .calculate(&tokens, Some("priority"))
+            .unwrap()
+            .cost,
+        "320"
+    );
 }
 
 #[test]
@@ -1410,6 +1416,17 @@ fn archived_proxy_receipts_survive_reimports_and_session_rebuilds() {
             .write_batch(std::slice::from_ref(&proxy), None)
             .unwrap();
         store.compact(compact_at).unwrap();
+        let ids: Vec<String> = {
+            let mut q = store
+                .connection
+                .prepare("SELECT id FROM records WHERE client='claude'")
+                .unwrap();
+            q.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        store.archive_batch(&ids).unwrap();
         drop(store);
         let mut store = Store::open(dir.path()).unwrap();
         assert!(store.detail(&proxy.id).is_err());
@@ -1418,6 +1435,17 @@ fn archived_proxy_receipts_survive_reimports_and_session_rebuilds() {
         write_jsonl(&path, std::slice::from_ref(&message));
         assert_eq!(import(&mut store, &prices, "claude", &root).imported, 1);
         store.compact(compact_at).unwrap();
+        let ids: Vec<String> = {
+            let mut q = store
+                .connection
+                .prepare("SELECT id FROM records WHERE client='claude'")
+                .unwrap();
+            q.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        store.archive_batch(&ids).unwrap();
         write_jsonl(&root.join("projects/fixture/reimport.jsonl"), &[message]);
         assert_eq!(import(&mut store, &prices, "claude", &root).imported, 1);
         assert_eq!(import(&mut store, &prices, "claude", &root).imported, 0);
@@ -1437,6 +1465,17 @@ fn archived_proxy_receipts_survive_reimports_and_session_rebuilds() {
             .unwrap();
             assert_eq!((report.files, report.errors), (2, 0));
             store.compact(compact_at).unwrap();
+            let ids: Vec<String> = {
+                let mut q = store
+                    .connection
+                    .prepare("SELECT id FROM records WHERE client='claude'")
+                    .unwrap();
+                q.query_map([], |r| r.get(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap()
+            };
+            store.archive_batch(&ids).unwrap();
             assert_eq!(store.logs(&Filter::default()).unwrap().total, 0);
             let dashboard = store.dashboard(&all_time()).unwrap();
             assert_eq!(
@@ -1811,4 +1850,154 @@ fn maintenance_compacts_history_when_session_auto_sync_is_disabled() {
         assert!(state.reports.is_empty());
         assert!(state.error.is_none());
     }
+}
+
+#[test]
+fn unavailable_source_root_does_not_block_other_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(&dir.path().join("db"));
+    let root = dir.path().join("claude");
+    write_jsonl(
+        &root.join("projects/fixture/session.jsonl"),
+        &[claude_message(
+            "fixture-message",
+            "fixture-uuid",
+            None,
+            now(),
+            3,
+            true,
+        )],
+    );
+    assert!(service
+        .sync_roots(
+            vec![
+                ("codex".into(), Err(failure("fixture source unavailable"))),
+                ("claude".into(), Ok(root)),
+            ],
+            None
+        )
+        .is_err());
+    let state = service.state();
+    assert_eq!(state.reports["codex"].phase, "failed");
+    assert_eq!(state.reports["claude"].imported, 1);
+    assert_eq!(
+        service
+            .read(|s| s.dashboard(&Filter::default()))
+            .unwrap()
+            .totals
+            .requests,
+        1
+    );
+}
+
+#[test]
+fn claude_retries_keep_each_attempt_and_rebuild_keeps_unexported_old_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(dir.path());
+    let trace = service.begin("claude", Some("fixture-model"));
+    for _ in 0..140 {
+        let _attempt = trace.attempt("fixture-provider", false, "http");
+    }
+    let attempts = trace.0.attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 140);
+    assert!(attempts.iter().all(|a| a.repeat_count == 1));
+    drop(attempts);
+    let (_dir, mut store, _prices) = fixture();
+    let mut archived = Record {
+        id: "fixture-exported".into(),
+        client: "claude".into(),
+        source: "claude".into(),
+        started_at: BASE,
+        finished_at: Some(BASE + 1000),
+        completed: true,
+        attempts: vec![Attempt {
+            id: "fixture-attempt".into(),
+            ..Attempt::default()
+        }],
+        ..Record::default()
+    };
+    store
+        .write_batch(std::slice::from_ref(&archived), None)
+        .unwrap();
+    store
+        .archive_batch(std::slice::from_ref(&archived.id))
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT OR REPLACE INTO metadata VALUES('detail_since',?1)",
+            [BASE + DAY],
+        )
+        .unwrap();
+    archived.id = "fixture-unexported".into();
+    store
+        .rebuild("claude", std::slice::from_ref(&archived), &[])
+        .unwrap();
+    assert!(store.detail("fixture-unexported").is_ok());
+    assert_eq!(
+        store.dashboard(&Filter::default()).unwrap().totals.requests,
+        2
+    );
+}
+
+#[test]
+fn sub2api_pinned_cache_long_context_and_tier_reference_cases() {
+    let mut data = json!({
+        "input_cost_per_token":"1", "output_cost_per_token":"2",
+        "cache_read_input_token_cost":"0.1", "cache_creation_input_token_cost":"0.5",
+        "cache_creation_input_token_cost_above_1hr":"1",
+        "long_context_input_token_threshold":130,
+        "long_context_input_cost_multiplier":"2", "long_context_output_cost_multiplier":"3"
+    });
+    let tokens = Tokens {
+        input: Some(100),
+        output: Some(10),
+        reasoning: Some(7),
+        cache_read: Some(20),
+        cache_write: Some(10),
+        cache_write_5m: Some(6),
+        cache_write_1h: Some(4),
+        ..Tokens::default()
+    };
+    assert_eq!(
+        quote(data.clone(), "1.25")
+            .calculate(&tokens, None)
+            .unwrap()
+            .cost,
+        "161.25"
+    );
+    data["long_context_threshold_inclusive"] = json!(true);
+    for (tier, expected) in [
+        (None, "347.5"),
+        (Some("priority"), "695"),
+        (Some("flex"), "173.75"),
+    ] {
+        assert_eq!(
+            quote(data.clone(), "1.25")
+                .calculate(&tokens, tier)
+                .unwrap()
+                .cost,
+            expected
+        );
+    }
+    let contradictory = Tokens {
+        cache_write_5m: Some(30),
+        cache_write_1h: Some(10),
+        ..tokens.clone()
+    };
+    assert_eq!(
+        quote(data.clone(), "1.25")
+            .calculate(&contradictory, None)
+            .unwrap()
+            .cost,
+        "345"
+    );
+    data["output_cost_per_token_priority"] = json!("4");
+    assert_eq!(
+        quote(data, "1.25")
+            .calculate(&tokens, Some("priority"))
+            .unwrap()
+            .cost,
+        "422.5"
+    );
 }

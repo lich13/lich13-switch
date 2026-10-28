@@ -298,6 +298,24 @@ impl Replay {
         B: Body<Data = Bytes> + Unpin,
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        Self::capture_until(&mut body, dir, idle, |bytes| {
+            observed(bytes);
+            false
+        })
+        .await
+    }
+    /// Bounded memory staging until an inspected protocol boundary. The caller
+    /// retains the unread upstream body; temporary files are removed on drop.
+    pub async fn capture_until<B>(
+        body: &mut B,
+        dir: &Path,
+        idle: Option<std::time::Duration>,
+        mut observed: impl FnMut(&[u8]) -> bool,
+    ) -> Result<Self, BoxError>
+    where
+        B: Body<Data = Bytes> + Unpin,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         let mut memory = BytesMut::new();
         let mut disk = None;
         let mut writer = None;
@@ -317,7 +335,7 @@ impl Replay {
             let frame = frame?;
             match frame.into_data() {
                 Ok(chunk) => {
-                    observed(&chunk);
+                    let stop = observed(&chunk);
                     length += chunk.len() as u64;
                     if length > MAX_BODY {
                         return Err(io::Error::other("请求超过 1 GiB").into());
@@ -334,6 +352,9 @@ impl Replay {
                         f.write_all(&chunk).await?;
                     } else {
                         memory.extend_from_slice(&chunk);
+                    }
+                    if stop {
+                        break;
                     }
                 }
                 Err(frame) => {

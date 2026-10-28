@@ -11,7 +11,6 @@ pub enum ClientId {
     Claude,
     Grok,
     Dsh,
-    Agy,
 }
 impl ClientId {
     pub fn name(self) -> &'static str {
@@ -20,7 +19,6 @@ impl ClientId {
             Self::Claude => "Claude Code",
             Self::Grok => "Grok Build",
             Self::Dsh => "DeepSeek Harness",
-            Self::Agy => "Antigravity CLI",
         }
     }
     pub fn legacy_port(self) -> Option<u16> {
@@ -28,7 +26,7 @@ impl ClientId {
             Self::Codex => Some(15722),
             Self::Claude => Some(15723),
             Self::Grok => Some(15724),
-            Self::Dsh | Self::Agy => None,
+            Self::Dsh => None,
         }
     }
     pub fn address(self, port: u16) -> String {
@@ -36,7 +34,7 @@ impl ClientId {
             "http://127.0.0.1:{port}{}",
             match self {
                 Self::Codex | Self::Grok | Self::Dsh => "/v1",
-                Self::Claude | Self::Agy => "",
+                Self::Claude => "",
             }
         )
     }
@@ -46,7 +44,7 @@ impl ClientId {
             Self::Codex => "/codex/v1",
             Self::Claude => "/claude",
             Self::Grok => "/grok/v1",
-            Self::Dsh | Self::Agy => return vec![],
+            Self::Dsh => return vec![],
         };
         let mut ports = vec![
             Some(port),
@@ -74,9 +72,7 @@ impl ClientId {
         if self == Self::Dsh {
             return home.join("profiles");
         }
-        if self == Self::Agy {
-            return home.join("antigravity-cli/settings.json");
-        }
+
         home.join(if self == Self::Claude {
             "settings.json"
         } else {
@@ -89,7 +85,6 @@ impl ClientId {
             Self::Codex | Self::Grok => Protocol::Responses,
             Self::Claude => Protocol::Messages,
             Self::Dsh => Protocol::ChatCompletions,
-            Self::Agy => Protocol::GeminiNative,
         }
     }
     pub fn accepts_protocol(self, protocol: super::provider_protocol::Protocol) -> bool {

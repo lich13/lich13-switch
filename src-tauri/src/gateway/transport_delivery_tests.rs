@@ -45,7 +45,7 @@ const HTTP_REQUEST: &[u8] =
 const SSE_REQUEST: &[u8] =
     br#" {"model":"fixture-model","stream":true,"input":"fixture","unknown":9007199254740993} "#;
 const HTTP_RESPONSE: &[u8] = br#" {"id":"fixture-http-response","status":"completed","model":"fixture-model","usage":{"input_tokens":11,"output_tokens":2},"unknown":9007199254740993} "#;
-const CREATED: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-open\",\"model\":\"fixture-model\"}}\n\n";
+const CREATED: &[u8] = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{\"id\":\"fixture-open\",\"model\":\"fixture-model\"}}\n\n";
 const COMPLETED: &[u8] = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-complete\",\"model\":\"fixture-model\",\"usage\":{\"input_tokens\":11,\"output_tokens\":2}}}\n\n";
 const CR_ONLY: &[u8] = b": fixture comment\r\revent: response.completed\rdata: {\"response\":{\"id\":\"fixture-cr\",\"model\":\"fixture-model\"}}\r\r: fixture tail\r\r";
 const MIXED_ENDINGS: &[u8] = b": fixture comment\r\n\r\nevent: response.completed\r\ndata: {\"response\":{\ndata: \"id\":\"fixture-mixed\",\"model\":\"fixture-model\",\"unknown\":9007199254740993}}\r\n\n: fixture tail\n\n";

@@ -82,6 +82,7 @@ function QuickContent({
     let receivedAccountState = false;
     let receivedGatewayState = false;
     let receivedQuickState = false;
+    let receivedVisibility = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
     const watch = events.watch;
     watch("switch-state", (next) => {
@@ -98,7 +99,10 @@ function QuickContent({
       receivedQuickState = true;
       setPrefs(p);
     });
-    watch("panel-visibility", setVisible);
+    watch("panel-visibility", (value) => {
+      receivedVisibility = true;
+      setVisible(value);
+    });
     watch("switch-notice", setNotice);
     watch("switch-error", (e) => setError(errorOf(e).message));
     void Promise.all([
@@ -111,7 +115,8 @@ function QuickContent({
           if (!receivedAccountState) setAccounts(a);
           if (!receivedGatewayState) setGateway(g);
           if (!receivedQuickState) setPrefs(p);
-          setVisible(p.visible ?? preview);
+          if (!receivedVisibility && !receivedQuickState)
+            setVisible(p.visible ?? preview);
         }
       })
       .catch((e) => {

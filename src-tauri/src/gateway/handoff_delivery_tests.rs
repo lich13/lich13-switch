@@ -304,7 +304,7 @@ async fn successful_cross_provider_commit_notifies_once_per_thread_and_keeps_thr
     registry.flush();
 
     let first_record = wait_for_handoff(&mut receiver).await;
-    assert_eq!(first_record.client_id, Some(ClientId::Codex));
+    assert_eq!(first_record.client_id, Some(ClientId::Codex.into()));
     assert_eq!(first_record.provider_id.as_deref(), Some(NEW));
     assert_eq!(first_record.action, Action::Routed);
     let first_scope = first_record.details.handoff_scope.clone().unwrap();

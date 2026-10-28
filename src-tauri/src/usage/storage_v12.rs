@@ -1036,7 +1036,7 @@ fn flush_batch(c: &Connection) -> Result<bool> {
 fn metric_select(table: &str, kind: i64) -> String {
     format!("SELECT {kind} kind,a.owner,ordinal,usage_value(p.value) provider,usage_value(m.value) model,
       CASE WHEN ordinal=r.last THEN 1 ELSE 0 END requests,repeat_count attempts,
-      CASE WHEN ordinal=r.last AND (status BETWEEN 200 AND 299 OR status=101 AND r.completed) THEN 1 ELSE 0 END success,
+      CASE WHEN ordinal=r.last AND (status BETWEEN 200 AND 299 OR status=101) AND r.completed THEN 1 ELSE 0 END success,
       CASE WHEN ordinal=r.last AND status IS NOT NULL THEN 1 ELSE 0 END status_known,
       CASE WHEN ordinal=r.last AND r.source<>0 THEN 1 ELSE 0 END sessions,
       input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,
@@ -1323,8 +1323,9 @@ pub(super) fn set_state(c: &Connection, r: &Record, effective: i64) -> Result<()
     ))?;
     save(c, r, effective, sequence)
 }
-pub(super) fn archive(c: &Connection, cutoff: i64) -> Result<()> {
-    db(c.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,ended,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
+// archive_ids is a bounded, connection-local selection owned by Store::archive_batch.
+pub(super) fn archive_selected(c: &Connection) -> Result<()> {
+    db(c.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,ended,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE rid IN (SELECT rid FROM archive_ids)",[]))?;
     for table in [
         "v12_attempt_rows",
         "v12_session_rows",
@@ -1332,15 +1333,32 @@ pub(super) fn archive(c: &Connection, cutoff: i64) -> Result<()> {
         "v12_links",
     ] {
         db(c.execute(
-            &format!(
-                "DELETE FROM {table} WHERE owner IN (SELECT rid FROM v12_records WHERE time<?1)"
-            ),
-            [cutoff],
+            &format!("DELETE FROM {table} WHERE owner IN (SELECT rid FROM archive_ids)"),
+            [],
         ))?;
     }
-    db(c.execute("UPDATE v12_records SET archived_duplicate=(SELECT usage_text(target.key) FROM v12_records target WHERE target.rid=v12_records.duplicate AND target.time<?1),duplicate=CASE WHEN duplicate IN (SELECT rid FROM v12_records WHERE time<?1) THEN NULL ELSE duplicate END WHERE duplicate IN (SELECT rid FROM v12_records WHERE time<?1)",[cutoff]))?;
-    db(c.execute("DELETE FROM v12_records WHERE time<?1", [cutoff]))?;
+    db(c.execute("UPDATE v12_records SET archived_duplicate=(SELECT usage_text(target.key) FROM v12_records target WHERE target.rid=v12_records.duplicate),duplicate=NULL WHERE duplicate IN (SELECT rid FROM archive_ids)",[]))?;
+    db(c.execute(
+        "DELETE FROM v12_records WHERE rid IN (SELECT rid FROM archive_ids)",
+        [],
+    ))?;
     Ok(())
+}
+pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
+    if !active(c) {
+        return Ok(());
+    }
+    let sql: String = db(c.query_row(
+        "SELECT sql FROM sqlite_master WHERE name='usage_metrics'",
+        [],
+        |r| r.get(0),
+    ))?;
+    if sql.contains("OR status=101) AND r.completed") {
+        return Ok(());
+    }
+    let original = metric_select("v12_raw_attempts", 2)
+        + " WHERE EXISTS(SELECT 1 FROM v12_original o WHERE o.owner=r.rid AND o.metrics_changed)";
+    db(c.execute_batch(&format!("DROP VIEW usage_metrics; CREATE VIEW usage_metrics AS {} UNION ALL {} UNION ALL {original} UNION ALL SELECT * FROM usage_daily_metrics;",metric_select("v12_attempts",0),metric_select("v12_sessions",0))))
 }
 pub(super) fn prune(c: &Connection) -> Result<()> {
     db(c.execute("DELETE FROM v12_archives WHERE rid NOT IN (SELECT json_extract(body,'$._usageArchive') FROM daily WHERE json_extract(body,'$._usageArchive') IS NOT NULL)",[]))?;
@@ -1445,7 +1463,7 @@ pub(super) fn cold_batch(c: &mut Connection, at: i64) -> Result<bool> {
         |r| r.get(0),
     ))?;
     let ids = {
-        let mut s=db(tx.prepare("SELECT rid FROM v12_records WHERE rid>?1 AND time<?2 AND archived=0 AND effective=1 ORDER BY rid LIMIT 2000"))?;
+        let mut s=db(tx.prepare("SELECT rid FROM v12_records WHERE rid>?1 AND time<?2 AND archived=0 AND effective=1 AND client NOT IN (usage_label('claude'),usage_label('antigravity')) ORDER BY rid LIMIT 2000"))?;
         let it = db(s.query_map(params![after, at - 7 * 86_400_000], |r| r.get::<_, i64>(0)))?;
         db(it.collect::<rusqlite::Result<Vec<_>>>())?
     };

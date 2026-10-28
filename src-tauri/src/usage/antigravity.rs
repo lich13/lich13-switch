@@ -1,0 +1,768 @@
+//! Read-only Antigravity app accounting. No conversation text or API headers persist.
+use super::{
+    model::*,
+    pricing::Pricing,
+    sessions::{Report, Repository},
+};
+use crate::storage::{self, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    io::{BufRead, BufReader, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
+
+const LIMIT: usize = 32 * 1024 * 1024;
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Cursor {
+    modified: String,
+    count: usize,
+    covered: BTreeSet<u64>,
+}
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct FileCursor {
+    offset: u64,
+    tail: String,
+    identity: String,
+}
+fn number(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str()?.parse().ok())
+        .filter(|n| *n <= 1_000_000_000_000)
+}
+fn time(v: &Value) -> Option<i64> {
+    v.as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.timestamp_millis())
+}
+fn text<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|k| v[*k].as_str().filter(|s| !s.is_empty()))
+}
+fn duration(v: &Value) -> Option<u64> {
+    v.as_str()?
+        .strip_suffix('s')?
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| (n * 1000.0) as u64)
+}
+fn tokens(u: &Value) -> Tokens {
+    Tokens {
+        input: number(&u["inputTokens"]),
+        output: number(&u["outputTokens"]),
+        cache_read: number(&u["cacheReadTokens"]),
+        cache_write: number(&u["cacheWriteTokens"]),
+        cache_write_5m: number(&u["cacheWrite5mTokens"]),
+        cache_write_1h: number(&u["cacheWrite1hTokens"]),
+        reasoning: number(&u["thinkingOutputTokens"]),
+        ..Tokens::default()
+    }
+}
+fn price(record: &mut Record, pricing: &Pricing, settings: &Settings) {
+    for a in &mut record.attempts {
+        a.cost_multiplier = settings.multiplier.clone();
+        a.pricing_model = a
+            .response_model
+            .clone()
+            .or_else(|| a.requested_model.clone());
+        a.price = pricing
+            .quote(a.pricing_model.as_deref(), &a.cost_multiplier)
+            .calculate(&a.tokens, a.price_tier());
+        a.pricing_basis = Some("estimated_import_snapshot".into());
+        a.annotate_availability("antigravity");
+    }
+}
+fn response_id(u: &Value) -> Option<&str> {
+    text(u, &["responseId", "messageId"])
+}
+fn failed(v: &Value) -> bool {
+    v.get("error")
+        .is_some_and(|e| !e.is_null() && e != "" && e != &json!({}))
+}
+
+/// Request IDs separate calls sharing one execution. A final usage envelope
+/// may mirror that request's last retry; equal counts alone never merge calls.
+fn record(
+    cascade: &str,
+    entry: &Value,
+    steps: &[Value],
+    generator_index: usize,
+) -> Result<Option<Record>> {
+    let Some(chat) = entry.get("chatModel") else {
+        return Ok(None);
+    };
+    let request_key = text(&chat["customMetadata"], &["request_id"]);
+    let key = request_key.or_else(|| text(entry, &["executionId"]));
+    let Some(key) = key else {
+        if chat.get("usage").is_some()
+            || chat["retryInfos"].as_array().is_some_and(|a| !a.is_empty())
+        {
+            return Err(failure("Antigravity 用量缺少可靠请求标识，未计入账单"));
+        }
+        return Ok(None);
+    };
+    let indices: BTreeSet<_> = entry["stepIndices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(number)
+        .collect();
+    let related: Vec<_> = steps
+        .iter()
+        .enumerate()
+        .filter(|(i, step)| {
+            if indices.is_empty() {
+                step["metadata"]["executionId"] == entry["executionId"]
+            } else {
+                indices.contains(&(*i as u64))
+            }
+        })
+        .map(|(_, s)| &s["metadata"])
+        .collect();
+    let start = related
+        .iter()
+        .filter_map(|s| time(&s["startedAt"]).or_else(|| time(&s["createdAt"])))
+        .min();
+    let finish = related
+        .iter()
+        .filter_map(|s| time(&s["finishedGeneratingAt"]).or_else(|| time(&s["completedAt"])))
+        .max();
+    let Some(start) = start else {
+        return Err(failure("Antigravity 用量缺少请求时间，未计入账单"));
+    };
+    let id = if let Some(key) = request_key {
+        safe_id(&format!("antigravity:request:{key}"))
+    } else {
+        safe_id(&format!("antigravity:{cascade}:{key}:{generator_index}"))
+    };
+    let mut r = Record {
+        id,
+        client: "antigravity".into(),
+        source: "antigravity".into(),
+        started_at: start,
+        finished_at: finish,
+        session_id: Some(safe_id(cascade)),
+        ..Record::default()
+    };
+    let mut usages: Vec<(&Value, &Value, String)> = Vec::new();
+    for (i, retry) in chat["retryInfos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let u = retry.get("usage").unwrap_or(&Value::Null);
+        let attempt_key = response_id(u)
+            .or_else(|| text(retry, &["traceId"]))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("retry:{i}"));
+        if !usages
+            .iter()
+            .any(|(other, _, _)| response_id(u).is_some() && response_id(u) == response_id(other))
+        {
+            usages.push((u, retry, attempt_key));
+        }
+    }
+    if let Some(u) = chat.get("usage").filter(|u| u.is_object()) {
+        let mirror = request_key.is_some() && usages.last().is_some_and(|(last, _, _)| *last == u);
+        if !mirror
+            && !usages.iter().any(|(other, _, _)| {
+                response_id(u).is_some() && response_id(u) == response_id(other)
+            })
+        {
+            // Without an identity we cannot decide whether this is a mirrored
+            // retry total. Preserve the ambiguity instead of double billing.
+            if !usages.is_empty() && response_id(u).is_none() {
+                return Err(failure(
+                    "Antigravity 重试用量缺少响应标识，无法核对完整账单",
+                ));
+            }
+            usages.push((u, chat, "final".into()));
+        }
+    }
+    if usages.is_empty() {
+        return Ok(None);
+    }
+    for (u, info, attempt_key) in usages {
+        let is_failed = failed(info);
+        let mut a = Attempt {
+            id: safe_id(&format!("{}:{attempt_key}", r.id)),
+            response_id: response_id(u).map(safe_id),
+            upstream_request_hash: text(info, &["traceId"]).map(safe_id),
+            thread_hash: r.session_id.clone(),
+            requested_model: model_id(text(chat, &["model", "responseModel"])),
+            response_model: model_id(
+                text(u, &["model"]).or_else(|| text(chat, &["responseModel", "model"])),
+            ),
+            tokens: tokens(u),
+            started_at: time(&info["startedAt"]).unwrap_or(start),
+            duration_ms: 0,
+            transport: "local_api".into(),
+            outcome: if is_failed {
+                "failed"
+            } else if finish.is_some() {
+                "success"
+            } else {
+                "in_progress"
+            }
+            .into(),
+            usage_status: if u.is_object() {
+                "reported"
+            } else {
+                "upstream_unreported"
+            }
+            .into(),
+            service_tier: text(u, &["serviceTier"])
+                .or_else(|| text(chat, &["serviceTier"]))
+                .map(str::to_owned),
+            first_token_ms: duration(&info["timeToFirstToken"]),
+            ..Attempt::default()
+        };
+        // A retry's individual clock is unknown unless explicitly reported.
+        if let (Some(s), Some(e)) = (time(&info["startedAt"]), time(&info["completedAt"])) {
+            a.duration_ms = e.saturating_sub(s).max(0) as u64;
+        } else {
+            a.parse_reasons.push("attempt_time_unreported".into());
+        }
+        r.attempts.push(a);
+    }
+    r.completed = r.final_attempt().is_some_and(|a| a.outcome == "success");
+    Ok(Some(r))
+}
+
+struct Api {
+    http: reqwest::Client,
+    origin: String,
+    token: String,
+}
+impl Api {
+    async fn bytes(request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
+        let mut response = request
+            .send()
+            .await
+            .map_err(|_| failure("Antigravity 本地只读接口不可用，请启动 app 后同步"))?;
+        if !response.status().is_success() {
+            return Err(failure("Antigravity 本地接口拒绝读取，未更新同步位置"));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| failure("Antigravity 本地响应未完整读取"))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > LIMIT {
+                return Err(failure("Antigravity 单页用量超过读取限制"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+    async fn connect() -> Result<Option<Self>> {
+        let port_path = dirs::config_dir()
+            .ok_or_else(|| failure("无法定位 Antigravity app"))?
+            .join("Antigravity/DevToolsActivePort");
+        let Some(bytes) = storage::read_bounded(&port_path, 4096)? else {
+            return Ok(None);
+        };
+        let port = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| s.lines().next())
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|p| *p > 0)
+            .ok_or_else(|| failure("Antigravity 本地端口无效"))?;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|_| failure("Antigravity 本地连接初始化失败"))?;
+        let pages: Value = serde_json::from_slice(
+            &Self::bytes(http.get(format!("http://127.0.0.1:{port}/json/list"))).await?,
+        )
+        .map_err(|_| failure("Antigravity 窗口信息无效"))?;
+        let origin = pages
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["type"] == "page")
+            .filter_map(|p| url::Url::parse(p["url"].as_str()?).ok())
+            .find(|u| {
+                u.scheme() == "https"
+                    && u.host_str() == Some("127.0.0.1")
+                    && u.port().is_some()
+                    && u.username().is_empty()
+                    && u.password().is_none()
+            })
+            .ok_or_else(|| failure("未找到 Antigravity app 窗口"))?
+            .origin()
+            .ascii_serialization();
+        let html = String::from_utf8(Self::bytes(http.get(format!("{origin}/"))).await?)
+            .map_err(|_| failure("Antigravity app 配置不可读"))?;
+        let raw = html
+            .split("window.__APP_CONFIG__")
+            .nth(1)
+            .and_then(|s| s.split_once('=').map(|(_, s)| s))
+            .ok_or_else(|| failure("Antigravity app 接口版本不支持"))?;
+        let config = serde_json::Deserializer::from_str(raw.trim())
+            .into_iter::<Value>()
+            .next()
+            .and_then(std::result::Result::ok)
+            .ok_or_else(|| failure("Antigravity app 接口配置无效"))?;
+        let token = config["csrfToken"]
+            .as_str()
+            .filter(|t| !t.is_empty() && t.len() < 4096)
+            .ok_or_else(|| failure("Antigravity app 只读接口认证不可用"))?
+            .to_owned();
+        Ok(Some(Self {
+            http,
+            origin,
+            token,
+        }))
+    }
+    async fn call(&self, method: &str, body: Value) -> Result<Value> {
+        let bytes = Self::bytes(
+            self.http
+                .post(format!(
+                    "{}/exa.language_server_pb.LanguageServerService/{method}",
+                    self.origin
+                ))
+                .header("Connect-Protocol-Version", "1")
+                .header("x-codeium-csrf-token", &self.token)
+                .json(&body),
+        )
+        .await?;
+        serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
+    }
+    async fn collect(
+        &self,
+        store: &mut impl Repository,
+        pricing: &Pricing,
+        settings: &Settings,
+        report: &mut Report,
+    ) -> Result<()> {
+        let all = self
+            .call(
+                "GetAllCascadeTrajectories",
+                json!({"excludeSubtrajectories":false}),
+            )
+            .await?;
+        let summaries = all["trajectorySummaries"]
+            .as_object()
+            .ok_or_else(|| failure("Antigravity 会话目录不完整"))?;
+        report.total_files = summaries.len() as u64;
+        for (id, summary) in summaries {
+            let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
+            let mut cursor: Cursor = store
+                .cursor(&cursor_id)?
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let modified = summary["lastModifiedTime"].as_str().unwrap_or("");
+            if !modified.is_empty() && cursor.modified == modified {
+                report.files += 1;
+                continue;
+            }
+            let full = self
+                .call(
+                    "GetCascadeTrajectory",
+                    json!({"cascadeId":id,"trajectoryVerbosity":3}),
+                )
+                .await?;
+            let trajectory = &full["trajectory"];
+            let mut steps = trajectory["steps"].as_array().cloned().unwrap_or_default();
+            let total = number(&full["numTotalSteps"]).unwrap_or(steps.len() as u64) as usize;
+            if total > 100_000 {
+                return Err(failure("Antigravity 会话步骤超过读取限制"));
+            }
+            while steps.len() < total {
+                let page = self
+                    .call(
+                        "GetCascadeTrajectorySteps",
+                        json!({"cascadeId":id,"stepOffset":steps.len(),"trajectoryVerbosity":3}),
+                    )
+                    .await?;
+                let next = page["steps"]
+                    .as_array()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| failure("Antigravity 历史步骤读取不完整"))?;
+                steps.extend(next.iter().cloned());
+            }
+            let count = number(&full["numTotalGeneratorMetadata"]).unwrap_or_else(|| {
+                trajectory["generatorMetadata"]
+                    .as_array()
+                    .map_or(0, |m| m.len()) as u64
+            }) as usize;
+            let mut offset = cursor.count.saturating_sub(1).min(count);
+            let mut stable = offset;
+            while offset < count {
+                let page=self.call("GetCascadeTrajectoryGeneratorMetadata",json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false})).await?;
+                let entries = page["generatorMetadata"]
+                    .as_array()
+                    .filter(|e| !e.is_empty())
+                    .ok_or_else(|| failure("Antigravity 历史用量读取不完整"))?;
+                for batch in entries.chunks(128) {
+                    let mut rows = Vec::new();
+                    for entry in batch {
+                        let parsed = record(id, entry, &steps, offset)?;
+                        if let Some(mut r) = parsed {
+                            if r.final_attempt()
+                                .is_some_and(|a| a.outcome == "in_progress")
+                            { /* reread this suffix on the next scan */
+                            } else if stable == offset {
+                                stable += 1;
+                                cursor.covered.extend(
+                                    entry["stepIndices"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .filter_map(number),
+                                );
+                            }
+                            price(&mut r, pricing, settings);
+                            rows.push(r);
+                        } else if stable == offset {
+                            stable += 1;
+                        }
+                        offset += 1;
+                    }
+                    report.imported += rows.len() as u64;
+                    store.write_batch(&rows, None)?;
+                }
+            }
+            cursor.count = stable;
+            cursor.modified = if stable == count {
+                modified.into()
+            } else {
+                String::new()
+            };
+            let cursor =
+                serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
+            store.write_batch(&[], Some((&cursor_id, &cursor)))?;
+            report.files += 1;
+            store.progress(report);
+        }
+        Ok(())
+    }
+}
+fn transcript_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    if depth > 8 || out.len() > 30_000 {
+        return Err(failure("Antigravity 历史目录超过读取限制"));
+    }
+    for item in std::fs::read_dir(root).map_err(storage::io_error)? {
+        let item = item.map_err(storage::io_error)?;
+        let kind = item.file_type().map_err(storage::io_error)?;
+        if kind.is_dir() {
+            transcript_files(&item.path(), out, depth + 1)?;
+        } else if kind.is_file() && item.file_name() == "transcript.jsonl" {
+            out.push(item.path());
+        }
+    }
+    Ok(())
+}
+pub(super) fn scan_files(
+    store: &mut impl Repository,
+    home: &Path,
+    pricing: &Pricing,
+    settings: &Settings,
+    report: &mut Report,
+) -> Result<()> {
+    let brain = home.join("antigravity/brain");
+    let mut files = Vec::new();
+    transcript_files(&brain, &mut files, 0)?;
+    for path in files {
+        let cascade = path
+            .strip_prefix(&brain)
+            .ok()
+            .and_then(|p| p.components().next())
+            .and_then(|c| c.as_os_str().to_str())
+            .ok_or_else(|| failure("Antigravity 历史路径无效"))?;
+        let rpc: Cursor = store
+            .cursor(&safe_id(&format!("antigravity:rpc:{cascade}")))?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
+        let mut c: FileCursor = store
+            .cursor(&key)?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut file = File::open(&path).map_err(storage::io_error)?;
+        let meta = file.metadata().map_err(storage::io_error)?;
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            format!("{}:{}", meta.dev(), meta.ino())
+        };
+        #[cfg(not(unix))]
+        let identity = format!("{:?}", meta.created().ok());
+        let tail = |file: &mut File, offset: u64| -> Result<String> {
+            use std::io::Read;
+            file.seek(SeekFrom::Start(offset.saturating_sub(4096)))
+                .map_err(storage::io_error)?;
+            let mut b = vec![0; offset.min(4096) as usize];
+            file.read_exact(&mut b).map_err(storage::io_error)?;
+            Ok(storage::digest(&b))
+        };
+        if c.identity != identity || meta.len() < c.offset || tail(&mut file, c.offset)? != c.tail {
+            c = FileCursor::default();
+        }
+        c.identity = identity;
+        file.seek(SeekFrom::Start(c.offset))
+            .map_err(storage::io_error)?;
+        let mut reader = BufReader::new(file);
+        let mut rows = Vec::new();
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            use std::io::Read;
+            let size = (&mut reader)
+                .take(LIMIT as u64 + 1)
+                .read_until(b'\n', &mut bytes)
+                .map_err(storage::io_error)?;
+            if size == 0 {
+                break;
+            }
+            if size > LIMIT {
+                return Err(failure("Antigravity 历史单行超过读取限制"));
+            }
+            if bytes.last() != Some(&b'\n') {
+                if store.requires_complete_history() {
+                    return Err(failure(
+                        "Antigravity 历史仍在写入，未导出、未清理，请稍后重试",
+                    ));
+                }
+                break;
+            }
+            let v: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| failure("Antigravity 历史文件存在无效完整行"))?;
+            let has_usage = [
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            ]
+            .iter()
+            .any(|k| number(&v[*k]).is_some());
+            if has_usage && !number(&v["step_index"]).is_some_and(|i| rpc.covered.contains(&i)) {
+                let request = text(&v, &["request_id"]);
+                let model = text(&v, &["model", "response_model"]);
+                let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
+                let (Some(request), Some(model), Some(at)) = (request, model, at) else {
+                    return Err(failure(
+                        "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
+                    ));
+                };
+                let id = safe_id(&format!("antigravity:request:{request}"));
+                let mut r = Record {
+                    id: id.clone(),
+                    client: "antigravity".into(),
+                    source: "antigravity".into(),
+                    session_id: Some(safe_id(cascade)),
+                    started_at: at,
+                    finished_at: Some(at),
+                    completed: true,
+                    attempts: vec![Attempt {
+                        id: safe_id(&format!("{id}:final")),
+                        response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
+                        requested_model: model_id(Some(model)),
+                        response_model: model_id(Some(model)),
+                        started_at: at,
+                        outcome: "success".into(),
+                        transport: "history_file".into(),
+                        tokens: Tokens {
+                            input: number(&v["input_tokens"]),
+                            output: number(&v["output_tokens"]),
+                            cache_read: number(&v["cache_read_tokens"]),
+                            cache_write: number(&v["cache_write_tokens"]),
+                            cache_write_5m: number(&v["cache_write_5m_tokens"]),
+                            cache_write_1h: number(&v["cache_write_1h_tokens"]),
+                            reasoning: number(&v["thinking_output_tokens"]),
+                            ..Tokens::default()
+                        },
+                        usage_status: "reported".into(),
+                        parse_reasons: vec!["attempt_time_unreported".into()],
+                        ..Attempt::default()
+                    }],
+                    ..Record::default()
+                };
+                price(&mut r, pricing, settings);
+                rows.push(r);
+            }
+            c.offset = reader.stream_position().map_err(storage::io_error)?;
+            if rows.len() >= 128 {
+                store.write_batch(&rows, None)?;
+                report.imported += rows.len() as u64;
+                rows.clear();
+            }
+        }
+        report.imported += rows.len() as u64;
+        c.tail = tail(reader.get_mut(), c.offset)?;
+        let cursor =
+            serde_json::to_string(&c).map_err(|_| failure("Antigravity 历史同步位置无效"))?;
+        store.write_batch(&rows, Some((&key, &cursor)))?;
+    }
+    Ok(())
+}
+pub fn sync(
+    store: &mut impl Repository,
+    pricing: &Pricing,
+    settings: &Settings,
+    home: &Path,
+) -> Result<Report> {
+    let mut report = Report {
+        phase: "syncing".into(),
+        ..Report::default()
+    };
+    let pricing = pricing.frozen();
+    let runtime = tokio::runtime::Handle::try_current()
+        .map_err(|_| failure("Antigravity 同步运行时不可用"))?;
+    let connected = runtime.block_on(async {
+        match Api::connect().await? {
+            Some(api) => {
+                api.collect(store, &pricing, settings, &mut report).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    });
+    // Already collected details remain available while the app is closed. Any
+    // new uncorrelated file usage makes a complete export fail explicitly.
+    scan_files(store, home, &pricing, settings, &mut report)?;
+    connected?;
+    report.phase = "done".into();
+    report.completed_at = Some(now());
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn shared_execution_keeps_requests_separate_and_final_mirror_is_not_a_retry() {
+        let steps = json!([{"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","completedAt":"2026-01-01T00:00:03Z"}}]);
+        let mut entry = json!({"executionId":"exec","stepIndices":[0],"chatModel":{"customMetadata":{"request_id":"request-one"},"model":"fixture-model","usage":{"inputTokens":"9","outputTokens":"3"},"retryInfos":[{"usage":{"inputTokens":"9","outputTokens":"3"}}]}});
+        let one = record("parent", &entry, steps.as_array().unwrap(), 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(one.attempts.len(), 1);
+        assert_eq!(one.tokens().total(), Some(12));
+        assert_eq!(
+            one.id,
+            record("child", &entry, steps.as_array().unwrap(), 2)
+                .unwrap()
+                .unwrap()
+                .id
+        );
+        entry["chatModel"]["customMetadata"]["request_id"] = json!("request-two");
+        let two = record("parent", &entry, steps.as_array().unwrap(), 1)
+            .unwrap()
+            .unwrap();
+        assert_ne!(one.id, two.id);
+    }
+    #[test]
+    fn retries_are_unique_and_reasoning_is_subset() {
+        let steps = json!([{"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","completedAt":"2026-01-01T00:00:03Z"}}]);
+        let m = json!({"executionId":"exec","stepIndices":[0],"chatModel":{"model":"claude-fixture","usage":{"responseId":"last","inputTokens":"10","cacheReadTokens":"20","outputTokens":"5","thinkingOutputTokens":"3"},"retryInfos":[{"traceId":"first","error":"unavailable","usage":{"inputTokens":"2","outputTokens":"0"}},{"usage":{"responseId":"last","inputTokens":"10","cacheReadTokens":"20","outputTokens":"5","thinkingOutputTokens":"3"}}]}});
+        let r = record("cascade", &m, steps.as_array().unwrap(), 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.attempts.len(), 2);
+        assert_eq!(r.tokens().total(), Some(37));
+        assert_eq!(r.tokens().reasoning, Some(3));
+        assert!(r.completed);
+        assert_eq!(r.attempts[0].outcome, "failed");
+        assert_eq!(r.attempts[1].tokens.cache_write, None);
+        assert_ne!(
+            r.id,
+            record("child", &m, steps.as_array().unwrap(), 0)
+                .unwrap()
+                .unwrap()
+                .id
+        );
+    }
+    #[test]
+    fn estimates_and_ambiguous_retries_do_not_become_bills() {
+        let steps = json!([{"metadata":{"executionId":"exec","createdAt":"2026-01-01T00:00:00Z"}}]);
+        let m = json!({"executionId":"exec","chatModel":{"chatStartMetadata":{"contextWindowMetadata":{"estimatedTokensUsed":500}}}});
+        assert!(record("cascade", &m, steps.as_array().unwrap(), 0)
+            .unwrap()
+            .is_none());
+        let m = json!({"executionId":"exec","chatModel":{"usage":{"inputTokens":"5"},"retryInfos":[{"usage":{"inputTokens":"5"}}]}});
+        assert!(record("cascade", &m, steps.as_array().unwrap(), 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::super::store::Store;
+    use super::*;
+    #[test]
+    fn history_is_incremental_and_correlates_rpc_steps_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("antigravity/brain/cascade/.system_generated/logs/transcript.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+        let mut report = Report::default();
+        let cursor = serde_json::to_string(&Cursor {
+            covered: BTreeSet::from([3]),
+            ..Cursor::default()
+        })
+        .unwrap();
+        store
+            .write_batch(&[], Some((&safe_id("antigravity:rpc:cascade"), &cursor)))
+            .unwrap();
+        let rows=concat!("{\"step_index\":3,\"input_tokens\":10,\"output_tokens\":2}\n", "{\"request_id\":\"request-fixture\",\"model\":\"fixture-model\",\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":10,\"output_tokens\":3}\n");
+        std::fs::write(&path, rows).unwrap();
+        scan_files(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(report.imported, 1);
+        scan_files(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            1
+        );
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"{\"step_index\":99,\"input_tokens\":10}\n")
+            .unwrap();
+        assert!(scan_files(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report
+        )
+        .is_err());
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            1
+        );
+    }
+}

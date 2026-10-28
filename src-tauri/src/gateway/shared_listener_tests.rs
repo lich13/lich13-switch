@@ -336,7 +336,7 @@ fn seed_client_configs(codex_home: &Path, claude_home: &Path, grok_home: &Path) 
 
 fn add_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) {
     let edit = match gateway.client_id() {
-        ClientId::Dsh | ClientId::Agy => panic!("DSH profile path is covered separately"),
+        ClientId::Dsh => panic!("DSH profile path is covered separately"),
         ClientId::Grok => Edit::SaveGrokProvider {
             quota_access_token: None,
             id: None,

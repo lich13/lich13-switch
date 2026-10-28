@@ -54,17 +54,18 @@ pub fn set_usage_settings(r: R<'_>, settings: Settings) -> Result<State> {
 pub async fn sync_usage(r: R<'_>, rebuild: Option<String>) -> Result<State> {
     if rebuild
         .as_deref()
-        .is_some_and(|s| !matches!(s, "codex" | "claude" | "grok"))
+        .is_some_and(|s| !matches!(s, "codex" | "claude" | "grok" | "antigravity"))
     {
         return Err(failure("未知的会话来源"));
     }
     let roots = vec![
-        ("codex".into(), r.home(crate::gateway::ClientId::Codex)?),
-        ("claude".into(), r.home(crate::gateway::ClientId::Claude)?),
-        ("grok".into(), r.home(crate::gateway::ClientId::Grok)?),
+        ("codex".into(), r.home(crate::gateway::ClientId::Codex)),
+        ("claude".into(), r.home(crate::gateway::ClientId::Claude)),
+        ("grok".into(), r.home(crate::gateway::ClientId::Grok)),
+        ("antigravity".into(), crate::antigravity::home()),
     ];
     let s = r.usage.clone();
-    tokio::task::spawn_blocking(move || s.sync(&roots, rebuild.as_deref()))
+    tokio::task::spawn_blocking(move || s.sync_roots(roots, rebuild.as_deref()))
         .await
         .map_err(|_| failure("同步中断"))?
 }
@@ -191,24 +192,58 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                 let maintenance = r.usage.clone();
                 let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
                 if r.usage.settings().auto_sync {
-                    let roots = [
-                        r.home(crate::gateway::ClientId::Codex)
-                            .map(|p| ("codex".into(), p)),
-                        r.home(crate::gateway::ClientId::Claude)
-                            .map(|p| ("claude".into(), p)),
-                        r.home(crate::gateway::ClientId::Grok)
-                            .map(|p| ("grok".into(), p)),
-                    ]
-                    .into_iter()
-                    .collect::<Result<Vec<_>>>();
-                    if let Ok(roots) = roots {
-                        let s = r.usage.clone();
-                        let _ = tokio::task::spawn_blocking(move || s.sync(&roots, None)).await;
-                    }
+                    let roots = vec![
+                        ("codex".into(), r.home(crate::gateway::ClientId::Codex)),
+                        ("claude".into(), r.home(crate::gateway::ClientId::Claude)),
+                        ("grok".into(), r.home(crate::gateway::ClientId::Grok)),
+                        ("antigravity".into(), crate::antigravity::home()),
+                    ];
+                    let s = r.usage.clone();
+                    let _ = tokio::task::spawn_blocking(move || s.sync_roots(roots, None)).await;
                 }
             }
             drop(r);
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     });
+}
+
+#[tauri::command]
+pub async fn export_usage_bill(
+    r: R<'_>,
+    app: tauri::AppHandle,
+    request: super::billing::Request,
+) -> Result<Option<super::billing::Exported>> {
+    use tauri_plugin_dialog::DialogExt;
+    request.validate()?;
+    let service = r.usage.clone();
+    let mut roots = Vec::new();
+    for client in &request.clients {
+        roots.push((
+            client.clone(),
+            if client == "claude" {
+                r.home(crate::gateway::ClientId::Claude)?
+            } else {
+                crate::antigravity::home()?
+            },
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .set_title("导出账单并清理明细")
+            .set_file_name("usage-bill.csv")
+            .add_filter("CSV", &["csv"])
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| failure("请选择本地账单保存路径"))?;
+        service.export_bill(&request, &roots, &path).map(Some)
+    })
+    .await
+    .map_err(|_| failure("账单导出中断，明细清理结果请检查用量页"))?
 }

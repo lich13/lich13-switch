@@ -259,7 +259,7 @@ describe("event log", () => {
     ["model", "模型熔断"],
     ["provider", "供应商熔断"],
   ] as const)(
-    "summarizes a %s circuit event with its HTTP cause and trigger",
+    "summarizes a %s circuit event with its own action and trigger",
     async (healthScope, expectedLabel) => {
       eventRecords = [
         {
@@ -296,7 +296,8 @@ describe("event log", () => {
       const summary = within(table).getAllByRole("button")[0];
 
       expect(summary).toHaveTextContent(expectedLabel);
-      expect(summary).toHaveTextContent("502");
+      expect(summary).toHaveTextContent("CIRCUIT_OPEN");
+      expect(summary).not.toHaveTextContent("502");
       expect(summary).toHaveTextContent("连续失败 3/3");
     },
   );
@@ -441,7 +442,7 @@ it("queries providers only on mount and keeps event names through filtering and 
   await screen.findByRole("button", { name: /模型不支持/ });
   const gateways = () =>
     mock.command.mock.calls.filter(([name]) => name === "get_gateway");
-  expect(gateways()).toHaveLength(5);
+  expect(gateways()).toHaveLength(4);
   const initial = eventCalls().length;
   await user.selectOptions(
     screen.getByRole("combobox", { name: "客户端" }),
@@ -450,7 +451,7 @@ it("queries providers only on mount and keeps event names through filtering and 
   await waitFor(() => expect(eventCalls()).toHaveLength(initial + 1));
   await user.click(screen.getByRole("button", { name: "下一页" }));
   await waitFor(() => expect(eventCalls()).toHaveLength(initial + 2));
-  expect(gateways()).toHaveLength(5);
+  expect(gateways()).toHaveLength(4);
   act(() =>
     mock.listeners.get("gateway-state")?.({
       clientId: "codex",
@@ -498,7 +499,7 @@ it("separates origins, resets pagination, and hides policy actions for internal 
     }),
   );
   const detail = await screen.findByRole("button", {
-    name: "上游服务异常",
+    name: "熔断",
   });
   expect(
     screen.queryByRole("button", { name: "查看策略" }),

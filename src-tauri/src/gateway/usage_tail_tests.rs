@@ -23,7 +23,7 @@ pub(super) const CANCEL_DELAY: Duration = Duration::from_millis(200);
 pub(super) const TAIL_WINDOW: Duration = Duration::from_millis(1500);
 pub(super) const TAIL_TOLERANCE: Duration = Duration::from_millis(500);
 
-pub(super) const HTTP_FIRST: &[u8] = br#"data: {"type":"response.created","response":{"id":"fixture-tail-response","model":"fixture-tail-model"}}
+pub(super) const HTTP_FIRST: &[u8] = br#"data: {"type":"response.output_text.delta","delta":"fixture","response":{"id":"fixture-tail-response","model":"fixture-tail-model"}}
 
 "#;
 const HTTP_PROGRESS: &[u8] = br#"data: {"type":"response.output_text.delta","response_id":"fixture-tail-response","delta":"fixture-progress"}
@@ -357,7 +357,7 @@ async fn websocket_cancel_tail_keeps_matching_terminal_usage_until_the_fixed_dea
         websocket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 format!(
-                    "{{\"type\":\"response.created\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
+                    "{{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
                 )
                 .into(),
             ))
@@ -418,8 +418,8 @@ async fn websocket_cancel_tail_keeps_matching_terminal_usage_until_the_fixed_dea
         .unwrap();
     let first = tokio::time::timeout(WAIT, client.next())
         .await
-        .expect("downstream WebSocket did not receive response.created")
-        .expect("downstream WebSocket ended before response.created");
+        .expect("downstream WebSocket did not receive output")
+        .expect("downstream WebSocket ended before output");
     assert!(first.as_str().contains(TAIL_RESPONSE_ID));
     let cancelled_at = Instant::now();
     client
@@ -572,7 +572,7 @@ async fn websocket_cancel_tail_with_continuous_content_and_heartbeat_closes_with
         websocket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 format!(
-                    "{{\"type\":\"response.created\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
+                    "{{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
                 )
                 .into(),
             ))
@@ -637,8 +637,8 @@ async fn websocket_cancel_tail_with_continuous_content_and_heartbeat_closes_with
         .unwrap();
     let first = tokio::time::timeout(WAIT, client.next())
         .await
-        .expect("downstream WebSocket did not receive response.created")
-        .expect("downstream WebSocket ended before response.created");
+        .expect("downstream WebSocket did not receive output")
+        .expect("downstream WebSocket ended before output");
     assert!(first.as_str().contains(TAIL_RESPONSE_ID));
     let cancelled_at = Instant::now();
     client
@@ -768,7 +768,7 @@ async fn websocket_cancel_tail_upstream_read_error_keeps_disconnected_evidence()
         websocket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 format!(
-                    "{{\"type\":\"response.created\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
+                    "{{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
                 )
                 .into(),
             ))
@@ -799,8 +799,8 @@ async fn websocket_cancel_tail_upstream_read_error_keeps_disconnected_evidence()
         .unwrap();
     let first = tokio::time::timeout(WAIT, client.next())
         .await
-        .expect("downstream WebSocket did not receive response.created")
-        .expect("downstream WebSocket ended before response.created");
+        .expect("downstream WebSocket did not receive output")
+        .expect("downstream WebSocket ended before output");
     assert!(first.as_str().contains(TAIL_RESPONSE_ID));
     assert!(gateway
         .view()
@@ -922,7 +922,7 @@ async fn websocket_gateway_stop_ends_tail_preserves_client_disconnect() {
         websocket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 format!(
-                    "{{\"type\":\"response.created\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
+                    "{{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{{\"id\":\"{TAIL_RESPONSE_ID}\",\"model\":\"{TAIL_MODEL}\"}}}}"
                 )
                 .into(),
             ))
@@ -956,8 +956,8 @@ async fn websocket_gateway_stop_ends_tail_preserves_client_disconnect() {
         .unwrap();
     let first = tokio::time::timeout(WAIT, client.next())
         .await
-        .expect("downstream WebSocket did not receive response.created")
-        .expect("downstream WebSocket ended before response.created");
+        .expect("downstream WebSocket did not receive output")
+        .expect("downstream WebSocket ended before output");
     assert!(first.as_str().contains(TAIL_RESPONSE_ID));
     assert!(gateway
         .view()

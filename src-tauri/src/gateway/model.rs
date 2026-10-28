@@ -186,8 +186,6 @@ pub struct Store {
     pub grok_connections: BTreeMap<String, super::grok_config::Connection>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dsh_models: BTreeMap<String, super::dsh::ModelMapping>,
-    #[serde(default)]
-    pub agy_models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dsh_catalog: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,7 +229,6 @@ impl Default for Store {
             provider_endpoints: BTreeMap::new(),
             grok_connections: BTreeMap::new(),
             dsh_models: BTreeMap::new(),
-            agy_models: BTreeMap::new(),
             dsh_catalog: vec![],
             grok_resume: None,
             grok_api_model: None,
@@ -590,7 +587,7 @@ impl Store {
                         },
                     );
                     if let Some(model) = model {
-                        self.agy_models.insert(p.id.clone(), model);
+                        let _ = model;
                     }
                 }
                 self.selected = selected;
@@ -721,7 +718,6 @@ impl Store {
                 self.quota_access_tokens.remove(&id);
                 self.providers.retain(|p| p.id != id);
                 self.dsh_models.remove(&id);
-                self.agy_models.remove(&id);
                 self.provider_endpoints.remove(&id);
                 if self.selected.as_deref() == Some(&id) {
                     self.selected = self.providers.first().map(|p| p.id.clone());

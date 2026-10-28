@@ -130,10 +130,12 @@ let claudeDoc: ConfigDocument = {
       2,
     ) + "\n",
 };
-let agyDoc: ConfigDocument = {
+let antigravityDoc: ConfigDocument = {
   ...doc,
-  clientId: "agy",
-  text: '{\n  "modelProvider": "gemini",\n  "model": "gemini-fixture"\n}\n',
+  clientId: "antigravity",
+  path: "~/.gemini/config/config.json",
+  revision: "preview-antigravity-config",
+  text: '{\n  "userSettings": {},\n  "model": "gemini-fixture"\n}\n',
 };
 const previousConfig: Record<string, string> = {};
 let login: LoginState = {
@@ -154,7 +156,7 @@ let quick = {
   visible: true,
   hiddenClients:
     previewParams.get("hiddenClients") === "all"
-      ? ["codex", "claude", "grok", "dsh", "agy"]
+      ? ["codex", "claude", "grok", "dsh"]
       : [],
 };
 const importPreview = previewParams.get("importPreview");
@@ -261,10 +263,6 @@ export async function run(
   if (name === "open_github" || name === "open_update_release") return;
   if (usageCommands.includes(name)) return usagePreview(name, args, emit);
   if (powerCommands.includes(name)) return powerPreview(name, args, emit);
-  if (name === "get_agy_launch")
-    return { installed: true, model: "gemini-fixture" };
-  if (name === "choose_agy_directory") return "/fixture/project";
-  if (name === "launch_agy") return;
   if (name === "get_quick") return { ...quick };
   if (name === "set_quick") {
     quick = { ...quick, ...args };
@@ -348,6 +346,27 @@ export async function run(
     const result = gatewayPreview(name, args);
     emit("gateway-state", gatewayPreview("get_gateway", args));
     return result;
+  }
+  if (name === "export_usage_bill")
+    return {
+      requests: 128,
+      attempts: 136,
+      cleaned: 192,
+      retained: 1,
+      cleanupError: null,
+    };
+  if (name === "read_antigravity_config")
+    return structuredClone(antigravityDoc);
+  if (name === "save_antigravity_config") {
+    JSON.parse(String(args.text));
+    if (args.expectedRevision !== antigravityDoc.revision)
+      throw { code: "CONFLICT", message: "配置已被外部修改，草稿已保留" };
+    antigravityDoc = {
+      ...antigravityDoc,
+      text: String(args.text),
+      revision: crypto.randomUUID(),
+    };
+    return structuredClone(antigravityDoc);
   }
   switch (name) {
     case "preview_account_import":
@@ -517,8 +536,8 @@ export async function run(
           ? claudeDoc
           : args.clientId === "grok"
             ? grokDoc
-            : args.clientId === "agy"
-              ? agyDoc
+            : args.clientId === "antigravity"
+              ? antigravityDoc
               : doc),
       };
     case "read_previous_config":
@@ -526,7 +545,7 @@ export async function run(
         throw new Error("没有可恢复的配置");
       return previousConfig[String(args.clientId)];
     case "validate_config":
-      if (args.clientId === "agy") {
+      if (args.clientId === "antigravity") {
         JSON.parse(String(args.text));
         return;
       }
@@ -544,8 +563,8 @@ export async function run(
           ? claudeDoc
           : args.clientId === "grok"
             ? grokDoc
-            : args.clientId === "agy"
-              ? agyDoc
+            : args.clientId === "antigravity"
+              ? antigravityDoc
               : doc;
       if (args.expectedRevision !== current.revision)
         throw { code: "CONFLICT", message: "配置已被外部修改，草稿已保留" };
@@ -558,7 +577,7 @@ export async function run(
       };
       if (args.clientId === "claude") claudeDoc = next;
       else if (args.clientId === "grok") grokDoc = next;
-      else if (args.clientId === "agy") agyDoc = next;
+      else if (args.clientId === "antigravity") antigravityDoc = next;
       else {
         doc = next;
         demo.configRevision = doc.revision;

@@ -229,9 +229,7 @@ pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
         ClientId::Codex => pair(&parse(text)?),
         ClientId::Claude => super::claude_config::pair(text),
         ClientId::Grok => super::grok_config::pair(text),
-        ClientId::Dsh | ClientId::Agy => {
-            Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入"))
-        }
+        ClientId::Dsh => Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入")),
     }
 }
 #[cfg(test)]
@@ -346,9 +344,7 @@ fn write_pair(
         ));
     }
     let output = match client {
-        ClientId::Dsh | ClientId::Agy => {
-            return Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入"))
-        }
+        ClientId::Dsh => return Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入")),
         ClientId::Codex => patch(text, target)?,
         ClientId::Claude => super::claude_config::patch(text, target)?,
         ClientId::Grok => super::grok_config::Snapshot::new(text, target)?

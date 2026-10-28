@@ -1,4 +1,3 @@
-import AgyLaunch from "./AgyLaunch";
 import ProviderTesting from "./ProviderTesting";
 import ConnectionTestIcon from "./ConnectionTestIcon";
 import Advanced from "./GatewayAdvanced";
@@ -142,7 +141,6 @@ function GatewayContent({
     action?: ProviderAction;
   } | null;
 }) {
-  const [launchOpen, setLaunchOpen] = useState(false);
   const [modelsOpen, setModelsOpen] = useState(false);
   const dirtyParts = useRef({ quota: false, advanced: false, dialog: false });
   const markQuota = useCallback(
@@ -355,9 +353,6 @@ function GatewayContent({
     e.currentTarget.closest("details")?.removeAttribute("open");
   return (
     <section className="gateway-page">
-      {launchOpen && (
-        <AgyLaunch state={state} close={() => setLaunchOpen(false)} />
-      )}
       <div className="gateway-navigation">
         <ClientSelection
           client={clientId}
@@ -365,14 +360,6 @@ function GatewayContent({
           disabled={busy}
         />
         <div className="gateway-client-actions">
-          {clientId === "agy" && (
-            <button
-              disabled={busy || !!dialog}
-              onClick={() => setLaunchOpen(true)}
-            >
-              启动 Antigravity
-            </button>
-          )}
           {clientId === "claude" && (
             <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
           )}

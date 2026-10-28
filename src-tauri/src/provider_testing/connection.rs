@@ -61,7 +61,6 @@ pub fn default_model(client: ClientId) -> &'static str {
         ClientId::Grok => "grok-4.1-fast",
         ClientId::Claude => "claude-sonnet-4-5",
         ClientId::Dsh => "deepseek-v4-pro",
-        ClientId::Agy => "gemini-2.5-flash",
         ClientId::Codex => downgrade::DEFAULT_TEST_MODEL,
     }
 }
@@ -137,13 +136,8 @@ impl Service {
         let mut error_detail = None;
         let result = async {
             let client = client()?;
-            let gemini = client_id == ClientId::Agy;
-            let mut url = url::Url::parse(&target.url(if gemini {
-                "/v1beta/models"
-            } else {
-                "/v1/models"
-            })?)
-            .map_err(|_| failure("模型目录地址无效"))?;
+            let mut url = url::Url::parse(&target.url("/v1/models")?)
+                .map_err(|_| failure("模型目录地址无效"))?;
             let mut models = Vec::new();
             let mut cursors = std::collections::HashSet::new();
             loop {
@@ -203,15 +197,6 @@ impl Service {
                     let id = item["id"]
                         .as_str()
                         .or_else(|| item["slug"].as_str())
-                        .or_else(|| {
-                            if gemini {
-                                item["name"]
-                                    .as_str()
-                                    .map(|id| id.strip_prefix("models/").unwrap_or(id))
-                            } else {
-                                None
-                            }
-                        })
                         .or_else(|| item.as_str());
                     if let Some(id) = id.filter(|s| {
                         !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
@@ -230,14 +215,10 @@ impl Service {
                         });
                     }
                 }
-                if if gemini {
-                    data["nextPageToken"].as_str().is_none_or(str::is_empty)
-                } else {
-                    data["has_more"] != true
-                } {
+                if data["has_more"] != true {
                     break;
                 }
-                let cursor = data[if gemini { "nextPageToken" } else { "last_id" }]
+                let cursor = data["last_id"]
                     .as_str()
                     .filter(|s| !s.is_empty() && s.len() <= 256)
                     .ok_or_else(|| failure("模型目录分页游标无效"))?;
@@ -246,13 +227,13 @@ impl Service {
                 }
                 let pairs: Vec<_> = url
                     .query_pairs()
-                    .filter(|(key, _)| key != if gemini { "pageToken" } else { "after_id" })
+                    .filter(|(key, _)| key != "after_id")
                     .map(|(k, v)| (k.into_owned(), v.into_owned()))
                     .collect();
                 url.query_pairs_mut()
                     .clear()
                     .extend_pairs(pairs)
-                    .append_pair(if gemini { "pageToken" } else { "after_id" }, cursor);
+                    .append_pair("after_id", cursor);
             }
             models.sort_by(|a, b| a.id.cmp(&b.id));
             models.dedup_by(|a, b| a.id == b.id);
@@ -298,9 +279,7 @@ impl Service {
     async fn connection_inner(&self, id: &str, context: &Context) -> Result<()> {
         let target = &context.target;
         let model = target.model(&context.request.model);
-        if target.client_id == ClientId::Agy && !crate::gateway::gemini::valid_model(&model) {
-            return Err(failure("模型 ID 无效"));
-        }
+
         let (path, mut payload) = payload(&context.request, &model, &target.protocol);
         if let Some(metadata) = target.codex_metadata() {
             payload["client_metadata"] = metadata;

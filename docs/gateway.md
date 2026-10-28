@@ -16,17 +16,9 @@
 
 Claude Code 的模型发现需要用户手动设置 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 后重新打开模型选择。Claude Code 会自行过滤和合并选项，网关返回的每个 ID 不保证在客户端界面逐项出现。
 
-## Antigravity CLI
-
-选择 Antigravity CLI 并添加 Gemini Native 供应商，支持模型目录读取和手填、白名单、并发、RPM、故障转移、连接测试与异常记录。启用后点击“启动 Antigravity”，填写 API 模型 ID 和工作目录；应用检测本机 `agy`，不存在、网关未启用或配置损坏时明确报错。
-
-启动使用应用私有 `agy/runtime` 作为固定 `--gemini_dir`，通过 `--model` 显式选择自定义模型。受管 `antigravity-cli/settings.json` 设置 `modelProvider` 和 `customModelsConfig`，保留其他字段；格式遵循[官方配置文档](https://antigravity.google/docs/settings?tab=cli)。原生共享 `config` 通过目录链接复用，已有冲突目录不会被覆盖。供应商切换不重建运行目录，删除供应商不删除 CLI 会话，直接运行原生 `agy` 的配置保持原状。
-
-网关原样转发 Gemini Native 生成、流式生成、Token 统计和模型目录接口，包括工具调用、多模态与思考签名。支持 `/v1beta`、`/v1alpha`、`/v1` 版本路径，模型从 URL 读取；上游使用 Google API Key 头。下游本地 Key 不会透传上游。Token 统计接口不增加生成用量，流式累计统计只结算一次；输入扣除缓存，输出包含思考 Token。未接入 Gemini CLI、Antigravity 桌面 App／IDE、官方账号、额度或原生会话导入。
-
 ## 供应商链接导入
 
-CC Switch 的 `app` 仅用于预选目标，`apiFormat` 用于预选兼容协议；未知或 Gemini 来源也可选择目标平台。Codex 使用 Responses，Claude Code 使用 Messages，Grok Build 可选 Responses／Chat Completions／Messages，DSH 使用 Chat Completions，Antigravity CLI 使用 Gemini Native。切换平台保留兼容协议，否则采用默认协议；不会转换上游接口。确认只保存供应商，保留队列、取消、重复检查和配置冲突重试。
+CC Switch 的 `app` 仅用于预选目标，`apiFormat` 用于预选兼容协议；未知或 Gemini 来源也可选择目标平台。Codex 使用 Responses，Claude Code 使用 Messages，Grok Build 可选 Responses／Chat Completions／Messages，DSH 使用 Chat Completions。切换平台保留兼容协议，否则采用默认协议；不会转换上游接口。确认只保存供应商，保留队列、取消、重复检查和配置冲突重试。
 
 ## DeepSeek Harness
 
@@ -42,7 +34,7 @@ DNS、TCP 和 TLS 握手共用故障策略中的连接时限，TLS 不重新计�
 
 ## 共享监听
 
-新安装默认共享 `127.0.0.1:43721`。Codex、Grok 和 DSH 使用 `/v1`，Claude 和 Antigravity 使用根地址；请求按客户端独立令牌精确分流，包括 Grok 也支持的 `/v1/messages`，不根据模型或协议猜测客户端。支持 `Authorization: Bearer`、`x-api-key` 和 `x-goog-api-key`；同时提供时必须匹配同一客户端，重复或不匹配的认证头返回 401。旧 `/codex`、`/claude`、`/grok` 前缀在当前共享端口继续作为对应客户端的别名。转发只移除旧本地前缀，剩余路径、查询参数、正文、SSE 和 WebSocket 保持原有转发规则。
+新安装默认共享 `127.0.0.1:43721`。Codex、Grok 和 DSH 使用 `/v1`，Claude 使用根地址；请求按客户端独立令牌精确分流，包括 Grok 也支持的 `/v1/messages`，不根据模型或协议猜测客户端。支持 `Authorization: Bearer`、`x-api-key` 和 `x-goog-api-key`；同时提供时必须匹配同一客户端，重复或不匹配的认证头返回 401。旧 `/codex`、`/claude`、`/grok` 前缀在当前共享端口继续作为对应客户端的别名。转发只移除旧本地前缀，剩余路径、查询参数、正文、SSE 和 WebSocket 保持原有转发规则。
 
 无前缀地址必须携带本客户端的本地令牌；缺失、错误或同时匹配多个客户端时返回 401，不会兜底交给 Codex。Bearer 认证方案名称不区分大小写，令牌本身仍须精确匹配。
 
@@ -256,3 +248,5 @@ Codex 连接失败与 5xx 共用同商短重试：连接拒绝、建连超时、
 日志页默认显示“上游报错”，另一标签为“网关内部”。真实上游错误响应归上游；连接、超时、熔断、换商、路由和配置等归内部，即使携带上游原因也不改变来源。历史记录根据已有证据分类，无法确认的归内部，不迁移日志文件。按来源过滤后计算数量及分页；从网关打开指定日志会自动选择对应标签。仅上游日志提供“查看策略”和“加入故障规则”，“清空全部日志”作用于两类。
 
 用量概览、排名与请求明细固定使用去重统计，不提供来源选择或计价模型筛选。数据来源管理、定价编辑和历史数据保留，Grok 独立轮次不加入常规请求总数。
+
+HTTP 200 的 JSON／SSE 业务失败使用同一错误分类。SSE 初始化与心跳仍处于检查阶段，直到有效业务输出或明确终态；原生 WebSocket 同样保留这一边界。可恢复错误在现有累计预算内重试、等待或安全换商，耗尽后返回明确错误。已输出的内容不重放，输出后的真实失败继续保留。

@@ -92,7 +92,7 @@ export type EventRecord = {
   firstAt: number;
   lastAt: number;
   count: number;
-  clientId: ClientId | null;
+  clientId: ClientId | "agy" | null;
   providerId: string | null;
   model: string | null;
   reason: keyof typeof reasons;
@@ -166,7 +166,7 @@ type StatusGroup =
   | "server_error"
   | "no_status";
 
-const client = (id: ClientId | null) =>
+const client = (id: ClientId | "agy" | null) =>
   id === "agy"
     ? "Antigravity CLI"
     : id === "codex"
@@ -243,11 +243,15 @@ function reasonText(r: EventRecord) {
     r.reason === "request_interrupted"
   )
     return "上游已结束，下游未完成交付";
-  const limit = limitLabel(r.details);
-  if (limit) return limit;
-  if (r.reason !== "circuit_open") return reasons[r.reason];
-  if (r.details?.healthScope === "model") return "模型熔断";
-  return r.details?.healthScope === "provider" ? "供应商熔断" : "熔断";
+  if (r.reason === "circuit_open") {
+    if (r.details?.healthScope === "model") return "模型熔断";
+    return r.details?.healthScope === "provider" ? "供应商熔断" : "熔断";
+  }
+  if (eventOrigin(r) === "upstream" || r.details?.quotaCheck) {
+    const limit = limitLabel(r.details);
+    if (limit) return limit;
+  }
+  return reasons[r.reason];
 }
 export function eventOrigin(r: EventRecord): FailureOrigin {
   if (r.origin) return r.origin;
@@ -318,6 +322,19 @@ function circuitTrigger(r: EventRecord) {
   }
 }
 function primaryCode(r: EventRecord) {
+  if (eventOrigin(r) === "gateway") {
+    if (
+      [
+        "circuit_open",
+        "thread_routing",
+        "thread_handoff",
+        "failover",
+        "failover_exhausted",
+      ].includes(r.reason)
+    )
+      return errorCodes[r.reason] || normalizedCode(r);
+    return r.details?.localCode || normalizedCode(r);
+  }
   return (
     r.details?.upstreamCode ??
     r.details?.upstreamReason ??
@@ -328,19 +345,12 @@ function primaryCode(r: EventRecord) {
 }
 function summaryMessage(r: EventRecord) {
   if (r.reason === "circuit_open")
-    return [reasonText(r), circuitCause(r), circuitTrigger(r)]
-      .filter(Boolean)
-      .join(" · ");
+    return [reasonText(r), circuitTrigger(r)].filter(Boolean).join(" · ");
   if (r.reason === "thread_routing" && r.details?.routing)
-    return [
-      r.details.message ||
-        (r.details.routing.failure
-          ? routingFailure(r.details.routing.failure)
-          : reasonText(r)),
-      routingOutcome(r.details.routing.outcome),
-    ]
+    return [reasonText(r), routingOutcome(r.details.routing.outcome)]
       .filter(Boolean)
       .join(" · ");
+  if (eventOrigin(r) === "gateway") return reasonText(r);
   return [
     r.details?.message || reasonText(r),
     r.details?.upstreamReason !== primaryCode(r)
@@ -431,6 +441,7 @@ export default function EventLog({
       if (
         request !== detailSequence.current ||
         !event.clientId ||
+        event.clientId === "agy" ||
         eventOrigin(event) !== "upstream"
       )
         return;
@@ -545,7 +556,7 @@ export default function EventLog({
       });
 
     const received = new Set<ClientId>();
-    for (const id of ["codex", "claude", "grok", "dsh", "agy"] as const)
+    for (const id of ["codex", "claude", "grok", "dsh"] as const)
       void command("get_gateway", { clientId: id })
         .then((s) => {
           if (!disposed && !received.has(id)) accept(s);
@@ -719,7 +730,6 @@ export default function EventLog({
           <option value="claude">Claude Code</option>
           <option value="grok">Grok Build</option>
           <option value="dsh">DeepSeek Harness</option>
-          <option value="agy">Antigravity CLI</option>
         </select>
         <select
           aria-label="供应商"
@@ -1000,7 +1010,7 @@ function EventDetail({
       }}
     >
       <div className="event-drawer-inner">
-        {addingRule && r.clientId && (
+        {addingRule && r.clientId && r.clientId !== "agy" && (
           <FailureRuleDialog
             clientId={r.clientId}
             initial={{

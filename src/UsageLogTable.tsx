@@ -179,7 +179,9 @@ export default function UsageLogTable({
               "--usage-narrow-columns":
                 secondary
                   .map((c) =>
-                    c.id === "tokens" ? "minmax(max-content, 1fr)" : c.width,
+                    c.id === "performance"
+                      ? c.width
+                      : `minmax(0, ${c.id === "cost" ? "0.65" : "1"}fr)`,
                   )
                   .join(" ") || "minmax(0, 1fr)",
               "--usage-narrow-areas": secondary.length

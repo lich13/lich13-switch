@@ -91,7 +91,7 @@ async fn http_200_application_failure_does_not_trip_provider_circuit() {
         vec![("content-type", "application/json")],
     )
     .await;
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), 502);
     assert_eq!(g.view().providers[0].health.failures, 0);
     assert_eq!(
         g.view().providers[0].health.state,
@@ -333,7 +333,7 @@ async fn previous_response_affinity_stays_on_owner_after_priority_changes() {
 }
 
 #[tokio::test]
-async fn later_sse_model_error_never_splices_backup_and_preserves_compressed_bytes() {
+async fn initialization_then_sse_model_error_retries_before_output_for_all_encodings() {
     let raw = concat!(
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"stream-fixture\"}}\n\n",
         "data: {\"type\":\"error\",\"error\":{\"code\":\"model_not_found\",\"message\":\"model exact-model does not exist\"}}\n\n"
@@ -383,10 +383,10 @@ async fn later_sse_model_error_never_splices_backup_and_preserves_compressed_byt
         assert_eq!(response.status(), 200, "{encoding}");
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),
-            payload,
+            Bytes::from_static(b"data: {\"type\":\"response.completed\"}\n\n"),
             "{encoding}"
         );
-        assert_eq!(backup_hits.load(Ordering::SeqCst), 0, "{encoding}");
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 1, "{encoding}");
         g.stop().await.unwrap();
     }
 }

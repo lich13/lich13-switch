@@ -190,3 +190,36 @@ it("restores previous configuration only into the draft and confirms client chan
     mocks.command.mock.calls.some(([name]) => name === "save_config"),
   ).toBe(false);
 });
+
+it("edits Antigravity app JSON through its own commands and preserves a conflicted draft", async () => {
+  localStorage.setItem("lich13-switch.config.client", "antigravity");
+  const appDoc = {
+    ...doc,
+    clientId: "antigravity",
+    path: "/fixture/config.json",
+    canRestore: false,
+    text: '{"userSettings":{},"future":7}',
+  };
+  mocks.command.mockImplementation(async (name) => {
+    if (name === "read_antigravity_config") return appDoc;
+    if (name === "save_antigravity_config")
+      throw { code: "CONFLICT", message: "配置已变化，草稿已保留" };
+  });
+  mount();
+  const source = await screen.findByLabelText("JSON 编辑器");
+  expect(screen.getByText("config.json")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "恢复上次配置" })).toBeDisabled();
+  fireEvent.change(source, {
+    target: { value: '{"userSettings":{"theme":"dark"},"future":7}' },
+  });
+  await userEvent.setup().click(screen.getByRole("button", { name: "保存" }));
+  expect(mocks.command).toHaveBeenCalledWith("save_antigravity_config", {
+    text: '{"userSettings":{"theme":"dark"},"future":7}',
+    expectedRevision: "r1",
+  });
+  expect(source).toHaveValue('{"userSettings":{"theme":"dark"},"future":7}');
+  expect(await screen.findByText("配置已变化，草稿已保留")).toBeInTheDocument();
+  expect(
+    mocks.command.mock.calls.some(([name]) => name === "read_config"),
+  ).toBe(false);
+});

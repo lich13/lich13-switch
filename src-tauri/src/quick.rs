@@ -42,7 +42,16 @@ impl Panel {
         let path = data.join("quick.json");
         let preferences = storage::read_optional(&path)?
             .map(|raw| {
-                serde_json::from_slice(&raw)
+                serde_json::from_slice::<serde_json::Value>(&raw)
+                    .and_then(|mut value| {
+                        if let Some(clients) = value
+                            .get_mut("hiddenClients")
+                            .and_then(serde_json::Value::as_array_mut)
+                        {
+                            clients.retain(|v| v != "agy");
+                        }
+                        serde_json::from_value(value)
+                    })
                     .map_err(|_| AppError::new(code::PANEL, "快捷面板设置无法读取"))
             })
             .transpose()?
@@ -316,6 +325,20 @@ mod tests {
 mod preference_tests {
     use super::*;
     #[test]
+    fn removed_cli_preferences_preserve_other_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("quick.json"),
+            r#"{"pinned":true,"tab":"accounts","hiddenClients":["agy","claude"]}"#,
+        )
+        .unwrap();
+        let panel = Panel::new(dir.path()).unwrap();
+        let prefs = panel.preferences.lock().unwrap();
+        assert!(prefs.pinned);
+        assert_eq!(prefs.tab, "accounts");
+        assert_eq!(prefs.hidden_clients, [crate::gateway::ClientId::Claude]);
+    }
+    #[test]
     fn legacy_preferences_default_visible_and_hidden_platforms_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -326,10 +349,7 @@ mod preference_tests {
         let panel = Panel::new(dir.path()).unwrap();
         let mut prefs = panel.preferences.lock().unwrap().clone();
         assert!(prefs.hidden_clients.is_empty());
-        prefs.hidden_clients = vec![
-            crate::gateway::ClientId::Agy,
-            crate::gateway::ClientId::Codex,
-        ];
+        prefs.hidden_clients = vec![crate::gateway::ClientId::Codex];
         std::fs::write(
             dir.path().join("quick.json"),
             serde_json::to_vec(&prefs).unwrap(),

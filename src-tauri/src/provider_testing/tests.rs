@@ -251,49 +251,6 @@ fn analyzer_and_collector_match_reference_fixtures() {
     assert_ne!(challenges[0].0, challenges[1].0);
     assert_ne!(challenges[1].0, challenges[2].0);
 }
-#[tokio::test]
-async fn antigravity_connection_uses_native_stream_without_captured_identity() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let capture = seen.clone();
-    let port = server(move |request| {
-        let capture = capture.clone();
-        async move {
-            let uri = request.uri().to_string();
-            let headers = request.headers().clone();
-            let body = request.into_body().collect().await.unwrap().to_bytes();
-            lock(&capture).push((uri, headers, serde_json::from_slice::<Value>(&body).unwrap()));
-            response(200, "text/event-stream", "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"fixture response\"}]}}],\"modelVersion\":\"gemini-fixture-returned\"}\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":4}}\n\n")
-        }
-    }).await;
-    let dir = tempfile::tempdir().unwrap();
-    let root = Gateway::new(dir.path().join("codex")).unwrap();
-    let agy = root.agy_companion(dir.path().join("agy")).unwrap();
-    let service = Service::new(dir.path(), [root, agy]).unwrap();
-    let id = add(&service, dir.path(), ClientId::Agy, port, "gemini_native");
-    let job = service
-        .start(request(&service, ClientId::Agy, &id))
-        .unwrap();
-    let result = completed(&service, &job.id).await;
-    assert_eq!(result.job.status, "completed", "{:?}", result.job.error);
-    assert_eq!(
-        result.job.returned_model.as_deref(),
-        Some("gemini-fixture-returned")
-    );
-    let seen = lock(&seen);
-    assert_eq!(seen.len(), 1);
-    assert_eq!(
-        seen[0].0,
-        "/deployment/v1beta/models/fixture-model:streamGenerateContent?alt=sse"
-    );
-    assert_eq!(seen[0].1["x-goog-api-key"], "fixture-test-token");
-    assert!(!seen[0].1.contains_key("authorization"));
-    assert!(!seen[0].1.contains_key("x-api-key"));
-    assert!(seen[0].2["contents"][0]["parts"][0]["text"].is_string());
-    assert!(seen[0].2.get("model").is_none());
-    let saved = std::fs::read_to_string(dir.path().join("provider-tests.json")).unwrap();
-    assert!(!saved.contains("fixture-test-token"));
-    assert!(!saved.contains("fixture response"));
-}
 
 #[tokio::test]
 async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_separate() {

@@ -30,7 +30,7 @@ import {
   errorOf,
   type ConfigDocument,
   type AppError,
-  type ClientId,
+  type ConfigClientId,
 } from "./types";
 import ClientSelection, {
   clientName,
@@ -133,7 +133,7 @@ function EditorContent({
   theme,
   onDirty,
   onMessage,
-}: Props & { clientId: ClientId; select: (id: ClientId) => void }) {
+}: Props & { clientId: ConfigClientId; select: (id: ConfigClientId) => void }) {
   const [doc, setDoc] = useState<ConfigDocument | null>(null),
     [text, setText] = useState(""),
     [error, setError] = useState<AppError | null>(null),
@@ -157,7 +157,9 @@ function EditorContent({
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     try {
-      const d = await command("read_config", { clientId });
+      const d = await (clientId === "antigravity"
+        ? command("read_antigravity_config")
+        : command("read_config", { clientId }));
       if (seq !== loadSeq.current) return;
       setDoc(d);
       setText(d.text);
@@ -212,11 +214,16 @@ function EditorContent({
     setBusy(true);
     setError(null);
     try {
-      const d = await command("save_config", {
-        clientId,
-        text: submitted,
-        expectedRevision: current.revision,
-      });
+      const d = await (clientId === "antigravity"
+        ? command("save_antigravity_config", {
+            text: submitted,
+            expectedRevision: current.revision,
+          })
+        : command("save_config", {
+            clientId,
+            text: submitted,
+            expectedRevision: current.revision,
+          }));
       const restart =
         clientId === "codex" ||
         ["model", "env", "effortLevel", "modelSettings"].some((key) => {
@@ -263,7 +270,7 @@ function EditorContent({
   }, [dirty, busy]);
   const extensions = useMemo(
     () => [
-      clientId === "claude" || clientId === "agy"
+      clientId === "claude" || clientId === "antigravity"
         ? json()
         : StreamLanguage.define(toml),
       lintGutter(),
@@ -277,16 +284,19 @@ function EditorContent({
         },
       ]),
       EditorView.lineWrapping,
-      ...((clientId === "claude" || clientId === "agy") && !revealed
+      ...((clientId === "claude" || clientId === "antigravity") && !revealed
         ? [maskedJson]
         : []),
       linter(
         async (view) => {
           try {
-            await command("validate_config", {
-              clientId,
-              text: view.state.doc.toString(),
-            });
+            if (clientId === "antigravity")
+              JSON.parse(view.state.doc.toString());
+            else
+              await command("validate_config", {
+                clientId,
+                text: view.state.doc.toString(),
+              });
             return [];
           } catch (e) {
             const err = errorOf(e);
@@ -330,7 +340,8 @@ function EditorContent({
     if (next) {
       try {
         get(text, []);
-        await command("validate_config", { clientId, text });
+        if (clientId === "antigravity") JSON.parse(text);
+        else await command("validate_config", { clientId, text });
         setError(null);
       } catch (e) {
         setError(errorOf(e));
@@ -365,7 +376,12 @@ function EditorContent({
         />
       )}
       <div className="config-heading">
-        <ClientSelection client={clientId} select={select} disabled={busy} />
+        <ClientSelection
+          visibleClients={["codex", "claude", "grok", "dsh", "antigravity"]}
+          client={clientId}
+          select={select}
+          disabled={busy}
+        />
         <div className="inline">
           {clientId === "claude" && (
             <div className="segmented" aria-label="编辑方式">
@@ -397,9 +413,11 @@ function EditorContent({
       </div>
       <div className="editor-toolbar">
         <span title={doc?.path}>
-          {clientId === "claude" || clientId === "agy"
-            ? "settings.json"
-            : "config.toml"}
+          {clientId === "antigravity"
+            ? "config.json"
+            : clientId === "claude"
+              ? "settings.json"
+              : "config.toml"}
         </span>
         <div className="inline">
           {dirty && <span className="status amber">未保存</span>}
@@ -420,7 +438,8 @@ function EditorContent({
               <ListChecks size={16} />
             </button>
           )}
-          {clientId === "claude" && !visual && (
+          {(clientId === "antigravity" ||
+            (clientId === "claude" && !visual)) && (
             <>
               <button
                 className="icon-button"
@@ -428,7 +447,15 @@ function EditorContent({
                 title="格式化 JSON"
                 onClick={() => {
                   try {
-                    update(JSON.stringify(get(text, []), null, 2) + "\n");
+                    update(
+                      JSON.stringify(
+                        clientId === "antigravity"
+                          ? JSON.parse(text)
+                          : get(text, []),
+                        null,
+                        2,
+                      ) + "\n",
+                    );
                   } catch (e) {
                     setError(errorOf(e));
                   }
@@ -452,12 +479,15 @@ function EditorContent({
             title="恢复上次配置"
             disabled={!doc?.canRestore || busy}
             onClick={async () => {
+              if (clientId === "antigravity") return;
               if (
                 dirty &&
                 !(await confirmAction("恢复上次配置会替换当前草稿。", "恢复"))
               )
                 return;
-              void command("read_previous_config", { clientId })
+              void command("read_previous_config", {
+                clientId,
+              })
                 .then(update)
                 .catch((e) => setError(errorOf(e)));
             }}
@@ -505,7 +535,7 @@ function EditorContent({
             height="100%"
             extensions={extensions}
             aria-label={
-              clientId === "claude" || clientId === "agy"
+              clientId === "claude" || clientId === "antigravity"
                 ? "JSON 编辑器"
                 : "TOML 编辑器"
             }

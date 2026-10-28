@@ -123,7 +123,7 @@ export default function ProviderTesting({
   const kind: ProviderTestKind =
     tab === "fingerprint" ? "fingerprint" : "connection";
   const testing = tab === "connection" || tab === "fingerprint";
-  const fingerprint = !provider.searchOnly && gateway.clientId !== "agy";
+  const fingerprint = !provider.searchOnly;
   const platform = state?.platform;
   const sampleCount =
     platform?.engine === "lmDetector"

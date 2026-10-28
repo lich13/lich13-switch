@@ -1,26 +1,38 @@
 import { flushTestPrompt } from "./provider-test-prompt";
 import { useCallback, useState } from "react";
-import type { ClientId } from "./types";
+import type { ClientId, ConfigClientId } from "./types";
 import { confirmAction } from "./confirmation";
 
-export const clients: ClientId[] = ["codex", "claude", "grok", "dsh", "agy"];
-export const clientName = (client: ClientId) =>
+export const clients: ClientId[] = ["codex", "claude", "grok", "dsh"];
+export const clientName = (client: ConfigClientId) =>
   ({
     codex: "Codex",
     claude: "Claude Code",
     grok: "Grok Build",
     dsh: "DSH",
-    agy: "Antigravity CLI",
+    antigravity: "Antigravity app",
   })[client];
+export function useClientSelection(
+  surface: "config",
+): readonly [
+  ConfigClientId,
+  (next: ConfigClientId, dirty?: boolean) => Promise<boolean>,
+];
+export function useClientSelection(
+  surface: "main" | "quick",
+): readonly [
+  ClientId,
+  (next: ConfigClientId, dirty?: boolean) => Promise<boolean>,
+];
 export function useClientSelection(surface: "main" | "quick" | "config") {
   const key = `lich13-switch.${surface}.client`;
-  const [client, setClient] = useState<ClientId>(() => {
+  const [client, setClient] = useState<ConfigClientId>(() => {
     try {
       const stored = localStorage.getItem(key);
       return stored === "claude" ||
         stored === "grok" ||
         stored === "dsh" ||
-        stored === "agy"
+        (surface === "config" && stored === "antigravity")
         ? stored
         : "codex";
     } catch {
@@ -28,7 +40,7 @@ export function useClientSelection(surface: "main" | "quick" | "config") {
     }
   });
   const select = useCallback(
-    async (next: ClientId, dirty = false) => {
+    async (next: ConfigClientId, dirty = false) => {
       if (next === client) return true;
       if (!(await flushTestPrompt())) return false;
       if (
@@ -48,18 +60,18 @@ export function useClientSelection(surface: "main" | "quick" | "config") {
   );
   return [client, select] as const;
 }
-export default function ClientSelection({
+export default function ClientSelection<C extends ConfigClientId = ClientId>({
   client,
   select,
   disabled = false,
   includeDsh = true,
-  visibleClients = clients,
+  visibleClients = clients as unknown as readonly C[],
 }: {
-  client: ClientId;
-  select: (id: ClientId) => void;
+  client: C;
+  select: (id: C) => void;
   disabled?: boolean;
   includeDsh?: boolean;
-  visibleClients?: readonly ClientId[];
+  visibleClients?: readonly C[];
 }) {
   return (
     <nav className="segmented client-selection" aria-label="客户端">

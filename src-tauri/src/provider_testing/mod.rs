@@ -44,7 +44,6 @@ fn client_key(client: ClientId) -> &'static str {
         ClientId::Claude => "claude",
         ClientId::Grok => "grok",
         ClientId::Dsh => "dsh",
-        ClientId::Agy => "agy",
     }
 }
 fn scope_key(client: ClientId, provider: &str) -> String {
@@ -302,9 +301,6 @@ impl Service {
         Ok(())
     }
     pub fn start(&self, request: Request) -> Result<Job> {
-        if request.client_id == ClientId::Agy && request.kind == Kind::Fingerprint {
-            return Err(failure("Antigravity 支持连接测试"));
-        }
         self.start_job(request, false)
     }
     pub fn set_prompt(&self, prompt: String) -> Result<()> {

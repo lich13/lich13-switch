@@ -180,10 +180,7 @@ fn parse_usage(
     let subtotal = short
         .or(long)
         .map(|_| short.unwrap_or(0) + long.unwrap_or(0));
-    let write = match (reported_write, subtotal) {
-        (Some(total), Some(parts)) => Some(total.max(parts)),
-        (total, parts) => total.or(parts),
-    };
+    let write = reported_write.or(subtotal);
     let mut reasons = Vec::new();
     if reported_write
         .zip(subtotal)
@@ -445,7 +442,7 @@ impl Meter {
                                 .push("cache_write_total_below_ttl_details".into());
                         }
                     }
-                    self.tokens.cache_write = Some(self.tokens.cache_write.unwrap_or(0).max(parts));
+                    self.tokens.cache_write = self.reported_cache_write.or(Some(parts));
                 }
                 // Some providers report cache details after the inclusive input
                 // counter. Normalize against that same counter after merging.
@@ -1351,7 +1348,7 @@ impl Totals {
             }
             if let Some(s) = a.status {
                 self.status_known += 1;
-                if (200..300).contains(&s) || s == 101 && r.completed {
+                if ((200..300).contains(&s) || s == 101) && r.completed {
                     self.success += 1;
                 }
             } else if r.source != "proxy" {

@@ -280,19 +280,19 @@ it("imports unknown sources into the chosen platform and keeps compatible protoc
   await user.selectOptions(screen.getByLabelText("协议"), "chat_completions");
   await user.selectOptions(screen.getByLabelText("平台"), "dsh");
   expect(screen.getByLabelText("协议")).toHaveValue("chat_completions");
-  await user.selectOptions(screen.getByLabelText("平台"), "agy");
-  expect(screen.getByLabelText("协议")).toHaveValue("gemini_native");
+  await user.selectOptions(screen.getByLabelText("平台"), "claude");
+  expect(screen.getByLabelText("协议")).toHaveValue("messages");
   expect(
     within(screen.getByLabelText("协议")).queryByRole("option", {
-      name: "Messages",
+      name: "Gemini Native",
     }),
   ).toBeNull();
   expect(within(dialog).getByText(first.baseUrl)).toBeVisible();
   await user.click(within(dialog).getByRole("button", { name: "导入" }));
   expect(mock.command).toHaveBeenCalledWith("confirm_provider_import", {
     id: first.id,
-    clientId: "agy",
-    protocol: "gemini_native",
+    clientId: "claude",
+    protocol: "messages",
     expectedRevision: revision,
   });
 });

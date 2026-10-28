@@ -493,7 +493,7 @@ async fn sse_error_after_output_is_forwarded_without_replay_or_backup_request() 
         seen.fetch_add(1, Ordering::SeqCst);
         async {
             sse_response(format!(
-                "event: response.created\ndata: {CREATED}\n\nevent: error\ndata: {TEMPORARY_429}\n\n"
+                "event: response.created\ndata: {CREATED}\n\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\"}}\n\nevent: error\ndata: {TEMPORARY_429}\n\n"
             ))
         }
     })

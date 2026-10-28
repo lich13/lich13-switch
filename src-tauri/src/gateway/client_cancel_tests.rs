@@ -845,17 +845,21 @@ async fn panel_cancel_sse_before_effective_output_ends_stream_without_failure() 
     socket.write_all(event).await.unwrap();
     socket.write_all(b"\r\n").await.unwrap();
     let mut prefix = vec![0; 4096];
-    let count = tokio::time::timeout(WAIT, downstream.read(&mut prefix))
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), downstream.read(&mut prefix))
+            .await
+            .is_err()
+    );
+    let id = gateway.view().pending_requests[0].request_id.clone();
+    assert!(gateway.cancel_wait(&id));
+    let mut tail = vec![0; 4096];
+    let count = tokio::time::timeout(WAIT, downstream.read(&mut tail))
         .await
         .unwrap()
         .unwrap();
-    assert!(count > 0);
-    let id = gateway.view().pending_requests[0].request_id.clone();
-    assert!(gateway.cancel_wait(&id));
-    let mut tail = Vec::new();
-    let _ = tokio::time::timeout(WAIT, downstream.read_to_end(&mut tail))
-        .await
-        .unwrap();
+    tail.truncate(count);
+    assert!(tail.starts_with(b"HTTP/1.1 499"));
+    assert!(!String::from_utf8_lossy(&tail).contains("response.created"));
     let record = wait_for_usage_record(&usage).await;
     assert_eq!(
         record

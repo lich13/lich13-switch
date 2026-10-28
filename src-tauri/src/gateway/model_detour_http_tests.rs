@@ -43,7 +43,7 @@ const V0255_FAILURE_RESPONSE: &[u8] =
 const V0255_INTERNAL_RETRY_FAILURE_RESPONSE: &[u8] =
     br#"{"error":{"code":"fixture_transient","message":"fixture upstream unavailable"}}"#;
 const V0255_CANCEL_PREFIX: &[u8] =
-    b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-cancel-response\"}}\n\n";
+    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{\"id\":\"fixture-cancel-response\"}}\n\n";
 
 async fn v0255_body(request: Request<Incoming>) -> Vec<u8> {
     request

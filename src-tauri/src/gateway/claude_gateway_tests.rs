@@ -492,7 +492,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
 
 #[tokio::test]
 async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconnect_fail() {
-    const START: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"model\":\"claude-fixture\",\"stop_reason\":null}}\n\n";
+    const START: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"model\":\"claude-fixture\",\"stop_reason\":null}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fixture\"}}\n\n";
     const STOP: &[u8] = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let release_upstream = release.clone();

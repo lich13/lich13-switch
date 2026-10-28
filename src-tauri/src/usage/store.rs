@@ -89,6 +89,7 @@ impl Store {
         query::register(&connection)?;
         if storage_v12::active(&connection) {
             storage_v12::protect_encoding(&connection)?;
+            storage_v12::refresh_metrics(&connection)?;
             return Ok(Self {
                 connection,
                 overview_cache: Default::default(),
@@ -309,11 +310,81 @@ impl Store {
                 )
                 .unwrap_or(false)
     }
+    fn repair_business_success_batch(&mut self) -> Result<bool> {
+        let cursor: Option<String> = db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='billing_success_completed'",
+                [],
+                |r| r.get(0),
+            )
+            .optional())?;
+        if cursor.as_deref() == Some("done") {
+            return Ok(false);
+        }
+        let native = storage_v12::active(&self.connection);
+        let cursor = cursor.unwrap_or_else(|| if native { "d:".into() } else { "r:".into() });
+        let daily = native || cursor.starts_with("d:");
+        let after = cursor.get(2..).unwrap_or("");
+        let table = if daily { "daily" } else { "records" };
+        let rows = {
+            let mut s = db(self.connection.prepare(&format!(
+                "SELECT id,body FROM {table} WHERE id>?1 ORDER BY id LIMIT 128"
+            )))?;
+            let rows = db(s.query_map([after], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+        };
+        let tx = db(self.connection.transaction())?;
+        let metrics = if native {
+            "usage_daily_metrics"
+        } else {
+            "usage_metrics"
+        };
+        let mut changed = false;
+        for (id, body) in &rows {
+            let failed = if daily {
+                let mut d: Daily = bodies::decode(&tx, body)?;
+                if !d.example.completed && d.totals.success > 0 {
+                    d.totals.success = 0;
+                    db(tx.execute(
+                        "UPDATE daily SET body=?2 WHERE id=?1",
+                        params![id, bodies::encode(&tx, &d)?],
+                    ))?;
+                }
+                !d.example.completed
+            } else {
+                !bodies::decode::<Record>(&tx, body)?.completed
+            };
+            if failed {
+                changed |= db(tx.execute(
+                    &format!("UPDATE {metrics} SET success=0 WHERE owner=?1 AND success<>0"),
+                    [id],
+                ))? > 0;
+            }
+        }
+        let next = rows
+            .last()
+            .map(|(id, _)| format!("{}:{id}", if daily { "d" } else { "r" }))
+            .unwrap_or_else(|| if daily { "done".into() } else { "d:".into() });
+        db(tx.execute(
+            "INSERT OR REPLACE INTO metadata VALUES('billing_success_completed',?1)",
+            [next],
+        ))?;
+        if changed {
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok(!daily || !rows.is_empty())
+    }
     /// Restartable storage-only conversion. Prices and associations remain exact;
     /// identical gateway/source metric projections share the same stored rows.
     pub fn compact_storage_batch(&mut self) -> Result<bool> {
+        let repaired_success = self.repair_business_success_batch()?;
         if storage_v12::active(&self.connection) {
-            return storage_v12::compact_diagnostics(&self.connection);
+            return storage_v12::compact_diagnostics(&self.connection)
+                .map(|changed| changed || repaired_success);
         }
         if storage_v12::pending(&self.connection)
             && (self.repair_metadata_batch()? || self.repair_finish_times()?)
@@ -609,36 +680,6 @@ impl Store {
             .then(|| db(self.connection.unchecked_transaction()))
             .transpose()
     }
-    fn records(&self, f: &Filter, with_status: bool) -> Result<Vec<Record>> {
-        let _snapshot = self.read_snapshot()?;
-        let (condition, args) = query::conditions(f, "r", with_status);
-        let condition = query::native_sql(&self.connection, condition);
-        let eligible = query::eligible(&self.connection, f, "r", false);
-        let mut statement = db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {eligible} AND {condition} ORDER BY time DESC,local_sequence DESC,id DESC")))?;
-        let rows = db(
-            statement.query_map(rusqlite::params_from_iter(args.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-            }),
-        )?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (body, duplicate) = db(row)?;
-            let mut r: Record = bodies::decode(&self.connection, &body)?;
-            r.duplicate_of = duplicate;
-            if f.source.as_deref() == Some("proxy") {
-                r.gateway_only();
-            }
-            if !with_status
-                || status_matches(
-                    r.final_attempt().and_then(|a| a.status),
-                    f.status.as_deref(),
-                )
-            {
-                out.push(r);
-            }
-        }
-        Ok(out)
-    }
     pub fn logs(&self, f: &Filter) -> Result<Page> {
         let _snapshot = self.read_snapshot()?;
         let (condition, args) = query::conditions(f, "r", true);
@@ -731,99 +772,140 @@ impl Store {
         }
         self.archive_details_batch(at)?;
         let cutoff = query::bucket(at - 30 * DAY, DAY);
-        if cutoff <= self.detail_since()?
-            && !db(self.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM records WHERE time<?1)",
-                [cutoff],
-                |r| r.get::<_, bool>(0),
-            ))?
-        {
-            return Ok(());
-        }
-        let mut records = Vec::new();
-        for scope in [None, Some("proxy"), Some("sessions"), Some("grok_sessions")] {
-            let selected = self.records(
-                &Filter {
-                    end: Some(cutoff - 1),
-                    source: scope.map(str::to_owned),
-                    ..Filter::default()
-                },
-                false,
-            )?;
-            records.extend(selected.into_iter().map(|r| (scope.map(str::to_owned), r)));
-        }
         let tx = db(self.connection.transaction())?;
-        for (scope, mut r) in records {
-            let day = query::bucket(r.event_time(), DAY);
-            let Some(a) = r.final_attempt() else {
-                continue;
+        loop {
+            let ids = {
+                let sql = if storage_v12::active(&tx) {
+                    "SELECT usage_text(key) FROM v12_rows WHERE time<?1 AND client NOT IN (usage_label('claude'),usage_label('antigravity')) ORDER BY time,key LIMIT 128"
+                } else {
+                    "SELECT id FROM records WHERE time<?1 AND client NOT IN ('claude','antigravity') ORDER BY time,id LIMIT 128"
+                };
+                let mut statement = db(tx.prepare(sql))?;
+                let rows = db(statement.query_map([cutoff], |r| r.get::<_, String>(0)))?;
+                db(rows.collect::<rusqlite::Result<Vec<_>>>())?
             };
-            let provider = a.provider.clone();
-            let model = a.grouping_model().map(str::to_owned);
-            let status = a.status;
-            let mut t = Totals::default();
-            t.add_record(&r);
-            r.id.clear();
-            r.session_id = None;
-            r.started_at = day;
-            // A per-request finish must not split otherwise identical daily buckets.
-            r.finished_at = None;
-            r.duplicate_of = None;
-            r.gateway_reported = None;
-            for a in &mut r.attempts {
-                a.id.clear();
-                a.response_id = None;
-                a.end = None;
-                a.transfer = None;
-                a.thread_hash = None;
-                a.upstream_request_hash = None;
-                a.routing_decision = None;
-                a.started_at = day;
-                a.duration_ms = 0;
-                a.first_token_ms = None;
-                // Per-request availability is not a billing dimension. Its
-                // first-token marker must not split otherwise identical days.
-                a.availability.clear();
+            if ids.is_empty() {
+                break;
             }
-            // Exact token/tier/price dimensions are retained for safe future backfill.
-            let key =
-                safe_id(&serde_json::to_string(&(&scope, &r)).map_err(|_| failure("汇总失败"))?);
-            let old: Option<String> = db(tx
-                .query_row("SELECT body FROM daily WHERE id=?1", [&key], |row| {
-                    row.get(0)
-                })
-                .optional())?;
-            let mut d = if let Some(body) = old {
-                bodies::decode::<Daily>(&tx, &body)?
-            } else {
-                Daily {
-                    scope: Some(scope.unwrap_or_else(|| "all".into())),
-                    client: r.client.clone(),
-                    provider,
-                    model,
-                    source: r.source.clone(),
-                    status,
-                    totals: Totals::default(),
-                    example: r,
-                }
-            };
-            d.totals.add(&t);
-            db(tx.execute("INSERT INTO daily(id,day,body) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![key,day,bodies::encode(&tx, &d)?]))?;
-            query::project(&tx, 1, &key, &d.example, d.totals.requests, Some(&d.totals))?;
-        }
-        // Keep only irreversible correlation keys after detail expiry. They prevent
-        // archived files, late imports and source rebuilds from duplicating daily totals.
-        if storage_v12::active(&tx) {
-            storage_v12::archive(&tx, cutoff)?;
-        } else {
-            db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE time<?1",[cutoff]))?;
-            db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE time<?1)",[cutoff]))?;
-            db(tx.execute("DELETE FROM records WHERE time<?1", [cutoff]))?;
+            Self::archive_into(&tx, &ids)?;
         }
         bodies::prune_shapes(&tx)?;
-        query::changed(&tx)?;
-        db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[cutoff.to_string()]))?;
+        db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=max(cast(value AS INTEGER),cast(excluded.value AS INTEGER))",[cutoff.to_string()]))?;
         db(tx.commit())
+    }
+    /// The exact set is selected while holding the writer lock. Each transaction
+    /// accounts and deletes the same bounded set; no global age-based deletion.
+    pub(super) fn archive_batch(&mut self, ids: &[String]) -> Result<()> {
+        let tx = db(self.connection.transaction())?;
+        Self::archive_into(&tx, ids)?;
+        db(tx.commit())
+    }
+    fn archive_into(tx: &rusqlite::Transaction<'_>, ids: &[String]) -> Result<()> {
+        let native = storage_v12::active(tx);
+        db(tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS archive_ids(id TEXT PRIMARY KEY,rid INTEGER); DELETE FROM archive_ids;"))?;
+        let sql = if native {
+            "INSERT OR IGNORE INTO archive_ids SELECT usage_text(key),rid FROM v12_rows WHERE usage_hint(key)=usage_hint(usage_key(?1)) AND key=usage_key(?1)"
+        } else {
+            "INSERT OR IGNORE INTO archive_ids SELECT id,NULL FROM records WHERE id=?1"
+        };
+        let mut selected = db(tx.prepare_cached(sql))?;
+        for id in ids {
+            db(selected.execute([id]))?;
+        }
+        drop(selected);
+        for scope in [None, Some("proxy"), Some("sessions"), Some("grok_sessions")] {
+            let filter = Filter {
+                source: scope.map(str::to_owned),
+                ..Filter::default()
+            };
+            let eligible = query::eligible(tx, &filter, "r", false);
+            let key = if native { "rid" } else { "id" };
+            let mut statement = db(tx.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE r.{key} IN (SELECT {key} FROM archive_ids) AND {eligible}")))?;
+            let rows = db(statement.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            }))?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (body, duplicate) = db(row)?;
+                let mut r: Record = bodies::decode(tx, &body)?;
+                r.duplicate_of = duplicate;
+                if scope == Some("proxy") {
+                    r.gateway_only();
+                }
+                records.push((scope.map(str::to_owned), r));
+            }
+            drop(statement);
+            for (scope, mut r) in records {
+                let day = query::bucket(r.event_time(), DAY);
+                let Some(a) = r.final_attempt() else {
+                    continue;
+                };
+                let provider = a.provider.clone();
+                let model = a.grouping_model().map(str::to_owned);
+                let status = a.status;
+                let mut t = Totals::default();
+                t.add_record(&r);
+                r.id.clear();
+                r.session_id = None;
+                r.started_at = day;
+                // A per-request finish must not split otherwise identical daily buckets.
+                r.finished_at = None;
+                r.duplicate_of = None;
+                r.gateway_reported = None;
+                for a in &mut r.attempts {
+                    a.id.clear();
+                    a.response_id = None;
+                    a.end = None;
+                    a.transfer = None;
+                    a.thread_hash = None;
+                    a.upstream_request_hash = None;
+                    a.routing_decision = None;
+                    a.started_at = day;
+                    a.duration_ms = 0;
+                    a.first_token_ms = None;
+                    // Per-request availability is not a billing dimension. Its
+                    // first-token marker must not split otherwise identical days.
+                    a.availability.clear();
+                }
+                // Exact token/tier/price dimensions are retained for safe future backfill.
+                let key = safe_id(
+                    &serde_json::to_string(&(&scope, &r)).map_err(|_| failure("汇总失败"))?,
+                );
+                let old: Option<String> = db(tx
+                    .query_row("SELECT body FROM daily WHERE id=?1", [&key], |row| {
+                        row.get(0)
+                    })
+                    .optional())?;
+                let mut d = if let Some(body) = old {
+                    bodies::decode::<Daily>(tx, &body)?
+                } else {
+                    Daily {
+                        scope: Some(scope.unwrap_or_else(|| "all".into())),
+                        client: r.client.clone(),
+                        provider,
+                        model,
+                        source: r.source.clone(),
+                        status,
+                        totals: Totals::default(),
+                        example: r,
+                    }
+                };
+                d.totals.add(&t);
+                db(tx.execute("INSERT INTO daily(id,day,body) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![key,day,bodies::encode(tx, &d)?]))?;
+                query::project(tx, 1, &key, &d.example, d.totals.requests, Some(&d.totals))?;
+            }
+        }
+        if native {
+            storage_v12::archive_selected(tx)?;
+        } else {
+            db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE id IN (SELECT id FROM archive_ids)",[]))?;
+            db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM archive_ids)",[]))?;
+            db(tx.execute(
+                "DELETE FROM records WHERE id IN (SELECT id FROM archive_ids)",
+                [],
+            ))?;
+        }
+        query::changed(tx)
     }
     pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {
         if storage_v12::pending(&self.connection) {
@@ -978,7 +1060,8 @@ impl Store {
             }
             for (_, body) in &rows {
                 let r = storage_v12::decode_stage(body)?;
-                if !archived || r.started_at >= cutoff {
+                if matches!(source, "claude" | "antigravity") || !archived || r.started_at >= cutoff
+                {
                     insert(&tx, &r)?;
                 }
             }
@@ -1023,16 +1106,6 @@ impl Store {
             self.stage_rebuild(source, &[], Some((id, body)))?;
         }
         self.finish_rebuild(source)
-    }
-}
-fn status_matches(status: Option<u16>, filter: Option<&str>) -> bool {
-    match filter {
-        None | Some("") => true,
-        Some("none") => status.is_none(),
-        Some("2xx") => status.is_some_and(|s| (200..300).contains(&s)),
-        Some("4xx") => status.is_some_and(|s| (400..500).contains(&s)),
-        Some("5xx") => status.is_some_and(|s| s >= 500),
-        Some(n) => n.parse::<u16>().ok() == status,
     }
 }
 fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
@@ -1082,9 +1155,16 @@ fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Resul
     let existing = storage_v12::record(tx, &incoming.id)?;
     preserve_record(incoming, existing)
 }
-fn preserve_record(incoming: &Record, existing: Option<Record>) -> Result<Record> {
+pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Result<Record> {
     let mut r = incoming.clone();
     if let Some(old) = existing {
+        if r.source == "antigravity"
+            && old.attempts.iter().any(|a| a.transport == "local_api")
+            && r.attempts.iter().all(|a| a.transport == "history_file")
+        {
+            // Transcript summaries do not replace the API's individual retries.
+            return Ok(old);
+        }
         if r.source != "proxy" {
             if (old.completed && !r.completed)
                 || old.final_attempt().and_then(|a| a.tokens.output)
@@ -1093,7 +1173,15 @@ fn preserve_record(incoming: &Record, existing: Option<Record>) -> Result<Record
                 return Ok(old);
             }
             r.started_at = r.started_at.min(old.started_at);
-            for (a, b) in r.attempts.iter_mut().zip(&old.attempts) {
+            for (index, a) in r.attempts.iter_mut().enumerate() {
+                let previous = if r.source == "antigravity" {
+                    old.attempts.iter().find(|b| b.id == a.id)
+                } else {
+                    old.attempts.get(index)
+                };
+                let Some(b) = previous else {
+                    continue;
+                };
                 a.cost_multiplier = b.cost_multiplier.clone();
                 if let Some(price) = &b.price {
                     a.price = if a.tokens == b.tokens {

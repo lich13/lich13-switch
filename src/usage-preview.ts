@@ -64,6 +64,19 @@ const rows: UsageRecord[] = Array.from({ length: 47 }, (_, i) => {
     deduplication: "独立记录",
   };
 });
+const app = rows[4];
+app.client = "antigravity";
+app.source = "antigravity";
+app.attempts[0] = {
+  ...app.attempts[0],
+  provider: null,
+  transport: "local_api",
+  status: null,
+  requestedModel: "claude-example",
+  responseModel: "claude-example",
+  pricingModel: "claude-example",
+  pricingBasis: "estimated_import_snapshot",
+};
 if (densePreview) {
   const large = rows[2].attempts[0];
   large.provider = "primary";
@@ -166,7 +179,11 @@ if (densePreview) {
       socketWrittenBytes: 8448,
       events: [
         { sequence: 1, at: interrupted.startedAt + 5100, kind: "peer_reset" },
-        { sequence: 2, at: interrupted.startedAt + 5200, kind: "response_body_cancelled" },
+        {
+          sequence: 2,
+          at: interrupted.startedAt + 5200,
+          kind: "response_body_cancelled",
+        },
       ],
     },
     timeoutPhase: null,

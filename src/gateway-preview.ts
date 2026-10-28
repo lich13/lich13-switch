@@ -187,24 +187,12 @@ export const dshGatewayDemo: GatewayState = {
   providers: [],
   running: false,
 };
-export const agyGatewayDemo: GatewayState = {
-  ...structuredClone(grokGatewayDemo),
-  clientId: "agy",
-  revision: "preview-agy",
-  address: "http://127.0.0.1:43721",
-  configRevision: null,
-  providers: grokGatewayDemo.providers.map((p) => ({
-    ...p,
-    protocol: "gemini_native",
-  })),
-};
 function syncListener(port = gatewayDemo.settings.port, changed = false) {
   const states = [
     gatewayDemo,
     claudeGatewayDemo,
     grokGatewayDemo,
     dshGatewayDemo,
-    agyGatewayDemo,
   ];
   const revision = changed
     ? crypto.randomUUID()
@@ -215,7 +203,7 @@ function syncListener(port = gatewayDemo.settings.port, changed = false) {
   for (const state of states) {
     state.settings.port = port;
     state.listener = { port, revision, runningClients };
-    state.address = `http://127.0.0.1:${port}${state.clientId === "claude" || state.clientId === "agy" ? "" : "/v1"}`;
+    state.address = `http://127.0.0.1:${port}${state.clientId === "claude" ? "" : "/v1"}`;
   }
 }
 syncListener();
@@ -231,15 +219,13 @@ const modelIndex = {
 };
 export function gatewayPreview(name: string, args: Record<string, unknown>) {
   const s =
-    args.clientId === "agy"
-      ? agyGatewayDemo
-      : args.clientId === "dsh"
-        ? dshGatewayDemo
-        : args.clientId === "claude"
-          ? claudeGatewayDemo
-          : args.clientId === "grok"
-            ? grokGatewayDemo
-            : gatewayDemo;
+    args.clientId === "dsh"
+      ? dshGatewayDemo
+      : args.clientId === "claude"
+        ? claudeGatewayDemo
+        : args.clientId === "grok"
+          ? grokGatewayDemo
+          : gatewayDemo;
   if (name === "get_failure_policy_catalog") return failureCatalogPreview;
   if (name === "match_failure_policy") {
     // Development samples only. Native lookups use the Rust classifier.

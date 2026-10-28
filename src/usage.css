@@ -402,6 +402,8 @@
 .usage-provider-inline small {
   color: var(--muted);
   font-size: 12px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .usage-model-name {
   display: grid;
@@ -1051,4 +1053,66 @@
 .usage-pricing,
 .usage-detail {
   font-size: 13px;
+}
+
+.usage-bill-modal {
+  width: min(660px, calc(100vw - 40px));
+}
+.usage-bill-form {
+  display: grid;
+  gap: 20px;
+  font-size: 13px;
+}
+.usage-bill-form label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.usage-bill-form select,
+.usage-bill-form input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  color: var(--ink);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+.usage-bill-times {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.usage-bill-scope {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 12px 16px;
+  line-height: 1.6;
+}
+.usage-bill-scope dt {
+  color: var(--muted);
+}
+.usage-bill-scope dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.usage-bill-rule {
+  margin: 0;
+  line-height: 1.6;
+  font-size: inherit;
+}
+.usage-bill-form .modal-actions {
+  margin: 0;
+}
+.usage-bill-form .modal-actions button {
+  height: 36px;
+  font-size: 13px;
+}
+.usage-bill-result {
+  margin: 0 0 16px;
+  line-height: 1.6;
 }

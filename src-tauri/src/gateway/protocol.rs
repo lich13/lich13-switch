@@ -27,6 +27,7 @@ pub struct Observation {
     pub retry_after: Option<std::time::Duration>,
     pub capacity_error: bool,
     pub search_content: bool,
+    pub opaque_output: bool,
     pub compaction_fingerprint: Option<String>,
     pub compaction_incompatible: bool,
     responses_seen: bool,
@@ -519,6 +520,19 @@ impl Sink {
             }
         } else {
             self.observation.incomplete = true;
+            // Unknown nonempty data is still opaque application output. Named
+            // initialization/heartbeat events remain behind the pre-output gate.
+            self.observation.opaque_output |=
+                self.data_prefix.iter().any(|b| !b.is_ascii_whitespace())
+                    && !matches!(
+                        self.event.as_str(),
+                        "ping"
+                            | "heartbeat"
+                            | "keepalive"
+                            | "message_start"
+                            | "response.created"
+                            | "response.in_progress"
+                    );
         }
         self.data_len = 0;
         self.data_prefix.clear();
@@ -1099,12 +1113,22 @@ impl Protocol {
     }
     pub fn search_content_observed(&self) -> bool {
         self.observation.search_content
+            || self.observation.opaque_output
             || self.observation.meter.first_token_ms.is_some()
             || self.succeeded()
     }
+    pub fn explicit_failure(&self) -> bool {
+        self.observation.fault_sequence > 0
+            && matches!(
+                self.terminal(),
+                Some(Terminal::Failure | Terminal::Rejected | Terminal::Unknown)
+            )
+    }
     pub fn business_observed(&self) -> bool {
         !self.stream
-            || self.observation.first_event_model_error.is_some()
+            || self.observation.meter.first_token_ms.is_some()
+            || self.observation.search_content
+            || self.observation.opaque_output
             || self.terminal_received
             || self.observation.incomplete
     }

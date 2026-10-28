@@ -53,7 +53,7 @@ export default function Sources({
   return (
     <Drawer title="数据来源" onClose={onClose}>
       <div className="usage-source-list">
-        {["proxy", "codex", "claude", "grok"].map((id) => (
+        {["proxy", "codex", "claude", "grok", "antigravity"].map((id) => (
           <div key={id}>
             <b>{id === "proxy" ? "网关" : clientName(id)}</b>
             <span>{numeric(counts[id] ?? 0)} 条</span>

@@ -164,7 +164,7 @@ it("renders historical v0.25.10 downstream status records with HTTP and byte evi
   });
   expect(row).not.toHaveTextContent("状态记录");
   expect(row).toHaveTextContent("DOWNSTREAM_CLOSED");
-  expect(row).toHaveTextContent("未确认客户端主动取消");
+  expect(row).toHaveTextContent("请求交付提前结束");
   expect(row).not.toHaveTextContent("客户端已取消");
 
   await user.click(row);
@@ -306,8 +306,8 @@ it("shows fresh exhausted evidence as status and does not retain the capacity co
   render(<EventLog />);
   const row = await screen.findByRole("button", { name: "额度已耗尽" });
   expect(row).not.toHaveTextContent("状态记录");
-  expect(row).toHaveTextContent("本次查询确认额度耗尽");
-  expect(row.textContent?.match(/USAGE_LIMIT_EXCEEDED/g)).toHaveLength(1);
+  expect(row).toHaveTextContent("额度已耗尽");
+  expect(row).not.toHaveTextContent("USAGE_LIMIT_EXCEEDED");
   await userEvent.setup().click(row);
   const dialog = await screen.findByRole("dialog", { name: "额度已耗尽" });
   expect(dialog).toHaveTextContent("当前 Key 配额");

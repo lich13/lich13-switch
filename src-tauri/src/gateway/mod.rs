@@ -1,4 +1,3 @@
-pub mod agy;
 pub mod gemini;
 use crate::errors::code;
 #[cfg(test)]
@@ -262,11 +261,7 @@ impl Route {
         &self,
         incoming: &hyper::Uri,
     ) -> std::result::Result<hyper::Uri, Box<dyn std::error::Error + Send + Sync>> {
-        let uri = if self.client_id == ClientId::Agy {
-            gemini::target(&self.provider.base_url, incoming)?
-        } else {
-            forward::target(&self.provider.base_url, incoming)?
-        };
+        let uri = forward::target(&self.provider.base_url, incoming)?;
         if let Some(c) = &self.grok {
             c.query_uri(uri).map_err(|e| e.message.into())
         } else {
@@ -324,7 +319,6 @@ impl Gateway {
                     ClientId::Claude => "claude",
                     ClientId::Grok => "grok",
                     ClientId::Dsh => "dsh",
-                    ClientId::Agy => "agy",
                 },
                 model,
                 operation,
@@ -466,9 +460,7 @@ impl Gateway {
     pub fn dsh_companion(&self, data: PathBuf) -> Result<Self> {
         Self::new_client(data, ClientId::Dsh, Some(self.0.registry.clone()))
     }
-    pub fn agy_companion(&self, data: PathBuf) -> Result<Self> {
-        Self::new_client(data, ClientId::Agy, Some(self.0.registry.clone()))
-    }
+
     fn new_client(
         data: PathBuf,
         client: ClientId,
@@ -577,10 +569,7 @@ impl Gateway {
         let mut s = self.0.inner.lock().unwrap();
         s.home = Some(home.to_owned());
         // Grok discovery is read-only. Its explicit import preview owns migration.
-        if matches!(
-            self.0.client,
-            ClientId::Grok | ClientId::Dsh | ClientId::Agy
-        ) {
+        if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             return Ok(());
         }
         if let Some(error) = &s.upgrade_error {
@@ -830,17 +819,15 @@ impl Gateway {
                         .quota
                         .probe_view(&p.id, &Self::quota_version(&s.store, p));
                     ProviderView {
-                        protocol: (matches!(
-                            self.0.client,
-                            ClientId::Grok | ClientId::Dsh | ClientId::Agy
-                        ))
-                        .then(|| {
-                            s.store
-                                .grok_connections
-                                .get(&p.id)
-                                .map(|c| c.protocol)
-                                .unwrap_or_else(|| self.0.client.default_protocol())
-                        }),
+                        protocol: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(
+                            || {
+                                s.store
+                                    .grok_connections
+                                    .get(&p.id)
+                                    .map(|c| c.protocol)
+                                    .unwrap_or_else(|| self.0.client.default_protocol())
+                            },
+                        ),
                         id: p.id.clone(),
                         has_quota_access_token: s.store.quota_access_tokens.contains_key(&p.id),
                         name: p.name.clone(),
@@ -957,7 +944,6 @@ impl Gateway {
             .map(|(r, _)| r.clone());
         let ports = [view.listener.port, store.settings.port];
         let mut current = match (self.0.client, home) {
-            (ClientId::Agy, _) => agy::current(view.running),
             (ClientId::Grok, Some(home)) => {
                 let effective = raw
                     .as_ref()
@@ -1100,9 +1086,7 @@ impl Gateway {
             }
         }
         let guarded = s.running || self.0.data.join("gateway-recovery.json").exists();
-        if guarded && self.0.client == ClientId::Agy {
-            agy::guard_config(home, text)?;
-        } else if guarded {
+        if guarded {
             let current = takeover::read_connection(self.0.client, home, &s.store.connection)?.1;
             let unchanged = if let (ClientId::Codex, codex_api::Connection::ApiKey { provider }) =
                 (self.0.client, &s.store.connection)
@@ -1276,9 +1260,7 @@ impl Gateway {
                 return Err(AppError::new(code::CLIENT, "所选平台不支持此协议"));
             }
         }
-        if self.0.client == ClientId::Agy && matches!(&edit, Edit::Import) {
-            return Err(AppError::new(code::CLIENT, "请添加 Antigravity API 供应商"));
-        }
+
         let direct_select = !s.running && matches!(&edit, Edit::Select { .. });
         if direct_select && self.claude_official() {
             return Err(AppError::new(
@@ -1409,9 +1391,7 @@ impl Gateway {
                 .listener
                 .set_port(port, &self.try_listener_view()?.revision)?;
         }
-        let revision = if !matches!(self.0.client, ClientId::Dsh | ClientId::Agy)
-            && (s.running || direct_select)
-        {
+        let revision = if !matches!(self.0.client, ClientId::Dsh) && (s.running || direct_select) {
             let p = Self::exit_provider(&next, s.last_successful.as_deref())?;
             let target = takeover::Pair::new(&p.base_url, &p.token);
             let resume_target = if self.0.client == ClientId::Grok && s.running {
@@ -1489,9 +1469,6 @@ impl Gateway {
         home: &Path,
         config_revision: Option<&str>,
     ) -> Result<View> {
-        if self.0.client == ClientId::Agy {
-            return self.start_agy(home, expected).await;
-        }
         if self.0.client == ClientId::Dsh {
             return self.restart_dsh(home, expected).await;
         }
@@ -1656,7 +1633,7 @@ impl Gateway {
         let Some(intent) = intent.filter(|i| i.desired) else {
             return Ok(());
         };
-        if matches!(self.0.client, ClientId::Dsh | ClientId::Agy) {
+        if matches!(self.0.client, ClientId::Dsh) {
             if intent.home != home {
                 return Err(AppError::new(
                     code::RESUME_CONFLICT,
@@ -1720,9 +1697,6 @@ impl Gateway {
         expected_config: Option<&str>,
         preserve_intent: bool,
     ) -> Result<View> {
-        if self.0.client == ClientId::Agy {
-            return self.stop_agy(preserve_intent).await;
-        }
         if self.0.client == ClientId::Dsh {
             return self.stop_dsh(preserve_intent).await;
         }
@@ -1867,12 +1841,7 @@ impl Gateway {
         {
             return;
         }
-        if s.store.mode == "auto"
-            && !matches!(
-                self.0.client,
-                ClientId::Grok | ClientId::Dsh | ClientId::Agy
-            )
-        {
+        if s.store.mode == "auto" && !matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             // Routes may use an auxiliary URL. Client configuration and recovery
             // always restore the canonical primary URL saved by the user.
             let canonical = s
@@ -1978,20 +1947,17 @@ impl Gateway {
                 .iter()
                 .find(|p| p.id == id)
                 .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
-            let connection = (matches!(
-                self.client_id(),
-                ClientId::Grok | ClientId::Dsh | ClientId::Agy
-            ))
-            .then(|| {
-                s.store
-                    .grok_connections
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| provider_protocol::Connection {
-                        protocol: self.0.client.default_protocol(),
-                        ..Default::default()
-                    })
-            });
+            let connection =
+                (matches!(self.client_id(), ClientId::Grok | ClientId::Dsh)).then(|| {
+                    s.store
+                        .grok_connections
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| provider_protocol::Connection {
+                            protocol: self.0.client.default_protocol(),
+                            ..Default::default()
+                        })
+                });
             let query = quota::Query {
                 client_id: self.0.client,
                 id: p.id.clone(),
@@ -2227,11 +2193,7 @@ impl Gateway {
             .clone();
         Some(Route {
             dsh_models,
-            grok: (matches!(
-                self.0.client,
-                ClientId::Grok | ClientId::Dsh | ClientId::Agy
-            ))
-            .then(|| {
+            grok: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(|| {
                 s.store
                     .grok_connections
                     .get(&provider.id)
@@ -2310,6 +2272,3 @@ mod grok_protocol_tests;
 
 #[cfg(test)]
 mod request_state_poison_tests;
-
-#[cfg(test)]
-mod agy_tests;

@@ -256,7 +256,7 @@ async fn native_websocket_exhausts_retry_budget_without_switching_provider() {
 }
 
 #[tokio::test]
-async fn native_websocket_does_not_replay_after_response_created() {
+async fn native_websocket_does_not_replay_after_effective_output() {
     let (port, state) = native_server(|_connection, mut ws, state| async move {
         if let Some(frame) = native_next(
             "single-response fixture waiting for response.create",
@@ -265,7 +265,7 @@ async fn native_websocket_does_not_replay_after_response_created() {
         .await
         {
             record_native_request(&state, &frame);
-            ws.send(yawc::Frame::text(NATIVE_CREATED.to_owned()))
+            ws.send(yawc::Frame::text(r#"{"type":"response.output_text.delta","response_id":"fixture-native-response","delta":"fixture"}"#.to_owned()))
                 .await
                 .unwrap();
             let _ = ws
@@ -284,12 +284,12 @@ async fn native_websocket_does_not_replay_after_response_created() {
         .unwrap();
 
     let created = native_next(
-        "single-response client waiting for response.created",
+        "single-response client waiting for response.output_text.delta",
         &mut client,
     )
     .await
     .unwrap();
-    assert!(created.as_str().contains("response.created"));
+    assert!(created.as_str().contains("response.output_text.delta"));
     let closed = native_next("single-response client waiting for close", &mut client)
         .await
         .unwrap();
@@ -606,7 +606,7 @@ async fn repeated_p1_model_errors_fail_over_to_p2_without_breaker_failures() {
 }
 
 #[tokio::test]
-async fn http_200_application_failures_do_not_accumulate_circuit_failures() {
+async fn http_200_application_failures_end_explicitly_without_polluting_provider_health() {
     let hits = Arc::new(AtomicUsize::new(0));
     let count = hits.clone();
     let payload = json!({
@@ -632,6 +632,9 @@ async fn http_200_application_failures_do_not_accumulate_circuit_failures() {
     })
     .await;
     let (t, g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
+    let mut settings = g.view().settings;
+    settings.max_retries = 0;
+    update(&g, &t, Edit::Settings { settings });
     start(&g, &t).await;
 
     for _ in 0..3 {
@@ -642,11 +645,11 @@ async fn http_200_application_failures_do_not_accumulate_circuit_failures() {
             vec![("content-type", "application/json")],
         )
         .await;
-        assert_eq!(response.status(), 200);
-        assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes(),
-            body.as_slice()
-        );
+        assert_eq!(response.status(), 502);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains(code::UPSTREAM_REJECTED));
     }
 
     assert_eq!(hits.load(Ordering::SeqCst), 3);
