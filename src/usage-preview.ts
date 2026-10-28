@@ -76,6 +76,10 @@ app.attempts[0] = {
   responseModel: "claude-example",
   pricingModel: "claude-example",
   pricingBasis: "estimated_import_snapshot",
+  modelDisplayName: "Fixture Model (High)",
+  apiProvider: "API_PROVIDER_FIXTURE",
+  generationMs: 4860,
+  availability: { duration: "reported", first_token: "reported" },
 };
 if (densePreview) {
   const large = rows[2].attempts[0];
@@ -285,7 +289,7 @@ let price: PricingView = {
 };
 function total(items: UsageRecord[]): Totals {
   const first = items
-    .filter((r) => r.source === "proxy")
+    .filter((r) => ["proxy", "antigravity"].includes(r.source))
     .map((r) => r.attempts.at(-1)!)
     .filter(
       (a) =>

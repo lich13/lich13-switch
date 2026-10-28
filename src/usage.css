@@ -807,8 +807,21 @@
   color: var(--muted);
   font-size: 12px;
 }
-.usage-source-list + .usage-actions {
+.usage-source-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 18px 0;
+}
+.usage-source-actions button {
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+.usage-source-actions button:last-child {
+  grid-column: 1 / -1;
 }
 .usage-drawer {
   position: fixed;

@@ -2,6 +2,24 @@ use super::*;
 use std::fs;
 
 #[test]
+fn bounded_read_rejects_growth_after_size_check_and_keeps_exact_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("growing.fixture");
+    assert!(read_bounded(&path, 4).unwrap().is_none());
+    fs::write(&path, b"data").unwrap();
+    assert_eq!(read_bounded(&path, 4).unwrap().unwrap(), b"data");
+    let file = fs::File::open(&path).unwrap();
+    assert_eq!(file.metadata().unwrap().len(), 4);
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writer.write_all(b"grew after metadata").unwrap();
+    assert_eq!(
+        read_file_bounded(file, 4).unwrap_err().code,
+        code::FILE_TYPE
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"datagrew after metadata");
+}
+
+#[test]
 fn publish_batch_rolls_back_earlier_files_when_a_destination_exists() {
     let temp = tempfile::tempdir().unwrap();
     let first = temp.path().join("first.fixture");

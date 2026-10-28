@@ -608,7 +608,7 @@ describe("usage records", () => {
         within(zero[1]).getByTitle(label).querySelector(".usage-number"),
       ).toHaveTextContent(/^0$/);
     }
-    expect(unavailable[2]).toHaveTextContent(/^—$/);
+    expect(unavailable[2]).toHaveTextContent(/^未定价$/);
     expect(zero[2]).toHaveTextContent(/^\$0$/);
     const tokenMetric = screen.getByText("已报告 Token").parentElement!;
     expect(within(tokenMetric).getByText("—")).toBeInTheDocument();
@@ -1074,7 +1074,7 @@ describe("usage records", () => {
       },
     };
     await act(async () => vi.advanceTimersByTime(5_000));
-    expect(within(dialog).getByText("2 个文件未同步")).toBeInTheDocument();
+    expect(within(dialog).getByText("2 项未同步")).toBeInTheDocument();
     expect(recording).not.toBeChecked();
     expect(autoSync).not.toBeChecked();
     expect(calls("set_usage_settings")).toHaveLength(0);

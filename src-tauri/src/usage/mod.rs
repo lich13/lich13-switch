@@ -464,7 +464,7 @@ impl Service {
                         client: client.clone(),
                     };
                     let mut report = if client == "antigravity" {
-                        antigravity::sync(&mut sink, pricing, &settings, &root)?
+                        antigravity::sync(&mut sink, pricing, &settings, &root, repair)?
                     } else {
                         sessions::sync(&mut sink, pricing, &settings, &client, &root, repair)?
                     };

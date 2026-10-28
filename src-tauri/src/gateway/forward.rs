@@ -2037,7 +2037,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 && !websocket
                 && !initial_model_error
                 && policy.temporary;
-            let initial_service_error = before_output
+            // This whole prefix is still private to the gateway. A body frame
+            // can contain both generated deltas and a terminal service error;
+            // observing those deltas is not proof that the client received them.
+            let initial_service_error = (before_output || protocol.explicit_failure())
                 && protocol.observation.error.error_basis
                     == Some(crate::events::ErrorBasis::ServiceError);
             let initial_other_error = before_output && !failed && protocol.explicit_failure();

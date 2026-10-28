@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 mod private;
@@ -61,7 +61,20 @@ pub fn read_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(io_error(e)),
     }
-    fs::read(path).map(Some).map_err(io_error)
+    read_file_bounded(fs::File::open(path).map_err(io_error)?, limit).map(Some)
+}
+fn read_file_bounded(file: fs::File, limit: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > limit {
+        return Err(AppError::new(
+            code::FILE_TYPE,
+            "文件不是普通文件或超过允许大小",
+        ));
+    }
+    Ok(bytes)
 }
 pub fn revision(bytes: Option<&[u8]>) -> String {
     bytes.map(digest).unwrap_or_else(|| "missing".into())

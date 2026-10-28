@@ -829,6 +829,14 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_model: Option<String>,
     pub response_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     pub pricing_model: Option<String>,
     pub response_id: Option<String>,
     pub status: Option<u16>,
@@ -846,6 +854,26 @@ fn one_attempt() -> u64 {
     1
 }
 impl Attempt {
+    pub fn measured_duration_ms(&self) -> Option<u64> {
+        let known = self.availability.get("duration").map_or_else(
+            || {
+                !self
+                    .parse_reasons
+                    .iter()
+                    .any(|r| r == "attempt_time_unreported")
+            },
+            |s| s == "reported",
+        );
+        known.then_some(self.duration_ms)
+    }
+    pub fn measured_generation_ms(&self) -> Option<u64> {
+        self.generation_ms
+            .or_else(|| {
+                self.measured_duration_ms()?
+                    .checked_sub(self.first_token_ms?)
+            })
+            .filter(|n| *n > 0)
+    }
     pub fn annotate_availability(&mut self, source: &str) {
         if self.tokens.inclusive_input.is_none() {
             self.tokens.inclusive_input = self.inclusive_input_tokens;
@@ -874,7 +902,10 @@ impl Attempt {
         }
         self.availability.insert(
             "first_token".into(),
-            if source != "proxy" || !self.stream || self.operation != Operation::Model {
+            if !matches!(source, "proxy" | "antigravity")
+                || !self.stream
+                || self.operation != Operation::Model
+            {
                 "not_applicable"
             } else if self.first_token_ms.is_some() {
                 "reported"
@@ -1005,6 +1036,10 @@ impl Default for Attempt {
             requested_model: None,
             upstream_model: None,
             response_model: None,
+            model_display_name: None,
+            api_provider: None,
+            generation_ms: None,
+            error_code: None,
             pricing_model: None,
             response_id: None,
             status: None,
@@ -1152,14 +1187,30 @@ impl Record {
             .unwrap_or(self.started_at)
     }
 
-    /// Only real gateway generations supply latency samples, including merged records.
+    /// Only explicitly measured generations supply latency samples.
     pub fn measured_first_token_ms(&self) -> Option<u64> {
         let a = self.final_attempt()?;
-        (self.source == "proxy" && a.stream && a.operation == Operation::Model)
+        (matches!(self.source.as_str(), "proxy" | "antigravity")
+            && a.stream
+            && a.operation == Operation::Model)
             .then_some(a.first_token_ms)
             .flatten()
     }
 
+    pub fn known_success(&self) -> Option<bool> {
+        let a = self.final_attempt()?;
+        if let Some(status) = a.status {
+            return Some(((200..300).contains(&status) || status == 101) && self.completed);
+        }
+        if self.source == "antigravity" {
+            return match a.outcome.as_str() {
+                "success" => Some(self.completed),
+                "failed" | "cancelled" | "rejected" => Some(false),
+                _ => None,
+            };
+        }
+        None
+    }
     pub fn gateway_only(&mut self) {
         if let (Some(original), Some(last)) =
             (self.gateway_reported.take(), self.attempts.last_mut())
@@ -1341,22 +1392,23 @@ impl Totals {
             self.unpriced += 1;
         }
         if let Some(a) = r.final_attempt() {
-            self.duration_ms += a.duration_ms;
+            self.duration_ms += a.measured_duration_ms().unwrap_or(0);
             if let Some(first) = r.measured_first_token_ms() {
                 self.first_token_sum_ms = self.first_token_sum_ms.saturating_add(first);
                 self.first_token_samples += 1;
             }
-            if let Some(s) = a.status {
+            if let Some(success) = r.known_success() {
                 self.status_known += 1;
-                if ((200..300).contains(&s) || s == 101) && r.completed {
+                if success {
                     self.success += 1;
                 }
-            } else if r.source != "proxy" {
+            }
+            if r.source != "proxy" {
                 self.sessions += 1;
             }
-            if let (Some(t), Some(out)) = (a.first_token_ms, a.tokens.output) {
-                if a.duration_ms > t {
-                    self.generation_ms += a.duration_ms - t;
+            if let (Some(generation), Some(out)) = (a.measured_generation_ms(), a.tokens.output) {
+                if generation > 0 {
+                    self.generation_ms += generation;
                     self.measured_outputs += out;
                 }
             }

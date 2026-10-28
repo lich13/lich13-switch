@@ -67,6 +67,103 @@ fn encoded(encoding: &str, raw: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn service_failure_in_buffered_output_retries_without_leaking_partial_output() {
+    for code in ["upstream_stream_read_error", "upstream_http2_stream_error"] {
+        for encoding in ["identity", "gzip", "deflate", "zstd"] {
+            let raw = format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"discarded fixture\"}}\n\ndata: {{\"type\":\"response.failed\",\"response\":{{\"error\":{{\"code\":\"{code}\",\"message\":\"fixture interrupted\"}}}}}}\n\n");
+            let payload = encoded(encoding, raw.as_bytes());
+            let first = server(move |_| {
+                let payload = payload.clone();
+                async move {
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("content-encoding", encoding)
+                        .body(full(payload))
+                        .unwrap()
+                }
+            })
+            .await;
+            let backup_hits = Arc::new(AtomicUsize::new(0));
+            let hits = backup_hits.clone();
+            let second = server(move |_| {
+                hits.fetch_add(1, Ordering::SeqCst);
+                async { sse(r#"{"type":"response.completed"}"#) }
+            })
+            .await;
+            let (t, g) = fixture(vec![
+                format!("http://127.0.0.1:{first}/v1"),
+                format!("http://127.0.0.1:{second}/v1"),
+            ])
+            .await;
+            auto(&g, &t, 1);
+            start(&g, &t).await;
+            let response = request(
+                &g,
+                "/v1/responses",
+                br#"{"model":"fixture-model","stream":true}"#.to_vec(),
+                vec![("content-type", "application/json")],
+            )
+            .await;
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                "data: {\"type\":\"response.completed\"}\n\n",
+                "{code}/{encoding}"
+            );
+            assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
+            g.stop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn service_failure_after_delivered_output_is_not_replayed() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let first = server(move |_| {
+        let gate = gate.clone();
+        async move {
+            let body = async_stream::stream! {
+                yield Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(Bytes::from_static(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"visible fixture\"}\n\n")));
+                gate.notified().await;
+                yield Ok(hyper::body::Frame::data(Bytes::from_static(b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"upstream_stream_read_error\"}}}\n\n")));
+            };
+            Response::builder().header("content-type","text/event-stream")
+                .body(http_body_util::StreamBody::new(body).map_err(|e|match e {}).boxed_unsync()).unwrap()
+        }
+    }).await;
+    let backup_hits = Arc::new(AtomicUsize::new(0));
+    let hits = backup_hits.clone();
+    let second = server(move |_| {
+        hits.fetch_add(1, Ordering::SeqCst);
+        async { sse(r#"{"type":"response.completed"}"#) }
+    })
+    .await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{first}/v1"),
+        format!("http://127.0.0.1:{second}/v1"),
+    ])
+    .await;
+    auto(&g, &t, 1);
+    start(&g, &t).await;
+    let response = request(
+        &g,
+        "/v1/responses",
+        br#"{"model":"fixture-model","stream":true}"#.to_vec(),
+        vec![("content-type", "application/json")],
+    )
+    .await;
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("visible fixture"));
+    release.notify_one();
+    let rest = body.collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&rest).contains("upstream_stream_read_error"));
+    assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn http_200_application_failure_does_not_trip_provider_circuit() {
     let upstream = server(|_| async {
         Response::builder()

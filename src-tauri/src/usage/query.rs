@@ -186,19 +186,16 @@ pub fn project(
     let mut stmt=db(c.prepare_cached(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)")))?;
     for (i, a) in r.attempts.iter().enumerate() {
         let final_record = i + 1 == r.attempts.len();
-        let known = final_record && a.status.is_some();
-        let success = known
-            && a.status
-                .is_some_and(|s| ((200..300).contains(&s) || s == 101) && r.completed);
+        let known = final_record && r.known_success().is_some();
+        let success = final_record && r.known_success() == Some(true);
         let duration = if final_record {
-            historical.map_or(a.duration_ms * count, |t| t.duration_ms)
+            historical.map_or(a.measured_duration_ms().unwrap_or(0) * count, |t| {
+                t.duration_ms
+            })
         } else {
             0
         };
-        let generation = a
-            .first_token_ms
-            .filter(|t| a.duration_ms > *t)
-            .map(|t| a.duration_ms - t);
+        let generation = a.measured_generation_ms();
         let measured = if final_record {
             historical.map_or(generation.and(a.tokens.output).unwrap_or(0) * count, |t| {
                 t.measured_outputs

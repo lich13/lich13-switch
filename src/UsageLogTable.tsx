@@ -21,6 +21,8 @@ import {
   logMoney,
   logNumber,
   logSpeed,
+  logDuration,
+  measuredFirstToken,
   unpricedReason,
   type LogColumn,
 } from "./usage-log-columns";
@@ -213,12 +215,15 @@ export default function UsageLogTable({
                 state = native ? "" : interruptionLabel(a),
                 rate = cacheHitRate(t),
                 speed = native ? null : logSpeed(a),
+                elapsed = native ? null : logDuration(a),
+                first = measuredFirstToken(a, r.source),
                 model =
                   native && r.attempts.length > 1
                     ? `多个模型（${r.attempts.length}）`
                     : a.operation === "web_search"
                       ? "网络搜索"
-                      : ((a.upstreamModel
+                      : (a.modelDisplayName ??
+                        (a.upstreamModel
                           ? a.requestedModel
                           : a.responseModel) ??
                         a.requestedModel ??
@@ -295,6 +300,7 @@ export default function UsageLogTable({
                       [
                         ...new Set(
                           [
+                            a.modelDisplayName,
                             a.requestedModel,
                             a.upstreamModel,
                             a.responseModel,
@@ -306,6 +312,7 @@ export default function UsageLogTable({
                       [
                         ...new Set(
                           [
+                            a.modelDisplayName,
                             a.requestedModel,
                             a.upstreamModel,
                             a.responseModel,
@@ -366,7 +373,11 @@ export default function UsageLogTable({
                         : (a.price?.cost ?? unpricedReason(a))
                     }
                   >
-                    {native ? "—" : logMoney(a.price?.cost, exact)}
+                    {native
+                      ? "—"
+                      : a.price
+                        ? logMoney(a.price.cost, exact)
+                        : "未定价"}
                     {!native && a.price && Number(a.price.multiplier) !== 1 && (
                       <span className="usage-multiplier">
                         ×{a.price.multiplier}
@@ -377,38 +388,42 @@ export default function UsageLogTable({
                 firstToken: (
                   <span
                     className={`usage-metric-value ${
-                      native || !a.stream || a.firstTokenMs == null
+                      native || first == null
                         ? "is-empty"
-                        : `latency-${firstTokenSeverity(a.firstTokenMs)}`
+                        : `latency-${firstTokenSeverity(first!)}`
                     }`}
                     tabIndex={0}
                     title={
                       native
                         ? "无可靠轮次首字时间"
-                        : a.firstTokenMs == null
+                        : first == null
                           ? missingReason(a, "first_token", r.source)
-                          : `${a.firstTokenMs} ms`
+                          : `${first} ms`
                     }
                   >
-                    {native || !a.stream || a.firstTokenMs == null
+                    {native || first == null
                       ? "—"
-                      : `${(a.firstTokenMs / 1000).toFixed(2)}s`}
+                      : `${(first! / 1000).toFixed(2)}s`}
                   </span>
                 ),
                 duration: (
                   <span
                     className={`usage-metric-value ${
-                      native
+                      elapsed == null
                         ? "is-empty"
-                        : `latency-${durationSeverity(a.durationMs)}`
+                        : `latency-${durationSeverity(elapsed)}`
                     }`}
                     tabIndex={0}
                     title={
                       state ||
-                      (native ? "无可靠轮次耗时" : `${a.durationMs} ms`)
+                      (native
+                        ? "无可靠轮次耗时"
+                        : elapsed == null
+                          ? missingReason(a, "duration", r.source)
+                          : `${elapsed} ms`)
                     }
                   >
-                    {native ? "—" : `${(a.durationMs / 1000).toFixed(2)}s`}
+                    {elapsed == null ? "—" : `${(elapsed / 1000).toFixed(2)}s`}
                     {state && <span className="usage-interruption"> ⚠</span>}
                   </span>
                 ),

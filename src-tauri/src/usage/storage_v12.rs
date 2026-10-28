@@ -646,6 +646,7 @@ fn save_attempt(
         "startedAt",
         "responseId",
         "inclusiveInputTokens",
+        "generationMs",
     ] {
         if let Some(value) = fields.remove(field) {
             diagnostic.insert(field.into(), value);
@@ -1034,21 +1035,22 @@ fn flush_batch(c: &Connection) -> Result<bool> {
 }
 
 fn metric_select(table: &str, kind: i64) -> String {
+    let generation = "CASE WHEN r.source=usage_label('antigravity') THEN coalesce(usage_generation_ms(a.body,r.time+r.started),duration-first_token) ELSE duration-first_token END";
     format!("SELECT {kind} kind,a.owner,ordinal,usage_value(p.value) provider,usage_value(m.value) model,
       CASE WHEN ordinal=r.last THEN 1 ELSE 0 END requests,repeat_count attempts,
-      CASE WHEN ordinal=r.last AND (status BETWEEN 200 AND 299 OR status=101) AND r.completed THEN 1 ELSE 0 END success,
-      CASE WHEN ordinal=r.last AND status IS NOT NULL THEN 1 ELSE 0 END status_known,
+      CASE WHEN ordinal=r.last AND ((status BETWEEN 200 AND 299 OR status=101) OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value)=1)) AND r.completed THEN 1 ELSE 0 END success,
+      CASE WHEN ordinal=r.last AND (status IS NOT NULL OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value) IS NOT NULL)) THEN 1 ELSE 0 END status_known,
       CASE WHEN ordinal=r.last AND r.source<>0 THEN 1 ELSE 0 END sessions,
       input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,
       coalesce(cost,'0') cost,unpriced,
       CASE WHEN ordinal=r.last THEN duration ELSE 0 END duration_ms,
-      CASE WHEN ordinal=r.last AND first_token IS NOT NULL AND duration>first_token THEN coalesce(output,0) ELSE 0 END measured_outputs,
-      CASE WHEN ordinal=r.last AND first_token IS NOT NULL AND duration>first_token THEN duration-first_token ELSE 0 END generation_ms,
-      CASE WHEN ordinal=r.last AND r.source=0 AND stream AND operation=0 THEN coalesce(first_token,0) ELSE 0 END first_token_sum_ms,
-      CASE WHEN ordinal=r.last AND r.source=0 AND stream AND operation=0 AND first_token IS NOT NULL THEN 1 ELSE 0 END first_token_samples,
+      CASE WHEN ordinal=r.last AND {generation}>0 THEN coalesce(output,0) ELSE 0 END measured_outputs,
+      CASE WHEN ordinal=r.last AND {generation}>0 THEN {generation} ELSE 0 END generation_ms,
+      CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 THEN coalesce(first_token,0) ELSE 0 END first_token_sum_ms,
+      CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 AND first_token IS NOT NULL THEN 1 ELSE 0 END first_token_samples,
       CASE WHEN cache_read IS NOT NULL AND cache_read<=coalesce(inclusive_input,input+cache_read+cache_write) THEN cache_read ELSE 0 END cache_read_eligible,
       CASE WHEN cache_read IS NOT NULL AND cache_read<=coalesce(inclusive_input,input+cache_read+cache_write) THEN coalesce(inclusive_input,input+cache_read+cache_write) ELSE 0 END cache_input_eligible
-      FROM {table} a JOIN v12_records r ON r.rid=a.owner LEFT JOIN v12_dictionary p ON p.id=a.provider LEFT JOIN v12_dictionary m ON m.id=a.model")
+      FROM {table} a JOIN v12_records r ON r.rid=a.owner LEFT JOIN v12_dictionary p ON p.id=a.provider LEFT JOIN v12_dictionary m ON m.id=a.model LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape")
 }
 fn create_views(c: &Connection) -> Result<()> {
     db(c.execute_batch("CREATE VIEW records AS SELECT usage_text(r.key) id,r.rid,r.client client_code,r.source source_code,usage_label(r.client) client,usage_label(r.source) source,r.time,usage_value(p.value) provider,usage_value(m.value) model,dim.status status,usage_text(r.response) response,usage_signature(r.client,s.value,measure.input,measure.output,measure.cache_read,measure.cache_write,dim.operation) signature,r.effective,r.duplicate,r.archived_duplicate,r.time+r.ended ended,coalesce(usage_text(d.key),r.archived_duplicate) duplicate_of,r.sequence local_sequence,
@@ -1066,6 +1068,34 @@ fn create_views(c: &Connection) -> Result<()> {
 }
 pub(super) fn register_values(c: &Connection) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
+    db(c.create_scalar_function(
+        "usage_generation_ms",
+        2,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            // The borrowed handle stays on this SQLite callback's thread and
+            // only reads the existing bounded diagnostic storage.
+            let c = unsafe { ctx.get_connection()? };
+            let value = unpack_diagnostic(&c, ctx.get(0)?, ctx.get(1)?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(value["generationMs"].as_u64())
+        },
+    ))?;
+    db(c.create_scalar_function(
+        "usage_app_outcome",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let bytes: Option<Vec<u8>> = ctx.get(0)?;
+            Ok(bytes
+                .and_then(|b| shared_value(&b))
+                .and_then(|v| match v["outcome"].as_str() {
+                    Some("success") => Some(1),
+                    Some("failed" | "cancelled" | "rejected") => Some(0),
+                    _ => None,
+                }))
+        },
+    ))?;
     db(c.create_scalar_function(
         "usage_value",
         1,
@@ -1353,7 +1383,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     ))?;
-    if sql.contains("OR status=101) AND r.completed") {
+    if sql.contains("usage_generation_ms") {
         return Ok(());
     }
     let original = metric_select("v12_raw_attempts", 2)

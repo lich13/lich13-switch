@@ -396,6 +396,16 @@ pub(super) const CODES: &[Code] = &[
         platform: "通用兼容",
     },
     Code {
+        value: "upstream_stream_read_error",
+        category: ServiceError,
+        platform: "通用兼容",
+    },
+    Code {
+        value: "upstream_http2_stream_error",
+        category: ServiceError,
+        platform: "通用兼容",
+    },
+    Code {
         value: "content_filter",
         category: SafetyRejection,
         platform: "通用兼容",

@@ -8,13 +8,16 @@ use crate::storage::{self, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{BufRead, BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 const LIMIT: usize = 32 * 1024 * 1024;
+#[cfg(test)]
+#[path = "antigravity_tests.rs"]
+mod regression_tests;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Cursor {
@@ -44,12 +47,89 @@ fn text<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .find_map(|k| v[*k].as_str().filter(|s| !s.is_empty()))
 }
 fn duration(v: &Value) -> Option<u64> {
-    v.as_str()?
-        .strip_suffix('s')?
-        .parse::<f64>()
-        .ok()
-        .filter(|n| n.is_finite() && *n >= 0.0)
-        .map(|n| (n * 1000.0) as u64)
+    let seconds = v.as_f64().or_else(|| {
+        v.as_str()?
+            .trim()
+            .trim_end_matches('s')
+            .trim()
+            .parse::<f64>()
+            .ok()
+    })?;
+    (seconds.is_finite() && (0.0..=u64::MAX as f64 / 1000.0).contains(&seconds))
+        .then_some((seconds * 1000.0).round() as u64)
+}
+fn actual_model(v: Option<&str>) -> Option<String> {
+    model_id(v)
+        .filter(|s| !s.starts_with("MODEL_PLACEHOLDER_") && !s.starts_with("MODEL_UNSPECIFIED"))
+}
+fn label(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 120
+                && !s.chars().any(char::is_control)
+                && model_id(Some(&s.replace([' ', '(', ')'], ""))).is_some()
+        })
+        .map(str::to_owned)
+}
+#[derive(Default)]
+struct StepTime {
+    start: Option<i64>,
+    generated: Option<i64>,
+    end: Option<i64>,
+}
+#[derive(Default)]
+struct Steps {
+    times: BTreeMap<u64, StepTime>,
+    executions: BTreeMap<String, Vec<u64>>,
+}
+impl Steps {
+    fn extend(&mut self, offset: u64, steps: &[Value]) {
+        for (i, step) in steps.iter().enumerate() {
+            let index = offset + i as u64;
+            if self.times.contains_key(&index) {
+                continue;
+            }
+            let m = &step["metadata"];
+            if let Some(id) = m["executionId"].as_str() {
+                self.executions.entry(id.into()).or_default().push(index);
+            }
+            self.times.insert(
+                index,
+                StepTime {
+                    start: time(&m["startedAt"]).or_else(|| time(&m["createdAt"])),
+                    generated: time(&m["finishedGeneratingAt"]),
+                    end: time(&m["completedAt"]),
+                },
+            );
+        }
+    }
+    fn related(&self, entry: &Value) -> Vec<&StepTime> {
+        let indices: Vec<_> = entry["stepIndices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(number)
+            .collect();
+        let indices = if indices.is_empty() {
+            entry["executionId"]
+                .as_str()
+                .and_then(|id| self.executions.get(id))
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        } else {
+            &indices
+        };
+        indices.iter().filter_map(|i| self.times.get(i)).collect()
+    }
+}
+#[cfg(test)]
+impl From<&[Value]> for Steps {
+    fn from(values: &[Value]) -> Self {
+        let mut result = Self::default();
+        result.extend(0, values);
+        result
+    }
 }
 fn tokens(u: &Value) -> Tokens {
     Tokens {
@@ -84,21 +164,30 @@ fn failed(v: &Value) -> bool {
     v.get("error")
         .is_some_and(|e| !e.is_null() && e != "" && e != &json!({}))
 }
+fn error_code(v: &Value) -> Option<String> {
+    let e = &v["error"];
+    [&e["code"], &e["type"], &v["errorCode"]]
+        .into_iter()
+        .find_map(|code| {
+            code.as_i64()
+                .map(|n| n.to_string())
+                .or_else(|| label(code.as_str()))
+        })
+}
 
 /// Request IDs separate calls sharing one execution. A final usage envelope
 /// may mirror that request's last retry; equal counts alone never merge calls.
 fn record(
     cascade: &str,
     entry: &Value,
-    steps: &[Value],
+    steps: &Steps,
     generator_index: usize,
 ) -> Result<Option<Record>> {
     let Some(chat) = entry.get("chatModel") else {
         return Ok(None);
     };
     let request_key = text(&chat["customMetadata"], &["request_id"]);
-    let key = request_key.or_else(|| text(entry, &["executionId"]));
-    let Some(key) = key else {
+    let Some(key) = request_key.or_else(|| text(entry, &["executionId"])) else {
         if chat.get("usage").is_some()
             || chat["retryInfos"].as_array().is_some_and(|a| !a.is_empty())
         {
@@ -106,49 +195,21 @@ fn record(
         }
         return Ok(None);
     };
-    let indices: BTreeSet<_> = entry["stepIndices"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(number)
-        .collect();
-    let related: Vec<_> = steps
-        .iter()
-        .enumerate()
-        .filter(|(i, step)| {
-            if indices.is_empty() {
-                step["metadata"]["executionId"] == entry["executionId"]
-            } else {
-                indices.contains(&(*i as u64))
-            }
-        })
-        .map(|(_, s)| &s["metadata"])
-        .collect();
+    let related = steps.related(entry);
     let start = related
         .iter()
-        .filter_map(|s| time(&s["startedAt"]).or_else(|| time(&s["createdAt"])))
-        .min();
-    let finish = related
-        .iter()
-        .filter_map(|s| time(&s["finishedGeneratingAt"]).or_else(|| time(&s["completedAt"])))
-        .max();
-    let Some(start) = start else {
-        return Err(failure("Antigravity 用量缺少请求时间，未计入账单"));
-    };
-    let id = if let Some(key) = request_key {
+        .filter_map(|s| s.start)
+        .min()
+        .or_else(|| time(&chat["startedAt"]));
+    let finish = related.iter().filter_map(|s| s.generated).max();
+    let end = related.iter().filter_map(|s| s.end).max();
+    let id = if request_key.is_some() {
         safe_id(&format!("antigravity:request:{key}"))
     } else {
         safe_id(&format!("antigravity:{cascade}:{key}:{generator_index}"))
     };
-    let mut r = Record {
-        id,
-        client: "antigravity".into(),
-        source: "antigravity".into(),
-        started_at: start,
-        finished_at: finish,
-        session_id: Some(safe_id(cascade)),
-        ..Record::default()
-    };
+    // Keep the retry identity used by earlier imports. A matching final envelope
+    // supplements that attempt; it never creates another charge.
     let mut usages: Vec<(&Value, &Value, String)> = Vec::new();
     for (i, retry) in chat["retryInfos"]
         .as_array()
@@ -161,74 +222,171 @@ fn record(
             .or_else(|| text(retry, &["traceId"]))
             .map(str::to_owned)
             .unwrap_or_else(|| format!("retry:{i}"));
-        if !usages
-            .iter()
-            .any(|(other, _, _)| response_id(u).is_some() && response_id(u) == response_id(other))
+        if let Some(existing) = usages
+            .iter_mut()
+            .find(|(other, _, _)| response_id(u).is_some() && response_id(u) == response_id(other))
         {
+            existing.0 = u;
+            existing.1 = retry;
+        } else {
             usages.push((u, retry, attempt_key));
         }
     }
+    let mut final_index = None;
     if let Some(u) = chat.get("usage").filter(|u| u.is_object()) {
-        let mirror = request_key.is_some() && usages.last().is_some_and(|(last, _, _)| *last == u);
-        if !mirror
-            && !usages.iter().any(|(other, _, _)| {
-                response_id(u).is_some() && response_id(u) == response_id(other)
-            })
+        final_index = usages.iter().position(|(other, _, _)| {
+            response_id(u).is_some() && response_id(u) == response_id(other)
+        });
+        if final_index.is_none()
+            && request_key.is_some()
+            && usages.last().is_some_and(|(last, _, _)| *last == u)
         {
-            // Without an identity we cannot decide whether this is a mirrored
-            // retry total. Preserve the ambiguity instead of double billing.
+            final_index = usages.len().checked_sub(1);
+        }
+        if let Some(index) = final_index {
+            usages[index].0 = u;
+        } else {
             if !usages.is_empty() && response_id(u).is_none() {
                 return Err(failure(
                     "Antigravity 重试用量缺少响应标识，无法核对完整账单",
                 ));
             }
+            final_index = Some(usages.len());
             usages.push((u, chat, "final".into()));
         }
     }
-    if usages.is_empty() {
-        return Ok(None);
+    if chat.get("usage").is_none_or(Value::is_null) {
+        final_index = usages.len().checked_sub(1);
     }
-    for (u, info, attempt_key) in usages {
-        let is_failed = failed(info);
+    if usages.is_empty() {
+        usages.push((&Value::Null, chat, "final".into()));
+        final_index = Some(0);
+    }
+    if final_index.is_some_and(|i| i + 1 != usages.len()) {
+        return Err(failure("Antigravity 最终响应与重试顺序不一致，未计入账单"));
+    }
+    let Some(start) = start else {
+        return Err(failure("Antigravity 用量缺少请求时间，未计入账单"));
+    };
+    let single = usages.len() == 1;
+    let mut r = Record {
+        id,
+        client: "antigravity".into(),
+        source: "antigravity".into(),
+        started_at: start,
+        session_id: Some(safe_id(cascade)),
+        ..Record::default()
+    };
+    for (index, (u, info, attempt_key)) in usages.into_iter().enumerate() {
+        let final_info = final_index == Some(index);
+        let field = |key: &str| {
+            info.get(key)
+                .filter(|v| !v.is_null())
+                .or_else(|| final_info.then(|| chat.get(key)).flatten())
+                .unwrap_or(&Value::Null)
+        };
+        let first = duration(field("timeToFirstToken"));
+        let generation = duration(field("streamingDuration"));
+        let attempt_start = time(field("startedAt")).or_else(|| single.then_some(start));
+        let explicit_end =
+            time(field("completedAt")).or_else(|| final_info.then_some(finish).flatten());
+        let elapsed = attempt_start
+            .zip(explicit_end)
+            .and_then(|(s, e)| u64::try_from(e.checked_sub(s)?).ok())
+            .or_else(|| first.zip(generation).and_then(|(f, g)| f.checked_add(g)));
+        let is_failed = failed(info) || (final_info && failed(chat));
+        let completed_at = explicit_end
+            .or_else(|| final_info.then_some(finish).flatten())
+            .or_else(|| {
+                attempt_start
+                    .zip(elapsed)
+                    .and_then(|(s, d)| s.checked_add(i64::try_from(d).ok()?))
+            })
+            .or_else(|| is_failed.then_some(end).flatten());
+        let mut tokens = tokens(u);
+        tokens.fill_missing(&self::tokens(&info["usage"]));
+        let outcome = if is_failed {
+            "failed"
+        } else if completed_at.is_some() && tokens.input.is_some() && tokens.output.is_some() {
+            "success"
+        } else if completed_at.is_some() {
+            "unknown"
+        } else {
+            "in_progress"
+        };
+        let response_model = actual_model(text(u, &["model"]))
+            .or_else(|| actual_model(text(&info["usage"], &["model"])))
+            .or_else(|| actual_model(text(info, &["responseModel"])))
+            .or_else(|| {
+                final_info
+                    .then(|| actual_model(text(chat, &["responseModel"])))
+                    .flatten()
+            });
         let mut a = Attempt {
             id: safe_id(&format!("{}:{attempt_key}", r.id)),
             response_id: response_id(u).map(safe_id),
             upstream_request_hash: text(info, &["traceId"]).map(safe_id),
             thread_hash: r.session_id.clone(),
-            requested_model: model_id(text(chat, &["model", "responseModel"])),
-            response_model: model_id(
-                text(u, &["model"]).or_else(|| text(chat, &["responseModel", "model"])),
-            ),
-            tokens: tokens(u),
-            started_at: time(&info["startedAt"]).unwrap_or(start),
-            duration_ms: 0,
+            requested_model: actual_model(text(chat, &["model"])),
+            response_model,
+            model_display_name: final_info
+                .then(|| label(text(chat, &["modelDisplayName"])))
+                .flatten(),
+            api_provider: label(text(u, &["apiProvider"]))
+                .or_else(|| label(text(&info["usage"], &["apiProvider"]))),
+            error_code: error_code(info).or_else(|| final_info.then(|| error_code(chat)).flatten()),
+            started_at: attempt_start.unwrap_or(start),
+            duration_ms: elapsed.unwrap_or(0),
+            first_token_ms: first,
+            generation_ms: generation,
+            stream: first.is_some() || generation.is_some(),
             transport: "local_api".into(),
-            outcome: if is_failed {
-                "failed"
-            } else if finish.is_some() {
-                "success"
+            outcome: outcome.into(),
+            usage_status: if tokens.input.is_some() && tokens.output.is_some() {
+                "reported"
             } else {
-                "in_progress"
+                "partial"
             }
             .into(),
-            usage_status: if u.is_object() {
+            raw_input_tokens: tokens.input,
+            input_basis: Some("exclusive".into()),
+            output_reported: Some(tokens.output.is_some()),
+            tokens,
+            service_tier: text(u, &["serviceTier"])
+                .or_else(|| text(info, &["serviceTier"]))
+                .or_else(|| final_info.then(|| text(chat, &["serviceTier"])).flatten())
+                .map(str::to_owned),
+            ..Attempt::default()
+        };
+        a.availability.insert(
+            "duration".into(),
+            if elapsed.is_some() {
                 "reported"
             } else {
                 "upstream_unreported"
             }
             .into(),
-            service_tier: text(u, &["serviceTier"])
-                .or_else(|| text(chat, &["serviceTier"]))
-                .map(str::to_owned),
-            first_token_ms: duration(&info["timeToFirstToken"]),
-            ..Attempt::default()
-        };
-        // A retry's individual clock is unknown unless explicitly reported.
-        if let (Some(s), Some(e)) = (time(&info["startedAt"]), time(&info["completedAt"])) {
-            a.duration_ms = e.saturating_sub(s).max(0) as u64;
-        } else {
+        );
+        a.availability.insert(
+            "attempt_start".into(),
+            if attempt_start.is_some() {
+                "reported"
+            } else {
+                "upstream_unreported"
+            }
+            .into(),
+        );
+        if elapsed.is_none() {
             a.parse_reasons.push("attempt_time_unreported".into());
         }
+        if a.tokens
+            .reasoning
+            .zip(a.tokens.output)
+            .is_some_and(|(thinking, output)| thinking > output)
+        {
+            a.parse_reasons.push("reasoning_exceeds_output".into());
+        }
+        r.finished_at = completed_at;
         r.attempts.push(a);
     }
     r.completed = r.final_attempt().is_some_and(|a| a.outcome == "success");
@@ -345,6 +503,7 @@ impl Api {
         pricing: &Pricing,
         settings: &Settings,
         report: &mut Report,
+        repair: bool,
     ) -> Result<()> {
         let all = self
             .call(
@@ -357,98 +516,159 @@ impl Api {
             .ok_or_else(|| failure("Antigravity 会话目录不完整"))?;
         report.total_files = summaries.len() as u64;
         for (id, summary) in summaries {
-            let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
-            let mut cursor: Cursor = store
-                .cursor(&cursor_id)?
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            let modified = summary["lastModifiedTime"].as_str().unwrap_or("");
-            if !modified.is_empty() && cursor.modified == modified {
-                report.files += 1;
-                continue;
-            }
-            let full = self
-                .call(
-                    "GetCascadeTrajectory",
-                    json!({"cascadeId":id,"trajectoryVerbosity":3}),
-                )
-                .await?;
-            let trajectory = &full["trajectory"];
-            let mut steps = trajectory["steps"].as_array().cloned().unwrap_or_default();
-            let total = number(&full["numTotalSteps"]).unwrap_or(steps.len() as u64) as usize;
-            if total > 100_000 {
-                return Err(failure("Antigravity 会话步骤超过读取限制"));
-            }
-            while steps.len() < total {
-                let page = self
-                    .call(
-                        "GetCascadeTrajectorySteps",
-                        json!({"cascadeId":id,"stepOffset":steps.len(),"trajectoryVerbosity":3}),
-                    )
-                    .await?;
-                let next = page["steps"]
-                    .as_array()
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| failure("Antigravity 历史步骤读取不完整"))?;
-                steps.extend(next.iter().cloned());
-            }
-            let count = number(&full["numTotalGeneratorMetadata"]).unwrap_or_else(|| {
-                trajectory["generatorMetadata"]
-                    .as_array()
-                    .map_or(0, |m| m.len()) as u64
-            }) as usize;
-            let mut offset = cursor.count.saturating_sub(1).min(count);
-            let mut stable = offset;
-            while offset < count {
-                let page=self.call("GetCascadeTrajectoryGeneratorMetadata",json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false})).await?;
-                let entries = page["generatorMetadata"]
-                    .as_array()
-                    .filter(|e| !e.is_empty())
-                    .ok_or_else(|| failure("Antigravity 历史用量读取不完整"))?;
-                for batch in entries.chunks(128) {
-                    let mut rows = Vec::new();
-                    for entry in batch {
-                        let parsed = record(id, entry, &steps, offset)?;
-                        if let Some(mut r) = parsed {
-                            if r.final_attempt()
-                                .is_some_and(|a| a.outcome == "in_progress")
-                            { /* reread this suffix on the next scan */
-                            } else if stable == offset {
-                                stable += 1;
-                                cursor.covered.extend(
-                                    entry["stepIndices"]
-                                        .as_array()
-                                        .into_iter()
-                                        .flatten()
-                                        .filter_map(number),
-                                );
-                            }
-                            price(&mut r, pricing, settings);
-                            rows.push(r);
-                        } else if stable == offset {
-                            stable += 1;
-                        }
-                        offset += 1;
+            match self
+                .collect_session(id, summary, store, pricing, settings, report, repair)
+                .await
+            {
+                Ok(()) => report.files += 1,
+                Err(error) => {
+                    if store.requires_complete_history() {
+                        return Err(error);
                     }
-                    report.imported += rows.len() as u64;
-                    store.write_batch(&rows, None)?;
+                    report.errors += 1;
                 }
             }
-            cursor.count = stable;
-            cursor.modified = if stable == count {
-                modified.into()
-            } else {
-                String::new()
-            };
-            let cursor =
-                serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
-            store.write_batch(&[], Some((&cursor_id, &cursor)))?;
-            report.files += 1;
             store.progress(report);
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
+    async fn collect_session(
+        &self,
+        id: &str,
+        summary: &Value,
+        store: &mut impl Repository,
+        pricing: &Pricing,
+        settings: &Settings,
+        report: &mut Report,
+        repair: bool,
+    ) -> Result<()> {
+        let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
+        let mut cursor: Cursor = if repair {
+            Cursor::default()
+        } else {
+            store
+                .cursor(&cursor_id)?
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        };
+        let modified = summary["lastModifiedTime"].as_str().unwrap_or("");
+        if !modified.is_empty() && cursor.modified == modified {
+            return Ok(());
+        }
+        let total = number(&summary["stepCount"]);
+        if total.is_some_and(|n| n > 100_000) {
+            return Err(failure("Antigravity 会话步骤超过读取限制"));
+        }
+        let mut steps = Steps::default();
+        let mut offset = cursor.count.saturating_sub(1);
+        let mut stable = offset;
+        loop {
+            let page=self.call("GetCascadeTrajectoryGeneratorMetadata",json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false})).await?;
+            let entries = match page["generatorMetadata"].as_array() {
+                Some(entries) => entries,
+                None if page.as_object().is_some_and(|o| o.is_empty()) => break,
+                None => return Err(failure("Antigravity 历史用量读取不完整")),
+            };
+            if entries.is_empty() {
+                break;
+            }
+            if offset.saturating_add(entries.len()) > 100_000 {
+                return Err(failure("Antigravity 会话用量超过读取限制"));
+            }
+            let fallback = entries.iter().any(|e| {
+                e.get("chatModel").is_some()
+                    && e["stepIndices"].as_array().is_none_or(|a| a.is_empty())
+            });
+            let required: BTreeSet<_> = entries
+                .iter()
+                .flat_map(|e| {
+                    e["stepIndices"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(number)
+                })
+                .collect();
+            if required
+                .last()
+                .is_some_and(|i| *i >= 100_000 || total.is_some_and(|n| *i >= n))
+            {
+                return Err(failure("Antigravity 用量关联步骤不完整"));
+            }
+            let missing = if fallback && steps.times.first_key_value().is_none_or(|(i, _)| *i != 0)
+            {
+                Some(0)
+            } else {
+                required
+                    .iter()
+                    .find(|i| !steps.times.contains_key(i))
+                    .copied()
+            };
+            if let Some(mut step_offset) = missing {
+                loop {
+                    let page=self.call("GetCascadeTrajectorySteps",json!({"cascadeId":id,"stepOffset":step_offset,"trajectoryVerbosity":1})).await?;
+                    let next = page["steps"]
+                        .as_array()
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| failure("Antigravity 历史步骤读取不完整"))?;
+                    if step_offset.saturating_add(next.len() as u64) > 100_000 {
+                        return Err(failure("Antigravity 会话步骤超过读取限制"));
+                    }
+                    steps.extend(step_offset, next);
+                    step_offset += next.len() as u64;
+                    if required.iter().all(|i| steps.times.contains_key(i))
+                        && (!fallback || total.is_none_or(|n| step_offset >= n))
+                    {
+                        break;
+                    }
+                }
+            }
+            for batch in entries.chunks(128) {
+                let mut rows = Vec::new();
+                for entry in batch {
+                    let parsed = record(id, entry, &steps, offset)?;
+                    let complete = match parsed {
+                        Some(mut r) => {
+                            let complete = r.finished_at.is_some()
+                                && r.final_attempt()
+                                    .is_some_and(|a| a.outcome != "in_progress");
+                            price(&mut r, pricing, settings);
+                            rows.push(r);
+                            complete
+                        }
+                        None => entry.get("chatModel").is_none(),
+                    };
+                    if complete && stable == offset {
+                        stable += 1;
+                        cursor.covered.extend(
+                            entry["stepIndices"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(number),
+                        );
+                    }
+                    offset += 1;
+                }
+                store.write_batch(&rows, None)?;
+                report.imported += rows.len() as u64;
+            }
+        }
+        // Commit only after the whole session is readable. Failed sessions keep
+        // their previous cursor, so already saved batches are safely replayed.
+        cursor.count = stable;
+        cursor.modified = if stable == offset {
+            modified.into()
+        } else {
+            String::new()
+        };
+        let cursor =
+            serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
+        store.write_batch(&[], Some((&cursor_id, &cursor)))
+    }
 }
+
 fn transcript_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
     if !root.exists() {
         return Ok(());
@@ -473,148 +693,174 @@ pub(super) fn scan_files(
     pricing: &Pricing,
     settings: &Settings,
     report: &mut Report,
+    repair: bool,
 ) -> Result<()> {
     let brain = home.join("antigravity/brain");
     let mut files = Vec::new();
     transcript_files(&brain, &mut files, 0)?;
     for path in files {
-        let cascade = path
-            .strip_prefix(&brain)
-            .ok()
-            .and_then(|p| p.components().next())
-            .and_then(|c| c.as_os_str().to_str())
-            .ok_or_else(|| failure("Antigravity 历史路径无效"))?;
-        let rpc: Cursor = store
-            .cursor(&safe_id(&format!("antigravity:rpc:{cascade}")))?
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
-        let mut c: FileCursor = store
-            .cursor(&key)?
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        let mut file = File::open(&path).map_err(storage::io_error)?;
-        let meta = file.metadata().map_err(storage::io_error)?;
-        #[cfg(unix)]
-        let identity = {
-            use std::os::unix::fs::MetadataExt;
-            format!("{}:{}", meta.dev(), meta.ino())
-        };
-        #[cfg(not(unix))]
-        let identity = format!("{:?}", meta.created().ok());
-        let tail = |file: &mut File, offset: u64| -> Result<String> {
-            use std::io::Read;
-            file.seek(SeekFrom::Start(offset.saturating_sub(4096)))
-                .map_err(storage::io_error)?;
-            let mut b = vec![0; offset.min(4096) as usize];
-            file.read_exact(&mut b).map_err(storage::io_error)?;
-            Ok(storage::digest(&b))
-        };
-        if c.identity != identity || meta.len() < c.offset || tail(&mut file, c.offset)? != c.tail {
-            c = FileCursor::default();
+        if let Err(error) = scan_file(store, &brain, &path, pricing, settings, report, repair) {
+            if store.requires_complete_history() {
+                return Err(error);
+            }
+            report.errors += 1;
         }
-        c.identity = identity;
-        file.seek(SeekFrom::Start(c.offset))
-            .map_err(storage::io_error)?;
-        let mut reader = BufReader::new(file);
-        let mut rows = Vec::new();
-        let mut bytes = Vec::new();
-        loop {
-            bytes.clear();
-            use std::io::Read;
-            let size = (&mut reader)
-                .take(LIMIT as u64 + 1)
-                .read_until(b'\n', &mut bytes)
-                .map_err(storage::io_error)?;
-            if size == 0 {
-                break;
-            }
-            if size > LIMIT {
-                return Err(failure("Antigravity 历史单行超过读取限制"));
-            }
-            if bytes.last() != Some(&b'\n') {
-                if store.requires_complete_history() {
-                    return Err(failure(
-                        "Antigravity 历史仍在写入，未导出、未清理，请稍后重试",
-                    ));
-                }
-                break;
-            }
-            let v: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| failure("Antigravity 历史文件存在无效完整行"))?;
-            let has_usage = [
-                "input_tokens",
-                "output_tokens",
-                "cache_read_tokens",
-                "cache_write_tokens",
-            ]
-            .iter()
-            .any(|k| number(&v[*k]).is_some());
-            if has_usage && !number(&v["step_index"]).is_some_and(|i| rpc.covered.contains(&i)) {
-                let request = text(&v, &["request_id"]);
-                let model = text(&v, &["model", "response_model"]);
-                let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
-                let (Some(request), Some(model), Some(at)) = (request, model, at) else {
-                    return Err(failure(
-                        "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
-                    ));
-                };
-                let id = safe_id(&format!("antigravity:request:{request}"));
-                let mut r = Record {
-                    id: id.clone(),
-                    client: "antigravity".into(),
-                    source: "antigravity".into(),
-                    session_id: Some(safe_id(cascade)),
-                    started_at: at,
-                    finished_at: Some(at),
-                    completed: true,
-                    attempts: vec![Attempt {
-                        id: safe_id(&format!("{id}:final")),
-                        response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
-                        requested_model: model_id(Some(model)),
-                        response_model: model_id(Some(model)),
-                        started_at: at,
-                        outcome: "success".into(),
-                        transport: "history_file".into(),
-                        tokens: Tokens {
-                            input: number(&v["input_tokens"]),
-                            output: number(&v["output_tokens"]),
-                            cache_read: number(&v["cache_read_tokens"]),
-                            cache_write: number(&v["cache_write_tokens"]),
-                            cache_write_5m: number(&v["cache_write_5m_tokens"]),
-                            cache_write_1h: number(&v["cache_write_1h_tokens"]),
-                            reasoning: number(&v["thinking_output_tokens"]),
-                            ..Tokens::default()
-                        },
-                        usage_status: "reported".into(),
-                        parse_reasons: vec!["attempt_time_unreported".into()],
-                        ..Attempt::default()
-                    }],
-                    ..Record::default()
-                };
-                price(&mut r, pricing, settings);
-                rows.push(r);
-            }
-            c.offset = reader.stream_position().map_err(storage::io_error)?;
-            if rows.len() >= 128 {
-                store.write_batch(&rows, None)?;
-                report.imported += rows.len() as u64;
-                rows.clear();
-            }
-        }
-        report.imported += rows.len() as u64;
-        c.tail = tail(reader.get_mut(), c.offset)?;
-        let cursor =
-            serde_json::to_string(&c).map_err(|_| failure("Antigravity 历史同步位置无效"))?;
-        store.write_batch(&rows, Some((&key, &cursor)))?;
     }
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
+fn scan_file(
+    store: &mut impl Repository,
+    brain: &Path,
+    path: &Path,
+    pricing: &Pricing,
+    settings: &Settings,
+    report: &mut Report,
+    repair: bool,
+) -> Result<()> {
+    let cascade = path
+        .strip_prefix(brain)
+        .ok()
+        .and_then(|p| p.components().next())
+        .and_then(|c| c.as_os_str().to_str())
+        .ok_or_else(|| failure("Antigravity 历史路径无效"))?;
+    let rpc: Cursor = store
+        .cursor(&safe_id(&format!("antigravity:rpc:{cascade}")))?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
+    let mut c: FileCursor = if repair {
+        FileCursor::default()
+    } else {
+        store
+            .cursor(&key)?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    };
+    let mut file = File::open(path).map_err(storage::io_error)?;
+    let meta = file.metadata().map_err(storage::io_error)?;
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}", meta.dev(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let identity = format!("{:?}", meta.created().ok());
+    let tail = |file: &mut File, offset: u64| -> Result<String> {
+        use std::io::Read;
+        file.seek(SeekFrom::Start(offset.saturating_sub(4096)))
+            .map_err(storage::io_error)?;
+        let mut b = vec![0; offset.min(4096) as usize];
+        file.read_exact(&mut b).map_err(storage::io_error)?;
+        Ok(storage::digest(&b))
+    };
+    if c.identity != identity || meta.len() < c.offset || tail(&mut file, c.offset)? != c.tail {
+        c = FileCursor::default();
+    }
+    c.identity = identity;
+    file.seek(SeekFrom::Start(c.offset))
+        .map_err(storage::io_error)?;
+    let mut reader = BufReader::new(file);
+    let mut rows = Vec::new();
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        use std::io::Read;
+        let size = (&mut reader)
+            .take(LIMIT as u64 + 1)
+            .read_until(b'\n', &mut bytes)
+            .map_err(storage::io_error)?;
+        if size == 0 {
+            break;
+        }
+        if size > LIMIT {
+            return Err(failure("Antigravity 历史单行超过读取限制"));
+        }
+        if bytes.last() != Some(&b'\n') {
+            if store.requires_complete_history() {
+                return Err(failure(
+                    "Antigravity 历史仍在写入，未导出、未清理，请稍后重试",
+                ));
+            }
+            break;
+        }
+        let v: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| failure("Antigravity 历史文件存在无效完整行"))?;
+        let has_usage = [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        ]
+        .iter()
+        .any(|k| number(&v[*k]).is_some());
+        if has_usage && !number(&v["step_index"]).is_some_and(|i| rpc.covered.contains(&i)) {
+            let request = text(&v, &["request_id"]);
+            let model = text(&v, &["model", "response_model"]);
+            let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
+            let (Some(request), Some(model), Some(at)) = (request, model, at) else {
+                return Err(failure(
+                    "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
+                ));
+            };
+            let id = safe_id(&format!("antigravity:request:{request}"));
+            let mut r = Record {
+                id: id.clone(),
+                client: "antigravity".into(),
+                source: "antigravity".into(),
+                session_id: Some(safe_id(cascade)),
+                started_at: at,
+                finished_at: Some(at),
+                // A transcript usage row reports consumption, not the model's
+                // terminal outcome. Only the API can supplement that evidence.
+                completed: false,
+                attempts: vec![Attempt {
+                    id: safe_id(&format!("{id}:final")),
+                    response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
+                    requested_model: actual_model(Some(model)),
+                    response_model: actual_model(Some(model)),
+                    started_at: at,
+                    outcome: "unknown".into(),
+                    transport: "history_file".into(),
+                    tokens: Tokens {
+                        input: number(&v["input_tokens"]),
+                        output: number(&v["output_tokens"]),
+                        cache_read: number(&v["cache_read_tokens"]),
+                        cache_write: number(&v["cache_write_tokens"]),
+                        cache_write_5m: number(&v["cache_write_5m_tokens"]),
+                        cache_write_1h: number(&v["cache_write_1h_tokens"]),
+                        reasoning: number(&v["thinking_output_tokens"]),
+                        ..Tokens::default()
+                    },
+                    usage_status: "reported".into(),
+                    parse_reasons: vec!["attempt_time_unreported".into()],
+                    ..Attempt::default()
+                }],
+                ..Record::default()
+            };
+            price(&mut r, pricing, settings);
+            rows.push(r);
+        }
+        c.offset = reader.stream_position().map_err(storage::io_error)?;
+        if rows.len() >= 128 {
+            store.write_batch(&rows, None)?;
+            report.imported += rows.len() as u64;
+            rows.clear();
+        }
+    }
+    report.imported += rows.len() as u64;
+    c.tail = tail(reader.get_mut(), c.offset)?;
+    let cursor = serde_json::to_string(&c).map_err(|_| failure("Antigravity 历史同步位置无效"))?;
+    store.write_batch(&rows, Some((&key, &cursor)))?;
+    Ok(())
+}
+
 pub fn sync(
     store: &mut impl Repository,
     pricing: &Pricing,
     settings: &Settings,
     home: &Path,
+    repair: bool,
 ) -> Result<Report> {
     let mut report = Report {
         phase: "syncing".into(),
@@ -626,17 +872,24 @@ pub fn sync(
     let connected = runtime.block_on(async {
         match Api::connect().await? {
             Some(api) => {
-                api.collect(store, &pricing, settings, &mut report).await?;
+                api.collect(store, &pricing, settings, &mut report, repair)
+                    .await?;
                 Ok(true)
             }
+            None if repair => Err(failure("请启动 Antigravity app 后补全历史")),
             None => Ok(false),
         }
     });
     // Already collected details remain available while the app is closed. Any
     // new uncorrelated file usage makes a complete export fail explicitly.
-    scan_files(store, home, &pricing, settings, &mut report)?;
+    scan_files(store, home, &pricing, settings, &mut report, repair)?;
     connected?;
-    report.phase = "done".into();
+    report.phase = if report.errors == 0 {
+        "done"
+    } else {
+        "partial"
+    }
+    .into();
     report.completed_at = Some(now());
     Ok(report)
 }
@@ -646,33 +899,53 @@ mod tests {
     use super::*;
     #[test]
     fn shared_execution_keeps_requests_separate_and_final_mirror_is_not_a_retry() {
-        let steps = json!([{"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","completedAt":"2026-01-01T00:00:03Z"}}]);
+        let steps = json!([{"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","finishedGeneratingAt":"2026-01-01T00:00:03Z"}}]);
         let mut entry = json!({"executionId":"exec","stepIndices":[0],"chatModel":{"customMetadata":{"request_id":"request-one"},"model":"fixture-model","usage":{"inputTokens":"9","outputTokens":"3"},"retryInfos":[{"usage":{"inputTokens":"9","outputTokens":"3"}}]}});
-        let one = record("parent", &entry, steps.as_array().unwrap(), 0)
-            .unwrap()
-            .unwrap();
+        let one = record(
+            "parent",
+            &entry,
+            &Steps::from(steps.as_array().unwrap().as_slice()),
+            0,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(one.attempts.len(), 1);
         assert_eq!(one.tokens().total(), Some(12));
         assert_eq!(
             one.id,
-            record("child", &entry, steps.as_array().unwrap(), 2)
-                .unwrap()
-                .unwrap()
-                .id
+            record(
+                "child",
+                &entry,
+                &Steps::from(steps.as_array().unwrap().as_slice()),
+                2
+            )
+            .unwrap()
+            .unwrap()
+            .id
         );
         entry["chatModel"]["customMetadata"]["request_id"] = json!("request-two");
-        let two = record("parent", &entry, steps.as_array().unwrap(), 1)
-            .unwrap()
-            .unwrap();
+        let two = record(
+            "parent",
+            &entry,
+            &Steps::from(steps.as_array().unwrap().as_slice()),
+            1,
+        )
+        .unwrap()
+        .unwrap();
         assert_ne!(one.id, two.id);
     }
     #[test]
     fn retries_are_unique_and_reasoning_is_subset() {
-        let steps = json!([{"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","completedAt":"2026-01-01T00:00:03Z"}}]);
+        let steps = json!([{"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","finishedGeneratingAt":"2026-01-01T00:00:03Z"}}]);
         let m = json!({"executionId":"exec","stepIndices":[0],"chatModel":{"model":"claude-fixture","usage":{"responseId":"last","inputTokens":"10","cacheReadTokens":"20","outputTokens":"5","thinkingOutputTokens":"3"},"retryInfos":[{"traceId":"first","error":"unavailable","usage":{"inputTokens":"2","outputTokens":"0"}},{"usage":{"responseId":"last","inputTokens":"10","cacheReadTokens":"20","outputTokens":"5","thinkingOutputTokens":"3"}}]}});
-        let r = record("cascade", &m, steps.as_array().unwrap(), 0)
-            .unwrap()
-            .unwrap();
+        let r = record(
+            "cascade",
+            &m,
+            &Steps::from(steps.as_array().unwrap().as_slice()),
+            0,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(r.attempts.len(), 2);
         assert_eq!(r.tokens().total(), Some(37));
         assert_eq!(r.tokens().reasoning, Some(3));
@@ -681,21 +954,39 @@ mod tests {
         assert_eq!(r.attempts[1].tokens.cache_write, None);
         assert_ne!(
             r.id,
-            record("child", &m, steps.as_array().unwrap(), 0)
-                .unwrap()
-                .unwrap()
-                .id
+            record(
+                "child",
+                &m,
+                &Steps::from(steps.as_array().unwrap().as_slice()),
+                0
+            )
+            .unwrap()
+            .unwrap()
+            .id
         );
     }
     #[test]
     fn estimates_and_ambiguous_retries_do_not_become_bills() {
         let steps = json!([{"metadata":{"executionId":"exec","createdAt":"2026-01-01T00:00:00Z"}}]);
         let m = json!({"executionId":"exec","chatModel":{"chatStartMetadata":{"contextWindowMetadata":{"estimatedTokensUsed":500}}}});
-        assert!(record("cascade", &m, steps.as_array().unwrap(), 0)
-            .unwrap()
-            .is_none());
+        let pending = record(
+            "cascade",
+            &m,
+            &Steps::from(steps.as_array().unwrap().as_slice()),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(pending.tokens().total(), None);
+        assert_eq!(pending.final_attempt().unwrap().outcome, "in_progress");
         let m = json!({"executionId":"exec","chatModel":{"usage":{"inputTokens":"5"},"retryInfos":[{"usage":{"inputTokens":"5"}}]}});
-        assert!(record("cascade", &m, steps.as_array().unwrap(), 0).is_err());
+        assert!(record(
+            "cascade",
+            &m,
+            &Steps::from(steps.as_array().unwrap().as_slice()),
+            0
+        )
+        .is_err());
     }
 }
 
@@ -729,15 +1020,22 @@ mod history_tests {
             &pricing,
             &Settings::default(),
             &mut report,
+            false,
         )
         .unwrap();
         assert_eq!(report.imported, 1);
+        let saved = store
+            .detail(&safe_id("antigravity:request:request-fixture"))
+            .unwrap();
+        assert_eq!(saved.known_success(), None);
+        assert_eq!(saved.attempts[0].measured_duration_ms(), None);
         scan_files(
             &mut store,
             dir.path(),
             &pricing,
             &Settings::default(),
             &mut report,
+            false,
         )
         .unwrap();
         assert_eq!(report.imported, 1);
@@ -757,9 +1055,11 @@ mod history_tests {
             dir.path(),
             &pricing,
             &Settings::default(),
-            &mut report
+            &mut report,
+            false,
         )
-        .is_err());
+        .is_ok());
+        assert_eq!(report.errors, 1);
         assert_eq!(
             store.dashboard(&Filter::default()).unwrap().totals.requests,
             1

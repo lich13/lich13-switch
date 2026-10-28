@@ -12,6 +12,9 @@ import {
   interruption,
   interruptionLabel,
   logSpeed,
+  logDuration,
+  measuredFirstToken,
+  generationSpeed,
   unpricedReason,
 } from "./usage-log-columns";
 import {
@@ -31,6 +34,9 @@ const outcomes: Record<string, string> = {
   model_unavailable: "模型不支持",
   cancelled: "已取消",
   failure: "请求失败",
+  failed: "请求失败",
+  in_progress: "进行中",
+  pending: "等待中",
   unknown: "结果未确认",
   completed: "会话完成",
   reported: "会话已报告",
@@ -318,18 +324,29 @@ function AttemptDetails({
   source: string;
   metadata?: [string, React.ReactNode][];
 }) {
-  const tps = source === "proxy" ? logSpeed(a) : null;
-  const first =
-    source === "proxy" && a.stream && (a.operation ?? "model") === "model"
-      ? a.firstTokenMs
-      : null;
+  const tps = ["proxy", "antigravity"].includes(source) ? logSpeed(a) : null;
+  const first = measuredFirstToken(a, source);
+  const elapsed = logDuration(a);
+  const generatedSpeed = generationSpeed(a);
   return (
     <>
       <h3>基本信息</h3>
       <DetailFields
         items={[
           ["供应商", name(a.provider)],
-          ["开始时间", preciseDate(a.startedAt)],
+          ...(source === "antigravity"
+            ? ([
+                ["服务来源", a.apiProvider],
+                ["模型名称", a.modelDisplayName],
+                ...(a.errorCode ? [["错误码", a.errorCode]] : []),
+              ] as [string, React.ReactNode][])
+            : []),
+          [
+            "开始时间",
+            a.availability?.attempt_start === "upstream_unreported"
+              ? "—"
+              : preciseDate(a.startedAt),
+          ],
           [
             "请求类型",
             a.operation === "web_search"
@@ -581,6 +598,7 @@ function AttemptDetails({
                         "缓存写总数小于 TTL 明细合计",
                       prompt_cache_total_mismatch:
                         "缓存命中与未命中之和不等于原始输入",
+                      attempt_time_unreported: "未报告尝试耗时",
                       reasoning_exceeds_output: "推理 token 超过输出 token",
                     }) as Record<string, string>
                   )[reason] ?? reason,
@@ -656,7 +674,7 @@ function AttemptDetails({
       <h3>费用</h3>
       <DetailFields
         items={[
-          ["估算费用", money(a.price?.cost)],
+          ["估算费用", a.price ? money(a.price.cost) : "未定价"],
           ["倍率", a.price?.multiplier],
           ["计价模型", a.pricingModel],
           [
@@ -716,10 +734,10 @@ function AttemptDetails({
         items={[
           [
             "总耗时",
-            a.durationMs != null ? (
-              `${(a.durationMs / 1000).toFixed(3)}s`
+            elapsed != null ? (
+              `${(elapsed / 1000).toFixed(3)}s`
             ) : (
-              <span tabIndex={0} title="历史缺失">
+              <span tabIndex={0} title={missingReason(a, "duration", source)}>
                 —
               </span>
             ),
@@ -738,7 +756,31 @@ function AttemptDetails({
             ),
           ],
           ["输出 TPS", tps == null ? "—" : `${tps.toFixed(1)} tok/s`],
-          ["传输", a.transport],
+          ...(source === "antigravity"
+            ? ([
+                [
+                  "生成耗时",
+                  a.generationMs == null
+                    ? "—"
+                    : `${(a.generationMs / 1000).toFixed(3)}s`,
+                ],
+                [
+                  "生成 TPS",
+                  generatedSpeed == null
+                    ? "—"
+                    : `${generatedSpeed.toFixed(1)} tok/s`,
+                ],
+              ] as [string, React.ReactNode][])
+            : []),
+          [
+            "传输",
+            (
+              { local_api: "本地接口", history_file: "历史文件" } as Record<
+                string,
+                string
+              >
+            )[a.transport] ?? a.transport,
+          ],
           ["流式", a.stream ? "是" : "否"],
         ]}
       />

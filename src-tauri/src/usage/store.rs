@@ -656,14 +656,15 @@ impl Store {
     }
     pub fn write_batch(&mut self, records: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
         let tx = db(self.connection.transaction())?;
+        let mut changed = false;
         for r in records {
-            insert(&tx, r)?;
+            changed |= insert(&tx, r)?;
         }
         storage_v12::flush(&tx)?;
         if let Some((id, body)) = cursor {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
         }
-        if !records.is_empty() {
+        if changed {
             query::changed(&tx)?;
         }
         db(tx.commit())
@@ -1108,18 +1109,27 @@ impl Store {
         self.finish_rebuild(source)
     }
 }
-fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
+fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<bool> {
     if db(tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM receipts WHERE id=?1)",
         [&incoming.id],
         |row| row.get::<_, bool>(0),
     ))? {
-        return Ok(());
+        return Ok(false);
     }
     let previous = storage_v12::record(tx, &incoming.id)?;
-    let r = preserve_existing(tx, incoming)?;
+    let r = preserve_record(incoming, previous.clone())?;
     let mut r = r;
-    r.finished_at = Some(r.event_time());
+    if r.source != "antigravity" {
+        r.finished_at = Some(r.event_time());
+    }
+    if r.source == "antigravity"
+        && previous
+            .as_ref()
+            .is_some_and(|old| serde_json::to_value(old).ok() == serde_json::to_value(&r).ok())
+    {
+        return Ok(false);
+    }
     dedup::prepare_session(tx, &mut r)?;
     let r = &r;
     let a = r.final_attempt();
@@ -1148,7 +1158,7 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<()> {
         }
     }
     dedup::reconcile(tx, r)?;
-    Ok(())
+    Ok(true)
 }
 
 fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<Record> {
@@ -1166,7 +1176,7 @@ pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Re
             return Ok(old);
         }
         if r.source != "proxy" {
-            if (old.completed && !r.completed)
+            if (r.source != "antigravity" && old.completed && !r.completed)
                 || old.final_attempt().and_then(|a| a.tokens.output)
                     > r.final_attempt().and_then(|a| a.tokens.output)
             {

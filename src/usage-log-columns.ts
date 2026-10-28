@@ -86,13 +86,37 @@ export function cacheHitRate(t: Tokens) {
     ? (t.cacheRead / full) * 100
     : null;
 }
+export function logDuration(a: Attempt): number | null {
+  const known = a.availability?.duration
+    ? a.availability.duration === "reported"
+    : !a.parseReasons?.includes("attempt_time_unreported");
+  return known && Number.isFinite(a.durationMs) && a.durationMs >= 0
+    ? a.durationMs
+    : null;
+}
+export function measuredFirstToken(a: Attempt, source: string): number | null {
+  return (source === "proxy" || source === "antigravity") &&
+    a.stream &&
+    (a.operation ?? "model") === "model"
+    ? a.firstTokenMs
+    : null;
+}
+export function generationSpeed(a: Attempt): number | null {
+  return a.generationMs != null && a.generationMs > 0
+    ? logSpeed({
+        ...a,
+        durationMs: a.generationMs,
+        availability: { ...a.availability, duration: "reported" },
+      })
+    : null;
+}
 export function logSpeed(a: Attempt) {
   const output = a.tokens.output;
   if (
     output == null ||
     !Number.isFinite(output) ||
     output <= 0 ||
-    !Number.isFinite(a.durationMs) ||
+    logDuration(a) == null ||
     a.durationMs <= 0 ||
     (a.tokens.imageOutput ?? 0) > 0 ||
     a.price?.basis?.unit === "image" ||

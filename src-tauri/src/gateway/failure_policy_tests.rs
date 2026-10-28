@@ -14,6 +14,22 @@ fn classify(status: u16, value: Value) -> crate::events::Details {
 }
 
 #[test]
+fn upstream_stream_codes_are_retryable_even_with_a_generic_request_wrapper() {
+    for code in ["upstream_stream_read_error", "upstream_http2_stream_error"] {
+        for status in [200, 400, 502] {
+            let d = classify(
+                status,
+                json!({"error":{"type":"invalid_request_error","code":code,"message":"fixture interrupted"}}),
+            );
+            assert_eq!(d.error_basis, Some(B::ServiceError));
+            let p = policy::decision(Some(status), &d);
+            assert!(p.retryable && p.counted_failure);
+            assert!(!p.hard && !p.temporary);
+        }
+    }
+}
+
+#[test]
 fn http_200_capacity_and_unknown_failures_use_complete_error_envelopes() {
     const MESSAGE: &str = "selected model is at capacity. please try a different model.";
     let values = [

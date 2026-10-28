@@ -131,6 +131,10 @@ export type Attempt = {
   requestedModel: string | null;
   upstreamModel?: string | null;
   responseModel: string | null;
+  modelDisplayName?: string | null;
+  apiProvider?: string | null;
+  generationMs?: number | null;
+  errorCode?: string | null;
   pricingModel: string | null;
   responseId: string | null;
   status: number | null;

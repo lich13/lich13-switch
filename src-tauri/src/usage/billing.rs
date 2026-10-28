@@ -381,6 +381,13 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
         "export_start",
         "export_end",
         "cleanup_through",
+        "model_display_name",
+        "api_provider",
+        "first_token_ms",
+        "generation_ms",
+        "output_tokens_per_second",
+        "generation_tokens_per_second",
+        "error_code",
     ];
     csv_row(w, &columns.map(str::to_owned))?;
     let mut result = Exported::default();
@@ -403,10 +410,14 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
         for (index, a) in r.attempts.iter().enumerate() {
             let p = a.price.as_ref();
             let t = &a.tokens;
-            let timing_known = !a
-                .parse_reasons
-                .iter()
-                .any(|r| r == "attempt_time_unreported");
+            let timing_known = a.availability.get("attempt_start").map_or_else(
+                || {
+                    !a.parse_reasons
+                        .iter()
+                        .any(|r| r == "attempt_time_unreported")
+                },
+                |v| v == "reported",
+            );
             let mut values = vec![
                 r.id.clone(),
                 a.id.clone(),
@@ -420,11 +431,7 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
                 } else {
                     String::new()
                 },
-                if timing_known {
-                    a.duration_ms.to_string()
-                } else {
-                    String::new()
-                },
+                opt(a.measured_duration_ms()),
                 request.timezone.clone(),
                 r.client.clone(),
                 r.source.clone(),
@@ -485,6 +492,32 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
                 local_time(request.start),
                 local_time(request.end),
                 local_time(request.end),
+            ]);
+            let speed = |duration: Option<u64>| -> String {
+                if a.output_reported == Some(false)
+                    || t.image_output.unwrap_or(0) > 0
+                    || a.price
+                        .as_ref()
+                        .and_then(|p| p.basis.as_ref())
+                        .is_some_and(|b| b["unit"] == "image")
+                {
+                    return String::new();
+                }
+                duration
+                    .filter(|n| *n > 0)
+                    .zip(t.output)
+                    .filter(|(_, n)| *n > 0)
+                    .map(|(ms, output)| format!("{:.6}", output as f64 * 1000.0 / ms as f64))
+                    .unwrap_or_default()
+            };
+            values.extend([
+                opt(a.model_display_name.as_ref()),
+                opt(a.api_provider.as_ref()),
+                opt(a.first_token_ms),
+                opt(a.generation_ms),
+                speed(a.measured_duration_ms()),
+                speed(a.generation_ms),
+                opt(a.error_code.as_ref()),
             ]);
             csv_row(w, &values)?;
             result.attempts += 1;
@@ -569,7 +602,7 @@ impl Service {
             self.read(|s| capture_cleanup_snapshot(s, &spool, request))?;
             for (client, home) in roots.iter().filter(|(c, _)| request.clients.contains(c)) {
                 let report = if client == "antigravity" {
-                    super::antigravity::sync(&mut spool, &pricing, &settings, home)?
+                    super::antigravity::sync(&mut spool, &pricing, &settings, home, false)?
                 } else {
                     sessions::sync(&mut spool, &pricing, &settings, client, home, true)?
                 };
@@ -866,6 +899,61 @@ mod tests {
         assert!(r.validate().is_err());
     }
     #[test]
+    fn app_csv_keeps_unknown_timing_separate_from_measured_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = Spool::new(dir.path()).unwrap();
+        let mut r = row("app", "antigravity", BASE + 999);
+        let a = &mut r.attempts[0];
+        a.duration_ms = 0;
+        a.generation_ms = Some(800);
+        a.model_display_name = Some("Fixture Model (High)".into());
+        a.api_provider = Some("API_PROVIDER_FIXTURE".into());
+        a.error_code = Some("RESOURCE_EXHAUSTED".into());
+        a.outcome = "failed".into();
+        a.availability
+            .insert("duration".into(), "upstream_unreported".into());
+        a.availability
+            .insert("attempt_start".into(), "reported".into());
+        a.parse_reasons.push("attempt_time_unreported".into());
+        append(&spool.connection, &r, 1, None).unwrap();
+        let mut out = Vec::new();
+        let result = write_csv(&spool, &request(), &mut out).unwrap();
+        assert_eq!((result.requests, result.attempts), (1, 1));
+        let csv = String::from_utf8(out).unwrap();
+        let mut lines = csv.lines();
+        let fields = |line: &str| -> Vec<String> {
+            let mut result = Vec::new();
+            let mut field = String::new();
+            let mut quoted = false;
+            let mut chars = line.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' if quoted && chars.peek() == Some(&'"') => {
+                        field.push(c);
+                        chars.next();
+                    }
+                    '"' => quoted = !quoted,
+                    ',' if !quoted => result.push(std::mem::take(&mut field)),
+                    _ => field.push(c),
+                }
+            }
+            result.push(field);
+            result
+        };
+        let headers = fields(lines.next().unwrap());
+        let values = fields(lines.next().unwrap());
+        assert_eq!(headers.len(), values.len());
+        let value = |key: &str| &values[headers.iter().position(|h| h == key).unwrap()];
+        assert!(!value("attempt_started_at").is_empty());
+        assert!(value("attempt_duration_ms").is_empty());
+        assert!(value("output_tokens_per_second").is_empty());
+        assert_eq!(value("generation_ms"), "800");
+        assert_eq!(value("generation_tokens_per_second"), "25.000000");
+        assert_eq!(value("error_code"), "RESOURCE_EXHAUSTED");
+        assert_eq!(value("model_display_name"), "Fixture Model (High)");
+        assert!(value("status").is_empty());
+    }
+    #[test]
     fn partial_source_history_blocks_export_before_cleanup() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(&dir.path().join("store"));
@@ -899,7 +987,8 @@ mod tests {
             dir.path(),
             &service.prices().unwrap().frozen(),
             &service.settings(),
-            &mut sessions::Report::default()
+            &mut sessions::Report::default(),
+            false,
         )
         .is_err());
     }

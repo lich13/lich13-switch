@@ -75,7 +75,7 @@ export default function Sources({
             )}
             {!!state.reports[id]?.errors && (
               <span className="form-error">
-                {state.reports[id].errors} 个文件未同步
+                {state.reports[id].errors} 项未同步
               </span>
             )}
           </div>
@@ -87,7 +87,7 @@ export default function Sources({
           <p>部分旧日汇总仅支持全部来源查询。</p>
         </details>
       )}
-      <div className="usage-actions">
+      <div className="usage-actions usage-source-actions">
         <button
           disabled={busy || state.syncing}
           onClick={() => void run("sync_usage")}
@@ -129,6 +129,12 @@ export default function Sources({
           }
         >
           重建 Grok 用量
+        </button>
+        <button
+          disabled={busy || state.syncing}
+          onClick={() => void run("sync_usage", { rebuild: "antigravity" })}
+        >
+          补全 Antigravity 历史
         </button>
       </div>
       <form

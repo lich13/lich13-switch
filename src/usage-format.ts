@@ -54,7 +54,9 @@ export function missingReason(
 ): string {
   if (
     field === "first_token" &&
-    (source !== "proxy" || !a.stream || (a.operation ?? "model") !== "model")
+    (!["proxy", "antigravity"].includes(source) ||
+      !a.stream ||
+      (a.operation ?? "model") !== "model")
   )
     return "不适用";
   const kind = a.availability?.[field] ?? a.usageStatus ?? "historical_missing";
