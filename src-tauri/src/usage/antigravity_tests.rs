@@ -782,7 +782,11 @@ async fn missing_identity_keeps_gap_but_saves_later_requests_and_repairs_after_r
 fn file_gap_does_not_hide_later_usage_or_advance_past_unresolved_history() {
     let dir = tempfile::tempdir().unwrap();
     let brain = dir.path().join("antigravity/brain");
-    let path = brain.join("fixture/.system_generated/logs/transcript.jsonl");
+    let path = brain
+        .join("fixture")
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let gap = "{\"step_index\":0,\"input_tokens\":7}\n";
     let later = "{\"request_id\":\"later\",\"model\":\"fixture-model\",\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":3}\n";
