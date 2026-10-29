@@ -113,7 +113,7 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
     startedAt: 1,
     elapsedSeconds: 61,
     remainingSeconds: 239 as number | null,
-    phase: "thread_queue",
+    phase: "admission",
   };
   const props = {
     clientId: "codex" as const,
@@ -127,7 +127,7 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
       gateway={{ ...gatewayDemo, pendingRequests: [pending] }}
     />,
   );
-  expect(screen.getByText("等待上一请求")).toBeInTheDocument();
+  expect(screen.getByText("等待准入")).toBeInTheDocument();
   expect(screen.getByText("剩余 239 秒")).toBeInTheDocument();
   act(() => {
     now += 10_000;

@@ -90,6 +90,22 @@ export default function ProviderTesting({
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const [documentVisible, setDocumentVisible] = useState(
+    document.visibilityState !== "hidden",
+  );
+  const [nativeVisible, setNativeVisible] = useState(true);
+  const visible = documentVisible && nativeVisible;
+  useEffect(() => {
+    const changed = () =>
+      setDocumentVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", changed);
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    events.watch("app-visibility", setNativeVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", changed);
+      events.dispose();
+    };
+  }, []);
   const tabsId = useId();
   const scope = { clientId: gateway.clientId, providerId: provider.id };
   const [state, setState] = useState<ProviderTestingState | null>(null);
@@ -174,17 +190,17 @@ export default function ProviderTesting({
   );
   useEffect(() => {
     mounted.current = true;
-    void refresh().catch(fail);
+    if (visible) void refresh().catch(fail);
     const events = subscriptions(fail);
     events.watch("provider-tests", async () => {
-      await refresh();
+      if (visible) await refresh();
     });
     return () => {
       mounted.current = false;
       stateSequence.current++;
       events.dispose();
     };
-  }, [refresh, fail]);
+  }, [refresh, fail, visible]);
   useEffect(() => {
     if (!state || detection) return;
     setDetection(structuredClone(state.detection));
@@ -206,6 +222,7 @@ export default function ProviderTesting({
     );
   }, [state, testing, kind, gateway.clientId, provider.id]);
   useEffect(() => {
+    if (!visible) return;
     if (!detailId) {
       setDetail(null);
       return;
@@ -226,11 +243,14 @@ export default function ProviderTesting({
     return () => {
       disposed = true;
     };
-  }, [detailId, state, gateway.clientId, provider.id, fail]);
+  }, [detailId, state, gateway.clientId, provider.id, fail, visible]);
+  const hasActiveJobs = state?.jobs.some(active) ?? false;
   useEffect(() => {
+    if (!visible || !hasActiveJobs) return;
+    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [visible, hasActiveJobs]);
   const loadCatalog = useCallback(
     async (reload: boolean) => {
       const request = ++catalogRequest.current;
@@ -264,11 +284,12 @@ export default function ProviderTesting({
     [gateway.clientId, provider.id, catalogEndpoint, gateway.revision],
   );
   useEffect(() => {
+    if (!visible) return;
     void loadCatalog(false);
     return () => {
       ++catalogRequest.current;
     };
-  }, [loadCatalog]);
+  }, [loadCatalog, visible]);
   const perform = async (work: () => Promise<void>) => {
     if (pending.current) return;
     pending.current = true;

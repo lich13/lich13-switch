@@ -30,9 +30,6 @@ const SSE_BODY: &[u8] = b": fixture-comment\r\n\r\ndata: {\"type\":\"response.co
 const JSON_BODY: &[u8] = br#"{"ok":true,"source":"fixture"}"#;
 const WAIT: Duration = Duration::from_secs(5);
 
-#[path = "thread_queue_transport_tests.rs"]
-mod thread_queue;
-
 #[derive(Clone, Debug)]
 struct SeenRequest {
     path_and_query: String,

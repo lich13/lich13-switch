@@ -88,7 +88,7 @@ function QuickContent({
   useEffect(() => {
     let disposed = false;
     let receivedAccountState = false;
-    let receivedGatewayState = false;
+    let gatewaySequence = 0;
     let receivedQuickState = false;
     let receivedVisibility = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
@@ -99,7 +99,7 @@ function QuickContent({
     });
     watch("gateway-state", (s) => {
       if ((s.clientId ?? "codex") === clientId) {
-        receivedGatewayState = true;
+        gatewaySequence++;
         setGateway(s);
       }
     });
@@ -110,6 +110,16 @@ function QuickContent({
     watch("panel-visibility", (value) => {
       receivedVisibility = true;
       setVisible(value);
+      const request = ++gatewaySequence;
+      if (value)
+        void command("get_gateway", { clientId })
+          .then((next) => {
+            if (!disposed && request === gatewaySequence) setGateway(next);
+          })
+          .catch((e) => {
+            if (!disposed && request === gatewaySequence)
+              setError(errorOf(e).message);
+          });
     });
     watch("switch-notice", setNotice);
     watch("switch-error", (e) => setError(errorOf(e).message));
@@ -121,7 +131,7 @@ function QuickContent({
       .then(([a, g, p]) => {
         if (!disposed) {
           if (!receivedAccountState) setAccounts(a);
-          if (!receivedGatewayState) setGateway(g);
+          if (gatewaySequence === 0) setGateway(g);
           if (!receivedQuickState) setPrefs(p);
           if (!receivedVisibility && !receivedQuickState)
             setVisible(p.visible ?? preview);

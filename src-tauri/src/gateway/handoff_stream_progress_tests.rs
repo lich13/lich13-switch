@@ -434,7 +434,7 @@ async fn seed_retained_owner(
         .await
         .unwrap();
     assert_eq!(admission.route.provider.id, owner.id);
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     admission.slot.complete();
     drop(admission);
     drop(budget);
@@ -559,7 +559,7 @@ async fn v0212_failed_handoff_releases_receiver_reservation_but_keeps_owner_rese
         .await
         .unwrap();
     assert_eq!(admission.route.provider.id, receiver_id);
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     // Dropping without completion models a receiver that failed before a
     // usable response. Its reservation must not block another request.
     drop(admission);
@@ -628,7 +628,7 @@ async fn v0212_successful_receiver_is_reserved_until_idle_retention_expires_and_
         .await
         .unwrap();
     assert_eq!(admission.route.provider.id, receiver_id);
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     admission.slot.complete();
     drop(admission);
     drop(budget);
@@ -677,7 +677,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         )
         .await
         .unwrap();
-    receiver.commit_rpm().unwrap();
+    receiver.commit_rpm().await.unwrap();
     assert_eq!(receiver.route.provider.id, receiver_id);
 
     let compacted = compacted_hints(&boundary);
@@ -714,7 +714,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         admission.handoff_wait,
         Some(crate::usage::model::RoutingDecision::ReceiverCapacityFull)
     );
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     admission.slot.complete();
     drop(admission);
     drop(budget);
@@ -755,7 +755,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         .await
         .unwrap();
     assert_eq!(receiver_admission.route.provider.id, receiver_id);
-    receiver_admission.commit_rpm().unwrap();
+    receiver_admission.commit_rpm().await.unwrap();
     receiver_admission.slot.complete();
     drop(receiver_admission);
     drop(continuation_budget);

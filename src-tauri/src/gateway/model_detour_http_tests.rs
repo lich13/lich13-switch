@@ -309,7 +309,7 @@ fn v0255_open_stream(
 }
 
 #[tokio::test]
-async fn v02611_http_queued_side_models_preserve_owner_during_and_after_completion() {
+async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_completion() {
     let main_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let main_seen = main_requests.clone();
     let main_port = super::v022_server(move |request| {
@@ -391,77 +391,74 @@ async fn v02611_http_queued_side_models_preserve_owner_during_and_after_completi
     let first_side = tokio::spawn(async move {
         v0255_request(&first_gateway, &first_thread, V0255_SIDE_ONE.to_vec()).await
     });
-    let first_arrived = tokio::time::timeout(Duration::from_secs(5), arrived_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(first_arrived, V0255_SIDE_ONE);
     let second_gateway = gateway.clone();
     let second_thread = thread.to_owned();
     let second_side = tokio::spawn(async move {
         v0255_request(&second_gateway, &second_thread, V0255_SIDE_TWO.to_vec()).await
     });
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while gateway
-            .0
-            .pending_requests
-            .view()
-            .iter()
-            .filter(|r| r.phase == "thread_queue")
-            .count()
-            != 1
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(arrived_rx.try_recv().is_err());
-    assert!(!first_side.is_finished());
-    assert!(!second_side.is_finished());
+    let mut arrived = vec![
+        tokio::time::timeout(Duration::from_secs(5), arrived_rx.recv())
+            .await
+            .expect("first side request did not reach B")
+            .expect("side fixture channel closed"),
+        tokio::time::timeout(Duration::from_secs(5), arrived_rx.recv())
+            .await
+            .expect("second side request did not reach B")
+            .expect("side fixture channel closed"),
+    ];
+    arrived.sort();
+    let mut expected_side_requests = vec![V0255_SIDE_ONE.to_vec(), V0255_SIDE_TWO.to_vec()];
+    expected_side_requests.sort();
+    assert_eq!(arrived, expected_side_requests);
+    assert!(
+        !first_side.is_finished(),
+        "first side response must stay held"
+    );
+    assert!(
+        !second_side.is_finished(),
+        "second side response must stay held"
+    );
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
     );
-    let during_gateway = gateway.clone();
-    let during = tokio::spawn(async move {
-        v0255_request(&during_gateway, thread, V0255_MAIN_DURING.to_vec()).await
-    });
-    side_gate.add_permits(1);
-    let first = tokio::time::timeout(Duration::from_secs(5), first_side)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(
-        v0255_response_body(first).await,
-        Bytes::from_static(V0255_SIDE_ONE_RESPONSE)
-    );
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), arrived_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        V0255_SIDE_TWO
-    );
-    let second = tokio::time::timeout(Duration::from_secs(5), second_side)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(second.status(), StatusCode::OK);
-    assert_eq!(
-        v0255_response_body(second).await,
-        Bytes::from_static(V0255_SIDE_TWO_RESPONSE)
-    );
-    let during = tokio::time::timeout(Duration::from_secs(5), during)
-        .await
-        .unwrap()
-        .unwrap();
+
+    let during = v0255_request(&gateway, thread, V0255_MAIN_DURING.to_vec()).await;
     assert_eq!(during.status(), StatusCode::OK);
     assert_eq!(
         v0255_response_body(during).await,
-        Bytes::from_static(V0255_MAIN_RESPONSE)
+        Bytes::from_static(V0255_MAIN_RESPONSE),
+        "interleaved main SSE bytes must pass through unchanged"
+    );
+    assert_eq!(
+        gateway.0.compaction.owner(&thread_hash),
+        Some(ids[0].clone()),
+        "the original main provider must retain ownership while both side responses are delayed"
+    );
+
+    side_gate.add_permits(2);
+    let first = tokio::time::timeout(Duration::from_secs(5), first_side)
+        .await
+        .expect("first side request did not finish after release")
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), second_side)
+        .await
+        .expect("second side request did not finish after release")
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    let first_bytes = v0255_response_body(first).await;
+    let second_bytes = v0255_response_body(second).await;
+    assert_eq!(
+        first_bytes,
+        Bytes::from_static(V0255_SIDE_ONE_RESPONSE),
+        "the first delayed side SSE response must preserve its exact wire bytes"
+    );
+    assert_eq!(
+        second_bytes,
+        Bytes::from_static(V0255_SIDE_TWO_RESPONSE),
+        "the second delayed side SSE response must preserve its exact wire bytes"
     );
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
@@ -501,8 +498,6 @@ async fn v02611_http_queued_side_models_preserve_owner_during_and_after_completi
     );
     let mut observed_side = side_requests.lock().unwrap().clone();
     observed_side.sort();
-    let mut expected_side_requests = vec![V0255_SIDE_ONE.to_vec(), V0255_SIDE_TWO.to_vec()];
-    expected_side_requests.sort();
     assert_eq!(observed_side, expected_side_requests);
 
     let usage_rows = v0255_wait_for_detour_usage(&usage, &ids[1], "fixture-side", 2).await;

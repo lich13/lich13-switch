@@ -35,7 +35,7 @@ vi.mock("./bridge", () => ({
 }));
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }));
 
-import Usage from "./Usage";
+import Usage, { syncStatus } from "./Usage";
 import Pricing from "./UsagePricing";
 import App from "./App";
 
@@ -993,7 +993,10 @@ describe("usage records", () => {
     expect(mock.listeners.has("app-visibility")).toBe(true);
     act(() => mock.listeners.get("app-visibility")!(false));
     const nativeHidden = calls("get_usage_logs").length;
+    const hiddenStateReads = calls("get_usage_state").length;
+    await act(async () => mock.listeners.get("usage-state")?.(undefined));
     await act(async () => vi.advanceTimersByTime(15_000));
+    expect(calls("get_usage_state")).toHaveLength(hiddenStateReads);
     expect(calls("get_usage_logs")).toHaveLength(nativeHidden);
     act(() => mock.listeners.get("app-visibility")!(true));
     await flush();
@@ -1557,4 +1560,60 @@ it("accepts only the latest detail selection and invalidates pending reads on cl
     pending[3](detail(0));
   });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("reports the selected source's latest outcome and exposes mixed failures", () => {
+  const report = {
+    files: 1,
+    imported: 1,
+    skipped: 0,
+    errors: 0,
+    completedAt: 100,
+    phase: "done",
+  };
+  const value = {
+    settings: {} as UsageSettings,
+    syncing: false,
+    error: null,
+    reports: {
+      claude: report,
+      antigravity: { ...report, phase: "failed", errors: 1 },
+    },
+  };
+  expect(syncStatus(value, "")).toBe("部分未同步");
+  expect(syncStatus(value, "antigravity")).toBe("同步失败");
+  expect(syncStatus(value, "claude")).toBe("已同步");
+  value.reports.antigravity.phase = "partial";
+  expect(syncStatus(value, "antigravity")).toBe("部分未同步");
+  value.reports.antigravity.phase = "syncing";
+  expect(syncStatus(value, "antigravity")).toBe("同步中…");
+  expect(syncStatus(value, "codex")).toBe("");
+});
+
+it("requests fresh state after showing and ignores an older hidden response", async () => {
+  const original = mock.command.getMockImplementation()!;
+  const reads: ((value: UsageState) => void)[] = [];
+  mock.command.mockImplementation((name, args) =>
+    name === "get_usage_state"
+      ? new Promise<UsageState>((resolve) => reads.push(resolve))
+      : original(name, args),
+  );
+  render(<Usage />);
+  await waitFor(() => expect(reads).toHaveLength(1));
+  await act(async () => mock.listeners.get("app-visibility")!(false));
+  await act(async () => mock.listeners.get("app-visibility")!(true));
+  await waitFor(() => expect(reads).toHaveLength(2));
+  const fresh = structuredClone(state);
+  fresh.reports.antigravity = {
+    files: 1,
+    imported: 1,
+    skipped: 0,
+    errors: 1,
+    phase: "failed",
+    completedAt: null,
+  };
+  await act(async () => reads[1](fresh));
+  expect(screen.getByText("同步失败")).toBeInTheDocument();
+  await act(async () => reads[0](structuredClone(state)));
+  expect(screen.getByText("同步失败")).toBeInTheDocument();
 });

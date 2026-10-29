@@ -477,6 +477,20 @@ impl Service {
             }
             *busy = true;
         }
+        {
+            let mut reports = self.0.report.lock().unwrap();
+            for (client, _) in &roots {
+                if rebuild.is_none_or(|s| s == client) {
+                    reports.insert(
+                        client.clone(),
+                        sessions::Report {
+                            phase: "syncing".into(),
+                            ..sessions::Report::default()
+                        },
+                    );
+                }
+            }
+        }
         let _ = self.0.events.send(());
         let result = (|| {
             let pricing = self.prices()?;
@@ -514,6 +528,7 @@ impl Service {
                         let mut reports = self.0.report.lock().unwrap();
                         let report = reports.entry(client.clone()).or_default();
                         report.phase = "failed".into();
+                        report.completed_at = None;
                         report.errors = report.errors.saturating_add(1);
                         first_error.get_or_insert(error);
                     }
@@ -522,6 +537,14 @@ impl Service {
             self.query(|store| store.compact(now()))?;
             first_error.map_or(Ok(()), Err)
         })();
+        if result.is_err() {
+            for report in self.0.report.lock().unwrap().values_mut() {
+                if report.phase == "syncing" {
+                    report.phase = "failed".into();
+                    report.errors += 1;
+                }
+            }
+        }
         *self.0.syncing.lock().unwrap() = false;
         *self.0.error.lock().unwrap() = result
             .as_ref()

@@ -94,7 +94,7 @@ async fn fill_failed_rpm_requests(scheduler: &Scheduler, route: &Route, limit: u
             .acquire(std::slice::from_ref(route), false, 8, &mut budget)
             .await
             .unwrap_or_else(|error| panic!("RPM request {attempt} should fit: {error:?}"));
-        admission.commit_rpm().expect("persisted RPM start");
+        admission.commit_rpm().await.expect("persisted RPM start");
         let mut completion = admission.take_completion().expect("request completion");
         completion.settle(Settlement::Failed);
         drop(admission);
@@ -694,11 +694,13 @@ async fn rpm_wait_outlives_thirty_seconds_and_resumes_two_waiters_fifo_after_61_
     let mut second = second.await.unwrap().expect("FIFO second admission");
     first
         .commit_rpm()
+        .await
         .expect("first resumed request should start");
     let mut first_completion = first.take_completion().expect("first request completion");
     first_completion.settle(Settlement::Failed);
     second
         .commit_rpm()
+        .await
         .expect("second resumed request should start");
     let mut second_completion = second.take_completion().expect("second request completion");
     second_completion.settle(Settlement::Failed);
@@ -1060,7 +1062,7 @@ async fn unlimited_to_limited_revalidates_existing_start_and_enables_initializat
         .acquire(&[route(unlimited.clone())], false, 8, &mut budget)
         .await
         .expect("unlimited request admission");
-    admission.commit_rpm().expect("unlimited commit");
+    admission.commit_rpm().await.expect("unlimited commit");
     drop(admission);
 
     let limited = provider("v1", true, 1);
@@ -1095,7 +1097,10 @@ async fn persistence_failure_fails_closed_for_limited_rpm() {
         )
         .await
         .expect("reservation before the first write");
-    assert!(matches!(admission.commit_rpm(), Err(Rejected::RateLedger)));
+    assert!(matches!(
+        admission.commit_rpm().await,
+        Err(Rejected::RateLedger)
+    ));
     drop(admission);
     assert_eq!(scheduler.rpm_status(PROVIDER, 1).0, 0);
     let (_, _, _, error) = scheduler.rpm_status(PROVIDER, 1);
@@ -1127,7 +1132,7 @@ async fn provider_credential_version_change_rejects_stale_uncommitted_reservatio
         .await
         .expect("stale reservation admission");
     scheduler.configure(&[provider("v2", true, 1)], true);
-    assert_eq!(admission.commit_rpm(), Err(Rejected::Unavailable));
+    assert_eq!(admission.commit_rpm().await, Err(Rejected::Unavailable));
     assert_eq!(scheduler.rpm_status(PROVIDER, 1).0, 0);
 }
 
@@ -1144,7 +1149,10 @@ async fn provider_dequeue_rejects_stale_uncommitted_reservation() {
         .await
         .expect("dequeued reservation admission");
     scheduler.configure(&[provider("v1", false, 1)], true);
-    assert!(matches!(admission.commit_rpm(), Err(Rejected::Unavailable)));
+    assert!(matches!(
+        admission.commit_rpm().await,
+        Err(Rejected::Unavailable)
+    ));
     assert_eq!(scheduler.rpm_status(PROVIDER, 1).0, 0);
 }
 
@@ -1166,7 +1174,7 @@ async fn rpm_is_shared_across_models_of_one_provider() {
         )
         .await
         .expect("first model admission");
-    first.commit_rpm().unwrap();
+    first.commit_rpm().await.unwrap();
     let mut completion = first.take_completion().expect("first completion");
     completion.settle(Settlement::Failed);
     drop(first);
@@ -1197,7 +1205,7 @@ async fn protocol_failure_releases_completion_but_keeps_send_start_and_output_by
         .acquire(&[route(p)], false, 8, &mut budget)
         .await
         .expect("protocol admission");
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     let completion = admission.take_completion();
     drop(admission);
 
@@ -1232,7 +1240,7 @@ async fn queued_waiter_cancellation_releases_fifo_slot() {
         .acquire(std::slice::from_ref(&r), false, 8, &mut first_budget)
         .await
         .expect("first admission");
-    first.commit_rpm().unwrap();
+    first.commit_rpm().await.unwrap();
     let mut completion = first.take_completion().unwrap();
     completion.settle(Settlement::Failed);
     drop(first);
@@ -1295,7 +1303,7 @@ async fn completion_window_settles_success_once_across_cancellation_tail() {
         .acquire(&[route(p)], false, 8, &mut budget)
         .await
         .expect("completion fixture admission");
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     let completion = admission.take_completion();
     drop(admission);
 
@@ -1311,6 +1319,7 @@ async fn completion_window_settles_success_once_across_cancellation_tail() {
     protocol.finish_usage_tail("upstream_eof");
     protocol.finish_usage_tail("upstream_eof");
 
+    assert!(scheduler.flush_rpm().await);
     let (ledger, error) = Ledger::load(&path);
     assert!(!error);
     let p = ledger.providers.get(PROVIDER).expect("provider ledger");
@@ -1331,7 +1340,7 @@ async fn http_200_without_a_terminal_event_does_not_settle_as_success() {
         .acquire(&[route(p)], false, 8, &mut budget)
         .await
         .expect("incomplete fixture admission");
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     let completion = admission.take_completion();
     drop(admission);
 
@@ -1351,6 +1360,7 @@ data: {"type":"response.created","response":{"id":"fixture"}}
         Some(crate::gateway::protocol::Terminal::Failure)
     );
 
+    assert!(scheduler.flush_rpm().await);
     let (ledger, error) = Ledger::load(&path);
     assert!(!error);
     let p = ledger.providers.get(PROVIDER).expect("provider ledger");
@@ -1398,4 +1408,48 @@ async fn native_websocket_two_rounds_reuse_one_handshake_and_preserve_request_by
     drop(client);
     gateway.stop().await.unwrap();
     drop(dir);
+}
+
+#[tokio::test]
+async fn websocket_cancel_during_rpm_write_does_not_dispatch_and_keeps_connection_usable() {
+    let upstream = native_ws_loopback().await;
+    let (_dir, gateway) = started_native_gateway(upstream.port, 10).await;
+    let mut client = gateway_ws_client(&gateway).await;
+    let (ready, release) = gateway.0.admission.hold_rpm_write();
+    client
+        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    client
+        .send(yawc::Frame::text(
+            r#"{"type":"response.cancel"}"#.to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert!(gateway_ws_next(&mut client)
+        .await
+        .as_str()
+        .contains("response.cancelled"));
+    assert_eq!(upstream.seen.lock().unwrap().len(), 0);
+    drop(release);
+    assert!(gateway.0.admission.flush_rpm().await);
+    client
+        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+        .await
+        .unwrap();
+    assert!(gateway_ws_next(&mut client)
+        .await
+        .as_str()
+        .contains("response.created"));
+    assert!(gateway_ws_next(&mut client)
+        .await
+        .as_str()
+        .contains("response.completed"));
+    assert_eq!(upstream.seen.lock().unwrap().len(), 1);
+    drop(client);
+    gateway.stop().await.unwrap();
 }

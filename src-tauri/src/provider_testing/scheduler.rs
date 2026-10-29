@@ -360,21 +360,6 @@ impl Service {
     fn tick_client(&self, client: ClientId, at: i64, suspended: bool) -> Result<()> {
         let gateway = self.gateway(client);
         let candidates = gateway.test_candidates()?;
-        let configs = lock(&self.0.data).saved.detection.clone();
-        let endpoints: HashMap<_, _> = candidates
-            .iter()
-            .map(|p| {
-                (
-                    p.id.clone(),
-                    gateway.test_endpoint(
-                        &p.id,
-                        configs
-                            .get(&scope_key(client, &p.id))
-                            .and_then(|c| c.endpoint.as_deref()),
-                    ),
-                )
-            })
-            .collect();
         let mut launch = vec![];
         {
             let mut data = lock(&self.0.data);
@@ -412,14 +397,7 @@ impl Service {
                         .copied()
                         .unwrap_or(0)
                 });
-                let cache_error = endpoints[&provider.id]
-                    .as_ref()
-                    .map_err(|e| e.message.clone())
-                    .and_then(|endpoint| {
-                        Self::cached_model(&data, client, &provider.id, endpoint, &config.model)
-                            .map_err(|e| e.message)
-                    })
-                    .err();
+                let mut cache_error = None;
                 let running = data.saved.jobs.iter().find(|j| {
                     j.client_id == client && j.provider_id == provider.id && !j.terminal()
                 });
@@ -450,12 +428,27 @@ impl Service {
                     "statsUnavailable"
                 } else if minutes.is_none() {
                     "idle"
-                } else if cache_error.is_some() {
-                    "modelsUnavailable"
-                } else if queued {
-                    "queued"
                 } else {
-                    "waiting"
+                    cache_error = gateway
+                        .test_endpoint(&provider.id, config.endpoint.as_deref())
+                        .and_then(|endpoint| {
+                            Self::cached_model(
+                                &data,
+                                client,
+                                &provider.id,
+                                &endpoint,
+                                &config.model,
+                            )
+                        })
+                        .err()
+                        .map(|e| e.message);
+                    if cache_error.is_some() {
+                        "modelsUnavailable"
+                    } else if queued {
+                        "queued"
+                    } else {
+                        "waiting"
+                    }
                 };
                 if matches!(status, "disabled" | "degraded" | "outOfQueue") {
                     timing.paused = true;

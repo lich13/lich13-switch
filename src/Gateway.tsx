@@ -43,12 +43,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { command } from "./bridge";
-import {
-  errorOf,
-  type GatewayState,
-  type GatewaySettings,
-  type Provider,
-} from "./types";
+import { errorOf, type GatewayState, type Provider } from "./types";
 
 type Edit = GatewayEdit;
 type Dialog =
@@ -182,23 +177,30 @@ function GatewayContent({
   );
   useEffect(() => {
     let disposed = false;
-    let receivedGatewayState = false;
+    let sequence = 0;
     const events = subscriptions((e) => setError(errorOf(e).message));
-    void command("get_gateway", { clientId })
-      .then((s) => {
+    const refresh = async () => {
+      const request = ++sequence;
+      try {
+        const value = await command("get_gateway", { clientId });
         if (
           !disposed &&
-          !receivedGatewayState &&
-          (s.clientId ?? "codex") === clientId
+          request === sequence &&
+          (value.clientId ?? "codex") === clientId
         )
-          setState(s);
-      })
-      .catch((e) => {
-        if (!disposed && !receivedGatewayState) setError(errorOf(e).message);
-      });
+          setState(value);
+      } catch (e) {
+        if (!disposed && request === sequence) setError(errorOf(e).message);
+      }
+    };
+    void refresh();
+    events.watch("app-visibility", (visible) => {
+      if (visible) void refresh();
+      else sequence++;
+    });
     events.watch("gateway-state", (s) => {
       if ((s.clientId ?? "codex") === clientId) {
-        receivedGatewayState = true;
+        sequence++;
         setState(s);
       }
     });

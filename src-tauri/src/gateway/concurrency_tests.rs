@@ -88,13 +88,23 @@ async fn freeze_keeps_fifo_limits_and_budget_without_reserving_rpm_or_capacity()
     assert_eq!(g.view().providers[0].rpm_used, 0);
     gate.set(false).unwrap();
     let mut first = tasks.remove(0).await.unwrap();
-    first.commit_rpm().unwrap();
+    {
+        // Disk I/O uses a real worker; keep virtual time fixed while it runs.
+        let commit = first.commit_rpm();
+        tokio::pin!(commit);
+        loop {
+            tokio::select! {
+                result = &mut commit => { result.unwrap(); break; },
+                _ = tokio::task::yield_now() => {},
+            }
+        }
+    }
     assert!(!tasks[0].is_finished());
     assert_eq!(g.view().providers[0].rpm_used, 1);
     drop(first);
     tickets[0].finish();
     let mut second = tasks.remove(0).await.unwrap();
-    second.commit_rpm().unwrap();
+    second.commit_rpm().await.unwrap();
     assert_eq!(g.view().providers[0].rpm_used, 2);
     drop(second);
     drop(tickets);
@@ -264,7 +274,7 @@ async fn rpm_window_counts_upstream_attempts_without_touching_circuit_health() {
     start(&g, &t).await;
     let routes = routes(&g);
     let mut first = slot(&g, &routes).await;
-    first.commit_rpm().unwrap();
+    first.commit_rpm().await.unwrap();
     drop(first);
     let mut budget = Budget::new(0);
     let result =
@@ -356,7 +366,7 @@ async fn rpm_reservations_are_persisted_across_gateway_restart() {
     start(&g, &t).await;
     let routes = routes(&g);
     let mut first = slot(&g, &routes).await;
-    first.commit_rpm().unwrap();
+    first.commit_rpm().await.unwrap();
     drop(first);
     let raw = std::fs::read(t.path().join("rpm-window.json")).unwrap();
     assert!(String::from_utf8_lossy(&raw).contains("providers"));
@@ -414,11 +424,11 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
     claude.0.admission.configure(&claude_providers, true);
 
     let mut codex_slot = slot(&codex, &routes(&codex)).await;
-    codex_slot.commit_rpm().unwrap();
+    codex_slot.commit_rpm().await.unwrap();
     drop(codex_slot);
 
     let mut claude_slot = slot(&claude, &routes(&claude)).await;
-    claude_slot.commit_rpm().unwrap();
+    claude_slot.commit_rpm().await.unwrap();
     drop(claude_slot);
 
     assert_eq!(codex.view().providers[0].rpm_used, 1);
@@ -1269,7 +1279,7 @@ async fn capacity_fallback_rechecks_owner_recovery_and_does_not_bypass_its_rpm()
     drop(backup);
     rpm_limit(&g, &t, 0, 1);
     let mut owner = slot(&g, &routes(&g)[..1]).await;
-    owner.commit_rpm().unwrap();
+    owner.commit_rpm().await.unwrap();
     let mut budget = Budget::new(3);
     budget.capacity_owner = Some(candidates[0].provider.id.clone());
     assert!(tokio::time::timeout(

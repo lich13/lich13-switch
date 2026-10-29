@@ -286,7 +286,7 @@ async fn scheduler_different_threads_cannot_share_one_reserved_receiver() {
         )
         .await
         .unwrap();
-    first.commit_rpm().unwrap();
+    first.commit_rpm().await.unwrap();
     first.slot.complete();
     drop(first);
     drop(first_budget);
@@ -347,7 +347,7 @@ async fn scheduler_different_threads_cannot_share_one_reserved_receiver() {
         )
         .await
         .unwrap();
-    third.commit_rpm().unwrap();
+    third.commit_rpm().await.unwrap();
     third.slot.complete();
     drop(third);
     drop(third_budget);
@@ -387,7 +387,7 @@ async fn scheduler_lowering_limit_preserves_existing_active_slots() {
         )
         .await
         .unwrap();
-    first.commit_rpm().unwrap();
+    first.commit_rpm().await.unwrap();
     let mut second_budget = Budget::new(2);
     let mut second = gateway
         .0
@@ -402,7 +402,7 @@ async fn scheduler_lowering_limit_preserves_existing_active_slots() {
         )
         .await
         .unwrap();
-    second.commit_rpm().unwrap();
+    second.commit_rpm().await.unwrap();
     assert_eq!(gateway.view().providers[0].active_requests, 2);
 
     super::update(

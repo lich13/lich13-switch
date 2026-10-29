@@ -21,7 +21,6 @@ import type {
   PricingConfig,
   PricingView,
   PricingSearchPage,
-  UsageState,
 } from "./usage-types";
 const fields = [
   ["input_cost_per_token", "输入"],

@@ -448,7 +448,7 @@ async fn protected_new_thread_capacity_prefers_new_only_and_does_not_bypass_its_
         .await
         .unwrap();
     assert_eq!(admission.route.provider.id, ids[1]);
-    admission.commit_rpm().unwrap();
+    admission.commit_rpm().await.unwrap();
     drop(admission);
 
     let mut second = Budget::new(0);

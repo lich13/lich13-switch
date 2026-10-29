@@ -450,7 +450,7 @@ pub fn blocks_gateway(data: &Path, home: &Path) -> bool {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn enable(
     data: &Path,
     home: &Path,

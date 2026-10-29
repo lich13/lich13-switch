@@ -330,23 +330,6 @@
 .provider-test-diagnostics > summary {
   cursor: pointer;
 }
-.provider-test-history {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 164px minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
-  padding: 10px 0;
-  text-align: left;
-  border-bottom: 1px solid var(--line);
-}
-.provider-test-history > * {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.provider-test-history time {
-  color: var(--muted);
-  font-size: 12px;
-}
 .provider-test-bank {
   margin-top: 20px;
 }
@@ -421,10 +404,6 @@
   .provider-test-groups summary > :nth-child(5)::before {
     content: "耗时 ";
     color: var(--muted);
-  }
-  .provider-test-history {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 4px;
   }
 }
 

@@ -4,14 +4,16 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import type { ClientId, GatewayState, ProviderQuota } from "./types";
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
-  listeners: new Map<string, (s: GatewayState) => void>(),
+  listeners: new Map<string, (s: GatewayState | boolean) => void>(),
 }));
 vi.mock("./bridge", () => ({
   command: mock.command,
-  subscribe: vi.fn(async (name: string, fn: (s: GatewayState) => void) => {
-    mock.listeners.set(name, fn);
-    return () => mock.listeners.delete(name);
-  }),
+  subscribe: vi.fn(
+    async (name: string, fn: (s: GatewayState | boolean) => void) => {
+      mock.listeners.set(name, fn);
+      return () => mock.listeners.delete(name);
+    },
+  ),
 }));
 import Gateway from "./Gateway";
 import { claudeGatewayDemo, gatewayDemo } from "./gateway-preview";
@@ -860,4 +862,25 @@ it("keeps a gateway event that arrives before the initial read", async () => {
   expect(
     screen.queryByRole("button", { name: "启用" }),
   ).not.toBeInTheDocument();
+});
+
+it("refreshes on show and keeps a newer gateway event over the resumed read", async () => {
+  render(<Gateway notify={() => {}} quotaRefreshSeconds={0} />);
+  await screen.findByRole("button", { name: "启用" });
+  await act(async () => mock.listeners.get("app-visibility")!(false));
+  let resolve!: (value: GatewayState) => void;
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation((name, args) =>
+    name === "get_gateway"
+      ? new Promise<GatewayState>((done) => {
+          resolve = done;
+        })
+      : original(name, args),
+  );
+  await act(async () => mock.listeners.get("app-visibility")!(true));
+  await act(async () =>
+    mock.listeners.get("gateway-state")!({ ...state, running: true }),
+  );
+  await act(async () => resolve({ ...state, running: false }));
+  expect(screen.getByRole("button", { name: "停用" })).toBeInTheDocument();
 });

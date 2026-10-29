@@ -91,7 +91,6 @@ mod routing_log;
 mod rpm;
 pub(crate) mod testing;
 mod thread_capacity;
-mod thread_queue;
 #[cfg(test)]
 mod token_reveal_tests;
 #[cfg(test)]
@@ -238,7 +237,6 @@ struct Shared {
     model_list: model_list::Service,
     endpoints: endpoints::Service,
     admission: admission::Scheduler,
-    thread_queue: thread_queue::Queue,
     compaction: Arc<compaction::Registry>,
 }
 impl Drop for Shared {
@@ -519,7 +517,6 @@ impl Gateway {
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
-            thread_queue: thread_queue::Queue::default(),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             catalog: catalog::Service::new(data.join("provider-models.json")),
             model_list: model_list::Service::new(data.join("model-list.json")),

@@ -729,12 +729,6 @@ pub fn recover(data: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-pub fn import(home: &Path) -> Result<(String, String)> {
-    import_for(ClientId::Codex, home)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     const ORIGINAL: &str = "# settings\r\nmodel_provider='custom'\r\nmodel='unchanged'\r\n[model_providers.custom] # comment\r\nbase_url = 'https://original.test/v1' # address\r\nexperimental_bearer_token = 'old' # key\r\nsupports_websockets = false\r\nwire_api = 'responses'\r\n[other]\r\na=42\r\n";

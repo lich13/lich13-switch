@@ -25,7 +25,7 @@ struct Entry {
     wall: i64,
 }
 #[derive(Deserialize, Serialize)]
-struct Saved {
+pub(super) struct Saved {
     thread: String,
     provider: String,
     idle_since: i64,
@@ -90,9 +90,8 @@ impl Retention {
         }
         state
     }
-    pub fn snapshot(&self) -> Vec<u8> {
-        let saved: Vec<_> = self
-            .entries
+    pub fn snapshot_data(&self) -> Vec<Saved> {
+        self.entries
             .iter()
             .filter(|(_, e)| e.retained)
             .map(|((thread, provider), e)| Saved {
@@ -101,8 +100,11 @@ impl Retention {
                 idle_since: e.wall,
                 busy: e.active != 0 || e.pending != 0,
             })
-            .collect();
-        serde_json::to_vec(&saved).expect("capacity metadata")
+            .collect()
+    }
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Vec<u8> {
+        serde_json::to_vec(&self.snapshot_data()).expect("capacity metadata")
     }
     pub fn configure(&mut self, providers: &HashSet<String>, seconds: u64) {
         self.seconds = seconds;

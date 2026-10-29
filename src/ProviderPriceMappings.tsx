@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { command } from "./bridge";
 import { Drawer } from "./Usage";
-import { errorOf, type ClientId, type GatewayState } from "./types";
+import { errorOf, type ClientId } from "./types";
 import type {
   PricingConfig,
   PricingView,

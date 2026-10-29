@@ -618,3 +618,24 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
     ),
   ).toBe(false);
 });
+
+it("refreshes the shown panel and ignores a resumed read older than a gateway event", async () => {
+  render(<QuickPanel />);
+  await screen.findByText(gatewayDemo.providers[0].name);
+  await act(async () => mock.listeners.get("panel-visibility")!(false));
+  const original = mock.command.getMockImplementation()!;
+  let resolve!: (value: GatewayState) => void;
+  mock.command.mockImplementation((name, args) =>
+    name === "get_gateway"
+      ? new Promise<GatewayState>((done) => {
+          resolve = done;
+        })
+      : original(name, args),
+  );
+  await act(async () => mock.listeners.get("panel-visibility")!(true));
+  const latest = structuredClone(gatewayDemo);
+  latest.providers[0].name = "Fixture shown provider";
+  await act(async () => mock.listeners.get("gateway-state")!(latest));
+  await act(async () => resolve(structuredClone(gatewayDemo)));
+  expect(screen.getByText("Fixture shown provider")).toBeInTheDocument();
+});

@@ -578,9 +578,11 @@ impl Api {
         .await?;
         serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn collect(
         &self,
         store: &mut impl Repository,
+        home: &Path,
         pricing: &Pricing,
         settings: &Settings,
         report: &mut Report,
@@ -592,11 +594,19 @@ impl Api {
                 json!({"excludeSubtrajectories":false}),
             )
             .await?;
-        let summaries = all["trajectorySummaries"]
+        let mut summaries = all["trajectorySummaries"]
             .as_object()
+            .cloned()
             .ok_or_else(|| failure("Antigravity 会话目录不完整"))?;
+        let brain = home.join("antigravity/brain");
+        let mut files = Vec::new();
+        transcript_files(&brain, &mut files, 0)?;
+        for path in files {
+            let id = cascade_id(&brain, &path)?;
+            summaries.entry(id.to_owned()).or_insert_with(|| json!({}));
+        }
         report.total_files = summaries.len() as u64;
-        for (id, summary) in summaries {
+        for (id, summary) in &summaries {
             match self
                 .collect_session(id, summary, store, pricing, settings, report, repair)
                 .await
@@ -642,6 +652,7 @@ impl Api {
             return Err(failure("Antigravity 会话步骤超过读取限制"));
         }
         let mut steps = Steps::default();
+        let mut fallback_loaded = false;
         let mut offset = cursor.count.saturating_sub(1);
         let mut stable = offset;
         loop {
@@ -677,8 +688,7 @@ impl Api {
             {
                 return Err(failure("Antigravity 用量关联步骤不完整"));
             }
-            let missing = if fallback && steps.times.first_key_value().is_none_or(|(i, _)| *i != 0)
-            {
+            let missing = if fallback && !fallback_loaded {
                 Some(0)
             } else {
                 required
@@ -688,27 +698,47 @@ impl Api {
             };
             if let Some(mut step_offset) = missing {
                 loop {
-                    let page=self.call("GetCascadeTrajectorySteps",json!({"cascadeId":id,"stepOffset":step_offset,"trajectoryVerbosity":1})).await?;
+                    let page=self.call("GetCascadeTrajectorySteps",json!({"cascadeId":id,"stepOffset":step_offset,"trajectoryVerbosity":2})).await?;
                     let next = page["steps"]
                         .as_array()
-                        .filter(|v| !v.is_empty())
+                        .map(Vec::as_slice)
+                        .or_else(|| page.as_object().filter(|o| o.is_empty()).map(|_| &[][..]))
                         .ok_or_else(|| failure("Antigravity 历史步骤读取不完整"))?;
+                    if next.is_empty() {
+                        if required.iter().all(|i| steps.times.contains_key(i))
+                            && total.is_none_or(|n| step_offset >= n)
+                        {
+                            break;
+                        }
+                        return Err(failure("Antigravity 历史步骤读取不完整"));
+                    }
                     if step_offset.saturating_add(next.len() as u64) > 100_000 {
                         return Err(failure("Antigravity 会话步骤超过读取限制"));
                     }
                     steps.extend(step_offset, next);
                     step_offset += next.len() as u64;
                     if required.iter().all(|i| steps.times.contains_key(i))
-                        && (!fallback || total.is_none_or(|n| step_offset >= n))
+                        && (!fallback || total.is_some_and(|n| step_offset >= n))
                     {
                         break;
                     }
                 }
             }
+            fallback_loaded |= fallback;
             for batch in entries.chunks(128) {
                 let mut rows = Vec::new();
                 for entry in batch {
-                    let parsed = record(id, entry, &steps, offset)?;
+                    let parsed = match record(id, entry, &steps, offset) {
+                        Ok(parsed) => parsed,
+                        Err(error) => {
+                            if store.requires_complete_history() {
+                                return Err(error);
+                            }
+                            report.errors += 1;
+                            offset += 1;
+                            continue;
+                        }
+                    };
                     let complete = match parsed {
                         Some(mut r) => {
                             let complete = r.finished_at.is_some()
@@ -720,15 +750,31 @@ impl Api {
                         }
                         None => entry.get("chatModel").is_none(),
                     };
-                    if complete && stable == offset {
-                        stable += 1;
-                        cursor.covered.extend(
-                            entry["stepIndices"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .filter_map(number),
-                        );
+                    if complete {
+                        if stable == offset {
+                            stable += 1;
+                        }
+                        let indices: Vec<_> = entry["stepIndices"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(number)
+                            .collect();
+                        if indices.is_empty() {
+                            if let Some(indices) = entry["executionId"]
+                                .as_str()
+                                .and_then(|id| steps.executions.get(id))
+                            {
+                                cursor.covered.extend(indices);
+                            }
+                        } else {
+                            cursor.covered.extend(indices);
+                        }
+                    } else if entry.get("chatModel").is_some() {
+                        if store.requires_complete_history() {
+                            return Err(failure("Antigravity 历史用量尚未完整，请稍后重试"));
+                        }
+                        report.errors += 1;
                     }
                     offset += 1;
                 }
@@ -748,6 +794,14 @@ impl Api {
             serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
         store.write_batch(&[], Some((&cursor_id, &cursor)))
     }
+}
+
+fn cascade_id<'a>(brain: &Path, path: &'a Path) -> Result<&'a str> {
+    path.strip_prefix(brain)
+        .ok()
+        .and_then(|p| p.components().next())
+        .and_then(|c| c.as_os_str().to_str())
+        .ok_or_else(|| failure("Antigravity 历史路径无效"))
 }
 
 fn transcript_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
@@ -799,12 +853,7 @@ fn scan_file(
     report: &mut Report,
     repair: bool,
 ) -> Result<()> {
-    let cascade = path
-        .strip_prefix(brain)
-        .ok()
-        .and_then(|p| p.components().next())
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| failure("Antigravity 历史路径无效"))?;
+    let cascade = cascade_id(brain, path)?;
     let rpc: Cursor = store
         .cursor(&safe_id(&format!("antigravity:rpc:{cascade}")))?
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -844,6 +893,7 @@ fn scan_file(
     let mut reader = BufReader::new(file);
     let mut rows = Vec::new();
     let mut bytes = Vec::new();
+    let mut gap = false;
     loop {
         bytes.clear();
         use std::io::Read;
@@ -865,64 +915,80 @@ fn scan_file(
             }
             break;
         }
-        let v: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| failure("Antigravity 历史文件存在无效完整行"))?;
-        let has_usage = [
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
-        ]
-        .iter()
-        .any(|k| number(&v[*k]).is_some());
-        if has_usage && !number(&v["step_index"]).is_some_and(|i| rpc.covered.contains(&i)) {
-            let request = text(&v, &["request_id"]);
-            let model = text(&v, &["model", "response_model"]);
-            let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
-            let (Some(request), Some(model), Some(at)) = (request, model, at) else {
-                return Err(failure(
-                    "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
-                ));
-            };
-            let id = safe_id(&format!("antigravity:request:{request}"));
-            let mut r = Record {
-                id: id.clone(),
-                client: "antigravity".into(),
-                source: "antigravity".into(),
-                session_id: Some(safe_id(cascade)),
-                started_at: at,
-                finished_at: Some(at),
-                // A transcript usage row reports consumption, not the model's
-                // terminal outcome. Only the API can supplement that evidence.
-                completed: false,
-                attempts: vec![Attempt {
-                    id: safe_id(&format!("{id}:final")),
-                    response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
-                    requested_model: actual_model(Some(model)),
-                    response_model: actual_model(Some(model)),
+        let parsed = (|| -> Result<Option<Record>> {
+            let v: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| failure("Antigravity 历史文件存在无效完整行"))?;
+            let has_usage = [
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            ]
+            .iter()
+            .any(|k| number(&v[*k]).is_some());
+            if has_usage && !number(&v["step_index"]).is_some_and(|i| rpc.covered.contains(&i)) {
+                let request = text(&v, &["request_id"]);
+                let model = text(&v, &["model", "response_model"]);
+                let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
+                let (Some(request), Some(model), Some(at)) = (request, model, at) else {
+                    return Err(failure(
+                        "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
+                    ));
+                };
+                let id = safe_id(&format!("antigravity:request:{request}"));
+                let mut r = Record {
+                    id: id.clone(),
+                    client: "antigravity".into(),
+                    source: "antigravity".into(),
+                    session_id: Some(safe_id(cascade)),
                     started_at: at,
-                    outcome: "unknown".into(),
-                    transport: "history_file".into(),
-                    tokens: Tokens {
-                        input: number(&v["input_tokens"]),
-                        output: number(&v["output_tokens"]),
-                        cache_read: number(&v["cache_read_tokens"]),
-                        cache_write: number(&v["cache_write_tokens"]),
-                        cache_write_5m: number(&v["cache_write_5m_tokens"]),
-                        cache_write_1h: number(&v["cache_write_1h_tokens"]),
-                        reasoning: number(&v["thinking_output_tokens"]),
-                        ..Tokens::default()
-                    },
-                    usage_status: "reported".into(),
-                    parse_reasons: vec!["attempt_time_unreported".into()],
-                    ..Attempt::default()
-                }],
-                ..Record::default()
-            };
-            price(&mut r, pricing, settings);
-            rows.push(r);
+                    finished_at: Some(at),
+                    // A transcript usage row reports consumption, not the model's
+                    // terminal outcome. Only the API can supplement that evidence.
+                    completed: false,
+                    attempts: vec![Attempt {
+                        id: safe_id(&format!("{id}:final")),
+                        response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
+                        requested_model: actual_model(Some(model)),
+                        response_model: actual_model(Some(model)),
+                        started_at: at,
+                        outcome: "unknown".into(),
+                        transport: "history_file".into(),
+                        tokens: Tokens {
+                            input: number(&v["input_tokens"]),
+                            output: number(&v["output_tokens"]),
+                            cache_read: number(&v["cache_read_tokens"]),
+                            cache_write: number(&v["cache_write_tokens"]),
+                            cache_write_5m: number(&v["cache_write_5m_tokens"]),
+                            cache_write_1h: number(&v["cache_write_1h_tokens"]),
+                            reasoning: number(&v["thinking_output_tokens"]),
+                            ..Tokens::default()
+                        },
+                        usage_status: "reported".into(),
+                        parse_reasons: vec!["attempt_time_unreported".into()],
+                        ..Attempt::default()
+                    }],
+                    ..Record::default()
+                };
+                price(&mut r, pricing, settings);
+                return Ok(Some(r));
+            }
+            Ok(None)
+        })();
+        match parsed {
+            Ok(Some(row)) => rows.push(row),
+            Ok(None) => {}
+            Err(error) => {
+                if store.requires_complete_history() {
+                    return Err(error);
+                }
+                gap = true;
+                report.errors += 1;
+            }
         }
-        c.offset = reader.stream_position().map_err(storage::io_error)?;
+        if !gap {
+            c.offset = reader.stream_position().map_err(storage::io_error)?;
+        }
         if rows.len() >= 128 {
             store.write_batch(&rows, None)?;
             report.imported += rows.len() as u64;
@@ -953,7 +1019,7 @@ pub fn sync(
     let connected = runtime.block_on(async {
         match Api::connect().await? {
             Some(api) => {
-                api.collect(store, &pricing, settings, &mut report, repair)
+                api.collect(store, home, &pricing, settings, &mut report, repair)
                     .await?;
                 Ok(true)
             }

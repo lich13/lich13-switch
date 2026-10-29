@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { command } from "./bridge";
-import { errorOf, type ViewState } from "./types";
+import { errorOf } from "./types";
 
 export default function QuotaRefreshSettings({
   seconds,

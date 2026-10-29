@@ -371,6 +371,7 @@ struct Fixture {
     api: Api,
     calls: Arc<Mutex<Vec<(String, Value)>>>,
     changed: Arc<Mutex<String>>,
+    entries: Arc<Mutex<Vec<Value>>>,
     server: tokio::task::JoinHandle<()>,
 }
 impl Drop for Fixture {
@@ -381,18 +382,20 @@ impl Drop for Fixture {
 async fn fixture(broken: bool) -> Fixture {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let changed = Arc::new(Mutex::new("first".to_string()));
+    let entries = Arc::new(Mutex::new(vec![entry("first", 0), entry("second", 1)]));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let (history, version) = (calls.clone(), changed.clone());
+    let (history, version, metadata) = (calls.clone(), changed.clone(), entries.clone());
     let server = tokio::spawn(async move {
         loop {
             let Ok((socket, _)) = listener.accept().await else {
                 break;
             };
-            let (history, version) = (history.clone(), version.clone());
+            let (history, version, metadata) = (history.clone(), version.clone(), metadata.clone());
             tokio::spawn(async move {
                 let service = service_fn(move |r: hyper::Request<hyper::body::Incoming>| {
-                    let (history, version) = (history.clone(), version.clone());
+                    let (history, version, metadata) =
+                        (history.clone(), version.clone(), metadata.clone());
                     async move {
                         let method = r.uri().path().rsplit('/').next().unwrap().to_owned();
                         let body: Value = serde_json::from_slice(
@@ -416,12 +419,34 @@ async fn fixture(broken: bool) -> Fixture {
                                     let offset =
                                         body["generatorMetadataOffset"].as_u64().unwrap_or(0)
                                             as usize;
-                                    let entries = [entry("first", 0), entry("second", 1)];
-                                    json!({"generatorMetadata":&entries[offset.min(2)..]})
+                                    let mut entries = metadata.lock().unwrap().clone();
+                                    if body["cascadeId"] != "z-good" {
+                                        for (i, entry) in entries.iter_mut().enumerate() {
+                                            let response = json!(format!(
+                                                "{}-response-{i}",
+                                                body["cascadeId"].as_str().unwrap()
+                                            ));
+                                            entry["chatModel"]["usage"]["responseId"] =
+                                                response.clone();
+                                            entry["chatModel"]["retryInfos"][0]["usage"]
+                                                ["responseId"] = response;
+                                            entry["chatModel"]["customMetadata"]["request_id"] =
+                                                json!(format!(
+                                                    "{}-{i}",
+                                                    body["cascadeId"].as_str().unwrap()
+                                                ));
+                                        }
+                                    }
+                                    json!({"generatorMetadata":&entries[offset.min(entries.len())..(offset + 1).min(entries.len())]})
                                 }
                                 "GetCascadeTrajectorySteps" => {
                                     let offset = body["stepOffset"].as_u64().unwrap_or(0) as usize;
-                                    json!({"steps":&[step(),step()][offset.min(2)..]})
+                                    if body["trajectoryVerbosity"] == 2 {
+                                        // One page per step also exercises the unknown-total fallback.
+                                        json!({"steps":&[step(),step()][offset.min(2)..(offset + 1).min(2)]})
+                                    } else {
+                                        json!({"steps":[step()],"detail":"x".repeat(LIMIT + 1)})
+                                    }
                                 }
                                 _ => panic!("unexpected read method"),
                             }
@@ -445,6 +470,7 @@ async fn fixture(broken: bool) -> Fixture {
         },
         calls,
         changed,
+        entries,
         server,
     }
 }
@@ -459,6 +485,7 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
     f.api
         .collect(
             &mut store,
+            dir.path(),
             &pricing,
             &settings,
             &mut Report::default(),
@@ -473,6 +500,7 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
     f.api
         .collect(
             &mut store,
+            dir.path(),
             &pricing,
             &settings,
             &mut Report::default(),
@@ -487,6 +515,7 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
     f.api
         .collect(
             &mut store,
+            dir.path(),
             &pricing,
             &settings,
             &mut Report::default(),
@@ -513,6 +542,7 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
     f.api
         .collect(
             &mut store,
+            dir.path(),
             &pricing,
             &settings,
             &mut Report::default(),
@@ -550,6 +580,7 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
     f.api
         .collect(
             &mut store,
+            dir.path(),
             &pricing,
             &Settings::default(),
             &mut report,
@@ -599,6 +630,7 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
         .api
         .collect(
             &mut Complete(&mut store),
+            dir.path(),
             &pricing,
             &Settings::default(),
             &mut Report::default(),
@@ -609,5 +641,199 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
     assert_eq!(
         store.dashboard(&Filter::default()).unwrap().totals.requests,
         2
+    );
+}
+
+#[tokio::test]
+async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_transcript() {
+    let f = fixture(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    f.entries.lock().unwrap()[1]
+        .as_object_mut()
+        .unwrap()
+        .remove("stepIndices");
+    for id in ["z-good", "local-only"] {
+        let path = dir.path().join(format!(
+            "antigravity/brain/{id}/.system_generated/logs/transcript.jsonl"
+        ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "{\"step_index\":0,\"input_tokens\":100}\n{\"step_index\":1,\"input_tokens\":100}\n",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.path().join("db")).unwrap();
+    let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+    for _ in 0..2 {
+        let mut report = Report::default();
+        f.api
+            .collect(
+                &mut store,
+                dir.path(),
+                &pricing,
+                &Settings::default(),
+                &mut report,
+                false,
+            )
+            .await
+            .unwrap();
+        scan_files(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .unwrap();
+        assert_eq!((report.total_files, report.files, report.errors), (2, 2, 0));
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            4
+        );
+        for id in ["z-good", "local-only"] {
+            let cursor: Cursor = serde_json::from_str(
+                &store
+                    .cursor(&safe_id(&format!("antigravity:rpc:{id}")))
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cursor.covered, BTreeSet::from([0, 1]));
+        }
+    }
+    assert!(f
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "GetCascadeTrajectorySteps")
+        .all(|(_, b)| b["trajectoryVerbosity"] == 2));
+}
+
+#[tokio::test]
+async fn missing_identity_keeps_gap_but_saves_later_requests_and_repairs_after_restart() {
+    let f = fixture(false).await;
+    let original = f.entries.lock().unwrap()[0].clone();
+    {
+        let mut entries = f.entries.lock().unwrap();
+        entries[0].as_object_mut().unwrap().remove("executionId");
+        entries[0]["chatModel"]
+            .as_object_mut()
+            .unwrap()
+            .remove("customMetadata");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let mut report = Report::default();
+    f.api
+        .collect(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.errors, 1);
+    assert_eq!(
+        store.dashboard(&Filter::default()).unwrap().totals.requests,
+        1
+    );
+    let cursor: Cursor = serde_json::from_str(
+        &store
+            .cursor(&safe_id("antigravity:rpc:z-good"))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cursor.count, 0);
+    assert!(cursor.modified.is_empty());
+    assert_eq!(cursor.covered, BTreeSet::from([1]));
+    drop(store);
+    f.entries.lock().unwrap()[0] = original;
+    let mut store = Store::open(dir.path()).unwrap();
+    for _ in 0..2 {
+        let mut report = Report::default();
+        f.api
+            .collect(
+                &mut store,
+                dir.path(),
+                &pricing,
+                &Settings::default(),
+                &mut report,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.errors, 0);
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            2
+        );
+    }
+}
+
+#[test]
+fn file_gap_does_not_hide_later_usage_or_advance_past_unresolved_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let brain = dir.path().join("antigravity/brain");
+    let path = brain.join("fixture/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let gap = "{\"step_index\":0,\"input_tokens\":7}\n";
+    let later = "{\"request_id\":\"later\",\"model\":\"fixture-model\",\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":3}\n";
+    std::fs::write(&path, format!("{gap}{later}")).unwrap();
+    let mut store = Store::open(&dir.path().join("db")).unwrap();
+    let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+    let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
+    for _ in 0..2 {
+        let mut report = Report::default();
+        scan_files(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.errors, 1);
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            1
+        );
+        let cursor: FileCursor =
+            serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
+        assert_eq!(cursor.offset, 0);
+    }
+    // A verified API association resolves the gap without rewriting the file.
+    let rpc = serde_json::to_string(&Cursor {
+        covered: BTreeSet::from([0]),
+        ..Cursor::default()
+    })
+    .unwrap();
+    store
+        .write_batch(&[], Some((&safe_id("antigravity:rpc:fixture"), &rpc)))
+        .unwrap();
+    let mut report = Report::default();
+    scan_files(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.errors, 0);
+    let cursor: FileCursor = serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
+    assert_eq!(cursor.offset, (gap.len() + later.len()) as u64);
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        format!("{gap}{later}")
     );
 }

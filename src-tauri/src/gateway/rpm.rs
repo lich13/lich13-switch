@@ -20,12 +20,12 @@ mod v02510_rpm_window_tests;
 // Keep the existing one-second margin for upstream second-granularity windows.
 pub(super) const WINDOW: Duration = Duration::from_secs(61);
 #[derive(Clone, Copy)]
-struct Stamp {
+pub(super) struct Stamp {
     at: Instant,
     wall: i64,
 }
 impl Stamp {
-    fn now() -> Self {
+    pub(super) fn now() -> Self {
         Self {
             at: Instant::now(),
             wall: super::admission::now_wall_ms(),
@@ -65,6 +65,10 @@ pub(super) struct Provider {
     backoff: Option<Stamp>,
     initialize: Option<Stamp>,
 }
+pub(super) struct Charge {
+    pub token: String,
+    at: Stamp,
+}
 #[derive(Clone, Default)]
 pub(super) struct Ledger {
     providers: HashMap<String, Provider>,
@@ -95,22 +99,13 @@ struct SavedProtection {
     #[serde(default)]
     initialize: Option<i64>,
 }
+#[derive(Clone, Copy)]
 pub(super) enum Settlement {
     Success,
     Failed,
     Uncertain,
 }
 impl Ledger {
-    pub(super) fn checkpoint(&self, id: &str) -> Option<Provider> {
-        self.providers.get(id).cloned()
-    }
-    pub(super) fn restore(&mut self, id: &str, previous: Option<Provider>) {
-        if let Some(previous) = previous {
-            self.providers.insert(id.into(), previous);
-        } else {
-            self.providers.remove(id);
-        }
-    }
     /// Pending sends and observing responses have no time-based release.
     /// Their reservation/settlement signals wake the scheduler instead.
     pub(super) fn next_change(&self, id: &str) -> Option<Instant> {
@@ -316,16 +311,41 @@ impl Ledger {
         }
         blocked.map(|(at, reason)| (at.saturating_duration_since(now), reason))
     }
-    pub(super) fn commit(&mut self, id: &str, _limit: u32) -> Option<String> {
-        let now = Stamp::now();
+    pub(super) fn charge(&mut self, id: &str) -> Charge {
+        let at = Stamp::now();
         let token = uuid::Uuid::new_v4().to_string();
         let p = self.providers.entry(id.into()).or_default();
-        p.starts.push_back(now);
-        p.last = Some(now);
+        p.starts.push_back(at);
+        p.last = Some(at);
         p.inflight.insert(token.clone(), None);
-        Some(token)
+        Charge { token, at }
     }
+    // Only retract a failed, unsent charge; other concurrent starts stay intact.
+    pub(super) fn retract(&mut self, id: &str, charge: &Charge) {
+        let Some(p) = self.providers.get_mut(id) else {
+            return;
+        };
+        p.inflight.remove(&charge.token);
+        if let Some(index) = p
+            .starts
+            .iter()
+            .position(|s| s.at == charge.at.at && s.wall == charge.at.wall)
+        {
+            p.starts.remove(index);
+        }
+        if p.last.is_some_and(|s| s.at == charge.at.at) {
+            p.last = p.starts.back().copied();
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn commit(&mut self, id: &str, _limit: u32) -> Option<String> {
+        Some(self.charge(id).token)
+    }
+    #[cfg(test)]
     pub(super) fn settle(&mut self, id: &str, token: &str, result: Settlement) {
+        self.settle_at(id, token, result, Stamp::now());
+    }
+    pub(super) fn settle_at(&mut self, id: &str, token: &str, result: Settlement, at: Stamp) {
         let Some(p) = self.providers.get_mut(id) else {
             return;
         };
@@ -333,10 +353,16 @@ impl Ledger {
             return;
         }
         match result {
-            Settlement::Success => p.completed.push_back(Stamp::now()),
+            Settlement::Success => p.completed.push_back(at),
             Settlement::Failed => (),
             Settlement::Uncertain => {
-                p.inflight.insert(token.into(), Some(Stamp::after(WINDOW)));
+                p.inflight.insert(
+                    token.into(),
+                    Some(Stamp {
+                        at: at.at + WINDOW,
+                        wall: at.wall.saturating_add(WINDOW.as_millis() as i64),
+                    }),
+                );
             }
         }
     }

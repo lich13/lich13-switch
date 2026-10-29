@@ -285,7 +285,7 @@ async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
     let _ = child.wait().await;
 }
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn run(
     cli: &Path,
     mode: &str,

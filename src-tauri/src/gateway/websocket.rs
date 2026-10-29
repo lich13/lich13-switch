@@ -17,11 +17,7 @@ use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use sha1::{Digest, Sha1};
-use std::{
-    collections::{HashMap, VecDeque},
-    future::Future,
-    time::Duration,
-};
+use std::{collections::HashMap, future::Future, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot, watch},
@@ -121,83 +117,8 @@ struct Peer {
     activity: std::sync::Arc<super::wire_progress::Activity>,
     // Retain handshake headers for complete error diagnostics on reused turns.
     response_identifiers: HeaderMap,
-    pending: VecDeque<PendingTurn>,
-    queue_context: Option<Box<QueueContext>>,
-}
-struct QueueContext {
-    gateway: Gateway,
-    thread: Option<String>,
-    max_waiting: usize,
-    seconds: u64,
-}
-struct PendingTurn {
-    frame: Frame,
-    traffic: super::freeze::Ticket,
-    budget: super::wait_budget::WaitBudget,
-    started: tokio::time::Instant,
-    received_at: i64,
-}
-async fn pending_event(pending: &VecDeque<PendingTurn>) -> (usize, bool) {
-    if pending.is_empty() {
-        return std::future::pending().await;
-    }
-    futures_util::future::select_all(pending.iter().enumerate().map(|(index, turn)| {
-        Box::pin(async move {
-            tokio::select! {
-                biased;
-                _ = turn.budget.cancelled() => (index, true),
-                _ = turn.budget.wait() => (index, false),
-            }
-        })
-    }))
-    .await
-    .0
 }
 impl Peer {
-    fn enqueue(&mut self, frame: Frame) -> Result<(), Failure> {
-        let context = self
-            .queue_context
-            .as_ref()
-            .ok_or((1013, "too many pending turns"))?;
-        let eligible = value(&frame)
-            .and_then(|v| replay::RequestHints::from_value(v, false).ok())
-            .is_some_and(|h| !h.auxiliary);
-        let thread = context.thread.as_ref().filter(|_| eligible);
-        if thread.is_none() && !self.pending.is_empty() {
-            return Err((1013, "too many pending turns"));
-        }
-        let traffic = context.gateway.0.registry.freeze.request();
-        traffic.waiting();
-        if let Some(thread) = thread {
-            traffic.attach_thread(
-                context
-                    .gateway
-                    .0
-                    .thread_queue
-                    .enqueue(
-                        thread.clone(),
-                        &context.gateway.0.admission,
-                        context.max_waiting,
-                    )
-                    .map_err(rejected)?,
-            );
-        }
-        let budget = super::wait_budget::WaitBudget::tracked(
-            context.seconds,
-            &context.gateway.0.pending_requests,
-        );
-        budget.begin();
-        budget.attach_traffic(&traffic);
-        budget.describe(None, None, "thread_queue");
-        self.pending.push_back(PendingTurn {
-            frame,
-            traffic,
-            budget,
-            started: tokio::time::Instant::now(),
-            received_at: crate::usage::model::now(),
-        });
-        Ok(())
-    }
     fn new<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         socket: WebSocket<S>,
         keepalive: Option<Duration>,
@@ -261,8 +182,6 @@ impl Peer {
             tasks: vec![reader, writer],
             activity,
             response_identifiers: HeaderMap::new(),
-            pending: VecDeque::new(),
-            queue_context: None,
         }
     }
     async fn send(&self, frame: Frame) -> Result<(), Failure> {
@@ -590,16 +509,10 @@ async fn while_connecting<T>(
                     OpCode::Pong => (),
                     OpCode::Close => { client.send(frame).await?; return Err((1000, "client closed")); },
                     _ if value(&frame).is_some_and(|v| v["type"] == "response.cancel") => return Err(TURN_CANCELLED),
-                    _ if creates(&frame) && client.queue_context.as_ref().is_some_and(|c| c.thread.is_some()) => client.enqueue(frame)?,
                     _ => return Err((1013, "too many pending turns")),
                 }
             },
             result = &mut operation => return Ok(result),
-            (index, cancelled) = pending_event(&client.pending) => {
-                client.pending.remove(index);
-                if !cancelled { return Err((1013, code::FIRST_BYTE_TIMEOUT)); }
-                cancellation(client).await?;
-            },
             _ = client.closed.changed() => return Err((1000, "client closed")),
         }
     }
@@ -608,36 +521,6 @@ async fn cancellation(client: &Peer) -> Result<(), Failure> {
     client
         .send(Frame::text(r#"{"type":"response.cancelled"}"#))
         .await
-}
-fn reserve_thread(
-    g: &Gateway,
-    headers: &HeaderMap,
-    frame: &Frame,
-    traffic: &super::freeze::Ticket,
-    cfg: &Settings,
-) -> Result<(), Failure> {
-    let eligible = value(frame)
-        .and_then(|v| super::replay::RequestHints::from_value(v, false).ok())
-        .is_some_and(|h| !h.auxiliary);
-    if let Some(turn) =
-        super::thread_queue::reserve(g, headers, eligible, cfg.max_waiting).map_err(rejected)?
-    {
-        traffic.attach_thread(turn);
-    }
-    Ok(())
-}
-async fn wait_thread(
-    client: &mut Peer,
-    traffic: &super::freeze::Ticket,
-    budget: &super::wait_budget::WaitBudget,
-) -> Result<(), Failure> {
-    if let Some(turn) = traffic.thread() {
-        if !turn.ready() {
-            budget.describe(None, None, "thread_queue");
-        }
-        while_connecting(client, turn.wait()).await?;
-    }
-    Ok(())
 }
 async fn upstream_native(
     route: &Route,
@@ -990,16 +873,6 @@ async fn session(
 ) -> Result<(), Failure> {
     let request_budget =
         super::wait_budget::WaitBudget::tracked(cfg.retry_budget_seconds, &g.0.pending_requests);
-    let (thread, identity) = super::compaction::identity(&headers);
-    client.queue_context = Some(Box::new(QueueContext {
-        gateway: g.clone(),
-        thread: thread.filter(|_| {
-            g.client_id() == super::ClientId::Codex
-                && identity == crate::usage::model::ThreadIdentity::Reliable
-        }),
-        max_waiting: cfg.max_waiting,
-        seconds: cfg.retry_budget_seconds,
-    }));
     let forwarding = async {
         let mut next_turn = None;
         let mut current_ids = ids;
@@ -1037,7 +910,6 @@ async fn session(
                         .collect();
                 }
                 Err(TURN_CANCELLED) => {
-                    client.pending.clear();
                     request_budget.acknowledge_cancel();
                     request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
@@ -1168,14 +1040,12 @@ async fn session_once(
     mut routes: HashMap<String, Route>,
     headers: HeaderMap,
     uri: Uri,
-    next_turn: &mut Option<(Frame, super::freeze::Ticket)>,
+    next_turn: &mut Option<Frame>,
     request_budget: &super::wait_budget::WaitBudget,
 ) -> Result<(), Failure> {
     let first_started = tokio::time::Instant::now();
     let mut first_deadline = first_started + Duration::from_secs(cfg.first_byte_seconds);
-    let mut carried_traffic = None;
-    let first = if let Some((frame, traffic)) = next_turn.take() {
-        carried_traffic = Some(traffic);
+    let first = if let Some(frame) = next_turn.take() {
         frame
     } else {
         loop {
@@ -1210,17 +1080,12 @@ async fn session_once(
             break frame;
         }
     };
-    let carried = carried_traffic.is_some();
-    let mut traffic = carried_traffic.unwrap_or_else(|| g.0.registry.freeze.request());
+    let mut traffic = g.0.registry.freeze.request();
     traffic.waiting();
     if request_budget.deadline().is_none() {
         request_budget.begin();
     }
-    if !carried {
-        request_budget.attach_traffic(&traffic);
-        reserve_thread(g, &headers, &first, &traffic, cfg)?;
-    }
-    wait_thread(client, &traffic, request_budget).await?;
+    request_budget.attach_traffic(&traffic);
     let mut turn_rules = g
         .request_state()
         .map_err(|_| (1011, code::STORE))?
@@ -1634,7 +1499,7 @@ async fn session_once(
             )
             .await
             .map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
-        if let Err(reason) = admission.commit_rpm() {
+        if let Err(reason) = while_connecting(client, admission.commit_rpm()).await? {
             return Err(rejected(reason));
         }
         ids.retain(|id| id != &admission.route.provider.id);
@@ -2003,7 +1868,11 @@ async fn session_once(
     let mut tail_deadline = None;
     let mut previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)> = None;
     let mut protocol = Some(initial_protocol);
+    let mut pending: Option<Frame> = None;
+    let mut pending_traffic: Option<super::freeze::Ticket> = None;
     let mut freeze_changes = g.0.registry.freeze.subscribe();
+    let mut pending_received_at = turn_received_at;
+    let mut pending_started = tokio::time::Instant::now();
     let mut confirmed_model: Option<String> = None;
     let mut received = false;
     let mut initial_frames: Vec<Frame> = Vec::new();
@@ -2343,7 +2212,24 @@ async fn session_once(
                     None,
                 );
             }
-            admission.commit_rpm().map_err(rejected)?;
+            match while_connecting(client, admission.commit_rpm()).await {
+                Ok(result) => result.map_err(rejected)?,
+                Err(TURN_CANCELLED) => {
+                    admission.permits.neutral(cfg);
+                    drop(admission);
+                    failover.finish(super::failover::Exit::Cancelled);
+                    protocol = None;
+                    usage_trace = None;
+                    ownership = None;
+                    failover.detach();
+                    retry_pending = false;
+                    traffic.finish();
+                    request_budget.complete(request_budget.deadline());
+                    cancellation(client).await?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
@@ -2581,18 +2467,11 @@ async fn session_once(
             deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
         }
         if turn.is_none() {
-            if let Some(pending) = client.pending.pop_front() {
+            if let Some(frame) = pending.take() {
                 traffic.finish();
-                if pending.budget.cancel_requested() {
-                    cancellation(client).await?;
-                    continue;
-                }
-                let frame = pending.frame;
-                traffic = pending.traffic;
-                request_budget.begin_at(pending.started + traffic.paused_for());
+                traffic = pending_traffic.take().expect("pending turn has a ticket");
+                request_budget.begin_at(pending_started + traffic.paused_for());
                 request_budget.attach_traffic(&traffic);
-                drop(pending.budget);
-                wait_thread(client, &traffic, request_budget).await?;
                 turn_rules = g
                     .request_state()
                     .map_err(|_| (1011, code::STORE))?
@@ -2600,7 +2479,7 @@ async fn session_once(
                     .settings
                     .custom_failure_rules
                     .clone();
-                turn_received_at = pending.received_at;
+                turn_received_at = pending_received_at;
                 if let Some(previous) = protocol.take().filter(|p| p.succeeded()) {
                     previous_usage = Some((previous, tokio::time::Instant::now() + USAGE_TAIL));
                 }
@@ -2657,7 +2536,7 @@ async fn session_once(
                             })
                             .any(|r| r.provider.handoff_after_compaction)
                     {
-                        *next_turn = Some((frame, traffic.clone()));
+                        *next_turn = Some(frame);
                         return Err((1999, "compaction handoff"));
                     }
                     ownership = if let Some(session) =
@@ -2691,7 +2570,7 @@ async fn session_once(
                                 .first()
                                 .is_some_and(|r| r.provider.id != route.provider.id)
                     }) {
-                        *next_turn = Some((frame, traffic.clone()));
+                        *next_turn = Some(frame);
                         return Err((1999, "compaction handoff"));
                     }
                     // A connection opened for a model detour is not permission
@@ -2718,7 +2597,7 @@ async fn session_once(
                                 .as_ref()
                                 .is_some_and(|lease| !lease.request_only())
                         {
-                            *next_turn = Some((frame, traffic.clone()));
+                            *next_turn = Some(frame);
                             return Err((1999, "compaction handoff"));
                         }
                         return Err((1013, code::NO_ELIGIBLE_PROVIDER));
@@ -2893,7 +2772,7 @@ async fn session_once(
                 .await;
                 match acquired {
                     Err((1999, "compaction handoff")) => {
-                        *next_turn = Some((frame, traffic.clone()));
+                        *next_turn = Some(frame);
                         return Err((1999, "compaction handoff"));
                     }
                     Ok(mut admission) => {
@@ -2907,11 +2786,20 @@ async fn session_once(
                                 .is_some_and(|h| h.previous_response_id.is_some()),
                         )? {
                             admission.permits.neutral(cfg);
-                            *next_turn = Some((frame, traffic.clone()));
+                            *next_turn = Some(frame);
                             return Err((1999, "compaction handoff"));
                         }
-                        if let Err(reason) = admission.commit_rpm() {
-                            return Err(rejected(reason));
+                        match while_connecting(client, admission.commit_rpm()).await {
+                            Ok(result) => result.map_err(rejected)?,
+                            Err(TURN_CANCELLED) => {
+                                admission.permits.neutral(cfg);
+                                drop(admission);
+                                traffic.finish();
+                                request_budget.complete(request_budget.deadline());
+                                cancellation(client).await?;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
                         }
                         turn = Some(admission)
                     }
@@ -3174,10 +3062,8 @@ async fn session_once(
         tokio::select! {
             biased;
             _ = freeze_changes.changed() => {},
-            (index, cancelled) = pending_event(&client.pending) => {
-                client.pending.remove(index);
-                if !cancelled { return Err((1013, code::FIRST_BYTE_TIMEOUT)); }
-                cancellation(client).await?;
+            _ = tokio::time::sleep_until(pending_started + Duration::from_secs(cfg.retry_budget_seconds) + pending_traffic.as_ref().map_or(Duration::ZERO, |t| t.paused_for())), if pending.is_some() && !pending_traffic.as_ref().is_some_and(|t| t.paused()) => {
+                return Err((1013, code::FIRST_BYTE_TIMEOUT));
             },
             _ = client.closed.changed() => {
                 if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
@@ -3377,7 +3263,13 @@ async fn session_once(
                     cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
                     return Ok(());
                 } else if creates(&frame) {
-                    client.enqueue(frame)?;
+                    if pending.is_some() { return Err((1013, "too many pending turns")); }
+                    pending_received_at = crate::usage::model::now();
+                    pending_started = tokio::time::Instant::now();
+                    pending = Some(frame);
+                    let ticket = g.0.registry.freeze.request();
+                    ticket.waiting();
+                    pending_traffic = Some(ticket);
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                     if e.0 == 1008 {
                         if let Some(mut admission) = turn.take() {

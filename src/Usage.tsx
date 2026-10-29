@@ -24,7 +24,7 @@ import {
   CalendarDays,
 } from "lucide-react";
 import { command } from "./bridge";
-import { errorOf, type GatewayState } from "./types";
+import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import Pricing from "./UsagePricing";
 import {
@@ -46,6 +46,29 @@ import {
   type UsageState,
 } from "./usage-types";
 import "./usage.css";
+export function syncStatus(state: UsageState | null, client: string) {
+  if (!state) return "";
+  if (state.maintenance) return state.maintenance;
+  const reports = client
+    ? [state.reports[client]].filter(Boolean)
+    : Object.values(state.reports);
+  if (
+    reports.some((r) =>
+      ["syncing", "scanning", "rebuilding"].includes(r.phase ?? ""),
+    ) ||
+    (!client && state.syncing)
+  )
+    return "同步中…";
+  if (!reports.length) return "";
+  if (reports.every((r) => r.phase === "failed")) return "同步失败";
+  if (
+    reports.some(
+      (r) => r.phase === "failed" || r.phase === "partial" || r.errors > 0,
+    )
+  )
+    return "部分未同步";
+  return reports.every((r) => r.completedAt != null) ? "已同步" : "";
+}
 const local = (n: number) => {
   const d = new Date(n);
   return new Date(n - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -151,15 +174,18 @@ export default function Usage({
       const key = name + JSON.stringify(args);
       let promise = pending.current.get(key);
       if (!promise) {
-        promise = command(name, ...params).finally(() =>
-          pending.current.delete(key),
-        );
+        promise = command(name, ...params).finally(() => {
+          if (pending.current.get(key) === promise) pending.current.delete(key);
+        });
         pending.current.set(key, promise);
       }
       return promise as Promise<CommandResult<K>>;
     },
     [],
   );
+  useEffect(() => {
+    if (!visible || !nativeVisible) pending.current.clear();
+  }, [visible, nativeVisible]);
   const query = useCallback((): UsageFilter => {
     const end = live
       ? Math.floor(Date.now() / 1000) * 1000
@@ -248,6 +274,7 @@ export default function Usage({
     };
   }, [loadRows, visible, nativeVisible, tab]);
   useEffect(() => {
+    if (!visible || !nativeVisible) return;
     void loadState();
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("usage-state", loadState);
@@ -255,8 +282,9 @@ export default function Usage({
       stateSequence.current++;
       events.dispose();
     };
-  }, [loadState]);
+  }, [loadState, visible, nativeVisible]);
   useEffect(() => {
+    if (!visible || !nativeVisible) return;
     let gone = false;
     void Promise.all([
       command("get_gateway", { clientId: "codex" }),
@@ -277,7 +305,7 @@ export default function Usage({
       gone = true;
       sequence.current++;
     };
-  }, []);
+  }, [visible, nativeVisible]);
   useEffect(() => {
     const changed = () => setVisible(document.visibilityState !== "hidden");
     document.addEventListener("visibilitychange", changed);
@@ -323,12 +351,7 @@ export default function Usage({
         <h1>用量</h1>
         <div className="usage-actions">
           <span className="usage-sync-status" aria-live="polite">
-            {state?.maintenance ??
-              (state?.syncing
-                ? "同步中…"
-                : Object.values(state?.reports ?? {}).some((r) => r.completedAt)
-                  ? "已同步"
-                  : "")}
+            {syncStatus(state, client)}
           </span>
           <select
             aria-label="用量刷新频率"

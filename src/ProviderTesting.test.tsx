@@ -11,14 +11,16 @@ import type {
 } from "./bridge-contracts";
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
-  listeners: new Map<string, () => void>(),
+  listeners: new Map<string, (value?: unknown) => void>(),
 }));
 vi.mock("./bridge", () => ({
   command: mock.command,
-  subscribe: vi.fn(async (event: string, callback: () => void) => {
-    mock.listeners.set(event, callback);
-    return () => mock.listeners.delete(event);
-  }),
+  subscribe: vi.fn(
+    async (event: string, callback: (value?: unknown) => void) => {
+      mock.listeners.set(event, callback);
+      return () => mock.listeners.delete(event);
+    },
+  ),
 }));
 import ProviderTesting from "./ProviderTesting";
 let gateway: typeof gatewayDemo;
@@ -905,9 +907,13 @@ it("orders initial, event and explicit state reads while preserving detection dr
   const user = userEvent.setup();
   const original = mock.command.getMockImplementation()!;
   const pending: ((value: ProviderTestingState) => void)[] = [];
-  mock.command.mockImplementation((name, args) => name === "provider_test_state"
-    ? new Promise<ProviderTestingState>((resolve) => { pending.push(resolve); })
-    : original(name, args));
+  mock.command.mockImplementation((name, args) =>
+    name === "provider_test_state"
+      ? new Promise<ProviderTestingState>((resolve) => {
+          pending.push(resolve);
+        })
+      : original(name, args),
+  );
   const value = (minimum: number) => {
     const current = structuredClone(states[gateway.providers[0].id]);
     current.detection.minIntervalMinutes = minimum;
@@ -917,29 +923,66 @@ it("orders initial, event and explicit state reads while preserving detection dr
   };
   const view = open();
   await emit();
-  await act(async () => { pending[1](value(9)); });
+  await act(async () => {
+    pending[1](value(9));
+  });
   await user.click(screen.getByRole("tab", { name: "定时检测" }));
   const minimum = await screen.findByRole("spinbutton", { name: "最小间隔" });
   expect(minimum).toHaveValue(9);
-  await act(async () => { pending[0](value(5)); });
+  await act(async () => {
+    pending[0](value(5));
+  });
   await user.clear(minimum);
   await user.type(minimum, "17");
   await emit();
   await emit();
-  await act(async () => { pending[3](value(10)); });
-  await act(async () => { pending[2](value(6)); });
+  await act(async () => {
+    pending[3](value(10));
+  });
+  await act(async () => {
+    pending[2](value(6));
+  });
   expect(minimum).toHaveValue(17);
   await user.click(screen.getByRole("tab", { name: "连接测试" }));
   expect(screen.getByRole("alert")).toHaveTextContent("fixture-state-10");
-  expect(screen.getByRole("textbox", { name: "测试文案" })).toHaveValue("fixture-prompt-9");
+  expect(screen.getByRole("textbox", { name: "测试文案" })).toHaveValue(
+    "fixture-prompt-9",
+  );
   await user.click(screen.getByRole("tab", { name: "定时检测" }));
   await emit();
   await user.click(screen.getByRole("button", { name: "重新读取" }));
-  await act(async () => { pending[5](value(12)); });
-  await act(async () => { pending[4](value(8)); });
+  await act(async () => {
+    pending[5](value(12));
+  });
+  await act(async () => {
+    pending[4](value(8));
+  });
   expect(screen.getByRole("spinbutton", { name: "最小间隔" })).toHaveValue(12);
   await emit();
   view.unmount();
-  await act(async () => { pending.slice(6).forEach((resolve) => resolve(value(15))); });
-  expect(screen.queryByRole("spinbutton", { name: "最小间隔" })).not.toBeInTheDocument();
+  await act(async () => {
+    pending.slice(6).forEach((resolve) => resolve(value(15)));
+  });
+  expect(
+    screen.queryByRole("spinbutton", { name: "最小间隔" }),
+  ).not.toBeInTheDocument();
+});
+
+it("pauses hidden reads and reloads on show without losing the detection draft", async () => {
+  const user = userEvent.setup();
+  open();
+  await user.click(await screen.findByRole("tab", { name: "定时检测" }));
+  const fields = screen.getAllByRole("spinbutton");
+  const field = fields[0] as HTMLInputElement;
+  await user.clear(field);
+  await user.type(field, "17");
+  await act(async () => mock.listeners.get("app-visibility")!(false));
+  const reads = mock.command.mock.calls.length;
+  await emit();
+  expect(mock.command.mock.calls).toHaveLength(reads);
+  await act(async () => mock.listeners.get("app-visibility")!(true));
+  await waitFor(() =>
+    expect(mock.command.mock.calls.length).toBeGreaterThan(reads),
+  );
+  expect(field.value).toBe("17");
 });

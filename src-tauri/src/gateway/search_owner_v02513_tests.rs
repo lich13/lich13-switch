@@ -115,7 +115,8 @@ async fn wait_for_idle_reservation(
         loop {
             if let Some(snapshot) = reservation_snapshot(dir) {
                 if let Some(entry) = reservation_entry(&snapshot, thread, provider) {
-                    if entry["busy"] == false {
+                    let memory: Value = serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
+                    if entry["busy"] == false && reservation_entry(&memory, thread, provider).as_ref() == Some(&entry) {
                         return (snapshot, entry);
                     }
                 }

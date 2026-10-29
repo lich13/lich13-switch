@@ -3,7 +3,6 @@ import { command } from "./bridge";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 const phases: Record<string, string> = {
   admission: "等待准入",
-  thread_queue: "等待上一请求",
   headers: "等待首字节",
   capacity: "容量等待",
   retry: "等待重试",

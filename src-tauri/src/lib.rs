@@ -321,9 +321,19 @@ mod gateway_broadcast_tests {
     }
 }
 fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
+    let windows: Vec<_> = ["main", "quick"]
+        .into_iter()
+        .filter_map(|name| app.get_webview_window(name))
+        .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+        .collect();
+    if windows.is_empty() {
+        return;
+    }
     match gateway.try_view() {
         Ok(view) => {
-            let _ = app.emit("gateway-state", view);
+            for window in windows {
+                let _ = window.emit("gateway-state", &view);
+            }
         }
         Err(error) => {
             let _ = app.emit("switch-error", error);

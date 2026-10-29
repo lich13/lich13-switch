@@ -1,10 +1,13 @@
 //! Request slots and bounded FIFO admission. Behavior informed by Sub2API
 //! a3eb7ef3 concurrency_service / account scheduler; independently implemented in Rust.
 use super::rpm::{Ledger, Settlement};
+#[path = "rpm_persistence.rs"]
+mod rpm_persistence;
 use super::{
     circuit::Circuit, health_settlement::Permits, model::Provider, routing::Requirement, Route,
 };
 use crate::storage;
+use rpm_persistence::{PendingRpm, Receipt, Settled};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -19,6 +22,9 @@ use tokio::{
 #[cfg(test)]
 #[path = "admission_persistence_tests.rs"]
 mod persistence_tests;
+#[cfg(test)]
+#[path = "rpm_persistence_tests.rs"]
+mod rpm_persistence_tests;
 
 #[derive(Clone)]
 pub struct Scheduler(Arc<Shared>);
@@ -27,6 +33,10 @@ struct Shared {
     wake: Notify,
     events: broadcast::Sender<()>,
     persist: std::sync::mpsc::SyncSender<()>,
+    #[cfg(test)]
+    rpm_write_gate: Mutex<Option<rpm_persistence::WriteGate>>,
+    #[cfg(test)]
+    rpm_writes: std::sync::atomic::AtomicUsize,
 }
 struct State {
     running: bool,
@@ -48,6 +58,7 @@ struct State {
     rpm_pending: HashMap<String, usize>,
     rpm_path: PathBuf,
     rpm_error: bool,
+    rpm_writes: PendingRpm,
     waiting: VecDeque<(u64, Vec<String>)>,
     capacity_waits: HashMap<u64, (String, Instant, WaitKind)>,
     resets: HashMap<String, u64>,
@@ -74,6 +85,7 @@ impl State {
             rpm_pending: HashMap::new(),
             rpm_path,
             rpm_error,
+            rpm_writes: PendingRpm::default(),
             waiting: VecDeque::new(),
             capacity_waits: HashMap::new(),
             resets: HashMap::new(),
@@ -150,6 +162,8 @@ struct RpmReservation {
     require_queued: bool,
     epoch: u64,
     completion: Option<Completion>,
+    receipt: Option<tokio::sync::oneshot::Receiver<bool>>,
+    committed_limit: u32,
 }
 /// Moved from admission to the protocol observer after actual send commitment.
 /// Drop retains an uncertainty guard, never inventing an upstream success.
@@ -164,13 +178,10 @@ impl Completion {
             return;
         };
         let mut s = self.scheduler.0.state.lock().unwrap();
-        s.rpm.prune();
-        let previous = s.rpm.checkpoint(&self.id);
-        s.rpm.settle(&self.id, &token, result);
-        if s.rpm_error || s.rpm.save(&s.rpm_path).is_err() {
-            s.rpm.restore(&self.id, previous);
-            s.rpm_error = true;
-        }
+        s.rpm_writes
+            .settlements
+            .push(Settled::new(self.id.clone(), token, result));
+        s.rpm_writes.dirty = true;
         drop(s);
         self.scheduler.signal();
     }
@@ -181,7 +192,7 @@ impl Drop for Completion {
     }
 }
 
-pub(super) struct Waiting {
+struct Waiting {
     scheduler: Scheduler,
     ticket: u64,
 }
@@ -225,62 +236,76 @@ impl Admission {
     pub(super) fn take_completion(&mut self) -> Option<Completion> {
         self.rpm.as_mut().and_then(|r| r.completion.take())
     }
-    pub fn commit_rpm(&mut self) -> Result<(), Rejected> {
+    pub async fn commit_rpm(&mut self) -> Result<(), Rejected> {
         if let Some(rpm) = self.rpm.as_mut() {
-            rpm.commit()?;
+            rpm.commit().await?;
         }
         Ok(())
     }
 }
 impl RpmReservation {
-    fn commit(&mut self) -> Result<(), Rejected> {
-        if self.committed {
-            return Ok(());
+    async fn commit(&mut self) -> Result<(), Rejected> {
+        if !self.committed {
+            let mut s = self.scheduler.0.state.lock().unwrap();
+            let limit = s.rpm_limits.get(&self.id).copied().unwrap_or(0);
+            s.rpm.prune();
+            let rejected = self.revalidate(&s).err().or_else(|| {
+                s.rpm.gate(&self.id, limit, 0).map(|(delay, _)| {
+                    Rejected::RateLimited(delay.as_millis().div_ceil(1000) as u64)
+                })
+            });
+            if let Some(reason) = rejected {
+                return Err(reason);
+            }
+            let charge = s.rpm.charge(&self.id);
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            self.completion = Some(Completion {
+                scheduler: self.scheduler.clone(),
+                id: self.id.clone(),
+                token: Some(charge.token.clone()),
+            });
+            s.rpm_writes.receipts.push(Receipt {
+                id: self.id.clone(),
+                charge: Some(charge),
+                limited: limit > 0,
+                sender,
+            });
+            s.rpm_writes.dirty = true;
+            Self::release_pending(&mut s, &self.id);
+            self.committed = true;
+            self.committed_limit = limit;
+            self.receipt = Some(receiver);
+            drop(s);
+            self.scheduler.signal();
         }
-        let mut s = self.scheduler.0.state.lock().unwrap();
-        let limit = s.rpm_limits.get(&self.id).copied().unwrap_or(0);
-        s.rpm.prune();
-        let rejected = if !s.running || s.epoch != self.epoch {
-            Some(Rejected::Stopped)
+        // Keep the receiver on the reservation when this future is cancelled.
+        // A second poll cannot mistake a queued write for a durable send.
+        if let Some(receipt) = &mut self.receipt {
+            let saved = receipt.await.unwrap_or(false);
+            self.receipt = None;
+            if !saved {
+                self.scheduler.0.state.lock().unwrap().rpm_error = true;
+            }
+        }
+        let s = self.scheduler.0.state.lock().unwrap();
+        self.revalidate(&s)?;
+        if s.rpm_limits.get(&self.id).copied().unwrap_or(0) != self.committed_limit {
+            return Err(Rejected::Unavailable);
+        }
+        Ok(())
+    }
+    fn revalidate(&self, s: &State) -> Result<(), Rejected> {
+        if !s.running || s.epoch != self.epoch {
+            Err(Rejected::Stopped)
         } else if s.versions.get(&self.id) != Some(&self.version)
             || (self.require_queued && !s.queued.contains(&self.id))
         {
-            Some(Rejected::Unavailable)
-        } else if s.rpm_error && limit > 0 {
-            Some(Rejected::RateLedger)
+            Err(Rejected::Unavailable)
+        } else if s.rpm_error && s.rpm_limits.get(&self.id).copied().unwrap_or(0) > 0 {
+            Err(Rejected::RateLedger)
         } else {
-            s.rpm
-                .gate(&self.id, limit, 0)
-                .map(|(delay, _)| Rejected::RateLimited(delay.as_millis().div_ceil(1000) as u64))
-        };
-        if let Some(reason) = rejected {
-            Self::release_pending(&mut s, &self.id);
-            self.committed = true;
-            drop(s);
-            self.scheduler.signal();
-            return Err(reason);
+            Ok(())
         }
-        let previous = s.rpm.checkpoint(&self.id);
-        let token = s.rpm.commit(&self.id, limit);
-        if token.is_some() && (s.rpm_error || s.rpm.save(&s.rpm_path).is_err()) && limit > 0 {
-            s.rpm.restore(&self.id, previous);
-            s.rpm_error = true;
-            Self::release_pending(&mut s, &self.id);
-            self.committed = true;
-            drop(s);
-            self.scheduler.signal();
-            return Err(Rejected::RateLedger);
-        }
-        Self::release_pending(&mut s, &self.id);
-        self.committed = true;
-        self.completion = token.map(|token| Completion {
-            scheduler: self.scheduler.clone(),
-            id: self.id.clone(),
-            token: Some(token),
-        });
-        drop(s);
-        self.scheduler.signal();
-        Ok(())
     }
     fn release_pending(state: &mut State, id: &str) {
         if let Some(value) = state.rpm_pending.get_mut(id) {
@@ -362,26 +387,6 @@ impl Budget {
     }
 }
 impl Scheduler {
-    /// Thread waiters share the global queue limit without reserving a provider.
-    pub(super) fn thread_wait(&self, max_waiting: usize) -> Result<Waiting, Rejected> {
-        let mut s = self.0.state.lock().unwrap();
-        if !s.running {
-            return Err(Rejected::Stopped);
-        }
-        if s.waiting.len() + s.capacity_waits.len() >= max_waiting {
-            return Err(Rejected::Full);
-        }
-        s.next += 1;
-        let ticket = s.next;
-        s.waiting.push_back((ticket, Vec::new()));
-        drop(s);
-        self.signal();
-        Ok(Waiting {
-            scheduler: self.clone(),
-            ticket,
-        })
-    }
-
     pub fn new(events: broadcast::Sender<()>, rpm_path: PathBuf) -> Self {
         let (rpm, rpm_error) = Ledger::load(&rpm_path);
         let (persist, updates) = std::sync::mpsc::sync_channel(1);
@@ -391,6 +396,10 @@ impl Scheduler {
             wake: Notify::new(),
             events,
             persist,
+            #[cfg(test)]
+            rpm_write_gate: Mutex::new(None),
+            #[cfg(test)]
+            rpm_writes: std::sync::atomic::AtomicUsize::new(0),
         });
         let weak = Arc::downgrade(&shared);
         std::thread::spawn(move || {
@@ -403,14 +412,16 @@ impl Scheduler {
                     let Some(shared) = weak.upgrade() else {
                         return;
                     };
+                    rpm_persistence::flush(&shared);
                     let (snapshot, retry_write) = {
                         let mut state = shared.state.lock().unwrap();
                         if state.retention.error {
                             break;
                         }
                         state.retention.prune();
-                        (state.retention.snapshot(), state.retention_write_error)
+                        (state.retention.snapshot_data(), state.retention_write_error)
                     };
+                    let snapshot = serde_json::to_vec(&snapshot).expect("capacity metadata");
                     if snapshot == previous && !retry_write {
                         break;
                     }
@@ -445,6 +456,37 @@ impl Scheduler {
             }
         });
         Self(shared)
+    }
+    #[cfg(test)]
+    pub(super) fn hold_rpm_write(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (resume, receiver) = std::sync::mpsc::channel();
+        *self.0.rpm_write_gate.lock().unwrap() = Some(rpm_persistence::WriteGate {
+            entered,
+            resume: receiver,
+        });
+        (ready, resume)
+    }
+    #[cfg(test)]
+    pub(super) async fn flush_rpm(&self) -> bool {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut state = self.0.state.lock().unwrap();
+            state.rpm_writes.dirty = true;
+            state.rpm_writes.receipts.push(Receipt {
+                id: String::new(),
+                charge: None,
+                limited: false,
+                sender,
+            });
+        }
+        self.signal();
+        receiver.await.unwrap_or(false)
     }
     pub fn configure_retention(&self, seconds: u64) {
         let mut s = self.0.state.lock().unwrap();
@@ -503,9 +545,7 @@ impl Scheduler {
                 newly_limited = true;
             }
         }
-        if newly_limited && !s.rpm_error && s.rpm.save(&s.rpm_path).is_err() {
-            s.rpm_error = true;
-        }
+        s.rpm_writes.dirty |= newly_limited;
         s.rpm_limits = providers
             .iter()
             .map(|p| (p.id.clone(), p.max_rpm))
@@ -572,9 +612,7 @@ impl Scheduler {
         let mut s = self.0.state.lock().unwrap();
         s.rpm.prune();
         s.rpm.backoff(id, delay);
-        if !s.rpm_error && s.rpm.save(&s.rpm_path).is_err() {
-            s.rpm_error = true;
-        }
+        s.rpm_writes.dirty = true;
         drop(s);
         self.signal();
     }
@@ -608,6 +646,8 @@ impl Scheduler {
             require_queued,
             epoch: state.epoch,
             completion: None,
+            receipt: None,
+            committed_limit: limit,
         })
     }
     pub fn counts(&self) -> (HashMap<String, usize>, usize) {

@@ -1946,6 +1946,15 @@ fn maintenance_compacts_history_when_session_auto_sync_is_disabled() {
 fn unavailable_source_root_does_not_block_other_sources() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(&dir.path().join("db"));
+    service.0.report.lock().unwrap().insert(
+        "codex".into(),
+        sessions::Report {
+            phase: "complete".into(),
+            completed_at: Some(1),
+            imported: 9,
+            ..sessions::Report::default()
+        },
+    );
     let root = dir.path().join("claude");
     write_jsonl(
         &root.join("projects/fixture/session.jsonl"),
@@ -1969,6 +1978,8 @@ fn unavailable_source_root_does_not_block_other_sources() {
         .is_err());
     let state = service.state();
     assert_eq!(state.reports["codex"].phase, "failed");
+    assert_eq!(state.reports["codex"].completed_at, None);
+    assert_eq!(state.reports["codex"].imported, 0);
     assert_eq!(state.reports["claude"].imported, 1);
     assert_eq!(
         service

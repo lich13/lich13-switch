@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Plus, RotateCcw, Trash2, Search, RefreshCw } from "lucide-react";
 import { command } from "./bridge";
-import { errorOf, type GatewayState } from "./types";
+import { errorOf } from "./types";
 import {
   fields,
   groups,
