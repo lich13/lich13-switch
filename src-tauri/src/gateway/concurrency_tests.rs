@@ -45,6 +45,63 @@ async fn slot(g: &Gateway, routes: &[Route]) -> admission::Admission {
         .unwrap()
 }
 
+#[tokio::test(start_paused = true)]
+async fn freeze_keeps_fifo_limits_and_budget_without_reserving_rpm_or_capacity() {
+    let (t, g) = fixture(vec!["https://example.invalid".into()]).await;
+    limit(&g, &t, 0, 1);
+    rpm_limit(&g, &t, 0, 2);
+    start(&g, &t).await;
+    let gate = g.freeze_gate();
+    gate.set(true).unwrap();
+    let mut tasks = Vec::new();
+    let mut tickets = Vec::new();
+    for count in 1..=2 {
+        let traffic = gate.request();
+        traffic.waiting();
+        tickets.push(traffic.clone());
+        let scheduler = g.0.admission.clone();
+        let routes = routes(&g);
+        tasks.push(tokio::spawn(async move {
+            let mut budget = Budget::new(1);
+            budget.traffic = Some(traffic);
+            scheduler
+                .acquire(&routes, false, 2, &mut budget)
+                .await
+                .unwrap()
+        }));
+        until(|| g.view().waiting_requests == count).await;
+    }
+    let excess = gate.request();
+    excess.waiting();
+    let mut budget = Budget::new(1);
+    budget.traffic = Some(excess);
+    assert!(matches!(
+        g.0.admission
+            .acquire(&routes(&g), false, 2, &mut budget)
+            .await,
+        Err(Rejected::Full)
+    ));
+    drop(budget);
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    assert!(tasks.iter().all(|task| !task.is_finished()));
+    assert_eq!(g.view().providers[0].active_requests, 0);
+    assert_eq!(g.view().providers[0].rpm_used, 0);
+    gate.set(false).unwrap();
+    let mut first = tasks.remove(0).await.unwrap();
+    first.commit_rpm().unwrap();
+    assert!(!tasks[0].is_finished());
+    assert_eq!(g.view().providers[0].rpm_used, 1);
+    drop(first);
+    tickets[0].finish();
+    let mut second = tasks.remove(0).await.unwrap();
+    second.commit_rpm().unwrap();
+    assert_eq!(g.view().providers[0].rpm_used, 2);
+    drop(second);
+    drop(tickets);
+    assert_eq!(gate.view().draining, 0);
+    g.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn queue_and_provider_switches_share_the_original_wait_budget() {
     let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));

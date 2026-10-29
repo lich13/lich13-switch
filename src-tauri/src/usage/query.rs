@@ -377,6 +377,7 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
         tokens: Tokens {
             inclusive_input: None,
             reasoning: None,
+            image_cache_read: None,
             input: row.get(i + 5)?,
             output: row.get(i + 6)?,
             cache_read: row.get(i + 7)?,

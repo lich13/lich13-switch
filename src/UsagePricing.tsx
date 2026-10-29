@@ -1,5 +1,5 @@
 import { subscriptions } from "./subscriptions";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Download,
   FolderOpen,
@@ -20,6 +20,7 @@ import type {
   PriceComparison,
   PricingConfig,
   PricingView,
+  PricingSearchPage,
   UsageState,
 } from "./usage-types";
 const fields = [
@@ -48,7 +49,9 @@ export default function Pricing({
     [billing, setBilling] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
-    [limit, setLimit] = useState(50);
+    [page, setPage] = useState<PricingSearchPage>({ rows: [], total: 0 }),
+    [loading, setLoading] = useState(false);
+  const searchGeneration = useRef(0);
   useEffect(() => {
     let disposed = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
@@ -69,6 +72,45 @@ export default function Pricing({
       events.dispose();
     };
   }, []);
+  useEffect(() => {
+    const generation = ++searchGeneration.current;
+    setPage({ rows: [], total: 0 });
+    setLoading(true);
+    void command("search_pricing", { query: search, offset: 0, limit: 50 })
+      .then((result) => {
+        if (generation === searchGeneration.current) setPage(result);
+      })
+      .catch((e) => {
+        if (generation === searchGeneration.current)
+          setError(errorOf(e).message);
+      })
+      .finally(() => {
+        if (generation === searchGeneration.current) setLoading(false);
+      });
+    return () => {
+      searchGeneration.current++;
+    };
+  }, [search, view, catalog?.version]);
+  const loadMore = async () => {
+    const generation = searchGeneration.current;
+    setLoading(true);
+    try {
+      const next = await command("search_pricing", {
+        query: search,
+        offset: page.rows.length,
+        limit: 100,
+      });
+      if (generation === searchGeneration.current)
+        setPage((current) => ({
+          rows: [...current.rows, ...next.rows],
+          total: next.total,
+        }));
+    } catch (e) {
+      if (generation === searchGeneration.current) setError(errorOf(e).message);
+    } finally {
+      if (generation === searchGeneration.current) setLoading(false);
+    }
+  };
   useEffect(() => {
     onDirtyChange?.(editor !== null || sync || mapping || billing);
     return () => onDirtyChange?.(false);
@@ -108,13 +150,6 @@ export default function Pricing({
       setBusy(false);
     }
   };
-  const models = useMemo(
-    () =>
-      Object.keys(view?.models ?? {})
-        .filter((m) => m.toLowerCase().includes(search.toLowerCase()))
-        .sort(),
-    [view, search],
-  );
   const importFile = async (file: File | undefined) => {
     if (!file || !view) return;
     if (file.size > 8 * 1024 * 1024) {
@@ -144,7 +179,6 @@ export default function Pricing({
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
-              setLimit(50);
             }}
           />
         </label>
@@ -252,15 +286,16 @@ export default function Pricing({
             </tr>
           </thead>
           <tbody>
-            {models.slice(0, limit).map((id) => {
-              const p = view!.models[id],
-                fixed = id in view!.config.fixed;
+            {page.rows.map((row) => {
+              const id = row.model,
+                p = row.data;
               return (
                 <tr key={id}>
                   <td>
                     <button
                       className="usage-model-button"
-                      title={id}
+                      disabled={busy || !view}
+                      title={row.name ? `${id} · ${row.name}` : id}
                       onClick={(e) => {
                         e.currentTarget.focus();
                         setEditor(id);
@@ -272,12 +307,19 @@ export default function Pricing({
                   {fields.map(([k]) => (
                     <td key={k}>{millions(p[k])}</td>
                   ))}
-                  <td>
-                    {fixed
-                      ? "固定"
-                      : view!.config.excluded.includes(id)
-                        ? "已排除"
-                        : "Sub2API"}
+                  <td
+                    title={
+                      row.matchedBy === "exact"
+                        ? row.matchedModel
+                        : `${row.matchedModel} · ${{ known_alias: "已知别名", user_alias: "自定义映射", normalized: "名称匹配", pinned: "指定来源" }[row.matchedBy] ?? "来源匹配"}`
+                    }
+                  >
+                    {{
+                      fixed: "固定",
+                      sub2api: "Sub2API",
+                      sub2api_builtin: "Sub2API 内置",
+                      "models.dev": "models.dev",
+                    }[row.source] ?? row.source}
                   </td>
                   <td>
                     <button
@@ -289,11 +331,12 @@ export default function Pricing({
                     </button>
                     <button
                       className="icon-button"
+                      disabled={busy || !view}
                       aria-label={`删除价格 ${id}`}
                       onClick={() =>
                         void confirmAction(`删除 ${id} 的价格？`).then((ok) => {
-                          if (ok) {
-                            const config = structuredClone(view!.config);
+                          if (ok && view) {
+                            const config = structuredClone(view.config);
                             delete config.fixed[id];
                             config.excluded = [
                               ...new Set([...config.excluded, id]),
@@ -312,12 +355,13 @@ export default function Pricing({
           </tbody>
         </table>
       </div>
-      {models.length > limit && (
+      {page.total > page.rows.length && (
         <button
           className="usage-load-more"
-          onClick={() => setLimit(limit + 100)}
+          disabled={loading}
+          onClick={() => void loadMore()}
         >
-          显示更多（{models.length - limit}）
+          显示更多（{page.total - page.rows.length}）
         </button>
       )}
       <details className="usage-price-source">
@@ -342,6 +386,11 @@ export default function Pricing({
           key={editor}
           model={editor}
           view={view}
+          data={
+            page.rows.find((row) => row.model === editor)?.data ??
+            view.models[editor] ??
+            {}
+          }
           busy={busy}
           save={save}
           onClose={() => setEditor(null)}
@@ -448,7 +497,7 @@ function PriceReference({
         <thead>
           <tr>
             <th>项目</th>
-            <th>Wei-Shaw / 百万</th>
+            <th>当前价格 / 百万</th>
             <th>models.dev / 百万</th>
             <th>偏差</th>
           </tr>
@@ -476,12 +525,14 @@ function PriceReference({
 function PriceEditor({
   model,
   view,
+  data,
   busy,
   save,
   onClose,
 }: {
   model: string;
   view: PricingView;
+  data: Record<string, unknown>;
   busy: boolean;
   save: (c: PricingConfig) => Promise<void>;
   onClose: () => void;
@@ -491,15 +542,11 @@ function PriceEditor({
       Object.fromEntries(
         fields.map(([k]) => [
           k,
-          view.models[model]?.[k] == null
-            ? ""
-            : String(Number(view.models[model][k]) * 1e6),
+          data[k] == null ? "" : String(Number(data[k]) * 1e6),
         ]),
       ),
     ),
-    [advanced, setAdvanced] = useState(
-      JSON.stringify(view.models[model] ?? {}, null, 2),
-    ),
+    [advanced, setAdvanced] = useState(JSON.stringify(data, null, 2)),
     [error, setError] = useState("");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -1539,6 +1539,71 @@ select:focus-visible {
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
 }
+.quick-freeze {
+  flex: 0 0 auto;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  border-top: 3px solid var(--freeze-color);
+  --freeze-color: var(--error);
+}
+.quick-freeze-yellow {
+  --freeze-color: var(--warning);
+}
+.quick-freeze-green {
+  --freeze-color: var(--latency-good);
+}
+.quick-freeze-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.quick-freeze-main strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  line-height: 24px;
+  color: var(--freeze-color);
+}
+.quick-freeze-light {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+.quick-freeze-main button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 104px;
+  height: 36px;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.quick-freeze-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 10px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.quick-freeze-stages span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.quick-freeze-stages b {
+  font-variant-numeric: tabular-nums;
+}
+.quick-freeze-error {
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--error);
+}
 .quick-spacer {
   flex: 1;
 }

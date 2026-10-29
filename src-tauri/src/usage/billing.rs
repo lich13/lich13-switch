@@ -295,7 +295,7 @@ fn estimate_missing(r: &mut Record, pricing: &Pricing, settings: &Settings) {
                 .or_else(|| a.pricing_model.clone())
                 .or_else(|| a.requested_model.clone());
             a.price = pricing
-                .quote(a.pricing_model.as_deref(), &a.cost_multiplier)
+                .quote_at(a.pricing_model.as_deref(), &a.cost_multiplier, a.started_at)
                 .calculate(&a.tokens, a.price_tier());
             a.pricing_basis = Some("estimated_export_snapshot".into());
         }
@@ -388,6 +388,8 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
         "output_tokens_per_second",
         "generation_tokens_per_second",
         "error_code",
+        "reasoning_effort",
+        "image_cache_read_tokens",
     ];
     csv_row(w, &columns.map(str::to_owned))?;
     let mut result = Exported::default();
@@ -518,6 +520,8 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
                 speed(a.measured_duration_ms()),
                 speed(a.generation_ms),
                 opt(a.error_code.as_ref()),
+                opt(a.reasoning_effort.as_ref()),
+                opt(t.image_cache_read),
             ]);
             csv_row(w, &values)?;
             result.attempts += 1;
@@ -906,7 +910,9 @@ mod tests {
         let a = &mut r.attempts[0];
         a.duration_ms = 0;
         a.generation_ms = Some(800);
-        a.model_display_name = Some("Fixture Model (High)".into());
+        a.model_display_name = Some("Fixture Model".into());
+        a.reasoning_effort = Some("high".into());
+        a.tokens.image_cache_read = Some(7);
         a.api_provider = Some("API_PROVIDER_FIXTURE".into());
         a.error_code = Some("RESOURCE_EXHAUSTED".into());
         a.outcome = "failed".into();
@@ -950,7 +956,9 @@ mod tests {
         assert_eq!(value("generation_ms"), "800");
         assert_eq!(value("generation_tokens_per_second"), "25.000000");
         assert_eq!(value("error_code"), "RESOURCE_EXHAUSTED");
-        assert_eq!(value("model_display_name"), "Fixture Model (High)");
+        assert_eq!(value("model_display_name"), "Fixture Model");
+        assert_eq!(value("reasoning_effort"), "high");
+        assert_eq!(value("image_cache_read_tokens"), "7");
         assert!(value("status").is_empty());
     }
     #[test]

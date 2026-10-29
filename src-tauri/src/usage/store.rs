@@ -14,6 +14,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 const DAY: i64 = 86_400_000;
+#[derive(Default)]
+pub(super) struct BackfillCursor {
+    after: String,
+    daily: bool,
+}
+
 pub(super) fn db<T>(r: rusqlite::Result<T>) -> Result<T> {
     r.map_err(|_| failure("用量数据库操作失败"))
 }
@@ -499,6 +505,9 @@ impl Store {
     }
     /// Bounded, restartable metadata repair. Old rate snapshots remain unchanged.
     pub fn repair_metadata_batch(&mut self) -> Result<bool> {
+        if self.repair_antigravity_batch()? {
+            return Ok(true);
+        }
         let after: Option<String> = db(self
             .connection
             .query_row(
@@ -546,6 +555,54 @@ impl Store {
                 "UPDATE metadata SET value=?1 WHERE key='repair_v020_after'",
                 [&rows.last().unwrap().0],
             ))?;
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok(!rows.is_empty())
+    }
+    fn repair_antigravity_batch(&mut self) -> Result<bool> {
+        if storage_v12::pending(&self.connection) {
+            return Ok(false);
+        }
+        let after: Option<String> = db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='antigravity_fields_v02610'",
+                [],
+                |r| r.get(0),
+            )
+            .optional())?;
+        if after.as_deref() == Some("done") {
+            return Ok(false);
+        }
+        let tx = db(self.connection.transaction())?;
+        if after.is_none() {
+            db(tx.execute(
+                "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
+                [],
+            ))?;
+        }
+        let rows = {
+            let mut stmt = db(tx.prepare("SELECT id,body FROM records WHERE source='antigravity' AND id>?1 ORDER BY id LIMIT 128"))?;
+            let rows = db(stmt.query_map([after.unwrap_or_default()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+        };
+        let mut changed = false;
+        for (id, body) in &rows {
+            let mut r: Record = bodies::decode(&tx, body)?;
+            if super::antigravity::normalize_record(&mut r) {
+                query::project(&tx, 0, id, &r, 1, None)?;
+                storage_v12::update(&tx, &r)?;
+                changed = true;
+            }
+        }
+        db(tx.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02610',?1)",
+            [rows.last().map_or("done", |(id, _)| id.as_str())],
+        ))?;
+        if changed {
             query::changed(&tx)?;
         }
         db(tx.commit())?;
@@ -908,83 +965,105 @@ impl Store {
         }
         query::changed(tx)
     }
+    #[cfg(test)]
     pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {
+        let prices = pricing.frozen();
+        let mut cursor = BackfillCursor::default();
+        while self.backfill_batch(&prices, &mut cursor)? {}
+        Ok(())
+    }
+    pub(super) fn backfill_batch(
+        &mut self,
+        pricing: &Pricing,
+        cursor: &mut BackfillCursor,
+    ) -> Result<bool> {
         if storage_v12::pending(&self.connection) {
             db(self.connection.execute(
                 "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
                 [],
             ))?;
-            return Ok(());
+            return Ok(false);
         }
-        let mut stmt = db(self.connection.prepare(if storage_v12::active(&self.connection) { "SELECT r.body FROM records r WHERE EXISTS(SELECT 1 FROM usage_metrics m WHERE m.kind=0 AND m.owner=r.rid AND m.unpriced>0)" } else { super::pending_prices::SELECT }))?;
-        let all = db(stmt.query_map([], |r| r.get::<_, String>(0)))?
-            .collect::<rusqlite::Result<Vec<_>>>();
-        let all = db(all)?;
-        drop(stmt);
+        let native = storage_v12::active(&self.connection);
         let tx = db(self.connection.transaction())?;
-        let mut any_changed = false;
-        for body in all {
-            let mut r: Record = bodies::decode(&tx, &body)?;
-            let mut changed = false;
-            for a in &mut r.attempts {
-                if a.price.is_none() && a.compacted_unpriced.is_none() {
-                    a.price = a.calculate_price(pricing);
-                    changed |= a.price.is_some();
+        let sql = if cursor.daily {
+            "SELECT id,body FROM daily WHERE id>?1 AND json_extract(body,'$.totals.unpriced')>0 ORDER BY id LIMIT 128"
+        } else if native {
+            "SELECT cast(r.rid as text),r.body FROM records r WHERE r.rid>cast(?1 as integer) AND EXISTS(SELECT 1 FROM usage_metrics m WHERE m.kind=0 AND m.owner=r.rid AND m.unpriced>0) ORDER BY r.rid LIMIT 128"
+        } else {
+            super::pending_prices::SELECT
+        };
+        let rows = {
+            let mut stmt = db(tx.prepare_cached(sql))?;
+            let rows = db(stmt.query_map([&cursor.after], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+        };
+        let mut changed = false;
+        for (id, body) in &rows {
+            if !cursor.daily {
+                let mut r: Record = bodies::decode(&tx, body)?;
+                let mut updated = false;
+                for a in &mut r.attempts {
+                    if a.price.is_none() && a.compacted_unpriced.is_none() {
+                        a.price = a.calculate_price(pricing);
+                        updated |= a.price.is_some();
+                    }
+                }
+                if updated {
+                    query::project(&tx, 0, &r.id, &r, 1, None)?;
+                    storage_v12::update(&tx, &r)?;
+                    changed = true;
+                }
+            } else {
+                let mut d: Daily = bodies::decode(&tx, body)?;
+                let mut updated = false;
+                for a in &mut d.example.attempts {
+                    if a.price.is_none() && a.compacted_unpriced.is_none() {
+                        a.price = a.calculate_price(pricing);
+                        updated |= a.price.is_some();
+                    }
+                }
+                if updated {
+                    let known = d
+                        .example
+                        .attempts
+                        .iter()
+                        .filter_map(|a| a.price.as_ref().and_then(|p| decimal(&p.cost)))
+                        .fold(rust_decimal::Decimal::ZERO, |sum, cost| sum + cost);
+                    d.totals.cost =
+                        (known * rust_decimal::Decimal::from(d.totals.requests)).to_string();
+                    if d.example.cost().is_some() {
+                        d.totals.unpriced = 0;
+                    }
+                    query::project(&tx, 1, id, &d.example, d.totals.requests, Some(&d.totals))?;
+                    db(tx.execute(
+                        "UPDATE daily SET body=?2 WHERE id=?1",
+                        params![id, bodies::encode(&tx, &d)?],
+                    ))?;
+                    changed = true;
                 }
             }
-            if changed {
-                any_changed = true;
-                query::project(&tx, 0, &r.id, &r, 1, None)?;
-                storage_v12::update(&tx, &r)?;
-            }
         }
-        let mut stmt = db(
-            tx.prepare("SELECT id,body FROM daily WHERE json_extract(body,'$.totals.unpriced')>0")
-        )?;
-        let daily =
-            db(stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?
-                .collect::<rusqlite::Result<Vec<_>>>();
-        let daily = db(daily)?;
-        drop(stmt);
-        for (id, body) in daily {
-            let mut d: Daily = bodies::decode(&tx, &body)?;
-            if d.totals.unpriced == 0 {
-                continue;
-            }
-            let before = serde_json::to_string(&d.example).map_err(|_| failure("汇总无效"))?;
-            for a in &mut d.example.attempts {
-                if a.price.is_none() && a.compacted_unpriced.is_none() {
-                    a.price = a.calculate_price(pricing);
-                }
-            }
-            if serde_json::to_string(&d.example).map_err(|_| failure("汇总无效"))? == before {
-                continue;
-            }
-            any_changed = true;
-            let known = d
-                .example
-                .attempts
-                .iter()
-                .filter_map(|a| a.price.as_ref().and_then(|p| decimal(&p.cost)))
-                .fold(rust_decimal::Decimal::ZERO, |sum, cost| sum + cost);
-            d.totals.cost = (known * rust_decimal::Decimal::from(d.totals.requests)).to_string();
-            if d.example.cost().is_some() {
-                d.totals.unpriced = 0;
-            }
-            query::project(&tx, 1, &id, &d.example, d.totals.requests, Some(&d.totals))?;
-            db(tx.execute(
-                "UPDATE daily SET body=?2 WHERE id=?1",
-                params![id, bodies::encode(&tx, &d)?],
-            ))?;
-        }
-        if any_changed {
+        if changed {
             query::changed(&tx)?;
         }
-        db(tx.execute(
-            "DELETE FROM metadata WHERE key='backfill_after_storage'",
-            [],
-        ))?;
-        db(tx.commit())
+        let done = rows.is_empty() && cursor.daily;
+        if done {
+            db(tx.execute(
+                "DELETE FROM metadata WHERE key='backfill_after_storage'",
+                [],
+            ))?;
+        }
+        db(tx.commit())?;
+        if let Some((last, _)) = rows.last() {
+            cursor.after = last.clone();
+        } else {
+            cursor.after.clear();
+            cursor.daily = true;
+        }
+        Ok(!done)
     }
     pub fn begin_rebuild(&mut self, source: &str) -> Result<()> {
         if !matches!(source, "codex" | "claude" | "grok") {

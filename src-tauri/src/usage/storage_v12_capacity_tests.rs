@@ -292,6 +292,7 @@ fn attempt(
         transport: if is_proxy { "http" } else { "session" }.into(),
         tokens: Tokens {
             reasoning: None,
+            image_cache_read: None,
             inclusive_input: Some(input.unwrap_or_default().saturating_add(payload % 9)),
             input,
             output,

@@ -347,6 +347,201 @@ fn completed(turn: u64) -> String {
 }
 
 #[tokio::test]
+async fn freeze_drains_http_and_releases_only_connected_requests() {
+    use tokio::io::AsyncWriteExt;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let observed = hits.clone();
+    let finish = release.clone();
+    let upstream = server(move |_, _| {
+        let first = observed.fetch_add(1, Ordering::SeqCst) == 0;
+        let finish = finish.clone();
+        async move {
+            if !first {
+                return Response::builder().header("content-type", "application/json")
+                    .body(full(HTTP_RESPONSE)).unwrap();
+            }
+            let stream = async_stream::try_stream! {
+                yield Frame::data(Bytes::from(format!("data: {WS_DELTA}\n\n")));
+                let _permit = finish.acquire().await.unwrap();
+                yield Frame::data(Bytes::from(format!("data: {}\n\ndata: [DONE]\n\n", completed(1))));
+            };
+            Response::builder().header("content-type", "text/event-stream")
+                .body(StreamBody::new(stream).map_err(|e: std::io::Error| -> BoxError { e.into() }).boxed_unsync()).unwrap()
+        }
+    }).await;
+    let fixture = Fixture::new(ClientId::Codex, &[upstream.url("/v1")]).await;
+    fixture.edit(Edit::Settings {
+        settings: Settings {
+            retry_budget_seconds: 1,
+            queue_seconds: 1,
+            ..fixture.gateway.view().settings
+        },
+    });
+    fixture.start().await;
+    let gate = fixture.gateway.freeze_gate();
+    let first = request(
+        &fixture.gateway,
+        "/v1/responses",
+        br#"{"model":"gpt-request-fixture","stream":true,"input":"fixture"}"#,
+    )
+    .await;
+    let mut body = first.into_body();
+    let head = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(head.starts_with(b"data: "));
+    settled(|| gate.view().streaming == 1).await;
+    assert_eq!(gate.set(true).unwrap().draining, 1);
+    assert!(gate.set(false).is_err());
+
+    let gateway = fixture.gateway.clone();
+    let queued = tokio::spawn(async move {
+        response_bytes(request(&gateway, "/v1/responses", HTTP_REQUEST).await).await
+    });
+    settled(|| gate.view().queued == 1).await;
+    let port = fixture.gateway.view().settings.port;
+    let token = fixture
+        .gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .store
+        .local_token
+        .clone();
+    let mut cancelled = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    super::tests::set_reset_on_drop(&cancelled);
+    cancelled.write_all(format!("POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", HTTP_REQUEST.len()).as_bytes()).await.unwrap();
+    cancelled.write_all(HTTP_REQUEST).await.unwrap();
+    settled(|| gate.view().queued == 2).await;
+    drop(cancelled);
+    settled(|| gate.view().queued == 1).await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(!queued.is_finished());
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.gateway.view().providers[0].active_requests, 1);
+    release.add_permits(1);
+    let tail = body.collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&tail).contains("response.completed"));
+    settled(|| gate.view().draining == 0).await;
+    assert_eq!(gate.view().queued, 1);
+    assert!(gate.view().frozen);
+    gate.set(false).unwrap();
+    assert_eq!(queued.await.unwrap(), HTTP_RESPONSE);
+    settled(|| gate.view().draining == 0).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn freeze_holds_websocket_next_turn_and_honors_cancel_and_disconnect() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let observed = hits.clone();
+    let finish = release.clone();
+    let upstream = server(move |mut request, tasks| {
+        let observed = observed.clone();
+        let finish = finish.clone();
+        async move {
+            let (response, upgrade) = yawc::WebSocket::upgrade(&mut request).unwrap();
+            tasks.spawn(async move {
+                let mut socket = upgrade.await.unwrap();
+                while let Some(frame) = socket.next().await {
+                    if frame.opcode() == yawc::OpCode::Close {
+                        break;
+                    }
+                    if frame.opcode() == yawc::OpCode::Ping {
+                        socket
+                            .send(yawc::Frame::pong(frame.payload().to_vec()))
+                            .await
+                            .unwrap();
+                        continue;
+                    }
+                    if frame.opcode().is_control() {
+                        continue;
+                    }
+                    let turn = observed.fetch_add(1, Ordering::SeqCst) + 1;
+                    socket.send(yawc::Frame::text(WS_DELTA)).await.unwrap();
+                    if turn == 1 {
+                        let _permit = finish.acquire().await.unwrap();
+                    }
+                    socket
+                        .send(yawc::Frame::text(completed(turn as u64)))
+                        .await
+                        .unwrap();
+                }
+            });
+            response.map(|_| replay::empty())
+        }
+    })
+    .await;
+    let fixture = Fixture::new(ClientId::Codex, &[upstream.url("/v1")]).await;
+    fixture.edit(Edit::Settings {
+        settings: Settings {
+            retry_budget_seconds: 1,
+            queue_seconds: 1,
+            ..fixture.gateway.view().settings
+        },
+    });
+    fixture.start().await;
+    let gate = fixture.gateway.freeze_gate();
+    let mut socket = websocket(&fixture.gateway).await;
+    let create = r#"{"type":"response.create","model":"gpt-ws-fixture","input":"fixture"}"#;
+    socket.send(yawc::Frame::text(create)).await.unwrap();
+    assert_eq!(
+        next_text_frame(&mut socket).await.payload().as_ref(),
+        WS_DELTA.as_bytes()
+    );
+    gate.set(true).unwrap();
+    socket.send(yawc::Frame::text(create)).await.unwrap();
+    settled(|| gate.view().queued == 1).await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.view().draining, 1);
+    release.add_permits(1);
+    assert_eq!(
+        next_text_frame(&mut socket).await.payload().as_ref(),
+        completed(1).as_bytes()
+    );
+    settled(|| gate.view().draining == 0).await;
+    assert_eq!(gate.view().queued, 1);
+    gate.set(false).unwrap();
+    assert_eq!(
+        next_text_frame(&mut socket).await.payload().as_ref(),
+        WS_DELTA.as_bytes()
+    );
+    assert_eq!(
+        next_text_frame(&mut socket).await.payload().as_ref(),
+        completed(2).as_bytes()
+    );
+    settled(|| gate.view().draining == 0).await;
+    gate.set(true).unwrap();
+    socket.send(yawc::Frame::text(create)).await.unwrap();
+    settled(|| gate.view().queued == 1).await;
+    socket
+        .send(yawc::Frame::text(r#"{"type":"response.cancel"}"#))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_text_frame(&mut socket).await.payload().as_ref(),
+        br#"{"type":"response.cancelled"}"#
+    );
+    settled(|| gate.view().queued == 0).await;
+    socket.send(yawc::Frame::text(create)).await.unwrap();
+    settled(|| gate.view().queued == 1).await;
+    socket
+        .send(yawc::Frame::close(1000.into(), "fixture cancelled"))
+        .await
+        .unwrap();
+    drop(socket);
+    settled(|| gate.view().queued == 0).await;
+    gate.set(false).unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn http_usage_preserves_request_and_response_bytes() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let observed = seen.clone();

@@ -292,6 +292,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
                 cache_write_5m,
                 cache_write_1h,
                 image_input,
+                image_cache_read,
                 image_output,
                 audio_input,
                 audio_output

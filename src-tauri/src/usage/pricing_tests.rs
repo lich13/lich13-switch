@@ -263,6 +263,62 @@ fn age_cache(dir: &Path) {
     fs::write(path, serde_json::to_vec(&cache).unwrap()).unwrap();
 }
 
+#[test]
+fn optional_config_reload_preserves_overrides_and_clears_recovered_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let prices = Pricing::new(dir.path()).unwrap();
+    assert!(prices.reload().unwrap().error.is_none());
+    let view = prices.view();
+    let mut config = view.config;
+    config.fixed.insert("gemini-4-argon".into(), rates("0"));
+    prices.configure(config.clone(), &view.revision).unwrap();
+    let original = prices.quote(Some("gemini-4-argon-f"), "1").data;
+    fs::write(dir.path().join("pricing.json"), "broken").unwrap();
+    assert!(prices.reload().is_err());
+    assert_eq!(prices.quote(Some("gemini-4-argon-f"), "1").data, original);
+    fs::remove_file(dir.path().join("pricing.json")).unwrap();
+    assert!(prices.reload().is_err());
+    assert_eq!(prices.quote(Some("gemini-4-argon-f"), "1").data, original);
+    fs::write(dir.path().join("pricing.json"), "broken").unwrap();
+    let recovered = Pricing::new(dir.path()).unwrap();
+    assert!(recovered.view().error.is_some());
+    fs::write(
+        dir.path().join("pricing.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    assert!(recovered.reload().unwrap().error.is_none());
+}
+
+#[test]
+fn search_pages_cover_builtin_names_aliases_remote_and_models_dev() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = json!({"schema":1,"updated_at":1,"providers":{"fixture":{"name":"Fixture","models":{"standalone":{"name":"Search Display Name","cost":{"input":1,"output":2}}}}}});
+    fs::write(dir.path().join("models-dev-index.json"), index.to_string()).unwrap();
+    let prices = Pricing::new(dir.path()).unwrap();
+    let all = prices.search("", 0, 100);
+    let first = prices.search("", 0, 2);
+    let second = prices.search("", 2, 2);
+    assert_eq!(first.total, all.total);
+    assert_eq!(first.rows[0].model, all.rows[0].model);
+    assert_eq!(second.rows[0].model, all.rows[2].model);
+    let argon = prices.search("gemini-4-argon-f", 0, 50);
+    assert!(argon
+        .rows
+        .iter()
+        .any(|r| r.model == "gemini-4-argon" && r.source == "sub2api_builtin"));
+    let named = prices.search("Search Display", 0, 50);
+    assert_eq!(named.total, 1);
+    assert_eq!(named.rows[0].source, "models.dev");
+    assert_eq!(named.rows[0].data["input_cost_per_token"], "0.000001");
+    let view = prices.view();
+    let mut config = view.config;
+    config.excluded.insert("gemini-4-argon".into());
+    prices.configure(config, &view.revision).unwrap();
+    assert!(prices.quote(Some("gemini-4-argon-f"), "1").data.is_none());
+    assert_eq!(prices.search("gemini-4-argon-f", 0, 50).total, 0);
+}
+
 #[tokio::test]
 async fn http_200_updates_existing_model_and_adds_new_model() {
     let dir = tempfile::tempdir().unwrap();
@@ -279,7 +335,11 @@ async fn http_200_updates_existing_model_and_adds_new_model() {
     let first = refresh(&prices, &source, true).await.unwrap();
     let updated = refresh(&prices, &source, true).await.unwrap();
     assert_eq!(first.models["fixture-model"], rates("0.000001"));
-    assert_eq!(updated.models.len(), 2);
+    assert!(updated.models.contains_key("gemini-4-argon"));
+    assert_eq!(
+        updated.models.len(),
+        super::builtin_pricing::catalog().len() + 2
+    );
     assert_eq!(updated.models["fixture-model"], rates("0.000002"));
     assert_eq!(updated.models["fixture-new-model"], rates("0.000003"));
     assert_eq!(updated.version, storage::digest(&next));
@@ -322,7 +382,7 @@ async fn etag_304_advances_check_time_without_changing_update_time() {
     let persisted: Value =
         serde_json::from_slice(&fs::read(dir.path().join("price-cache.json")).unwrap()).unwrap();
     assert_eq!(persisted["updatedAt"], json!(1));
-    assert!(persisted["checkedAt"].as_i64().unwrap() > 1);
+    assert_eq!(persisted["checkedAt"], json!(1));
     source.assert_requests(&[
         ("/prices.sha256", None),
         ("/prices.json", None),
@@ -457,6 +517,31 @@ async fn unchanged_hash_skips_json_download_on_scheduled_update() {
         ("/prices.json", None),
         ("/prices.sha256", None),
     ]);
+}
+
+#[tokio::test]
+async fn equivalent_catalog_formatting_does_not_write_cache_or_change_content_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let prices = Pricing::new(dir.path()).unwrap();
+    let body = catalog("0.000001");
+    let formatted =
+        serde_json::to_vec_pretty(&serde_json::from_slice::<Value>(&body).unwrap()).unwrap();
+    let mut replies = download_replies(&body, ETAG);
+    replies.extend(download_replies(&formatted, NEXT_ETAG));
+    let source = SourceFixture::new(replies);
+    let before = refresh(&prices, &source, true).await.unwrap();
+    let version = prices.content_version();
+    let path = dir.path().join("price-cache.json");
+    let bytes = fs::read(&path).unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let after = refresh(&prices, &source, true).await.unwrap();
+    assert_eq!(after.models, before.models);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_ne!(after.version, before.version);
+    assert_eq!(prices.content_version(), version);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(Pricing::new(dir.path()).unwrap().content_version(), version);
 }
 
 #[tokio::test]
@@ -658,7 +743,9 @@ async fn aliases_are_explicit_and_missing_prices_are_not_estimated() {
     prices.configure(config, &view.revision).unwrap();
     let alias = prices.quote(Some("fixture-alias"), "1");
     assert_eq!(alias.model, "fixture-model");
-    assert_eq!(alias.data, Some(rates("0.000001")));
+    let mut expected = rates("0.000001");
+    expected["price_match"] = json!({"matchedBy":"user_alias","model":"fixture-model"});
+    assert_eq!(alias.data, Some(expected));
     assert_eq!(alias.source, "sub2api");
     let exact = prices.quote(Some("fixture-model"), "1");
     assert_eq!(exact.model, "fixture-model");
@@ -841,7 +928,7 @@ fn model_list_references_keep_fixed_and_seed_priority_without_changing_quotes() 
     let original = prices.quote(Some(&model), "1");
     assert_eq!(
         prices.reference(&model, Some(&source)).unwrap().source,
-        "sub2api"
+        original.source
     );
     let view = prices.view();
     let mut config = view.config;
@@ -859,7 +946,10 @@ fn model_list_references_keep_fixed_and_seed_priority_without_changing_quotes() 
     assert_eq!(reference.source, "models.dev");
     assert_eq!(reference.input_per_m.as_deref(), Some("9"));
     assert!(prices.quote(Some("fixture-ambiguous"), "1").data.is_none());
-    assert_eq!(original.source, "sub2api");
+    assert!(matches!(
+        original.source.as_str(),
+        "sub2api" | "sub2api_builtin"
+    ));
     let view = prices.view();
     let mut config = view.config;
     config.excluded.insert("fixture-ambiguous".into());

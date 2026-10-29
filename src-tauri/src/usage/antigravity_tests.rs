@@ -24,11 +24,9 @@ fn placeholder_mirror_uses_real_model_and_final_timings_once() {
     assert_eq!(r.attempts.len(), 1);
     assert_eq!(a.requested_model, None);
     assert_eq!(a.response_model.as_deref(), Some("fixture-response"));
-    assert_eq!(
-        a.model_display_name.as_deref(),
-        Some("Fixture Model (High)")
-    );
+    assert_eq!(a.model_display_name.as_deref(), Some("Fixture Model"));
     assert_eq!(a.api_provider.as_deref(), Some("API_PROVIDER_FIXTURE"));
+    assert_eq!(a.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(
         (a.first_token_ms, a.generation_ms, a.measured_duration_ms()),
         (Some(250), Some(1750), Some(2000))
@@ -37,6 +35,84 @@ fn placeholder_mirror_uses_real_model_and_final_timings_once() {
     assert_eq!(r.known_success(), Some(true));
     assert_eq!(r.finished_at, Some(r.started_at + 2000));
     assert_eq!(a.tokens.cache_write, None);
+}
+
+#[test]
+fn zero_step_clock_uses_request_timings_and_unknown_suffixes_are_preserved() {
+    let mut s = step();
+    s["metadata"]["finishedGeneratingAt"] = s["metadata"]["startedAt"].clone();
+    let steps = Steps::from([s].as_slice());
+    let mut v = entry("one", 0);
+    v["chatModel"]["responseModel"] = json!("gemini-4-argon-f");
+    let r = record("fixture", &v, &steps, 0).unwrap().unwrap();
+    assert_eq!(r.attempts[0].measured_duration_ms(), Some(2000));
+    assert_eq!(r.finished_at, Some(r.started_at + 2000));
+    assert_eq!(
+        r.attempts[0].response_model.as_deref(),
+        Some("gemini-4-argon-f")
+    );
+    v["chatModel"]["modelDisplayName"] = json!("Fixture (Preview) (High)");
+    assert_eq!(
+        parsed(&v).attempts[0].model_display_name.as_deref(),
+        Some("Fixture (Preview)")
+    );
+    v["chatModel"]["modelDisplayName"] = json!("Fixture (Preview)");
+    let r = parsed(&v);
+    assert_eq!(
+        r.attempts[0].model_display_name.as_deref(),
+        Some("Fixture (Preview)")
+    );
+    assert_eq!(r.attempts[0].reasoning_effort, None);
+    for key in ["timeToFirstToken", "streamingDuration"] {
+        v["chatModel"].as_object_mut().unwrap().remove(key);
+    }
+    let r = record("fixture", &v, &steps, 0).unwrap().unwrap();
+    assert_eq!(r.attempts[0].measured_duration_ms(), None);
+    assert!(r.completed);
+}
+
+#[test]
+fn historical_repair_preserves_prices_and_identity_in_both_storage_formats() {
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let mut old = parsed(&entry("one", 0));
+        old.attempts[0].model_display_name = Some("Fixture Model (High)".into());
+        old.attempts[0].reasoning_effort = None;
+        old.attempts[0].duration_ms = 0;
+        old.finished_at = Some(old.started_at);
+        let price = super::super::pricing::Quote { model:"fixture-response".into(), data:Some(json!({"input_cost_per_token":1,"output_cost_per_token":2,"cache_read_input_token_cost":0})), version:"historical".into(), source:"fixed".into(), multiplier:"1".into() }.calculate(&old.attempts[0].tokens,None).unwrap();
+        old.attempts[0].price = Some(price.clone());
+        store.write_batch(&[old.clone()], None).unwrap();
+        while store.repair_metadata_batch().unwrap() {}
+        let repaired = store.detail(&old.id).unwrap();
+        assert_eq!(repaired.attempts[0].id, old.attempts[0].id);
+        assert_eq!(
+            repaired.attempts[0].reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(repaired.attempts[0].measured_duration_ms(), Some(2000));
+        assert_eq!(repaired.finished_at, Some(old.started_at + 2000));
+        assert_eq!(
+            serde_json::to_value(&repaired.attempts[0].price).unwrap(),
+            serde_json::to_value(Some(&price)).unwrap()
+        );
+        let before = store.connection.total_changes();
+        assert!(!store.repair_metadata_batch().unwrap());
+        assert_eq!(store.connection.total_changes(), before);
+        assert_eq!(
+            store.logs(&super::super::Filter::default()).unwrap().total,
+            1
+        );
+    }
 }
 
 #[test]
@@ -341,7 +417,7 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
         store.detail(&id).unwrap().attempts[0]
             .model_display_name
             .as_deref(),
-        Some("Fixture Model (High)")
+        Some("Fixture Model")
     );
     f.calls.lock().unwrap().clear();
     *f.changed.lock().unwrap() = "next".into();

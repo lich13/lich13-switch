@@ -33,7 +33,8 @@ function record(): UsageRecord {
         provider: null,
         requestedModel: null,
         responseModel: "fixture-response",
-        modelDisplayName: "Fixture Model (High)",
+        modelDisplayName: "Fixture Model",
+        reasoningEffort: "high",
         apiProvider: "API_PROVIDER_FIXTURE",
         pricingModel: "fixture-response",
         responseId: null,
@@ -70,7 +71,8 @@ it("shows the display model and measured app performance without a fabricated HT
     />,
   );
   const table = screen.getByRole("table", { name: "请求记录" });
-  expect(within(table).getByText("Fixture Model (High)")).toBeInTheDocument();
+  expect(within(table).getByText("Fixture Model")).toBeInTheDocument();
+  expect(within(table).getByText("思考 High")).toBeInTheDocument();
   expect(within(table).getByText("0.25s")).toBeInTheDocument();
   expect(within(table).getByText("2.00s")).toBeInTheDocument();
   expect(within(table).getByText("10.0")).toBeInTheDocument();

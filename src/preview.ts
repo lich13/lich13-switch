@@ -7,6 +7,17 @@ import type { ViewState, ConfigDocument, LoginState } from "./types";
 import { densePreview } from "./preview-fixtures";
 const previewParams = new URLSearchParams(location.search);
 const previewTheme = previewParams.get("theme");
+const freezePreview = previewParams.get("freeze");
+let freezeState = {
+  frozen: freezePreview === "draining" || freezePreview === "frozen",
+  draining: freezePreview === "draining" ? 2 : 0,
+  receiving: 0,
+  waiting: 0,
+  headers: freezePreview === "draining" ? 1 : 0,
+  streaming: freezePreview === "draining" ? 1 : 0,
+  finishing: 0,
+  queued: freezePreview === "draining" || freezePreview === "frozen" ? 3 : 0,
+};
 const callbacks = new Map<string, Set<(p: never) => void>>();
 export function subscribe<T>(event: string, fn: (p: T) => void) {
   if (!callbacks.has(event)) callbacks.set(event, new Set());
@@ -195,6 +206,18 @@ export async function run(
   name: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  if (name === "get_gateway_freeze") return { ...freezeState };
+  if (name === "set_gateway_frozen") {
+    if (freezeState.draining && args.frozen === false)
+      throw { code: "BUSY", message: "等待收尾完成后才能解冻" };
+    freezeState = {
+      ...freezeState,
+      frozen: !!args.frozen,
+      queued: args.frozen ? freezeState.queued : 0,
+    };
+    emit("gateway-freeze", { ...freezeState });
+    return { ...freezeState };
+  }
   if (name.startsWith("provider_test_")) {
     const result = providerTestingPreview(name, args);
     if (

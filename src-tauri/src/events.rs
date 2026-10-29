@@ -15,6 +15,7 @@ pub use details::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
+    io::{BufRead, BufReader},
     path::Path,
     sync::{mpsc, Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -589,10 +590,35 @@ fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
 }
 fn load(path: &Path) -> Journal {
     let mut j = Journal::default();
-    match storage::read_bounded(path, u64::MAX) {
-        Ok(Some(bytes)) => {
-            for line in bytes.split(|b| *b == b'\n').filter(|b| !b.is_empty()) {
-                match serde_json::from_slice::<Record>(line) {
+    let file = (|| -> std::io::Result<Option<std::fs::File>> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other("invalid journal file"));
+        }
+        std::fs::File::open(path).map(Some)
+    })();
+    match file {
+        Ok(Some(file)) => {
+            let mut reader = BufReader::new(file);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => (),
+                    Err(_) => {
+                        j.error = Some("日志读取失败，请检查文件权限与空间".into());
+                        break;
+                    }
+                }
+                if line == b"\n" {
+                    continue;
+                }
+                match serde_json::from_slice::<Record>(&line) {
                     Ok(mut r)
                         if uuid::Uuid::parse_str(&r.id).is_ok()
                             && r.provider_id
@@ -615,8 +641,15 @@ fn load(path: &Path) -> Journal {
     }
     j
 }
-fn persist(j: &mut Journal, path: &Path) -> Result<()> {
+fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
     let cutoff = now().saturating_sub(RETENTION);
+    if !changed
+        && j.error.is_none()
+        && path.exists()
+        && j.records.iter().all(|r| r.last_at >= cutoff)
+    {
+        return Ok(());
+    }
     j.records.retain(|r| r.last_at >= cutoff);
     let retained: std::collections::HashSet<_> = j.records.iter().map(|r| r.id.as_str()).collect();
     j.aliases
@@ -644,7 +677,7 @@ impl Service {
             {
                 let mut initial = j.lock().unwrap();
                 if initial.error.is_none() && path.exists() {
-                    if persist(&mut initial, &path).is_err() {
+                    if persist(&mut initial, &path, true).is_err() {
                         initial.error = Some("日志写入失败，请检查文件权限与空间".into());
                     } else if prune_raw(&raw_path, &initial).is_err() {
                         initial.error = Some("日志原文清理失败，请重试".into());
@@ -672,6 +705,7 @@ impl Service {
                 });
                 let mut done = None;
                 let cleanup = matches!(&job, Job::Clear(_) | Job::Prune);
+                let prune_only = matches!(&job, Job::Prune);
                 let append = matches!(&job, Job::Append(_));
                 let mut jobs = vec![job];
                 if append {
@@ -802,7 +836,7 @@ impl Service {
                     changes.push((changed, notify));
                 }
                 let before_retention = journal.records.len();
-                let result = persist(&mut journal, &path);
+                let result = persist(&mut journal, &path, !prune_only);
                 if result.is_err() {
                     if let Some((records, aliases)) = previous {
                         journal.records = records;
@@ -1089,6 +1123,39 @@ mod v02512_tests;
 mod routing_visibility_tests {
     use super::*;
     use crate::usage::model::{RoutingDecision, RoutingEvidence};
+
+    #[test]
+    fn unchanged_retention_keeps_file_and_expired_records_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.jsonl");
+        let mut journal = Journal::default();
+        journal.records.push_back(Record::new(
+            None,
+            None,
+            None,
+            Reason::AccountSync,
+            Action::Stopped,
+            None,
+            None,
+        ));
+        persist(&mut journal, &path, true).unwrap();
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        persist(&mut journal, &path, false).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            old_time
+        );
+        journal.records[0].last_at = now() - RETENTION - 1;
+        persist(&mut journal, &path, false).unwrap();
+        assert!(journal.records.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+    }
 
     #[test]
     fn routine_routing_is_hidden_on_emit_and_legacy_load_but_faults_remain() {

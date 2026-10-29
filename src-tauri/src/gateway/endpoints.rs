@@ -590,6 +590,9 @@ impl Gateway {
         self.try_view()
     }
     pub async fn probe_due_endpoints(&self) {
+        if self.0.registry.freeze.is_frozen() {
+            return;
+        }
         let ids = {
             let Ok(s) = self.request_state() else { return };
             if !s.running {

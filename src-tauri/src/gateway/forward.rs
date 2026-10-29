@@ -346,6 +346,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         );
     }
     let downstream_upgrade = websocket.then(|| hyper::upgrade::on(&mut request));
+    let traffic = gateway.0.registry.freeze.request();
     let (parts, body) = request.into_parts();
     let replay = match Replay::capture_progress(
         body,
@@ -367,7 +368,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         settings.retry_budget_seconds,
         &gateway.0.pending_requests,
     );
+    traffic.waiting();
     request_budget.begin();
+    request_budget.attach_traffic(&traffic);
     let forwarding = async {
         let content_type = parts
             .headers
@@ -576,6 +579,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let mut last_category = code::NO_PROVIDER;
         request_budget.describe(pinned.as_deref(), model.as_deref(), "admission");
         let mut wait_budget = Budget::new(settings.queue_seconds);
+        wait_budget.traffic = Some(traffic.clone());
         wait_budget.track(
             &gateway.0.admission,
             ownership.as_deref(),
@@ -594,6 +598,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         let mut retry_owner: Option<String> = None;
         let mut search_fallback = false;
         while dedicated_search || ordinary_attempts <= settings.max_retries {
+            traffic.waiting();
             search_fallback |= attempted > 0;
             // An unknown previous_response_id has no safe owner to replay against;
             // preserve the existing one-attempt rule instead of silently
@@ -1476,6 +1481,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 let provider_for_tunnel = route.provider.clone();
                 tokio::spawn(async move {
                     let _active = active;
+                    let _traffic = traffic;
                     let _slot = slot;
                     let mut permits = permits;
                     let connected = tokio::try_join!(upstream_upgrade, downstream);
@@ -2279,6 +2285,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let request_budget = request_budget.clone();
             tokio::spawn(async move {
                 let mut active = Some(active);
+                let traffic = traffic;
                 let mut slot = Some(slot);
                 remember(&protocol, &g, &route, model.as_deref());
                 observe_protocol(
@@ -2453,6 +2460,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 // Close the body channel before waiting: Hyper must see its end in
                 // order to flush the final chunk/trailers. Socket completion is local
                 // write evidence, never an acknowledgement by the client.
+                traffic.finishing();
                 drop(body);
                 drop(sender);
                 if disconnected {

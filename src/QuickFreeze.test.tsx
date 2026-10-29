@@ -1,0 +1,122 @@
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, it, vi } from "vitest";
+import type { GatewayFreeze } from "./bridge-contracts";
+const mock = vi.hoisted(() => ({
+  command: vi.fn(),
+  listeners: new Map<string, (v: unknown) => void>(),
+  registration: null as Promise<void> | null,
+}));
+vi.mock("./bridge", () => ({
+  command: mock.command,
+  subscribe: async (name: string, fn: (v: unknown) => void) => {
+    mock.listeners.set(name, fn);
+    if (name === "gateway-freeze") await mock.registration;
+    return () => mock.listeners.delete(name);
+  },
+}));
+import QuickFreeze from "./QuickFreeze";
+const idle: GatewayFreeze = {
+  frozen: false,
+  draining: 0,
+  receiving: 0,
+  waiting: 0,
+  headers: 0,
+  streaming: 0,
+  finishing: 0,
+  queued: 0,
+};
+beforeEach(() => {
+  mock.command.mockReset().mockResolvedValue(idle);
+  mock.listeners.clear();
+  mock.registration = null;
+});
+
+it("reads the initial status only after change subscription is ready", async () => {
+  let ready!: () => void;
+  mock.registration = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  render(<QuickFreeze />);
+  expect(mock.command).not.toHaveBeenCalled();
+  expect(screen.getByText("读取状态")).toBeInTheDocument();
+  mock.command.mockResolvedValue({ ...idle, frozen: true });
+  await act(async () => ready());
+  expect(await screen.findByText("可休眠")).toBeInTheDocument();
+  expect(mock.command).toHaveBeenCalledExactlyOnceWith("get_gateway_freeze");
+});
+
+it("freezes globally, disables controls while draining, and thaws when safe", async () => {
+  const user = userEvent.setup();
+  render(<QuickFreeze />);
+  await screen.findByText("未冻结");
+  mock.command.mockResolvedValue({
+    ...idle,
+    frozen: true,
+    draining: 1,
+    streaming: 1,
+    queued: 3,
+  });
+  await user.click(screen.getByRole("button", { name: "全局冻结" }));
+  expect(mock.command).toHaveBeenLastCalledWith("set_gateway_frozen", {
+    frozen: true,
+  });
+  expect(await screen.findByText("等待收尾")).toBeInTheDocument();
+  const thaw = screen.getByRole("button", { name: "解冻" });
+  expect(thaw).toBeDisabled();
+  mock.command.mockClear();
+  await user.click(thaw);
+  expect(mock.command).not.toHaveBeenCalled();
+  act(() =>
+    mock.listeners.get("gateway-freeze")?.({
+      ...idle,
+      frozen: true,
+      queued: 3,
+    }),
+  );
+  expect(screen.getByText("可休眠")).toBeInTheDocument();
+  expect(thaw).toBeEnabled();
+  mock.command.mockResolvedValue(idle);
+  await user.click(thaw);
+  expect(mock.command).toHaveBeenLastCalledWith("set_gateway_frozen", {
+    frozen: false,
+  });
+  expect(await screen.findByText("未冻结")).toBeInTheDocument();
+});
+
+it("keeps newer events when initial or command responses arrive late", async () => {
+  let resolve!: (state: GatewayFreeze) => void;
+  mock.command.mockImplementation(
+    () =>
+      new Promise<GatewayFreeze>((done) => {
+        resolve = done;
+      }),
+  );
+  const user = userEvent.setup();
+  const view = render(<QuickFreeze />);
+  await waitFor(() => expect(mock.listeners.has("gateway-freeze")).toBe(true));
+  act(() => mock.listeners.get("gateway-freeze")?.({ ...idle, frozen: true }));
+  await act(async () => resolve(idle));
+  expect(screen.getByText("可休眠")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "解冻" }));
+  act(() => mock.listeners.get("gateway-freeze")?.(idle));
+  await act(async () => resolve({ ...idle, frozen: true }));
+  expect(screen.getByText("未冻结")).toBeInTheDocument();
+  view.unmount();
+  expect(mock.listeners.size).toBe(0);
+});
+
+it("retries failed reads and refreshes status when the panel reopens", async () => {
+  mock.command.mockRejectedValueOnce(new Error("fixture failure"));
+  const user = userEvent.setup();
+  render(<QuickFreeze />);
+  await screen.findByRole("alert");
+  expect(screen.getByText("状态异常")).toBeInTheDocument();
+  mock.command.mockResolvedValue({ ...idle, frozen: true });
+  await user.click(screen.getByRole("button", { name: "重试" }));
+  expect(await screen.findByText("可休眠")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  mock.command.mockResolvedValue(idle);
+  act(() => mock.listeners.get("panel-visibility")?.(true));
+  expect(await screen.findByText("未冻结")).toBeInTheDocument();
+});

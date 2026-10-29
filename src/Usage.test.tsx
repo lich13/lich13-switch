@@ -274,6 +274,28 @@ beforeEach(() => {
             settings: structuredClone(args.settings as UsageSettings),
           };
           return structuredClone(state);
+        case "search_pricing": {
+          const rows = Object.entries(pricing.models)
+            .filter(([model]) =>
+              model.toLowerCase().includes(String(args.query).toLowerCase()),
+            )
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([model, data]) => ({
+              model,
+              name: null,
+              source: model in pricing.config.fixed ? "fixed" : "sub2api",
+              matchedModel: model,
+              matchedBy: "exact",
+              data,
+            }));
+          return {
+            rows: rows.slice(
+              Number(args.offset),
+              Number(args.offset) + Number(args.limit),
+            ),
+            total: rows.length,
+          };
+        }
         case "get_pricing":
           return structuredClone(pricing);
         case "configure_pricing": {
@@ -1135,6 +1157,11 @@ describe("usage pricing", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "搜索价格模型" }), {
       target: { value: "GPT-ALPHA" },
     });
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("table")).getAllByRole("row"),
+      ).toHaveLength(2),
+    );
     const rows = within(screen.getByRole("table")).getAllByRole("row");
     expect(rows).toHaveLength(2);
     const cells = within(rows[1]).getAllByRole("cell");

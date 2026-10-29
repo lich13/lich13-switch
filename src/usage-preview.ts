@@ -76,7 +76,8 @@ app.attempts[0] = {
   responseModel: "claude-example",
   pricingModel: "claude-example",
   pricingBasis: "estimated_import_snapshot",
-  modelDisplayName: "Fixture Model (High)",
+  modelDisplayName: "Fixture Model",
+  reasoningEffort: "high",
   apiProvider: "API_PROVIDER_FIXTURE",
   generationMs: 4860,
   availability: { duration: "reported", first_token: "reported" },
@@ -360,6 +361,7 @@ export const usageCommands = [
   "set_usage_settings",
   "sync_usage",
   "get_pricing",
+  "search_pricing",
   "configure_pricing",
   "update_pricing",
   "reload_pricing",
@@ -407,6 +409,28 @@ export function usagePreview(
     price.models = { ...price.models, ...price.config.fixed };
     emit("pricing-state", {});
     return structuredClone(price);
+  }
+  if (name === "search_pricing") {
+    const matches = Object.entries(price.models)
+      .filter(([model]) =>
+        model.toLowerCase().includes(String(args.query).toLowerCase()),
+      )
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([model, data]) => ({
+        model,
+        name: null,
+        source: model in price.config.fixed ? "fixed" : "sub2api",
+        matchedModel: model,
+        matchedBy: "exact",
+        data,
+      }));
+    return {
+      rows: matches.slice(
+        Number(args.offset),
+        Number(args.offset) + Number(args.limit),
+      ),
+      total: matches.length,
+    };
   }
   if (name.includes("pricing"))
     return name === "open_pricing_directory"

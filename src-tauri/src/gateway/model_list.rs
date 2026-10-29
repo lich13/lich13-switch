@@ -383,7 +383,13 @@ impl Gateway {
         }
         let usage = self.0.usage.lock().unwrap().clone();
         if let Some(prices) = usage.as_ref().and_then(|u| u.prices().ok()) {
-            prices.models_dev.refresh(false).await?;
+            let before = prices.models_dev.view().version;
+            let refreshed = prices.models_dev.refresh(false).await?;
+            if refreshed.error.is_none() && refreshed.version != before {
+                if let Some(usage) = usage {
+                    usage.schedule_price_backfill();
+                }
+            }
         }
         self.changed();
         Ok(())

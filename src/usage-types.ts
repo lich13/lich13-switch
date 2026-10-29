@@ -8,6 +8,7 @@ export type Tokens = {
   cacheWrite5m?: number | null;
   cacheWrite1h?: number | null;
   imageInput?: number | null;
+  imageCacheRead?: number | null;
   imageOutput?: number | null;
   audioInput?: number | null;
   audioOutput?: number | null;
@@ -132,6 +133,7 @@ export type Attempt = {
   upstreamModel?: string | null;
   responseModel: string | null;
   modelDisplayName?: string | null;
+  reasoningEffort?: string | null;
   apiProvider?: string | null;
   generationMs?: number | null;
   errorCode?: string | null;
@@ -316,6 +318,15 @@ export type PricingView = {
   syncing: boolean;
   revision: string;
 };
+export type PricingSearchRow = {
+  model: string;
+  name: string | null;
+  source: string;
+  matchedModel: string;
+  matchedBy: string;
+  data: Record<string, unknown>;
+};
+export type PricingSearchPage = { rows: PricingSearchRow[]; total: number };
 export const numeric = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("zh-CN");
 export const compact = (n: number | null | undefined) => {

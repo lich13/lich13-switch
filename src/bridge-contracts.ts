@@ -28,6 +28,7 @@ import type {
   PriceComparison,
   PricingConfig,
   PricingView,
+  PricingSearchPage,
   UsageFilter,
   UsagePage,
   UsageRecord,
@@ -540,6 +541,8 @@ export type CommandMap = {
   >;
   cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
   get_gateway: Call<Client, GatewayState>;
+  get_gateway_freeze: Call<None, GatewayFreeze>;
+  set_gateway_frozen: Call<{ frozen: boolean }, GatewayFreeze>;
   get_gateway_listener: Call<None, GatewayListener>;
   set_gateway_listener: Call<{ port: number } & Revision, GatewayListener>;
   get_gateway_models: Call<Client, GatewayModels>;
@@ -727,6 +730,10 @@ export type CommandMap = {
   set_usage_settings: Call<{ settings: UsageSettings }, UsageState>;
   sync_usage: Call<{ rebuild?: string }, UsageState>;
   get_pricing: Call<None, PricingView>;
+  search_pricing: Call<
+    { query: string; offset: number; limit: number },
+    PricingSearchPage
+  >;
   get_models_dev: Call<None, ModelsDevState>;
   get_usage_interruptions: Call<{ filter: UsageFilter }, InterruptionSummary>;
   update_models_dev: Call<None, ModelsDevState>;
@@ -744,12 +751,23 @@ export type CommandArgs<K extends CommandName> = CommandMap[K]["args"];
 export type CommandResult<K extends CommandName> = CommandMap[K]["result"];
 export type CommandParams<K extends CommandName> =
   {} extends CommandArgs<K> ? [args?: CommandArgs<K>] : [args: CommandArgs<K>];
+export type GatewayFreeze = {
+  frozen: boolean;
+  draining: number;
+  receiving: number;
+  waiting: number;
+  headers: number;
+  streaming: number;
+  finishing: number;
+  queued: number;
+};
 export type EventMap = {
   "switch-state": ViewState;
   "login-state": LoginState;
   "switch-error": AppError;
   "switch-notice": string;
   "gateway-state": GatewayState;
+  "gateway-freeze": GatewayFreeze;
   "provider-quota": { clientId: ClientId; quota: ProviderQuota };
   "config-state": { clientId: ClientId; revision: string; guarded: boolean };
   "clamshell-state": PowerState;

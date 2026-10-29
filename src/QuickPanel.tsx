@@ -1,4 +1,5 @@
 import QuickWaits from "./QuickWaits";
+import QuickFreeze from "./QuickFreeze";
 import { subscriptions } from "./subscriptions";
 import type { GatewayEdit } from "./bridge-contracts";
 import ClientSelection, {
@@ -38,7 +39,14 @@ import type { QuickPreferences as Preferences } from "./bridge-contracts";
 export default function QuickPanel() {
   const [clientId, select] = useClientSelection("quick");
   return (
-    <QuickContent key={clientId} clientId={clientId} onClientChange={select} />
+    <div className="quick-panel">
+      <QuickFreeze />
+      <QuickContent
+        key={clientId}
+        clientId={clientId}
+        onClientChange={select}
+      />
+    </div>
   );
 }
 function QuickContent({
@@ -207,7 +215,7 @@ function QuickContent({
       await command("open_main", { page: page ?? null });
     });
   return (
-    <div className="quick-panel">
+    <>
       <header className="quick-toolbar">
         <nav className="segmented" aria-label="快捷面板">
           {(["providers", "accounts"] as const).map((tab) => (
@@ -573,6 +581,6 @@ function QuickContent({
           {prefs.tab === "providers" ? "管理供应商" : "管理账号"}
         </button>
       </footer>
-    </div>
+    </>
   );
 }

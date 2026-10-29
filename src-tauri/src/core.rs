@@ -898,6 +898,11 @@ impl Core {
             .read(&self.home().join("auth.json"), PolledAuth::parse)?;
         let auth = &polled.bytes;
         let config = storage::read_optional(&self.home().join("config.toml"))?;
+        let auth_source = source(config.as_deref());
+        let optional_auth = auth.is_none() && auth_source.inline_token;
+        if optional_auth {
+            self.auth_sync = None;
+        }
         let managed = crate::gateway::manages_auth(&self.data_dir, &self.home());
         let info = if managed { None } else { polled.info.clone() };
         let matched = match info
@@ -931,6 +936,7 @@ impl Core {
             });
         let changed = normalization_error.is_none()
             && !managed
+            && !optional_auth
             && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
                 || newer_token);
         let old = self.store.clone();
@@ -1087,7 +1093,7 @@ impl Core {
             auth_revision,
             config_revision: storage::revision(config.as_deref()),
             current_state: status.into(),
-            auth_source: source(config.as_deref()),
+            auth_source,
             preferences: self.preferences(),
             error: normalization_error.map(|e| e.message),
             auth_sync: if managed {
@@ -1388,6 +1394,25 @@ mod tests {
         let mut reopened = Core::new(t.path().join("app"), c.home()).unwrap();
         assert!(reopened.state().unwrap().accounts.is_empty());
         assert_eq!(reopened.state().unwrap().current_state, "unsaved");
+    }
+    #[test]
+    fn bearer_provider_without_account_does_not_report_missing_auth() {
+        let (_t, mut core) = setup();
+        assert_eq!(core.state().unwrap().auth_sync.unwrap().state, "missing");
+        let config = "model_provider='custom'\n[model_providers.custom]\nexperimental_bearer_token='fixture-token'\nrequires_openai_auth=true\n";
+        std::fs::write(core.home().join("config.toml"), config).unwrap();
+        for _ in 0..2 {
+            let state = core.state().unwrap();
+            assert!(state.auth_sync.is_none());
+            assert!(state.accounts.is_empty());
+        }
+        assert!(!core.home().join("auth.json").exists());
+        std::fs::write(core.home().join("auth.json"), "broken").unwrap();
+        assert_eq!(core.state().unwrap().auth_sync.unwrap().state, "invalid");
+        std::fs::remove_file(core.home().join("auth.json")).unwrap();
+        assert!(core.state().unwrap().auth_sync.is_none());
+        std::fs::write(core.home().join("config.toml"), "").unwrap();
+        assert_eq!(core.state().unwrap().auth_sync.unwrap().state, "missing");
     }
     #[test]
     fn monitor_adds_and_updates_preserving_identity_name_and_unknown_fields() {

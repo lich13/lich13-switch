@@ -414,7 +414,11 @@ pub fn sync(
                         a.price = (client != "grok")
                             .then(|| {
                                 pricing
-                                    .quote(a.pricing_model.as_deref(), &settings.multiplier)
+                                    .quote_at(
+                                        a.pricing_model.as_deref(),
+                                        &settings.multiplier,
+                                        a.started_at,
+                                    )
                                     .calculate(&a.tokens, a.price_tier())
                             })
                             .flatten();

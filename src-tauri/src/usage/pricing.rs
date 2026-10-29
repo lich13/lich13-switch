@@ -1,5 +1,5 @@
 //! Independent adapter for Sub2API's public price source (no provider credentials).
-use super::model::*;
+use super::{builtin_pricing, model::*};
 use crate::storage::{self, Result};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,21 @@ pub struct View {
     pub error: Option<String>,
     pub syncing: bool,
     pub revision: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRow {
+    pub model: String,
+    pub name: Option<String>,
+    pub source: String,
+    pub matched_model: String,
+    pub matched_by: String,
+    pub data: Value,
+}
+#[derive(Serialize)]
+pub struct SearchPage {
+    pub rows: Vec<SearchRow>,
+    pub total: usize,
 }
 #[derive(Clone)]
 pub struct Quote {
@@ -146,6 +161,7 @@ struct Inner {
     cache: Cache,
     config: Config,
     error: Option<String>,
+    config_error: Option<String>,
     syncing: bool,
     revision: String,
     generation: u64,
@@ -264,7 +280,7 @@ impl Pricing {
             .as_deref()
             .map(serde_json::from_slice::<Config>)
             .transpose();
-        let (config, mut error) = match decoded {
+        let (config, config_error) = match decoded {
             Ok(Some(c)) if valid_config(&c).is_ok() => (c, None),
             Ok(None) => (Config::default(), None),
             _ => (
@@ -272,6 +288,7 @@ impl Pricing {
                 Some("定价文件无效，正在使用有效价格源".into()),
             ),
         };
+        let mut error = None;
         let seed = include_bytes!("../../resources/usage-prices.json");
         if storage::digest(seed) != include_str!("../../resources/usage-prices.sha256").trim() {
             return Err(failure("初始价格库校验失败"));
@@ -303,6 +320,7 @@ impl Pricing {
                 cache,
                 config,
                 error,
+                config_error,
                 syncing: false,
                 generation: 0,
                 revision: storage::revision(saved.as_deref()),
@@ -324,7 +342,8 @@ impl Pricing {
     }
     pub fn view(&self) -> View {
         let s = self.state.read().unwrap();
-        let mut models = s.cache.catalog.clone();
+        let mut models = builtin_pricing::catalog().clone();
+        models.extend(s.cache.catalog.clone());
         models.extend(s.config.fixed.clone());
         models.remove("sample_spec");
         View {
@@ -334,10 +353,13 @@ impl Pricing {
             source: "Sub2API · Wei-Shaw/model-price-repo",
             checked_at: s.cache.checked_at,
             updated_at: s.cache.updated_at,
-            error: s.error.clone(),
+            error: s.config_error.clone().or_else(|| s.error.clone()),
             syncing: s.syncing,
             revision: s.revision.clone(),
         }
+    }
+    pub(super) fn content_version(&self) -> String {
+        self.state.read().unwrap().cache.catalog_hash.clone()
     }
     pub fn configure(&self, c: Config, expected: &str) -> Result<View> {
         valid_config(&c)?;
@@ -350,68 +372,197 @@ impl Pricing {
         storage::atomic_write_bounded(&self.path, &bytes, Some(expected), LIMIT)?;
         s.revision = storage::digest(&bytes);
         s.config = c;
+        s.config_error = None;
         drop(guard);
         Ok(self.view())
     }
+    pub fn search(&self, query: &str, offset: usize, limit: usize) -> SearchPage {
+        let frozen = self.frozen();
+        let s = frozen.state.read().unwrap();
+        let mut names = frozen.models_dev.pricing_names();
+        for model in builtin_pricing::catalog()
+            .keys()
+            .chain(s.cache.catalog.keys())
+            .chain(s.config.fixed.keys())
+        {
+            if model != "sample_spec" {
+                names.entry(model.clone()).or_insert(None);
+            }
+        }
+        let normalize = |s: &str| {
+            s.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        let query = normalize(query);
+        let mut matched_aliases = BTreeSet::new();
+        if !query.is_empty() {
+            for (alias, model) in builtin_pricing::aliases()
+                .iter()
+                .chain(s.config.aliases.iter())
+            {
+                if normalize(alias).contains(&query) {
+                    matched_aliases.insert(model.clone());
+                    if let Some(model) = builtin_pricing::canonical(model) {
+                        matched_aliases.insert(model);
+                    }
+                }
+            }
+        }
+        drop(s);
+        let mut rows = Vec::new();
+        let mut total = 0;
+        let at = now();
+        for (model, name) in names {
+            if !query.is_empty()
+                && !normalize(&model).contains(&query)
+                && !name.as_ref().is_some_and(|n| normalize(n).contains(&query))
+                && !matched_aliases.contains(&model)
+            {
+                continue;
+            }
+            let quote = frozen.quote_at(Some(&model), "1", at);
+            let Some(mut data) = quote.data else {
+                continue;
+            };
+            let matched_by = data["price_match"]["matchedBy"]
+                .as_str()
+                .or_else(|| data["models_dev_match"]["matchedBy"].as_str())
+                .unwrap_or("exact")
+                .to_owned();
+            let matched_model = data["models_dev_match"]["model"]
+                .as_str()
+                .unwrap_or(&quote.model)
+                .to_owned();
+            if quote.source == "models.dev" {
+                let Some((rates, _)) = crate::models_dev::rates(&data, 0, false) else {
+                    continue;
+                };
+                data = rates;
+            }
+            if data.get("input_cost_per_token").is_none()
+                && data.get("output_cost_per_token").is_none()
+            {
+                continue;
+            }
+            if total >= offset && rows.len() < limit.min(100) {
+                rows.push(SearchRow {
+                    model,
+                    name,
+                    source: quote.source,
+                    matched_model,
+                    matched_by,
+                    data,
+                });
+            }
+            total += 1;
+        }
+        SearchPage { rows, total }
+    }
     pub fn reload(&self) -> Result<View> {
-        let bytes =
-            storage::read_bounded(&self.path, LIMIT)?.ok_or_else(|| failure("定价文件不存在"))?;
-        let c: Config =
-            serde_json::from_slice(&bytes).map_err(|_| failure("定价文件无效，已保留当前价格"))?;
-        valid_config(&c)?;
+        let bytes = storage::read_bounded(&self.path, LIMIT)?;
         let mut guard = self.state.write().unwrap();
         let s = Arc::make_mut(&mut guard);
-        s.config = c;
-        s.revision = storage::digest(&bytes);
+        let config = match bytes.as_deref() {
+            Some(bytes) => serde_json::from_slice::<Config>(bytes)
+                .map_err(|_| failure("定价文件无效，已保留当前价格"))?,
+            None if s.revision == "missing" => s.config.clone(),
+            None => {
+                // Preserve the loaded overrides, while allowing a subsequent save
+                // to recreate the externally deleted optional configuration.
+                s.revision = "missing".into();
+                return Err(failure("自定义定价文件已删除，当前价格已保留，可重新保存"));
+            }
+        };
+        valid_config(&config)?;
+        s.config = config;
+        s.revision = storage::revision(bytes.as_deref());
+        s.config_error = None;
         drop(guard);
         Ok(self.view())
     }
     pub fn quote(&self, model: Option<&str>, multiplier: &str) -> Quote {
+        self.quote_at(model, multiplier, now())
+    }
+    pub fn quote_at(&self, model: Option<&str>, multiplier: &str, at: i64) -> Quote {
         let s = self.state.read().unwrap();
         let original = model.unwrap_or("");
-        let mut canonical =
-            if s.config.fixed.contains_key(original) || s.cache.catalog.contains_key(original) {
-                original
-            } else {
-                s.config
-                    .aliases
-                    .get(original)
-                    .map(String::as_str)
-                    .unwrap_or(original)
-            };
-        let mut matched_by = "exact";
-        if !s.config.fixed.contains_key(canonical) && !s.cache.catalog.contains_key(canonical) {
-            let names = crate::models_dev::names(canonical, true);
+        let exact = s.config.fixed.contains_key(original) || s.cache.catalog.contains_key(original);
+        let requested = if exact {
+            original
+        } else {
+            s.config
+                .aliases
+                .get(original)
+                .map(String::as_str)
+                .unwrap_or(original)
+        };
+        let mut canonical = requested.to_owned();
+        let mut matched_by = if requested == original {
+            "exact"
+        } else {
+            "user_alias"
+        };
+        if !s.config.fixed.contains_key(&canonical) && !s.cache.catalog.contains_key(&canonical) {
+            let names = crate::models_dev::names(requested, true);
             let matches: Vec<_> = s
-                .cache
-                .catalog
+                .config
+                .fixed
                 .keys()
+                .chain(s.cache.catalog.keys())
                 .filter(|key| names.contains(&key.to_ascii_lowercase()))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect();
             if matches.len() == 1 {
-                canonical = matches[0];
-                matched_by = "normalized";
+                canonical = matches[0].clone();
+                if matched_by == "exact" {
+                    matched_by = "normalized";
+                }
+            } else if let Some(known) = builtin_pricing::canonical(requested) {
+                canonical = if known == "gpt-5.3-codex"
+                    && requested.to_ascii_lowercase().contains("-spark")
+                    && (s.cache.catalog.contains_key("gpt-5.1-codex")
+                        || s.config.fixed.contains_key("gpt-5.1-codex"))
+                {
+                    "gpt-5.1-codex".into()
+                } else {
+                    known
+                };
+                if matched_by == "exact" && canonical != requested {
+                    matched_by = "known_alias";
+                }
             }
         }
-        let fixed = s.config.fixed.get(canonical);
+        let fixed = s.config.fixed.get(&canonical);
         let allowed = !s.config.excluded.contains(original)
-            && !s.config.excluded.contains(canonical)
+            && !s.config.excluded.contains(requested)
+            && !s.config.excluded.contains(&canonical)
             && s.config
                 .selected
                 .as_ref()
-                .is_none_or(|v| v.contains(canonical));
+                .is_none_or(|v| v.contains(&canonical));
         let mut data = fixed
-            .or_else(|| allowed.then(|| s.cache.catalog.get(canonical)).flatten())
+            .or_else(|| allowed.then(|| s.cache.catalog.get(&canonical)).flatten())
             .cloned();
-        if allowed && fixed.is_none() && !s.cache.catalog.contains_key(canonical) {
-            if let Some((data, version)) = self.models_dev.price(canonical) {
-                if !data["models_dev_match"]["model"]
+        let mut source = if fixed.is_some() { "fixed" } else { "sub2api" };
+        let mut version = fixed
+            .map(|v| storage::digest(v.to_string().as_bytes()))
+            .unwrap_or_else(|| s.cache.hash.clone());
+        if allowed && data.is_none() {
+            if let Some(card) = builtin_pricing::catalog().get(&canonical) {
+                data = Some(card.clone());
+                source = "sub2api_builtin";
+                version = builtin_pricing::VERSION.into();
+            } else if let Some((card, version)) = self.models_dev.price(&canonical) {
+                if !card["models_dev_match"]["model"]
                     .as_str()
-                    .is_some_and(|model| s.config.excluded.contains(model))
+                    .is_some_and(|m| s.config.excluded.contains(m))
                 {
                     return Quote {
-                        model: canonical.into(),
-                        data: Some(data),
+                        model: canonical,
+                        data: Some(card),
                         version,
                         source: "models.dev".into(),
                         multiplier: multiplier.into(),
@@ -419,23 +570,19 @@ impl Pricing {
                 }
             }
         }
-        if matched_by == "normalized" {
-            if let Some(data) = data.as_mut().and_then(Value::as_object_mut) {
-                data.insert(
-                    "price_match".into(),
-                    serde_json::json!({"matchedBy":matched_by,"model":canonical}),
-                );
+        if let Some(data) = &mut data {
+            if fixed.is_none() {
+                builtin_pricing::apply(&canonical, data, at);
+            }
+            if matched_by != "exact" {
+                data["price_match"] = serde_json::json!({"matchedBy":matched_by,"model":canonical});
             }
         }
         Quote {
-            model: canonical.into(),
-            version: if let Some(v) = fixed {
-                storage::digest(v.to_string().as_bytes())
-            } else {
-                s.cache.hash.clone()
-            },
-            source: if fixed.is_some() { "fixed" } else { "sub2api" }.into(),
+            model: canonical,
             data,
+            version,
+            source: source.into(),
             multiplier: multiplier.into(),
         }
     }
@@ -499,15 +646,18 @@ impl Pricing {
             fields: vec![],
             reason: Some("当前参考：来源、模型或价格阶梯缺少可比依据".into()),
         };
-        let state = self.state.read().unwrap();
-        let Some(wei) = state.cache.catalog.get(model) else {
+        let quote = self.quote(Some(model), "1");
+        if quote.source == "models.dev" {
+            return result;
+        }
+        let Some(wei) = quote.data else {
             return result;
         };
         let provider = wei["litellm_provider"].as_str();
-        let qualified = provider.map(|provider| format!("{provider}/{model}"));
+        let qualified = provider.map(|provider| format!("{provider}/{}", quote.model));
         let Some((data, _)) = self
             .models_dev
-            .price_from(model, source.or(qualified.as_deref()))
+            .price_from(&quote.model, source.or(qualified.as_deref()))
         else {
             return result;
         };
@@ -530,7 +680,7 @@ impl Pricing {
             ("cache_read", "cache_read_input_token_cost"),
             ("cache_write", "cache_creation_input_token_cost"),
         ] {
-            let Some((_, price, wei_threshold)) = unit_rate(wei, key, context, "") else {
+            let Some((_, price, wei_threshold)) = unit_rate(&wei, key, context, "") else {
                 continue;
             };
             let Some(reference) = rates.get(key).and_then(|v| decimal(&number_text(v))) else {
@@ -632,7 +782,8 @@ impl Pricing {
         result.map(|_| self.view())
     }
     fn view_unlocked(&self, s: &Inner) -> View {
-        let mut models = s.cache.catalog.clone();
+        let mut models = builtin_pricing::catalog().clone();
+        models.extend(s.cache.catalog.clone());
         models.extend(s.config.fixed.clone());
         models.remove("sample_spec");
         View {
@@ -642,7 +793,7 @@ impl Pricing {
             source: "Sub2API · Wei-Shaw/model-price-repo",
             checked_at: s.cache.checked_at,
             updated_at: s.cache.updated_at,
-            error: s.error.clone(),
+            error: s.config_error.clone().or_else(|| s.error.clone()),
             syncing: s.syncing,
             revision: s.revision.clone(),
         }
@@ -653,9 +804,13 @@ impl Pricing {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| failure("价格连接初始化失败"))?;
-        let (etag, oldhash) = {
+        let (etag, oldhash, old_catalog_hash) = {
             let s = self.state.read().unwrap();
-            (s.cache.etag.clone(), s.cache.hash.clone())
+            (
+                s.cache.etag.clone(),
+                s.cache.hash.clone(),
+                s.cache.catalog_hash.clone(),
+            )
         };
         let hash_body = fetch(&client, hash_url, None, 1024).await?;
         let hash = String::from_utf8(hash_body.1).map_err(|_| failure("价格校验码无效"))?;
@@ -666,11 +821,9 @@ impl Pricing {
             .ok_or_else(|| failure("价格校验码无效"))?
             .to_ascii_lowercase();
         if !force && hash == oldhash {
-            let mut cache = self.state.read().unwrap().cache.clone();
-            cache.checked_at = Some(now());
-            let bytes = serde_json::to_vec(&cache).map_err(|_| failure("价格缓存保存失败"))?;
-            storage::atomic_write_bounded(&self.cache_path, &bytes, None, LIMIT)?;
-            Arc::make_mut(&mut self.state.write().unwrap()).cache = cache;
+            Arc::make_mut(&mut self.state.write().unwrap())
+                .cache
+                .checked_at = Some(now());
             return Ok(());
         }
         let mut response = fetch(&client, source, etag.as_deref(), LIMIT).await?;
@@ -697,17 +850,20 @@ impl Pricing {
             let catalog: Catalog =
                 serde_json::from_slice(&response.1).map_err(|_| failure("价格数据无效"))?;
             validate(&catalog)?;
-            if cache.hash != hash {
-                cache.catalog_hash = catalog_hash(&catalog);
+            let next_catalog_hash = catalog_hash(&catalog);
+            if cache.catalog_hash != next_catalog_hash {
+                cache.catalog_hash = next_catalog_hash;
                 cache.catalog = catalog;
-                cache.hash = hash;
                 cache.updated_at = Some(now());
             }
+            cache.hash = hash;
             cache.etag = response.2;
         }
         cache.checked_at = Some(now());
-        let bytes = serde_json::to_vec(&cache).map_err(|_| failure("价格缓存保存失败"))?;
-        storage::atomic_write_bounded(&self.cache_path, &bytes, None, LIMIT)?;
+        if cache.catalog_hash != old_catalog_hash || !self.cache_path.exists() {
+            let bytes = serde_json::to_vec(&cache).map_err(|_| failure("价格缓存保存失败"))?;
+            storage::atomic_write_bounded(&self.cache_path, &bytes, None, LIMIT)?;
+        }
         Arc::make_mut(&mut self.state.write().unwrap()).cache = cache;
         Ok(())
     }
@@ -748,21 +904,17 @@ async fn fetch(
 impl Quote {
     pub fn calculate(&self, t: &Tokens, tier: Option<&str>) -> Option<PriceSnapshot> {
         let original = self.data.as_ref()?;
+        let tier = tier.unwrap_or("default").trim().to_ascii_lowercase();
         let context = t
             .input?
             .saturating_add(t.cache_read.unwrap_or(0))
             .saturating_add(t.cache_write.unwrap_or(0));
         let converted = if self.source == "models.dev" {
-            Some(crate::models_dev::rates(
-                original,
-                context,
-                tier == Some("fast"),
-            )?)
+            Some(crate::models_dev::rates(original, context, tier == "fast")?)
         } else {
             None
         };
         let data = converted.as_ref().map(|(data, _)| data).unwrap_or(original);
-        let tier = tier.unwrap_or("default").trim().to_ascii_lowercase();
         let suffix = match tier.as_str() {
             "default" | "standard" | "auto" => "",
             "batch" => "_batches",
@@ -816,11 +968,27 @@ impl Quote {
             } else {
                 suffix
             };
-            let (key, rate, _) = unit_rate(data, name, context, selected_suffix).or_else(|| {
-                standard
-                    .then(|| unit_rate(data, name, context, ""))
-                    .flatten()
-            })?;
+            let (key, rate, _) = unit_rate(data, name, context, selected_suffix)
+                .or_else(|| {
+                    standard
+                        .then(|| unit_rate(data, name, context, ""))
+                        .flatten()
+                })
+                .or_else(|| {
+                    // Known Token tariffs use the text rate when the upstream card
+                    // has no separate image Token rate. Explicit zero stays zero.
+                    if standard && builtin_pricing::canonical(&self.model).is_some() {
+                        let fallback = match name {
+                            "input_cost_per_image_token" => "input_cost_per_token",
+                            "output_cost_per_image_token" => "output_cost_per_token",
+                            _ => return None,
+                        };
+                        unit_rate(data, fallback, context, selected_suffix)
+                            .or_else(|| unit_rate(data, fallback, context, ""))
+                    } else {
+                        None
+                    }
+                })?;
             let explicit = key.ends_with(selected_suffix) && !selected_suffix.is_empty();
             let rate = if explicit || explicit_priority {
                 rate
@@ -850,7 +1018,14 @@ impl Quote {
         charge("output_cost_per_image_token", t.image_output.unwrap_or(0))?;
         charge("input_cost_per_audio_token", t.audio_input.unwrap_or(0))?;
         charge("output_cost_per_audio_token", t.audio_output.unwrap_or(0))?;
-        charge("cache_read_input_token_cost", t.cache_read.unwrap_or(0))?;
+        let cached = t.cache_read.unwrap_or(0);
+        let image_cached = t.image_cache_read.unwrap_or(0).min(cached);
+        if data.get("cache_read_input_image_token_cost").is_some() {
+            charge("cache_read_input_token_cost", cached - image_cached)?;
+            charge("cache_read_input_image_token_cost", image_cached)?;
+        } else {
+            charge("cache_read_input_token_cost", cached)?;
+        }
         let short_rate = data
             .get("cache_creation_input_token_cost")
             .and_then(|v| decimal(&number_text(v)));
@@ -880,12 +1055,11 @@ impl Quote {
             charge("cache_creation_input_token_cost_above_1hr", long)?;
             charge("cache_creation_input_token_cost", short)?;
         }
-        if data["mode"].as_str().is_some_and(|s| {
-            matches!(
-                s,
-                "image_generation" | "video_generation" | "audio_transcription"
-            )
-        }) {
+        if data["mode"]
+            .as_str()
+            .is_some_and(|s| matches!(s, "video_generation" | "audio_transcription"))
+            || (data["mode"].as_str() == Some("image_generation") && t.image_output.is_none())
+        {
             return None;
         }
         cost = cost.checked_mul(decimal(&self.multiplier)?)?;
@@ -898,7 +1072,7 @@ impl Quote {
             cost: cost.normalize().to_string(),
             basis: Some({
                 let mut basis = price_basis(original);
-                basis["billing_engine"] = Value::String("sub2api-0a2a29b".into());
+                basis["billing_engine"] = Value::String(builtin_pricing::VERSION.into());
                 if let Some((_, threshold)) = &converted {
                     basis["models_dev_context_threshold"] = serde_json::json!(threshold);
                 }
@@ -916,11 +1090,19 @@ fn unit_rate(
 ) -> Option<(String, Decimal, Option<u64>)> {
     let mut key = format!("{name}{suffix}");
     let mut band = None;
-    for threshold in [100_000, 200_000, 272_000] {
-        let candidate = format!("{name}_above_{}k_tokens{suffix}", threshold / 1000);
-        if context > threshold && data.get(&candidate).is_some() {
-            key = candidate;
-            band = Some(threshold);
+    let prefix = format!("{name}_above_");
+    let ending = format!("k_tokens{suffix}");
+    for candidate in data.as_object()?.keys() {
+        if let Some(threshold) = candidate
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(&ending))
+            .and_then(|n| n.parse::<u64>().ok())
+            .and_then(|n| n.checked_mul(1000))
+        {
+            if context > threshold && band.is_none_or(|old| threshold > old) {
+                key = candidate.clone();
+                band = Some(threshold);
+            }
         }
     }
     let mut rate = decimal(&number_text(data.get(&key)?))?;

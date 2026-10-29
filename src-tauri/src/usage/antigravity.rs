@@ -72,6 +72,74 @@ fn label(v: Option<&str>) -> Option<String> {
         })
         .map(str::to_owned)
 }
+pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
+    let mut changed = false;
+    if let Some((name, effort)) = a.model_display_name.as_deref().and_then(|name| {
+        let (name, suffix) = name.strip_suffix(')')?.rsplit_once(" (")?;
+        let effort = suffix.to_ascii_lowercase();
+        (!name.is_empty()
+            && matches!(
+                effort.as_str(),
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            ))
+        .then(|| (name.to_owned(), effort))
+    }) {
+        a.model_display_name = Some(name);
+        a.reasoning_effort.get_or_insert(effort);
+        changed = true;
+    }
+    if a.duration_ms == 0 {
+        if let Some(total) = a
+            .first_token_ms
+            .zip(a.generation_ms)
+            .and_then(|(f, g)| f.checked_add(g))
+            .filter(|n| *n > 0)
+        {
+            a.duration_ms = total;
+            a.availability.insert("duration".into(), "reported".into());
+            a.parse_reasons.retain(|s| s != "attempt_time_unreported");
+            changed = true;
+        } else if a
+            .availability
+            .get("duration")
+            .is_none_or(|s| s == "reported")
+        {
+            a.availability
+                .insert("duration".into(), "upstream_unreported".into());
+            if !a
+                .parse_reasons
+                .iter()
+                .any(|s| s == "attempt_time_unreported")
+            {
+                a.parse_reasons.push("attempt_time_unreported".into());
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+pub(super) fn normalize_record(r: &mut Record) -> bool {
+    if r.source != "antigravity" {
+        return false;
+    }
+    let mut changed = false;
+    for a in &mut r.attempts {
+        changed |= normalize_attempt(a);
+    }
+    if let Some(a) = r.final_attempt() {
+        if r.finished_at.is_some_and(|end| end <= a.started_at) && a.duration_ms > 0 {
+            if let Some(end) = i64::try_from(a.duration_ms)
+                .ok()
+                .and_then(|d| a.started_at.checked_add(d))
+            {
+                r.finished_at = Some(end);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
 #[derive(Default)]
 struct StepTime {
     start: Option<i64>,
@@ -151,7 +219,7 @@ fn price(record: &mut Record, pricing: &Pricing, settings: &Settings) {
             .clone()
             .or_else(|| a.requested_model.clone());
         a.price = pricing
-            .quote(a.pricing_model.as_deref(), &a.cost_multiplier)
+            .quote_at(a.pricing_model.as_deref(), &a.cost_multiplier, a.started_at)
             .calculate(&a.tokens, a.price_tier());
         a.pricing_basis = Some("estimated_import_snapshot".into());
         a.annotate_availability("antigravity");
@@ -288,20 +356,24 @@ fn record(
         let first = duration(field("timeToFirstToken"));
         let generation = duration(field("streamingDuration"));
         let attempt_start = time(field("startedAt")).or_else(|| single.then_some(start));
-        let explicit_end =
+        let reported_end =
             time(field("completedAt")).or_else(|| final_info.then_some(finish).flatten());
+        let explicit_end =
+            reported_end.filter(|end| attempt_start.is_none_or(|start| *end > start));
         let elapsed = attempt_start
             .zip(explicit_end)
             .and_then(|(s, e)| u64::try_from(e.checked_sub(s)?).ok())
             .or_else(|| first.zip(generation).and_then(|(f, g)| f.checked_add(g)));
         let is_failed = failed(info) || (final_info && failed(chat));
         let completed_at = explicit_end
-            .or_else(|| final_info.then_some(finish).flatten())
             .or_else(|| {
                 attempt_start
                     .zip(elapsed)
                     .and_then(|(s, d)| s.checked_add(i64::try_from(d).ok()?))
             })
+            // A completion marker still establishes the outcome when its
+            // clock has insufficient precision to measure elapsed time.
+            .or_else(|| reported_end.filter(|end| attempt_start.is_none_or(|start| *end >= start)))
             .or_else(|| is_failed.then_some(end).flatten());
         let mut tokens = tokens(u);
         tokens.fill_missing(&self::tokens(&info["usage"]));
@@ -386,6 +458,7 @@ fn record(
         {
             a.parse_reasons.push("reasoning_exceeds_output".into());
         }
+        normalize_attempt(&mut a);
         r.finished_at = completed_at;
         r.attempts.push(a);
     }

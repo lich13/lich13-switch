@@ -118,6 +118,12 @@ https://github.com/Wei-Shaw/model-price-repo
 
 Seed fetched 2026-10-08; SHA-256: `cbecf56c1cd81f32928bbb623c65ab473eae8cb00136399c071c85090549e452`.
 
+The v0.26.10 Token tariff cards, explicit aliases, cache TTL, context, service-tier and DeepSeek request-time rules are independently implemented with behavioral reference to Wei-Shaw/sub2api at `a3298b46ebe239fb0720b068a1eb3383955bdac2` (LGPL-3.0). The bundled numerical tariff data is in `src-tauri/resources/usage-builtin-prices.json`; Go implementation and tests are not copied. Unknown model family guessing and quantity/duration-based media billing are excluded.
+
+https://github.com/Wei-Shaw/sub2api/blob/a3298b46ebe239fb0720b068a1eb3383955bdac2/backend/internal/service/billing_service.go
+https://github.com/Wei-Shaw/sub2api/blob/a3298b46ebe239fb0720b068a1eb3383955bdac2/backend/internal/service/pricing_service.go
+
+
 
 The v0.16 request-table layout, request/response/pricing model distinction, and Alpha Search route review use CC Switch at `2db86e94da13365caae55bb08d09295e31500d21` (MIT), under the notice above. The eight-column layout intentionally omits speed. The USD 0.01 per confirmed search rule is specific to this application; it is not represented as an upstream price rule.
 

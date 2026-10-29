@@ -338,6 +338,7 @@ function AttemptDetails({
             ? ([
                 ["服务来源", a.apiProvider],
                 ["模型名称", a.modelDisplayName],
+                ["思考强度", a.reasoningEffort],
                 ...(a.errorCode ? [["错误码", a.errorCode]] : []),
               ] as [string, React.ReactNode][])
             : []),
@@ -659,6 +660,7 @@ function AttemptDetails({
                             cache_write_5m: "短时缓存写入",
                             cache_write_1h: "长时缓存写入",
                             image_input: "图片输入",
+                            image_cache_read: "图片缓存读取",
                             image_output: "图片输出",
                             audio_input: "音频输入",
                             audio_output: "音频输出",

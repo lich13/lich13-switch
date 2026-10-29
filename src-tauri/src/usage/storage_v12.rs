@@ -634,6 +634,9 @@ fn save_attempt(
     if let Some(reasoning) = a.tokens.reasoning {
         diagnostic.insert("reasoningTokens".into(), json!(reasoning));
     }
+    if let Some(image_cached) = a.tokens.image_cache_read {
+        diagnostic.insert("imageCacheReadTokens".into(), json!(image_cached));
+    }
     for field in [
         "transfer",
         "end",
@@ -886,6 +889,9 @@ fn load_attempt(c: &Connection, table: &str, owner: i64, ordinal: i64, r: &Value
     let mut tokens = serde_json::Map::new();
     if let Some(reasoning) = obj.remove("reasoningTokens") {
         tokens.insert("reasoning".into(), reasoning);
+    }
+    if let Some(image_cached) = obj.remove("imageCacheReadTokens") {
+        tokens.insert("imageCacheRead".into(), image_cached);
     }
     for (i, k) in TOKENS.iter().enumerate() {
         tokens.insert((*k).into(), json!(db(row.get::<_, Option<u64>>(4 + i))?));
@@ -1272,12 +1278,13 @@ pub(super) fn update(c: &Connection, r: &Record) -> Result<()> {
         save(c, r, effective, seq)
     } else {
         db(c.execute(
-            "UPDATE records SET body=?2,signature=?3,model=?4 WHERE id=?1",
+            "UPDATE records SET body=?2,signature=?3,model=?4,time=?5 WHERE id=?1",
             params![
                 r.id,
                 bodies::encode(c, r)?,
                 r.signature(),
-                r.final_attempt().and_then(|a| a.grouping_model())
+                r.final_attempt().and_then(|a| a.grouping_model()),
+                r.event_time()
             ],
         ))?;
         Ok(())

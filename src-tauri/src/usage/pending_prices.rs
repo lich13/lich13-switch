@@ -7,7 +7,7 @@ fn db<T>(result: rusqlite::Result<T>) -> Result<T> {
 }
 
 pub(super) const SELECT: &str =
-    "SELECT r.body FROM pending_prices p CROSS JOIN records r ON r.id=p.id";
+    "SELECT p.id,r.body FROM pending_prices p CROSS JOIN records r ON r.id=p.id WHERE p.id>?1 ORDER BY p.id LIMIT 128";
 
 pub(super) fn ensure(connection: &Connection) -> Result<()> {
     // Installation and its first scan commit together. Older writers also maintain

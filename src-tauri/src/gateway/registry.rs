@@ -17,6 +17,7 @@ pub struct Registry {
     pub ports: Arc<Mutex<Vec<u16>>>,
     pub lifecycle: tokio::sync::Mutex<()>,
     pub listener: Listener,
+    pub freeze: super::freeze::Gate,
 }
 impl Registry {
     pub fn new(data: PathBuf, port: Option<u16>) -> Result<Self> {
@@ -28,6 +29,7 @@ impl Registry {
             ports: Arc::new(Mutex::new(vec![port])),
             lifecycle: tokio::sync::Mutex::new(()),
             listener,
+            freeze: super::freeze::Gate::default(),
         })
     }
     pub fn gateway(&self, client: ClientId) -> Option<Gateway> {

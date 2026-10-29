@@ -31,6 +31,7 @@ export function promptTokens(attempts: Attempt[]): Tokens {
     "cacheWrite5m",
     "cacheWrite1h",
     "imageInput",
+    "imageCacheRead",
     "imageOutput",
     "audioInput",
     "audioOutput",

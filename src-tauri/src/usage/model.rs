@@ -42,6 +42,9 @@ pub struct Tokens {
     pub cache_write_5m: Option<u64>,
     pub cache_write_1h: Option<u64>,
     pub image_input: Option<u64>,
+    /// Reported subset of cache_read, separate from fresh image input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_cache_read: Option<u64>,
     pub image_output: Option<u64>,
     pub audio_input: Option<u64>,
     pub audio_output: Option<u64>,
@@ -65,6 +68,7 @@ impl Tokens {
             cache_write_5m,
             cache_write_1h,
             image_input,
+            image_cache_read,
             image_output,
             audio_input,
             audio_output
@@ -83,6 +87,7 @@ impl Tokens {
             cache_write_5m,
             cache_write_1h,
             image_input,
+            image_cache_read,
             image_output,
             audio_input,
             audio_output
@@ -112,6 +117,7 @@ impl Tokens {
             cache_write_5m,
             cache_write_1h,
             image_input,
+            image_cache_read,
             image_output,
             audio_input,
             audio_output
@@ -130,6 +136,7 @@ impl Tokens {
             cache_write_5m,
             cache_write_1h,
             image_input,
+            image_cache_read,
             image_output,
             audio_input,
             audio_output
@@ -212,6 +219,10 @@ fn parse_usage(
     let output = count(usage, &["output_tokens", "completion_tokens"]);
     let reasoning = count(usage, &["reasoning_tokens"])
         .or_else(|| count(output_details, &["reasoning_tokens"]));
+    let image_cache_read = details
+        .get("cached_tokens_details")
+        .and_then(|cached| count(cached, &["image_tokens"]))
+        .or_else(|| count(details, &["cached_image_tokens"]));
     if reasoning
         .zip(output)
         .is_some_and(|(reasoning, output)| reasoning > output)
@@ -235,7 +246,14 @@ fn parse_usage(
             cache_write: write,
             cache_write_5m: short,
             cache_write_1h: long,
-            image_input: count(details, &["image_tokens"]),
+            image_input: count(details, &["image_tokens"]).map(|n| {
+                if exclusive {
+                    n
+                } else {
+                    n.saturating_sub(image_cache_read.unwrap_or(0))
+                }
+            }),
+            image_cache_read,
             image_output: count(output_details, &["image_tokens"]),
             audio_input: count(details, &["audio_tokens"]),
             audio_output: count(output_details, &["audio_tokens"]),
@@ -410,6 +428,7 @@ impl Meter {
                     cache_write_5m,
                     cache_write_1h,
                     image_input,
+                    image_cache_read,
                     image_output,
                     audio_input,
                     audio_output
@@ -832,6 +851,8 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_ms: Option<u64>,
@@ -1037,6 +1058,7 @@ impl Default for Attempt {
             upstream_model: None,
             response_model: None,
             model_display_name: None,
+            reasoning_effort: None,
             api_provider: None,
             generation_ms: None,
             error_code: None,
@@ -1135,7 +1157,11 @@ impl Attempt {
             self.search_price()
         } else {
             pricing
-                .quote(self.pricing_model.as_deref(), &self.cost_multiplier)
+                .quote_at(
+                    self.pricing_model.as_deref(),
+                    &self.cost_multiplier,
+                    self.started_at,
+                )
                 .calculate(&self.tokens, self.price_tier())
         }
     }

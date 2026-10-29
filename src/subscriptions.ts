@@ -14,7 +14,7 @@ export function subscriptions(onError: (error: unknown) => void) {
       event: K,
       fn: (value: EventMap[K]) => void | Promise<void>,
     ) {
-      void subscribe(event, (value) => {
+      return subscribe(event, (value) => {
         if (disposed) return;
         try {
           void Promise.resolve(fn(value)).catch(failed);

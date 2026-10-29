@@ -791,6 +791,7 @@ impl Delivery {
 pub struct Protocol {
     business: Option<(super::Gateway, super::testing::BusinessIdentity)>,
     wait_budget: Option<(super::wait_budget::WaitBudget, Option<tokio::time::Instant>)>,
+    traffic: Option<super::freeze::Ticket>,
     rpm_completion: Option<super::admission::Completion>,
     observer: Option<Observer>,
     thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
@@ -832,6 +833,7 @@ impl Protocol {
         Self {
             business: None,
             wait_budget: None,
+            traffic: None,
             rpm_completion: None,
             observer: None,
             thread: None,
@@ -874,6 +876,7 @@ impl Protocol {
     }
     pub(super) fn attach_wait_budget(&mut self, budget: &super::wait_budget::WaitBudget) {
         self.wait_budget = Some((budget.clone(), budget.deadline()));
+        self.traffic = budget.traffic();
     }
     pub(super) fn effective_output(&self) {
         if self.compaction_operation && !self.succeeded() {
@@ -1136,6 +1139,11 @@ impl Protocol {
         self.compaction_operation = operation == crate::usage::model::Operation::Compaction;
     }
     pub fn output_handed(&self, business: bool) {
+        if business {
+            if let Some(traffic) = &self.traffic {
+                traffic.streaming();
+            }
+        }
         if business && !self.compaction_operation {
             if let Some((lease, provider)) = &self.ownership {
                 lease.output_started(provider);

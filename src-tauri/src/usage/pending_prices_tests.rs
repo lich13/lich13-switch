@@ -219,13 +219,15 @@ fn pending_select_scans_pending_ids_then_searches_the_records_primary_key() {
     let sql = format!("EXPLAIN QUERY PLAN {}", pending_prices::SELECT);
     let mut statement = connection.prepare(&sql).unwrap();
     let details = statement
-        .query_map([], |row| row.get::<_, String>(3))
+        .query_map([""], |row| row.get::<_, String>(3))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
 
     assert!(
-        details.iter().any(|detail| detail == "SCAN p"),
+        details
+            .iter()
+            .any(|detail| detail.contains("SEARCH p USING PRIMARY KEY (id>?)")),
         "{details:?}"
     );
     assert!(

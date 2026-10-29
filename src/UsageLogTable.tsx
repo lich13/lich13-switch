@@ -323,6 +323,13 @@ export default function UsageLogTable({
                   >
                     <strong>{model}</strong>
                     <span className="usage-badges">
+                      {a.reasoningEffort && (
+                        <span className="usage-badge">
+                          思考{" "}
+                          {a.reasoningEffort[0].toUpperCase() +
+                            a.reasoningEffort.slice(1)}
+                        </span>
+                      )}
                       {a.stream && !native && (
                         <span className="usage-badge stream">流式</span>
                       )}

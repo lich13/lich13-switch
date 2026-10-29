@@ -1080,6 +1080,12 @@ async fn session_once(
             break frame;
         }
     };
+    let mut traffic = g.0.registry.freeze.request();
+    traffic.waiting();
+    if request_budget.deadline().is_none() {
+        request_budget.begin();
+    }
+    request_budget.attach_traffic(&traffic);
     let mut turn_rules = g
         .request_state()
         .map_err(|_| (1011, code::STORE))?
@@ -1155,6 +1161,7 @@ async fn session_once(
     let mut established_capacity_owner =
         super::routing::capacity_owner(g.client_id(), manual, ownership.as_deref());
     let mut budget = Budget::new(cfg.queue_seconds);
+    budget.traffic = Some(traffic.clone());
     budget.track(
         &g.0.admission,
         ownership.as_deref(),
@@ -1862,6 +1869,8 @@ async fn session_once(
     let mut previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)> = None;
     let mut protocol = Some(initial_protocol);
     let mut pending: Option<Frame> = None;
+    let mut pending_traffic: Option<super::freeze::Ticket> = None;
+    let mut freeze_changes = g.0.registry.freeze.subscribe();
     let mut pending_received_at = turn_received_at;
     let mut pending_started = tokio::time::Instant::now();
     let mut confirmed_model: Option<String> = None;
@@ -1921,6 +1930,7 @@ async fn session_once(
             return Ok(());
         }
         if retry_pending {
+            traffic.waiting();
             let requirement = Requirement::model(current_model.as_deref());
             let hints = value(&replay_frame)
                 .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
@@ -2063,6 +2073,7 @@ async fn session_once(
                     usage_trace = None;
                     ownership = None;
                     failover.detach();
+                    traffic.finish();
                     request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
                     continue;
@@ -2103,6 +2114,7 @@ async fn session_once(
                 Some(&route.provider.id),
             )?;
             let mut budget = Budget::new(cfg.queue_seconds);
+            budget.traffic = Some(traffic.clone());
             budget.thread = thread_request.clone();
             budget.handoff_owner = ownership
                 .as_ref()
@@ -2162,6 +2174,7 @@ async fn session_once(
                     usage_trace = None;
                     ownership = None;
                     failover.detach();
+                    traffic.finish();
                     request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
                     continue;
@@ -2272,6 +2285,7 @@ async fn session_once(
                     ownership = None;
                     failover.detach();
                     retry_pending = false;
+                    traffic.finish();
                     request_budget.complete(request_budget.deadline());
                     cancellation(client).await?;
                     continue;
@@ -2437,7 +2451,10 @@ async fn session_once(
         }
         if turn.is_none() {
             if let Some(frame) = pending.take() {
-                request_budget.begin_at(pending_started);
+                traffic.finish();
+                traffic = pending_traffic.take().expect("pending turn has a ticket");
+                request_budget.begin_at(pending_started + traffic.paused_for());
+                request_budget.attach_traffic(&traffic);
                 turn_rules = g
                     .request_state()
                     .map_err(|_| (1011, code::STORE))?
@@ -2600,6 +2617,7 @@ async fn session_once(
                     .await;
                     match waited {
                         Err(TURN_CANCELLED) => {
+                            traffic.finish();
                             request_budget.complete(request_budget.deadline());
                             cancellation(client).await?;
                             continue 'turns;
@@ -2628,6 +2646,7 @@ async fn session_once(
                 }
                 tail_deadline = None;
                 let mut budget = Budget::new(cfg.queue_seconds);
+                budget.traffic = Some(traffic.clone());
                 budget.track(
                     &g.0.admission,
                     ownership.as_deref(),
@@ -2759,6 +2778,7 @@ async fn session_once(
                         turn = Some(admission)
                     }
                     Err(TURN_CANCELLED) => {
+                        traffic.finish();
                         request_budget.complete(request_budget.deadline());
                         cancellation(client).await?;
                         continue;
@@ -3015,7 +3035,8 @@ async fn session_once(
         }
         tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(pending_started + Duration::from_secs(cfg.retry_budget_seconds)), if pending.is_some() => {
+            _ = freeze_changes.changed() => {},
+            _ = tokio::time::sleep_until(pending_started + Duration::from_secs(cfg.retry_budget_seconds) + pending_traffic.as_ref().map_or(Duration::ZERO, |t| t.paused_for())), if pending.is_some() && !pending_traffic.as_ref().is_some_and(|t| t.paused()) => {
                 return Err((1013, code::FIRST_BYTE_TIMEOUT));
             },
             _ = client.closed.changed() => {
@@ -3146,6 +3167,7 @@ async fn session_once(
                     let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
                     if protocol.as_ref().map_or_else(|| matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error"), |u| u.terminal().is_some()) {
+                        traffic.finishing();
                         request_budget.complete(request_budget.deadline());
                         if let Some(mut admission) = turn.take() {
                             if let Some(u)=protocol.as_mut() {
@@ -3197,6 +3219,7 @@ async fn session_once(
                     }
                     if turn.is_none() { u.attach_thread(None); thread_request = None; }
                 }
+                if settled_turn.is_some() { traffic.finish(); }
             },
             frame = client.incoming.recv() => {
                 let Some(frame) = frame else {
@@ -3218,6 +3241,9 @@ async fn session_once(
                     pending_received_at = crate::usage::model::now();
                     pending_started = tokio::time::Instant::now();
                     pending = Some(frame);
+                    let ticket = g.0.registry.freeze.request();
+                    ticket.waiting();
+                    pending_traffic = Some(ticket);
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
                     if e.0 == 1008 {
                         if let Some(mut admission) = turn.take() {

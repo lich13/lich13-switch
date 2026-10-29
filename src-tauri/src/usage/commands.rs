@@ -74,12 +74,34 @@ pub fn get_pricing(r: R<'_>) -> Result<pricing::View> {
     Ok(r.usage.prices()?.view())
 }
 #[tauri::command]
+pub async fn search_pricing(
+    r: R<'_>,
+    query: String,
+    offset: usize,
+    limit: usize,
+) -> Result<pricing::SearchPage> {
+    if query.len() > 256 || limit == 0 || limit > 100 || offset > 100_000 {
+        return Err(failure("定价查询参数无效"));
+    }
+    let prices = r.usage.prices()?.frozen();
+    tokio::task::spawn_blocking(move || prices.search(&query, offset, limit))
+        .await
+        .map_err(|_| failure("定价查询中断"))
+}
+#[tauri::command]
 pub fn get_models_dev(r: R<'_>) -> Result<crate::models_dev::View> {
     Ok(r.usage.prices()?.models_dev.view())
 }
 #[tauri::command]
 pub async fn update_models_dev(r: R<'_>, app: tauri::AppHandle) -> Result<crate::models_dev::View> {
+    let before = r.usage.prices()?.models_dev.view().version;
     let view = r.usage.prices()?.models_dev.refresh(true).await?;
+    if view.error.is_none() && view.version != before {
+        let service = r.usage.clone();
+        tokio::task::spawn_blocking(move || service.backfill_prices())
+            .await
+            .map_err(|_| failure("价格补算中断"))??;
+    }
     let _ = app.emit("pricing-state", ());
     Ok(view)
 }
@@ -103,7 +125,7 @@ pub async fn configure_pricing(
 ) -> Result<pricing::View> {
     let result = r.usage.prices()?.configure(config, &expected_revision)?;
     let service = r.usage.clone();
-    tokio::task::spawn_blocking(move || service.query(|db| db.backfill(service.prices()?)))
+    tokio::task::spawn_blocking(move || service.backfill_prices())
         .await
         .map_err(|_| failure("价格补算中断"))??;
     let _ = app.emit("usage-state", ());
@@ -120,7 +142,7 @@ pub async fn update_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::
 pub async fn reload_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::View> {
     let result = r.usage.prices()?.reload()?;
     let service = r.usage.clone();
-    tokio::task::spawn_blocking(move || service.query(|db| db.backfill(service.prices()?)))
+    tokio::task::spawn_blocking(move || service.backfill_prices())
         .await
         .map_err(|_| failure("价格补算中断"))??;
     let _ = app.emit("usage-state", ());

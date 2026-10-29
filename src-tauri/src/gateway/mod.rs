@@ -23,6 +23,7 @@ pub(crate) use takeover::manages_auth;
 mod client;
 #[cfg(test)]
 mod client_cancel_tests;
+pub mod freeze;
 mod listener;
 mod locks;
 mod registry;
@@ -291,6 +292,9 @@ fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
 impl Gateway {
+    pub fn freeze_gate(&self) -> freeze::Gate {
+        self.0.registry.freeze.clone()
+    }
     pub fn cancel_wait(&self, request_id: &str) -> bool {
         self.0.pending_requests.cancel(request_id)
     }

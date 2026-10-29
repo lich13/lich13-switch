@@ -25,6 +25,21 @@ struct Pending {
     started: Instant,
     deadline: Instant,
     compaction_execution: bool,
+    traffic: Option<super::freeze::Ticket>,
+    paused_before: Duration,
+}
+impl Pending {
+    fn paused_for(&self) -> Duration {
+        self.traffic.as_ref().map_or(Duration::ZERO, |t| {
+            t.paused_for().saturating_sub(self.paused_before)
+        })
+    }
+    fn paused(&self) -> bool {
+        self.traffic.as_ref().is_some_and(|t| t.paused())
+    }
+    fn expires_at(&self) -> Instant {
+        self.deadline + self.paused_for()
+    }
 }
 #[derive(Default)]
 struct State {
@@ -68,14 +83,22 @@ impl Registry {
                 let state = shared.state.lock().unwrap();
                 let active = state.active.as_ref()?;
                 let mut view = active.view.clone();
-                view.elapsed_seconds = active.started.elapsed().as_secs();
-                view.remaining_seconds = (!active.compaction_execution).then(|| {
-                    active
-                        .deadline
-                        .saturating_duration_since(Instant::now())
-                        .as_millis()
-                        .div_ceil(1000) as u64
-                });
+                view.elapsed_seconds = active
+                    .started
+                    .elapsed()
+                    .saturating_sub(active.paused_for())
+                    .as_secs();
+                if active.paused() {
+                    view.phase = "frozen".into();
+                }
+                view.remaining_seconds =
+                    (!active.compaction_execution && !active.paused()).then(|| {
+                        active
+                            .expires_at()
+                            .saturating_duration_since(Instant::now())
+                            .as_millis()
+                            .div_ceil(1000) as u64
+                    });
                 Some(view)
             })
             .collect();
@@ -99,7 +122,8 @@ impl Registry {
         };
         let mut state = shared.state.lock().unwrap();
         if !state.active.as_ref().is_some_and(|p| {
-            p.view.request_id == id && (p.compaction_execution || p.deadline > Instant::now())
+            p.view.request_id == id
+                && (p.compaction_execution || p.paused() || p.expires_at() > Instant::now())
         }) {
             return false;
         }
@@ -169,6 +193,8 @@ impl WaitBudget {
             started,
             deadline: started + Duration::from_secs(self.seconds),
             compaction_execution: false,
+            traffic: None,
+            paused_before: Duration::ZERO,
         });
         if let Some(registry) = &self.shared.registry {
             registry
@@ -182,9 +208,30 @@ impl WaitBudget {
         drop(state);
         self.shared.changes.send_replace(());
     }
+    pub fn attach_traffic(&self, traffic: &super::freeze::Ticket) {
+        if let Some(active) = &mut self.shared.state.lock().unwrap().active {
+            active.paused_before = traffic.paused_for();
+            active.traffic = Some(traffic.clone());
+        }
+        self.shared.changes.send_replace(());
+    }
+    pub fn traffic(&self) -> Option<super::freeze::Ticket> {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .and_then(|p| p.traffic.clone())
+    }
     pub fn describe(&self, provider: Option<&str>, model: Option<&str>, phase: &str) {
         let mut state = self.shared.state.lock().unwrap();
         if let Some(active) = &mut state.active {
+            if matches!(phase, "admission" | "capacity" | "retry" | "ws_wait") {
+                if let Some(traffic) = &active.traffic {
+                    traffic.waiting();
+                }
+            }
             if let Some(provider) = provider {
                 active.view.provider_id = Some(provider.into());
             }
@@ -294,7 +341,8 @@ impl WaitBudget {
             .is_some_and(|p| {
                 !p.compaction_execution
                     && Some(p.deadline) == deadline
-                    && Instant::now() >= p.deadline
+                    && !p.paused()
+                    && Instant::now() >= p.expires_at()
             })
     }
     pub async fn cancelled(&self) {
@@ -313,14 +361,28 @@ impl WaitBudget {
         let mut changes = self.shared.changes.subscribe();
         loop {
             changes.borrow_and_update();
-            if let Some(deadline) = self.deadline().filter(|_| !self.executing_compaction()) {
+            let mut traffic_changes = self.traffic().map(|t| t.subscribe());
+            let deadline = self
+                .shared
+                .state
+                .lock()
+                .unwrap()
+                .active
+                .as_ref()
+                .filter(|p| !p.compaction_execution && !p.paused())
+                .map(|p| (p.deadline, p.expires_at()));
+            if let Some((identity, deadline)) = deadline {
                 tokio::select! {
                     biased;
                     _ = changes.changed() => {},
-                    _ = tokio::time::sleep_until(deadline) => { if self.expired(Some(deadline)) { return; } }
+                    _ = super::freeze::changed(&mut traffic_changes) => {},
+                    _ = tokio::time::sleep_until(deadline) => { if self.expired(Some(identity)) { return; } }
                 }
-            } else if changes.changed().await.is_err() {
-                return;
+            } else {
+                tokio::select! {
+                    _ = changes.changed() => {},
+                    _ = super::freeze::changed(&mut traffic_changes) => {},
+                }
             }
         }
     }
@@ -331,6 +393,45 @@ mod tests {
     use super::*;
     use crate::gateway::protocol::Protocol;
     use serde_json::json;
+
+    #[tokio::test(start_paused = true)]
+    async fn freeze_preserves_deadline_identity_and_only_live_wait_time_counts() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(10, &registry);
+        let gate = crate::gateway::freeze::Gate::default();
+        let traffic = gate.request();
+        traffic.waiting();
+        budget.begin();
+        budget.attach_traffic(&traffic);
+        let identity = budget.deadline();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        gate.set(true).unwrap();
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(!budget.expired(identity));
+        assert!(tokio::time::timeout(Duration::from_secs(1), budget.wait())
+            .await
+            .is_err());
+        let row = registry.view().pop().unwrap();
+        assert_eq!(row.phase, "frozen");
+        assert_eq!(row.elapsed_seconds, 3);
+        assert_eq!(row.remaining_seconds, None);
+        gate.set(false).unwrap();
+        assert_eq!(budget.deadline(), identity);
+        assert_eq!(registry.view()[0].remaining_seconds, Some(7));
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(!budget.expired(identity));
+        budget.wait().await;
+        assert!(budget.expired(identity));
+        budget.complete(identity);
+
+        budget.begin();
+        budget.attach_traffic(&traffic);
+        gate.set(true).unwrap();
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(registry.cancel(&registry.view()[0].request_id));
+        budget.cancelled().await;
+        assert!(registry.view().is_empty());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn compaction_can_be_silent_beyond_300_seconds_and_cancelled_without_resetting_budget() {

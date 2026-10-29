@@ -2,6 +2,7 @@ mod antigravity;
 mod billing;
 mod bodies;
 mod body_wire;
+mod builtin_pricing;
 pub mod commands;
 #[cfg(test)]
 mod decimal_v13_tests;
@@ -70,7 +71,9 @@ struct Inner {
     dropped_records: std::sync::atomic::AtomicU64,
     spool_lock: Mutex<()>,
     price_hint: tokio::sync::Notify,
-    backfilling: std::sync::atomic::AtomicBool,
+    backfilling: std::sync::atomic::AtomicU8,
+    backfill_lock: Mutex<()>,
+    backfill_error: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
     settings_error: Mutex<Option<String>>,
     write_error: Mutex<Option<String>>,
@@ -227,7 +230,9 @@ impl Service {
             dropped_records: std::sync::atomic::AtomicU64::new(0),
             spool_lock: Mutex::new(()),
             price_hint: tokio::sync::Notify::new(),
-            backfilling: std::sync::atomic::AtomicBool::new(false),
+            backfilling: std::sync::atomic::AtomicU8::new(0),
+            backfill_lock: Mutex::new(()),
+            backfill_error: Mutex::new(None),
             error: Mutex::new(error),
             settings_error: Mutex::new(settings_error),
             write_error: Mutex::new(write_error),
@@ -286,13 +291,20 @@ impl Service {
                     let changed = store.repair_metadata_batch()? | store.repair_finish_times()?;
                     let migrated = store.compact_storage_batch()?;
                     let correlated = store.repair_correlations_batch()?;
-                    if store.deferred_backfill() {
-                        if let Some(pricing) = &inner.prices {
-                            store.backfill(pricing)?;
-                        }
-                    }
                     Ok::<_, storage::AppError>(changed || migrated || correlated)
                 });
+                if inner
+                    .store
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|store| store.deferred_backfill())
+                {
+                    // Do not hold the write lock while traversing historical batches.
+                    if inner.backfilling.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                        Service(inner.clone()).schedule_price_backfill();
+                    }
+                }
                 let repair_failed = repair
                     .as_ref()
                     .and_then(|v| v.as_ref().err())
@@ -338,19 +350,38 @@ impl Service {
         });
         Self(inner)
     }
+    pub fn backfill_prices(&self) -> Result<()> {
+        let _guard = self.0.backfill_lock.lock().unwrap();
+        let result = (|| -> Result<()> {
+            let prices = self.prices()?.frozen();
+            let mut cursor = store::BackfillCursor::default();
+            while self.query(|store| store.backfill_batch(&prices, &mut cursor))? {
+                std::thread::yield_now();
+            }
+            Ok(())
+        })();
+        *self.0.backfill_error.lock().unwrap() =
+            result.as_ref().err().map(|error| error.message.clone());
+        let _ = self.0.events.send(());
+        result
+    }
     pub fn schedule_price_backfill(&self) {
         use std::sync::atomic::Ordering;
-        if self.0.backfilling.swap(true, Ordering::AcqRel) {
+        if self.0.backfilling.swap(2, Ordering::AcqRel) != 0 {
             return;
         }
         let service = self.clone();
-        std::thread::spawn(move || {
-            let result = service.query(|store| store.backfill(service.prices()?));
-            if let Err(error) = result {
-                *service.0.error.lock().unwrap() = Some(error.message);
+        std::thread::spawn(move || loop {
+            service.0.backfilling.store(1, Ordering::Release);
+            let _ = service.backfill_prices();
+            if service
+                .0
+                .backfilling
+                .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
             }
-            service.0.backfilling.store(false, Ordering::Release);
-            let _ = service.0.events.send(());
         });
     }
     pub async fn wait_price_hint(&self) {
@@ -381,6 +412,7 @@ impl Service {
                 .clone())
                 .or_else(|| self.0.pending_error.lock().unwrap().clone())
                 .or_else(|| self.0.repair_error.lock().unwrap().clone())
+                .or_else(|| self.0.backfill_error.lock().unwrap().clone())
                 .or_else(|| self.0.settings_error.lock().unwrap().clone())
                 .or_else(|| self.0.error.lock().unwrap().clone()),
         }
@@ -499,13 +531,13 @@ impl Service {
         result.map(|_| self.state())
     }
     pub async fn update_prices(&self, force: bool) -> Result<pricing::View> {
-        let before = self.prices()?.view().version;
+        let before = self.prices()?.content_version();
         let view = self.prices()?.update(force).await?;
-        if !force && before == view.version {
+        if !force && before == self.prices()?.content_version() {
             return Ok(view);
         }
         let s = self.clone();
-        tokio::task::spawn_blocking(move || s.query(|store| store.backfill(s.prices()?)))
+        tokio::task::spawn_blocking(move || s.backfill_prices())
             .await
             .map_err(|_| failure("价格补算中断"))??;
         let _ = self.0.events.send(());
@@ -704,16 +736,21 @@ impl Trace {
     pub fn attempt(&self, provider: &str, stream: bool, transport: &str) -> AttemptTrace {
         let settings = self.0.service.settings();
         let prices = self.0.service.0.prices.as_ref().map(Pricing::frozen);
-        let quote = prices
-            .as_ref()
-            .map(|p| p.quote(self.0.requested.as_deref(), &settings.multiplier));
+        let started_at = now();
+        let quote = prices.as_ref().map(|p| {
+            p.quote_at(
+                self.0.requested.as_deref(),
+                &settings.multiplier,
+                started_at,
+            )
+        });
         AttemptTrace {
             trace: self.clone(),
             attempt: Attempt {
                 id: uuid::Uuid::new_v4().to_string(),
                 provider: Some(provider.into()),
                 requested_model: self.0.requested.clone(),
-                started_at: now(),
+                started_at,
                 stream,
                 transport: transport.into(),
                 cost_multiplier: settings.multiplier.clone(),
@@ -890,9 +927,10 @@ impl AttemptTrace {
             .is_none_or(|q| Some(&q.model) != self.attempt.pricing_model.as_ref())
         {
             self.quote = self.prices.as_ref().map(|p| {
-                p.quote(
+                p.quote_at(
                     self.attempt.pricing_model.as_deref(),
                     &self.settings.multiplier,
+                    self.attempt.started_at,
                 )
             });
         }

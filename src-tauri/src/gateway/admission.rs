@@ -211,6 +211,7 @@ pub enum Rejected {
     RateLedger,
 }
 pub struct Budget {
+    pub traffic: Option<super::freeze::Ticket>,
     pub thread: Option<Arc<ThreadRequest>>,
     pub handoff_owner: Option<String>,
     pub capacity_owner: Option<String>,
@@ -348,6 +349,7 @@ impl Budget {
     }
     pub fn new(seconds: u64) -> Self {
         Self {
+            traffic: None,
             thread: None,
             handoff_owner: None,
             capacity_owner: None,
@@ -820,6 +822,15 @@ impl Scheduler {
         immediate: bool,
     ) -> Result<Admission, Rejected> {
         let started = Instant::now();
+        if let Some(traffic) = &budget.traffic {
+            traffic.waiting();
+        }
+        let paused_before = budget
+            .traffic
+            .as_ref()
+            .map_or(Duration::ZERO, |t| t.paused_for());
+        let mut paused = Duration::ZERO;
+        let mut freeze_changes = budget.traffic.as_ref().map(|t| t.subscribe());
         let epoch = {
             let mut state = self.0.state.lock().unwrap();
             state.retention.prune();
@@ -839,10 +850,44 @@ impl Scheduler {
         let mut rate_retry;
         let mut ledger_error;
         let result = 'admission: loop {
+            if let Some(traffic) = &budget.traffic {
+                let next = traffic.paused_for().saturating_sub(paused_before);
+                deadline += next.saturating_sub(paused);
+                paused = next;
+            }
             let next_wake;
             let notified = self.0.wake.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if budget.traffic.as_ref().is_some_and(|t| t.paused()) {
+                {
+                    let mut s = self.0.state.lock().unwrap();
+                    if !s.running || s.epoch != epoch {
+                        break Err(Rejected::Stopped);
+                    }
+                    if waiting.is_none() {
+                        if s.waiting.len() + s.capacity_waits.len() >= max_waiting {
+                            break Err(Rejected::Full);
+                        }
+                        s.next += 1;
+                        let ticket = s.next;
+                        s.waiting.push_back((
+                            ticket,
+                            routes.iter().map(|r| r.provider.id.clone()).collect(),
+                        ));
+                        waiting = Some(Waiting {
+                            scheduler: self.clone(),
+                            ticket,
+                        });
+                        let _ = self.0.events.send(());
+                    }
+                }
+                tokio::select! {
+                    _ = notified => {},
+                    _ = super::freeze::changed(&mut freeze_changes) => {},
+                }
+                continue;
+            }
             {
                 let mut s = self.0.state.lock().unwrap();
                 if !s.running || s.epoch != epoch {
@@ -1075,6 +1120,10 @@ impl Scheduler {
                             break 'admission Err(Rejected::Reconnect);
                         }
                         if let Some(permits) = Permits::acquire_for(route, manual, requirement) {
+                            if budget.traffic.as_ref().is_some_and(|t| !t.dispatch()) {
+                                drop(permits);
+                                continue 'admission;
+                            }
                             match self.reserve_rpm(
                                 &mut s,
                                 id,
@@ -1114,15 +1163,26 @@ impl Scheduler {
                                     break;
                                 }
                                 Err(Rejected::RateLimited(retry)) => {
+                                    if let Some(t) = &budget.traffic {
+                                        t.waiting();
+                                    }
                                     rate_retry = Some(retry);
                                     drop(permits);
                                     break 'selection;
                                 }
                                 Err(Rejected::RateLedger) => {
+                                    if let Some(t) = &budget.traffic {
+                                        t.waiting();
+                                    }
                                     drop(permits);
                                     break 'selection;
                                 }
-                                Err(_) => drop(permits),
+                                Err(_) => {
+                                    if let Some(t) = &budget.traffic {
+                                        t.waiting();
+                                    }
+                                    drop(permits);
+                                }
                             }
                         }
 
@@ -1221,8 +1281,14 @@ impl Scheduler {
                 }
             }
             let wait_started = Instant::now();
+            let pause_started = budget
+                .traffic
+                .as_ref()
+                .map_or(Duration::ZERO, |t| t.paused_for());
             let waiting_for_rpm = rate_retry.is_some() && !ledger_error;
             tokio::select! {
+                biased;
+                _ = super::freeze::changed(&mut freeze_changes) => {},
                 _ = notified => {},
                 _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else if ledger_error { Rejected::RateLedger } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
                 _ = async {
@@ -1231,15 +1297,23 @@ impl Scheduler {
                 } => {},
             }
             if waiting_for_rpm {
-                let elapsed = wait_started.elapsed();
+                let paused = budget
+                    .traffic
+                    .as_ref()
+                    .map_or(Duration::ZERO, |t| t.paused_for())
+                    .saturating_sub(pause_started);
+                let elapsed = wait_started.elapsed().saturating_sub(paused);
                 deadline += elapsed;
                 rpm_waited += elapsed;
             }
         };
         if waiting.is_some() {
-            budget.remaining = budget
-                .remaining
-                .saturating_sub(started.elapsed().saturating_sub(rpm_waited));
+            budget.remaining = budget.remaining.saturating_sub(
+                started
+                    .elapsed()
+                    .saturating_sub(rpm_waited)
+                    .saturating_sub(paused),
+            );
         }
         drop(waiting);
         self.signal();

@@ -69,6 +69,34 @@ beforeEach(() => {
 afterEach(() => mock.listeners.clear());
 
 describe("Claude profile controls", () => {
+  it("checks official login only in official mode and discards late status", async () => {
+    let complete: (value: Login) => void = () => {};
+    const original = mock.command.getMockImplementation()!;
+    mock.command.mockImplementation((name, args) =>
+      name === "claude_login_status"
+        ? new Promise<Login>((resolve) => {
+            complete = resolve;
+          })
+        : original(name, args),
+    );
+    render(<ClaudeProfile notify={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "API" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
+    );
+    expect(mock.command).not.toHaveBeenCalledWith("claude_login_status");
+    act(() => mock.listeners.get("claude-profile-state")?.(state("official")));
+    await waitFor(() =>
+      expect(mock.command).toHaveBeenCalledWith("claude_login_status"),
+    );
+    act(() => mock.listeners.get("claude-profile-state")?.(state("api")));
+    await act(async () =>
+      complete({ ...idle, error: "fixture official status failure" }),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
   it("switches to the official profile without starting OAuth", async () => {
     const user = userEvent.setup();
     const notify = vi.fn();

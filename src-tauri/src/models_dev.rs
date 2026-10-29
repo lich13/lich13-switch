@@ -34,7 +34,7 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_cost: Option<Value>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 struct Provider {
     name: String,
     models: BTreeMap<String, Model>,
@@ -248,6 +248,15 @@ impl Catalog {
             return Ok(self.view());
         }
         let result = download(source).await.and_then(|index| {
+            let state = self.state.read().unwrap();
+            if state
+                .index
+                .as_ref()
+                .is_some_and(|old| old.providers == index.providers)
+            {
+                return Ok((index, state.version.clone().unwrap_or_default()));
+            }
+            drop(state);
             let bytes = serde_json::to_vec(&index).map_err(|_| failure("models.dev 缓存无效"))?;
             storage::replace_cache_bounded(&self.path, &bytes, CACHE_LIMIT)?;
             Ok((index, storage::digest(&bytes)))
@@ -390,6 +399,20 @@ impl Catalog {
             hits,
             error: state.error.clone(),
         }
+    }
+    pub(crate) fn pricing_names(&self) -> BTreeMap<String, Option<String>> {
+        let state = self.state.read().unwrap();
+        let mut names = BTreeMap::new();
+        if let Some(index) = &state.index {
+            for (provider_id, provider) in &index.providers {
+                for (id, model) in &provider.models {
+                    if model.cost.is_some() {
+                        names.insert(format!("{provider_id}/{id}"), model.name.clone());
+                    }
+                }
+            }
+        }
+        names
     }
 }
 async fn download(source: &str) -> Result<Index> {
@@ -926,6 +949,98 @@ mod tests {
             std::fs::read(dir.path().join("models-dev-index.json")).unwrap(),
             b"broken"
         );
+    }
+    #[tokio::test]
+    async fn unchanged_refresh_keeps_cache_bytes_and_changed_prices_backfill_only_missing_costs() {
+        use crate::usage::{
+            model::{Attempt, Record, Tokens},
+            Service,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for input in [1, 1, 9] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                let body=json!({"fixture":{"models":{"fixture-price":{"cost":{"input":input,"output":2}}}}}).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let prices = service.prices().unwrap();
+        let cat = &prices.models_dev;
+        let first = cat.refresh_from(true, &url).await.unwrap();
+        let before = std::fs::read(&cat.path).unwrap();
+        let old_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&cat.path)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        let unchanged = cat.refresh_from(true, &url).await.unwrap();
+        assert_eq!(unchanged.version, first.version);
+        assert_eq!(std::fs::read(&cat.path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&cat.path).unwrap().modified().unwrap(),
+            old_time
+        );
+        let at = crate::usage::model::now();
+        let mut record = Record {
+            id: "fixture-old-price".into(),
+            client: "codex".into(),
+            source: "proxy".into(),
+            started_at: at,
+            completed: true,
+            attempts: vec![Attempt {
+                id: "fixture-attempt".into(),
+                started_at: at,
+                pricing_model: Some("fixture-price".into()),
+                tokens: Tokens {
+                    input: Some(1000),
+                    output: Some(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        record.attempts[0].price = prices
+            .quote(Some("fixture-price"), "1")
+            .calculate(&record.attempts[0].tokens, None);
+        let mut missing = record.clone();
+        missing.id = "fixture-missing-price".into();
+        missing.attempts[0].price = None;
+        service
+            .query(|store| store.write_batch(&[record, missing], None))
+            .unwrap();
+        let changed = cat.refresh_from(true, &url).await.unwrap();
+        assert_ne!(changed.version, first.version);
+        service.backfill_prices().unwrap();
+        assert_eq!(
+            service
+                .read(|store| store.detail("fixture-old-price"))
+                .unwrap()
+                .cost()
+                .unwrap()
+                .normalize()
+                .to_string(),
+            "0.0012"
+        );
+        assert_eq!(
+            service
+                .read(|store| store.detail("fixture-missing-price"))
+                .unwrap()
+                .cost()
+                .unwrap()
+                .normalize()
+                .to_string(),
+            "0.0092"
+        );
+        server.await.unwrap();
     }
     #[tokio::test]
     async fn refresh_coalesces_and_rejects_failed_empty_invalid_and_compressed_oversize_responses()

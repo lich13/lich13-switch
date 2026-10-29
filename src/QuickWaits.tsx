@@ -8,6 +8,7 @@ const phases: Record<string, string> = {
   retry: "等待重试",
   ws_wait: "等待重连",
   compaction: "压缩中",
+  frozen: "已暂存",
 };
 export default function QuickWaits({
   gateway,

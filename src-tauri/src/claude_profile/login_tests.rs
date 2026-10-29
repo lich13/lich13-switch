@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn windows_npm_supports_native_and_legacy_launchers_with_spaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("fixture npm");
+    let package = root.join("node_modules/@anthropic-ai/claude-code");
+    std::fs::create_dir_all(package.join("bin")).unwrap();
+    let shim = root.join("claude.cmd");
+    std::fs::write(&shim, "fixture").unwrap();
+    assert!(windows_command(&shim).is_err());
+    let script = package.join("cli.js");
+    std::fs::write(&script, "fixture").unwrap();
+    let legacy = windows_command(&shim).unwrap();
+    assert_eq!(legacy.as_std().get_program(), "node.exe");
+    assert_eq!(
+        legacy.as_std().get_args().collect::<Vec<_>>(),
+        [script.as_os_str()]
+    );
+    let native = package.join("bin/claude.exe");
+    std::fs::write(&native, "fixture").unwrap();
+    let current = windows_command(&shim).unwrap();
+    assert_eq!(current.as_std().get_program(), native);
+    assert_eq!(current.as_std().get_args().count(), 0);
+    assert_eq!(
+        windows_command(&native).unwrap().as_std().get_program(),
+        native
+    );
+}
+
+#[test]
 fn accepts_only_official_claude_subscription_auth_methods() {
     for method in ["claude.ai", "oauth_token"] {
         let payload = format!(r#"{{"loggedIn":true,"authMethod":"{method}"}}"#);

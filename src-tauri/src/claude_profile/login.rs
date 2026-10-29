@@ -59,27 +59,37 @@ fn executable() -> Result<PathBuf> {
         .find(|p| p.is_file())
         .ok_or_else(|| fail("未找到 Claude Code CLI"))
 }
-fn command(home: &Path) -> Result<Command> {
-    let path = executable()?;
-    #[cfg(windows)]
-    let mut cmd = if path
+#[cfg(any(windows, test))]
+fn windows_command(path: &Path) -> Result<Command> {
+    if path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd"))
     {
-        let script = path
+        let package = path
             .parent()
             .ok_or_else(|| fail("CLI 路径无效"))?
-            .join("node_modules/@anthropic-ai/claude-code/cli.js");
+            .join("node_modules/@anthropic-ai/claude-code");
+        // Current npm releases launch a native binary; older packages use Node.
+        let native = package.join("bin/claude.exe");
+        if native.is_file() {
+            return Ok(Command::new(native));
+        }
+        let script = package.join("cli.js");
         if !script.is_file() {
             return Err(fail("不支持的 Claude 启动脚本"));
         }
         let mut c = Command::new("node.exe");
         c.arg(script);
-        c
+        Ok(c)
     } else {
-        Command::new(path)
-    };
+        Ok(Command::new(path))
+    }
+}
+fn command(home: &Path) -> Result<Command> {
+    let path = executable()?;
+    #[cfg(windows)]
+    let mut cmd = windows_command(&path)?;
     #[cfg(not(windows))]
     let mut cmd = Command::new(path);
     cmd.env("CLAUDE_CONFIG_DIR", home)

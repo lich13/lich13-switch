@@ -932,6 +932,17 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
     });
 }
 #[tauri::command]
+fn get_gateway_freeze(r: tauri::State<'_, Arc<Runtime>>) -> gateway::freeze::View {
+    r.gateway.freeze_gate().view()
+}
+#[tauri::command]
+fn set_gateway_frozen(
+    frozen: bool,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::freeze::View> {
+    r.gateway.freeze_gate().set(frozen)
+}
+#[tauri::command]
 fn get_gateway(
     client_id: gateway::ClientId,
     r: tauri::State<'_, Arc<Runtime>>,
@@ -1716,6 +1727,14 @@ pub fn run() {
             }
             links::receive(app.handle(), args.iter().cloned());
             quick::Panel::create(app.handle(), runtime.smoke.is_some())?;
+            let freeze = runtime.gateway.freeze_gate();
+            let mut freeze_events = freeze.subscribe();
+            let freeze_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while freeze_events.changed().await.is_ok() {
+                    let _ = freeze_app.emit("gateway-freeze", freeze.view());
+                }
+            });
             #[cfg(target_os = "macos")]
             if start_silently {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -1983,6 +2002,7 @@ pub fn run() {
             usage::commands::set_usage_settings,
             usage::commands::sync_usage,
             usage::commands::get_pricing,
+            usage::commands::search_pricing,
             usage::commands::get_usage_interruptions,
             usage::commands::get_models_dev,
             usage::commands::update_models_dev,
@@ -2031,6 +2051,8 @@ pub fn run() {
             quick::hide_quick,
             quick::resize_quick,
             get_gateway,
+            get_gateway_freeze,
+            set_gateway_frozen,
             cancel_gateway_wait,
             get_failure_policy_catalog,
             match_failure_policy,

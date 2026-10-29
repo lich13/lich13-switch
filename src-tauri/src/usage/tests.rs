@@ -1198,6 +1198,7 @@ fn service_tier_prices_and_multiplier_use_exact_decimal_arithmetic() {
 fn cache_durations_and_media_subsets_are_charged_once() {
     let tokens = Tokens {
         reasoning: None,
+        image_cache_read: None,
         inclusive_input: None,
         input: Some(100),
         output: Some(20),
@@ -1354,6 +1355,81 @@ fn backfill_preserves_priced_history_and_original_multipliers_in_details_and_dai
 }
 
 #[test]
+fn backfill_batches_allow_writes_retry_and_freeze_prices() {
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        let prices = Pricing::new(dir.path()).unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let rows: Vec<_> = (0..257)
+            .map(|n| {
+                record(
+                    &format!("fixture-{n:04}"),
+                    "antigravity",
+                    "antigravity",
+                    BASE + n,
+                )
+            })
+            .collect();
+        store.write_batch(&rows, None).unwrap();
+        install_fixed(
+            &prices,
+            &[(
+                "gpt-fixture",
+                json!({"input_cost_per_token":1,"output_cost_per_token":2,"cache_read_input_token_cost":0}),
+            )],
+        );
+        let frozen = prices.frozen();
+        let mut cursor = super::store::BackfillCursor::default();
+        assert!(store.backfill_batch(&frozen, &mut cursor).unwrap());
+        assert_eq!(store.dashboard(&all_time()).unwrap().totals.unpriced, 129);
+        store
+            .write_batch(
+                &[record(
+                    "fixture-new",
+                    "antigravity",
+                    "antigravity",
+                    BASE + 400,
+                )],
+                None,
+            )
+            .unwrap();
+        install_fixed(
+            &prices,
+            &[(
+                "gpt-fixture",
+                json!({"input_cost_per_token":9,"output_cost_per_token":9,"cache_read_input_token_cost":0}),
+            )],
+        );
+        let target = if native { "v12_rows" } else { "records" };
+        store.connection.execute_batch(&format!("CREATE TRIGGER fixture_backfill_fail BEFORE UPDATE ON {target} BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")).unwrap();
+        assert!(store.backfill_batch(&frozen, &mut cursor).is_err());
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fixture_backfill_fail")
+            .unwrap();
+        while store.backfill_batch(&frozen, &mut cursor).unwrap() {}
+        let totals = store.dashboard(&all_time()).unwrap().totals;
+        assert_eq!(totals.requests, 258);
+        assert_eq!(totals.unpriced, 0);
+        assert_eq!(
+            decimal(&totals.cost).unwrap(),
+            rust_decimal::Decimal::from(258 * 120)
+        );
+        let before = store.connection.total_changes();
+        store.backfill(&prices).unwrap();
+        assert_eq!(store.connection.total_changes(), before);
+    }
+}
+
+#[test]
 fn service_query_reads_only_its_isolated_store() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
@@ -1374,6 +1450,20 @@ fn service_query_reads_only_its_isolated_store() {
     assert!(PathBuf::from(dir.path())
         .join("usage/usage.sqlite")
         .is_file());
+}
+
+#[test]
+fn successful_backfill_clears_only_its_previous_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(dir.path());
+    *service.0.backfill_error.lock().unwrap() = Some("fixture previous backfill failure".into());
+    *service.0.error.lock().unwrap() = Some("fixture unrelated failure".into());
+    service.backfill_prices().unwrap();
+    assert!(service.0.backfill_error.lock().unwrap().is_none());
+    assert_eq!(
+        service.state().error.as_deref(),
+        Some("fixture unrelated failure")
+    );
 }
 
 #[test]
