@@ -181,7 +181,7 @@ impl Drop for Completion {
     }
 }
 
-struct Waiting {
+pub(super) struct Waiting {
     scheduler: Scheduler,
     ticket: u64,
 }
@@ -362,6 +362,26 @@ impl Budget {
     }
 }
 impl Scheduler {
+    /// Thread waiters share the global queue limit without reserving a provider.
+    pub(super) fn thread_wait(&self, max_waiting: usize) -> Result<Waiting, Rejected> {
+        let mut s = self.0.state.lock().unwrap();
+        if !s.running {
+            return Err(Rejected::Stopped);
+        }
+        if s.waiting.len() + s.capacity_waits.len() >= max_waiting {
+            return Err(Rejected::Full);
+        }
+        s.next += 1;
+        let ticket = s.next;
+        s.waiting.push_back((ticket, Vec::new()));
+        drop(s);
+        self.signal();
+        Ok(Waiting {
+            scheduler: self.clone(),
+            ticket,
+        })
+    }
+
     pub fn new(events: broadcast::Sender<()>, rpm_path: PathBuf) -> Self {
         let (rpm, rpm_error) = Ledger::load(&rpm_path);
         let (persist, updates) = std::sync::mpsc::sync_channel(1);

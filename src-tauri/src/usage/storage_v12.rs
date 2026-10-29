@@ -398,6 +398,56 @@ fn unpack_diagnostic(c: &Connection, body: rusqlite::types::Value, anchor: i64) 
     }
     Ok(v)
 }
+
+fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<u64>> {
+    // Resolve only this scalar; no absolute clock restoration or full diagnostic
+    // object copy is needed for aggregation. Cache templates by their bytes so
+    // old WAL snapshots and different databases cannot reuse a stale ID.
+    thread_local! {
+        static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<(Vec<u8>, Option<usize>)>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    }
+    diagnostics::inspect(c, body, |tag, value| {
+        let ms = if tag == 4 {
+            let values = value
+                .as_array()
+                .ok_or_else(|| failure("用量诊断字段无效"))?;
+            let id = values
+                .first()
+                .and_then(Value::as_i64)
+                .ok_or_else(|| failure("用量诊断结构缺失"))?;
+            let bytes: Vec<u8> = db(db(
+                c.prepare_cached("SELECT body FROM v12_templates WHERE id=?1")
+            )?
+            .query_row([id], |r| r.get(0)))?;
+            let index = TEMPLATES.with(|cache| -> Result<Option<usize>> {
+                let mut cache = cache.borrow_mut();
+                if let Some((_, index)) = cache.iter().find(|(saved, _)| *saved == bytes) {
+                    return Ok(*index);
+                }
+                let shape = unpack(&bytes)?;
+                let index = shape["generationMs"]
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok());
+                if cache.len() == 4 {
+                    cache.pop_front();
+                }
+                cache.push_back((bytes, index));
+                Ok(index)
+            })?;
+            index
+                .map(|i| {
+                    values
+                        .get(i + 1)
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| failure("用量诊断字段缺失"))
+                })
+                .transpose()?
+        } else {
+            value["generationMs"].as_u64()
+        };
+        Ok(ms.filter(|ms| *ms > 50))
+    })
+}
 fn intern(c: &Connection, v: &Value) -> Result<i64> {
     let payload = wire::encode_v13(v);
     if payload.len() > LIMIT {
@@ -1041,7 +1091,7 @@ fn flush_batch(c: &Connection) -> Result<bool> {
 }
 
 fn metric_select(table: &str, kind: i64) -> String {
-    let generation = "CASE WHEN r.source=usage_label('antigravity') THEN coalesce(usage_generation_ms(a.body,r.time+r.started),duration-first_token) ELSE duration-first_token END";
+    let generation = "CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,r.time+r.started) ELSE duration-first_token END";
     format!("SELECT {kind} kind,a.owner,ordinal,usage_value(p.value) provider,usage_value(m.value) model,
       CASE WHEN ordinal=r.last THEN 1 ELSE 0 END requests,repeat_count attempts,
       CASE WHEN ordinal=r.last AND ((status BETWEEN 200 AND 299 OR status=101) OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value)=1)) AND r.completed THEN 1 ELSE 0 END success,
@@ -1082,9 +1132,7 @@ pub(super) fn register_values(c: &Connection) -> Result<()> {
             // The borrowed handle stays on this SQLite callback's thread and
             // only reads the existing bounded diagnostic storage.
             let c = unsafe { ctx.get_connection()? };
-            let value = unpack_diagnostic(&c, ctx.get(0)?, ctx.get(1)?)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok(value["generationMs"].as_u64())
+            generation_ms(&c, ctx.get(0)?).map_err(|_| rusqlite::Error::InvalidQuery)
         },
     ))?;
     db(c.create_scalar_function(
@@ -1390,7 +1438,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     ))?;
-    if sql.contains("usage_generation_ms") {
+    if sql.contains("THEN usage_generation_ms") {
         return Ok(());
     }
     let original = metric_select("v12_raw_attempts", 2)

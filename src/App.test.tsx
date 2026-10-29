@@ -97,6 +97,17 @@ beforeEach(() => {
       if (name.startsWith("provider_test_"))
         return providerTestingPreview(name, args);
       switch (name) {
+        case "get_gateway_freeze":
+          return {
+            frozen: false,
+            draining: 0,
+            receiving: 0,
+            waiting: 0,
+            headers: 0,
+            streaming: 0,
+            finishing: 0,
+            queued: 0,
+          };
         case "get_provider_imports":
           return structuredClone(pendingImports);
         case "get_gateway":
@@ -626,7 +637,10 @@ describe("user workflows", () => {
       id: "b",
       expectedRevision: "auth-1",
     });
-    expect(await screen.findByRole("status")).toHaveTextContent("文件已切换");
+    expect(await screen.findByText(/文件已切换/)).toHaveAttribute(
+      "role",
+      "status",
+    );
     expect(mocks.command.mock.calls.some((c) => c[0] === "save_config")).toBe(
       false,
     );

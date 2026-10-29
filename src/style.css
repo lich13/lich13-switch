@@ -1546,6 +1546,15 @@ select:focus-visible {
   border-top: 3px solid var(--freeze-color);
   --freeze-color: var(--error);
 }
+.quick-freeze-neutral {
+  --freeze-color: var(--muted);
+}
+.quick-freeze-ice {
+  --freeze-color: #1686b8;
+}
+[data-theme="dark"] .quick-freeze-ice {
+  --freeze-color: #89d9fa;
+}
 .quick-freeze-yellow {
   --freeze-color: var(--warning);
 }
@@ -4169,4 +4178,213 @@ button.exchange-button:active:not(:disabled) {
   max-height: 360px;
   overflow: auto;
   font-size: 13px;
+}
+
+/* A single crystallization at the sleep boundary; the settled layer is static. */
+.quick-freeze-compact {
+  margin: 0 0 12px;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+}
+.quick-freeze-compact .quick-freeze-main {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.quick-freeze-compact .quick-freeze-main strong {
+  font-size: 14px;
+  line-height: 20px;
+}
+.quick-freeze-compact .quick-freeze-light {
+  width: 9px;
+  height: 9px;
+}
+.quick-freeze-compact .quick-freeze-main button {
+  width: 100%;
+}
+.freeze-effect {
+  position: fixed;
+  inset: 0;
+  z-index: 7;
+  overflow: hidden;
+  pointer-events: none;
+  --ice-fill: rgba(164, 223, 246, 0.22);
+  --ice-inner: rgba(221, 249, 255, 0.5);
+  --ice-line: rgba(116, 193, 223, 0.68);
+  --ice-glow: rgba(130, 216, 251, 0.28);
+}
+.app-shell:has(.freeze-effect) .brand,
+.app-shell:has(.freeze-effect) .sidebar-bottom > .nav-item,
+.quick-freeze-main,
+.quick-freeze-stages,
+.quick-panel:has(.freeze-effect) .quick-footer {
+  position: relative;
+  z-index: 8;
+}
+[data-theme="dark"] .freeze-effect {
+  --ice-fill: rgba(126, 209, 244, 0.18);
+  --ice-inner: rgba(191, 242, 255, 0.28);
+  --ice-line: rgba(161, 229, 255, 0.72);
+  --ice-glow: rgba(91, 192, 240, 0.26);
+}
+.freeze-effect::before,
+.freeze-effect::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.freeze-effect::before {
+  border: 1px solid var(--ice-line);
+  box-shadow:
+    inset 0 0 10px var(--ice-glow),
+    inset 0 0 30px var(--ice-glow);
+  background: repeating-linear-gradient(
+    119deg,
+    transparent 0 14px,
+    var(--ice-inner) 15px,
+    transparent 16px 31px
+  );
+  mask-image:
+    linear-gradient(
+      to bottom,
+      #000,
+      transparent 15px,
+      transparent calc(100% - 15px),
+      #000
+    ),
+    linear-gradient(
+      to right,
+      #000,
+      transparent 12px,
+      transparent calc(100% - 12px),
+      #000
+    );
+}
+.freeze-effect::after {
+  opacity: 0;
+  background: linear-gradient(
+    115deg,
+    transparent 38%,
+    rgba(181, 237, 255, 0.28) 48%,
+    rgba(233, 253, 255, 0.52) 50%,
+    transparent 61%
+  );
+}
+.freeze-crystal {
+  position: absolute;
+  width: clamp(72px, 13vw, 128px);
+  height: auto;
+  opacity: 0.9;
+  transform: rotate(var(--crystal-angle));
+}
+.quick-panel .freeze-crystal {
+  width: 86px;
+}
+.freeze-crystal-nw {
+  top: 0;
+  left: 0;
+  --crystal-angle: 0deg;
+}
+.freeze-crystal-ne {
+  top: 0;
+  right: 0;
+  --crystal-angle: 90deg;
+}
+.freeze-crystal-se {
+  bottom: 0;
+  right: 0;
+  --crystal-angle: 180deg;
+}
+.freeze-crystal-sw {
+  bottom: 0;
+  left: 0;
+  --crystal-angle: 270deg;
+}
+.freeze-facet {
+  fill: var(--ice-fill);
+  stroke: var(--ice-line);
+  stroke-width: 0.6;
+}
+.freeze-facet-inner {
+  fill: var(--ice-inner);
+  stroke-width: 0.4;
+}
+.freeze-vein {
+  stroke: var(--ice-line);
+  stroke-width: 0.8;
+}
+.freeze-splinter {
+  fill: var(--ice-inner);
+}
+.freeze-effect-freeze::before {
+  animation: ice-rim 1400ms ease-out both;
+}
+.freeze-effect-freeze::after {
+  animation: ice-sweep 1300ms 80ms ease-out both;
+}
+.freeze-effect-freeze .freeze-crystal {
+  animation: ice-grow 1250ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.freeze-effect-thaw {
+  animation: ice-thaw 460ms ease-out both;
+}
+@keyframes ice-grow {
+  from {
+    opacity: 0;
+    clip-path: polygon(0 0, 8% 0, 0 8%);
+  }
+  55% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.9;
+    clip-path: polygon(0 0, 200% 0, 0 200%);
+  }
+}
+@keyframes ice-rim {
+  from {
+    opacity: 0;
+  }
+  45% {
+    opacity: 1;
+    box-shadow:
+      inset 0 0 20px var(--ice-glow),
+      inset 0 0 44px var(--ice-glow);
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes ice-sweep {
+  from {
+    opacity: 0;
+    transform: translateX(-85%);
+  }
+  25% {
+    opacity: 0.8;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(85%);
+  }
+}
+@keyframes ice-thaw {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .freeze-effect,
+  .freeze-effect::before,
+  .freeze-effect::after,
+  .freeze-effect .freeze-crystal {
+    animation: none;
+  }
+  .freeze-effect-thaw {
+    display: none;
+  }
 }

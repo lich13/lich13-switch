@@ -1,3 +1,4 @@
+import QuickFreeze from "./QuickFreeze";
 import QuickPlatformSettings from "./QuickPlatformSettings";
 import type { FailureFocus } from "./failure-policy-types";
 import { flushTestPrompt } from "./provider-test-prompt";
@@ -397,6 +398,7 @@ export default function App() {
           </button>
         </nav>
         <div className="sidebar-bottom">
+          <QuickFreeze surface="main" />
           <button
             className="nav-item"
             onClick={() => {

@@ -13,15 +13,23 @@ thread_local! {
 }
 
 pub(super) fn read(c: &Connection, body: Sql) -> Result<(u8, Value)> {
+    inspect(c, body, |tag, value| Ok((tag, value.clone())))
+}
+
+pub(super) fn inspect<T>(
+    c: &Connection,
+    body: Sql,
+    read: impl FnOnce(u8, &Value) -> Result<T>,
+) -> Result<T> {
     match body {
-        Sql::Integer(0) => Ok((0, json!({}))),
-        Sql::Blob(bytes) => Ok((bytes.first().copied().unwrap_or(255), unpack(&bytes)?)),
+        Sql::Integer(0) => read(0, &json!({})),
+        Sql::Blob(bytes) => read(bytes.first().copied().unwrap_or(255), &unpack(&bytes)?),
         Sql::Integer(reference) if reference >= 2048 => {
             let bytes: Vec<u8> = db(db(
                 c.prepare_cached("SELECT body FROM v12_diagnostics WHERE id=?1")
             )?
             .query_row([reference / 2048], |r| r.get(0)))?;
-            let entry = CACHE.with(|cache| -> Result<Value> {
+            CACHE.with(|cache| -> Result<T> {
                 let mut cache = cache.borrow_mut();
                 let index = if let Some(index) = cache.iter().position(|(b, _)| *b == bytes) {
                     index
@@ -33,23 +41,22 @@ pub(super) fn read(c: &Connection, body: Sql) -> Result<(u8, Value)> {
                     cache.push_back((bytes, value));
                     cache.len() - 1
                 };
-                cache[index]
+                let entry = cache[index]
                     .1
                     .as_array()
                     .and_then(|a| a.get((reference % 2048) as usize))
-                    .cloned()
-                    .ok_or_else(|| failure("用量诊断块缺失，原数据已保留"))
-            })?;
-            let a = entry
-                .as_array()
-                .filter(|a| a.len() == 2)
-                .ok_or_else(|| failure("用量诊断块字段损坏，原数据已保留"))?;
-            let tag = a[0]
-                .as_u64()
-                .filter(|tag| matches!(tag, 0..=4))
-                .ok_or_else(|| failure("用量诊断块版本无效，原数据已保留"))?
-                as u8;
-            Ok((tag, a[1].clone()))
+                    .ok_or_else(|| failure("用量诊断块缺失，原数据已保留"))?;
+                let a = entry
+                    .as_array()
+                    .filter(|a| a.len() == 2)
+                    .ok_or_else(|| failure("用量诊断块字段损坏，原数据已保留"))?;
+                let tag = a[0]
+                    .as_u64()
+                    .filter(|tag| matches!(tag, 0..=4))
+                    .ok_or_else(|| failure("用量诊断块版本无效，原数据已保留"))?
+                    as u8;
+                read(tag, &a[1])
+            })
         }
         _ => Err(failure("用量诊断引用无效，原数据已保留")),
     }

@@ -88,34 +88,38 @@ pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
         a.reasoning_effort.get_or_insert(effort);
         changed = true;
     }
-    if a.duration_ms == 0 {
-        if let Some(total) = a
-            .first_token_ms
-            .zip(a.generation_ms)
-            .and_then(|(f, g)| f.checked_add(g))
-            .filter(|n| *n > 0)
+    if let Some(total) = a
+        .first_token_ms
+        .zip(a.generation_ms)
+        .and_then(|(f, g)| f.checked_add(g))
+    {
+        if a.duration_ms != total
+            || a.availability
+                .get("duration")
+                .is_none_or(|s| s != "reported")
         {
             a.duration_ms = total;
             a.availability.insert("duration".into(), "reported".into());
             a.parse_reasons.retain(|s| s != "attempt_time_unreported");
             changed = true;
-        } else if a
-            .availability
+        }
+    } else if a.duration_ms == 0
+        && a.availability
             .get("duration")
             .is_none_or(|s| s == "reported")
+    {
+        a.availability
+            .insert("duration".into(), "upstream_unreported".into());
+        if !a
+            .parse_reasons
+            .iter()
+            .any(|s| s == "attempt_time_unreported")
         {
-            a.availability
-                .insert("duration".into(), "upstream_unreported".into());
-            if !a
-                .parse_reasons
-                .iter()
-                .any(|s| s == "attempt_time_unreported")
-            {
-                a.parse_reasons.push("attempt_time_unreported".into());
-            }
-            changed = true;
+            a.parse_reasons.push("attempt_time_unreported".into());
         }
+        changed = true;
     }
+
     changed
 }
 
@@ -360,10 +364,14 @@ fn record(
             time(field("completedAt")).or_else(|| final_info.then_some(finish).flatten());
         let explicit_end =
             reported_end.filter(|end| attempt_start.is_none_or(|start| *end > start));
-        let elapsed = attempt_start
-            .zip(explicit_end)
-            .and_then(|(s, e)| u64::try_from(e.checked_sub(s)?).ok())
-            .or_else(|| first.zip(generation).and_then(|(f, g)| f.checked_add(g)));
+        let elapsed = first
+            .zip(generation)
+            .and_then(|(f, g)| f.checked_add(g))
+            .or_else(|| {
+                attempt_start
+                    .zip(explicit_end)
+                    .and_then(|(s, e)| u64::try_from(e.checked_sub(s)?).ok())
+            });
         let is_failed = failed(info) || (final_info && failed(chat));
         let completed_at = explicit_end
             .or_else(|| {

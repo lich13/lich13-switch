@@ -567,7 +567,7 @@ impl Store {
         let after: Option<String> = db(self
             .connection
             .query_row(
-                "SELECT value FROM metadata WHERE key='antigravity_fields_v02610'",
+                "SELECT value FROM metadata WHERE key='antigravity_fields_v02611'",
                 [],
                 |r| r.get(0),
             )
@@ -592,14 +592,21 @@ impl Store {
         let mut changed = false;
         for (id, body) in &rows {
             let mut r: Record = bodies::decode(&tx, body)?;
-            if super::antigravity::normalize_record(&mut r) {
+            let normalized = super::antigravity::normalize_record(&mut r);
+            let generation_changed = r
+                .attempts
+                .iter()
+                .any(|a| a.transport == "local_api" && a.generation_ms.is_none_or(|ms| ms <= 50));
+            if normalized || generation_changed {
                 query::project(&tx, 0, id, &r, 1, None)?;
-                storage_v12::update(&tx, &r)?;
+                if normalized {
+                    storage_v12::update(&tx, &r)?;
+                }
                 changed = true;
             }
         }
         db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02610',?1)",
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02611',?1)",
             [rows.last().map_or("done", |(id, _)| id.as_str())],
         ))?;
         if changed {

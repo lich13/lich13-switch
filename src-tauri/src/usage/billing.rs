@@ -518,7 +518,7 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
                 opt(a.first_token_ms),
                 opt(a.generation_ms),
                 speed(a.measured_duration_ms()),
-                speed(a.generation_ms),
+                speed(a.generation_ms.filter(|ms| *ms > 50)),
                 opt(a.error_code.as_ref()),
                 opt(a.reasoning_effort.as_ref()),
                 opt(t.image_cache_read),
@@ -904,62 +904,72 @@ mod tests {
     }
     #[test]
     fn app_csv_keeps_unknown_timing_separate_from_measured_generation() {
-        let dir = tempfile::tempdir().unwrap();
-        let spool = Spool::new(dir.path()).unwrap();
-        let mut r = row("app", "antigravity", BASE + 999);
-        let a = &mut r.attempts[0];
-        a.duration_ms = 0;
-        a.generation_ms = Some(800);
-        a.model_display_name = Some("Fixture Model".into());
-        a.reasoning_effort = Some("high".into());
-        a.tokens.image_cache_read = Some(7);
-        a.api_provider = Some("API_PROVIDER_FIXTURE".into());
-        a.error_code = Some("RESOURCE_EXHAUSTED".into());
-        a.outcome = "failed".into();
-        a.availability
-            .insert("duration".into(), "upstream_unreported".into());
-        a.availability
-            .insert("attempt_start".into(), "reported".into());
-        a.parse_reasons.push("attempt_time_unreported".into());
-        append(&spool.connection, &r, 1, None).unwrap();
-        let mut out = Vec::new();
-        let result = write_csv(&spool, &request(), &mut out).unwrap();
-        assert_eq!((result.requests, result.attempts), (1, 1));
-        let csv = String::from_utf8(out).unwrap();
-        let mut lines = csv.lines();
-        let fields = |line: &str| -> Vec<String> {
-            let mut result = Vec::new();
-            let mut field = String::new();
-            let mut quoted = false;
-            let mut chars = line.chars().peekable();
-            while let Some(c) = chars.next() {
-                match c {
-                    '"' if quoted && chars.peek() == Some(&'"') => {
-                        field.push(c);
-                        chars.next();
+        for generation in [Some(0), Some(50), Some(51), Some(800), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let spool = Spool::new(dir.path()).unwrap();
+            let mut r = row("app", "antigravity", BASE + 999);
+            let a = &mut r.attempts[0];
+            a.duration_ms = 0;
+            a.generation_ms = generation;
+            a.model_display_name = Some("Fixture Model".into());
+            a.reasoning_effort = Some("high".into());
+            a.tokens.image_cache_read = Some(7);
+            a.api_provider = Some("API_PROVIDER_FIXTURE".into());
+            a.error_code = Some("RESOURCE_EXHAUSTED".into());
+            a.outcome = "failed".into();
+            a.availability
+                .insert("duration".into(), "upstream_unreported".into());
+            a.availability
+                .insert("attempt_start".into(), "reported".into());
+            a.parse_reasons.push("attempt_time_unreported".into());
+            append(&spool.connection, &r, 1, None).unwrap();
+            let mut out = Vec::new();
+            let result = write_csv(&spool, &request(), &mut out).unwrap();
+            assert_eq!((result.requests, result.attempts), (1, 1));
+            let csv = String::from_utf8(out).unwrap();
+            let mut lines = csv.lines();
+            let fields = |line: &str| -> Vec<String> {
+                let mut result = Vec::new();
+                let mut field = String::new();
+                let mut quoted = false;
+                let mut chars = line.chars().peekable();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' if quoted && chars.peek() == Some(&'"') => {
+                            field.push(c);
+                            chars.next();
+                        }
+                        '"' => quoted = !quoted,
+                        ',' if !quoted => result.push(std::mem::take(&mut field)),
+                        _ => field.push(c),
                     }
-                    '"' => quoted = !quoted,
-                    ',' if !quoted => result.push(std::mem::take(&mut field)),
-                    _ => field.push(c),
                 }
-            }
-            result.push(field);
-            result
-        };
-        let headers = fields(lines.next().unwrap());
-        let values = fields(lines.next().unwrap());
-        assert_eq!(headers.len(), values.len());
-        let value = |key: &str| &values[headers.iter().position(|h| h == key).unwrap()];
-        assert!(!value("attempt_started_at").is_empty());
-        assert!(value("attempt_duration_ms").is_empty());
-        assert!(value("output_tokens_per_second").is_empty());
-        assert_eq!(value("generation_ms"), "800");
-        assert_eq!(value("generation_tokens_per_second"), "25.000000");
-        assert_eq!(value("error_code"), "RESOURCE_EXHAUSTED");
-        assert_eq!(value("model_display_name"), "Fixture Model");
-        assert_eq!(value("reasoning_effort"), "high");
-        assert_eq!(value("image_cache_read_tokens"), "7");
-        assert!(value("status").is_empty());
+                result.push(field);
+                result
+            };
+            let headers = fields(lines.next().unwrap());
+            let values = fields(lines.next().unwrap());
+            assert_eq!(headers.len(), values.len());
+            let value = |key: &str| &values[headers.iter().position(|h| h == key).unwrap()];
+            assert!(!value("attempt_started_at").is_empty());
+            assert!(value("attempt_duration_ms").is_empty());
+            assert!(value("output_tokens_per_second").is_empty());
+            assert_eq!(
+                value("generation_ms"),
+                &generation.map_or(String::new(), |ms| ms.to_string())
+            );
+            assert_eq!(
+                value("generation_tokens_per_second"),
+                &generation
+                    .filter(|ms| *ms > 50)
+                    .map_or(String::new(), |ms| format!("{:.6}", 20_000.0 / ms as f64))
+            );
+            assert_eq!(value("error_code"), "RESOURCE_EXHAUSTED");
+            assert_eq!(value("model_display_name"), "Fixture Model");
+            assert_eq!(value("reasoning_effort"), "high");
+            assert_eq!(value("image_cache_read_tokens"), "7");
+            assert!(value("status").is_empty());
+        }
     }
     #[test]
     fn partial_source_history_blocks_export_before_cleanup() {

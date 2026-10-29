@@ -27,12 +27,43 @@ fn vacuum_has_room(connection: &Connection, copies: u64) -> rusqlite::Result<boo
     ) {
         return Ok(available >= required);
     }
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    Ok(disks
+    #[cfg(target_os = "macos")]
+    let available = {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::InvalidPath(path.to_owned()))?;
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // Query this filesystem directly; enumerating every disk also probes
+        // unrelated IOKit devices and can fail before reaching the database.
+        if unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+            return Err(Error::InvalidQuery);
+        }
+        // statfs initialized the complete output on success.
+        let stats = unsafe { stats.assume_init() };
+        stats.f_bavail.saturating_mul(u64::from(stats.f_bsize))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let available = sysinfo::Disks::new_with_refreshed_list()
         .iter()
         .filter(|disk| path.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .is_some_and(|disk| disk.available_space() >= required))
+        .map_or(0, |disk| disk.available_space());
+    Ok(available >= required)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn filesystem_probe_handles_database_paths_and_reports_missing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixture 数据.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE fixture(value TEXT)")
+        .unwrap();
+    assert!(has_room(&connection, 2).is_ok());
+    std::fs::remove_file(&path).unwrap();
+    assert!(has_room(&connection, 2).is_err());
+    assert!(has_room(&Connection::open_in_memory().unwrap(), 2).unwrap());
 }
 
 const WAL_LIMIT: i64 = 8 * 1024 * 1024;

@@ -888,6 +888,9 @@ impl Attempt {
         known.then_some(self.duration_ms)
     }
     pub fn measured_generation_ms(&self) -> Option<u64> {
+        if self.transport == "local_api" {
+            return self.generation_ms.filter(|n| *n > 50);
+        }
         self.generation_ms
             .or_else(|| {
                 self.measured_duration_ms()?

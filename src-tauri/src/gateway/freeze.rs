@@ -125,12 +125,14 @@ impl Gate {
         Ticket(Arc::new(Entry {
             gate: self.clone(),
             id,
+            thread: Mutex::default(),
         }))
     }
 }
 struct Entry {
     gate: Gate,
     id: u64,
+    thread: Mutex<Option<super::thread_queue::Ticket>>,
 }
 impl Drop for Entry {
     fn drop(&mut self) {
@@ -148,6 +150,12 @@ pub async fn changed(receiver: &mut Option<watch::Receiver<()>>) {
     }
 }
 impl Ticket {
+    pub(super) fn attach_thread(&self, ticket: super::thread_queue::Ticket) {
+        *self.0.thread.lock().unwrap() = Some(ticket);
+    }
+    pub(super) fn thread(&self) -> Option<super::thread_queue::Ticket> {
+        self.0.thread.lock().unwrap().clone()
+    }
     fn phase(&self, phase: Phase) {
         let mut s = self.0.gate.0.state.lock().unwrap();
         let frozen = s.frozen;
@@ -174,6 +182,7 @@ impl Ticket {
     }
     pub fn finish(&self) {
         self.phase(Phase::Done);
+        self.0.thread.lock().unwrap().take();
     }
     pub fn paused(&self) -> bool {
         let s = self.0.gate.0.state.lock().unwrap();

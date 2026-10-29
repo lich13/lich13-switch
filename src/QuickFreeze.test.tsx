@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { GatewayFreeze } from "./bridge-contracts";
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
@@ -31,6 +31,7 @@ beforeEach(() => {
   mock.listeners.clear();
   mock.registration = null;
 });
+afterEach(() => vi.restoreAllMocks());
 
 it("reads the initial status only after change subscription is ready", async () => {
   let ready!: () => void;
@@ -119,4 +120,25 @@ it("retries failed reads and refreshes status when the panel reopens", async () 
   mock.command.mockResolvedValue(idle);
   act(() => mock.listeners.get("panel-visibility")?.(true));
   expect(await screen.findByText("未冻结")).toBeInTheDocument();
+});
+
+it("uses the same status in the main window and never replays ice after reopening", async () => {
+  vi.spyOn(window, "matchMedia").mockReturnValue({
+    ...window.matchMedia(""),
+    matches: false,
+  });
+  const view = render(<QuickFreeze surface="main" />);
+  act(() => mock.listeners.get("app-visibility")?.(true));
+  await screen.findByText("未冻结");
+  expect(view.container.querySelector(".quick-freeze-green")).not.toBeNull();
+  act(() => mock.listeners.get("gateway-freeze")?.({ ...idle, frozen: true }));
+  expect(view.container.querySelector(".freeze-effect-freeze")).not.toBeNull();
+  expect(view.container.querySelector(".quick-freeze-ice")).not.toBeNull();
+  act(() => mock.listeners.get("app-visibility")?.(false));
+  expect(view.container.querySelector(".freeze-effect-freeze")).toBeNull();
+  mock.command.mockResolvedValue({ ...idle, frozen: true });
+  await act(async () => mock.listeners.get("app-visibility")?.(true));
+  expect(view.container.querySelector(".freeze-effect-still")).not.toBeNull();
+  act(() => mock.listeners.get("gateway-freeze")?.(idle));
+  expect(view.container.querySelector(".freeze-effect-thaw")).not.toBeNull();
 });

@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -14,7 +15,10 @@ beforeEach(() => {
   mock.command.mockReset();
   vi.spyOn(Date, "now").mockReturnValue(Date.now());
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 it("keeps long compaction cancellable and shows elapsed time without a countdown", async () => {
   const start = Math.floor(Date.now() / 1000);
   mock.command.mockResolvedValueOnce(true);
@@ -96,4 +100,76 @@ it("shows only long waits and cancels the selected request on its platform", asy
     />,
   );
   expect(screen.queryByRole("region")).not.toBeInTheDocument();
+});
+
+it("anchors the countdown to the received budget and excludes frozen time", () => {
+  vi.useFakeTimers();
+  let now = 10_000_000;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const pending = {
+    requestId: "fixture-queued",
+    providerId: null,
+    model: "fixture-model",
+    startedAt: 1,
+    elapsedSeconds: 61,
+    remainingSeconds: 239 as number | null,
+    phase: "thread_queue",
+  };
+  const props = {
+    clientId: "codex" as const,
+    visible: true,
+    notify: vi.fn(),
+    error: vi.fn(),
+  };
+  const view = render(
+    <QuickWaits
+      {...props}
+      gateway={{ ...gatewayDemo, pendingRequests: [pending] }}
+    />,
+  );
+  expect(screen.getByText("等待上一请求")).toBeInTheDocument();
+  expect(screen.getByText("剩余 239 秒")).toBeInTheDocument();
+  act(() => {
+    now += 10_000;
+    vi.advanceTimersByTime(10_000);
+  });
+  expect(screen.getByText("剩余 229 秒")).toBeInTheDocument();
+  view.rerender(
+    <QuickWaits
+      {...props}
+      gateway={{
+        ...gatewayDemo,
+        pendingRequests: [
+          {
+            ...pending,
+            phase: "frozen",
+            elapsedSeconds: 71,
+            remainingSeconds: null,
+          },
+        ],
+      }}
+    />,
+  );
+  act(() => {
+    now += 600_000;
+    vi.advanceTimersByTime(600_000);
+  });
+  expect(screen.getByText("已用 71 秒")).toBeInTheDocument();
+  view.rerender(
+    <QuickWaits
+      {...props}
+      gateway={{
+        ...gatewayDemo,
+        pendingRequests: [
+          { ...pending, elapsedSeconds: 71, remainingSeconds: 229 },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByText("剩余 229 秒")).toBeInTheDocument();
+  act(() => {
+    now += 1_000;
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(screen.getByText("剩余 228 秒")).toBeInTheDocument();
 });

@@ -18,6 +18,53 @@ fn parsed(v: &Value) -> Record {
 }
 
 #[test]
+fn request_timings_override_step_clocks_and_small_generation_is_not_a_speed() {
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let mut memory = Totals::default();
+        for (index, generation) in [Some(0), Some(50), Some(51), None].into_iter().enumerate() {
+            let mut v = entry(&format!("timing-{index}"), 0);
+            v["chatModel"]["timeToFirstToken"] = json!("1.999s");
+            if let Some(ms) = generation {
+                v["chatModel"]["streamingDuration"] = json!(ms as f64 / 1000.0);
+            } else {
+                v["chatModel"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("streamingDuration");
+            }
+            let r = parsed(&v);
+            let a = &r.attempts[0];
+            assert_eq!(a.first_token_ms, Some(1999));
+            assert_eq!(
+                a.measured_duration_ms(),
+                Some(generation.map_or(2000, |ms| 1999 + ms))
+            );
+            assert_eq!(a.measured_generation_ms(), generation.filter(|ms| *ms > 50));
+            memory.add_record(&r);
+            store.write_batch(&[r], None).unwrap();
+        }
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let total = store.dashboard(&Filter::default()).unwrap().totals;
+        assert_eq!(total.generation_ms, 51);
+        assert_eq!(total.generation_ms, memory.generation_ms);
+        assert_eq!(total.duration_ms, memory.duration_ms);
+        assert_eq!(total.first_token_sum_ms, 1999 * 4);
+    }
+}
+
+#[test]
 fn placeholder_mirror_uses_real_model_and_final_timings_once() {
     let r = parsed(&entry("one", 0));
     let a = &r.attempts[0];
@@ -113,6 +160,40 @@ fn historical_repair_preserves_prices_and_identity_in_both_storage_formats() {
             1
         );
     }
+}
+
+#[test]
+fn history_reprojects_small_generation_even_when_total_was_already_correct() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
+    let mut v = entry("old-small-generation", 0);
+    v["chatModel"]["streamingDuration"] = json!("0.05s");
+    let r = parsed(&v);
+    store.write_batch(std::slice::from_ref(&r), None).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE usage_metrics SET generation_ms=50,measured_outputs=20 WHERE owner=?1",
+            [&r.id],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02610','done')",
+            [],
+        )
+        .unwrap();
+    while store.repair_metadata_batch().unwrap() {}
+    let total = store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!(total.generation_ms, 0);
+    assert_eq!(
+        store.detail(&r.id).unwrap().attempts[0].generation_ms,
+        Some(50)
+    );
+    let before = store.connection.total_changes();
+    assert!(!store.repair_metadata_batch().unwrap());
+    assert_eq!(store.connection.total_changes(), before);
 }
 
 #[test]

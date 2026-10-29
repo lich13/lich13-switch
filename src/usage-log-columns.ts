@@ -102,7 +102,7 @@ export function measuredFirstToken(a: Attempt, source: string): number | null {
     : null;
 }
 export function generationSpeed(a: Attempt): number | null {
-  return a.generationMs != null && a.generationMs > 0
+  return a.generationMs != null && a.generationMs > 50
     ? logSpeed({
         ...a,
         durationMs: a.generationMs,

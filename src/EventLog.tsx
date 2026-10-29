@@ -224,6 +224,7 @@ const phases: Record<string, string> = {
   ws_send: "WebSocket 发送",
   ws_receive: "WebSocket 接收",
   ws_wait: "等待重连",
+  thread_queue: "等待上一请求",
 };
 const timeoutPhases: Record<string, string> = {
   response_headers: "等待响应头",

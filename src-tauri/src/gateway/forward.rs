@@ -392,6 +392,45 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 Ok(replay::RequestHints::default())
             };
+        let queued = super::thread_queue::reserve(
+            &gateway,
+            &parts.headers,
+            parts.method == hyper::Method::POST
+                && matches!(
+                    parts.uri.path().trim_end_matches('/'),
+                    "/responses"
+                        | "/v1/responses"
+                        | "/responses/compact"
+                        | "/v1/responses/compact"
+                        | "/chat/completions"
+                        | "/v1/chat/completions"
+                        | "/completions"
+                        | "/v1/completions"
+                )
+                && hints.as_ref().is_ok_and(|h| !h.auxiliary),
+            settings.max_waiting,
+        );
+        match queued {
+            Ok(Some(turn)) => {
+                traffic.attach_thread(turn.clone());
+                if !turn.ready() {
+                    request_budget.describe(
+                        None,
+                        hints.as_ref().ok().and_then(|h| h.model.as_deref()),
+                        "thread_queue",
+                    );
+                }
+                turn.wait().await;
+            }
+            Ok(None) => (),
+            Err(_) => {
+                return error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    code::CAPACITY,
+                    "等待队列已满或网关已停止",
+                )
+            }
+        }
         let stream_hint = websocket
             || hints.as_ref().is_ok_and(|h| h.stream)
             || parts

@@ -38,6 +38,8 @@ mod business_ua_tests;
 pub mod catalog;
 mod circuit;
 mod compaction;
+#[cfg(test)]
+mod config_poll_tests;
 mod connector;
 #[cfg(test)]
 mod diagnostic_test_support;
@@ -89,6 +91,7 @@ mod routing_log;
 mod rpm;
 pub(crate) mod testing;
 mod thread_capacity;
+mod thread_queue;
 #[cfg(test)]
 mod token_reveal_tests;
 #[cfg(test)]
@@ -235,6 +238,7 @@ struct Shared {
     model_list: model_list::Service,
     endpoints: endpoints::Service,
     admission: admission::Scheduler,
+    thread_queue: thread_queue::Queue,
     compaction: Arc<compaction::Registry>,
 }
 impl Drop for Shared {
@@ -515,6 +519,7 @@ impl Gateway {
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
+            thread_queue: thread_queue::Queue::default(),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             catalog: catalog::Service::new(data.join("provider-models.json")),
             model_list: model_list::Service::new(data.join("model-list.json")),
@@ -1044,20 +1049,40 @@ impl Gateway {
         state.home = Some(home.to_owned());
     }
     pub fn read_config(&self, home: &Path) -> Result<crate::configuration::Document> {
-        let s = self.0.inner.lock().unwrap();
         if self.0.client == ClientId::Dsh {
             return Err(AppError::new(code::CONFIG, "请在 DSH 接入面板选择 profile"));
         }
-        crate::configuration::read(
-            self.0.client,
-            home,
-            &self.0.data,
-            s.running
-                || self.0.data.join("gateway-recovery.json").exists()
-                || self.0.data.join("grok-import.json").exists()
-                || self.0.data.join("dsh-recovery.json").exists()
-                || self.claude_official(),
-        )
+        crate::configuration::read(self.0.client, home, &self.0.data, self.config_guarded())
+    }
+    fn config_guarded(&self) -> bool {
+        let running = self.0.inner.lock().unwrap().running;
+        running
+            || self.0.data.join("gateway-recovery.json").exists()
+            || self.0.data.join("grok-import.json").exists()
+            || self.0.data.join("dsh-recovery.json").exists()
+            || self.claude_official()
+    }
+    pub(crate) fn config_stamp(
+        &self,
+        home: &Path,
+        cache: &mut crate::auth_cache::Cache<Result<String>>,
+    ) -> Result<(String, String, bool)> {
+        if self.0.client == ClientId::Dsh {
+            return Err(AppError::new(code::CONFIG, "请在 DSH 接入面板选择 profile"));
+        }
+        let path = self.0.client.config(home);
+        let revision = cache.read(&path, |raw| {
+            if let Some(bytes) = &raw {
+                std::str::from_utf8(bytes)
+                    .map_err(|_| AppError::new(code::UTF8, "配置必须使用 UTF-8 编码"))?;
+            }
+            Ok(storage::revision(raw.as_deref()))
+        })?;
+        Ok((
+            path.to_string_lossy().into(),
+            revision.as_ref().clone()?,
+            self.config_guarded(),
+        ))
     }
     pub fn previous_config(&self) -> Result<String> {
         crate::configuration::previous(self.0.client, &self.0.data)

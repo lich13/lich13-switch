@@ -7,6 +7,7 @@ import {
   logMoney,
   logNumber,
   logSpeed,
+  generationSpeed,
 } from "./usage-log-columns";
 import type { Attempt, UsageRecord, UsageSettings } from "./usage-types";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
@@ -38,6 +39,17 @@ const attempt = {
   parseReasons: [],
 } as unknown as Attempt;
 describe("request log columns", () => {
+  it("keeps total TPS independent of near-zero generation timing", () => {
+    for (const generationMs of [0, 50, null, undefined]) {
+      expect(generationSpeed({ ...attempt, generationMs })).toBeNull();
+    }
+    expect(generationSpeed({ ...attempt, generationMs: 51 })).toBeCloseTo(
+      60000 / 51,
+    );
+    expect(logSpeed({ ...attempt, firstTokenMs: 2499, generationMs: 1 })).toBe(
+      24,
+    );
+  });
   it("distinguishes unknown, zero, compact boundaries and exact costs", () => {
     expect([null, 0, 9999, 10000, 1050000].map((v) => logNumber(v))).toEqual([
       "—",

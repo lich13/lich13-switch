@@ -1732,7 +1732,12 @@ pub fn run() {
             let freeze_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while freeze_events.changed().await.is_ok() {
-                    let _ = freeze_app.emit("gateway-freeze", freeze.view());
+                    let view = freeze.view();
+                    for name in ["main", "quick"] {
+                        if let Some(window) = freeze_app.get_webview_window(name).filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false)) {
+                            let _ = window.emit("gateway-freeze", &view);
+                        }
+                    }
                 }
             });
             #[cfg(target_os = "macos")]
@@ -1904,6 +1909,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let mut last = Some(state);
                 let mut config_versions = std::collections::HashMap::new();
+                let mut config_cache = std::collections::HashMap::new();
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     if runtime.quitting.load(Ordering::Relaxed) {
@@ -1932,11 +1938,10 @@ pub fn run() {
                         }
                     }
                     for client in [gateway::ClientId::Codex, gateway::ClientId::Claude, gateway::ClientId::Grok, gateway::ClientId::Dsh] {
-                        if let Ok(doc) = runtime.home(client).and_then(|home| runtime.gateway(client).read_config(&home)) {
-                            let stamp = (doc.path.clone(), doc.revision.clone(), doc.guarded);
+                        if let Ok(stamp) = runtime.home(client).and_then(|home| runtime.gateway(client).config_stamp(&home, config_cache.entry(client).or_default())) {
                             if config_versions.get(&client) != Some(&stamp) {
+                                let _ = handle.emit("config-state", serde_json::json!({"clientId":client,"revision":stamp.1,"guarded":stamp.2}));
                                 config_versions.insert(client, stamp);
-                                let _ = handle.emit("config-state", serde_json::json!({"clientId":client,"revision":doc.revision,"guarded":doc.guarded}));
                                 if client != gateway::ClientId::Codex {
                                     publish_gateway(&handle, runtime.gateway(client));
                                 }
@@ -1965,6 +1970,11 @@ pub fn run() {
             }
         })
         .on_window_event(|w, event| {
+            if matches!(event, tauri::WindowEvent::Focused(true))
+                || (matches!(event, tauri::WindowEvent::Resized(_)) && w.is_minimized().unwrap_or(false)) {
+                let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
+                let _ = w.emit(if w.label() == "quick" { "panel-visibility" } else { "app-visibility" }, visible);
+            }
             if w.label() == "quick" {
                 match event {
                     tauri::WindowEvent::Focused(focused) => {

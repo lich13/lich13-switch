@@ -1,6 +1,6 @@
 {
   "name": "lich13-switch",
-  "version": "0.26.10",
+  "version": "0.26.11",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.15.0",

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { command } from "./bridge";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 const phases: Record<string, string> = {
   admission: "等待准入",
+  thread_queue: "等待上一请求",
   headers: "等待首字节",
   capacity: "容量等待",
   retry: "等待重试",
@@ -25,15 +26,18 @@ export default function QuickWaits({
 }) {
   const [now, setNow] = useState(Date.now()),
     [busy, setBusy] = useState<string[]>([]);
+  const receivedAt = useMemo(() => Date.now(), [gateway.pendingRequests]);
+  const elapsed = (phase: string) =>
+    phase === "frozen" ? 0 : Math.max(0, Math.floor((now - receivedAt) / 1000));
   useEffect(() => {
-    if (!visible || !gateway.pendingRequests?.length) return;
+    if (!visible || !gateway.pendingRequests?.some((r) => r.phase !== "frozen"))
+      return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [visible, gateway.pendingRequests]);
   const requests = (gateway.pendingRequests ?? []).filter(
-    (r) =>
-      Math.max(r.elapsedSeconds, Math.floor(now / 1000) - r.startedAt) >= 60,
+    (r) => r.elapsedSeconds + elapsed(r.phase) >= 60,
   );
   if (!requests.length) return null;
   return (
@@ -78,19 +82,10 @@ export default function QuickWaits({
             <span>{phases[r.phase] ?? r.phase}</span>
             <span>
               {r.remainingSeconds == null ? (
-                `已用 ${Math.max(r.elapsedSeconds, Math.floor(now / 1000) - r.startedAt)} 秒`
+                `已用 ${r.elapsedSeconds + elapsed(r.phase)} 秒`
               ) : (
                 <>
-                  剩余{" "}
-                  {Math.max(
-                    0,
-                    r.remainingSeconds -
-                      Math.max(
-                        0,
-                        Math.floor(now / 1000) - r.startedAt - r.elapsedSeconds,
-                      ),
-                  )}{" "}
-                  秒
+                  剩余 {Math.max(0, r.remainingSeconds - elapsed(r.phase))} 秒
                 </>
               )}
             </span>

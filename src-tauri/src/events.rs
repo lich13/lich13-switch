@@ -525,6 +525,18 @@ struct Journal {
     // those links; persisted terminal events use the canonical row ID.
     aliases: VecDeque<(String, String)>,
     error: Option<String>,
+    dirty: bool,
+}
+impl Journal {
+    fn needs_write(&self, path: &Path) -> bool {
+        self.dirty
+            || self.error.is_some()
+            || !path.exists()
+            || self
+                .records
+                .iter()
+                .any(|r| r.last_at < now().saturating_sub(RETENTION))
+    }
 }
 enum Job {
     Append(Box<Record>),
@@ -627,9 +639,13 @@ fn load(path: &Path) -> Journal {
                             && r.model.as_deref().is_none_or(|s| safe_model(s).is_some())
                             && r.last_at <= now().saturating_add(60) =>
                     {
-                        r.details = r.details.sanitized();
+                        let sanitized = r.details.clone().sanitized();
+                        j.dirty |= sanitized != r.details;
+                        r.details = sanitized;
                         if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
                             j.records.push_back(r)
+                        } else {
+                            j.dirty = true;
                         }
                     }
                     _ => j.error = Some("日志包含损坏记录，已跳过；其余记录仍可查看".into()),
@@ -643,24 +659,23 @@ fn load(path: &Path) -> Journal {
 }
 fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
     let cutoff = now().saturating_sub(RETENTION);
-    if !changed
-        && j.error.is_none()
-        && path.exists()
-        && j.records.iter().all(|r| r.last_at >= cutoff)
-    {
+    if !changed && !j.needs_write(path) {
         return Ok(());
     }
     j.records.retain(|r| r.last_at >= cutoff);
     let retained: std::collections::HashSet<_> = j.records.iter().map(|r| r.id.as_str()).collect();
     j.aliases
         .retain(|(_, target)| retained.contains(target.as_str()));
+    j.dirty = true;
     storage::atomic_write_stream(path, |writer| {
         for record in &j.records {
             serde_json::to_writer(&mut *writer, record)?;
             writer.write_all(b"\n")?;
         }
         Ok(())
-    })
+    })?;
+    j.dirty = false;
+    Ok(())
 }
 impl Service {
     pub fn new(data: &Path) -> Self {
@@ -677,7 +692,7 @@ impl Service {
             {
                 let mut initial = j.lock().unwrap();
                 if initial.error.is_none() && path.exists() {
-                    if persist(&mut initial, &path, true).is_err() {
+                    if persist(&mut initial, &path, false).is_err() {
                         initial.error = Some("日志写入失败，请检查文件权限与空间".into());
                     } else if prune_raw(&raw_path, &initial).is_err() {
                         initial.error = Some("日志原文清理失败，请重试".into());
@@ -694,6 +709,20 @@ impl Service {
                         Err(_) => break,
                     },
                 };
+                if matches!(&job, Job::Prune) {
+                    let mut current = j.lock().unwrap();
+                    if !current.needs_write(&path) {
+                        if prune_raw(&raw_path, &current).is_err() {
+                            current.error = Some("日志原文清理失败，请重试".into());
+                        }
+                        let _ = events_copy.send(Change {
+                            record: None,
+                            error: current.error.clone(),
+                            notify: false,
+                        });
+                        continue;
+                    }
+                }
                 let mut journal = j.lock().unwrap().clone();
                 // Only Clear promises rollback after a failed write. Append keeps
                 // its in-memory evidence so the next write can retry it.
@@ -1123,6 +1152,45 @@ mod v02512_tests;
 mod routing_visibility_tests {
     use super::*;
     use crate::usage::model::{RoutingDecision, RoutingEvidence};
+
+    #[test]
+    fn loaded_retention_and_sanitization_remain_dirty_until_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.jsonl");
+        let mut keep = Record::new(
+            None,
+            None,
+            None,
+            Reason::AccountSync,
+            Action::Stopped,
+            None,
+            None,
+        );
+        keep.details.custom_rule_id = Some("invalid-fixture-id".into());
+        let mut expired = keep.clone();
+        expired.id = uuid::Uuid::new_v4().to_string();
+        expired.last_at = now() - RETENTION - 1;
+        let lines = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&keep).unwrap(),
+            serde_json::to_string(&expired).unwrap()
+        );
+        std::fs::write(&path, lines).unwrap();
+        let mut journal = load(&path);
+        assert!(journal.error.is_none());
+        assert_eq!(journal.records.len(), 1);
+        assert!(journal.needs_write(&path));
+        persist(&mut journal, &path, false).unwrap();
+        assert!(!journal.needs_write(&path));
+        assert!(!load(&path).dirty);
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("invalid-fixture-id"));
+        std::fs::write(&path, "invalid fixture\n").unwrap();
+        let damaged = load(&path);
+        assert!(damaged.error.is_some());
+        assert!(damaged.needs_write(&path));
+    }
 
     #[test]
     fn unchanged_retention_keeps_file_and_expired_records_are_removed() {
