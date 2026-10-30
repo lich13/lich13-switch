@@ -269,7 +269,7 @@ function QuickContent({
         </button>
       </header>
       <div className="quick-scroll">
-        <div>
+        <div className="quick-body">
           {prefs.tab === "providers" && visibleClients.length > 0 && (
             <ClientSelection
               client={clientVisible ? clientId : visibleClients[0]}

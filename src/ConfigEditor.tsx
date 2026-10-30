@@ -1,3 +1,4 @@
+import "./styles/modals-config.css";
 import { subscriptions } from "./subscriptions";
 import ClaudeProfile from "./ClaudeProfile";
 import DshConfigEditor from "./DshConfigEditor";

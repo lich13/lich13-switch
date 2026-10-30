@@ -81,6 +81,7 @@ export default function ClientSelection<C extends ConfigClientId = ClientId>({
           <button
             key={id}
             type="button"
+            data-client={id}
             data-client-switch
             disabled={disabled}
             aria-pressed={id === client}

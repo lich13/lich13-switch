@@ -1,14 +1,16 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
-import QuickPanel from "./QuickPanel";
-import "./style.css";
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    {new URLSearchParams(location.search).get("panel") === "quick" ? (
-      <QuickPanel />
-    ) : (
-      <App />
-    )}
-  </React.StrictMode>,
+
+const root = createRoot(document.getElementById("root")!);
+const isQuickPanel =
+  new URLSearchParams(location.search).get("panel") === "quick";
+
+void (isQuickPanel ? import("./QuickEntry") : import("./AppEntry")).then(
+  ({ default: Entry }) => {
+    root.render(
+      <React.StrictMode>
+        <Entry />
+      </React.StrictMode>,
+    );
+  },
 );
