@@ -83,6 +83,15 @@ pub fn register(c: &Connection) -> Result<()> {
                 .unwrap_or(at.saturating_add(DAY));
             Ok(next)
         }),
+    )?;
+    db(
+        c.create_scalar_function("usage_v11_session", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
+            let body: String = ctx.get(0)?;
+            let c = unsafe { ctx.get_connection()? };
+            Ok(super::bodies::decode::<Record>(&c, &body)
+                .ok()
+                .and_then(|r| r.session_id))
+        }),
     )
 }
 /// Identical expression for the index and its filters; aliases only qualify columns.
@@ -344,6 +353,10 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
             args.push(Value::Text(value.clone()));
         }
     }
+    if let Some(session_id) = f.session_id.as_deref().filter(|v| !v.is_empty()) {
+        terms.push(format!("usage_v11_session({alias}.body)=?"));
+        args.push(Value::Text(session_id.into()));
+    }
     if let Some(operation) = f.operation.as_deref().filter(|v| !v.is_empty()) {
         terms.push(format!(
             "{}=?",
@@ -421,6 +434,9 @@ fn selection(c: &Connection, f: &Filter) -> (String, Vec<Value>) {
             }
             args.push(Value::Text(v.clone()));
         }
+    }
+    if f.session_id.as_deref().is_some_and(|v| !v.is_empty()) {
+        daily.push("0=1".into());
     }
     if let Some(operation) = f.operation.as_deref().filter(|v| !v.is_empty()) {
         daily.push(format!("{}=?", operation_expression("d.body", "$.example")));
@@ -620,6 +636,10 @@ pub(super) fn native_sql(c: &Connection, sql: String) -> String {
     .replace("native.owner=r.id", "native.owner=r.rid")
     .replace("original_kind.owner=r.id", "original_kind.owner=r.rid")
     .replace("r.client=?", "r.client_code=usage_label(?)")
+    .replace(
+        "usage_v11_session(r.body)=?",
+        "EXISTS(SELECT 1 FROM v12_rows srow WHERE srow.rid=r.rid AND srow.session=usage_key(?))",
+    )
     .replace("r.source='proxy'", "r.source_code=0")
     .replace("r.source='grok'", "r.source_code=3")
     .replace("r.source<>'grok'", "r.source_code<>3")

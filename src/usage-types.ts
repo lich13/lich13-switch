@@ -223,8 +223,87 @@ export type UsageFilter = {
   client?: string;
   provider?: string;
   model?: string;
+  sessionId?: string;
   status?: string;
   page?: number;
+};
+
+export type AntigravityTokenMix = {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  visibleOutput: number;
+  reasoning: number;
+  total: number;
+  thinkingSharePercent: number | null;
+  cacheHitPercent: number | null;
+  cacheReadEligible: number;
+  cacheInputEligible: number;
+  cacheSavingsUsd: string;
+};
+
+export type AntigravityTrackWindow = {
+  requests: number;
+  tokens: number;
+  reasoningTokens: number;
+  costUsd: string;
+  unpricedRequests: number;
+  tokensPerHour: number;
+};
+
+export type AntigravityLiveQuota = {
+  label: string;
+  remainingPercent: number | null;
+  usedPercent: number | null;
+  resetAt: number | null;
+};
+
+export type AntigravityQuotaTrack = {
+  id: string;
+  label: string;
+  burst5h: AntigravityTrackWindow;
+  weekly7d: AntigravityTrackWindow;
+  liveQuota: AntigravityLiveQuota | null;
+};
+
+export type AntigravityFamilyGroup = {
+  family: string;
+  label: string;
+  requests: number;
+  tokens: number;
+  reasoningTokens: number;
+  costUsd: string;
+  sharePercent: number;
+};
+
+export type AntigravitySessionRow = {
+  sessionId: string;
+  shortHash: string;
+  requests: number;
+  primaryModel: string;
+  family: string;
+  totalTokens: number;
+  reasoningTokens: number;
+  cacheHitPercent: number | null;
+  durationMs: number;
+  costUsd: string;
+  unpricedRequests: number;
+  startedAt: number;
+  lastActiveAt: number;
+};
+
+export type AntigravityUsageStats = {
+  requests: number;
+  sessions: number;
+  costUsd: string;
+  unpricedRequests: number;
+  tokenMix: AntigravityTokenMix;
+  tracks: AntigravityQuotaTrack[];
+  families: AntigravityFamilyGroup[];
+  topSessions: AntigravitySessionRow[];
+  liveQuotas: AntigravityLiveQuota[];
+  liveConnected: boolean;
 };
 export type Dashboard = {
   dataVersion?: number;

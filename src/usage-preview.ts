@@ -1,4 +1,5 @@
 import type {
+  AntigravityUsageStats,
   Attempt,
   Dashboard,
   PricingView,
@@ -67,6 +68,8 @@ const rows: UsageRecord[] = Array.from({ length: 47 }, (_, i) => {
 const app = rows[4];
 app.client = "antigravity";
 app.source = "antigravity";
+app.sessionId =
+  "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 app.attempts[0] = {
   ...app.attempts[0],
   provider: null,
@@ -356,6 +359,7 @@ function total(items: UsageRecord[]): Totals {
 export const usageCommands = [
   "get_usage_state",
   "get_usage_dashboard",
+  "get_antigravity_usage_stats",
   "get_usage_logs",
   "get_usage_detail",
   "set_usage_settings",
@@ -449,12 +453,144 @@ export function usagePreview(
         (!f.client || r.client === f.client) &&
         (!f.provider || r.attempts.at(-1)!.provider === f.provider) &&
         (!f.model || r.attempts.at(-1)!.pricingModel === f.model) &&
+        (!f.sessionId || r.sessionId === f.sessionId) &&
         (!f.operation ||
           (r.attempts.at(-1)!.operation ?? "model") === f.operation),
     )
     .sort(
       (a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt),
     );
+  if (name === "get_antigravity_usage_stats") {
+    const now = Date.now();
+    const previewStats: AntigravityUsageStats = {
+      requests: 18,
+      sessions: 3,
+      costUsd: "1.4826",
+      unpricedRequests: 0,
+      tokenMix: {
+        input: 64200,
+        cacheRead: 298400,
+        cacheWrite: 12000,
+        output: 42800,
+        visibleOutput: 24400,
+        reasoning: 18400,
+        total: 417400,
+        thinkingSharePercent: 43,
+        cacheHitPercent: 79.7,
+        cacheReadEligible: 298400,
+        cacheInputEligible: 374600,
+        cacheSavingsUsd: "0.8057",
+      },
+      tracks: [
+        {
+          id: "gemini",
+          label: "Gemini",
+          burst5h: {
+            requests: 7,
+            tokens: 182400,
+            reasoningTokens: 8200,
+            costUsd: "0.492",
+            unpricedRequests: 0,
+            tokensPerHour: 36480,
+          },
+          weekly7d: {
+            requests: 12,
+            tokens: 286000,
+            reasoningTokens: 11800,
+            costUsd: "0.784",
+            unpricedRequests: 0,
+            tokensPerHour: 1702.4,
+          },
+          liveQuota: {
+            label: "Gemini Pro",
+            remainingPercent: 76,
+            usedPercent: 24,
+            resetAt: now + 3 * 3600000,
+          },
+        },
+        {
+          id: "claude_gpt",
+          label: "Claude / GPT",
+          burst5h: {
+            requests: 4,
+            tokens: 94200,
+            reasoningTokens: 5400,
+            costUsd: "0.4686",
+            unpricedRequests: 0,
+            tokensPerHour: 18840,
+          },
+          weekly7d: {
+            requests: 6,
+            tokens: 131400,
+            reasoningTokens: 6600,
+            costUsd: "0.6986",
+            unpricedRequests: 0,
+            tokensPerHour: 782.1,
+          },
+          liveQuota: {
+            label: "Claude / GPT",
+            remainingPercent: 62,
+            usedPercent: 38,
+            resetAt: now + 11 * 3600000,
+          },
+        },
+      ],
+      families: [
+        {
+          family: "gemini",
+          label: "Gemini",
+          requests: 12,
+          tokens: 286000,
+          reasoningTokens: 11800,
+          costUsd: "0.784",
+          sharePercent: 68.5,
+        },
+        {
+          family: "claude",
+          label: "Claude",
+          requests: 6,
+          tokens: 131400,
+          reasoningTokens: 6600,
+          costUsd: "0.6986",
+          sharePercent: 31.5,
+        },
+      ],
+      topSessions: [
+        {
+          sessionId:
+            "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          shortHash: "a1b2c3d4",
+          requests: 10,
+          primaryModel: "gemini-3.1-pro",
+          family: "gemini",
+          totalTokens: 242000,
+          reasoningTokens: 10400,
+          cacheHitPercent: 81.2,
+          durationMs: 42600,
+          costUsd: "0.684",
+          unpricedRequests: 0,
+          startedAt: now - 7200000,
+          lastActiveAt: now - 600000,
+        },
+      ],
+      liveQuotas: [
+        {
+          label: "Gemini Pro",
+          remainingPercent: 76,
+          usedPercent: 24,
+          resetAt: now + 3 * 3600000,
+        },
+        {
+          label: "Claude / GPT",
+          remainingPercent: 62,
+          usedPercent: 38,
+          resetAt: now + 11 * 3600000,
+        },
+      ],
+      liveConnected: true,
+    };
+    return previewStats;
+  }
   if (name === "get_usage_logs") {
     const filtered = selected.filter(
       (r) =>

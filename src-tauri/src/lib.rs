@@ -2353,6 +2353,7 @@ pub fn run() {
             usage::commands::get_usage_state,
             usage::commands::export_usage_bill,
             usage::commands::get_usage_dashboard,
+            usage::commands::get_antigravity_usage_stats,
             usage::commands::get_usage_logs,
             usage::commands::get_usage_detail,
             usage::commands::set_usage_settings,

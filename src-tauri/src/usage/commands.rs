@@ -14,6 +14,22 @@ pub async fn get_usage_dashboard(r: R<'_>, filter: Filter) -> Result<store::Dash
         .map_err(|_| failure("用量查询中断"))?
 }
 #[tauri::command]
+pub async fn get_antigravity_usage_stats(
+    r: R<'_>,
+    filter: Filter,
+) -> Result<super::antigravity::AntigravityUsageStats> {
+    let s = r.usage.clone();
+    let prices = s.prices()?.frozen();
+    let multiplier = s.settings().multiplier;
+    let now_ms = now();
+    let live = super::antigravity::probe_live_quotas().await;
+    tokio::task::spawn_blocking(move || {
+        s.read(|db| db.antigravity_stats(&filter, &prices, &multiplier, now_ms, live))
+    })
+    .await
+    .map_err(|_| failure("Antigravity 统计查询中断"))?
+}
+#[tauri::command]
 pub async fn get_usage_logs(r: R<'_>, filter: Filter) -> Result<store::Page> {
     let s = r.usage.clone();
     tokio::task::spawn_blocking(move || s.read(|db| db.logs(&filter)))

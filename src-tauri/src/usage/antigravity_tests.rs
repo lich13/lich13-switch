@@ -463,11 +463,11 @@ async fn fixture(broken: bool) -> Fixture {
         }
     });
     Fixture {
-        api: Api {
+        api: Api::from_single(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
             origin,
-            token: "fixture".into(),
-            http: reqwest::Client::builder().no_proxy().build().unwrap(),
-        },
+            "fixture".into(),
+        ),
         calls,
         changed,
         entries,
@@ -880,4 +880,473 @@ fn file_gap_does_not_hide_later_usage_or_advance_past_unresolved_history() {
         std::fs::read_to_string(path).unwrap(),
         format!("{gap}{later}")
     );
+}
+
+#[test]
+fn known_placeholders_and_enums_resolve_pricing_and_effort_while_unknown_stays_unpriced() {
+    let dir = tempfile::tempdir().unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let settings = Settings::default();
+    let steps = Steps::from([step()].as_slice());
+
+    for (raw, expected_model, expected_display, expected_effort, expects_priced) in [
+        (
+            "MODEL_PLACEHOLDER_M37",
+            Some("gemini-3.1-pro"),
+            Some("Gemini 3.1 Pro"),
+            Some("high"),
+            true,
+        ),
+        (
+            "MODEL_PLACEHOLDER_M36",
+            Some("gemini-3.1-pro"),
+            Some("Gemini 3.1 Pro"),
+            Some("low"),
+            true,
+        ),
+        (
+            "MODEL_PLACEHOLDER_M18",
+            Some("gemini-3-flash"),
+            Some("Gemini 3 Flash"),
+            None,
+            true,
+        ),
+        (
+            "MODEL_PLACEHOLDER_M26",
+            Some("claude-opus-4-6"),
+            Some("Claude Opus 4.6"),
+            Some("high"),
+            true,
+        ),
+        (
+            "MODEL_PLACEHOLDER_M35",
+            Some("claude-sonnet-4-6"),
+            Some("Claude Sonnet 4.6"),
+            None,
+            true,
+        ),
+        (
+            "MODEL_CLAUDE_4_5_SONNET_THINKING",
+            Some("claude-sonnet-4-5"),
+            Some("Claude Sonnet 4.5"),
+            Some("high"),
+            true,
+        ),
+        (
+            "MODEL_CHAT_20706",
+            Some("gemini-2.5-flash"),
+            Some("Gemini 2.5 Flash"),
+            None,
+            true,
+        ),
+        (
+            "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+            Some("gpt-oss-120b"),
+            Some("GPT-OSS 120B"),
+            Some("medium"),
+            false,
+        ),
+        ("MODEL_PLACEHOLDER_M999", None, None, None, false),
+    ] {
+        let item = json!({
+            "executionId": "exec",
+            "stepIndices": [0],
+            "chatModel": {
+                "model": raw,
+                "customMetadata": {"request_id": format!("req-{raw}")},
+                "usage": {
+                    "responseId": format!("resp-{raw}"),
+                    "model": raw,
+                    "inputTokens": "1000",
+                    "cacheReadTokens": "500",
+                    "outputTokens": "200",
+                    "thinkingOutputTokens": "80"
+                },
+                "timeToFirstToken": "0.2s",
+                "streamingDuration": "1.0s"
+            }
+        });
+        let mut rec = record("cascade-one", &item, &steps, 0).unwrap().unwrap();
+        price(&mut rec, &pricing, &settings);
+        let a = &rec.attempts[0];
+        assert_eq!(a.requested_model.as_deref(), expected_model, "{raw}");
+        assert_eq!(a.response_model.as_deref(), expected_model, "{raw}");
+        assert_eq!(a.model_display_name.as_deref(), expected_display, "{raw}");
+        assert_eq!(a.reasoning_effort.as_deref(), expected_effort, "{raw}");
+        assert_eq!(a.price.is_some(), expects_priced, "{raw}");
+    }
+
+    // Historical attempt with only display name or raw enum recovers canonical model via normalize_attempt.
+    let mut legacy = Attempt {
+        model_display_name: Some("Claude Opus 4.6 (Thinking)".into()),
+        duration_ms: 1000,
+        ..Attempt::default()
+    };
+    assert!(normalize_attempt(&mut legacy));
+    assert_eq!(
+        legacy.model_display_name.as_deref(),
+        Some("Claude Opus 4.6")
+    );
+    assert_eq!(legacy.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(legacy.response_model.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(legacy.pricing_model.as_deref(), Some("claude-opus-4-6"));
+}
+
+#[tokio::test]
+async fn multi_window_endpoints_merge_fresher_trajectories_and_fallback_for_brain_only_sessions() {
+    let pages = json!([
+        {"type":"page","url":"https://127.0.0.1:41001/index.html"},
+        {"type":"page","url":"https://127.0.0.1:41001/other"},
+        {"type":"other","url":"https://127.0.0.1:41002/worker"},
+        {"type":"page","url":"https://127.0.0.1:41002/index.html"}
+    ]);
+    assert_eq!(
+        parse_page_origins(&pages),
+        vec![
+            "https://127.0.0.1:41001".to_owned(),
+            "https://127.0.0.1:41002".to_owned(),
+        ]
+    );
+
+    async fn spawn_window(
+        summaries: Value,
+        owned_sessions: BTreeMap<String, Vec<Value>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let summaries = summaries.clone();
+                let owned_sessions = owned_sessions.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |r: hyper::Request<hyper::body::Incoming>| {
+                        let summaries = summaries.clone();
+                        let owned_sessions = owned_sessions.clone();
+                        async move {
+                            let method = r.uri().path().rsplit('/').next().unwrap().to_owned();
+                            let body: Value = serde_json::from_slice(
+                                &r.into_body().collect().await.unwrap().to_bytes(),
+                            )
+                            .unwrap();
+                            let cid = body["cascadeId"].as_str().unwrap_or("");
+                            let value = match method.as_str() {
+                                "GetAllCascadeTrajectories" => {
+                                    json!({"trajectorySummaries": summaries})
+                                }
+                                "GetCascadeTrajectoryGeneratorMetadata" => {
+                                    let offset =
+                                        body["generatorMetadataOffset"].as_u64().unwrap_or(0)
+                                            as usize;
+                                    if let Some(items) = owned_sessions.get(cid) {
+                                        let end = items.len();
+                                        json!({"generatorMetadata": &items[offset.min(end)..end]})
+                                    } else {
+                                        json!({})
+                                    }
+                                }
+                                "GetCascadeTrajectorySteps" => {
+                                    json!({"steps": [step(), step()]})
+                                }
+                                _ => json!({}),
+                            };
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                Bytes::from(serde_json::to_vec(&value).unwrap()),
+                            )))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
+                        .await;
+                });
+            }
+        });
+        (origin, handle)
+    }
+
+    let (origin_a, server_a) = spawn_window(
+        json!({
+            "shared": {"lastModifiedTime":"2026-01-01T00:00:10Z","stepCount":1},
+            "only-a": {"lastModifiedTime":"2026-01-01T00:00:20Z","stepCount":1}
+        }),
+        BTreeMap::from([
+            ("shared".into(), vec![entry("shared-stale", 0)]),
+            ("only-a".into(), vec![entry("only-a-req", 0)]),
+        ]),
+    )
+    .await;
+    let (origin_b, server_b) = spawn_window(
+        json!({
+            "shared": {"lastModifiedTime":"2026-01-01T00:00:50Z","stepCount":2}
+        }),
+        BTreeMap::from([
+            (
+                "shared".into(),
+                vec![entry("shared-fresh-1", 0), entry("shared-fresh-2", 1)],
+            ),
+            ("brain-b".into(), vec![entry("brain-b-req", 0)]),
+        ]),
+    )
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let brain_file = dir
+        .path()
+        .join("antigravity/brain/brain-b/transcript.jsonl");
+    std::fs::create_dir_all(brain_file.parent().unwrap()).unwrap();
+    std::fs::write(&brain_file, "{}\n").unwrap();
+
+    let api = Api::from_endpoints(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        vec![(origin_a, "tok-a".into()), (origin_b, "tok-b".into())],
+    );
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let mut report = Report::default();
+    api.collect(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .await
+    .unwrap();
+    server_a.abort();
+    server_b.abort();
+
+    assert_eq!(report.errors, 0);
+    // 2 from fresher window_b "shared" + 1 from window_a "only-a" + 1 from fallback window_b "brain-b"
+    assert_eq!(
+        store.dashboard(&Filter::default()).unwrap().totals.requests,
+        4
+    );
+    assert!(store
+        .detail(&safe_id("antigravity:request:shared-fresh-2"))
+        .is_ok());
+    assert!(store
+        .detail(&safe_id("antigravity:request:shared-stale"))
+        .is_err());
+    assert!(store
+        .detail(&safe_id("antigravity:request:brain-b-req"))
+        .is_ok());
+}
+
+#[tokio::test]
+async fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_sessions_and_live_quotas() {
+    let quota_payload = json!({
+        "email": "private-user@example.invalid",
+        "userQuotaSummary": {
+            "quotas": [
+                {
+                    "label": "Gemini Pro",
+                    "remainingPercentage": 72.5,
+                    "resetTime": "2026-10-30T15:00:00Z"
+                },
+                {
+                    "displayName": "Claude / GPT",
+                    "usedFraction": 0.4,
+                    "resetTime": "2026-10-30T16:00:00Z"
+                },
+                {
+                    "label": "leak@example.invalid",
+                    "remainingPercentage": 50.0
+                },
+                {
+                    "label": "~/workspace/secret",
+                    "remainingPercentage": 50.0
+                }
+            ]
+        }
+    });
+    let parsed_quotas = parse_quota_summary(&quota_payload);
+    assert_eq!(parsed_quotas.len(), 2);
+    assert_eq!(parsed_quotas[0].label, "Gemini Pro");
+    assert_eq!(parsed_quotas[0].remaining_percent, Some(72.5));
+    assert_eq!(parsed_quotas[0].used_percent, Some(27.5));
+    assert!(parsed_quotas[0].reset_at.is_some());
+    assert_eq!(parsed_quotas[1].label, "Claude / GPT");
+    assert_eq!(parsed_quotas[1].used_percent, Some(40.0));
+    assert_eq!(parsed_quotas[1].remaining_percent, Some(60.0));
+
+    // Offline / closed endpoint degrades silently without error.
+    let closed_api = Api::from_single(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        "http://127.0.0.1:9".into(),
+        "fixture".into(),
+    );
+    assert_eq!(
+        probe_live_quotas_with_api(&closed_api).await,
+        (false, vec![])
+    );
+
+    let now_ms = 1_760_000_000_000i64;
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let pricing = Pricing::new(dir.path()).unwrap();
+        let settings = Settings::default();
+
+        let make_ag = |req_id: &str,
+                       cascade: &str,
+                       model: &str,
+                       at: i64,
+                       inp: u64,
+                       cr: u64,
+                       out: u64,
+                       think: u64| {
+            let mut r = Record {
+                id: safe_id(&format!("antigravity:request:{req_id}")),
+                client: "antigravity".into(),
+                source: "antigravity".into(),
+                started_at: at - 2_000,
+                finished_at: Some(at),
+                session_id: Some(safe_id(cascade)),
+                completed: true,
+                attempts: vec![Attempt {
+                    id: safe_id(&format!("antigravity:request:{req_id}:final")),
+                    requested_model: actual_model(Some(model)),
+                    response_model: actual_model(Some(model)),
+                    started_at: at - 2_000,
+                    duration_ms: 2_000,
+                    first_token_ms: Some(300),
+                    generation_ms: Some(1_700),
+                    stream: true,
+                    transport: "local_api".into(),
+                    outcome: "success".into(),
+                    usage_status: "reported".into(),
+                    tokens: Tokens {
+                        input: Some(inp),
+                        cache_read: Some(cr),
+                        cache_write: Some(0),
+                        output: Some(out),
+                        reasoning: Some(think),
+                        ..Tokens::default()
+                    },
+                    ..Attempt::default()
+                }],
+                ..Record::default()
+            };
+            normalize_record(&mut r);
+            price(&mut r, &pricing, &settings);
+            r
+        };
+
+        // 1) Gemini 3.1 Pro within 5h window
+        let r1 = make_ag(
+            "g-recent",
+            "session-alpha",
+            "MODEL_PLACEHOLDER_M37",
+            now_ms - 3_600_000,
+            10_000,
+            40_000,
+            2_000,
+            1_200,
+        );
+        // 2) Gemini 3 Flash outside 5h but inside 7d
+        let r2 = make_ag(
+            "g-older",
+            "session-alpha",
+            "MODEL_PLACEHOLDER_M18",
+            now_ms - 24 * 3_600_000,
+            5_000,
+            5_000,
+            1_000,
+            200,
+        );
+        // 3) Claude Opus 4.6 within 5h window
+        let r3 = make_ag(
+            "c-recent",
+            "session-beta",
+            "MODEL_PLACEHOLDER_M26",
+            now_ms - 1_800_000,
+            8_000,
+            32_000,
+            3_000,
+            1_800,
+        );
+        // 4) Non-Antigravity Codex record (must be excluded from Antigravity stats)
+        let mut other = r1.clone();
+        other.id = safe_id("codex:other");
+        other.client = "codex".into();
+        other.source = "proxy".into();
+
+        store
+            .write_batch(&[r1.clone(), r2, r3.clone(), other], None)
+            .unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+
+        let stats = store
+            .antigravity_stats(
+                &Filter {
+                    end: Some(now_ms),
+                    ..Filter::default()
+                },
+                &pricing,
+                "1",
+                now_ms,
+                (true, parsed_quotas.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(stats.requests, 3);
+        assert_eq!(stats.sessions, 2);
+        assert_eq!(stats.token_mix.input, 23_000);
+        assert_eq!(stats.token_mix.cache_read, 77_000);
+        assert_eq!(stats.token_mix.output, 6_000);
+        assert_eq!(stats.token_mix.reasoning, 3_200);
+        assert_eq!(stats.token_mix.visible_output, 2_800);
+        assert_eq!(stats.token_mix.thinking_share_percent, Some(53.3));
+        assert_eq!(stats.token_mix.cache_hit_percent, Some(77.0));
+        assert!(decimal(&stats.token_mix.cache_savings_usd).unwrap() > rust_decimal::Decimal::ZERO);
+
+        assert_eq!(stats.tracks[0].id, "gemini");
+        assert_eq!(stats.tracks[0].burst_5h.requests, 1);
+        assert_eq!(stats.tracks[0].weekly_7d.requests, 2);
+        assert_eq!(
+            stats.tracks[0]
+                .live_quota
+                .as_ref()
+                .and_then(|q| q.remaining_percent),
+            Some(72.5)
+        );
+        assert_eq!(stats.tracks[1].id, "claude_gpt");
+        assert_eq!(stats.tracks[1].burst_5h.requests, 1);
+        assert_eq!(stats.tracks[1].weekly_7d.requests, 1);
+        assert_eq!(
+            stats.tracks[1]
+                .live_quota
+                .as_ref()
+                .and_then(|q| q.remaining_percent),
+            Some(60.0)
+        );
+
+        assert_eq!(stats.families.len(), 2);
+        assert_eq!(stats.top_sessions.len(), 2);
+        assert_eq!(stats.top_sessions[0].short_hash.len(), 8);
+        assert!(!stats.top_sessions[0].session_id.contains("session-"));
+
+        // Verify session_id filter isolates logs cleanly in both v11 and v12.
+        let alpha_logs = store
+            .logs(&Filter {
+                client: Some("antigravity".into()),
+                session_id: Some(safe_id("session-alpha")),
+                ..Filter::default()
+            })
+            .unwrap();
+        assert_eq!(alpha_logs.total, 2);
+    }
 }

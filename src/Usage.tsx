@@ -27,7 +27,9 @@ import { command } from "./bridge";
 import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import Pricing from "./UsagePricing";
+import UsageAntigravity from "./UsageAntigravity";
 import {
+  type AntigravityUsageStats,
   clientName,
   averageFirstToken,
   firstTokenLabel,
@@ -103,9 +105,12 @@ export default function Usage({
   const [client, setClient] = useState(""),
     [provider, setProvider] = useState(""),
     [operation, setOperation] = useState(""),
+    [sessionId, setSessionId] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
+  const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
+    [agBusy, setAgBusy] = useState(false);
   const [interruptions, setInterruptions] =
       useState<InterruptionSummary | null>(null),
     [countingInterruptions, setCountingInterruptions] = useState(false);
@@ -156,6 +161,7 @@ export default function Usage({
     [nativeVisible, setNativeVisible] = useState(true);
   const sequence = useRef(0),
     rowsSequence = useRef(0),
+    agSequence = useRef(0),
     stateSequence = useRef(0),
     detailSequence = useRef(0);
   useEffect(
@@ -203,8 +209,9 @@ export default function Usage({
       client: client || undefined,
       provider: provider || undefined,
       operation: operation || undefined,
+      sessionId: sessionId || undefined,
     };
-  }, [range, from, to, live, client, provider, operation]);
+  }, [range, from, to, live, client, provider, operation, sessionId]);
   const loadOverview = useCallback(async () => {
     const id = ++sequence.current;
     setBusy(true);
@@ -243,6 +250,28 @@ export default function Usage({
       if (id === rowsSequence.current) setRowsBusy(false);
     }
   }, [query, status, page, request]);
+  const loadAntigravity = useCallback(async () => {
+    const id = ++agSequence.current;
+    setAgBusy(true);
+    try {
+      const filter = query();
+      if (
+        filter.start != null &&
+        (!Number.isFinite(filter.start) ||
+          filter.start > (filter.end ?? Date.now()))
+      )
+        throw new Error("请选择有效时间范围");
+      const stats = await request("get_antigravity_usage_stats", { filter });
+      if (id === agSequence.current) {
+        setAgStats(stats);
+        setError("");
+      }
+    } catch (e) {
+      if (id === agSequence.current) setError(errorOf(e).message);
+    } finally {
+      if (id === agSequence.current) setAgBusy(false);
+    }
+  }, [query, request]);
   const loadState = useCallback(async () => {
     const id = ++stateSequence.current;
     try {
@@ -257,9 +286,10 @@ export default function Usage({
       Promise.all([
         loadOverview(),
         ...(tab === "requests" ? [loadRows()] : []),
+        ...(tab === "antigravity" ? [loadAntigravity()] : []),
         loadState(),
       ]),
-    [loadOverview, loadRows, loadState, tab],
+    [loadOverview, loadRows, loadAntigravity, loadState, tab],
   );
   useEffect(() => {
     if (visible && nativeVisible) void loadOverview();
@@ -273,6 +303,14 @@ export default function Usage({
       rowsSequence.current++;
     };
   }, [loadRows, visible, nativeVisible, tab]);
+  useEffect(() => {
+    if (visible && nativeVisible && tab === "antigravity") {
+      void loadAntigravity();
+    }
+    return () => {
+      agSequence.current++;
+    };
+  }, [loadAntigravity, visible, nativeVisible, tab]);
   useEffect(() => {
     if (!visible || !nativeVisible) return;
     void loadState();
@@ -457,8 +495,10 @@ export default function Usage({
           aria-label="用量客户端"
           value={client}
           onChange={(e) => {
-            choose(setClient, e.target.value);
+            const next = e.target.value;
+            choose(setClient, next);
             setProvider("");
+            if (next !== "antigravity") setSessionId("");
           }}
         >
           <option value="">全部客户端</option>
@@ -502,6 +542,20 @@ export default function Usage({
           {ranges.find(([id]) => id === range)?.[1]}
           <ChevronDown size={13} />
         </button>
+        {sessionId && (
+          <button
+            type="button"
+            className="usage-session-chip"
+            aria-label={`清除会话筛选 #${sessionId.slice(0, 8)}`}
+            onClick={() => {
+              setSessionId("");
+              resetPages();
+            }}
+          >
+            <span>会话 #{sessionId.slice(0, 8)}</span>
+            <span aria-hidden="true">×</span>
+          </button>
+        )}
       </div>
       {timeOpen && (
         <TimeRange
@@ -531,10 +585,12 @@ export default function Usage({
           ["requests", "请求日志"],
           ["providers", "供应商"],
           ["models", "模型"],
+          ["antigravity", "Antigravity"],
           ["pricing", "定价"],
         ].map(([id, n]) => (
           <button
             role="tab"
+            data-tab={id}
             aria-selected={tab === id}
             key={id}
             onClick={() => void selectTab(id)}
@@ -577,6 +633,18 @@ export default function Usage({
           />
           <Pagination page={logs.page} total={logs.total} onChange={setPage} />
         </>
+      ) : tab === "antigravity" ? (
+        <UsageAntigravity
+          stats={agStats}
+          busy={agBusy}
+          onSelectSession={(nextSessionId) => {
+            setClient("antigravity");
+            setProvider("");
+            setSessionId(nextSessionId);
+            resetPages();
+            setTab("requests");
+          }}
+        />
       ) : tab === "pricing" ? (
         <Pricing onDirtyChange={priceDirty} />
       ) : (

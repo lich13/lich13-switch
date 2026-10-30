@@ -567,7 +567,7 @@ impl Store {
         let after: Option<String> = db(self
             .connection
             .query_row(
-                "SELECT value FROM metadata WHERE key='antigravity_fields_v02611'",
+                "SELECT value FROM metadata WHERE key='antigravity_fields_v02613'",
                 [],
                 |r| r.get(0),
             )
@@ -606,7 +606,7 @@ impl Store {
             }
         }
         db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02611',?1)",
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02613',?1)",
             [rows.last().map_or("done", |(id, _)| id.as_str())],
         ))?;
         if changed {
@@ -815,6 +815,67 @@ impl Store {
         let view = query::dashboard(&self.connection, f, self.detail_since()?)?;
         *self.overview_cache.lock().unwrap() = Some((key, view.clone()));
         Ok(view)
+    }
+    pub fn antigravity_stats(
+        &self,
+        f: &Filter,
+        pricing: &Pricing,
+        multiplier: &str,
+        now_ms: i64,
+        live: (bool, Vec<super::antigravity::AntigravityLiveQuota>),
+    ) -> Result<super::antigravity::AntigravityUsageStats> {
+        let _snapshot = self.read_snapshot()?;
+        let anchor = f.end.unwrap_or(now_ms);
+        let start_7d = anchor.saturating_sub(7 * DAY);
+        let min_time = f.start.unwrap_or(0).min(start_7d);
+        let max_time = f.end.unwrap_or(now_ms).max(anchor);
+        let mut collected = Vec::new();
+        if storage_v12::active(&self.connection) {
+            storage_v12::scan_antigravity_attempts(&self.connection, min_time, max_time, |row| {
+                collected.push(Ok(row));
+                Ok(())
+            })?;
+        } else {
+            let mut stmt = db(self.connection.prepare(
+                "SELECT body FROM records WHERE client='antigravity' AND effective=1 AND time>=?1 AND time<=?2 ORDER BY rowid",
+            ))?;
+            let mut rows = db(stmt.query(params![min_time, max_time]))?;
+            while let Some(row) = db(rows.next())? {
+                let body: String = db(row.get(0))?;
+                let r: Record = bodies::decode(&self.connection, &body)?;
+                let last_idx = r.attempts.len().saturating_sub(1);
+                let time = r.event_time();
+                for (idx, a) in r.attempts.iter().enumerate() {
+                    let is_final = idx == last_idx;
+                    collected.push(Ok(storage_v12::AntigravityAttemptRow {
+                        session_id: r.session_id.clone(),
+                        time,
+                        started_at: a.started_at,
+                        is_final,
+                        model: a
+                            .grouping_model()
+                            .map(str::to_owned)
+                            .or_else(|| a.response_model.clone())
+                            .or_else(|| a.requested_model.clone()),
+                        display_name: a.model_display_name.clone(),
+                        inclusive_input: a.tokens.inclusive_input,
+                        input: a.tokens.input,
+                        output: a.tokens.output,
+                        reasoning: a.tokens.reasoning,
+                        cache_read: a.tokens.cache_read,
+                        cache_write: a.tokens.cache_write,
+                        cost: a.price.as_ref().map(|p| p.cost.clone()),
+                        unpriced: a.unpriced_count(),
+                        duration_ms: if is_final {
+                            a.measured_duration_ms().unwrap_or(0)
+                        } else {
+                            0
+                        },
+                    }));
+                }
+            }
+        }
+        super::antigravity::compute_usage_stats(collected, f, pricing, multiplier, now_ms, live)
     }
     pub fn detail_since(&self) -> Result<i64> {
         let value: Option<String> = db(self

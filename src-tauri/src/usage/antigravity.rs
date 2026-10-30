@@ -108,7 +108,116 @@ fn duration(v: &Value) -> Option<u64> {
     (seconds.is_finite() && (0.0..=u64::MAX as f64 / 1000.0).contains(&seconds))
         .then_some((seconds * 1000.0).round() as u64)
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedModelAlias {
+    canonical: &'static str,
+    display_name: &'static str,
+    effort: Option<&'static str>,
+}
+
+fn resolve_model_alias(raw: Option<&str>) -> Option<ResolvedModelAlias> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let key = trimmed.to_ascii_uppercase();
+    let (canonical, display_name, effort) = match key.as_str() {
+        "MODEL_PLACEHOLDER_M37" | "MODEL_GOOGLE_GEMINI_3_1_PRO_HIGH" => {
+            ("gemini-3.1-pro", "Gemini 3.1 Pro", Some("high"))
+        }
+        "MODEL_PLACEHOLDER_M36" | "MODEL_GOOGLE_GEMINI_3_1_PRO_LOW" => {
+            ("gemini-3.1-pro", "Gemini 3.1 Pro", Some("low"))
+        }
+        "MODEL_GOOGLE_GEMINI_3_1_PRO" => ("gemini-3.1-pro", "Gemini 3.1 Pro", None),
+        "MODEL_PLACEHOLDER_M18"
+        | "MODEL_GOOGLE_GEMINI_3_FLASH"
+        | "MODEL_GOOGLE_GEMINI_3_0_FLASH" => ("gemini-3-flash", "Gemini 3 Flash", None),
+        "MODEL_PLACEHOLDER_M19" | "MODEL_GOOGLE_GEMINI_3_PRO_HIGH" => {
+            ("gemini-3-pro-preview", "Gemini 3 Pro", Some("high"))
+        }
+        "MODEL_PLACEHOLDER_M17" | "MODEL_GOOGLE_GEMINI_3_PRO_LOW" => {
+            ("gemini-3-pro-preview", "Gemini 3 Pro", Some("low"))
+        }
+        "MODEL_GOOGLE_GEMINI_3_PRO" => ("gemini-3-pro-preview", "Gemini 3 Pro", None),
+        "MODEL_PLACEHOLDER_M26" | "MODEL_CLAUDE_4_6_OPUS_THINKING" => {
+            ("claude-opus-4-6", "Claude Opus 4.6", Some("high"))
+        }
+        "MODEL_CLAUDE_4_6_OPUS" => ("claude-opus-4-6", "Claude Opus 4.6", None),
+        "MODEL_PLACEHOLDER_M35" | "MODEL_CLAUDE_4_6_SONNET" => {
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6", None)
+        }
+        "MODEL_CLAUDE_4_6_SONNET_THINKING" => {
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6", Some("high"))
+        }
+        "MODEL_PLACEHOLDER_M12" | "MODEL_CLAUDE_4_5_OPUS" => {
+            ("claude-opus-4-5", "Claude Opus 4.5", None)
+        }
+        "MODEL_CLAUDE_4_5_OPUS_THINKING" => ("claude-opus-4-5", "Claude Opus 4.5", Some("high")),
+        "MODEL_CLAUDE_4_5_SONNET" => ("claude-sonnet-4-5", "Claude Sonnet 4.5", None),
+        "MODEL_CLAUDE_4_5_SONNET_THINKING" => {
+            ("claude-sonnet-4-5", "Claude Sonnet 4.5", Some("high"))
+        }
+        "MODEL_CLAUDE_4_SONNET" => ("claude-sonnet-4-20250514", "Claude Sonnet 4", None),
+        "MODEL_CLAUDE_4_SONNET_THINKING" => {
+            ("claude-sonnet-4-20250514", "Claude Sonnet 4", Some("high"))
+        }
+        "MODEL_PLACEHOLDER_M8" | "MODEL_CHAT_23310" | "MODEL_GOOGLE_GEMINI_2_5_PRO" => {
+            ("gemini-2.5-pro", "Gemini 2.5 Pro", None)
+        }
+        "MODEL_GOOGLE_GEMINI_2_5_PRO_THINKING" => {
+            ("gemini-2.5-pro", "Gemini 2.5 Pro", Some("high"))
+        }
+        "MODEL_PLACEHOLDER_M7" | "MODEL_CHAT_20706" | "MODEL_GOOGLE_GEMINI_2_5_FLASH" => {
+            ("gemini-2.5-flash", "Gemini 2.5 Flash", None)
+        }
+        "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING" => {
+            ("gemini-2.5-flash", "Gemini 2.5 Flash", Some("high"))
+        }
+        "MODEL_PLACEHOLDER_M9" | "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE" => {
+            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", None)
+        }
+        "MODEL_OPENAI_GPT_OSS_120B_MEDIUM" => ("gpt-oss-120b", "GPT-OSS 120B", Some("medium")),
+        "MODEL_OPENAI_GPT_OSS_120B" => ("gpt-oss-120b", "GPT-OSS 120B", None),
+        _ => return None,
+    };
+    Some(ResolvedModelAlias {
+        canonical,
+        display_name,
+        effort,
+    })
+}
+
+fn resolve_display_name_model(display_name: &str) -> Option<&'static str> {
+    match display_name.trim().to_ascii_lowercase().as_str() {
+        "gemini 3.1 pro" => Some("gemini-3.1-pro"),
+        "gemini 3 flash" | "gemini 3.0 flash" => Some("gemini-3-flash"),
+        "gemini 3 pro" | "gemini 3.0 pro" => Some("gemini-3-pro-preview"),
+        "gemini 2.5 pro" => Some("gemini-2.5-pro"),
+        "gemini 2.5 flash" => Some("gemini-2.5-flash"),
+        "gemini 2.5 flash lite" | "gemini 2.5 flash-lite" => Some("gemini-2.5-flash-lite"),
+        "claude opus 4.6" | "claude 4.6 opus" => Some("claude-opus-4-6"),
+        "claude sonnet 4.6" | "claude 4.6 sonnet" => Some("claude-sonnet-4-6"),
+        "claude opus 4.5" | "claude 4.5 opus" => Some("claude-opus-4-5"),
+        "claude sonnet 4.5" | "claude 4.5 sonnet" => Some("claude-sonnet-4-5"),
+        "claude sonnet 4" | "claude 4 sonnet" => Some("claude-sonnet-4-20250514"),
+        "gpt-oss 120b" | "gpt oss 120b" => Some("gpt-oss-120b"),
+        _ => None,
+    }
+}
+
+fn non_enum_model(v: Option<&str>) -> Option<String> {
+    model_id(v).filter(|s| {
+        let upper = s.to_ascii_uppercase();
+        !upper.starts_with("MODEL_PLACEHOLDER_")
+            && !upper.starts_with("MODEL_UNSPECIFIED")
+            && resolve_model_alias(Some(s)).is_none()
+    })
+}
+
 fn actual_model(v: Option<&str>) -> Option<String> {
+    if let Some(alias) = resolve_model_alias(v) {
+        return Some(alias.canonical.to_owned());
+    }
     model_id(v)
         .filter(|s| !s.starts_with("MODEL_PLACEHOLDER_") && !s.starts_with("MODEL_UNSPECIFIED"))
 }
@@ -126,17 +235,67 @@ pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
     let mut changed = false;
     if let Some((name, effort)) = a.model_display_name.as_deref().and_then(|name| {
         let (name, suffix) = name.strip_suffix(')')?.rsplit_once(" (")?;
-        let effort = suffix.to_ascii_lowercase();
-        (!name.is_empty()
-            && matches!(
-                effort.as_str(),
-                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
-            ))
-        .then(|| (name.to_owned(), effort))
+        let raw = suffix.to_ascii_lowercase();
+        let effort = match raw.as_str() {
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => Some(raw),
+            "thinking" => Some("high".to_owned()),
+            _ => None,
+        }?;
+        (!name.is_empty()).then(|| (name.to_owned(), effort))
     }) {
         a.model_display_name = Some(name);
         a.reasoning_effort.get_or_insert(effort);
         changed = true;
+    }
+    let mut resolved_alias = None;
+    if let Some(alias) = resolve_model_alias(a.requested_model.as_deref()) {
+        a.requested_model = Some(alias.canonical.to_owned());
+        resolved_alias = Some(alias);
+        changed = true;
+    }
+    if let Some(alias) = resolve_model_alias(a.response_model.as_deref()) {
+        a.response_model = Some(alias.canonical.to_owned());
+        resolved_alias = Some(alias);
+        changed = true;
+    }
+    if let Some(alias) = resolve_model_alias(a.pricing_model.as_deref()) {
+        if a.price.is_none() {
+            a.pricing_model = Some(alias.canonical.to_owned());
+            changed = true;
+        }
+        resolved_alias.get_or_insert(alias);
+    }
+    if let Some(alias) = resolved_alias {
+        if a.model_display_name.is_none() {
+            a.model_display_name = Some(alias.display_name.to_owned());
+            changed = true;
+        }
+        if a.reasoning_effort.is_none() {
+            if let Some(effort) = alias.effort {
+                a.reasoning_effort = Some(effort.to_owned());
+                changed = true;
+            }
+        }
+        if a.price.is_none() && a.pricing_model.is_none() {
+            a.pricing_model = a
+                .response_model
+                .clone()
+                .or_else(|| a.requested_model.clone());
+            changed = true;
+        }
+    }
+    if a.requested_model.is_none() && a.response_model.is_none() {
+        if let Some(canonical) = a
+            .model_display_name
+            .as_deref()
+            .and_then(resolve_display_name_model)
+        {
+            a.response_model = Some(canonical.to_owned());
+            if a.price.is_none() && a.pricing_model.is_none() {
+                a.pricing_model = Some(canonical.to_owned());
+            }
+            changed = true;
+        }
     }
     if let Some(total) = a
         .first_token_ms
@@ -444,14 +603,32 @@ fn record(
         } else {
             "in_progress"
         };
-        let response_model = actual_model(text(u, &["model"]))
+        let alias_hint = resolve_model_alias(text(u, &["model"]))
+            .or_else(|| resolve_model_alias(text(&info["usage"], &["model"])))
+            .or_else(|| resolve_model_alias(text(info, &["responseModel"])))
+            .or_else(|| {
+                final_info
+                    .then(|| resolve_model_alias(text(chat, &["responseModel"])))
+                    .flatten()
+            })
+            .or_else(|| resolve_model_alias(text(chat, &["model"])));
+        let response_model = non_enum_model(text(u, &["model"]))
+            .or_else(|| non_enum_model(text(&info["usage"], &["model"])))
+            .or_else(|| non_enum_model(text(info, &["responseModel"])))
+            .or_else(|| {
+                final_info
+                    .then(|| non_enum_model(text(chat, &["responseModel"])))
+                    .flatten()
+            })
+            .or_else(|| actual_model(text(u, &["model"])))
             .or_else(|| actual_model(text(&info["usage"], &["model"])))
             .or_else(|| actual_model(text(info, &["responseModel"])))
             .or_else(|| {
                 final_info
                     .then(|| actual_model(text(chat, &["responseModel"])))
                     .flatten()
-            });
+            })
+            .or_else(|| alias_hint.map(|alias| alias.canonical.to_owned()));
         let mut a = Attempt {
             id: safe_id(&format!("{}:{attempt_key}", r.id)),
             response_id: response_id(u).map(safe_id),
@@ -460,8 +637,12 @@ fn record(
             requested_model: actual_model(text(chat, &["model"])),
             response_model,
             model_display_name: final_info
-                .then(|| label(text(chat, &["modelDisplayName"])))
+                .then(|| {
+                    label(text(chat, &["modelDisplayName"]))
+                        .or_else(|| alias_hint.map(|alias| alias.display_name.to_owned()))
+                })
                 .flatten(),
+            reasoning_effort: alias_hint.and_then(|alias| alias.effort).map(str::to_owned),
             api_provider: label(text(u, &["apiProvider"]))
                 .or_else(|| label(text(&info["usage"], &["apiProvider"]))),
             error_code: error_code(info).or_else(|| final_info.then(|| error_code(chat)).flatten()),
@@ -524,12 +705,95 @@ fn record(
     Ok(Some(r))
 }
 
-struct Api {
-    http: reqwest::Client,
+#[derive(Clone)]
+struct Endpoint {
     origin: String,
     token: String,
 }
+
+fn parse_page_origins(pages: &Value) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut origins = Vec::new();
+    for origin in pages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["type"] == "page")
+        .filter_map(|p| url::Url::parse(p["url"].as_str()?).ok())
+        .filter(|u| {
+            u.scheme() == "https"
+                && u.host_str() == Some("127.0.0.1")
+                && u.port().is_some()
+                && u.username().is_empty()
+                && u.password().is_none()
+        })
+        .map(|u| u.origin().ascii_serialization())
+    {
+        if seen.insert(origin.clone()) {
+            origins.push(origin);
+        }
+    }
+    origins
+}
+
+fn extract_csrf_token(html: &str) -> Result<String> {
+    let raw = html
+        .split("window.__APP_CONFIG__")
+        .nth(1)
+        .and_then(|s| s.split_once('=').map(|(_, s)| s))
+        .ok_or_else(|| failure("Antigravity app 接口版本不支持"))?;
+    let config = serde_json::Deserializer::from_str(raw.trim())
+        .into_iter::<Value>()
+        .next()
+        .and_then(std::result::Result::ok)
+        .ok_or_else(|| failure("Antigravity app 接口配置无效"))?;
+    config["csrfToken"]
+        .as_str()
+        .filter(|t| !t.is_empty() && t.len() < 4096)
+        .ok_or_else(|| failure("Antigravity app 只读接口认证不可用"))
+        .map(str::to_owned)
+}
+
+fn summary_freshness_wins(candidate: &Value, current: &Value) -> bool {
+    let cand_time = time(&candidate["lastModifiedTime"]);
+    let curr_time = time(&current["lastModifiedTime"]);
+    match (cand_time, curr_time) {
+        (Some(a), Some(b)) if a != b => return a > b,
+        (Some(_), None) => return true,
+        (None, Some(_)) => return false,
+        _ => {
+            let cand_str = candidate["lastModifiedTime"].as_str().unwrap_or("");
+            let curr_str = current["lastModifiedTime"].as_str().unwrap_or("");
+            if cand_str != curr_str {
+                return cand_str > curr_str;
+            }
+        }
+    }
+    number(&candidate["stepCount"]).unwrap_or(0) > number(&current["stepCount"]).unwrap_or(0)
+}
+
+struct Api {
+    http: reqwest::Client,
+    endpoints: Vec<Endpoint>,
+}
 impl Api {
+    #[cfg(test)]
+    fn from_single(http: reqwest::Client, origin: String, token: String) -> Self {
+        Self {
+            http,
+            endpoints: vec![Endpoint { origin, token }],
+        }
+    }
+    #[cfg(test)]
+    fn from_endpoints(http: reqwest::Client, endpoints: Vec<(String, String)>) -> Self {
+        Self {
+            http,
+            endpoints: endpoints
+                .into_iter()
+                .map(|(origin, token)| Endpoint { origin, token })
+                .collect(),
+        }
+    }
     async fn bytes(request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
         let mut response = request
             .send()
@@ -569,55 +833,60 @@ impl Api {
             &Self::bytes(http.get(format!("http://127.0.0.1:{port}/json/list"))).await?,
         )
         .map_err(|_| failure("Antigravity 窗口信息无效"))?;
-        let origin = pages
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|p| p["type"] == "page")
-            .filter_map(|p| url::Url::parse(p["url"].as_str()?).ok())
-            .find(|u| {
-                u.scheme() == "https"
-                    && u.host_str() == Some("127.0.0.1")
-                    && u.port().is_some()
-                    && u.username().is_empty()
-                    && u.password().is_none()
-            })
-            .ok_or_else(|| failure("未找到 Antigravity app 窗口"))?
-            .origin()
-            .ascii_serialization();
-        let html = String::from_utf8(Self::bytes(http.get(format!("{origin}/"))).await?)
-            .map_err(|_| failure("Antigravity app 配置不可读"))?;
-        let raw = html
-            .split("window.__APP_CONFIG__")
-            .nth(1)
-            .and_then(|s| s.split_once('=').map(|(_, s)| s))
-            .ok_or_else(|| failure("Antigravity app 接口版本不支持"))?;
-        let config = serde_json::Deserializer::from_str(raw.trim())
-            .into_iter::<Value>()
-            .next()
-            .and_then(std::result::Result::ok)
-            .ok_or_else(|| failure("Antigravity app 接口配置无效"))?;
-        let token = config["csrfToken"]
-            .as_str()
-            .filter(|t| !t.is_empty() && t.len() < 4096)
-            .ok_or_else(|| failure("Antigravity app 只读接口认证不可用"))?
-            .to_owned();
-        Ok(Some(Self {
-            http,
-            origin,
-            token,
-        }))
+        let origins = parse_page_origins(&pages);
+        if origins.is_empty() {
+            return Err(failure("未找到 Antigravity app 窗口"));
+        }
+        let mut endpoints = Vec::with_capacity(origins.len());
+        let mut last_error = None;
+        for origin in origins {
+            match Self::bytes(http.get(format!("{origin}/"))).await {
+                Ok(raw_html) => match String::from_utf8(raw_html)
+                    .map_err(|_| failure("Antigravity app 配置不可读"))
+                    .and_then(|html| extract_csrf_token(&html))
+                {
+                    Ok(token) => endpoints.push(Endpoint { origin, token }),
+                    Err(err) => last_error = Some(err),
+                },
+                Err(err) => last_error = Some(err),
+            }
+        }
+        if endpoints.is_empty() {
+            return Err(last_error.unwrap_or_else(|| failure("Antigravity app 只读接口认证不可用")));
+        }
+        Ok(Some(Self { http, endpoints }))
     }
-    async fn call(&self, method: &str, body: Value) -> Result<Value> {
+    async fn call_on(&self, endpoint: &Endpoint, method: &str, body: &Value) -> Result<Value> {
         let bytes = Self::bytes(
             self.http
                 .post(format!(
                     "{}/exa.language_server_pb.LanguageServerService/{method}",
-                    self.origin
+                    endpoint.origin
                 ))
                 .header("Connect-Protocol-Version", "1")
-                .header("x-codeium-csrf-token", &self.token)
-                .json(&body),
+                .header("x-codeium-csrf-token", &endpoint.token)
+                .json(body),
+        )
+        .await?;
+        serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
+    }
+    async fn call_on_timeout(
+        &self,
+        endpoint: &Endpoint,
+        method: &str,
+        body: &Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
+        let bytes = Self::bytes(
+            self.http
+                .post(format!(
+                    "{}/exa.language_server_pb.LanguageServerService/{method}",
+                    endpoint.origin
+                ))
+                .timeout(timeout)
+                .header("Connect-Protocol-Version", "1")
+                .header("x-codeium-csrf-token", &endpoint.token)
+                .json(body),
         )
         .await?;
         serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
@@ -648,27 +917,49 @@ impl Api {
         report: &mut Report,
         repair: bool,
     ) -> Result<()> {
-        let all = self
-            .call(
-                "GetAllCascadeTrajectories",
-                json!({"excludeSubtrajectories":false}),
-            )
-            .await?;
-        let mut summaries = all["trajectorySummaries"]
-            .as_object()
-            .cloned()
-            .ok_or_else(|| failure("Antigravity 会话目录不完整"))?;
+        let mut summaries: BTreeMap<String, (Option<usize>, Value)> = BTreeMap::new();
+        let mut any_endpoint_ok = false;
+        let mut last_error = None;
+        let req = json!({"excludeSubtrajectories":false});
+        for (idx, endpoint) in self.endpoints.iter().enumerate() {
+            match self
+                .call_on(endpoint, "GetAllCascadeTrajectories", &req)
+                .await
+            {
+                Ok(all) => {
+                    let Some(map) = all["trajectorySummaries"].as_object() else {
+                        last_error = Some(failure("Antigravity 会话目录不完整"));
+                        continue;
+                    };
+                    any_endpoint_ok = true;
+                    for (id, summary) in map {
+                        match summaries.get(id) {
+                            Some((_, existing)) if !summary_freshness_wins(summary, existing) => {}
+                            _ => {
+                                summaries.insert(id.clone(), (Some(idx), summary.clone()));
+                            }
+                        }
+                    }
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+        if !any_endpoint_ok {
+            return Err(last_error.unwrap_or_else(|| failure("Antigravity 会话目录不完整")));
+        }
         for path in files {
             let id = cascade_id(brain, path)?;
             let stamp = local_file_stamp(path);
             summaries
                 .entry(id.to_owned())
-                .or_insert_with(|| json!({"localModifiedStamp": stamp}));
+                .or_insert_with(|| (None, json!({"localModifiedStamp": stamp})));
         }
         report.total_files = summaries.len() as u64;
-        for (id, summary) in &summaries {
+        for (id, (owner, summary)) in &summaries {
             match self
-                .collect_session(id, summary, store, pricing, settings, report, repair)
+                .collect_session(
+                    id, *owner, summary, store, pricing, settings, report, repair,
+                )
                 .await
             {
                 Ok(()) => report.files += 1,
@@ -687,6 +978,7 @@ impl Api {
     async fn collect_session(
         &self,
         id: &str,
+        owner: Option<usize>,
         summary: &Value,
         store: &mut impl Repository,
         pricing: &Pricing,
@@ -715,12 +1007,64 @@ impl Api {
         if total.is_some_and(|n| n > 100_000) {
             return Err(failure("Antigravity 会话步骤超过读取限制"));
         }
+        let mut active_endpoint = owner.unwrap_or(0);
+        let mut resolved_owner = owner.is_some();
         let mut steps = Steps::default();
         let mut fallback_loaded = false;
         let mut offset = cursor.count.saturating_sub(1);
         let mut stable = offset;
         loop {
-            let page=self.call("GetCascadeTrajectoryGeneratorMetadata",json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false})).await?;
+            let meta_req =
+                json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false});
+            let page = if resolved_owner || self.endpoints.len() <= 1 {
+                resolved_owner = true;
+                self.call_on(
+                    &self.endpoints[active_endpoint],
+                    "GetCascadeTrajectoryGeneratorMetadata",
+                    &meta_req,
+                )
+                .await?
+            } else {
+                let mut selected_page = None;
+                let mut empty_fallback = None;
+                let mut last_err = None;
+                for (idx, endpoint) in self.endpoints.iter().enumerate() {
+                    match self
+                        .call_on(endpoint, "GetCascadeTrajectoryGeneratorMetadata", &meta_req)
+                        .await
+                    {
+                        Ok(candidate) => {
+                            let non_empty = candidate["generatorMetadata"]
+                                .as_array()
+                                .is_some_and(|a| !a.is_empty());
+                            if non_empty {
+                                active_endpoint = idx;
+                                resolved_owner = true;
+                                selected_page = Some(candidate);
+                                break;
+                            }
+                            if empty_fallback.is_none()
+                                && (candidate["generatorMetadata"].is_array()
+                                    || candidate.as_object().is_some_and(|o| o.is_empty()))
+                            {
+                                empty_fallback = Some((idx, candidate));
+                            }
+                        }
+                        Err(err) => last_err = Some(err),
+                    }
+                }
+                if let Some(found) = selected_page {
+                    found
+                } else if let Some((idx, empty)) = empty_fallback {
+                    active_endpoint = idx;
+                    resolved_owner = true;
+                    empty
+                } else {
+                    return Err(
+                        last_err.unwrap_or_else(|| failure("Antigravity 历史用量读取不完整"))
+                    );
+                }
+            };
             let entries = match page["generatorMetadata"].as_array() {
                 Some(entries) => entries,
                 None if page.as_object().is_some_and(|o| o.is_empty()) => break,
@@ -762,7 +1106,15 @@ impl Api {
             };
             if let Some(mut step_offset) = missing {
                 loop {
-                    let page=self.call("GetCascadeTrajectorySteps",json!({"cascadeId":id,"stepOffset":step_offset,"trajectoryVerbosity":2})).await?;
+                    let step_req =
+                        json!({"cascadeId":id,"stepOffset":step_offset,"trajectoryVerbosity":2});
+                    let page = self
+                        .call_on(
+                            &self.endpoints[active_endpoint],
+                            "GetCascadeTrajectorySteps",
+                            &step_req,
+                        )
+                        .await?;
                     let next = page["steps"]
                         .as_array()
                         .map(Vec::as_slice)
@@ -1046,6 +1398,33 @@ fn scan_file(
                     ));
                 };
                 let id = safe_id(&format!("antigravity:request:{request}"));
+                let alias = resolve_model_alias(Some(model));
+                let mut attempt = Attempt {
+                    id: safe_id(&format!("{id}:final")),
+                    response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
+                    requested_model: actual_model(Some(model)),
+                    response_model: actual_model(Some(model)),
+                    model_display_name: label(text(&v, &["model_display_name"]))
+                        .or_else(|| alias.map(|a| a.display_name.to_owned())),
+                    reasoning_effort: alias.and_then(|a| a.effort).map(str::to_owned),
+                    started_at: at,
+                    outcome: "unknown".into(),
+                    transport: "history_file".into(),
+                    tokens: Tokens {
+                        input: number(&v["input_tokens"]),
+                        output: number(&v["output_tokens"]),
+                        cache_read: number(&v["cache_read_tokens"]),
+                        cache_write: number(&v["cache_write_tokens"]),
+                        cache_write_5m: number(&v["cache_write_5m_tokens"]),
+                        cache_write_1h: number(&v["cache_write_1h_tokens"]),
+                        reasoning: number(&v["thinking_output_tokens"]),
+                        ..Tokens::default()
+                    },
+                    usage_status: "reported".into(),
+                    parse_reasons: vec!["attempt_time_unreported".into()],
+                    ..Attempt::default()
+                };
+                normalize_attempt(&mut attempt);
                 let mut r = Record {
                     id: id.clone(),
                     client: "antigravity".into(),
@@ -1056,28 +1435,7 @@ fn scan_file(
                     // A transcript usage row reports consumption, not the model's
                     // terminal outcome. Only the API can supplement that evidence.
                     completed: false,
-                    attempts: vec![Attempt {
-                        id: safe_id(&format!("{id}:final")),
-                        response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
-                        requested_model: actual_model(Some(model)),
-                        response_model: actual_model(Some(model)),
-                        started_at: at,
-                        outcome: "unknown".into(),
-                        transport: "history_file".into(),
-                        tokens: Tokens {
-                            input: number(&v["input_tokens"]),
-                            output: number(&v["output_tokens"]),
-                            cache_read: number(&v["cache_read_tokens"]),
-                            cache_write: number(&v["cache_write_tokens"]),
-                            cache_write_5m: number(&v["cache_write_5m_tokens"]),
-                            cache_write_1h: number(&v["cache_write_1h_tokens"]),
-                            reasoning: number(&v["thinking_output_tokens"]),
-                            ..Tokens::default()
-                        },
-                        usage_status: "reported".into(),
-                        parse_reasons: vec!["attempt_time_unreported".into()],
-                        ..Attempt::default()
-                    }],
+                    attempts: vec![attempt],
                     ..Record::default()
                 };
                 price(&mut r, pricing, settings);
@@ -1174,6 +1532,827 @@ pub fn sync(
     .into();
     report.completed_at = Some(now());
     Ok(report)
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityTokenMix {
+    pub input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub output: u64,
+    pub visible_output: u64,
+    pub reasoning: u64,
+    pub total: u64,
+    pub thinking_share_percent: Option<f64>,
+    pub cache_hit_percent: Option<f64>,
+    pub cache_read_eligible: u64,
+    pub cache_input_eligible: u64,
+    pub cache_savings_usd: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityTrackWindow {
+    pub requests: u64,
+    pub tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cost_usd: String,
+    pub unpriced_requests: u64,
+    pub tokens_per_hour: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityLiveQuota {
+    pub label: String,
+    pub remaining_percent: Option<f64>,
+    pub used_percent: Option<f64>,
+    pub reset_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityQuotaTrack {
+    pub id: String,
+    pub label: String,
+    pub burst_5h: AntigravityTrackWindow,
+    pub weekly_7d: AntigravityTrackWindow,
+    pub live_quota: Option<AntigravityLiveQuota>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityFamilyGroup {
+    pub family: String,
+    pub label: String,
+    pub requests: u64,
+    pub tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cost_usd: String,
+    pub share_percent: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravitySessionRow {
+    pub session_id: String,
+    pub short_hash: String,
+    pub requests: u64,
+    pub primary_model: String,
+    pub family: String,
+    pub total_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cache_hit_percent: Option<f64>,
+    pub duration_ms: u64,
+    pub cost_usd: String,
+    pub unpriced_requests: u64,
+    pub started_at: i64,
+    pub last_active_at: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityUsageStats {
+    pub requests: u64,
+    pub sessions: u64,
+    pub cost_usd: String,
+    pub unpriced_requests: u64,
+    pub token_mix: AntigravityTokenMix,
+    pub tracks: Vec<AntigravityQuotaTrack>,
+    pub families: Vec<AntigravityFamilyGroup>,
+    pub top_sessions: Vec<AntigravitySessionRow>,
+    pub live_quotas: Vec<AntigravityLiveQuota>,
+    pub live_connected: bool,
+}
+
+fn classify_model_family(
+    model: Option<&str>,
+    display_name: Option<&str>,
+) -> (
+    Option<String>,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+) {
+    let resolved = model
+        .and_then(|m| {
+            resolve_model_alias(Some(m))
+                .map(|a| a.canonical.to_owned())
+                .or_else(|| (!m.trim().is_empty()).then(|| m.trim().to_owned()))
+        })
+        .or_else(|| {
+            display_name
+                .and_then(resolve_display_name_model)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            display_name
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        });
+    let lower = resolved.as_deref().unwrap_or("").to_ascii_lowercase();
+    let (family, family_label, track) = if lower.contains("gemini") {
+        ("gemini", "Gemini", Some("gemini"))
+    } else if lower.contains("claude")
+        || lower.contains("sonnet")
+        || lower.contains("opus")
+        || lower.contains("haiku")
+        || lower.contains("anthropic")
+    {
+        ("claude", "Claude", Some("claude_gpt"))
+    } else if lower.contains("gpt")
+        || lower.contains("openai")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
+        ("gpt", "GPT / OpenAI", Some("claude_gpt"))
+    } else {
+        ("other", "其他 / 未识别", None)
+    };
+    (resolved, family, family_label, track)
+}
+
+fn sanitize_quota_label(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let looks_like_path = trimmed.starts_with('/')
+        || trimmed.starts_with("~/")
+        || trimmed.contains('\\')
+        || trimmed.contains("://")
+        || (trimmed.len() >= 3
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.as_bytes()[1] == b':'
+            && trimmed.as_bytes()[2] == b'/');
+    if trimmed.is_empty()
+        || trimmed.len() > 64
+        || trimmed.chars().any(char::is_control)
+        || trimmed.contains('@')
+        || looks_like_path
+    {
+        return None;
+    }
+    let humanized = match trimmed {
+        "geminiQuota" | "gemini_quota" | "geminiModels" => "Gemini",
+        "claudeQuota" | "claude_quota" | "claudeModels" => "Claude / GPT",
+        "premiumQuota" | "premium_quota" | "premiumModels" => "Premium",
+        "flowCredits" | "flow_credits" => "Flow Credits",
+        "promptCredits" | "prompt_credits" => "Prompt Credits",
+        other => other,
+    };
+    Some(humanized.to_owned())
+}
+
+fn float_field(v: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|k| {
+        let cell = v.get(*k)?;
+        cell.as_f64()
+            .or_else(|| cell.as_str()?.trim().trim_end_matches('%').parse().ok())
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    })
+}
+
+fn reset_timestamp(v: &Value) -> Option<i64> {
+    for key in [
+        "resetTime",
+        "resetsAt",
+        "nextResetTime",
+        "windowEndTime",
+        "expiresAt",
+        "resetAt",
+    ] {
+        let Some(cell) = v.get(key) else {
+            continue;
+        };
+        if let Some(ts) = time(cell) {
+            return Some(ts);
+        }
+        if let Some(raw) = cell.as_i64().or_else(|| cell.as_str()?.parse().ok()) {
+            if (1_577_836_800..=4_102_444_800).contains(&raw) {
+                return Some(raw * 1000);
+            }
+            if (1_577_836_800_000..=4_102_444_800_000).contains(&raw) {
+                return Some(raw);
+            }
+        }
+    }
+    None
+}
+
+fn parse_single_quota_entry(v: &Value, fallback_key: Option<&str>) -> Option<AntigravityLiveQuota> {
+    let obj = v.as_object()?;
+    let raw_label = text(
+        v,
+        &[
+            "label",
+            "displayName",
+            "title",
+            "name",
+            "track",
+            "modelFamily",
+            "category",
+            "quotaType",
+            "modelOrAlias",
+        ],
+    )
+    .or(fallback_key)?;
+    let label = sanitize_quota_label(raw_label)?;
+    let mut remaining =
+        float_field(v, &["remainingPercentage", "remainingPercent"]).or_else(|| {
+            float_field(v, &["remainingFraction", "remainingRatio"]).map(|f| {
+                if f <= 1.0 {
+                    f * 100.0
+                } else {
+                    f
+                }
+            })
+        });
+    let mut used = float_field(
+        v,
+        &[
+            "usedPercentage",
+            "usedPercent",
+            "usagePercentage",
+            "percentUsed",
+        ],
+    )
+    .or_else(|| {
+        float_field(v, &["usedFraction", "usageFraction", "usedRatio"]).map(|f| {
+            if f <= 1.0 {
+                f * 100.0
+            } else {
+                f
+            }
+        })
+    });
+    if remaining.is_none() && used.is_none() {
+        let limit = float_field(
+            v,
+            &["limit", "max", "total", "quotaLimit", "monthlyLimit", "cap"],
+        )
+        .filter(|n| *n > 0.0);
+        if let Some(limit) = limit {
+            if let Some(rem_count) =
+                float_field(v, &["remaining", "available", "left", "remainingCount"])
+            {
+                remaining = Some(((rem_count / limit) * 100.0).clamp(0.0, 100.0));
+            } else if let Some(used_count) =
+                float_field(v, &["used", "consumed", "usage", "usedCount"])
+            {
+                used = Some(((used_count / limit) * 100.0).clamp(0.0, 100.0));
+            }
+        }
+    }
+    if remaining.is_none() && used.is_none() && !obj.contains_key("quotaInfo") {
+        return None;
+    }
+    if let Some(nested) = v.get("quotaInfo").filter(|q| q.is_object()) {
+        if let Some(mut inner) = parse_single_quota_entry(nested, Some(&label)) {
+            inner.label = label;
+            if inner.reset_at.is_none() {
+                inner.reset_at = reset_timestamp(v);
+            }
+            return Some(inner);
+        }
+    }
+    let remaining_percent = remaining
+        .map(|n| n.clamp(0.0, 100.0))
+        .or_else(|| used.map(|u| (100.0 - u.clamp(0.0, 100.0)).clamp(0.0, 100.0)));
+    let used_percent = used
+        .map(|n| n.clamp(0.0, 100.0))
+        .or_else(|| remaining_percent.map(|r| (100.0 - r).clamp(0.0, 100.0)));
+    if remaining_percent.is_none() && used_percent.is_none() {
+        return None;
+    }
+    Some(AntigravityLiveQuota {
+        label,
+        remaining_percent,
+        used_percent,
+        reset_at: reset_timestamp(v),
+    })
+}
+
+pub(super) fn parse_quota_summary(root: &Value) -> Vec<AntigravityLiveQuota> {
+    fn walk(
+        node: &Value,
+        key_hint: Option<&str>,
+        depth: usize,
+        out: &mut Vec<AntigravityLiveQuota>,
+    ) {
+        if depth > 5 || out.len() >= 16 {
+            return;
+        }
+        match node {
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(parsed) = parse_single_quota_entry(item, None) {
+                        out.push(parsed);
+                    } else {
+                        walk(item, None, depth + 1, out);
+                    }
+                }
+            }
+            Value::Object(map) => {
+                if depth > 0 {
+                    if let Some(parsed) = parse_single_quota_entry(node, key_hint) {
+                        out.push(parsed);
+                        return;
+                    }
+                }
+                for (k, child) in map {
+                    if matches!(
+                        k.as_str(),
+                        "email"
+                            | "userEmail"
+                            | "apiKey"
+                            | "token"
+                            | "accessToken"
+                            | "refreshToken"
+                            | "csrfToken"
+                    ) {
+                        continue;
+                    }
+                    let hint = matches!(
+                        k.as_str(),
+                        "geminiQuota"
+                            | "gemini_quota"
+                            | "geminiModels"
+                            | "claudeQuota"
+                            | "claude_quota"
+                            | "claudeModels"
+                            | "premiumQuota"
+                            | "premium_quota"
+                            | "premiumModels"
+                            | "flowCredits"
+                            | "promptCredits"
+                    )
+                    .then_some(k.as_str());
+                    walk(child, hint, depth + 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut raw = Vec::new();
+    walk(root, None, 0, &mut raw);
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for item in raw {
+        let key = item.label.to_ascii_lowercase();
+        if seen.insert(key) {
+            deduped.push(item);
+        }
+    }
+    deduped
+}
+
+async fn probe_live_quotas_with_api(api: &Api) -> (bool, Vec<AntigravityLiveQuota>) {
+    let mut connected = false;
+    let mut merged = Vec::new();
+    let mut seen = BTreeSet::new();
+    let body = json!({});
+    let timeout = std::time::Duration::from_secs(2);
+    for endpoint in &api.endpoints {
+        if let Ok(payload) = api
+            .call_on_timeout(endpoint, "RetrieveUserQuotaSummary", &body, timeout)
+            .await
+        {
+            connected = true;
+            for item in parse_quota_summary(&payload) {
+                let key = item.label.to_ascii_lowercase();
+                if seen.insert(key) {
+                    merged.push(item);
+                }
+            }
+            if !merged.is_empty() {
+                break;
+            }
+        }
+    }
+    (connected, merged)
+}
+
+pub async fn probe_live_quotas() -> (bool, Vec<AntigravityLiveQuota>) {
+    let connect = tokio::time::timeout(std::time::Duration::from_secs(2), Api::connect()).await;
+    let Ok(Ok(Some(api))) = connect else {
+        return (false, Vec::new());
+    };
+    probe_live_quotas_with_api(&api).await
+}
+
+fn match_track_live_quota(
+    track_id: &str,
+    live_quotas: &[AntigravityLiveQuota],
+) -> Option<AntigravityLiveQuota> {
+    live_quotas
+        .iter()
+        .find(|q| {
+            let lower = q.label.to_ascii_lowercase();
+            if track_id == "gemini" {
+                lower.contains("gemini")
+            } else {
+                lower.contains("claude")
+                    || lower.contains("sonnet")
+                    || lower.contains("opus")
+                    || lower.contains("gpt")
+                    || lower.contains("openai")
+                    || lower.contains("anthropic")
+            }
+        })
+        .cloned()
+}
+
+pub(super) fn compute_usage_stats(
+    rows: impl IntoIterator<Item = Result<super::storage_v12::AntigravityAttemptRow>>,
+    filter: &Filter,
+    pricing: &Pricing,
+    multiplier: &str,
+    now_ms: i64,
+    live: (bool, Vec<AntigravityLiveQuota>),
+) -> Result<AntigravityUsageStats> {
+    use rust_decimal::Decimal;
+    let filter_start = filter.start.unwrap_or(0);
+    let filter_end = filter.end.unwrap_or(now_ms);
+    let anchor = filter.end.unwrap_or(now_ms);
+    let start_5h = anchor.saturating_sub(5 * 3_600_000);
+    let start_7d = anchor.saturating_sub(7 * 86_400_000);
+    let model_filter = filter.model.as_deref().filter(|s| !s.is_empty());
+    let session_filter = filter.session_id.as_deref().filter(|s| !s.is_empty());
+
+    #[derive(Default)]
+    struct WindowAcc {
+        requests: u64,
+        tokens: u64,
+        reasoning_tokens: u64,
+        cost: Decimal,
+        unpriced_requests: u64,
+    }
+    impl WindowAcc {
+        fn into_view(self, hours: f64) -> AntigravityTrackWindow {
+            AntigravityTrackWindow {
+                requests: self.requests,
+                tokens: self.tokens,
+                reasoning_tokens: self.reasoning_tokens,
+                cost_usd: if self.cost.is_zero() {
+                    "0".into()
+                } else {
+                    self.cost.normalize().to_string()
+                },
+                unpriced_requests: self.unpriced_requests,
+                tokens_per_hour: if hours > 0.0 {
+                    ((self.tokens as f64 / hours) * 10.0).round() / 10.0
+                } else {
+                    0.0
+                },
+            }
+        }
+    }
+    #[derive(Default)]
+    struct FamilyAcc {
+        label: &'static str,
+        requests: u64,
+        tokens: u64,
+        reasoning_tokens: u64,
+        cost: Decimal,
+    }
+    #[derive(Default)]
+    struct SessionAcc {
+        requests: u64,
+        models: BTreeMap<String, u64>,
+        family_counts: BTreeMap<&'static str, u64>,
+        total_tokens: u64,
+        reasoning_tokens: u64,
+        cache_read_eligible: u64,
+        cache_input_eligible: u64,
+        duration_ms: u64,
+        cost: Decimal,
+        unpriced_requests: u64,
+        started_at: Option<i64>,
+        last_active_at: Option<i64>,
+    }
+
+    let mut requests = 0u64;
+    let mut unpriced_requests = 0u64;
+    let mut total_cost = Decimal::ZERO;
+    let mut mix_input = 0u64;
+    let mut mix_cache_read = 0u64;
+    let mut mix_cache_write = 0u64;
+    let mut mix_output = 0u64;
+    let mut mix_visible_output = 0u64;
+    let mut mix_reasoning = 0u64;
+    let mut cache_read_eligible = 0u64;
+    let mut cache_input_eligible = 0u64;
+    let mut cache_savings = Decimal::ZERO;
+
+    let mut gemini_5h = WindowAcc::default();
+    let mut gemini_7d = WindowAcc::default();
+    let mut claude_5h = WindowAcc::default();
+    let mut claude_7d = WindowAcc::default();
+
+    let mut families: BTreeMap<&'static str, FamilyAcc> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, SessionAcc> = BTreeMap::new();
+    let mut quote_cache: BTreeMap<String, super::pricing::Quote> = BTreeMap::new();
+
+    for item in rows {
+        let row = item?;
+        let (resolved_model, family, family_label, track) =
+            classify_model_family(row.model.as_deref(), row.display_name.as_deref());
+        let attempt_tokens = Tokens {
+            inclusive_input: row.inclusive_input,
+            input: row.input,
+            output: row.output,
+            reasoning: row.reasoning,
+            cache_read: row.cache_read,
+            cache_write: row.cache_write,
+            ..Tokens::default()
+        };
+        let tok_total = attempt_tokens.total().unwrap_or(0);
+        let tok_reasoning = row.reasoning.unwrap_or(0);
+        let row_cost = row
+            .cost
+            .as_deref()
+            .and_then(decimal)
+            .unwrap_or(Decimal::ZERO);
+        let is_unpriced_final = row.is_final && row.cost.is_none() && row.unpriced > 0;
+
+        // Dual-Track 5h & 7d rolling windows relative to anchor
+        if row.time >= start_7d && row.time <= anchor {
+            if let Some(track_id) = track {
+                let add_win = |win: &mut WindowAcc| {
+                    if row.is_final {
+                        win.requests += 1;
+                        if is_unpriced_final {
+                            win.unpriced_requests += 1;
+                        }
+                    }
+                    win.tokens = win.tokens.saturating_add(tok_total);
+                    win.reasoning_tokens = win.reasoning_tokens.saturating_add(tok_reasoning);
+                    win.cost += row_cost;
+                };
+                if track_id == "gemini" {
+                    add_win(&mut gemini_7d);
+                    if row.time >= start_5h {
+                        add_win(&mut gemini_5h);
+                    }
+                } else {
+                    add_win(&mut claude_7d);
+                    if row.time >= start_5h {
+                        add_win(&mut claude_5h);
+                    }
+                }
+            }
+        }
+
+        // Main filtered range breakdown
+        if row.time < filter_start || row.time > filter_end {
+            continue;
+        }
+        if let Some(wanted_session) = session_filter {
+            if row.session_id.as_deref() != Some(wanted_session) {
+                continue;
+            }
+        }
+        if let Some(wanted_model) = model_filter {
+            if resolved_model.as_deref() != Some(wanted_model)
+                && row.model.as_deref() != Some(wanted_model)
+            {
+                continue;
+            }
+        }
+
+        if row.is_final {
+            requests += 1;
+            if is_unpriced_final {
+                unpriced_requests += 1;
+            }
+        }
+        total_cost += row_cost;
+
+        let inp = row.input.unwrap_or(0);
+        let cr = row.cache_read.unwrap_or(0);
+        let cw = row.cache_write.unwrap_or(0);
+        let out = row.output.unwrap_or(0);
+        let capped_reasoning = tok_reasoning.min(out);
+        mix_input = mix_input.saturating_add(inp);
+        mix_cache_read = mix_cache_read.saturating_add(cr);
+        mix_cache_write = mix_cache_write.saturating_add(cw);
+        mix_output = mix_output.saturating_add(out);
+        mix_visible_output =
+            mix_visible_output.saturating_add(out.saturating_sub(capped_reasoning));
+        mix_reasoning = mix_reasoning.saturating_add(tok_reasoning);
+
+        if let Some((elig_read, elig_input)) = attempt_tokens.cache_sample() {
+            cache_read_eligible = cache_read_eligible.saturating_add(elig_read);
+            cache_input_eligible = cache_input_eligible.saturating_add(elig_input);
+        }
+
+        if cr > 0 && row.cost.is_some() {
+            if let Some(model_name) = resolved_model.as_deref() {
+                let quote = quote_cache.entry(model_name.to_owned()).or_insert_with(|| {
+                    pricing.quote_at(Some(model_name), multiplier, row.started_at)
+                });
+                let uncached_tokens = Tokens {
+                    input: Some(inp.saturating_add(cr)),
+                    output: Some(out),
+                    cache_read: Some(0),
+                    cache_write: row.cache_write,
+                    ..Tokens::default()
+                };
+                if let Some(uncached_snap) = quote.calculate(&uncached_tokens, None) {
+                    if let Some(uncached_cost) = decimal(&uncached_snap.cost) {
+                        if uncached_cost > row_cost {
+                            cache_savings += uncached_cost - row_cost;
+                        }
+                    }
+                }
+            }
+        }
+
+        let fam = families.entry(family).or_insert_with(|| FamilyAcc {
+            label: family_label,
+            ..FamilyAcc::default()
+        });
+        if row.is_final {
+            fam.requests += 1;
+        }
+        fam.tokens = fam.tokens.saturating_add(tok_total);
+        fam.reasoning_tokens = fam.reasoning_tokens.saturating_add(tok_reasoning);
+        fam.cost += row_cost;
+
+        if let Some(sid) = row.session_id.filter(|s| !s.is_empty()) {
+            let sess = sessions.entry(sid).or_default();
+            if row.is_final {
+                sess.requests += 1;
+                sess.duration_ms = sess.duration_ms.saturating_add(row.duration_ms);
+                if is_unpriced_final {
+                    sess.unpriced_requests += 1;
+                }
+            }
+            if let Some(m) = resolved_model.as_deref() {
+                *sess.models.entry(m.to_owned()).or_insert(0) += 1;
+            }
+            *sess.family_counts.entry(family).or_insert(0) += 1;
+            sess.total_tokens = sess.total_tokens.saturating_add(tok_total);
+            sess.reasoning_tokens = sess.reasoning_tokens.saturating_add(tok_reasoning);
+            if let Some((er, ei)) = attempt_tokens.cache_sample() {
+                sess.cache_read_eligible = sess.cache_read_eligible.saturating_add(er);
+                sess.cache_input_eligible = sess.cache_input_eligible.saturating_add(ei);
+            }
+            sess.cost += row_cost;
+            sess.started_at = Some(
+                sess.started_at
+                    .map_or(row.started_at, |prev| prev.min(row.started_at)),
+            );
+            sess.last_active_at = Some(
+                sess.last_active_at
+                    .map_or(row.time, |prev| prev.max(row.time)),
+            );
+        }
+    }
+
+    let mix_total = mix_input
+        .saturating_add(mix_cache_read)
+        .saturating_add(mix_cache_write)
+        .saturating_add(mix_output);
+    let thinking_share_percent = (mix_output > 0).then(|| {
+        ((mix_reasoning.min(mix_output) as f64 * 100.0) / mix_output as f64 * 10.0).round() / 10.0
+    });
+    let cache_hit_percent = (cache_input_eligible > 0).then(|| {
+        ((cache_read_eligible as f64 * 100.0) / cache_input_eligible as f64 * 10.0).round() / 10.0
+    });
+
+    let mut family_rows: Vec<AntigravityFamilyGroup> = families
+        .into_iter()
+        .map(|(family, acc)| AntigravityFamilyGroup {
+            family: family.to_owned(),
+            label: acc.label.to_owned(),
+            requests: acc.requests,
+            tokens: acc.tokens,
+            reasoning_tokens: acc.reasoning_tokens,
+            cost_usd: if acc.cost.is_zero() {
+                "0".into()
+            } else {
+                acc.cost.normalize().to_string()
+            },
+            share_percent: if mix_total > 0 {
+                ((acc.tokens as f64 * 100.0) / mix_total as f64 * 10.0).round() / 10.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    family_rows.sort_by(|a, b| {
+        b.tokens
+            .cmp(&a.tokens)
+            .then_with(|| b.requests.cmp(&a.requests))
+            .then_with(|| a.family.cmp(&b.family))
+    });
+
+    let total_sessions = sessions.len() as u64;
+    let mut top_sessions: Vec<AntigravitySessionRow> = sessions
+        .into_iter()
+        .map(|(session_id, acc)| {
+            let short_hash: String = session_id.chars().take(8).collect();
+            let primary_model = acc
+                .models
+                .into_iter()
+                .max_by(|(ma, ca), (mb, cb)| ca.cmp(cb).then_with(|| mb.cmp(ma)))
+                .map(|(m, _)| m)
+                .unwrap_or_else(|| "未识别".into());
+            let family = acc
+                .family_counts
+                .into_iter()
+                .max_by(|(fa, ca), (fb, cb)| ca.cmp(cb).then_with(|| fb.cmp(fa)))
+                .map(|(f, _)| f)
+                .unwrap_or("other")
+                .to_owned();
+            let sess_cache_hit = (acc.cache_input_eligible > 0).then(|| {
+                ((acc.cache_read_eligible as f64 * 100.0) / acc.cache_input_eligible as f64 * 10.0)
+                    .round()
+                    / 10.0
+            });
+            AntigravitySessionRow {
+                session_id,
+                short_hash,
+                requests: acc.requests,
+                primary_model,
+                family,
+                total_tokens: acc.total_tokens,
+                reasoning_tokens: acc.reasoning_tokens,
+                cache_hit_percent: sess_cache_hit,
+                duration_ms: acc.duration_ms,
+                cost_usd: if acc.cost.is_zero() {
+                    "0".into()
+                } else {
+                    acc.cost.normalize().to_string()
+                },
+                unpriced_requests: acc.unpriced_requests,
+                started_at: acc.started_at.unwrap_or(0),
+                last_active_at: acc.last_active_at.unwrap_or(0),
+            }
+        })
+        .collect();
+    top_sessions.sort_by(|a, b| {
+        b.total_tokens
+            .cmp(&a.total_tokens)
+            .then_with(|| b.requests.cmp(&a.requests))
+            .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    top_sessions.truncate(20);
+
+    let (live_connected, live_quotas) = live;
+    let tracks = vec![
+        AntigravityQuotaTrack {
+            id: "gemini".into(),
+            label: "Gemini".into(),
+            burst_5h: gemini_5h.into_view(5.0),
+            weekly_7d: gemini_7d.into_view(168.0),
+            live_quota: match_track_live_quota("gemini", &live_quotas),
+        },
+        AntigravityQuotaTrack {
+            id: "claude_gpt".into(),
+            label: "Claude / GPT".into(),
+            burst_5h: claude_5h.into_view(5.0),
+            weekly_7d: claude_7d.into_view(168.0),
+            live_quota: match_track_live_quota("claude_gpt", &live_quotas),
+        },
+    ];
+
+    Ok(AntigravityUsageStats {
+        requests,
+        sessions: total_sessions,
+        cost_usd: if total_cost.is_zero() {
+            "0".into()
+        } else {
+            total_cost.normalize().to_string()
+        },
+        unpriced_requests,
+        token_mix: AntigravityTokenMix {
+            input: mix_input,
+            cache_read: mix_cache_read,
+            cache_write: mix_cache_write,
+            output: mix_output,
+            visible_output: mix_visible_output,
+            reasoning: mix_reasoning,
+            total: mix_total,
+            thinking_share_percent,
+            cache_hit_percent,
+            cache_read_eligible,
+            cache_input_eligible,
+            cache_savings_usd: if cache_savings.is_zero() {
+                "0".into()
+            } else {
+                cache_savings.normalize().to_string()
+            },
+        },
+        tracks,
+        families: family_rows,
+        top_sessions,
+        live_quotas,
+        live_connected,
+    })
 }
 
 #[cfg(test)]

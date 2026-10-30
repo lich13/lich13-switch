@@ -23,6 +23,7 @@ import type {
   ViewState,
 } from "./types";
 import type {
+  AntigravityUsageStats,
   Dashboard,
   ModelsDevState,
   InterruptionSummary,
@@ -728,6 +729,10 @@ export type CommandMap = {
   get_usage_state: Call<None, UsageState>;
   export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
   get_usage_dashboard: Call<{ filter: UsageFilter }, Dashboard>;
+  get_antigravity_usage_stats: Call<
+    { filter: UsageFilter },
+    AntigravityUsageStats
+  >;
   get_usage_logs: Call<{ filter: UsageFilter }, UsagePage>;
   get_usage_detail: Call<{ id: string; source?: string }, UsageRecord>;
   set_usage_settings: Call<{ settings: UsageSettings }, UsageState>;

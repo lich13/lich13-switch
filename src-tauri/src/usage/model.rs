@@ -1371,6 +1371,7 @@ pub struct Filter {
     pub client: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub session_id: Option<String>,
     pub status: Option<String>,
     pub page: u32,
     pub sort: Option<String>,
