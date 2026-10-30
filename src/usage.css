@@ -182,19 +182,25 @@
 }
 .usage-tabs {
   border-bottom: 1px solid var(--line);
-  gap: 20px;
+  gap: 8px;
   margin: 8px 0 0;
 }
 .usage-tabs > button {
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
   background: transparent;
   color: var(--muted);
-  padding: 6px 0;
+  padding: 7px 12px;
   border-bottom: 2px solid transparent;
+  font-weight: 540;
+}
+.usage-tabs > button:hover:not([aria-selected="true"]) {
+  color: var(--ink);
+  background: var(--hover);
 }
 .usage-tabs > [aria-selected="true"] {
   border-bottom-color: var(--accent);
+  background: linear-gradient(180deg, transparent 25%, var(--accent-soft) 100%);
   color: var(--accent);
   font-weight: 600;
 }
@@ -207,7 +213,10 @@
 }
 .usage-toolbar > select {
   width: 140px;
-  padding: 5px 8px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
 }
 .usage-table-scroll {
   min-width: 0;

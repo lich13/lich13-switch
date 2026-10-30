@@ -534,7 +534,7 @@ kbd {
   background: var(--hover);
 }
 
-/* Client Selection */
+/* Client Selection — five-client multi-tone identity */
 .client-selection {
   flex-shrink: 0;
 }
@@ -543,12 +543,44 @@ kbd {
   white-space: nowrap;
 }
 
+.client-selection button[data-client="codex"][aria-pressed="true"] {
+  color: var(--accent);
+  background: linear-gradient(180deg, var(--accent-soft), var(--surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent),
+    var(--shadow-sm);
+}
+
 .client-selection button[data-client="claude"][aria-pressed="true"] {
   color: var(--accent-blue);
+  background: linear-gradient(180deg, var(--accent-blue-soft), var(--surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-blue) 28%, transparent),
+    var(--shadow-sm);
 }
 
 .client-selection button[data-client="antigravity"][aria-pressed="true"] {
   color: var(--accent-violet);
+  background: linear-gradient(180deg, var(--accent-violet-soft), var(--surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-violet) 30%, transparent),
+    var(--shadow-sm);
+}
+
+.client-selection button[data-client="grok"][aria-pressed="true"] {
+  color: var(--accent-amber);
+  background: linear-gradient(180deg, var(--accent-amber-soft), var(--surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-amber) 30%, transparent),
+    var(--shadow-sm);
+}
+
+.client-selection button[data-client="dsh"][aria-pressed="true"] {
+  color: var(--accent-emerald);
+  background: linear-gradient(180deg, var(--accent-emerald-soft), var(--surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-emerald) 30%, transparent),
+    var(--shadow-sm);
 }
 
 /* Auth Sync & Account Plan multi-tone badges */
@@ -590,21 +622,49 @@ kbd {
 
 .account-plan {
   flex-shrink: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.account-plan[data-plan="free"] {
+  color: var(--accent-slate);
+  background: var(--accent-slate-soft);
+  border-color: color-mix(in srgb, var(--accent-slate) 28%, var(--line));
 }
 
 .account-plan[data-plan="plus"] {
   color: var(--accent);
   background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
 }
 
-.account-plan[data-plan="pro"],
-.account-plan[data-plan="max"],
-.account-plan[data-plan="team"],
-.account-plan[data-plan="enterprise"] {
+.account-plan[data-plan="pro"] {
   color: var(--accent-violet);
   background: var(--accent-violet-soft);
-  border-color: color-mix(in srgb, var(--accent-violet) 30%, var(--line));
+  border-color: color-mix(in srgb, var(--accent-violet) 32%, var(--line));
+}
+
+.account-plan[data-plan="max"] {
+  color: var(--accent-amber);
+  background: linear-gradient(
+    135deg,
+    var(--accent-amber-soft) 0%,
+    var(--accent-violet-soft) 100%
+  );
+  border-color: color-mix(in srgb, var(--accent-amber) 36%, var(--line));
+}
+
+.account-plan[data-plan="team"],
+.account-plan[data-plan="business"] {
+  color: var(--accent-blue);
+  background: var(--accent-blue-soft);
+  border-color: color-mix(in srgb, var(--accent-blue) 32%, var(--line));
+}
+
+.account-plan[data-plan="enterprise"],
+.account-plan[data-plan="edu"] {
+  color: var(--accent-emerald);
+  background: var(--accent-emerald-soft);
+  border-color: color-mix(in srgb, var(--accent-emerald) 32%, var(--line));
 }
 
 .quota-subscription {
@@ -932,9 +992,16 @@ kbd {
   display: inline-flex;
   align-items: center;
   margin-top: 5px;
-  padding: 2px 8px;
+  padding: 2px 9px;
   border-radius: var(--radius-pill);
-  background: var(--accent-violet-soft);
+  color: var(--accent-blue);
+  background: linear-gradient(
+    135deg,
+    var(--accent-blue-soft) 0%,
+    var(--accent-soft) 100%
+  );
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 28%, var(--line));
+  font-weight: 560;
 }
 
 .sortable-providers {
@@ -1151,13 +1218,20 @@ kbd {
 
   .status-pill.online {
     color: var(--success);
-    background: var(--success-soft);
-    border-color: color-mix(in srgb, var(--success) 32%, var(--line));
+    background: linear-gradient(
+      135deg,
+      var(--success-soft) 0%,
+      color-mix(in srgb, var(--accent-soft) 50%, var(--surface)) 100%
+    );
+    border-color: color-mix(in srgb, var(--success) 38%, var(--line));
+    box-shadow:
+      0 2px 10px color-mix(in srgb, var(--success) 14%, transparent),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
 
   .status-pill.online .dot {
     background: var(--success);
-    box-shadow: 0 0 8px color-mix(in srgb, var(--success) 65%, transparent);
+    box-shadow: 0 0 9px color-mix(in srgb, var(--success) 75%, transparent);
   }
 
   .banner.warning {

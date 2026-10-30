@@ -250,6 +250,27 @@
   flex: 1 1 auto;
   text-align: center;
   padding: 5px 10px;
+  border-radius: var(--radius-pill);
+}
+
+.quick-scroll .client-selection button[data-client="codex"][aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.quick-scroll .client-selection button[data-client="claude"][aria-pressed="true"] {
+  color: var(--accent-blue);
+}
+
+.quick-scroll .client-selection button[data-client="antigravity"][aria-pressed="true"] {
+  color: var(--accent-violet);
+}
+
+.quick-scroll .client-selection button[data-client="grok"][aria-pressed="true"] {
+  color: var(--accent-amber);
+}
+
+.quick-scroll .client-selection button[data-client="dsh"][aria-pressed="true"] {
+  color: var(--accent-emerald);
 }
 
 /* Gateway status bar card */

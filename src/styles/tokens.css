@@ -36,13 +36,19 @@
     --line: rgba(148, 174, 219, 0.145);
     --line-strong: rgba(148, 174, 219, 0.26);
 
-    /* Multi-tone accents: Cyan + Cobalt + Indigo/Violet */
+    /* Multi-tone accents: Cyan + Cobalt + Indigo/Violet + Amber + Emerald */
     --accent: #38bdf8;
     --accent-blue: #60a5fa;
     --accent-violet: #a78bfa;
+    --accent-amber: #fbbf24;
+    --accent-emerald: #34d399;
+    --accent-slate: #94a3b8;
     --accent-soft: rgba(56, 189, 248, 0.13);
     --accent-blue-soft: rgba(96, 165, 250, 0.14);
     --accent-violet-soft: rgba(167, 139, 250, 0.15);
+    --accent-amber-soft: rgba(251, 191, 36, 0.14);
+    --accent-emerald-soft: rgba(52, 211, 153, 0.14);
+    --accent-slate-soft: rgba(148, 163, 184, 0.13);
     --primary: #38bdf8;
     --primary-gradient: linear-gradient(
       135deg,
@@ -120,9 +126,15 @@
     --accent: #0284c7;
     --accent-blue: #2563eb;
     --accent-violet: #6d28d9;
+    --accent-amber: #b45309;
+    --accent-emerald: #059669;
+    --accent-slate: #475569;
     --accent-soft: rgba(2, 132, 199, 0.11);
     --accent-blue-soft: rgba(37, 99, 235, 0.1);
     --accent-violet-soft: rgba(109, 40, 217, 0.1);
+    --accent-amber-soft: rgba(217, 119, 6, 0.11);
+    --accent-emerald-soft: rgba(5, 150, 105, 0.11);
+    --accent-slate-soft: rgba(71, 85, 105, 0.1);
     --primary: #0284c7;
     --primary-gradient: linear-gradient(
       135deg,

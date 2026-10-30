@@ -86,12 +86,13 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--surface-subtle);
+  background: color-mix(in srgb, var(--surface-subtle) 88%, var(--surface));
+  backdrop-filter: blur(8px);
   color: var(--muted);
   text-align: left;
   font-weight: 560;
   padding: 10px 8px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-strong);
   overflow-wrap: anywhere;
 }
 
@@ -132,10 +133,6 @@
 
 .event-table th:nth-child(5) {
   width: 104px;
-}
-
-.event-table th:nth-child(6) {
-  width: 110px;
 }
 
 .event-table time,
@@ -255,10 +252,18 @@
 }
 
 .event-count {
-  display: inline-block;
-  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 28%, var(--line));
+  background: var(--accent-blue-soft);
+  color: var(--accent-blue);
   margin-left: 6px;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
 }
 
 .event-code .event-count {
@@ -346,7 +351,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 24px;
+  padding-bottom: 14px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
 }
 
 .event-drawer h2 {
@@ -357,7 +364,7 @@
 
 .event-drawer dl {
   display: grid;
-  gap: 18px;
+  gap: 10px;
   font-size: 13px;
 }
 
@@ -365,6 +372,10 @@
   display: grid;
   grid-template-columns: 80px minmax(0, 1fr);
   gap: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-subtle) 58%, var(--surface));
 }
 
 .event-drawer dt {
@@ -437,8 +448,20 @@
     color: var(--warning);
   }
 
+  .event-code.warning .event-count {
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
+  }
+
   .event-code.error,
   .event-table .event-code.error {
     color: var(--danger);
+  }
+
+  .event-code.error .event-count {
+    color: var(--danger);
+    background: var(--error-soft);
+    border-color: color-mix(in srgb, var(--danger) 34%, var(--line));
   }
 }

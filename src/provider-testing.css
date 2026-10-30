@@ -24,7 +24,7 @@
 .provider-test-tabs {
   display: flex;
   flex: 0 0 auto;
-  gap: 20px;
+  gap: 6px;
   padding: 0 20px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-subtle);
@@ -33,17 +33,21 @@
 .provider-test-tabs button {
   min-height: 44px;
   flex-shrink: 0;
-  padding: 0 0 2px;
+  padding: 0 12px 2px;
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
   border-bottom: 2px solid transparent;
   color: var(--muted);
   font: inherit;
+  font-weight: 540;
   white-space: nowrap;
 }
 .provider-test-tabs button:hover:not([aria-selected="true"]) {
   color: var(--ink);
+  background: var(--hover);
 }
 .provider-test-tabs [aria-selected="true"] {
   border-color: var(--accent);
+  background: linear-gradient(180deg, transparent 22%, var(--accent-soft) 100%);
   color: var(--accent);
   font-weight: 600;
 }
@@ -67,9 +71,6 @@
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 16px;
-}
-.provider-test-config.with-concurrency {
-  grid-template-columns: minmax(0, 1fr) 100px;
 }
 .provider-test-detection-config {
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -125,6 +126,10 @@
 }
 .provider-test-reply {
   margin-top: 20px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 65%, var(--surface));
   min-width: 0;
 }
 .provider-test-reply-heading {
@@ -397,9 +402,8 @@
 }
 @media (max-width: 640px) {
   .provider-test-tabs {
-    gap: 16px;
+    gap: 8px;
   }
-  .provider-test-config.with-concurrency,
   .provider-test-detection-config {
     grid-template-columns: minmax(0, 1fr);
   }

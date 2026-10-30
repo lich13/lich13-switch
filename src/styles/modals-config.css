@@ -42,7 +42,12 @@
   border-radius: var(--radius-md) var(--radius-md) 0 0;
   padding: 8px 14px;
   gap: 12px;
-  background: var(--surface);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-subtle) 86%, var(--elevated)) 0%,
+    var(--surface) 100%
+  );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   color: var(--muted);
   font-size: 11.5px;
 }
@@ -117,11 +122,15 @@
 .config-diff del {
   background: var(--error-soft);
   color: var(--error);
+  border: 1px solid color-mix(in srgb, var(--error) 30%, var(--line));
+  border-left: 3px solid var(--error);
 }
 
 .config-diff ins {
   background: var(--success-soft);
   color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 30%, var(--line));
+  border-left: 3px solid var(--success);
 }
 
 /* Visual settings: Claude & Antigravity dual-mode editors */
@@ -169,14 +178,24 @@
 }
 
 .settings-tabs button[aria-pressed="true"] {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  color: var(--accent-blue);
+  border-bottom-color: var(--accent-blue);
+  background: linear-gradient(
+    180deg,
+    transparent 20%,
+    var(--accent-blue-soft) 100%
+  );
   font-weight: 600;
 }
 
 .antigravity-settings .settings-tabs button[aria-pressed="true"] {
   color: var(--accent-violet);
   border-bottom-color: var(--accent-violet);
+  background: linear-gradient(
+    180deg,
+    transparent 20%,
+    var(--accent-violet-soft) 100%
+  );
 }
 
 .settings-content {
@@ -191,9 +210,16 @@
   grid-template-columns: minmax(120px, 0.72fr) minmax(0, 1fr);
   align-items: center;
   gap: 16px;
-  padding: 11px 0;
+  padding: 11px 8px;
+  margin: 0 -8px;
   border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-xs);
   min-width: 0;
+  transition: background 0.14s ease;
+}
+
+.settings-content .setting-row:hover {
+  background: color-mix(in srgb, var(--hover) 68%, transparent);
 }
 
 .settings-content .setting-row > label,
@@ -262,7 +288,11 @@
 }
 
 .settings-list-group {
-  margin: 20px 0;
+  margin: 18px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 65%, var(--surface));
 }
 
 .settings-list-group h3 {
@@ -369,8 +399,17 @@
   gap: 12px;
   padding: 9px 13px;
   border-radius: var(--radius-sm);
-  border: 1px solid color-mix(in srgb, var(--accent-violet) 24%, var(--line));
-  background: var(--surface-subtle);
+  border: 1px solid color-mix(in srgb, var(--accent-violet) 26%, var(--line));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-violet-soft) 50%, var(--surface-subtle)) 0%,
+    var(--surface-subtle) 100%
+  );
+  transition: border-color 0.14s ease;
+}
+
+.ag-plugin-item:hover {
+  border-color: color-mix(in srgb, var(--accent-violet) 46%, var(--line));
 }
 
 .ag-plugin-item code {
@@ -412,7 +451,11 @@
 }
 
 .dsh-file-selectors {
-  padding: 0;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 72%, var(--surface));
   display: flex;
   flex-wrap: wrap;
   gap: 12px;

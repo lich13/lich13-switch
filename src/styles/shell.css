@@ -13,7 +13,13 @@
 .sidebar {
   width: 190px;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  background:
+    radial-gradient(
+      120% 42% at 18% 0%,
+      color-mix(in srgb, var(--accent) 9%, transparent),
+      transparent 70%
+    ),
+    color-mix(in srgb, var(--surface) 93%, transparent);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -31,6 +37,7 @@
   width: 36px;
   height: 36px;
   border-radius: var(--radius-xs);
+  box-shadow: 0 4px 12px rgba(2, 8, 23, 0.22);
 }
 
 .brand strong {
@@ -147,11 +154,16 @@ label.search {
   padding: 6px 12px;
   max-width: 220px;
   box-shadow: var(--shadow-sm);
-  transition: border-color 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 label.search:focus-within {
   border-color: var(--accent);
+  box-shadow:
+    0 0 0 3px var(--accent-soft),
+    var(--shadow-sm);
 }
 
 label.search input {
@@ -185,11 +197,16 @@ label.search input:focus-visible {
   transition:
     border-color 0.16s ease,
     background 0.16s ease,
-    box-shadow 0.16s ease;
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
 }
 
 .account-row:hover {
   border-color: var(--line-strong);
+  transform: translateY(-1px);
+  box-shadow:
+    0 6px 18px rgba(3, 8, 20, 0.18),
+    var(--shadow-sm);
 }
 
 .account-row.selected {
