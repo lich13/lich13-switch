@@ -1,9 +1,5 @@
 import { preferredDshProfile, rememberDshProfile } from "./dsh-profile";
 import { useEffect, useRef, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
-import { StreamLanguage } from "@codemirror/language";
-import { yaml } from "@codemirror/legacy-modes/mode/yaml";
-import { EditorView } from "@codemirror/view";
 import { Save, RotateCcw, History } from "lucide-react";
 import { command } from "./bridge";
 import type { DshFileKey, DshFileView } from "./bridge-contracts";
@@ -11,6 +7,10 @@ import ClientSelection from "./ClientSelection";
 import { errorOf, type ClientId } from "./types";
 import { confirmAction } from "./confirmation";
 import Modal from "./Modal";
+import {
+  getCachedCodeMirrorSurface,
+  loadCodeMirrorSurface,
+} from "./codeMirrorLoader";
 
 const names: Record<DshFileKey, string> = {
   profilePatch: "profile · cordis.patch.yml",
@@ -19,21 +19,6 @@ const names: Record<DshFileKey, string> = {
   environment: ".env · 只读",
   credentials: ".credentials.yaml · 只读",
 };
-const extensions = [
-  StreamLanguage.define(yaml),
-  EditorView.theme({
-    "&": { height: "100%", background: "var(--canvas)" },
-    ".cm-scroller": {
-      fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
-      fontSize: "13px",
-    },
-    ".cm-content": { padding: "12px 0" },
-    ".cm-gutters": {
-      background: "var(--canvas)",
-      borderRight: "1px solid var(--line)",
-    },
-  }),
-];
 
 export default function DshConfigEditor({
   select,
@@ -64,7 +49,19 @@ export default function DshConfigEditor({
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [previous, setPrevious] = useState<string | null>(null);
+  const [Surface, setSurface] = useState(() => getCachedCodeMirrorSurface());
   const dirty = !!doc && !doc.readOnly && text !== doc.text;
+  useEffect(() => {
+    if (!Surface) {
+      let active = true;
+      void loadCodeMirrorSurface().then((Loaded) => {
+        if (active) setSurface(() => Loaded);
+      });
+      return () => {
+        active = false;
+      };
+    }
+  }, [Surface]);
   useEffect(() => {
     onDirty(dirty);
     return () => onDirty(false);
@@ -76,9 +73,13 @@ export default function DshConfigEditor({
     let gone = false;
     setLoading(true);
     setError("");
-    void command("read_dsh_file", { profile: profile || null, key })
-      .then((value) => {
+    void Promise.all([
+      command("read_dsh_file", { profile: profile || null, key }),
+      loadCodeMirrorSurface(),
+    ])
+      .then(([value, Loaded]) => {
         if (!gone) {
+          setSurface(() => Loaded);
           if (profile !== (value.profile ?? "") || key !== value.key) {
             normalizedSelection.current = {
               profile: value.profile ?? "",
@@ -283,15 +284,18 @@ export default function DshConfigEditor({
         <p className="muted">仅显示名称与遮蔽值，请在 DSH 中管理凭据。</p>
       )}
       <div className="dsh-source-editor">
-        <CodeMirror
-          aria-label="DSH 配置内容"
-          value={text}
-          theme={theme}
-          height="100%"
-          extensions={extensions}
-          editable={!busy && !loading && !!doc && !doc.readOnly}
-          onChange={setText}
-        />
+        {Surface ? (
+          <Surface
+            mode="yaml"
+            ariaLabel="DSH 配置内容"
+            value={text}
+            theme={theme}
+            editable={!busy && !loading && !!doc && !doc.readOnly}
+            onChange={setText}
+          />
+        ) : (
+          <div className="empty">正在加载编辑器…</div>
+        )}
       </div>
       {previous != null && (
         <Modal title="DSH 上一版配置" close={() => setPrevious(null)}>

@@ -1,3 +1,5 @@
+@layer tokens, base, layout, pages, modifiers;
+@layer pages {
 .usage-page {
   height: 100%;
   min-width: 0;
@@ -71,35 +73,67 @@
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s ease;
+}
+.usage-filters input:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+.usage-filters input:focus {
+  border-color: var(--accent);
 }
 .usage-time-button {
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.usage-time-button:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--surface-subtle);
 }
 .usage-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  padding-bottom: 10px;
-  margin-bottom: 8px;
-  border-bottom: 1px solid var(--line);
+  gap: 10px;
+  margin-bottom: 12px;
 }
 .usage-metric {
+  --metric-tone: var(--accent);
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-width: 0;
-  min-height: 76px;
+  min-height: 78px;
   gap: 4px;
-  padding: 8px;
+  padding: 10px 10px 9px;
+  border: 1px solid color-mix(in srgb, var(--metric-tone) 24%, var(--line));
+  border-radius: var(--radius-md);
+  background:
+    radial-gradient(
+      115% 95% at 50% 0%,
+      color-mix(in srgb, var(--metric-tone) 13%, transparent),
+      transparent 68%
+    ),
+    var(--surface);
+  box-shadow: var(--shadow-sm);
   color: var(--ink);
   font: inherit;
   text-align: center;
+}
+.usage-metric:nth-child(2) {
+  --metric-tone: var(--accent-blue);
+}
+.usage-metric:nth-child(3) {
+  --metric-tone: var(--accent-violet);
+}
+.usage-metric:nth-child(4) {
+  --metric-tone: var(--success);
 }
 .usage-metric > span,
 .usage-metric em {
@@ -110,30 +144,30 @@
 .usage-metric strong {
   font-size: 18px;
   line-height: 1.2;
-  font-weight: 600;
+  font-weight: 620;
   letter-spacing: 0;
   overflow-wrap: anywhere;
 }
 .usage-metric > svg {
   position: absolute;
-  right: 0;
-  top: 0;
-  color: var(--muted);
+  right: 8px;
+  top: 8px;
+  color: color-mix(in srgb, var(--metric-tone) 72%, var(--muted));
 }
 .usage-metric > .usage-exact-value {
   position: absolute;
   z-index: 5;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   left: 0;
   right: 0;
-  padding: 7px 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
   background: var(--elevated);
   color: var(--ink);
   line-height: 1.5;
   overflow-wrap: anywhere;
-  box-shadow: 0 4px 14px #0002;
+  box-shadow: var(--shadow-md);
   pointer-events: none;
 }
 .usage-number,
@@ -161,7 +195,8 @@
 }
 .usage-tabs > [aria-selected="true"] {
   border-bottom-color: var(--accent);
-  color: var(--ink);
+  color: var(--accent);
+  font-weight: 600;
 }
 .usage-tabs .usage-toolbar {
   margin-left: auto;
@@ -209,7 +244,7 @@
   cursor: pointer;
 }
 .usage-table tr[tabindex]:hover {
-  background: var(--surface);
+  background: var(--hover);
 }
 .usage-table tr[tabindex]:focus-visible {
   outline: 2px solid var(--accent);
@@ -398,20 +433,29 @@
 }
 .usage-badge {
   display: inline-flex;
+  align-items: center;
   font-size: 12px;
   line-height: 14px;
-  padding: 0 3px;
-  border-radius: 3px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
   color: var(--muted);
-  background: var(--surface);
+  background: var(--surface-subtle);
 }
-.usage-badge.stream,
-.usage-badge.compaction {
+.usage-badge.stream {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+.usage-badge.compaction {
+  color: var(--accent-violet);
+  background: var(--accent-violet-soft);
+  border-color: color-mix(in srgb, var(--accent-violet) 28%, var(--line));
 }
 .usage-badge.search {
-  color: var(--ink);
+  color: var(--accent-blue);
+  background: var(--accent-blue-soft);
+  border-color: color-mix(in srgb, var(--accent-blue) 28%, var(--line));
 }
 .usage-cell-cost {
   text-align: center;
@@ -464,7 +508,7 @@
   color: var(--success);
 }
 .usage-token-grid .output svg {
-  color: #8b5cf6;
+  color: var(--accent-violet);
 }
 .usage-token-grid .cacheRead svg {
   color: var(--accent);
@@ -627,10 +671,18 @@
   align-items: center;
   gap: 5px;
   border: 1px solid var(--line);
-  padding: 7px 10px;
-  border-radius: 7px;
+  background: var(--surface-subtle);
+  padding: 7px 11px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.usage-import:hover {
+  border-color: var(--line-strong);
+  background: var(--elevated);
 }
 .usage-import input {
   position: absolute;
@@ -645,26 +697,35 @@
 .usage-more summary {
   cursor: pointer;
   padding: 8px;
+  border-radius: var(--radius-xs);
+}
+.usage-more summary:hover {
+  background: var(--hover);
 }
 .usage-more > div {
   position: absolute;
   right: 0;
-  top: 100%;
+  top: calc(100% + 4px);
   z-index: 3;
-  background: var(--elevated);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 5px;
-  width: 150px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+  width: 156px;
   max-width: calc(100vw - 48px);
   box-sizing: border-box;
 }
 .usage-more button {
   width: 100%;
   border: 0;
+  border-radius: var(--radius-xs);
   background: none;
   justify-content: flex-start;
-  padding: 9px;
+  padding: 8px 10px;
+}
+.usage-more button:hover:not(:disabled) {
+  background: var(--hover);
 }
 .usage-price-table th:first-child {
   width: 22%;
@@ -790,6 +851,7 @@
 .usage-source-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
   padding: 18px 0;
 }
 .usage-source-actions button {
@@ -797,8 +859,13 @@
   height: 36px;
   padding: 0 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
   font: inherit;
+}
+.usage-source-actions button:hover:not(:disabled) {
+  background: var(--elevated);
+  border-color: var(--line-strong);
 }
 .usage-source-actions button:last-child {
   grid-column: 1 / -1;
@@ -808,21 +875,22 @@
   inset: 0 0 0 auto;
   margin: 0;
   border: 0;
-  border-left: 1px solid var(--line);
+  border-left: 1px solid var(--line-strong);
   width: min(550px, 100vw);
   max-width: 100vw;
   height: 100dvh;
   max-height: 100dvh;
-  border-radius: 0;
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
   padding: 0;
   color: var(--ink);
   background: var(--surface);
-  box-shadow: -8px 0 30px #0002;
+  box-shadow: var(--shadow-lg);
   box-sizing: border-box;
   font-size: 13px;
 }
 .usage-drawer::backdrop {
-  background: #02060b77;
+  background: rgba(3, 8, 20, 0.56);
+  backdrop-filter: blur(4px);
 }
 .usage-drawer > header {
   display: flex;
@@ -882,7 +950,8 @@
   font-size: 13px;
   line-height: 1.5;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
   overflow: hidden;
 }
 .usage-detail-pair {
@@ -912,20 +981,21 @@
 .usage-range-dialog {
   position: fixed;
   margin: 0;
-  width: 330px;
+  width: 336px;
   max-width: calc(100vw - 24px);
   max-height: calc(100dvh - 24px);
   box-sizing: border-box;
   overflow: auto;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
   background: var(--surface);
   color: var(--ink);
-  box-shadow: 0 12px 40px #0004;
+  box-shadow: var(--shadow-lg);
 }
 .usage-range-dialog::backdrop {
-  background: #02060b33;
+  background: rgba(3, 8, 20, 0.42);
+  backdrop-filter: blur(3px);
 }
 .usage-range-dialog .usage-form-actions {
   margin-top: 16px;
@@ -947,30 +1017,13 @@
   width: 15px;
   height: 15px;
 }
-.event-code {
+.usage-page .event-code {
   max-width: 230px;
   white-space: normal;
   text-align: left;
 }
-.event-table {
+.usage-page .event-table {
   min-width: 670px;
-}
-.quota-refresh-settings {
-  border-bottom: 1px solid var(--line);
-  padding: 12px 0 18px;
-  margin-bottom: 18px;
-}
-.quota-refresh-settings .setting-row {
-  margin-bottom: 10px;
-}
-.quota-refresh-settings input[type="number"] {
-  max-width: 140px;
-}
-.provider-settings.gateway-form {
-  gap: 12px;
-}
-.provider-settings .model-manual textarea {
-  min-height: 58px;
 }
 @container (max-width: 660px) {
   .usage-request-table tbody tr {
@@ -1028,9 +1081,6 @@
 .usage-pricing-toolbar summary {
   padding: 6px 8px;
 }
-.usage-metric + .usage-metric {
-  border-left: 1px solid var(--line);
-}
 .usage-performance-grid .usage-token-item {
   line-height: 16px;
   gap: 12px;
@@ -1063,7 +1113,7 @@
   color: var(--ink);
   background: var(--canvas);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font: inherit;
 }
 .usage-bill-times {
@@ -1101,4 +1151,5 @@
 .usage-bill-result {
   margin: 0 0 16px;
   line-height: 1.6;
+}
 }

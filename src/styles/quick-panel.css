@@ -1,3 +1,4 @@
+@layer layout {
 /* Rounded, card-layered QuickPanel & QuickFreeze surface */
 .quick-panel {
   height: min(720px, 100dvh);
@@ -37,19 +38,49 @@
 }
 
 .quick-freeze-ice {
-  --freeze-color: #0ea5e9;
+  --freeze-color: #0284c7;
+  border-color: rgba(56, 189, 248, 0.48);
+  background:
+    radial-gradient(
+      125% 135% at 0% 0%,
+      rgba(56, 189, 248, 0.2),
+      transparent 62%
+    ),
+    radial-gradient(
+      110% 120% at 100% 100%,
+      rgba(129, 140, 248, 0.14),
+      transparent 60%
+    ),
+    var(--surface);
+  box-shadow:
+    inset 0 1px 0 rgba(224, 242, 254, 0.24),
+    0 4px 18px rgba(14, 165, 233, 0.15),
+    var(--shadow-sm);
 }
 
 [data-theme="dark"] .quick-freeze-ice {
   --freeze-color: #7dd3fc;
+  border-color: rgba(125, 211, 252, 0.44);
+  box-shadow:
+    inset 0 1px 0 rgba(224, 242, 254, 0.2),
+    0 6px 22px rgba(56, 189, 248, 0.16),
+    var(--shadow-sm);
 }
 
 .quick-freeze-yellow {
   --freeze-color: var(--warning);
 }
 
+.quick-freeze-yellow .quick-freeze-light {
+  animation: freeze-drain-pulse 1.6s ease-in-out infinite;
+}
+
 .quick-freeze-green {
   --freeze-color: var(--latency-good);
+}
+
+.freeze-effect-thaw ~ .quick-freeze-green {
+  animation: freeze-card-thaw 820ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .quick-freeze-main {
@@ -633,12 +664,6 @@
   overflow-wrap: anywhere;
 }
 
-.quick-feedback.error {
-  color: var(--error);
-  border-color: color-mix(in srgb, var(--error) 32%, var(--line));
-  background: var(--error-soft);
-}
-
 .quick-empty {
   display: flex;
   flex-direction: column;
@@ -746,7 +771,7 @@
   background: var(--surface);
 }
 
-/* Sleep/freeze crystallization overlay */
+/* Sleep/freeze multi-stage crystallization & dynamic thermal-shatter thaw */
 .freeze-effect {
   position: fixed;
   inset: 0;
@@ -754,10 +779,13 @@
   overflow: hidden;
   pointer-events: none;
   border-radius: inherit;
-  --ice-fill: rgba(164, 223, 246, 0.22);
-  --ice-inner: rgba(221, 249, 255, 0.5);
-  --ice-line: rgba(116, 193, 223, 0.68);
-  --ice-glow: rgba(130, 216, 251, 0.28);
+  --ice-deep: rgba(56, 189, 248, 0.14);
+  --ice-fill: rgba(148, 224, 252, 0.24);
+  --ice-inner: rgba(224, 248, 255, 0.56);
+  --ice-line: rgba(56, 189, 248, 0.74);
+  --ice-bright: rgba(240, 253, 255, 0.94);
+  --ice-glow: rgba(125, 211, 252, 0.32);
+  --thaw-glow: rgba(52, 211, 153, 0.26);
 }
 
 .app-shell:has(.freeze-effect) .brand,
@@ -770,10 +798,13 @@
 }
 
 [data-theme="dark"] .freeze-effect {
-  --ice-fill: rgba(126, 209, 244, 0.18);
-  --ice-inner: rgba(191, 242, 255, 0.28);
-  --ice-line: rgba(161, 229, 255, 0.72);
-  --ice-glow: rgba(91, 192, 240, 0.26);
+  --ice-deep: rgba(37, 99, 235, 0.18);
+  --ice-fill: rgba(114, 209, 250, 0.2);
+  --ice-inner: rgba(196, 243, 255, 0.34);
+  --ice-line: rgba(154, 228, 255, 0.78);
+  --ice-bright: rgba(236, 254, 255, 0.95);
+  --ice-glow: rgba(56, 189, 248, 0.3);
+  --thaw-glow: rgba(52, 211, 153, 0.24);
 }
 
 .freeze-effect::before,
@@ -785,29 +816,29 @@
 }
 
 .freeze-effect::before {
-  border: 1px solid var(--ice-line);
+  border: 1.5px solid var(--ice-line);
   box-shadow:
-    inset 0 0 10px var(--ice-glow),
-    inset 0 0 30px var(--ice-glow);
+    inset 0 0 12px var(--ice-glow),
+    inset 0 0 34px var(--ice-glow);
   background: repeating-linear-gradient(
-    119deg,
-    transparent 0 14px,
-    var(--ice-inner) 15px,
-    transparent 16px 31px
+    122deg,
+    transparent 0 12px,
+    var(--ice-inner) 13px,
+    transparent 14px 28px
   );
   mask-image:
     linear-gradient(
       to bottom,
       #000,
-      transparent 15px,
-      transparent calc(100% - 15px),
+      transparent 17px,
+      transparent calc(100% - 17px),
       #000
     ),
     linear-gradient(
       to right,
       #000,
-      transparent 12px,
-      transparent calc(100% - 12px),
+      transparent 14px,
+      transparent calc(100% - 14px),
       #000
     );
 }
@@ -815,24 +846,76 @@
 .freeze-effect::after {
   opacity: 0;
   background: linear-gradient(
-    115deg,
-    transparent 38%,
-    rgba(181, 237, 255, 0.28) 48%,
-    rgba(233, 253, 255, 0.52) 50%,
-    transparent 61%
+    112deg,
+    transparent 34%,
+    rgba(125, 211, 252, 0.24) 45%,
+    rgba(236, 254, 255, 0.58) 50%,
+    rgba(167, 139, 250, 0.2) 55%,
+    transparent 66%
   );
 }
 
-.freeze-crystal {
+.freeze-pulse {
   position: absolute;
-  width: clamp(72px, 13vw, 128px);
+  inset: -12%;
+  opacity: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    transparent 36%,
+    var(--ice-glow) 52%,
+    rgba(224, 248, 255, 0.42) 55%,
+    transparent 66%
+  );
+}
+
+.freeze-rime {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  height: 10px;
+  opacity: 0.82;
+  background:
+    radial-gradient(
+      8px 10px at 14px 0,
+      var(--ice-inner) 45%,
+      transparent 52%
+    )
+    repeat-x,
+    linear-gradient(
+      90deg,
+      transparent,
+      var(--ice-fill) 18%,
+      var(--ice-inner) 50%,
+      var(--ice-fill) 82%,
+      transparent
+    );
+  background-size:
+    28px 10px,
+    100% 3px;
+  background-repeat: repeat-x, no-repeat;
+}
+
+.freeze-rime-top {
+  top: 0;
+}
+
+.freeze-rime-bottom {
+  bottom: 0;
+  transform: scaleY(-1);
+}
+
+.freeze-crystal {
+  --stagger: calc(var(--corner-index, 0) * 45ms);
+  position: absolute;
+  width: clamp(86px, 14.5vw, 146px);
   height: auto;
-  opacity: 0.9;
+  opacity: 0.94;
   transform: rotate(var(--crystal-angle));
 }
 
 .quick-panel .freeze-crystal {
-  width: 86px;
+  width: 96px;
 }
 
 .freeze-crystal-nw {
@@ -862,87 +945,453 @@
 .freeze-facet {
   fill: var(--ice-fill);
   stroke: var(--ice-line);
-  stroke-width: 0.6;
+  stroke-width: 0.65;
+}
+
+.freeze-facet-deep {
+  fill: var(--ice-deep);
+  stroke: color-mix(in srgb, var(--ice-line) 55%, transparent);
+  stroke-width: 0.45;
 }
 
 .freeze-facet-inner {
   fill: var(--ice-inner);
-  stroke-width: 0.4;
+  stroke: var(--ice-bright);
+  stroke-width: 0.45;
 }
 
 .freeze-vein {
   stroke: var(--ice-line);
-  stroke-width: 0.8;
+  stroke-width: 0.85;
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 0;
 }
 
-.freeze-splinter {
+.freeze-shard {
   fill: var(--ice-inner);
+  stroke: var(--ice-line);
+  stroke-width: 0.4;
+  transform-box: fill-box;
+  transform-origin: center;
 }
 
+.freeze-glint {
+  fill: var(--ice-bright);
+  opacity: 0.72;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* Stage 1: Multi-stage arctic crystallization (1500ms -> static 0% GPU) */
 .freeze-effect-freeze::before {
-  animation: ice-rim 1400ms ease-out both;
+  animation: ice-rim 1420ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .freeze-effect-freeze::after {
-  animation: ice-sweep 1300ms 80ms ease-out both;
+  animation: ice-sweep 1320ms 60ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.freeze-effect-freeze .freeze-pulse {
+  animation: ice-pulse-in 1120ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.freeze-effect-freeze .freeze-rime-top {
+  animation: ice-rime-top-in 1180ms 90ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.freeze-effect-freeze .freeze-rime-bottom {
+  animation: ice-rime-bottom-in 1180ms 130ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .freeze-effect-freeze .freeze-crystal {
-  animation: ice-grow 1250ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: ice-grow 1260ms var(--stagger) cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-.freeze-effect-thaw {
-  animation: ice-thaw 460ms ease-out both;
+.freeze-effect-freeze .freeze-vein {
+  animation: ice-vein-draw 1120ms calc(var(--stagger) + 80ms)
+    cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.freeze-effect-freeze .freeze-shard-a,
+.freeze-effect-freeze .freeze-shard-b {
+  animation: ice-shard-lock 1060ms calc(var(--stagger) + 160ms)
+    cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.freeze-effect-freeze .freeze-glint {
+  animation: ice-glint-flash 1240ms calc(var(--stagger) + 210ms) ease-out both;
+}
+
+/* Stage 2: Dynamic thermal-shatter thaw & melt (860ms -> unmount) */
+.freeze-effect-thaw::before {
+  animation: ice-rim-thaw 840ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.freeze-effect-thaw::after {
+  background: linear-gradient(
+    116deg,
+    transparent 32%,
+    rgba(56, 189, 248, 0.22) 45%,
+    rgba(236, 254, 255, 0.48) 50%,
+    var(--thaw-glow) 56%,
+    transparent 68%
+  );
+  animation: ice-thaw-sweep 760ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.freeze-effect-thaw .freeze-pulse {
+  background: radial-gradient(
+    circle,
+    transparent 24%,
+    var(--thaw-glow) 44%,
+    rgba(125, 211, 252, 0.36) 50%,
+    transparent 64%
+  );
+  animation: ice-pulse-thaw 760ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.freeze-effect-thaw .freeze-rime-top {
+  animation: ice-rime-top-thaw 680ms ease-out both;
+}
+
+.freeze-effect-thaw .freeze-rime-bottom {
+  animation: ice-rime-bottom-thaw 680ms 35ms ease-out both;
+}
+
+.freeze-effect-thaw .freeze-vein {
+  animation: ice-vein-fracture 700ms var(--stagger) ease-out both;
+}
+
+.freeze-effect-thaw .freeze-facet-inner {
+  animation: ice-core-melt 640ms var(--stagger) cubic-bezier(0.32, 0, 0.67, 0)
+    both;
+}
+
+.freeze-effect-thaw .freeze-facet:not(.freeze-facet-inner) {
+  animation: ice-shelf-break 780ms calc(var(--stagger) + 35ms)
+    cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.freeze-effect-thaw .freeze-shard-a {
+  animation: ice-shard-drift-a 790ms calc(var(--stagger) + 45ms)
+    cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.freeze-effect-thaw .freeze-shard-b {
+  animation: ice-shard-drift-b 820ms calc(var(--stagger) + 80ms)
+    cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.freeze-effect-thaw .freeze-glint {
+  animation: ice-glint-thaw 540ms var(--stagger) ease-out both;
+}
+
+@keyframes freeze-drain-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.52;
+    transform: scale(0.86);
+  }
+}
+
+@keyframes freeze-card-thaw {
+  0% {
+    box-shadow:
+      0 0 0 1px rgba(125, 211, 252, 0.55),
+      0 0 22px rgba(52, 211, 153, 0.28),
+      var(--shadow-sm);
+  }
+  100% {
+    box-shadow: var(--shadow-sm);
+  }
+}
+
+@keyframes ice-pulse-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.42);
+  }
+  28% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.22);
+  }
+}
+
+@keyframes ice-rime-top-in {
+  from {
+    opacity: 0;
+    transform: scaleX(0.35) translateY(-6px);
+  }
+  to {
+    opacity: 0.82;
+    transform: scaleX(1) translateY(0);
+  }
+}
+
+@keyframes ice-rime-bottom-in {
+  from {
+    opacity: 0;
+    transform: scaleX(0.35) scaleY(-1) translateY(-6px);
+  }
+  to {
+    opacity: 0.82;
+    transform: scaleX(1) scaleY(-1) translateY(0);
+  }
 }
 
 @keyframes ice-grow {
-  from {
+  0% {
     opacity: 0;
-    clip-path: polygon(0 0, 8% 0, 0 8%);
+    clip-path: polygon(0 0, 6% 0, 0 6%);
+  }
+  48% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.94;
+    clip-path: polygon(0 0, 210% 0, 0 210%);
+  }
+}
+
+@keyframes ice-vein-draw {
+  0% {
+    stroke-dashoffset: 100;
+    opacity: 0.25;
   }
   55% {
     opacity: 1;
   }
-  to {
-    opacity: 0.9;
-    clip-path: polygon(0 0, 200% 0, 0 200%);
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes ice-shard-lock {
+  0% {
+    opacity: 0;
+    transform: translate(10px, 8px) scale(0.45);
+  }
+  65% {
+    opacity: 1;
+    transform: translate(-1px, -1px) scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+
+@keyframes ice-glint-flash {
+  0% {
+    opacity: 0;
+    transform: scale(0.3) rotate(-25deg);
+  }
+  52% {
+    opacity: 1;
+    transform: scale(1.3) rotate(0deg);
+  }
+  100% {
+    opacity: 0.72;
+    transform: scale(1) rotate(0deg);
   }
 }
 
 @keyframes ice-rim {
-  from {
+  0% {
     opacity: 0;
   }
-  45% {
+  42% {
     opacity: 1;
     box-shadow:
-      inset 0 0 20px var(--ice-glow),
-      inset 0 0 44px var(--ice-glow);
+      inset 0 0 24px var(--ice-glow),
+      inset 0 0 52px var(--ice-glow);
   }
-  to {
+  100% {
     opacity: 1;
   }
 }
 
 @keyframes ice-sweep {
-  from {
+  0% {
     opacity: 0;
-    transform: translateX(-85%);
+    transform: translateX(-90%);
   }
-  25% {
-    opacity: 0.8;
+  28% {
+    opacity: 0.88;
   }
-  to {
+  100% {
+    opacity: 0;
+    transform: translateX(90%);
+  }
+}
+
+@keyframes ice-rim-thaw {
+  0% {
+    opacity: 1;
+  }
+  20% {
+    opacity: 1;
+    border-color: var(--ice-bright);
+    box-shadow:
+      inset 0 0 22px var(--ice-glow),
+      inset 0 0 42px var(--thaw-glow);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+@keyframes ice-thaw-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-75%);
+  }
+  32% {
+    opacity: 0.82;
+  }
+  100% {
     opacity: 0;
     transform: translateX(85%);
   }
 }
 
-@keyframes ice-thaw {
-  from {
+@keyframes ice-pulse-thaw {
+  0% {
+    opacity: 0.88;
+    transform: scale(0.32);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.25);
+  }
+}
+
+@keyframes ice-rime-top-thaw {
+  0% {
+    opacity: 0.82;
+    transform: scaleX(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(1.08) translateY(-8px);
+  }
+}
+
+@keyframes ice-rime-bottom-thaw {
+  0% {
+    opacity: 0.82;
+    transform: scaleX(1) scaleY(-1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(1.08) scaleY(-1) translateY(-8px);
+  }
+}
+
+@keyframes ice-vein-fracture {
+  0% {
+    stroke: var(--ice-line);
+    stroke-dashoffset: 0;
     opacity: 1;
   }
-  to {
+  24% {
+    stroke: var(--ice-bright);
+    stroke-width: 1.35;
+    opacity: 1;
+  }
+  100% {
+    stroke: var(--ice-bright);
+    stroke-dashoffset: 72;
     opacity: 0;
+  }
+}
+
+@keyframes ice-core-melt {
+  0% {
+    opacity: 1;
+    clip-path: polygon(0 0, 180% 0, 0 180%);
+  }
+  100% {
+    opacity: 0;
+    clip-path: polygon(0 0, 12% 0, 0 12%);
+  }
+}
+
+@keyframes ice-shelf-break {
+  0% {
+    opacity: 0.94;
+    transform: translate(0, 0) scale(1);
+  }
+  22% {
+    opacity: 1;
+    transform: translate(3px, 3px) scale(1.015);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-6px, -6px) scale(0.84);
+  }
+}
+
+@keyframes ice-shard-drift-a {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(0deg) scale(1);
+  }
+  20% {
+    opacity: 1;
+    transform: translate(5px, 4px) rotate(3deg) scale(1.08);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(20px, 15px) rotate(11deg) scale(0.55);
+  }
+}
+
+@keyframes ice-shard-drift-b {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(0deg) scale(1);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(7px, 2px) rotate(-4deg) scale(1.1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(30px, 10px) rotate(-14deg) scale(0.46);
+  }
+}
+
+@keyframes ice-glint-thaw {
+  0% {
+    opacity: 0.72;
+    transform: scale(1) rotate(0deg);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1.45) rotate(22deg);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.2) rotate(55deg);
+  }
+}
+}
+
+@layer modifiers {
+  .quick-feedback.error {
+    color: var(--error);
+    border-color: color-mix(in srgb, var(--error) 32%, var(--line));
+    background: var(--error-soft);
   }
 }

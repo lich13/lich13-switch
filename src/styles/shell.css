@@ -1,3 +1,5 @@
+@layer tokens, base, layout, pages, modifiers;
+@layer layout {
 /* Main application shell, navigation sidebar, accounts page & shared dialogs */
 .app-shell {
   display: flex;
@@ -134,7 +136,7 @@
   font-size: 11.5px;
 }
 
-.search {
+label.search {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -148,11 +150,11 @@
   transition: border-color 0.15s ease;
 }
 
-.search:focus-within {
+label.search:focus-within {
   border-color: var(--accent);
 }
 
-.search input {
+label.search input {
   background: none;
   border: 0;
   min-width: 0;
@@ -160,7 +162,7 @@
   font-size: 12px;
 }
 
-.search input:focus-visible {
+label.search input:focus-visible {
   outline: 0;
 }
 
@@ -836,6 +838,20 @@ button.exchange-button:active:not(:disabled) {
   }
 }
 
+.quota-refresh-settings {
+  border-bottom: 1px solid var(--line);
+  padding: 12px 0 18px;
+  margin-bottom: 18px;
+}
+
+.quota-refresh-settings .setting-row {
+  margin-bottom: 10px;
+}
+
+.quota-refresh-settings input[type="number"] {
+  max-width: 140px;
+}
+
 @media (max-width: 560px) {
   .accounts-page .page-heading {
     align-items: flex-start;
@@ -845,4 +861,5 @@ button.exchange-button:active:not(:disabled) {
   .account-actions {
     gap: 6px;
   }
+}
 }

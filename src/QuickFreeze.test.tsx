@@ -141,4 +141,49 @@ it("uses the same status in the main window and never replays ice after reopenin
   expect(view.container.querySelector(".freeze-effect-still")).not.toBeNull();
   act(() => mock.listeners.get("gateway-freeze")?.(idle));
   expect(view.container.querySelector(".freeze-effect-thaw")).not.toBeNull();
+  expect(view.container.querySelector(".freeze-pulse")).not.toBeNull();
+  expect(view.container.querySelectorAll(".freeze-shard-a")).toHaveLength(4);
+});
+
+it("completes dynamic thaw animation after 860ms and respects prefers-reduced-motion", async () => {
+  vi.useFakeTimers();
+  try {
+    const media = {
+      ...window.matchMedia(""),
+      matches: false,
+    };
+    vi.spyOn(window, "matchMedia").mockImplementation(() => media);
+    const view = render(<QuickFreeze />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText("未冻结")).toBeInTheDocument();
+
+    act(() =>
+      mock.listeners.get("gateway-freeze")?.({ ...idle, frozen: true }),
+    );
+    expect(
+      view.container.querySelector(".freeze-effect-freeze"),
+    ).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1500));
+    expect(view.container.querySelector(".freeze-effect-still")).not.toBeNull();
+
+    act(() => mock.listeners.get("gateway-freeze")?.(idle));
+    expect(view.container.querySelector(".freeze-effect-thaw")).not.toBeNull();
+    act(() => vi.advanceTimersByTime(859));
+    expect(view.container.querySelector(".freeze-effect-thaw")).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(view.container.querySelector(".freeze-effect")).toBeNull();
+
+    media.matches = true;
+    act(() =>
+      mock.listeners.get("gateway-freeze")?.({ ...idle, frozen: true }),
+    );
+    expect(view.container.querySelector(".freeze-effect-still")).not.toBeNull();
+    act(() => mock.listeners.get("gateway-freeze")?.(idle));
+    expect(view.container.querySelector(".freeze-effect")).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });

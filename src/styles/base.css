@@ -1,3 +1,4 @@
+@layer base {
 * {
   box-sizing: border-box;
 }
@@ -108,23 +109,6 @@ kbd {
 
 .muted {
   color: var(--muted);
-}
-
-.warning {
-  color: var(--warning);
-}
-
-.error,
-.danger {
-  color: var(--error);
-}
-
-.amber {
-  color: var(--warning);
-}
-
-.online {
-  color: var(--success);
 }
 
 .full {
@@ -318,17 +302,6 @@ kbd {
   background: var(--muted);
 }
 
-.status-pill.online {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: color-mix(in srgb, var(--success) 32%, var(--line));
-}
-
-.status-pill.online .dot {
-  background: var(--success);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--success) 65%, transparent);
-}
-
 /* Banners, errors & toast */
 .banner {
   display: flex;
@@ -352,18 +325,6 @@ kbd {
 
 .banner svg {
   margin-top: 2px;
-}
-
-.banner.warning {
-  color: var(--warning);
-  background: color-mix(in srgb, var(--warning-soft) 55%, var(--surface));
-  border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
-}
-
-.banner.error {
-  color: var(--error);
-  background: color-mix(in srgb, var(--error-soft) 55%, var(--surface));
-  border-color: color-mix(in srgb, var(--error) 34%, var(--line));
 }
 
 .form-error,
@@ -470,6 +431,25 @@ kbd {
 
 .modal-content {
   padding: 22px;
+}
+
+.gateway-modal {
+  width: 468px;
+}
+
+.gateway-modal .modal-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.gateway-modal h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.gateway-modal > .gateway-form {
+  padding: 20px;
 }
 
 .shared-modal .modal-heading {
@@ -582,10 +562,6 @@ kbd {
   font-size: 12px;
 }
 
-.auth-sync.warning {
-  color: var(--warning);
-}
-
 .account-title {
   display: flex;
   align-items: center;
@@ -673,6 +649,12 @@ kbd {
   opacity: 1;
 }
 
+.quota-summary .icon-button {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+}
+
 .quota-compact .icon-button {
   width: 24px;
   height: 24px;
@@ -728,12 +710,6 @@ kbd {
   font-weight: 640;
   letter-spacing: -0.4px;
   overflow-wrap: anywhere;
-}
-
-.quota-summary .icon-button {
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-pill);
 }
 
 .quota-notices {
@@ -1151,5 +1127,52 @@ kbd {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+}
+
+@layer modifiers {
+  .warning {
+    color: var(--warning);
+  }
+
+  .error,
+  .danger {
+    color: var(--error);
+  }
+
+  .amber {
+    color: var(--warning);
+  }
+
+  .online {
+    color: var(--success);
+  }
+
+  .status-pill.online {
+    color: var(--success);
+    background: var(--success-soft);
+    border-color: color-mix(in srgb, var(--success) 32%, var(--line));
+  }
+
+  .status-pill.online .dot {
+    background: var(--success);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--success) 65%, transparent);
+  }
+
+  .banner.warning {
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning-soft) 55%, var(--surface));
+    border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
+  }
+
+  .banner.error {
+    color: var(--error);
+    background: color-mix(in srgb, var(--error-soft) 55%, var(--surface));
+    border-color: color-mix(in srgb, var(--error) 34%, var(--line));
+  }
+
+  .auth-sync.warning {
+    color: var(--warning);
   }
 }

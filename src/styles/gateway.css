@@ -1,3 +1,4 @@
+@layer pages {
 /* Gateway routing page, provider cards, endpoints, model directory & failure policy */
 .gateway-page {
   overflow-y: auto;
@@ -353,25 +354,6 @@
   min-width: 0;
 }
 
-.gateway-modal {
-  width: 468px;
-}
-
-.gateway-modal .modal-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.gateway-modal h2 {
-  font-size: 18px;
-  margin: 0;
-}
-
-.gateway-modal > .gateway-form {
-  padding: 20px;
-}
-
 .gateway-settings > form {
   margin-top: 12px;
 }
@@ -379,6 +361,14 @@
 .provider-settings {
   display: grid;
   gap: 18px;
+}
+
+.provider-settings.gateway-form {
+  gap: 12px;
+}
+
+.provider-settings .model-manual textarea {
+  min-height: 58px;
 }
 
 .provider-settings > label:not(.check-label) {
@@ -1174,4 +1164,5 @@
     flex-wrap: wrap;
     gap: 10px;
   }
+}
 }

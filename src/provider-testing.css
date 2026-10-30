@@ -1,3 +1,5 @@
+@layer tokens, base, layout, pages, modifiers;
+@layer pages {
 .provider-testing[open] {
   width: min(720px, calc(100vw - 48px));
   height: min(680px, calc(100dvh - 48px));
@@ -25,6 +27,7 @@
   gap: 20px;
   padding: 0 20px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface-subtle);
   overflow-x: auto;
 }
 .provider-test-tabs button {
@@ -36,9 +39,12 @@
   font: inherit;
   white-space: nowrap;
 }
+.provider-test-tabs button:hover:not([aria-selected="true"]) {
+  color: var(--ink);
+}
 .provider-test-tabs [aria-selected="true"] {
   border-color: var(--accent);
-  color: var(--ink);
+  color: var(--accent);
   font-weight: 600;
 }
 .provider-test-tabs button:focus-visible {
@@ -89,12 +95,23 @@
   min-width: 0;
   height: 36px;
   margin: 0;
-  padding: 0 10px;
+  padding: 0 11px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--canvas);
   color: var(--ink);
   font: inherit;
+  transition: border-color 0.15s ease;
+}
+.provider-test-content input:not([type="checkbox"]):hover:not(:disabled),
+.provider-test-content select:hover:not(:disabled),
+.provider-test-content textarea:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+.provider-test-content input:not([type="checkbox"]):focus,
+.provider-test-content select:focus,
+.provider-test-content textarea:focus {
+  border-color: var(--accent);
 }
 .provider-test-content textarea {
   height: auto;
@@ -151,7 +168,8 @@
   width: 36px;
   height: 36px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
 }
 .provider-test-results {
   --test-columns: minmax(0, 1fr) 84px 80px 76px;
@@ -173,8 +191,16 @@
 .provider-test-result-head > :nth-child(4) {
   text-align: right;
 }
+.provider-test-row:hover {
+  background: var(--hover);
+}
 .provider-test-row.selected {
-  background: var(--selection);
+  background: linear-gradient(
+    135deg,
+    var(--accent-soft) 0%,
+    var(--accent-blue-soft) 100%
+  );
+  box-shadow: inset 2.5px 0 0 var(--accent);
 }
 .provider-test-row > .provider-test-job {
   grid-column: 1 / 5;
@@ -237,15 +263,11 @@
   color: var(--muted);
   font-size: 12px;
 }
-.provider-test-error {
-  color: var(--error);
-  overflow-wrap: anywhere;
-}
 .provider-test-output {
   padding: 12px;
-  background: var(--canvas);
+  background: var(--surface-subtle);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font-family: inherit;
 }
 .provider-test-detail pre,
@@ -317,6 +339,10 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--line));
+  background: var(--warning-soft);
   color: var(--warning);
 }
 .provider-test-mark > span:last-child {
@@ -352,7 +378,7 @@
   flex: 0 0 auto;
   padding: 14px 20px;
   border-top: 1px solid var(--line);
-  background: var(--surface);
+  background: var(--surface-subtle);
 }
 .provider-test-footer > p,
 .provider-test-footer > [role="alert"] {
@@ -409,12 +435,12 @@
 
 .provider-test-error-detail {
   margin: 16px 0;
-  padding: 12px;
+  padding: 12px 14px;
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--error) 34%, var(--line));
+  border-radius: var(--radius-md);
   color: var(--error);
-  background: var(--canvas);
+  background: color-mix(in srgb, var(--error-soft) 45%, var(--surface));
 }
 .provider-test-error-detail > div {
   display: flex;
@@ -503,5 +529,13 @@
   }
   .provider-test-actions {
     flex-wrap: wrap;
+  }
+}
+}
+
+@layer modifiers {
+  .provider-test-error {
+    color: var(--error);
+    overflow-wrap: anywhere;
   }
 }

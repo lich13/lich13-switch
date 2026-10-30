@@ -39,6 +39,7 @@ vi.mock("@uiw/react-codemirror", () => ({
 }));
 import ConfigEditor from "./ConfigEditor";
 import { get } from "./claude-settings";
+import { getCachedCodeMirrorSurface } from "./codeMirrorLoader";
 let doc: ConfigDocument;
 beforeEach(() => {
   localStorage.clear();
@@ -85,10 +86,14 @@ it("shares visual/source drafts, edits the effective model, and saves once with 
   const u = userEvent.setup();
   mount();
   const model = await screen.findByLabelText("默认模型");
+  expect(getCachedCodeMirrorSurface()).toBeNull();
   expect(model).toHaveValue("effective");
   fireEvent.change(model, { target: { value: "manual-model" } });
   await u.click(screen.getByRole("button", { name: "JSON" }));
-  const source = screen.getByLabelText("JSON 编辑器") as HTMLTextAreaElement;
+  const source = (await screen.findByLabelText(
+    "JSON 编辑器",
+  )) as HTMLTextAreaElement;
+  expect(getCachedCodeMirrorSurface()).not.toBeNull();
   expect(JSON.parse(source.value).model).toBe("old");
   expect(JSON.parse(source.value).env.ANTHROPIC_MODEL).toBe("manual-model");
   await u.click(screen.getByRole("button", { name: "可视化" }));
@@ -112,7 +117,7 @@ it("keeps invalid source, and protects drafts from other-client and external eve
   mount();
   await screen.findByLabelText("默认模型");
   await u.click(screen.getByRole("button", { name: "JSON" }));
-  const source = screen.getByLabelText("JSON 编辑器");
+  const source = await screen.findByLabelText("JSON 编辑器");
   fireEvent.change(source, { target: { value: '{"env":' } });
   await u.click(screen.getByRole("button", { name: "可视化" }));
   expect(source).toHaveValue('{"env":');
@@ -288,7 +293,9 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
 
   // Switch to JSON mode: official enum values, unknown fields, and plugins remain intact.
   await u.click(screen.getByRole("button", { name: "JSON" }));
-  const source = screen.getByLabelText("JSON 编辑器") as HTMLTextAreaElement;
+  const source = (await screen.findByLabelText(
+    "JSON 编辑器",
+  )) as HTMLTextAreaElement;
   expect(JSON.parse(source.value)).toEqual({
     userSettings: {
       themeMode: "THEME_MODE_LIGHT",

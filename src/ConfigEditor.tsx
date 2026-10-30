@@ -1,22 +1,7 @@
-import "./styles/modals-config.css";
 import { subscriptions } from "./subscriptions";
 import ClaudeProfile from "./ClaudeProfile";
 import DshConfigEditor from "./DshConfigEditor";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
-import { StreamLanguage } from "@codemirror/language";
-import { toml } from "@codemirror/legacy-modes/mode/toml";
-import { json } from "@codemirror/lang-json";
-import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
-import {
-  Decoration,
-  EditorView,
-  keymap,
-  WidgetType,
-  type DecorationSet,
-} from "@codemirror/view";
-import { parseTree, type Node } from "jsonc-parser";
-import { StateField, type EditorState } from "@codemirror/state";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Save,
   RotateCcw,
@@ -39,48 +24,13 @@ import ClientSelection, {
 } from "./ClientSelection";
 import ClaudeSettings from "./ClaudeSettings";
 import AntigravitySettings from "./AntigravitySettings";
-import { changes, get, sensitive } from "./claude-settings";
+import { changes, get } from "./claude-settings";
 import Modal from "./Modal";
 import { confirmAction } from "./confirmation";
-
-class Secret extends WidgetType {
-  toDOM() {
-    const span = document.createElement("span");
-    span.className = "masked-secret";
-    span.textContent = '"••••••••"';
-    span.setAttribute("aria-label", "已遮蔽凭据");
-    return span;
-  }
-}
-function secretDecorations(state: EditorState): DecorationSet {
-  const ranges: { from: number; to: number }[] = [];
-  const visit = (node: Node) => {
-    if (
-      node.type === "property" &&
-      sensitive([String(node.children?.[0].value)])
-    ) {
-      const value = node.children?.[1];
-      if (value)
-        ranges.push({ from: value.offset, to: value.offset + value.length });
-    } else node.children?.forEach(visit);
-  };
-  const tree = parseTree(state.doc.toString());
-  if (tree) visit(tree);
-  return Decoration.set(
-    ranges.map(({ from, to }) =>
-      Decoration.replace({ widget: new Secret() }).range(from, to),
-    ),
-    true,
-  );
-}
-const maskedJson = StateField.define<DecorationSet>({
-  create: secretDecorations,
-  update: (value, tr) => (tr.docChanged ? secretDecorations(tr.state) : value),
-  provide: (field) => [
-    EditorView.decorations.from(field),
-    EditorView.atomicRanges.of((view) => view.state.field(field)),
-  ],
-});
+import {
+  getCachedCodeMirrorSurface,
+  loadCodeMirrorSurface,
+} from "./codeMirrorLoader";
 
 type Props = {
   revision: string;
@@ -144,14 +94,17 @@ function EditorContent({
     [conflict, setConflict] = useState(false),
     [visual, setVisual] = useState(jsonDualMode),
     [revealed, setRevealed] = useState(false),
-    [diff, setDiff] = useState(false);
+    [diff, setDiff] = useState(false),
+    [Surface, setSurface] = useState(() => getCachedCodeMirrorSurface());
   const docRef = useRef(doc),
     textRef = useRef(text),
     saveRef = useRef(() => {}),
     loadSeq = useRef(0),
-    saving = useRef(false);
+    saving = useRef(false),
+    visualRef = useRef(visual);
   docRef.current = doc;
   textRef.current = text;
+  visualRef.current = visual;
   const dirty = !!doc && text !== doc.text;
   useEffect(() => {
     onDirty(dirty);
@@ -160,25 +113,43 @@ function EditorContent({
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     try {
-      const d = await (clientId === "antigravity"
-        ? command("read_antigravity_config")
-        : command("read_config", { clientId }));
+      const readPromise =
+        clientId === "antigravity"
+          ? command("read_antigravity_config")
+          : command("read_config", { clientId });
+      const d = !jsonDualMode
+        ? (
+            await Promise.all([
+              readPromise,
+              loadCodeMirrorSurface().then((Loaded) => {
+                if (seq === loadSeq.current) setSurface(() => Loaded);
+              }),
+            ])
+          )[0]
+        : await readPromise;
       if (seq !== loadSeq.current) return;
-      setDoc(d);
-      setText(d.text);
-      setError(null);
-      setConflict(false);
+      let fallbackToSource = false;
       if (jsonDualMode) {
         try {
           get(d.text, []);
         } catch {
-          setVisual(false);
+          fallbackToSource = true;
+        }
+        if (fallbackToSource || !visualRef.current) {
+          const Loaded = await loadCodeMirrorSurface();
+          if (seq !== loadSeq.current) return;
+          setSurface(() => Loaded);
         }
       }
+      setDoc(d);
+      setText(d.text);
+      setError(null);
+      setConflict(false);
+      if (fallbackToSource) setVisual(false);
     } catch (e) {
       if (seq === loadSeq.current) setError(errorOf(e));
     }
-  }, [clientId]);
+  }, [clientId, jsonDualMode]);
   useEffect(() => {
     void load();
     return () => {
@@ -272,88 +243,38 @@ function EditorContent({
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [dirty, busy]);
-  const extensions = useMemo(
-    () => [
-      clientId === "claude" || clientId === "antigravity"
-        ? json()
-        : StreamLanguage.define(toml),
-      lintGutter(),
-      keymap.of([
-        {
-          key: "Mod-s",
-          run: () => {
-            saveRef.current();
-            return true;
-          },
-        },
-      ]),
-      EditorView.lineWrapping,
-      ...((clientId === "claude" || clientId === "antigravity") && !revealed
-        ? [maskedJson]
-        : []),
-      linter(
-        async (view) => {
-          try {
-            if (clientId === "antigravity")
-              await command("validate_antigravity_config", {
-                text: view.state.doc.toString(),
-              });
-            else
-              await command("validate_config", {
-                clientId,
-                text: view.state.doc.toString(),
-              });
-            return [];
-          } catch (e) {
-            const err = errorOf(e);
-            if (!err.line) return [];
-            const line = view.state.doc.line(
-              Math.min(Math.max(1, err.line), view.state.doc.lines),
-            );
-            const from = Math.min(
-              line.to,
-              line.from + Math.max(0, (err.column ?? 1) - 1),
-            );
-            return [
-              {
-                from,
-                to: Math.min(view.state.doc.length, from + 1),
-                severity: "error",
-                message: err.message,
-              },
-            ] as Diagnostic[];
-          }
-        },
-        { delay: 450 },
-      ),
-      EditorView.theme({
-        "&": { height: "100%", background: "var(--canvas)" },
-        ".cm-scroller": {
-          fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
-          fontSize: "13px",
-        },
-        ".cm-gutters": {
-          background: "var(--canvas)",
-          borderRight: "1px solid var(--line)",
-        },
-        ".cm-content": { padding: "16px 0" },
-        ".cm-line": { padding: "0 16px" },
-      }),
-    ],
-    [clientId, revealed],
+  useEffect(() => {
+    if ((!jsonDualMode || !visual) && !Surface) {
+      let active = true;
+      void loadCodeMirrorSurface().then((Loaded) => {
+        if (active) setSurface(() => Loaded);
+      });
+      return () => {
+        active = false;
+      };
+    }
+  }, [jsonDualMode, visual, Surface]);
+  const validateText = useCallback(
+    async (candidate: string) => {
+      if (clientId === "antigravity")
+        await command("validate_antigravity_config", { text: candidate });
+      else await command("validate_config", { clientId, text: candidate });
+    },
+    [clientId],
   );
   const switchMode = async (next: boolean) => {
     if (next) {
       try {
         get(text, []);
-        if (clientId === "antigravity")
-          await command("validate_antigravity_config", { text });
-        else await command("validate_config", { clientId, text });
+        await validateText(text);
         setError(null);
       } catch (e) {
         setError(errorOf(e));
         return;
       }
+    } else if (!Surface) {
+      const Loaded = await loadCodeMirrorSurface();
+      setSurface(() => Loaded);
     }
     setVisual(next);
   };
@@ -529,23 +450,20 @@ function EditorContent({
         <AntigravitySettings text={text} onChange={update} />
       ) : (
         <div className="editor-body">
-          <CodeMirror
-            value={text}
-            onChange={update}
-            theme={theme}
-            height="100%"
-            extensions={extensions}
-            aria-label={
-              clientId === "claude" || clientId === "antigravity"
-                ? "JSON 编辑器"
-                : "TOML 编辑器"
-            }
-            basicSetup={{
-              foldGutter: true,
-              autocompletion: false,
-              highlightActiveLine: true,
-            }}
-          />
+          {Surface ? (
+            <Surface
+              mode={jsonDualMode ? "json" : "toml"}
+              value={text}
+              onChange={update}
+              theme={theme}
+              maskSecrets={jsonDualMode && !revealed}
+              onSave={() => saveRef.current()}
+              validateText={validateText}
+              ariaLabel={jsonDualMode ? "JSON 编辑器" : "TOML 编辑器"}
+            />
+          ) : (
+            <div className="empty">正在加载编辑器…</div>
+          )}
         </div>
       )}
       {diff && (

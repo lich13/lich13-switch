@@ -1,4 +1,3 @@
-import "./styles/event-log.css";
 import FailureRuleDialog from "./FailureRuleDialog";
 import type {
   FailureFocus,

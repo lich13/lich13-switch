@@ -1,3 +1,4 @@
+@layer pages {
 /* Diagnostic EventLog table, filters & detail drawer */
 .event-page {
   padding: 28px;
@@ -22,7 +23,12 @@
 .event-filters {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  gap: 10px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
 }
 
 .event-filters label {
@@ -41,11 +47,17 @@
   min-width: 0;
   height: 34px;
   padding: 4px 10px;
-  background: var(--surface);
+  background: var(--surface-subtle);
   color: var(--ink);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   font-size: 12px;
+  transition: border-color 0.15s ease;
+}
+
+.event-filters select:hover:not(:disabled),
+.event-filters input:hover:not(:disabled) {
+  border-color: var(--line-strong);
 }
 
 .event-filters input:focus {
@@ -171,24 +183,6 @@
   overflow: hidden;
 }
 
-.event-status.success {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
-}
-
-.event-status.client {
-  color: var(--warning);
-  background: var(--warning-soft);
-  border-color: color-mix(in srgb, var(--warning) 42%, var(--line));
-}
-
-.event-status.server {
-  color: var(--danger);
-  background: var(--error-soft);
-  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
-}
-
 .event-code {
   border: 0;
   background: transparent;
@@ -200,14 +194,6 @@
   max-width: 230px;
   white-space: normal;
   text-align: left;
-}
-
-.event-code.warning {
-  color: var(--warning);
-}
-
-.event-code.error {
-  color: var(--danger);
 }
 
 .event-table .event-code {
@@ -423,5 +409,36 @@
   .event-table td,
   .event-table th {
     padding: 10px 6px;
+  }
+}
+}
+
+@layer modifiers {
+  .event-status.success {
+    color: var(--success);
+    background: var(--success-soft);
+    border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+  }
+
+  .event-status.client {
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-color: color-mix(in srgb, var(--warning) 42%, var(--line));
+  }
+
+  .event-status.server {
+    color: var(--danger);
+    background: var(--error-soft);
+    border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  }
+
+  .event-code.warning,
+  .event-table .event-code.warning {
+    color: var(--warning);
+  }
+
+  .event-code.error,
+  .event-table .event-code.error {
+    color: var(--danger);
   }
 }

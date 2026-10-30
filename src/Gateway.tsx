@@ -1,4 +1,3 @@
-import "./styles/gateway.css";
 import ProviderTesting from "./ProviderTesting";
 import ConnectionTestIcon from "./ConnectionTestIcon";
 import Advanced from "./GatewayAdvanced";
