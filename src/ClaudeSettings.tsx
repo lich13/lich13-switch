@@ -14,7 +14,7 @@ import {
   type Path,
 } from "./claude-settings";
 
-type Editing = {
+export type Editing = {
   text: string;
   guarded: boolean;
   change: (path: Path, value: Json | undefined) => void;
@@ -87,7 +87,7 @@ function Scalar({
     />
   );
 }
-function Setting({ field, editing }: { field: Field; editing: Editing }) {
+export function Setting({ field, editing }: { field: Field; editing: Editing }) {
   const path =
     field.override && get(editing.text, field.override) !== undefined
       ? field.override
@@ -348,7 +348,7 @@ function AddField({
     </form>
   );
 }
-function JsonNode({
+export function JsonNode({
   path,
   value,
   editing,

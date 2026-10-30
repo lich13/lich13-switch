@@ -37,6 +37,7 @@ import ClientSelection, {
   useClientSelection,
 } from "./ClientSelection";
 import ClaudeSettings from "./ClaudeSettings";
+import AntigravitySettings from "./AntigravitySettings";
 import { changes, get, sensitive } from "./claude-settings";
 import Modal from "./Modal";
 import { confirmAction } from "./confirmation";
@@ -134,12 +135,13 @@ function EditorContent({
   onDirty,
   onMessage,
 }: Props & { clientId: ConfigClientId; select: (id: ConfigClientId) => void }) {
+  const jsonDualMode = clientId === "claude" || clientId === "antigravity";
   const [doc, setDoc] = useState<ConfigDocument | null>(null),
     [text, setText] = useState(""),
     [error, setError] = useState<AppError | null>(null),
     [busy, setBusy] = useState(false),
     [conflict, setConflict] = useState(false),
-    [visual, setVisual] = useState(clientId === "claude"),
+    [visual, setVisual] = useState(jsonDualMode),
     [revealed, setRevealed] = useState(false),
     [diff, setDiff] = useState(false);
   const docRef = useRef(doc),
@@ -165,7 +167,7 @@ function EditorContent({
       setText(d.text);
       setError(null);
       setConflict(false);
-      if (clientId === "claude") {
+      if (jsonDualMode) {
         try {
           get(d.text, []);
         } catch {
@@ -226,16 +228,17 @@ function EditorContent({
           }));
       const restart =
         clientId === "codex" ||
-        ["model", "env", "effortLevel", "modelSettings"].some((key) => {
-          try {
-            return (
-              JSON.stringify(get(current.text, [key])) !==
-              JSON.stringify(get(d.text, [key]))
-            );
-          } catch {
-            return true;
-          }
-        });
+        (clientId === "claude" &&
+          ["model", "env", "effortLevel", "modelSettings"].some((key) => {
+            try {
+              return (
+                JSON.stringify(get(current.text, [key])) !==
+                JSON.stringify(get(d.text, [key]))
+              );
+            } catch {
+              return true;
+            }
+          }));
       setDoc(d);
       setText((draft) => (draft === submitted ? d.text : draft));
       setConflict(false);
@@ -291,7 +294,9 @@ function EditorContent({
         async (view) => {
           try {
             if (clientId === "antigravity")
-              JSON.parse(view.state.doc.toString());
+              await command("validate_antigravity_config", {
+                text: view.state.doc.toString(),
+              });
             else
               await command("validate_config", {
                 clientId,
@@ -340,7 +345,8 @@ function EditorContent({
     if (next) {
       try {
         get(text, []);
-        if (clientId === "antigravity") JSON.parse(text);
+        if (clientId === "antigravity")
+          await command("validate_antigravity_config", { text });
         else await command("validate_config", { clientId, text });
         setError(null);
       } catch (e) {
@@ -383,7 +389,7 @@ function EditorContent({
           disabled={busy}
         />
         <div className="inline">
-          {clientId === "claude" && (
+          {jsonDualMode && (
             <div className="segmented" aria-label="编辑方式">
               <button
                 aria-pressed={visual}
@@ -421,7 +427,7 @@ function EditorContent({
         </span>
         <div className="inline">
           {dirty && <span className="status amber">未保存</span>}
-          {clientId === "claude" && dirty && (
+          {jsonDualMode && dirty && (
             <button
               className="icon-button"
               aria-label="查看改动"
@@ -438,8 +444,7 @@ function EditorContent({
               <ListChecks size={16} />
             </button>
           )}
-          {(clientId === "antigravity" ||
-            (clientId === "claude" && !visual)) && (
+          {jsonDualMode && !visual && (
             <>
               <button
                 className="icon-button"
@@ -447,15 +452,7 @@ function EditorContent({
                 title="格式化 JSON"
                 onClick={() => {
                   try {
-                    update(
-                      JSON.stringify(
-                        clientId === "antigravity"
-                          ? JSON.parse(text)
-                          : get(text, []),
-                        null,
-                        2,
-                      ) + "\n",
-                    );
+                    update(JSON.stringify(get(text, []), null, 2) + "\n");
                   } catch (e) {
                     setError(errorOf(e));
                   }
@@ -479,15 +476,16 @@ function EditorContent({
             title="恢复上次配置"
             disabled={!doc?.canRestore || busy}
             onClick={async () => {
-              if (clientId === "antigravity") return;
               if (
                 dirty &&
                 !(await confirmAction("恢复上次配置会替换当前草稿。", "恢复"))
               )
                 return;
-              void command("read_previous_config", {
-                clientId,
-              })
+              void (
+                clientId === "antigravity"
+                  ? command("read_previous_antigravity_config")
+                  : command("read_previous_config", { clientId })
+              )
                 .then(update)
                 .catch((e) => setError(errorOf(e)));
             }}
@@ -526,6 +524,8 @@ function EditorContent({
         <div className="empty">正在读取配置…</div>
       ) : clientId === "claude" && visual ? (
         <ClaudeSettings text={text} onChange={update} guarded={doc.guarded} />
+      ) : clientId === "antigravity" && visual ? (
+        <AntigravitySettings text={text} onChange={update} />
       ) : (
         <div className="editor-body">
           <CodeMirror

@@ -4,6 +4,7 @@ import type { BillRequest, BillExport } from "./usage-types";
 import type {
   AppError,
   ClientId,
+  ConfigClientId,
   CurrentConnection,
   DshProfileCurrent,
   ConfigDocument,
@@ -478,6 +479,8 @@ export type CommandMap = {
   delete_account: Call<{ id: string }, ViewState>;
   read_antigravity_config: Call<None, ConfigDocument>;
   save_antigravity_config: Call<{ text: string } & Revision, ConfigDocument>;
+  read_previous_antigravity_config: Call<None, string>;
+  validate_antigravity_config: Call<{ text: string }, void>;
   read_config: Call<{ clientId?: ClientId }, ConfigDocument>;
   read_previous_config: Call<Client, string>;
   validate_config: Call<{ clientId?: ClientId; text: string }, void>;
@@ -769,7 +772,11 @@ export type EventMap = {
   "gateway-state": GatewayState;
   "gateway-freeze": GatewayFreeze;
   "provider-quota": { clientId: ClientId; quota: ProviderQuota };
-  "config-state": { clientId: ClientId; revision: string; guarded: boolean };
+  "config-state": {
+    clientId: ConfigClientId;
+    revision: string;
+    guarded: boolean;
+  };
   "clamshell-state": PowerState;
   "notification-state": NotificationState;
   "claude-profile-state": ClaudeProfileState;

@@ -191,33 +191,114 @@ it("restores previous configuration only into the draft and confirms client chan
   ).toBe(false);
 });
 
-it("edits Antigravity app JSON through its own commands and preserves a conflicted draft", async () => {
+it("edits Antigravity app config across visual and JSON modes, diffs, restores backup, and guards conflicts", async () => {
+  const u = userEvent.setup();
   localStorage.setItem("lich13-switch.config.client", "antigravity");
-  const appDoc = {
+  const appDoc: ConfigDocument = {
     ...doc,
     clientId: "antigravity",
     path: "/fixture/config.json",
-    canRestore: false,
-    text: '{"userSettings":{},"future":7}',
+    canRestore: true,
+    text: '{"userSettings":{"themeMode":"dark","autoExecutionPolicy":"custom-future"},"plugins":{"example.invalid":{"enabled":true}},"future":7}',
   };
-  mocks.command.mockImplementation(async (name) => {
-    if (name === "read_antigravity_config") return appDoc;
+  mocks.command.mockImplementation(async (name, args) => {
+    if (name === "read_antigravity_config") return { ...appDoc };
+    if (name === "validate_antigravity_config") {
+      const parsed = get(args.text, []);
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        (parsed.userSettings !== undefined &&
+          (typeof parsed.userSettings !== "object" ||
+            parsed.userSettings === null ||
+            Array.isArray(parsed.userSettings)))
+      ) {
+        throw { code: "CONFIG_TYPE", message: "userSettings 必须是对象" };
+      }
+      return;
+    }
+    if (name === "read_previous_antigravity_config")
+      return '{"userSettings":{"themeMode":"system"},"future":7}';
     if (name === "save_antigravity_config")
       throw { code: "CONFLICT", message: "配置已变化，草稿已保留" };
   });
   mount();
-  const source = await screen.findByLabelText("JSON 编辑器");
+  const theme = await screen.findByLabelText("主题模式");
   expect(screen.getByText("config.json")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "恢复上次配置" })).toBeDisabled();
-  fireEvent.change(source, {
-    target: { value: '{"userSettings":{"theme":"dark"},"future":7}' },
+  expect(theme).toHaveValue("dark");
+  await u.selectOptions(theme, "light");
+
+  // Unknown enum values on disk are preserved in visual mode.
+  await u.click(screen.getByRole("button", { name: "执行与安全" }));
+  expect(screen.getByLabelText("命令自动执行策略")).toHaveValue(
+    "custom-future",
+  );
+  await u.selectOptions(screen.getByLabelText("终端沙盒"), "true");
+
+  // Plugin summary renders in the remote/plugins tab.
+  await u.click(screen.getByRole("button", { name: "远程与插件" }));
+  expect(screen.getByText("example.invalid")).toBeInTheDocument();
+
+  // Diff modal works for Antigravity drafts.
+  await u.click(screen.getByLabelText("查看改动"));
+  const diffDialog = await screen.findByRole("dialog", { name: "配置改动" });
+  expect(
+    within(diffDialog).getByText("userSettings.themeMode"),
+  ).toBeInTheDocument();
+  await u.click(within(diffDialog).getByLabelText("关闭"));
+
+  // Switch to JSON mode: unknown fields and plugins remain intact.
+  await u.click(screen.getByRole("button", { name: "JSON" }));
+  const source = screen.getByLabelText("JSON 编辑器") as HTMLTextAreaElement;
+  expect(JSON.parse(source.value)).toEqual({
+    userSettings: {
+      themeMode: "light",
+      autoExecutionPolicy: "custom-future",
+      enableTerminalSandbox: true,
+    },
+    plugins: { "example.invalid": { enabled: true } },
+    future: 7,
   });
-  await userEvent.setup().click(screen.getByRole("button", { name: "保存" }));
+
+  // Invalid userSettings type prevents returning to visual mode.
+  fireEvent.change(source, { target: { value: '{"userSettings":0}' } });
+  await u.click(screen.getByRole("button", { name: "可视化" }));
+  expect(await screen.findByText("userSettings 必须是对象")).toBeInTheDocument();
+
+  // Restore previous backup into draft via Antigravity command.
+  await u.click(screen.getByLabelText("恢复上次配置"));
+  await u.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "恢复" },
+    ),
+  );
+  await waitFor(() =>
+    expect(source).toHaveValue(
+      '{"userSettings":{"themeMode":"system"},"future":7}',
+    ),
+  );
+
+  // External config-state event for antigravity marks conflict without losing draft.
+  await act(async () =>
+    mocks.events.get("config-state")?.({
+      clientId: "antigravity",
+      revision: "external-r2",
+      guarded: false,
+    }),
+  );
+  expect(screen.getByText(/磁盘配置已变化/)).toBeInTheDocument();
+
+  // Save uses save_antigravity_config and preserves draft on CONFLICT.
+  await u.click(screen.getByRole("button", { name: "保存" }));
   expect(mocks.command).toHaveBeenCalledWith("save_antigravity_config", {
-    text: '{"userSettings":{"theme":"dark"},"future":7}',
+    text: '{"userSettings":{"themeMode":"system"},"future":7}',
     expectedRevision: "r1",
   });
-  expect(source).toHaveValue('{"userSettings":{"theme":"dark"},"future":7}');
+  expect(source).toHaveValue(
+    '{"userSettings":{"themeMode":"system"},"future":7}',
+  );
   expect(await screen.findByText("配置已变化，草稿已保留")).toBeInTheDocument();
   expect(
     mocks.command.mock.calls.some(([name]) => name === "read_config"),

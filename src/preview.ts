@@ -380,14 +380,41 @@ export async function run(
     };
   if (name === "read_antigravity_config")
     return structuredClone(antigravityDoc);
+  if (name === "validate_antigravity_config") {
+    const parsed = JSON.parse(String(args.text));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw { code: "CONFIG_TYPE", message: "配置根节点必须是 JSON 对象" };
+    if (
+      parsed.userSettings !== undefined &&
+      (!parsed.userSettings ||
+        typeof parsed.userSettings !== "object" ||
+        Array.isArray(parsed.userSettings))
+    )
+      throw { code: "CONFIG_TYPE", message: "userSettings 必须是对象" };
+    if (
+      parsed.plugins !== undefined &&
+      (!parsed.plugins ||
+        typeof parsed.plugins !== "object" ||
+        Array.isArray(parsed.plugins))
+    )
+      throw { code: "CONFIG_TYPE", message: "plugins 必须是对象" };
+    return;
+  }
+  if (name === "read_previous_antigravity_config") {
+    if (!previousConfig.antigravity)
+      throw { code: "RESTORE", message: "没有可恢复的上次配置" };
+    return previousConfig.antigravity;
+  }
   if (name === "save_antigravity_config") {
     JSON.parse(String(args.text));
     if (args.expectedRevision !== antigravityDoc.revision)
       throw { code: "CONFLICT", message: "配置已被外部修改，草稿已保留" };
+    previousConfig.antigravity = antigravityDoc.text;
     antigravityDoc = {
       ...antigravityDoc,
       text: String(args.text),
       revision: crypto.randomUUID(),
+      canRestore: true,
     };
     return structuredClone(antigravityDoc);
   }

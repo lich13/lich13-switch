@@ -2008,6 +2008,8 @@ pub fn run() {
                 let mut last = Some(state);
                 let mut config_versions = std::collections::HashMap::new();
                 let mut config_cache = std::collections::HashMap::new();
+                let mut agy_config_version: Option<String> = None;
+                let mut agy_config_cache = auth_cache::Cache::default();
                 #[cfg(windows)]
                 let mut last_tray_dark: Option<bool> = None;
                 loop {
@@ -2053,6 +2055,17 @@ pub fn run() {
                                     publish_gateway(&handle, runtime.gateway(client));
                                 }
                             }
+                        }
+                    }
+                    if let Ok(rev) = antigravity::home()
+                        .and_then(|home| antigravity::config_stamp(&home, &mut agy_config_cache))
+                    {
+                        if agy_config_version.as_ref() != Some(&rev) {
+                            let _ = handle.emit(
+                                "config-state",
+                                serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false}),
+                            );
+                            agy_config_version = Some(rev);
                         }
                     }
                     #[cfg(windows)]
@@ -2124,6 +2137,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             antigravity::read_antigravity_config,
             antigravity::save_antigravity_config,
+            antigravity::read_previous_antigravity_config,
+            antigravity::validate_antigravity_config,
             usage::commands::get_usage_state,
             usage::commands::export_usage_bill,
             usage::commands::get_usage_dashboard,
