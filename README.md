@@ -1,100 +1,194 @@
 # lich13-switch
 
-Codex、Claude Code、Grok Build、DSH 独立供应商管理、本地 API 网关，兼具 Codex 账号切换、配置编辑、Antigravity app 用量与账单导出，支持 macOS 和 Windows。Tauri 2 + Rust + React。首次启动网关均默认关闭；之后启动时按上次启用意图恢复，可设置登录静默启动。
+<img src="assets/icon.svg" alt="Prism Relay icon" width="96" />
 
-<img src="assets/icon.svg" alt="Prism Relay icon" width="100" />
+面向 **macOS** 与 **Windows** 的本地多客户端 AI 账号、配置与 API 网关工作台（基于 **Tauri 2 + Rust + React** 构建）。统一管理 **Codex**、**Claude Code**、**Grok Build**、**DSH** 的独立供应商队列与本地流量调度，并原生支持 **Antigravity app** 的双模配置编辑、增量会话用量核算与账单导出。
 
-- 菜单栏／托盘左键打开供应商／账号快捷面板，右键保留精简原生菜单。
-- 添加 ChatGPT 登录或导入现有凭据；设备码登录支持复制链接和设备码，同一身份的 Token 刷新自动回存。
-- 添加供应商时可填写显示名称，留空使用 endpoint 主机名；CC Switch 导入可选择平台及兼容协议，保留链接字段。
-- Codex／Grok TOML 原文与 Claude 可视化／JSON 配置，共用草稿，支持校验、冲突保护和恢复上次配置。
-- Claude 官方／API 全局配置独立保存，可从官方配置启动 CLI 登录；不替换官方 OAuth 凭据。
-- 跟随系统深浅主题，关闭窗口后驻留；不会自动重启 Codex。
-- 设置页和托盘菜单提供检查更新与 GitHub 入口。
+> **安全提示**：所有账号凭据、供应商密钥与配置文件均保存在本机当前系统账户目录下（默认未加密），不会上传至任何第三方或项目服务。请按原客户端凭据的安全级别妥善保管本机文件；官方与第三方 API 配置隔离不承诺规避上游平台风控。
 
-**凭据保存在本机文件中，未加密。请像保护原客户端凭据一样保护这些文件。官方／API 配置分开保存不保证避免账号封禁。**
+---
 
-## 安装
+## 核心特性
 
-从 [GitHub Releases](https://github.com/lich13/lich13-switch/releases) 下载 macOS Apple Silicon DMG 或 Windows x64 安装程序。macOS 包使用 ad-hoc 签名，Windows 包未配置商业代码签名；系统可能要求确认来自非商店开发者的应用。校验下载文件时使用 Release 中的 `SHA256SUMS`。
+### 1. 共享端口与多客户端隔离网关
+- **单端口令牌分流**：默认监听 `127.0.0.1:43721`，通过各客户端独立的本地访问令牌在根路径／`/v1` 精确鉴权与分流，同时保留 `/codex`、`/claude`、`/grok` 兼容前缀；HTTP、SSE 与原生 WebSocket 全程保持原协议透传，不做有损消息转换。
+- **精细准入与限流**：四客户端各自隔离供应商优先级队列、并发上限（含 Codex 线程空闲预留明细）、滚动一分钟 RPM 窗口保护以及模型级健康作用域（`客户端 + 供应商 + 凭据版本 + 请求模型`）。
+- **多端点测速优选**：每家供应商支持主地址与最多 8 个辅助 `base_url`；网关按需对多端点发起无凭据预热与响应头延迟探测，新连接自动优选最低延迟可达端点，固定线程与响应游标保持原端点不漂移。
+- **安全启停与恢复**：首次安装所有网关默认关闭；后续启动按上次启用意图恢复（支持开机静默启动），跨文件接入写入具备私有事务快照与外部修改冲突保护。
 
-版本变化见 [发布说明](RELEASE.md)，数据范围和网络访问见 [隐私与安全](PRIVACY.md)。
+### 2. Codex 线程亲和、压缩交接与故障策略引擎
+- **线程归属与按代次接管**：精确识别 Codex `thread-id`（排除缓存亲和性 `session-id` 与空预热），支持按供应商独立开启「新线程接管」与「上下文压缩后接管」，按 owner epoch 与压缩边界代次原子交接，严守已输出内容不重放边界。
+- **统一故障策略与搜索**：内置结构化错误封套分类器（区分 RPM／Token／并发临时限流、周期额度／余额耗尽、认证失效、5xx 与传输断流）；支持单框粘贴 HTTP 状态码、业务错误码、原始消息或 JSON 自动定位命中策略，并可添加客户端自定义故障规则。
 
-## 基本使用
+### 3. 供应商连接测试与模型真伪核验
+- **直连对话与数字指纹**：按供应商独立执行流式连接测试（全局共用测试文案自动保存）、**ModelTrace** 与 **LM Detector** 模型指纹挑战及可选分词器探测，所有评分均在本地完成。
+- **自适应定时巡检**：支持固定周期或按近一小时真实业务请求量动态分档（5–30 分钟，零调用自动暂停）的智能定时检测；识别低家族混用或汇总降智时自动标记并移出自动队列。
 
-1. 在“网关”选择客户端，添加供应商，按需选择手动／自动模式和队列；首次启动网关默认关闭。
-2. 启用网关后按提示重新打开对应客户端。运行中切换只影响新请求，已有连接保持原供应商。
-3. Codex 账号在“账号”页登录、导入、切换或导出；配置页保存前校验并保留未保存草稿。
-4. 托盘左键打开快捷面板，直接点击平台按钮切换，可在设置隐藏平台；“用量”查看采集记录与估算费用，“日志”查看异常与熔断原因。
+### 4. 多客户端账号切换与双模配置中心
+- **Codex 账号库**：支持 ChatGPT 浏览器登录、设备码登录（一键复制链接与设备码）、指定账号设备码无损刷新、官方账号直连模式，以及 Codex / Sub2API / CLIProxyAPI 批量导入导出与 CC Switch 链接队列导入。
+- **跨客户端接入管理**：Claude Code 支持「官方／API」全局配置档独立切换与官方 CLI 登录；Grok Build 支持只读发现、`endpoint.env` 字面量解析并迁入独立 API 模型（与原生官方模型并存）；DSH 支持多 profile 统一接入与官方模型目录映射。
+- **双模配置编辑器**：
+  - **Claude Code**（`settings.json`）与 **Antigravity app**（`config.json`）提供「可视化 | JSON」双模同步编辑，支持分组表单、高级 JSON 树无损保留未知／插件字段、敏感值遮蔽、脱敏改动对比、私有快照备份与「恢复上次配置」。
+  - **Codex / Grok Build**（`config.toml`）与 **DSH**（profile / home YAML patch）提供语法高亮、即时校验与外部文件变更监听（干净草稿自动同步，未保存草稿触发版本冲突保护）。
 
-网关的“故障策略”集中调整限流、额度／认证和服务故障参数，与“高级设置”共用保存入口。设置页“保存设置”位于电源助手上方。
+### 5. 去重用量核算、压缩存储与账单导出
+- **双向增量去重**：网关流式计量（含首字延迟 TTFT、输出 TPS、缓存读／写 TTL 明细、推理 Token 与网络搜索计费）与本机 Codex、Claude Code、Grok Build、Antigravity app 会话文件增量扫描自动关联补齐，未变化会话按文件游标跳过重扫。
+- **紧凑本地存储**：SQLite 用量库采用计量列分离、内容摘要共享定价基座与带校验和的 Zstd 字典无损压缩，主库与 WAL 合计以约 `80 MiB` 为常态维护目标（7 天后归档无异常成功请求的细粒度诊断，30 天后收敛历史明细为日汇总）。
+- **多源定价与账单导出**：支持固定价格优先、`Wei-Shaw` 自动价格同步、`models.dev` 索引补缺及供应商模型精确映射；支持导出 **Claude Code** 与 **Antigravity app** 精确到秒的核对账单，并可选按导出截止秒原子清理已结清历史记录。
 
-详细操作：[面板、额度与系统控制](docs/controls.md)、[网关调度、白名单及并发](docs/gateway.md)、[用量与计价口径](docs/usage.md)。
+### 6. 圆润快捷面板、全局冻结与低占用后台
+- **多色调界面与按窗口动态拆包**：采用青、钴蓝、靛紫多色调深浅主题与模块化样式架构；托盘窗口（`?panel=quick`）与主窗口按入口动态拆包加载，互不冗余占用前端资源。
+- **卡片式圆润快捷面板**：菜单栏／托盘左键直达独立圆润面板，集成全局冻结卡、平台胶囊切换、供应商拖拽排序、实时额度与并发／RPM 就地调整、超 60 秒长等待请求逐条中止，以及分平台一键退出客户端 CLI 进程。
+- **全局冻结与电源助手**：支持一键「全局冻结」（等待在途请求与网关任务安全收尾后展示冰晶休眠就绪态）与 macOS 防合盖休眠电源助手（`lmfpd`）；窗口隐藏时自动挂起非必要前端广播与轮询，空闲状态下后台线程按事件按需唤醒。
 
-## 各客户端说明
+---
 
-| 客户端 | 默认本地入口 | 配置与认证 |
-| --- | --- | --- |
-| Codex | `127.0.0.1:43721/v1` | Bearer 两字段或普通 API 文件事务；官方账号独立管理 |
-| Claude Code | `127.0.0.1:43721` | `settings.json` 的连接字段；官方／API 配置档与可视化编辑 |
-| Grok Build | `127.0.0.1:43721/v1` | 独立 API 模型与原生官方模型并存；OAuth 继续由 Grok 登录和刷新 |
-| DSH | `127.0.0.1:43721/v1` | Chat Completions；profile 接入与模型映射 |
-| Antigravity app | — | 本地只读用量采集、账单导出、`config.json` 编辑 |
+## 客户端支持矩阵
 
-四个网关客户端共享监听端口，通过各自的本地访问令牌分流，供应商和调度状态各自隔离。旧默认端口在成功绑定新端口后迁移，自定义端口保持不变；旧路径前缀在当前端口继续可用，缓存旧端口的客户端需重新打开。全部网关停用后可在高级设置修改共享端口。Grok 在“导入当前配置”中预览模型及凭据来源，确认后建立独立 API 模型；终端环境未被桌面应用继承时，可明确选择读取 `endpoint.env` 的简单赋值。
+| 客户端 | 默认本地网关入口 | 接入与认证机制 | 配置编辑支持 | 用量采集与账单 |
+| --- | --- | --- | --- | --- |
+| **Codex** | `127.0.0.1:43721/v1` | Bearer 两字段或普通 API 跨文件事务；ChatGPT OAuth 账号库与官方直连 | `config.toml` 原文校验、受管字段保护与上次配置恢复 | 网关实时计量 + 本机活跃／归档会话双向去重 |
+| **Claude Code** | `127.0.0.1:43721` | `settings.json` 环境变量接入；官方／API 配置档隔离切换 | `settings.json` **可视化（5 分组）+ JSON** 双模编辑 | 网关实时计量 + 主／子代理会话去重 + **账单导出** |
+| **Grok Build** | `127.0.0.1:43721/v1` | 独立受管 API 模型接入，保留原生官方 OAuth 模型自由切换 | `config.toml` 原文校验与 `endpoint.env` 导入预览 | 网关实时计量 + 原生多模型轮次独立统计 |
+| **DSH** | `127.0.0.1:43721/v1` | Chat Completions 协议；全 profile 事务同步与官方模型目录映射 | `desktop` / 各 profile YAML patch 编辑与恢复 | 网关实时请求与模型调用计量 |
+| **Antigravity app** | —（不经过本地网关） | 本机应用直连上游；`lich13-switch` 本地只读协同 | `config.json` **可视化（4 分组）+ JSON** 双模编辑与备份恢复 | 本机 RPC／`brain` 会话增量采集 + **账单导出与清理** |
 
-账号登录、导入导出及 Claude 官方／API 文件切换表见[账号与客户端配置](docs/clients.md)。协议、配置恢复和各客户端的边界见[客户端网关与调度](docs/gateway.md)。
+---
 
-## 隐私
+## 架构概览
 
-应用不会把账号、配置或供应商凭据上传到本项目的服务，也不包含广告和遥测。启用网关后，业务请求只发送到用户配置的供应商；检查更新只访问官方 GitHub Release API。仓库和发布包使用脱敏夹具，不包含真实账号、令牌、回调地址或个人路径。完整说明见 [PRIVACY.md](PRIVACY.md)。
+```mermaid
+flowchart LR
+  subgraph Clients["本机 AI 客户端"]
+    Codex["Codex"]
+    Claude["Claude Code"]
+    Grok["Grok Build"]
+    DSH["DSH"]
+    AG["Antigravity app"]
+  end
 
-更新检查以外，公开价格更新、供应商额度／模型查询、端点测速及原生 CLI 登录按各自功能运行；完整目标、触发方式和源码检查边界见[网络访问清单](PRIVACY.md#网络访问)。
+  subgraph Core["lich13-switch (Tauri 2 / Rust)"]
+    GW["共享回环网关\n127.0.0.1:43721"]
+    Watch["配置事务与文件监听"]
+    Sync["会话增量同步与去重引擎"]
+    DB[("SQLite 用量库 (Zstd)\n+ 私有配置与诊断存储")]
+  end
 
-数据位置、旧安装兼容、恢复记录和清理范围见[本地数据与恢复](docs/data.md)。内部标识 `com.lich13.gpt-switch` 与旧私有目录保持兼容。
+  subgraph UI["按窗口动态拆包前端 (React)"]
+    Main["主窗口 (AppEntry)\n账号 / 配置 / 网关 / 用量 / 日志"]
+    Quick["托盘圆润快捷面板 (QuickEntry)\n全局冻结 / 供应商队列 / 进程控制"]
+  end
 
-## 开发
+  Upstreams["已配置的各家上游供应商端点"]
 
-Node.js 版本见 [.nvmrc](.nvmrc)，pnpm 版本见 [package.json](package.json) 的 `packageManager`，Rust 版本与组件见 [rust-toolchain.toml](rust-toolchain.toml)。CI 使用同一来源；另需 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。
+  Codex & Claude & Grok & DSH -->|"独立本地令牌 (HTTP / SSE / WS)"| GW
+  GW -->|"故障策略 / 线程亲和 / 多端点优选"| Upstreams
+  Codex & Claude & Grok & DSH & AG <-->|"受管事务写入 / 变更通知 / 只读采集"| Watch & Sync
+  GW & Sync --> DB
+  Main & Quick <-->|"可见窗口按需 IPC"| Core
+```
 
-项目设置 `pmOnFail: ignore`，让前端锁文件保持 GitHub 依赖图可识别的单文档格式；pnpm 不再自行切换版本。本机通过 Corepack 使用 `packageManager` 指定的版本，或先安装并核对完全相同的 pnpm 版本。CI 的 `pnpm/action-setup` 继续从 `packageManager` 安装固定版本。
+---
+
+## 安装与完整性校验
+
+从 [GitHub Releases](https://github.com/lich13/lich13-switch/releases) 下载对应平台安装包：
+
+- **macOS（Apple Silicon）**：`.dmg` 磁盘映像（采用 ad-hoc 签名，首次打开如遇系统拦截请按 macOS 提示在「系统设置 → 隐私与安全性」中确认打开）。
+- **Windows（x64）**：NSIS `.exe` 安装程序（未附带商业代码签名，SmartScreen 提示时确认运行即可）。
+
+下载后建议使用同一 Release 附带的 `SHA256SUMS` 校验安装包哈希：
 
 ```sh
+# macOS
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+```powershell
+# Windows PowerShell
+Get-FileHash .\lich13-switch_*.exe -Algorithm SHA256
+```
+
+历史版本演进详见 [发布说明 (RELEASE.md)](RELEASE.md)。
+
+---
+
+## 快速上手
+
+1. **配置并启用网关**：打开主窗口「网关」页，选择目标客户端（Codex / Claude Code / Grok Build / DSH），添加至少一家供应商并按需调整队列顺序、并发与 RPM 上限；打开网关开关后，按提示重新打开对应客户端使连接生效（运行中切换供应商仅作用于新请求，不中断已有流）。
+2. **管理 Codex 账号与多端接入**：在「账号」页登录 ChatGPT 或导入已有 `auth.json`／Sub2API／CLIProxyAPI 凭据；Claude Code 可在网关页或配置页一键切换「官方／API」模式；Grok Build 与 DSH 可通过页头入口完成首次配置识别与接入。
+3. **双模编辑客户端配置**：在「配置」页切换客户端，使用可视化表单或代码编辑器维护配置；保存前可通过「查看改动」核对脱敏差异，误改后可点击「恢复上次配置」载入最近一次私有备份草稿。
+4. **使用托盘快捷面板与全局冻结**：左键点击系统菜单栏／托盘图标唤起圆润快捷面板，随时切换供应商、查看余额额度、中止超时长等待请求或退出后台 CLI 进程；合盖或休眠前可点击顶部「全局冻结」，待指示灯变为冰蓝色「可休眠」后安全休眠。
+5. **核对用量、导出账单与排查异常**：在「用量」页按时间、客户端、供应商与模型查看去重费用及首字性能，或点击「导出账单」导出 Claude Code 与 Antigravity app 账单；遇到上游报错或熔断时，在「日志」页查看脱敏原始响应并一键跳转定位「故障策略」。
+
+更多分专题说明：
+- [设计系统与完整交互规范 (DESIGN.md)](DESIGN.md)
+- [账号登录、导入导出与客户端配置 (docs/clients.md)](docs/clients.md)
+- [客户端网关、线程调度与故障转移 (docs/gateway.md)](docs/gateway.md)
+- [快捷面板、额度展示与系统控制 (docs/controls.md)](docs/controls.md)
+- [用量采集、去重与计价口径 (docs/usage.md)](docs/usage.md)
+- [本地数据目录、事务恢复与清理边界 (docs/data.md)](docs/data.md)
+
+---
+
+## 隐私、网络与存储边界
+
+- **零遥测与本地自治**：应用不含广告、统计埋点或云端账号同步。内部应用标识保持 `com.lich13.gpt-switch` 以兼容既有本地私有数据目录。
+- **明确的网络边界**：业务转发、额度刷新、模型目录拉取、无凭据多端点测速与模型指纹挑战仅发往用户显式配置的供应商地址；其余应用直接请求仅限用户检查更新（GitHub Releases API）、自动／手动同步公开模型价格（`Wei-Shaw/model-price-repo` / `models.dev`）以及用户手动更新公开指纹库资源。源码硬编码域名由 `scripts/check-network-hosts.py` 与 `scripts/network-hosts.json` 离线静态门禁严格校验。
+- **脱敏诊断与仓库规范**：诊断日志自动过滤敏感头与路径，不保存请求／响应正文或账号邮箱；仓库源码与测试统一使用 `example.invalid`、回环地址与 `fixture` 脱敏夹具。
+- 完整数据清单与网络矩阵请参阅 **[隐私与安全 (PRIVACY.md)](PRIVACY.md)**。发现安全隐患请通过 [GitHub Security Advisories](https://github.com/lich13/lich13-switch/security/advisories/new) 私下报告。
+
+---
+
+## 本地开发与验证
+
+### 环境要求
+- **Node.js**：版本见 [.nvmrc](.nvmrc)
+- **pnpm**：版本固定于 [package.json](package.json) 的 `packageManager` 字段（项目启用 `pmOnFail: ignore` 以保持单文档锁文件兼容 GitHub 依赖图，请通过 `corepack` 启用对应版本）
+- **Rust**：工具链与组件见 [rust-toolchain.toml](rust-toolchain.toml)
+- **平台系统依赖**：参见 [Tauri v2 Prerequisites](https://v2.tauri.app/start/prerequisites/)
+
+### 常用命令
+
+```sh
+# 1. 核对包管理器并安装前端依赖
 corepack pnpm --version
 corepack pnpm install --frozen-lockfile
-corepack pnpm icons
+
+# 2. 前端测试、类型检查与生产构建
 corepack pnpm test
 corepack pnpm build
+
+# 3. Rust 单元测试、Clippy 静态检查与格式校验
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+# 4. 源码域名白名单与本地错误码一致性门禁
+python3 scripts/check-network-hosts.py
+python3 scripts/check-error-codes.py
+python3 -m unittest discover -s scripts -p "test_*.py"
+
+# 5. 重新生成全套应用与托盘图标 / 启动桌面开发模式
+corepack pnpm icons
 corepack pnpm tauri dev
 ```
 
-`pnpm dev` 是标明“预览”的模拟界面，真实凭据只能在桌面应用中操作。`--smoke-test <绝对输出路径>` 使用独立临时账号和配置，验证 WebView、托盘、账号切换、网关监听与认证、两字段切换、退出恢复和 auth 不变后退出，不接触真实 Codex 目录。
+- `corepack pnpm dev` 仅启动带「预览」标识的浏览器模拟界面，不读写任何真实客户端凭据。
+- 桌面构建产物支持 `--smoke-test <绝对输出路径>` 参数：在独立临时目录中端到端验证 WebView、托盘、账号切换、共享网关鉴权、配置事务写入与退出恢复，全程不触碰本机真实客户端目录。
 
-`pnpm icons` 从原创 SVG 生成 9 档 PNG、黑白托盘图标、ICNS 和 ICO。发布通过 CI 构建 macOS Apple Silicon DMG 与 Windows x64 NSIS 安装包及校验和；真实 OAuth 和操作系统托盘交互验收与自动冒烟测试分别记录。
+---
 
-## 依赖维护
+## 依赖维护与安全审计
 
-Dependabot 每周一 09:00（Asia/Taipei）检查 Cargo、前端和 GitHub Actions，普通更新冷却 7 天。Cargo 覆盖直接与间接依赖，以 `lockfile-only` 在现有约束内维护主锁文件，每次最多 1 个普通 PR；同时通过 `allow.update-types` 只允许兼容的 minor／patch，提前排除不兼容候选，避免解析器尝试 reqwest 0.13 等迁移。Cargo 的 `0.x` 次版本变化属于不兼容升级；本地 `lmfpd` 的依赖也通过主锁文件审计。前端普通更新允许 minor／patch，按 React 全家桶、其他运行依赖、开发工具分成 3 组，最多 3 个 PR；React 与 React DOM 的运行版本必须一致，对应类型包一起评估。Actions 合为一组，最多 1 个普通 PR，继续固定提交 SHA。
+- **Dependabot 策略**：每周一 `09:00 (Asia/Taipei)` 检查 Cargo、前端与 GitHub Actions（普通更新冷却 7 天，安全更新走独立通道立即触发）。Cargo 采用 `lockfile-only` 与兼容 `minor/patch` 约束维护主锁文件（含本地 `lmfpd` 审计）；前端按 React 核心（保持 `react` 与 `react-dom` 同版本）、运行依赖、开发工具分 3 组；GitHub Actions 保持固定提交 SHA。
+- **关键兼容约束**：
+  - `tauri` 运行时保持 `2.11` 系列，宏、构建与代码生成组件保持兼容的 `2.6` 系列，升级主包时成组评估。
+  - `yaml-edit` 固定 `0.3.2`，保障 DSH 空数组、注释及外部修改保护往返测试稳定通过。
+- **漏洞审计**：执行 `cargo audit --file src-tauri/Cargo.lock` 与 `corepack pnpm audit`。当前 `Cargo.lock` 中仅存 5 条由 Tauri Linux GTK 3 / D-Bus 单实例链路引入的上游间接警告（`proc-macro-error 1.0.4` / `RUSTSEC-2024-0370`、`glib 0.18.5` / `RUSTSEC-2024-0429`、`zvariant 5.15.1` / `RUSTSEC-2026-0370`、`zbus_names 4.3.5` / `RUSTSEC-2026-0371`、`zvariant_derive 5.15.1` / `RUSTSEC-2026-0372`），均不在 macOS 与 Windows 目标依赖树中，遵循不添加忽略列表隐藏警告的原则保留可见并随上游迁移更新。
 
-漏洞告警和自动安全修复在 GitHub 仓库设置中独立启用；安全更新使用独立组，不等待普通更新窗口或冷却期。普通更新的版本限制不屏蔽安全修复。保持人工合并，并启用合并后自动删除分支。
+---
 
-每月集中核对 Rust、Node、pnpm、审计工具、Tauri 关联组件及延期升级；安全修复优先处理。更新 Rust 锁文件使用 `cargo update --manifest-path src-tauri/Cargo.toml`，前端使用 `corepack pnpm update`，随后执行冻结安装、受影响测试、构建和安全检查。固定工具版本需要显式更新，并核对本机与 CI 一致；Tauri JS API、CLI 和 Rust 组件作为兼容组合评估，不能仅放宽单个包的约束。前端锁文件继续保持单文档，推送后确认 GitHub 依赖清单包含实际运行、开发和间接依赖。
+## 许可证
 
-Tauri 2.11 的运行时保持 2.11 系列，宏、构建和代码生成组件保持 2.6 系列，避免新组件的监视器返回类型、菜单宏及 Windows 图标接口与主包不匹配；升级 Tauri 主包时一起评估这些约束。`yaml-edit` 固定为 0.3.2，0.3.5 会使现有 DSH 空数组、注释和恢复往返测试失败；后续升级须先通过这些原有夹具，保留文件与外部修改保护。
-
-没有安全或功能必要时，延期迁移 jsdom、图标库、测试断言库，以及 Rust 的 sha1／sha2、toml／toml_edit、reqwest、rusqlite、sysinfo、yawc 等兼容线。需要调整约束才能修复安全问题时先评估兼容性，不新增漏洞忽略。依赖 PR 失败时一次读取全部失败检查，先处理共同原因；只有修复或新证据出现后再重跑，必要时拆分失败组定位。已被吸收或明确延期的 PR 经核对后关闭，分支仅在确认没有额外提交时删除。
-
-依赖审计使用 `cargo audit --file src-tauri/Cargo.lock` 和 `corepack pnpm audit`。v0.25.32 的 Rust 锁文件已移除 Tokio I/O 健全性告警、撤回的 `clipboard-win` 版本和 5 条 `unic-*` 维护告警；仍保留以下 5 条上游维护／健全性警告，不通过忽略列表隐藏。
-
-| 间接依赖 | 告警与约束 |
-| --- | --- |
-| `proc-macro-error 1.0.4` | RUSTSEC-2024-0370，未维护；由 GTK 3 的宏依赖引入，不在 macOS／Windows 依赖树中。 |
-| `glib 0.18.5` | RUSTSEC-2024-0429，迭代器健全性问题；由 Tauri 的 Linux GTK 3 链约束，不在 macOS／Windows 依赖树中。不能只替换为不兼容的 GLib 大版本。 |
-| `zbus_names 4.3.5` | RUSTSEC-2026-0371，未维护；由 Linux 单实例插件的 D-Bus 链引入，不在 macOS／Windows 依赖树中，等待上游兼容迁移。 |
-| `zvariant 5.15.1` | RUSTSEC-2026-0370，未维护；由同一 D-Bus 链引入，不在 macOS／Windows 依赖树中，等待上游兼容迁移。 |
-| `zvariant_derive 5.15.1` | RUSTSEC-2026-0372，未维护；由同一 D-Bus 链引入，不在 macOS／Windows 依赖树中，等待上游兼容迁移。 |
-
-MIT License。独立项目，与 OpenAI 无隶属关系。
+MIT License。独立开源项目，与 OpenAI、Anthropic、xAI、Google 等厂商无隶属关系。
