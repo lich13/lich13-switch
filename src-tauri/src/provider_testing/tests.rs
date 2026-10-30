@@ -3153,8 +3153,8 @@ fn populates_disabled_detection_status_at_startup_and_when_providers_change_whil
 }
 
 #[test]
-fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summaries_and_active_jobs()
-{
+fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summaries_and_active_jobs(
+) {
     let (dir, service) = fixture();
     let id = add(&service, dir.path(), ClientId::Claude, 18081, "messages");
     ua(&service, ClientId::Claude);
@@ -3181,7 +3181,7 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
         let retryable = index < 40;
         next.jobs.push(Job {
             id: job_id.clone(),
-            client_id: ClientId::Codex,
+            client_id: ClientId::Claude,
             provider_id: id.clone(),
             provider_name: "Fixture".into(),
             provider_version: target.version.clone(),
@@ -3224,8 +3224,8 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
     let active_id = "active-running".to_owned();
     next.jobs.push(Job {
         id: active_id.clone(),
-        client_id: ClientId::Codex,
-        provider_id: id,
+        client_id: ClientId::Claude,
+        provider_id: id.clone(),
         provider_name: "Fixture".into(),
         provider_version: target.version.clone(),
         endpoint: Some(target.base_url.clone()),
@@ -3263,7 +3263,10 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
     service.save(&mut data, next).unwrap();
 
     let after_output_bytes: usize = data.outputs.values().map(|o| o.text.len()).sum();
-    assert_eq!(after_output_bytes, MAX_RETAINED_TERMINAL_OUTPUTS * 16 * 1024);
+    assert_eq!(
+        after_output_bytes,
+        MAX_RETAINED_TERMINAL_OUTPUTS * 16 * 1024
+    );
 
     // All 200 terminal job summaries + 1 active job remain persisted.
     assert_eq!(data.saved.jobs.len(), 201);
@@ -3274,15 +3277,16 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
     assert!(data.outputs.contains_key("terminal-136"));
     assert!(data.outputs.contains_key("terminal-199"));
 
-    // In-memory retry contexts keep the active job + newest 16 retryable jobs (24..40),
-    // and clear `can_retry` on older evicted retryable jobs (0..24).
+    // In-memory retry contexts keep the active job + newest 16 retryable jobs (24..40).
+    // Persisted summaries keep their original `can_retry` flag untouched on disk,
+    // while `state()` and `detail()` project `can_retry` from retained in-memory contexts.
     assert_eq!(data.contexts.len(), MAX_RETAINED_RETRY_CONTEXTS + 1);
     assert!(data.contexts.contains_key(&active_id));
     for evicted in 0..24 {
         let key = format!("terminal-{evicted}");
         assert!(!data.contexts.contains_key(&key));
         let saved_job = data.saved.jobs.iter().find(|j| j.id == key).unwrap();
-        assert!(!saved_job.can_retry);
+        assert!(saved_job.can_retry);
     }
     for retained in 24..40 {
         let key = format!("terminal-{retained}");
@@ -3290,4 +3294,132 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
         let saved_job = data.saved.jobs.iter().find(|j| j.id == key).unwrap();
         assert!(saved_job.can_retry);
     }
+    drop(data);
+
+    let projected = service.state(ClientId::Claude, &id).unwrap();
+    for evicted in 0..24 {
+        let key = format!("terminal-{evicted}");
+        assert!(!service.detail(&key).unwrap().job.can_retry);
+        assert!(
+            !projected
+                .jobs
+                .iter()
+                .find(|j| j.id == key)
+                .unwrap()
+                .can_retry
+        );
+    }
+    for retained in 24..40 {
+        let key = format!("terminal-{retained}");
+        assert!(service.detail(&key).unwrap().job.can_retry);
+        assert!(
+            projected
+                .jobs
+                .iter()
+                .find(|j| j.id == key)
+                .unwrap()
+                .can_retry
+        );
+    }
+
+    // Noisy automatic detections on a second provider must not evict the first provider's
+    // newest manual output or retry context.
+    let second = add(&service, dir.path(), ClientId::Claude, 18082, "messages");
+    let mut data = lock(&service.0.data);
+    let mut next = data.saved.clone();
+    let protected_manual_id = "provider-a-manual-retryable".to_owned();
+    next.jobs.push(Job {
+        id: protected_manual_id.clone(),
+        client_id: ClientId::Claude,
+        provider_id: id.clone(),
+        provider_name: "Fixture A".into(),
+        provider_version: target.version.clone(),
+        endpoint: Some(target.base_url.clone()),
+        kind: Kind::Connection,
+        mode: Mode::Text,
+        requested_model: "gpt-6-luna".into(),
+        forwarded_model: "gpt-6-luna".into(),
+        returned_model: None,
+        status: "failed".into(),
+        created_at: 400,
+        started_at: Some(400),
+        completed_at: Some(401),
+        elapsed_ms: 10,
+        first_byte_ms: Some(5),
+        error: None,
+        report: None,
+        groups: vec![],
+        automatic: false,
+        batch_id: None,
+        can_retry: true,
+        completion_reason: None,
+        engine: Engine::ModelTrace,
+        sample_count: 1,
+        resource_version: Value::Null,
+        tokenizer: false,
+        tokenizer_result: None,
+    });
+    data.outputs.insert(
+        protected_manual_id.clone(),
+        Output {
+            text: "manual-output".into(),
+            ..Default::default()
+        },
+    );
+    data.contexts
+        .insert(protected_manual_id.clone(), make_context());
+
+    for index in 0..80 {
+        let auto_id = format!("provider-b-auto-{index}");
+        next.jobs.push(Job {
+            id: auto_id.clone(),
+            client_id: ClientId::Claude,
+            provider_id: second.clone(),
+            provider_name: "Fixture B".into(),
+            provider_version: target.version.clone(),
+            endpoint: Some(target.base_url.clone()),
+            kind: Kind::Fingerprint,
+            mode: Mode::Text,
+            requested_model: "gpt-6-luna".into(),
+            forwarded_model: "gpt-6-luna".into(),
+            returned_model: None,
+            status: "failed".into(),
+            created_at: 500 + index as i64,
+            started_at: Some(500 + index as i64),
+            completed_at: Some(501 + index as i64),
+            elapsed_ms: 10,
+            first_byte_ms: Some(5),
+            error: None,
+            report: None,
+            groups: vec![],
+            automatic: true,
+            batch_id: None,
+            can_retry: true,
+            completion_reason: None,
+            engine: Engine::ModelTrace,
+            sample_count: 1,
+            resource_version: Value::Null,
+            tokenizer: false,
+            tokenizer_result: None,
+        });
+        data.outputs.insert(
+            auto_id.clone(),
+            Output {
+                text: "auto-output".into(),
+                ..Default::default()
+            },
+        );
+        data.contexts.insert(auto_id, make_context());
+    }
+    service.save(&mut data, next).unwrap();
+    assert_eq!(data.outputs.len(), MAX_RETAINED_TERMINAL_OUTPUTS + 1);
+    assert_eq!(data.contexts.len(), MAX_RETAINED_RETRY_CONTEXTS + 1);
+    drop(data);
+
+    let protected = service.detail(&protected_manual_id).unwrap();
+    assert!(protected.job.can_retry);
+    assert_eq!(
+        protected.output.as_ref().map(|o| o.text.as_str()),
+        Some("manual-output")
+    );
 }

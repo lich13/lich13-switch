@@ -15,76 +15,24 @@ use std::{
 
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 
-const ENUM_SETTINGS: &[(&str, &[&str])] = &[
-    (
-        "themeMode",
-        &[
-            "THEME_MODE_UNSPECIFIED",
-            "THEME_MODE_INHERIT",
-            "THEME_MODE_DARK",
-            "THEME_MODE_LIGHT",
-        ],
-    ),
-    (
-        "conversationWidth",
-        &[
-            "CONVERSATION_WIDTH_UNSPECIFIED",
-            "CONVERSATION_WIDTH_DEFAULT",
-            "CONVERSATION_WIDTH_WIDE",
-            "CONVERSATION_WIDTH_NARROW",
-        ],
-    ),
-    (
-        "artifactReviewMode",
-        &[
-            "ARTIFACT_REVIEW_MODE_UNSPECIFIED",
-            "ARTIFACT_REVIEW_MODE_ALWAYS",
-            "ARTIFACT_REVIEW_MODE_AUTO",
-            "ARTIFACT_REVIEW_MODE_TURBO",
-        ],
-    ),
-    (
-        "autoExecutionPolicy",
-        &[
-            "CASCADE_COMMANDS_AUTO_EXECUTION_UNSPECIFIED",
-            "CASCADE_COMMANDS_AUTO_EXECUTION_OFF",
-            "CASCADE_COMMANDS_AUTO_EXECUTION_AUTO",
-            "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
-            "CASCADE_COMMANDS_AUTO_EXECUTION_EAGER",
-        ],
-    ),
-    (
-        "browserJsExecutionPolicy",
-        &[
-            "BROWSER_JS_EXECUTION_POLICY_UNSPECIFIED",
-            "BROWSER_JS_EXECUTION_POLICY_DISABLED",
-            "BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK",
-            "BROWSER_JS_EXECUTION_POLICY_MODEL_DECIDES",
-            "BROWSER_JS_EXECUTION_POLICY_TURBO",
-        ],
-    ),
-    (
-        "nonWorkspaceFileAccessPolicy",
-        &[
-            "AGENT_SETTING_POLICY_UNSPECIFIED",
-            "AGENT_SETTING_POLICY_ASK",
-            "AGENT_SETTING_POLICY_ALLOW",
-            "AGENT_SETTING_POLICY_DENY",
-        ],
-    ),
-    (
-        "permissionPreset",
-        &[
-            "AGENT_PERMISSION_PRESET_UNSPECIFIED",
-            "AGENT_PERMISSION_PRESET_REQUEST_REVIEW",
-            "AGENT_PERMISSION_PRESET_DEFAULT",
-            "AGENT_PERMISSION_PRESET_VETTED",
-            "AGENT_PERMISSION_PRESET_TURBO",
-            "AGENT_PERMISSION_PRESET_AUTO",
-            "AGENT_PERMISSION_PRESET_NONE",
-        ],
-    ),
+const ENUM_PREFIXES: &[(&str, &str)] = &[
+    ("themeMode", "THEME_MODE_"),
+    ("conversationWidth", "CONVERSATION_WIDTH_"),
+    ("artifactReviewMode", "ARTIFACT_REVIEW_MODE_"),
+    ("autoExecutionPolicy", "CASCADE_COMMANDS_AUTO_EXECUTION_"),
+    ("browserJsExecutionPolicy", "BROWSER_JS_EXECUTION_POLICY_"),
+    ("nonWorkspaceFileAccessPolicy", "AGENT_SETTING_POLICY_"),
+    ("permissionPreset", "AGENT_PERMISSION_PRESET_"),
 ];
+
+fn valid_enum_value(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    })
+}
 
 const STRING_SETTINGS: &[&str] = &["remoteControlHostname"];
 
@@ -127,7 +75,7 @@ pub fn validate_text(text: &str) -> Result<Value> {
         let Some(settings) = user_settings.as_object() else {
             return Err(AppError::new(code::CONFIG_TYPE, "userSettings 必须是对象"));
         };
-        for (key, allowed) in ENUM_SETTINGS {
+        for (key, prefix) in ENUM_PREFIXES {
             if let Some(raw) = settings.get(*key) {
                 let Some(val) = raw.as_str() else {
                     return Err(AppError::new(
@@ -135,7 +83,7 @@ pub fn validate_text(text: &str) -> Result<Value> {
                         &format!("userSettings.{key} 必须是字符串"),
                     ));
                 };
-                if !allowed.contains(&val) {
+                if !valid_enum_value(val, prefix) {
                     return Err(AppError::new(
                         code::CONFIG_TYPE,
                         &format!("userSettings.{key} 枚举值无效"),
@@ -291,6 +239,8 @@ mod tests {
         );
         for invalid in [
             "{\"userSettings\":{\"themeMode\":\"dark\"}}",
+            "{\"userSettings\":{\"themeMode\":\"THEME_MODE_\"}}",
+            "{\"userSettings\":{\"themeMode\":\"THEME_MODE_dark\"}}",
             "{\"userSettings\":{\"conversationWidth\":\"wide\"}}",
             "{\"userSettings\":{\"artifactReviewMode\":\"always\"}}",
             "{\"userSettings\":{\"autoExecutionPolicy\":\"eager\"}}",
@@ -302,6 +252,11 @@ mod tests {
         }
         assert!(validate_text(
             "{\"userSettings\":{\"themeMode\":\"THEME_MODE_INHERIT\",\"conversationWidth\":\"CONVERSATION_WIDTH_WIDE\",\"artifactReviewMode\":\"ARTIFACT_REVIEW_MODE_TURBO\",\"autoExecutionPolicy\":\"CASCADE_COMMANDS_AUTO_EXECUTION_EAGER\",\"browserJsExecutionPolicy\":\"BROWSER_JS_EXECUTION_POLICY_MODEL_DECIDES\",\"nonWorkspaceFileAccessPolicy\":\"AGENT_SETTING_POLICY_ALLOW\",\"permissionPreset\":\"AGENT_PERMISSION_PRESET_DEFAULT\"}}"
+        )
+        .is_ok());
+        // Future official Antigravity enum variants with matching prefix remain valid and saveable.
+        assert!(validate_text(
+            "{\"userSettings\":{\"themeMode\":\"THEME_MODE_HIGH_CONTRAST_V2\",\"autoExecutionPolicy\":\"CASCADE_COMMANDS_AUTO_EXECUTION_SANDBOX_V3\",\"permissionPreset\":\"AGENT_PERMISSION_PRESET_STRICT_2027\"}}"
         )
         .is_ok());
         assert_eq!(

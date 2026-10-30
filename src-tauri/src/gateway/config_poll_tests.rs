@@ -41,14 +41,12 @@ async fn endpoint_probe_wake_ignores_request_events_and_wakes_on_store_or_lifecy
     {
         let _active = Active::new(g.clone());
     }
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(25),
-            g.wait_endpoint_probe_wake(),
-        )
-        .await
-        .is_err()
-    );
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(25),
+        g.wait_endpoint_probe_wake(),
+    )
+    .await
+    .is_err());
 
     // Store mutation wakes the dedicated prober immediately (even if notified before awaiting).
     let rev = g.view().revision;

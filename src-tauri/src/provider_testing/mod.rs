@@ -59,6 +59,56 @@ fn config_revision(saved: &Persisted, client: ClientId, provider: &str) -> Strin
             .as_bytes(),
     )
 }
+fn project_job(job: &Job, contexts: &HashMap<String, Context>) -> Job {
+    let mut view = job.clone();
+    if view.terminal() {
+        view.can_retry = view.can_retry && contexts.contains_key(&view.id);
+    }
+    view
+}
+fn retain_terminal_ids<'a>(
+    jobs: &'a [Job],
+    cap: usize,
+    mut eligible: impl FnMut(&'a Job) -> bool,
+) -> std::collections::HashSet<&'a str> {
+    let candidates: Vec<&'a Job> = jobs
+        .iter()
+        .rev()
+        .filter(|job| job.terminal() && eligible(job))
+        .collect();
+    let mut kept = std::collections::HashSet::with_capacity(cap.min(candidates.len()));
+    if cap == 0 || candidates.is_empty() {
+        return kept;
+    }
+    let mut covered_scopes = std::collections::HashSet::new();
+    for job in &candidates {
+        if kept.len() >= cap {
+            return kept;
+        }
+        if !job.automatic && covered_scopes.insert((job.client_id, job.provider_id.as_str())) {
+            kept.insert(job.id.as_str());
+        }
+    }
+    for job in &candidates {
+        if kept.len() >= cap {
+            return kept;
+        }
+        if covered_scopes.insert((job.client_id, job.provider_id.as_str())) {
+            kept.insert(job.id.as_str());
+        }
+    }
+    for manual_pass in [true, false] {
+        for job in &candidates {
+            if kept.len() >= cap {
+                return kept;
+            }
+            if (!job.automatic) == manual_pass {
+                kept.insert(job.id.as_str());
+            }
+        }
+    }
+    kept
+}
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -220,17 +270,6 @@ impl Service {
                 true
             }
         });
-        let mut kept_retry = 0usize;
-        for job in next.jobs.iter_mut().rev() {
-            if job.terminal() && job.can_retry {
-                if !data.contexts.contains_key(&job.id) || kept_retry >= MAX_RETAINED_RETRY_CONTEXTS
-                {
-                    job.can_retry = false;
-                } else {
-                    kept_retry += 1;
-                }
-            }
-        }
         if next.history.len() > 500 {
             next.history.drain(..next.history.len() - 500);
         }
@@ -238,25 +277,22 @@ impl Service {
         storage::atomic_write_bounded(&self.0.path, &bytes, Some(&data.revision), STATE_LIMIT)?;
         data.revision = storage::digest(&bytes);
         data.saved = next;
-        let mut keep_outputs = std::collections::HashSet::new();
-        let mut kept_terminal_outputs = 0usize;
-        for job in data.saved.jobs.iter().rev() {
+        let mut keep_outputs =
+            retain_terminal_ids(&data.saved.jobs, MAX_RETAINED_TERMINAL_OUTPUTS, |job| {
+                data.outputs.contains_key(&job.id) && !data.cancel.contains_key(&job.id)
+            });
+        let mut keep_contexts =
+            retain_terminal_ids(&data.saved.jobs, MAX_RETAINED_RETRY_CONTEXTS, |job| {
+                job.can_retry
+                    && data.contexts.contains_key(&job.id)
+                    && !data.cancel.contains_key(&job.id)
+            });
+        for job in &data.saved.jobs {
             if !job.terminal() || data.cancel.contains_key(&job.id) {
                 keep_outputs.insert(job.id.as_str());
-            } else if data.outputs.contains_key(&job.id)
-                && kept_terminal_outputs < MAX_RETAINED_TERMINAL_OUTPUTS
-            {
-                keep_outputs.insert(job.id.as_str());
-                kept_terminal_outputs += 1;
+                keep_contexts.insert(job.id.as_str());
             }
         }
-        let keep_contexts: std::collections::HashSet<&str> = data
-            .saved
-            .jobs
-            .iter()
-            .filter(|job| !job.terminal() || job.can_retry || data.cancel.contains_key(&job.id))
-            .map(|job| job.id.as_str())
-            .collect();
         data.outputs
             .retain(|id, _| keep_outputs.contains(id.as_str()));
         data.contexts
@@ -322,7 +358,7 @@ impl Service {
                 .iter()
                 .rev()
                 .filter(scope)
-                .cloned()
+                .map(|job| project_job(job, &data.contexts))
                 .collect(),
             detection,
             degraded: data
@@ -344,7 +380,7 @@ impl Service {
             .iter()
             .find(|j| j.id == id)
             .or_else(|| data.saved.history.iter().find(|j| j.id == id))
-            .cloned()
+            .map(|job| project_job(job, &data.contexts))
             .ok_or_else(|| failure("测试记录已不存在"))?;
         Ok(Detail {
             job,

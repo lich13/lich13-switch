@@ -27,10 +27,7 @@ import AntigravitySettings from "./AntigravitySettings";
 import { changes, get } from "./claude-settings";
 import Modal from "./Modal";
 import { confirmAction } from "./confirmation";
-import {
-  getCachedCodeMirrorSurface,
-  loadCodeMirrorSurface,
-} from "./codeMirrorLoader";
+import { useCodeMirrorSurface } from "./codeMirrorLoader";
 
 type Props = {
   revision: string;
@@ -94,17 +91,22 @@ function EditorContent({
     [conflict, setConflict] = useState(false),
     [visual, setVisual] = useState(jsonDualMode),
     [revealed, setRevealed] = useState(false),
-    [diff, setDiff] = useState(false),
-    [Surface, setSurface] = useState(() => getCachedCodeMirrorSurface());
+    [diff, setDiff] = useState(false);
+  const handleEditorLoadError = useCallback(
+    (e: unknown) => setError(errorOf(e)),
+    [],
+  );
+  const Surface = useCodeMirrorSurface(
+    !jsonDualMode || !visual,
+    handleEditorLoadError,
+  );
   const docRef = useRef(doc),
     textRef = useRef(text),
     saveRef = useRef(() => {}),
     loadSeq = useRef(0),
-    saving = useRef(false),
-    visualRef = useRef(visual);
+    saving = useRef(false);
   docRef.current = doc;
   textRef.current = text;
-  visualRef.current = visual;
   const dirty = !!doc && text !== doc.text;
   useEffect(() => {
     onDirty(dirty);
@@ -113,20 +115,9 @@ function EditorContent({
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     try {
-      const readPromise =
-        clientId === "antigravity"
-          ? command("read_antigravity_config")
-          : command("read_config", { clientId });
-      const d = !jsonDualMode
-        ? (
-            await Promise.all([
-              readPromise,
-              loadCodeMirrorSurface().then((Loaded) => {
-                if (seq === loadSeq.current) setSurface(() => Loaded);
-              }),
-            ])
-          )[0]
-        : await readPromise;
+      const d = await (clientId === "antigravity"
+        ? command("read_antigravity_config")
+        : command("read_config", { clientId }));
       if (seq !== loadSeq.current) return;
       let fallbackToSource = false;
       if (jsonDualMode) {
@@ -134,11 +125,6 @@ function EditorContent({
           get(d.text, []);
         } catch {
           fallbackToSource = true;
-        }
-        if (fallbackToSource || !visualRef.current) {
-          const Loaded = await loadCodeMirrorSurface();
-          if (seq !== loadSeq.current) return;
-          setSurface(() => Loaded);
         }
       }
       setDoc(d);
@@ -243,17 +229,6 @@ function EditorContent({
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [dirty, busy]);
-  useEffect(() => {
-    if ((!jsonDualMode || !visual) && !Surface) {
-      let active = true;
-      void loadCodeMirrorSurface().then((Loaded) => {
-        if (active) setSurface(() => Loaded);
-      });
-      return () => {
-        active = false;
-      };
-    }
-  }, [jsonDualMode, visual, Surface]);
   const validateText = useCallback(
     async (candidate: string) => {
       if (clientId === "antigravity")
@@ -272,9 +247,6 @@ function EditorContent({
         setError(errorOf(e));
         return;
       }
-    } else if (!Surface) {
-      const Loaded = await loadCodeMirrorSurface();
-      setSurface(() => Loaded);
     }
     setVisual(next);
   };

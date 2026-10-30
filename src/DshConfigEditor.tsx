@@ -1,5 +1,5 @@
 import { preferredDshProfile, rememberDshProfile } from "./dsh-profile";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Save, RotateCcw, History } from "lucide-react";
 import { command } from "./bridge";
 import type { DshFileKey, DshFileView } from "./bridge-contracts";
@@ -7,10 +7,7 @@ import ClientSelection from "./ClientSelection";
 import { errorOf, type ClientId } from "./types";
 import { confirmAction } from "./confirmation";
 import Modal from "./Modal";
-import {
-  getCachedCodeMirrorSurface,
-  loadCodeMirrorSurface,
-} from "./codeMirrorLoader";
+import { useCodeMirrorSurface } from "./codeMirrorLoader";
 
 const names: Record<DshFileKey, string> = {
   profilePatch: "profile · cordis.patch.yml",
@@ -49,19 +46,12 @@ export default function DshConfigEditor({
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [previous, setPrevious] = useState<string | null>(null);
-  const [Surface, setSurface] = useState(() => getCachedCodeMirrorSurface());
+  const handleEditorLoadError = useCallback(
+    (e: unknown) => setError(errorOf(e).message),
+    [],
+  );
+  const Surface = useCodeMirrorSurface(true, handleEditorLoadError);
   const dirty = !!doc && !doc.readOnly && text !== doc.text;
-  useEffect(() => {
-    if (!Surface) {
-      let active = true;
-      void loadCodeMirrorSurface().then((Loaded) => {
-        if (active) setSurface(() => Loaded);
-      });
-      return () => {
-        active = false;
-      };
-    }
-  }, [Surface]);
   useEffect(() => {
     onDirty(dirty);
     return () => onDirty(false);
@@ -73,13 +63,9 @@ export default function DshConfigEditor({
     let gone = false;
     setLoading(true);
     setError("");
-    void Promise.all([
-      command("read_dsh_file", { profile: profile || null, key }),
-      loadCodeMirrorSurface(),
-    ])
-      .then(([value, Loaded]) => {
+    void command("read_dsh_file", { profile: profile || null, key })
+      .then((value) => {
         if (!gone) {
-          setSurface(() => Loaded);
           if (profile !== (value.profile ?? "") || key !== value.key) {
             normalizedSelection.current = {
               profile: value.profile ?? "",

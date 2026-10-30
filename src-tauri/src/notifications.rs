@@ -137,7 +137,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
-                    crate::emit_if_main_visible(&app, "app-event", &event);
+                    crate::emit_main_app_event(&app, &event);
                     let r = app.state::<Arc<Runtime>>();
                     if !event.notify
                         || !r.core.lock().unwrap().preferences().system_notifications

@@ -78,6 +78,50 @@ struct Runtime {
     official_tx: tokio::sync::Mutex<()>,
     window_wake: tokio::sync::Notify,
     window_visible: [AtomicBool; 2],
+    pending_main: PendingMainEvents,
+}
+#[derive(Default)]
+pub(crate) struct PendingMainEvents {
+    app_event: Mutex<Option<events::Change>>,
+    config_states: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
+    provider_tests: AtomicBool,
+    pricing_state: AtomicBool,
+}
+impl PendingMainEvents {
+    fn record_signal(&self, event: &str) {
+        match event {
+            "provider-tests" => self.provider_tests.store(true, Ordering::Relaxed),
+            "pricing-state" => self.pricing_state.store(true, Ordering::Relaxed),
+            _ => {}
+        }
+    }
+    fn record_app_event(&self, change: &events::Change) {
+        if let Ok(mut slot) = self.app_event.lock() {
+            let previous_record = slot.as_ref().and_then(|old| old.record.clone());
+            *slot = Some(events::Change {
+                record: change.record.clone().or(previous_record),
+                error: change.error.clone(),
+                notify: false,
+            });
+        }
+    }
+    fn record_config_state(&self, key: &str, payload: serde_json::Value) {
+        if let Ok(mut map) = self.config_states.lock() {
+            map.insert(key.to_owned(), payload);
+        }
+    }
+    fn drain(&self) -> (Option<events::Change>, bool, bool, Vec<serde_json::Value>) {
+        let app_event = self.app_event.lock().ok().and_then(|mut s| s.take());
+        let provider_tests = self.provider_tests.swap(false, Ordering::Relaxed);
+        let pricing_state = self.pricing_state.swap(false, Ordering::Relaxed);
+        let config_states = self
+            .config_states
+            .lock()
+            .ok()
+            .map(|mut map| std::mem::take(&mut *map).into_values().collect())
+            .unwrap_or_default();
+        (app_event, provider_tests, pricing_state, config_states)
+    }
 }
 impl Runtime {
     pub(crate) fn mark_window_visible(&self, label: &str, visible: bool) -> bool {
@@ -178,16 +222,37 @@ pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindo
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
         .collect()
 }
+fn main_visible_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    app.get_webview_window("main")
+        .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+}
 pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
     app: &tauri::AppHandle,
     event: &str,
     payload: S,
 ) {
-    if let Some(window) = app
-        .get_webview_window("main")
-        .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
-    {
+    if let Some(window) = main_visible_window(app) {
         let _ = window.emit(event, payload);
+    } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        r.pending_main.record_signal(event);
+    }
+}
+pub(crate) fn emit_main_app_event(app: &tauri::AppHandle, change: &events::Change) {
+    if let Some(window) = main_visible_window(app) {
+        let _ = window.emit("app-event", change);
+    } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        r.pending_main.record_app_event(change);
+    }
+}
+pub(crate) fn emit_main_config_state(
+    app: &tauri::AppHandle,
+    client_key: &str,
+    payload: serde_json::Value,
+) {
+    if let Some(window) = main_visible_window(app) {
+        let _ = window.emit("config-state", payload);
+    } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        r.pending_main.record_config_state(client_key, payload);
     }
 }
 pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
@@ -197,7 +262,23 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return;
     };
-    if r.mark_window_visible(label, true) {
+    let was_visible = r.mark_window_visible(label, true);
+    if label == "main" {
+        let (app_event, provider_tests, pricing_state, config_states) = r.pending_main.drain();
+        if let Some(change) = app_event {
+            let _ = window.emit("app-event", &change);
+        }
+        if provider_tests {
+            let _ = window.emit("provider-tests", ());
+        }
+        if pricing_state && was_visible {
+            let _ = window.emit("pricing-state", ());
+        }
+        for payload in config_states {
+            let _ = window.emit("config-state", payload);
+        }
+    }
+    if was_visible {
         return;
     }
     if let Ok(state) = state_for(&r) {
@@ -1766,6 +1847,7 @@ pub fn run() {
                 official_tx: tokio::sync::Mutex::new(()),
                 window_wake: tokio::sync::Notify::new(),
                 window_visible: [AtomicBool::new(!start_silently), AtomicBool::new(false)],
+                pending_main: PendingMainEvents::default(),
             });
             runtime.gateway.observe_home(&lock(&runtime.core)?.home());
             runtime
@@ -2049,7 +2131,12 @@ pub fn run() {
                     for client in [gateway::ClientId::Codex, gateway::ClientId::Claude, gateway::ClientId::Grok, gateway::ClientId::Dsh] {
                         if let Ok(stamp) = runtime.home(client).and_then(|home| runtime.gateway(client).config_stamp(&home, config_cache.entry(client).or_default())) {
                             if config_versions.get(&client) != Some(&stamp) {
-                                let _ = handle.emit("config-state", serde_json::json!({"clientId":client,"revision":stamp.1,"guarded":stamp.2}));
+                                let key = serde_json::to_string(&client).unwrap_or_default();
+                                emit_main_config_state(
+                                    &handle,
+                                    &key,
+                                    serde_json::json!({"clientId":client,"revision":stamp.1,"guarded":stamp.2}),
+                                );
                                 config_versions.insert(client, stamp);
                                 if client != gateway::ClientId::Codex {
                                     publish_gateway(&handle, runtime.gateway(client));
@@ -2061,8 +2148,9 @@ pub fn run() {
                         .and_then(|home| antigravity::config_stamp(&home, &mut agy_config_cache))
                     {
                         if agy_config_version.as_ref() != Some(&rev) {
-                            let _ = handle.emit(
-                                "config-state",
+                            emit_main_config_state(
+                                &handle,
+                                "antigravity",
                                 serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false}),
                             );
                             agy_config_version = Some(rev);
@@ -2294,7 +2382,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod page_whitelist_tests {
-    use super::valid_main_page;
+    use super::{events, valid_main_page, PendingMainEvents};
 
     #[test]
     fn allows_usage_and_all_primary_pages_while_rejecting_unknown_pages() {
@@ -2302,5 +2390,53 @@ mod page_whitelist_tests {
             assert!(valid_main_page(page), "{page} should be allowed");
         }
         assert!(!valid_main_page("invalid"));
+    }
+
+    #[test]
+    fn pending_main_events_coalesce_while_hidden_and_drain_once_on_show() {
+        let pending = PendingMainEvents::default();
+        pending.record_signal("provider-tests");
+        pending.record_signal("provider-tests");
+        pending.record_signal("pricing-state");
+        pending.record_config_state(
+            "claude",
+            serde_json::json!({"clientId":"claude","revision":"r1","guarded":false}),
+        );
+        pending.record_config_state(
+            "claude",
+            serde_json::json!({"clientId":"claude","revision":"r2","guarded":true}),
+        );
+        pending.record_config_state(
+            "antigravity",
+            serde_json::json!({"clientId":"antigravity","revision":"a1","guarded":false}),
+        );
+        pending.record_app_event(&events::Change {
+            record: None,
+            error: Some("first".into()),
+            notify: true,
+        });
+        pending.record_app_event(&events::Change {
+            record: None,
+            error: Some("second".into()),
+            notify: true,
+        });
+
+        let (app_event, provider_tests, pricing_state, configs) = pending.drain();
+        assert!(provider_tests);
+        assert!(pricing_state);
+        assert_eq!(app_event.unwrap().error.as_deref(), Some("second"));
+        assert_eq!(configs.len(), 2);
+        assert!(configs
+            .iter()
+            .any(|v| v["clientId"] == "claude" && v["revision"] == "r2" && v["guarded"] == true));
+        assert!(configs
+            .iter()
+            .any(|v| v["clientId"] == "antigravity" && v["revision"] == "a1"));
+
+        let (app_event_2, provider_tests_2, pricing_state_2, configs_2) = pending.drain();
+        assert!(app_event_2.is_none());
+        assert!(!provider_tests_2);
+        assert!(!pricing_state_2);
+        assert!(configs_2.is_empty());
     }
 }

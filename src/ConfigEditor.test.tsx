@@ -39,9 +39,14 @@ vi.mock("@uiw/react-codemirror", () => ({
 }));
 import ConfigEditor from "./ConfigEditor";
 import { get } from "./claude-settings";
-import { getCachedCodeMirrorSurface } from "./codeMirrorLoader";
+import {
+  getCachedCodeMirrorSurface,
+  loadCodeMirrorSurface,
+  resetCodeMirrorLoaderForTests,
+} from "./codeMirrorLoader";
 let doc: ConfigDocument;
 beforeEach(() => {
+  resetCodeMirrorLoaderForTests();
   localStorage.clear();
   localStorage.setItem("lich13-switch.config.client", "claude");
   mocks.events.clear();
@@ -199,21 +204,14 @@ it("restores previous configuration only into the draft and confirms client chan
 it("edits Antigravity app config across visual and JSON modes, diffs, restores backup, and guards conflicts", async () => {
   const u = userEvent.setup();
   localStorage.setItem("lich13-switch.config.client", "antigravity");
-  const validEnums: Record<string, string[]> = {
-    themeMode: [
-      "THEME_MODE_UNSPECIFIED",
-      "THEME_MODE_INHERIT",
-      "THEME_MODE_DARK",
-      "THEME_MODE_LIGHT",
-    ],
-    autoExecutionPolicy: [
-      "CASCADE_COMMANDS_AUTO_EXECUTION_UNSPECIFIED",
-      "CASCADE_COMMANDS_AUTO_EXECUTION_OFF",
-      "CASCADE_COMMANDS_AUTO_EXECUTION_AUTO",
-      "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
-      "CASCADE_COMMANDS_AUTO_EXECUTION_EAGER",
-    ],
+  const enumPrefixes: Record<string, string> = {
+    themeMode: "THEME_MODE_",
+    autoExecutionPolicy: "CASCADE_COMMANDS_AUTO_EXECUTION_",
   };
+  const validPrefixEnum = (val: unknown, prefix: string) =>
+    typeof val === "string" &&
+    val.startsWith(prefix) &&
+    /^[A-Z0-9_]+$/.test(val.slice(prefix.length));
   const appDoc: ConfigDocument = {
     ...doc,
     clientId: "antigravity",
@@ -237,11 +235,10 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
         throw { code: "CONFIG_TYPE", message: "userSettings 必须是对象" };
       }
       const settings = (parsed.userSettings ?? {}) as Record<string, unknown>;
-      for (const [key, allowed] of Object.entries(validEnums)) {
+      for (const [key, prefix] of Object.entries(enumPrefixes)) {
         if (
           settings[key] !== undefined &&
-          (typeof settings[key] !== "string" ||
-            !allowed.includes(settings[key] as string))
+          !validPrefixEnum(settings[key], prefix)
         ) {
           throw {
             code: "CONFIG_TYPE",
@@ -358,4 +355,18 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
   expect(
     mocks.command.mock.calls.some(([name]) => name === "read_config"),
   ).toBe(false);
+});
+
+it("recovers cleanly after a transient CodeMirror lazy-load failure", async () => {
+  let attempts = 0;
+  resetCodeMirrorLoaderForTests(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("chunk load failed");
+    return import("./CodeMirrorSurface");
+  });
+  await expect(loadCodeMirrorSurface()).rejects.toThrow("chunk load failed");
+  expect(getCachedCodeMirrorSurface()).toBeNull();
+  const Loaded = await loadCodeMirrorSurface();
+  expect(Loaded).toBeTypeOf("function");
+  expect(getCachedCodeMirrorSurface()).toBe(Loaded);
 });
