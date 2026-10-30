@@ -622,11 +622,27 @@ impl Api {
         .await?;
         serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
     }
-    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     async fn collect(
         &self,
         store: &mut impl Repository,
         home: &Path,
+        pricing: &Pricing,
+        settings: &Settings,
+        report: &mut Report,
+        repair: bool,
+    ) -> Result<()> {
+        let brain = home.join("antigravity/brain");
+        let files = collect_transcript_files(&brain)?;
+        self.collect_with_files(store, &brain, &files, pricing, settings, report, repair)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn collect_with_files(
+        &self,
+        store: &mut impl Repository,
+        brain: &Path,
+        files: &[PathBuf],
         pricing: &Pricing,
         settings: &Settings,
         report: &mut Report,
@@ -642,12 +658,9 @@ impl Api {
             .as_object()
             .cloned()
             .ok_or_else(|| failure("Antigravity 会话目录不完整"))?;
-        let brain = home.join("antigravity/brain");
-        let mut files = Vec::new();
-        transcript_files(&brain, &mut files, 0)?;
         for path in files {
-            let id = cascade_id(&brain, &path)?;
-            let stamp = local_file_stamp(&path);
+            let id = cascade_id(brain, path)?;
+            let stamp = local_file_stamp(path);
             summaries
                 .entry(id.to_owned())
                 .or_insert_with(|| json!({"localModifiedStamp": stamp}));
@@ -855,6 +868,20 @@ fn cascade_id<'a>(brain: &Path, path: &'a Path) -> Result<&'a str> {
         .ok_or_else(|| failure("Antigravity 历史路径无效"))
 }
 
+fn collect_transcript_files(brain: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    transcript_files(brain, &mut files, 0)?;
+    Ok(files)
+}
+
+fn should_skip_transcript_subdir(depth: usize, name: &std::ffi::OsStr) -> bool {
+    depth >= 1
+        && matches!(
+            name.to_str(),
+            Some("scratch" | "node_modules" | "target" | ".git")
+        )
+}
+
 fn transcript_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
     if !root.exists() {
         return Ok(());
@@ -865,14 +892,18 @@ fn transcript_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result
     for item in std::fs::read_dir(root).map_err(storage::io_error)? {
         let item = item.map_err(storage::io_error)?;
         let kind = item.file_type().map_err(storage::io_error)?;
+        let name = item.file_name();
         if kind.is_dir() {
-            transcript_files(&item.path(), out, depth + 1)?;
-        } else if kind.is_file() && item.file_name() == "transcript.jsonl" {
+            if !should_skip_transcript_subdir(depth, &name) {
+                transcript_files(&item.path(), out, depth + 1)?;
+            }
+        } else if kind.is_file() && name == "transcript.jsonl" {
             out.push(item.path());
         }
     }
     Ok(())
 }
+#[cfg(test)]
 pub(super) fn scan_files(
     store: &mut impl Repository,
     home: &Path,
@@ -882,10 +913,20 @@ pub(super) fn scan_files(
     repair: bool,
 ) -> Result<()> {
     let brain = home.join("antigravity/brain");
-    let mut files = Vec::new();
-    transcript_files(&brain, &mut files, 0)?;
+    let files = collect_transcript_files(&brain)?;
+    scan_file_list(store, &brain, &files, pricing, settings, report, repair)
+}
+fn scan_file_list(
+    store: &mut impl Repository,
+    brain: &Path,
+    files: &[PathBuf],
+    pricing: &Pricing,
+    settings: &Settings,
+    report: &mut Report,
+    repair: bool,
+) -> Result<()> {
     for path in files {
-        if let Err(error) = scan_file(store, &brain, &path, pricing, settings, report, repair) {
+        if let Err(error) = scan_file(store, brain, path, pricing, settings, report, repair) {
             if store.requires_complete_history() {
                 return Err(error);
             }
@@ -1090,13 +1131,23 @@ pub fn sync(
         ..Report::default()
     };
     let pricing = pricing.frozen();
+    let brain = home.join("antigravity/brain");
+    let files = collect_transcript_files(&brain)?;
     let runtime = tokio::runtime::Handle::try_current()
         .map_err(|_| failure("Antigravity 同步运行时不可用"))?;
     let connected = runtime.block_on(async {
         match Api::connect().await? {
             Some(api) => {
-                api.collect(store, home, &pricing, settings, &mut report, repair)
-                    .await?;
+                api.collect_with_files(
+                    store,
+                    &brain,
+                    &files,
+                    &pricing,
+                    settings,
+                    &mut report,
+                    repair,
+                )
+                .await?;
                 Ok(true)
             }
             None if repair => Err(failure("请启动 Antigravity app 后补全历史")),
@@ -1105,7 +1156,15 @@ pub fn sync(
     });
     // Already collected details remain available while the app is closed. Any
     // new uncorrelated file usage makes a complete export fail explicitly.
-    scan_files(store, home, &pricing, settings, &mut report, repair)?;
+    scan_file_list(
+        store,
+        &brain,
+        &files,
+        &pricing,
+        settings,
+        &mut report,
+        repair,
+    )?;
     connected?;
     report.phase = if report.errors == 0 {
         "done"
@@ -1287,5 +1346,21 @@ mod history_tests {
             store.dashboard(&Filter::default()).unwrap().totals.requests,
             1
         );
+    }
+
+    #[test]
+    fn transcript_discovery_keeps_system_logs_while_skipping_scratch_and_build_trees() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = dir.path().join("antigravity/brain");
+        let valid = brain.join("cascade-one/.system_generated/logs/transcript.jsonl");
+        let scratch = brain.join("cascade-one/scratch/sub/transcript.jsonl");
+        let modules = brain.join("cascade-one/node_modules/pkg/transcript.jsonl");
+        let target_dir = brain.join("cascade-one/target/debug/transcript.jsonl");
+        for path in [&valid, &scratch, &modules, &target_dir] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}\n").unwrap();
+        }
+        let discovered = collect_transcript_files(&brain).unwrap();
+        assert_eq!(discovered, vec![valid]);
     }
 }

@@ -82,9 +82,8 @@ async fn legacy_routes_and_full_snapshots_upgrade_without_false_conflicts() {
     }
     {
         let mut state = gateway.0.inner.lock().unwrap();
-        state.store = store;
+        state.editable_mut().store = store;
         state.revision = revision;
-        state.refresh_editable_digest(gateway.0.client);
     }
     gateway
         .restart_dsh(home.path(), &gateway.view().revision)
@@ -124,7 +123,7 @@ async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() 
     .unwrap();
     {
         let mut state = gateway.0.inner.lock().unwrap();
-        state.store.dsh_catalog =
+        state.editable_mut().store.dsh_catalog =
             vec![serde_json::json!({"id":models::FLASH,"inputModalities":["text","image"]})];
     }
     gateway
@@ -202,7 +201,7 @@ async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() 
         assert!(model.get("inputModalities").is_none());
     }
     // Reload projected snapshots, then synchronize settings through the real edit transaction.
-    gateway.0.inner.lock().unwrap().store.dsh = Some(saved);
+    gateway.0.inner.lock().unwrap().editable_mut().store.dsh = Some(saved);
     let mut settings = gateway.view().settings;
     settings.idle_seconds = 211;
     gateway
@@ -226,7 +225,7 @@ async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() 
         .restart_dsh(home.path(), &gateway.view().revision)
         .await
         .unwrap();
-    gateway.0.inner.lock().unwrap().store.dsh = Some(read_saved());
+    gateway.0.inner.lock().unwrap().editable_mut().store.dsh = Some(read_saved());
     fs::write(
         &credential,
         fs::read_to_string(&credential)

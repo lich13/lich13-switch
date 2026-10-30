@@ -491,9 +491,9 @@ mod tests {
         let g = Gateway::new(dir.path().join("data")).unwrap();
         {
             let mut state = g.0.inner.lock().unwrap();
+            let store = &mut state.editable_mut().store;
             for n in 0..4 {
-                state
-                    .store
+                store
                     .edit(
                         super::super::Edit::SaveProvider {
                             search_only: None,
@@ -506,7 +506,7 @@ mod tests {
                         false,
                     )
                     .unwrap();
-                state.store.providers.last_mut().unwrap().queued = true;
+                store.providers.last_mut().unwrap().queued = true;
             }
         }
         g.0.discover_new_providers.store(true, Ordering::Relaxed);
@@ -587,13 +587,13 @@ mod tests {
             .unwrap();
         {
             let mut state = g.0.inner.lock().unwrap();
+            let store = &mut state.editable_mut().store;
             for (name, protocol) in [
                 ("a", Protocol::Messages),
                 ("b", Protocol::ChatCompletions),
                 ("c", Protocol::Messages),
             ] {
-                state
-                    .store
+                store
                     .edit(
                         super::super::Edit::SaveGrokProvider {
                             quota_access_token: None,
@@ -606,12 +606,12 @@ mod tests {
                         false,
                     )
                     .unwrap();
-                let p = state.store.providers.last_mut().unwrap();
+                let p = store.providers.last_mut().unwrap();
                 p.queued = true;
             }
-            state.store.providers[0].allowed_models = Some(vec!["shared".into(), "first".into()]);
-            state.store.providers[1].allowed_models = Some(vec!["shared".into(), "second".into()]);
-            let p = &state.store.providers[2];
+            store.providers[0].allowed_models = Some(vec!["shared".into(), "first".into()]);
+            store.providers[1].allowed_models = Some(vec!["shared".into(), "second".into()]);
+            let p = &store.providers[2];
             g.0.catalog
                 .commit(&super::super::catalog::View {
                     provider_id: p.id.clone(),
@@ -654,7 +654,8 @@ mod tests {
             ["a", "c"]
         );
         assert!(models[0].manual);
-        g.0.inner.lock().unwrap().store.providers[2].version = "fixture-changed".into();
+        g.0.inner.lock().unwrap().editable_mut().store.providers[2].version =
+            "fixture-changed".into();
         assert!(!g
             .model_union(Some(Protocol::Messages))
             .unwrap()

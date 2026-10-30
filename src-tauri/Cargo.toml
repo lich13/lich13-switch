@@ -38,7 +38,7 @@ tempfile = "3"
 toml = "0.9"
 tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "net", "fs", "rt-multi-thread"] }
 open = "5"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
@@ -61,13 +61,13 @@ zstd = "0.14.3"
 yawc = { version = "0.4.2", default-features = false, features = ["zlib", "rustls-ring"] }
 auto-launch = "0.5"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
-plist = "1"
 rusqlite = { version = "0.37", features = ["bundled", "functions"] }
 rust_decimal = { version = "1", features = ["serde-str"] }
 # 0.3.5 breaks the existing DSH empty-array/comment round-trip fixtures.
 yaml-edit = "=0.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "NSRunningApplication", "block2"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString"] }

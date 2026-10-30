@@ -1249,10 +1249,18 @@ fn core_state_caches_credential_metadata_and_invalidates_on_rotation_or_deletion
     );
     std::fs::write(home.join("auth.json"), &auth_v1).unwrap();
 
+    std::fs::write(
+        home.join("config.toml"),
+        "model_provider='openai'\ncli_auth_credentials_store='file'\n",
+    )
+    .unwrap();
     let mut core = super::Core::new(data, home.clone()).unwrap();
     let id = core.import_raw(&auth_v1, Some("Primary".into())).unwrap();
     let saved = core.state().unwrap();
     let rev_v1 = saved.accounts[0].credential_revision.clone();
+    let cfg_rev_v1 = saved.config_revision.clone();
+    assert_eq!(saved.auth_source.provider, "openai");
+    assert!(!saved.auth_source.inline_token);
     assert_eq!(
         saved.accounts[0]
             .subscription
@@ -1264,26 +1272,28 @@ fn core_state_caches_credential_metadata_and_invalidates_on_rotation_or_deletion
         saved.accounts[0].subscription.as_ref().map(|s| s.stale),
         Some(false)
     );
-    assert_eq!(core.profile_meta_cache.len(), 1);
+    // Steady-state repeat poll hits config_cache and returns identical revision and auth_source.
+    let cached_poll = core.state().unwrap();
+    assert_eq!(cached_poll.config_revision, cfg_rev_v1);
+    assert_eq!(cached_poll.auth_source, saved.auth_source);
 
-    // Expiration staleness is dynamically recomputed from cached exp without re-decoding JWT.
-    core.profile_meta_cache
-        .get_mut(&id)
-        .unwrap()
-        .subscription
-        .as_mut()
-        .unwrap()
-        .exp = Some(super::now().saturating_sub(1));
-    let expired_state = core.state().unwrap();
-    assert_eq!(
-        expired_state.accounts[0]
-            .subscription
-            .as_ref()
-            .map(|s| s.stale),
-        Some(true)
-    );
+    // Modifying config.toml on disk invalidates config_cache immediately.
+    crate::storage::atomic_write(
+        &home.join("config.toml"),
+        b"model_provider='custom'\n[model_providers.custom]\nexperimental_bearer_token='tok-fixture'\n",
+        None,
+    )
+    .unwrap();
+    let updated_cfg = core.state().unwrap();
+    assert_ne!(updated_cfg.config_revision, cfg_rev_v1);
+    assert_eq!(updated_cfg.auth_source.provider, "custom");
+    assert!(updated_cfg.auth_source.inline_token);
+    std::fs::remove_file(home.join("config.toml")).unwrap();
+    let deleted_cfg = core.state().unwrap();
+    assert_eq!(deleted_cfg.config_revision, "missing");
+    assert_eq!(deleted_cfg.auth_source.provider, "openai");
 
-    // Credential rotation invalidates the cached revision & plan immediately.
+    // Credential rotation updates revision & plan immediately without retaining duplicate auth cache.
     let auth_v2 = credential_from_claims(
         {
             let mut c = identity_claims(
@@ -1326,9 +1336,7 @@ fn core_state_caches_credential_metadata_and_invalidates_on_rotation_or_deletion
         Some(false)
     );
 
-    // Deleting the profile prunes its cached metadata entry on the next state() call.
     core.delete(&id).unwrap();
     let after_delete = core.state().unwrap();
     assert!(after_delete.accounts.is_empty());
-    assert!(core.profile_meta_cache.is_empty());
 }

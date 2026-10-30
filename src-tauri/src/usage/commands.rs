@@ -1,7 +1,6 @@
 use super::{model::*, pricing, store, State};
 use crate::{storage::Result, Runtime};
 use std::sync::Arc;
-use tauri::Emitter;
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 #[tauri::command]
 pub fn get_usage_state(r: R<'_>) -> State {
@@ -102,7 +101,7 @@ pub async fn update_models_dev(r: R<'_>, app: tauri::AppHandle) -> Result<crate:
             .await
             .map_err(|_| failure("价格补算中断"))??;
     }
-    let _ = app.emit("pricing-state", ());
+    crate::emit_if_main_visible(&app, crate::MainSignal::PricingState, ());
     Ok(view)
 }
 #[tauri::command]
@@ -128,14 +127,14 @@ pub async fn configure_pricing(
     tokio::task::spawn_blocking(move || service.backfill_prices())
         .await
         .map_err(|_| failure("价格补算中断"))??;
-    let _ = app.emit("usage-state", ());
-    let _ = app.emit("pricing-state", ());
+    crate::emit_if_main_visible(&app, crate::MainSignal::UsageState, ());
+    crate::emit_if_main_visible(&app, crate::MainSignal::PricingState, ());
     Ok(result)
 }
 #[tauri::command]
 pub async fn update_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::View> {
     let result = r.usage.update_prices(true).await;
-    let _ = app.emit("pricing-state", ());
+    crate::emit_if_main_visible(&app, crate::MainSignal::PricingState, ());
     result
 }
 #[tauri::command]
@@ -145,8 +144,8 @@ pub async fn reload_pricing(r: R<'_>, app: tauri::AppHandle) -> Result<pricing::
     tokio::task::spawn_blocking(move || service.backfill_prices())
         .await
         .map_err(|_| failure("价格补算中断"))??;
-    let _ = app.emit("usage-state", ());
-    let _ = app.emit("pricing-state", ());
+    crate::emit_if_main_visible(&app, crate::MainSignal::UsageState, ());
+    crate::emit_if_main_visible(&app, crate::MainSignal::PricingState, ());
     Ok(result)
 }
 #[tauri::command]
@@ -167,9 +166,8 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
         while let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
             events.recv().await
         {
-            for window in crate::visible_windows(&handle) {
-                let _ = window.emit("usage-state", ());
-            }
+            crate::coalesce_gateway_events(&mut events);
+            crate::emit_if_main_visible(&handle, crate::MainSignal::UsageState, ());
         }
     });
     // Price checks must not wait behind a session scan or historical compaction.
@@ -186,14 +184,18 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
             let usage = runtime.usage.clone();
             if runtime.smoke.is_none() {
                 if let Ok(prices) = usage.prices() {
-                    let before = prices.view();
+                    let before = prices.sync_stamp();
                     let _ = prices.update(false).await;
-                    let after = prices.view();
-                    if before.version != after.version {
+                    let after = prices.sync_stamp();
+                    if before.0 != after.0 {
                         usage.schedule_price_backfill();
                     }
-                    if before.checked_at != after.checked_at {
-                        crate::emit_if_main_visible(&price_handle, "pricing-state", ());
+                    if before.1 != after.1 {
+                        crate::emit_if_main_visible(
+                            &price_handle,
+                            crate::MainSignal::PricingState,
+                            (),
+                        );
                     }
                 }
             }

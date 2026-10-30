@@ -300,12 +300,11 @@ fn grok_import_does_not_adopt_local_credentials_from_an_old_loopback_address() {
 
 fn save_local(gateway: &Gateway, token: &str) {
     let mut state = gateway.0.inner.lock().unwrap();
-    state.store.local_token = token.to_owned();
+    state.editable_mut().store.local_token = token.to_owned();
     state.revision = state
         .store
         .persist(&gateway.0.data.join("gateway.json"), &state.revision)
         .unwrap();
-    state.refresh_editable_digest(gateway.0.client);
 }
 
 fn provider(gateway: &Gateway, home: &Path) {

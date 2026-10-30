@@ -520,7 +520,7 @@ pub struct Change {
 }
 #[derive(Default)]
 struct Journal {
-    records: VecDeque<Record>,
+    records: VecDeque<Arc<Record>>,
     // Runtime health can refer to a just-merged event. Keep bounded aliases for
     // those links; persisted terminal events use the canonical row ID.
     aliases: VecDeque<(String, String)>,
@@ -536,6 +536,29 @@ impl Journal {
                 .records
                 .iter()
                 .any(|r| r.last_at < now().saturating_sub(RETENTION))
+    }
+    fn retain_since(&mut self, cutoff: u64) -> bool {
+        let before = self.records.len();
+        self.records.retain(|r| r.last_at >= cutoff);
+        let pruned = self.records.len() != before;
+        let retained: HashSet<_> = self.records.iter().map(|r| r.id.as_str()).collect();
+        self.aliases
+            .retain(|(_, target)| retained.contains(target.as_str()));
+        pruned
+    }
+    fn prepare_rewrite(&mut self, path: &Path, force: bool) -> Option<Vec<Arc<Record>>> {
+        if !force && !self.needs_write(path) {
+            return None;
+        }
+        self.retain_since(now().saturating_sub(RETENTION));
+        self.dirty = true;
+        Some(self.records.iter().cloned().collect())
+    }
+    fn retained_raw_ids(&self) -> HashSet<String> {
+        self.records
+            .iter()
+            .filter_map(|r| r.details.raw_error.as_ref().map(|r| r.id.clone()))
+            .collect()
     }
 }
 enum Job {
@@ -643,7 +666,7 @@ fn load(path: &Path) -> Journal {
                         j.dirty |= sanitized != r.details;
                         r.details = sanitized;
                         if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
-                            j.records.push_back(r)
+                            j.records.push_back(Arc::new(r))
                         } else {
                             j.dirty = true;
                         }
@@ -722,24 +745,21 @@ where
             .map(|cause| cause.id.clone());
     }
 }
-fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
-    let cutoff = now().saturating_sub(RETENTION);
-    if !changed && !j.needs_write(path) {
-        return Ok(());
-    }
-    j.records.retain(|r| r.last_at >= cutoff);
-    let retained: std::collections::HashSet<_> = j.records.iter().map(|r| r.id.as_str()).collect();
-    j.aliases
-        .retain(|(_, target)| retained.contains(target.as_str()));
-    j.dirty = true;
+fn write_records_stream(path: &Path, records: &[Arc<Record>]) -> Result<()> {
     storage::atomic_write_stream(path, |writer| {
-        for record in &j.records {
-            serde_json::to_writer(&mut *writer, record)?;
+        for record in records {
+            serde_json::to_writer(&mut *writer, record.as_ref())?;
             writer.write_all(b"\n")?;
         }
         Ok(())
-    })?;
-    j.dirty = false;
+    })
+}
+#[cfg(test)]
+fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
+    if let Some(snapshot) = j.prepare_rewrite(path, changed) {
+        write_records_stream(path, &snapshot)?;
+        j.dirty = false;
+    }
     Ok(())
 }
 impl Service {
@@ -755,12 +775,34 @@ impl Service {
         std::thread::spawn(move || {
             // Retention also runs after restart, before processing queued writes.
             {
-                let mut initial = j.lock().unwrap();
-                if initial.error.is_none() && path.exists() {
-                    if persist(&mut initial, &path, false).is_err() {
+                let startup = {
+                    let mut initial = j.lock().unwrap();
+                    (initial.error.is_none() && path.exists()).then(|| {
+                        let snapshot = initial.prepare_rewrite(&path, false);
+                        let retained = initial.retained_raw_ids();
+                        (snapshot, retained)
+                    })
+                };
+                if let Some((snapshot, retained)) = startup {
+                    let written = match &snapshot {
+                        Some(records) => write_records_stream(&path, records),
+                        None => Ok(()),
+                    };
+                    let pruned = if written.is_ok() {
+                        prune_raw_ids(&raw_path, &retained)
+                    } else {
+                        Ok(())
+                    };
+                    let mut initial = j.lock().unwrap();
+                    if written.is_err() {
                         initial.error = Some("日志写入失败，请检查文件权限与空间".into());
-                    } else if prune_raw(&raw_path, &initial).is_err() {
-                        initial.error = Some("日志原文清理失败，请重试".into());
+                    } else {
+                        if snapshot.is_some() {
+                            initial.dirty = false;
+                        }
+                        if pruned.is_err() {
+                            initial.error = Some("日志原文清理失败，请重试".into());
+                        }
                     }
                 }
             }
@@ -853,11 +895,13 @@ impl Service {
                                     guard
                                         .records
                                         .iter()
+                                        .map(Arc::as_ref)
                                         .chain(staged.iter().map(|(rec, _)| rec)),
                                 );
                                 if guard
                                     .records
                                     .iter()
+                                    .map(Arc::as_ref)
                                     .chain(staged.iter().map(|(rec, _)| rec))
                                     .rev()
                                     .any(|old| {
@@ -882,7 +926,7 @@ impl Service {
                         let result = append_lines(&path, &rows);
                         let error = {
                             let mut guard = j.lock().unwrap();
-                            guard.records.extend(rows);
+                            guard.records.extend(rows.into_iter().map(Arc::new));
                             if result.is_err() {
                                 guard.dirty = true;
                                 guard.error = Some("日志写入失败，请检查文件权限与空间".into());
@@ -926,12 +970,19 @@ impl Service {
                             notify = r.reason.notifiable(r.action);
                             let outcome = {
                                 let mut journal = j.lock().unwrap();
-                                resolve_cause_id(&mut r, &journal.aliases, journal.records.iter());
-                                if let Some(old) = journal.records.iter_mut().rev().find(|old| {
-                                    old.same(&r)
-                                        && r.last_at.saturating_sub(old.first_at)
-                                            < r.merge_seconds()
-                                }) {
+                                resolve_cause_id(
+                                    &mut r,
+                                    &journal.aliases,
+                                    journal.records.iter().map(Arc::as_ref),
+                                );
+                                if let Some(old_arc) =
+                                    journal.records.iter_mut().rev().find(|old| {
+                                        old.same(&r)
+                                            && r.last_at.saturating_sub(old.first_at)
+                                                < r.merge_seconds()
+                                    })
+                                {
+                                    let old = Arc::make_mut(old_arc);
                                     old.last_at = r.last_at;
                                     old.count = old.count.saturating_add(1);
                                     old.status = r.status;
@@ -950,7 +1001,7 @@ impl Service {
                                     Ok(snapshot)
                                 } else if raw.is_none() {
                                     let snapshot = r.clone();
-                                    journal.records.push_back(r);
+                                    journal.records.push_back(Arc::new(r));
                                     Ok(snapshot)
                                 } else {
                                     Err(r)
@@ -975,13 +1026,14 @@ impl Service {
                                             Some("错误原文保存失败，请检查文件权限与空间".into());
                                     }
                                     changed = Some(r.clone());
-                                    journal.records.push_back(r);
+                                    journal.records.push_back(Arc::new(r));
                                 }
                             }
                         }
                         Job::NotificationAccepted(id) => {
                             let mut journal = j.lock().unwrap();
-                            if let Some(r) = journal.records.iter_mut().find(|r| r.id == id) {
+                            if let Some(r_arc) = journal.records.iter_mut().find(|r| r.id == id) {
+                                let r = Arc::make_mut(r_arc);
                                 r.notified_at = now();
                                 changed = Some(r.clone());
                             }
@@ -990,44 +1042,16 @@ impl Service {
                     }
                     changes.push((changed, notify));
                 }
-                let (payload, retained_raw_ids) = {
-                    let mut guard = j.lock().unwrap();
-                    let journal = &mut *guard;
+                let (snapshot, retained_raw_ids) = {
+                    let mut journal = j.lock().unwrap();
                     let before_retention = journal.records.len();
-                    let cutoff = now().saturating_sub(RETENTION);
-                    let payload = if !prune_only || journal.needs_write(&path) {
-                        journal.records.retain(|r| r.last_at >= cutoff);
-                        let retained: HashSet<_> =
-                            journal.records.iter().map(|r| r.id.as_str()).collect();
-                        journal
-                            .aliases
-                            .retain(|(_, target)| retained.contains(target.as_str()));
-                        journal.dirty = true;
-                        let mut buf = Vec::with_capacity(journal.records.len() * 256);
-                        for record in &journal.records {
-                            serde_json::to_writer(&mut buf, record)
-                                .expect("serializable diagnostic record");
-                            buf.push(b'\n');
-                        }
-                        Some(buf)
-                    } else {
-                        None
-                    };
-                    let retained_raw =
-                        (cleanup || journal.records.len() != before_retention).then(|| {
-                            journal
-                                .records
-                                .iter()
-                                .filter_map(|r| r.details.raw_error.as_ref().map(|r| r.id.clone()))
-                                .collect::<HashSet<_>>()
-                        });
-                    (payload, retained_raw)
+                    let snapshot = journal.prepare_rewrite(&path, !prune_only);
+                    let retained_raw = (cleanup || journal.records.len() != before_retention)
+                        .then(|| journal.retained_raw_ids());
+                    (snapshot, retained_raw)
                 };
-                let result = match &payload {
-                    Some(bytes) => storage::atomic_write_stream(&path, |writer| {
-                        writer.write_all(bytes)?;
-                        Ok(())
-                    }),
+                let result = match &snapshot {
+                    Some(records) => write_records_stream(&path, records),
                     None => Ok(()),
                 };
                 let raw_pruned = if result.is_ok() {
@@ -1042,7 +1066,7 @@ impl Service {
                 let error = {
                     let mut journal = j.lock().unwrap();
                     if result.is_ok() {
-                        if payload.is_some() {
+                        if snapshot.is_some() {
                             journal.dirty = false;
                         }
                         if raw_pruned.is_err() {
@@ -1131,7 +1155,7 @@ impl Service {
                 .take(50)
                 .map(|r| ClassifiedRecord {
                     origin: r.origin(),
-                    record: r.clone(),
+                    record: (**r).clone(),
                     category: classify(r, &causes),
                 })
                 .collect(),
@@ -1157,7 +1181,7 @@ impl Service {
             .find(|r| r.visible() && r.id == target && r.last_at >= cutoff)
             .map(|r| ClassifiedRecord {
                 origin: r.origin(),
-                record: r.clone(),
+                record: (**r).clone(),
                 category: classify(r, &causes),
             })
     }
@@ -1180,12 +1204,7 @@ impl Service {
 }
 
 fn prune_raw(directory: &Path, journal: &Journal) -> std::io::Result<()> {
-    let retained: HashSet<_> = journal
-        .records
-        .iter()
-        .filter_map(|r| r.details.raw_error.as_ref().map(|r| r.id.clone()))
-        .collect();
-    prune_raw_ids(directory, &retained)
+    prune_raw_ids(directory, &journal.retained_raw_ids())
 }
 
 fn prune_raw_ids(directory: &Path, retained: &HashSet<String>) -> std::io::Result<()> {
@@ -1370,7 +1389,7 @@ mod routing_visibility_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.jsonl");
         let mut journal = Journal::default();
-        journal.records.push_back(Record::new(
+        journal.records.push_back(Arc::new(Record::new(
             None,
             None,
             None,
@@ -1378,7 +1397,7 @@ mod routing_visibility_tests {
             Action::Stopped,
             None,
             None,
-        ));
+        )));
         persist(&mut journal, &path, true).unwrap();
         let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
         std::fs::File::options()
@@ -1392,7 +1411,7 @@ mod routing_visibility_tests {
             std::fs::metadata(&path).unwrap().modified().unwrap(),
             old_time
         );
-        journal.records[0].last_at = now() - RETENTION - 1;
+        Arc::make_mut(&mut journal.records[0]).last_at = now() - RETENTION - 1;
         persist(&mut journal, &path, false).unwrap();
         assert!(journal.records.is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), b"");
@@ -1449,11 +1468,16 @@ mod routing_visibility_tests {
         *service.journal.lock().unwrap() = loaded;
         assert_eq!(service.query(Filter::default()).total, 5);
         // Query/count also defend against routine records still held in memory.
-        let mut routine = service.journal.lock().unwrap().records[0].clone();
+        let mut routine = (*service.journal.lock().unwrap().records[0]).clone();
         routine.id = uuid::Uuid::new_v4().to_string();
         routine.details.routing.as_mut().unwrap().failure = None;
         let id = routine.id.clone();
-        service.journal.lock().unwrap().records.push_back(routine);
+        service
+            .journal
+            .lock()
+            .unwrap()
+            .records
+            .push_back(Arc::new(routine));
         assert_eq!(
             service
                 .query(Filter {

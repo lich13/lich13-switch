@@ -344,8 +344,14 @@ mod tests {
     #[tokio::test]
     async fn failed_refresh_retains_saved_catalog_and_does_not_change_credentials() {
         let (home, _parent, gateway) = tests_v02516::fixture();
-        gateway.0.inner.lock().unwrap().store.dsh_catalog =
-            vec![json!({"id":"deepseek-future","name":"Future"})];
+        gateway
+            .0
+            .inner
+            .lock()
+            .unwrap()
+            .editable_mut()
+            .store
+            .dsh_catalog = vec![json!({"id":"deepseek-future","name":"Future"})];
         let before = std::fs::read(home.path().join(".credentials.yaml")).unwrap();
         let result = gateway
             .dsh_official_models(home.path(), true)

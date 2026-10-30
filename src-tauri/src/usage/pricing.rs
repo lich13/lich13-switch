@@ -361,6 +361,10 @@ impl Pricing {
     pub(super) fn content_version(&self) -> String {
         self.state.read().unwrap().cache.catalog_hash.clone()
     }
+    pub(super) fn sync_stamp(&self) -> (String, Option<i64>) {
+        let s = self.state.read().unwrap();
+        (s.cache.hash.clone(), s.cache.checked_at)
+    }
     pub fn configure(&self, c: Config, expected: &str) -> Result<View> {
         valid_config(&c)?;
         let mut guard = self.state.write().unwrap();

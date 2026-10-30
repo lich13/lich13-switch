@@ -46,6 +46,7 @@ fn gateway(home: &Path) -> Gateway {
         .unwrap();
     let mut state = gateway.0.inner.lock().unwrap();
     state
+        .editable_mut()
         .store
         .edit(
             Edit::SaveDshProvider {
@@ -63,7 +64,6 @@ fn gateway(home: &Path) -> Gateway {
         .store
         .persist(&gateway.0.data.join("gateway.json"), &state.revision)
         .unwrap();
-    state.refresh_editable_digest(gateway.0.client);
     drop(state);
     gateway
 }

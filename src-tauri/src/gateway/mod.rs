@@ -201,66 +201,133 @@ pub struct View {
     pub error: Option<String>,
     pub recovery_pending: bool,
 }
-struct Inner {
-    store: Store,
-    revision: String,
-    editable_digest: String,
-    running: bool,
-    upgrade_error: Option<AppError>,
-    shutdown: Option<watch::Sender<bool>>,
-    error: Option<String>,
-    circuits: HashMap<String, Circuit>,
-    model_circuits: HashMap<String, model_health::Models>,
-    affinity: HashMap<String, (String, Option<String>, Instant)>,
-    last_successful: Option<String>,
-    home: Option<PathBuf>,
-}
-impl Inner {
-    fn compute_editable_digest(
-        client: ClientId,
-        store: &Store,
-        running: bool,
-        home: Option<&Path>,
-        has_upgrade_error: bool,
-    ) -> String {
-        let editable = (
-            client,
-            (&store.providers, &store.quota_access_tokens),
-            &store.provider_endpoints,
-            &store.grok_connections,
-            &store.dsh_models,
-            &store.grok_api_model,
-            &store.connection,
-            &store.settings,
-            &store.mode,
-            &store.selected,
-            &store.local_token,
-            running,
-            home,
-            has_upgrade_error,
-        );
-        storage::digest(&serde_json::to_vec(&editable).expect("serializable gateway configuration"))
+mod inner_state {
+    use super::{model, model_health, storage, AppError, Circuit, ClientId, Store};
+    use std::{
+        collections::HashMap,
+        ops::Deref,
+        path::{Path, PathBuf},
+        sync::OnceLock,
+        time::Instant,
+    };
+    use tokio::sync::watch;
+
+    pub(in crate::gateway) struct EditableState {
+        pub(in crate::gateway) store: Store,
+        pub(in crate::gateway) running: bool,
+        pub(in crate::gateway) upgrade_error: Option<AppError>,
+        pub(in crate::gateway) home: Option<PathBuf>,
     }
-    pub(super) fn refresh_editable_digest(&mut self, client: ClientId) {
-        self.editable_digest = Self::compute_editable_digest(
-            client,
-            &self.store,
-            self.running,
-            self.home.as_deref(),
-            self.upgrade_error.is_some(),
-        );
+
+    pub(in crate::gateway) struct Inner {
+        editable: EditableState,
+        editable_digest: OnceLock<String>,
+        pub(in crate::gateway) revision: String,
+        pub(in crate::gateway) shutdown: Option<watch::Sender<bool>>,
+        pub(in crate::gateway) error: Option<String>,
+        pub(in crate::gateway) circuits: HashMap<String, Circuit>,
+        pub(in crate::gateway) model_circuits: HashMap<String, model_health::Models>,
+        pub(in crate::gateway) affinity: HashMap<String, (String, Option<String>, Instant)>,
+        pub(in crate::gateway) last_successful: Option<String>,
+    }
+
+    impl Deref for Inner {
+        type Target = EditableState;
+        fn deref(&self) -> &Self::Target {
+            &self.editable
+        }
+    }
+
+    impl Inner {
+        pub(in crate::gateway) fn new(
+            store: Store,
+            revision: String,
+            upgrade_error: Option<AppError>,
+            error: Option<String>,
+        ) -> Self {
+            Self {
+                editable: EditableState {
+                    store,
+                    running: false,
+                    upgrade_error,
+                    home: None,
+                },
+                editable_digest: OnceLock::new(),
+                revision,
+                shutdown: None,
+                error,
+                circuits: HashMap::new(),
+                model_circuits: HashMap::new(),
+                affinity: HashMap::new(),
+                last_successful: None,
+            }
+        }
+
+        pub(in crate::gateway) fn compute_editable_digest(
+            client: ClientId,
+            store: &Store,
+            running: bool,
+            home: Option<&Path>,
+            has_upgrade_error: bool,
+        ) -> String {
+            let editable = (
+                client,
+                (&store.providers, &store.quota_access_tokens),
+                &store.provider_endpoints,
+                &store.grok_connections,
+                &store.dsh_models,
+                &store.grok_api_model,
+                &store.connection,
+                &store.settings,
+                &store.mode,
+                &store.selected,
+                &store.local_token,
+                running,
+                home,
+                has_upgrade_error,
+            );
+            storage::digest(
+                &serde_json::to_vec(&editable).expect("serializable gateway configuration"),
+            )
+        }
+
+        pub(in crate::gateway) fn editable_mut(&mut self) -> &mut EditableState {
+            self.editable_digest.take();
+            &mut self.editable
+        }
+
+        pub(in crate::gateway) fn store_resume_mut(&mut self) -> &mut Option<model::Resume> {
+            &mut self.editable.store.resume
+        }
+
+        pub(in crate::gateway) fn editable_digest(&self, client: ClientId) -> &str {
+            self.editable_digest.get_or_init(|| {
+                Self::compute_editable_digest(
+                    client,
+                    &self.editable.store,
+                    self.editable.running,
+                    self.editable.home.as_deref(),
+                    self.editable.upgrade_error.is_some(),
+                )
+            })
+        }
+
+        #[cfg(test)]
+        pub(in crate::gateway) fn has_cached_editable_digest(&self) -> bool {
+            self.editable_digest.get().is_some()
+        }
     }
 }
+use inner_state::Inner;
+
 type CachedConfigPair = Result<(String, takeover::Pair)>;
-type CachedCodexApiToml = Result<(String, Option<String>)>;
-type CachedCodexApiAuth = (String, Result<Option<String>>);
 
 #[derive(Default)]
 struct ViewConfigCache {
     claude: crate::auth_cache::Cache<(CachedConfigPair, Option<String>)>,
     codex_bearer: crate::auth_cache::Cache<CachedConfigPair>,
-    codex_api_toml: (String, crate::auth_cache::Cache<CachedCodexApiToml>),
-    codex_api_auth: crate::auth_cache::Cache<CachedCodexApiAuth>,
+    codex_api_toml: (String, crate::auth_cache::Cache<codex_api::CachedToml>),
+    codex_api_auth: crate::auth_cache::Cache<codex_api::CachedAuth>,
     grok: crate::auth_cache::Cache<(Option<Vec<u8>>, CachedConfigPair)>,
 }
 struct Shared {
@@ -562,8 +629,6 @@ impl Gateway {
         admission.configure(&store.providers, false);
         admission.configure_retention(store.settings.thread_idle_release_seconds);
         let local_token = store.local_token.clone();
-        let editable_digest =
-            Inner::compute_editable_digest(client, &store, false, None, upgrade_error.is_some());
         let gateway = Self(Arc::new(Shared {
             #[cfg(test)]
             discover_new_providers: std::sync::atomic::AtomicBool::new(false),
@@ -572,20 +637,7 @@ impl Gateway {
             diagnostics: Mutex::new(None),
             usage: Mutex::new(None),
             registry: registry.clone(),
-            inner: Mutex::new(Inner {
-                store,
-                revision,
-                editable_digest,
-                running: false,
-                upgrade_error,
-                shutdown: None,
-                error,
-                circuits: HashMap::new(),
-                model_circuits: HashMap::new(),
-                affinity: HashMap::new(),
-                last_successful: None,
-                home: None,
-            }),
+            inner: Mutex::new(Inner::new(store, revision, upgrade_error, error)),
             view_config_cache: Mutex::new(ViewConfigCache::default()),
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
@@ -625,8 +677,7 @@ impl Gateway {
         if let Err(e) = self.0.model_list.forget(&removed) {
             state.error = Some(e.message);
         }
-        state.store = store;
-        state.refresh_editable_digest(self.0.client);
+        state.editable_mut().store = store;
         self.0
             .registry
             .publish_token(&self.0, &state.store.local_token);
@@ -649,8 +700,7 @@ impl Gateway {
     pub fn import_initial(&self, home: &Path) -> Result<()> {
         let _guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
-        s.home = Some(home.to_owned());
-        s.refresh_editable_digest(self.0.client);
+        s.editable_mut().home = Some(home.to_owned());
         // Grok discovery is read-only. Its explicit import preview owns migration.
         if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             return Ok(());
@@ -780,18 +830,9 @@ impl Gateway {
         // File revisions also include resume checkpoints, which change after successful
         // auto-routing. Only configuration/lifecycle changes invalidate an editor.
         // Keep s.revision separate for the on-disk transaction checks below.
-        debug_assert_eq!(
-            s.editable_digest,
-            Inner::compute_editable_digest(
-                self.0.client,
-                &s.store,
-                s.running,
-                s.home.as_deref(),
-                s.upgrade_error.is_some(),
-            )
-        );
-        let mut buf = Vec::with_capacity(s.editable_digest.len() + 1 + listener_revision.len());
-        buf.extend_from_slice(s.editable_digest.as_bytes());
+        let editable_digest = s.editable_digest(self.0.client);
+        let mut buf = Vec::with_capacity(editable_digest.len() + 1 + listener_revision.len());
+        buf.extend_from_slice(editable_digest.as_bytes());
         buf.push(b':');
         buf.extend_from_slice(listener_revision.as_bytes());
         storage::digest(&buf)
@@ -1003,7 +1044,8 @@ impl Gateway {
     fn read_view_config(&self, view: &mut View, home: Option<&Path>, store: &Store) {
         let resolve = |name: &str| std::env::var(name).ok();
         let (grok_raw, config, claude_warning) = {
-            let mut cache = self.0.view_config_cache.lock().unwrap();
+            let mut cache_guard = self.0.view_config_cache.lock().unwrap();
+            let cache = &mut *cache_guard;
             match (self.0.client, home) {
                 (ClientId::Claude, Some(home)) => {
                     match cache.claude.read(&self.0.client.config(home), |bytes| {
@@ -1027,63 +1069,12 @@ impl Gateway {
                 }
                 (ClientId::Codex, Some(home)) => {
                     let parsed = match &store.connection {
-                        codex_api::Connection::ApiKey { provider } => {
-                            if cache.codex_api_toml.0 != *provider {
-                                cache.codex_api_toml.0.clone_from(provider);
-                                cache.codex_api_toml.1.clear();
-                            }
-                            let provider_id = provider.clone();
-                            match cache.codex_api_toml.1.read(
-                                &home.join("config.toml"),
-                                move |bytes| {
-                                    let raw = bytes.ok_or_else(|| {
-                                        AppError::new(code::CODEX_AUTH, "未找到 Codex config.toml")
-                                    })?;
-                                    let text = String::from_utf8(raw).map_err(|_| {
-                                        AppError::new(code::CODEX_AUTH, "Codex 配置必须使用 UTF-8")
-                                    })?;
-                                    let base_url = codex_api::base(&text, &provider_id)?;
-                                    Ok((storage::digest(text.as_bytes()), base_url))
-                                },
-                            ) {
-                                Ok(toml_entry) => match toml_entry.as_ref() {
-                                    Ok((config_digest, base_url)) => {
-                                        match cache.codex_api_auth.read(
-                                            &home.join("auth.json"),
-                                            |bytes| {
-                                                (
-                                                    storage::revision(bytes.as_deref()),
-                                                    codex_api::auth_api_key(bytes.as_deref()),
-                                                )
-                                            },
-                                        ) {
-                                            Ok(auth_entry) => match &auth_entry.1 {
-                                                Ok(token) => {
-                                                    let revision = storage::digest(
-                                                        &serde_json::to_vec(&(
-                                                            config_digest,
-                                                            &auth_entry.0,
-                                                        ))
-                                                        .unwrap(),
-                                                    );
-                                                    Ok((
-                                                        revision,
-                                                        takeover::Pair {
-                                                            base_url: base_url.clone(),
-                                                            token: token.clone(),
-                                                        },
-                                                    ))
-                                                }
-                                                Err(e) => Err(e.clone()),
-                                            },
-                                            Err(e) => Err(e),
-                                        }
-                                    }
-                                    Err(e) => Err(e.clone()),
-                                },
-                                Err(e) => Err(e),
-                            }
-                        }
+                        codex_api::Connection::ApiKey { provider } => codex_api::read_cached(
+                            home,
+                            provider,
+                            &mut cache.codex_api_toml,
+                            &mut cache.codex_api_auth,
+                        ),
                         codex_api::Connection::Bearer => {
                             match cache
                                 .codex_bearer
@@ -1187,7 +1178,7 @@ impl Gateway {
             next.successful_codex_identity = None;
             match next.persist(&self.0.data.join("gateway.json"), &state.revision) {
                 Ok(revision) => {
-                    state.store = next;
+                    state.editable_mut().store = next;
                     state.revision = revision;
                 }
                 Err(_) => {
@@ -1195,8 +1186,7 @@ impl Gateway {
                 }
             }
         }
-        state.home = Some(home.to_owned());
-        state.refresh_editable_digest(self.0.client);
+        state.editable_mut().home = Some(home.to_owned());
     }
     pub fn is_running(&self) -> bool {
         self.0.inner.lock().map(|s| s.running).unwrap_or(false)
@@ -1621,8 +1611,7 @@ impl Gateway {
         s.circuits.retain(|key, _| keys.contains(key));
         s.model_circuits.retain(|key, _| keys.contains(key));
         s.revision = revision;
-        s.home = Some(home.to_owned());
-        s.refresh_editable_digest(self.0.client);
+        s.editable_mut().home = Some(home.to_owned());
         self.sync_single_protection(&s);
         self.0.admission.configure(&s.store.providers, s.running);
         self.0
@@ -1769,12 +1758,14 @@ impl Gateway {
                     )?;
                     self.replace_store(&mut s, next);
                     s.revision = storage::digest(after.as_bytes());
-                    s.home = Some(home.to_owned());
+                    {
+                        let editable = s.editable_mut();
+                        editable.home = Some(home.to_owned());
+                        editable.running = true;
+                    }
                     s.last_successful = None;
-                    s.running = true;
                     s.shutdown = Some(tx);
                     s.error = listener.notice;
-                    s.refresh_editable_digest(self.0.client);
                     self.0.admission.configure(&s.store.providers, true);
                     self.0
                         .admission
@@ -1896,9 +1887,8 @@ impl Gateway {
                     if let Some(shutdown) = state.shutdown.take() {
                         let _ = shutdown.send(true);
                     }
-                    state.running = false;
+                    state.editable_mut().running = false;
                     state.error = Some(error.message.clone());
-                    state.refresh_editable_digest(peer.client);
                     peer.admission.configure(&state.store.providers, false);
                     peer.probe_wake.notify_one();
                 }
@@ -1993,9 +1983,11 @@ impl Gateway {
             if let Some(tx) = s.shutdown.take() {
                 let _ = tx.send(true);
             }
-            s.running = false;
-            s.upgrade_error = None;
-            s.refresh_editable_digest(self.0.client);
+            {
+                let editable = s.editable_mut();
+                editable.running = false;
+                editable.upgrade_error = None;
+            }
             self.0.admission.configure(&s.store.providers, false);
             self.0
                 .admission
@@ -2074,7 +2066,7 @@ impl Gateway {
                     true,
                     None,
                 )?;
-                self.replace_store(&mut s, next);
+                *s.store_resume_mut() = next.resume;
                 s.revision = storage::digest(after.as_bytes());
                 Ok(())
             })();
@@ -2345,7 +2337,7 @@ impl Gateway {
         }
         match next.persist(&self.0.data.join("gateway.json"), &s.revision) {
             Ok(revision) => {
-                s.store = next;
+                s.editable_mut().store = next;
                 s.revision = revision;
             }
             Err(_) => {

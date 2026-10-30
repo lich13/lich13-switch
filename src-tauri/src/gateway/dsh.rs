@@ -1130,8 +1130,7 @@ impl Gateway {
             let mut state = self.0.inner.lock().unwrap();
             self.replace_store(&mut state, store);
             state.revision = revision;
-            state.upgrade_error = None;
-            state.refresh_editable_digest(self.0.client);
+            state.editable_mut().upgrade_error = None;
         }
         Ok(())
     }
@@ -1384,10 +1383,12 @@ impl Gateway {
                 if !s.running {
                     s.shutdown = Some(tokio::sync::watch::channel(false).0);
                 }
-                s.running = true;
-                s.home = Some(home.to_owned());
+                {
+                    let editable = s.editable_mut();
+                    editable.running = true;
+                    editable.home = Some(home.to_owned());
+                }
                 s.error = listener.notice;
-                s.refresh_editable_digest(self.0.client);
                 self.0.admission.configure(&s.store.providers, true);
                 self.0
                     .admission
@@ -1454,9 +1455,8 @@ impl Gateway {
             if let Some(shutdown) = s.shutdown.take() {
                 let _ = shutdown.send(true);
             }
-            s.running = false;
+            s.editable_mut().running = false;
             s.error = None;
-            s.refresh_editable_digest(self.0.client);
             self.0.admission.configure(&s.store.providers, false);
             self.wake_endpoint_prober();
         }
@@ -1818,8 +1818,7 @@ mod tests {
             state.revision = store
                 .persist(&gateway.0.data.join("gateway.json"), &state.revision)
                 .unwrap();
-            state.store = store;
-            state.refresh_editable_digest(gateway.0.client);
+            state.editable_mut().store = store;
         }
         let preview = gateway
             .preview_dsh(dir.path(), Some("default"), Protocol::ChatCompletions)

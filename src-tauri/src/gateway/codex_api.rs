@@ -172,8 +172,51 @@ pub fn base(text: &str, id: &str) -> Result<Option<String>> {
             .ok_or_else(|| invalid("base_url 必须是字符串")),
     }
 }
-pub(super) fn auth_api_key(raw: Option<&[u8]>) -> Result<Option<String>> {
+fn auth_api_key(raw: Option<&[u8]>) -> Result<Option<String>> {
     api_key(&auth(raw)?)
+}
+fn pair_revision(config_digest: &str, auth_revision: &str) -> String {
+    storage::digest(
+        &serde_json::to_vec(&(config_digest, auth_revision))
+            .expect("codex api revision serializes"),
+    )
+}
+pub(super) type CachedToml = Result<(String, Option<String>)>;
+pub(super) type CachedAuth = (String, Result<Option<String>>);
+
+pub(super) fn read_cached(
+    home: &Path,
+    provider: &str,
+    toml_cache: &mut (String, crate::auth_cache::Cache<CachedToml>),
+    auth_cache: &mut crate::auth_cache::Cache<CachedAuth>,
+) -> Result<(String, Pair)> {
+    if toml_cache.0 != provider {
+        toml_cache.0.clear();
+        toml_cache.0.push_str(provider);
+        toml_cache.1.clear();
+    }
+    let provider_id = provider.to_owned();
+    let toml_entry = toml_cache.1.read(&home.join("config.toml"), move |bytes| {
+        let raw = bytes.ok_or_else(|| invalid("未找到 Codex config.toml"))?;
+        let text = String::from_utf8(raw).map_err(|_| invalid("Codex 配置必须使用 UTF-8"))?;
+        let base_url = base(&text, &provider_id)?;
+        Ok((storage::digest(text.as_bytes()), base_url))
+    })?;
+    let (config_digest, base_url) = toml_entry.as_ref().as_ref().map_err(Clone::clone)?;
+    let auth_entry = auth_cache.read(&home.join("auth.json"), |bytes| {
+        (
+            storage::revision(bytes.as_deref()),
+            auth_api_key(bytes.as_deref()),
+        )
+    })?;
+    let token = auth_entry.1.as_ref().map_err(Clone::clone)?.clone();
+    Ok((
+        pair_revision(config_digest, &auth_entry.0),
+        Pair {
+            base_url: base_url.clone(),
+            token,
+        },
+    ))
 }
 pub fn read(home: &Path, id: &str) -> Result<(String, Pair)> {
     let config = text(home)?;
@@ -182,12 +225,9 @@ pub fn read(home: &Path, id: &str) -> Result<(String, Pair)> {
         base_url: base(&config, id)?,
         token: auth_api_key(raw.as_deref())?,
     };
-    let revision = storage::digest(
-        &serde_json::to_vec(&(
-            storage::digest(config.as_bytes()),
-            storage::revision(raw.as_deref()),
-        ))
-        .unwrap(),
+    let revision = pair_revision(
+        &storage::digest(config.as_bytes()),
+        &storage::revision(raw.as_deref()),
     );
     Ok((revision, pair))
 }

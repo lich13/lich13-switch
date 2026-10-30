@@ -215,7 +215,14 @@ fn admission_rechecks_changed_models_queue_and_receiver_flags() {
         provider("fixture-a", Some("fixture-main"), true),
         provider("fixture-b", None, false),
     ];
-    gateway.0.inner.lock().unwrap().store.providers = providers.to_vec();
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers = providers.to_vec();
     establish(registry, &key, &providers);
     let main = Requirement::model(Some("fixture-main"));
     let pending = registry
@@ -228,8 +235,15 @@ fn admission_rechecks_changed_models_queue_and_receiver_flags() {
             None,
         )
         .unwrap();
-    gateway.0.inner.lock().unwrap().store.providers[0].allowed_models =
-        Some(vec!["fixture-other".into()]);
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers[0]
+        .allowed_models = Some(vec!["fixture-other".into()]);
     assert_eq!(
         pending
             .admit_request(&gateway, &providers[1], &main, false)
@@ -256,19 +270,36 @@ fn admission_rechecks_changed_models_queue_and_receiver_flags() {
     // detour, and a newly special-only receiver no longer accepts it.
     {
         let mut state = gateway.0.inner.lock().unwrap();
-        state.store.providers[0].allowed_models = None;
-        state.store.providers[1].take_new_threads = true;
+        let store = &mut state.editable_mut().store;
+        store.providers[0].allowed_models = None;
+        store.providers[1].take_new_threads = true;
     }
     assert!(readonly
         .admit_request(&gateway, &providers[1], &side, false)
         .is_err());
-    gateway.0.inner.lock().unwrap().store.providers[1].take_new_threads = false;
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers[1]
+        .take_new_threads = false;
     assert!(readonly
         .admit_request(&gateway, &providers[1], &side, false)
         .unwrap());
     readonly.complete("fixture-b", None);
     assert_eq!(snapshot(registry, &key), before);
-    gateway.0.inner.lock().unwrap().store.providers[1].queued = false;
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers[1]
+        .queued = false;
     assert!(readonly
         .admit_request(&gateway, &providers[1], &side, false)
         .is_err());

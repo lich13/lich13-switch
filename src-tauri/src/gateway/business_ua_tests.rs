@@ -186,9 +186,9 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
     let gateway = Gateway::new(dir.path().join("data")).unwrap();
     {
         let mut state = gateway.0.inner.lock().unwrap();
+        let store = &mut state.editable_mut().store;
         for (name, search_only) in [("search", true), ("ordinary", false)] {
-            state
-                .store
+            store
                 .edit(
                     Edit::SaveProvider {
                         search_only: None,
@@ -201,12 +201,12 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
                     false,
                 )
                 .unwrap();
-            let provider = state.store.providers.last_mut().unwrap();
+            let provider = store.providers.last_mut().unwrap();
             provider.queued = true;
             provider.search_only = search_only;
             provider.allowed_models = Some(vec![format!("fixture-{name}")]);
         }
-        state.store.mode = "auto".into();
+        store.mode = "auto".into();
         assert_eq!(
             Gateway::exit_provider(&state.store, Some(&state.store.providers[0].id))
                 .unwrap()

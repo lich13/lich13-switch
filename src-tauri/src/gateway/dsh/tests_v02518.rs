@@ -108,8 +108,14 @@ async fn mapping_save_updates_every_active_catalog_and_retains_model_choices() {
         .await
         .unwrap();
     change_default(home.path(), "desktop", "deepseek-future", "max");
-    gateway.0.inner.lock().unwrap().store.dsh_catalog =
-        vec![serde_json::json!({"id":"deepseek-future","name":"Future"})];
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .dsh_catalog = vec![serde_json::json!({"id":"deepseek-future","name":"Future"})];
     let id = gateway.view().providers[0].id.clone();
     gateway
         .edit(

@@ -39,14 +39,9 @@ vi.mock("@uiw/react-codemirror", () => ({
 }));
 import ConfigEditor from "./ConfigEditor";
 import { get } from "./claude-settings";
-import {
-  getCachedCodeMirrorSurface,
-  loadCodeMirrorSurface,
-  resetCodeMirrorLoaderForTests,
-} from "./codeMirrorLoader";
+import { getCachedCodeMirrorSurface } from "./codeMirrorLoader";
 let doc: ConfigDocument;
 beforeEach(() => {
-  resetCodeMirrorLoaderForTests();
   localStorage.clear();
   localStorage.setItem("lich13-switch.config.client", "claude");
   mocks.events.clear();
@@ -358,15 +353,21 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
 });
 
 it("recovers cleanly after a transient CodeMirror lazy-load failure", async () => {
-  let attempts = 0;
-  resetCodeMirrorLoaderForTests(async () => {
-    attempts += 1;
-    if (attempts === 1) throw new Error("chunk load failed");
-    return import("./CodeMirrorSurface");
-  });
-  await expect(loadCodeMirrorSurface()).rejects.toThrow("chunk load failed");
-  expect(getCachedCodeMirrorSurface()).toBeNull();
-  const Loaded = await loadCodeMirrorSurface();
-  expect(Loaded).toBeTypeOf("function");
-  expect(getCachedCodeMirrorSurface()).toBe(Loaded);
+  vi.resetModules();
+  const FakeSurface = (() => null) as unknown as typeof import("./CodeMirrorSurface").default;
+  vi.doMock("./CodeMirrorSurface", () =>
+    Promise.reject(new Error("chunk load failed")),
+  );
+  try {
+    const loaderMod = await import("./codeMirrorLoader");
+    await expect(loaderMod.loadCodeMirrorSurface()).rejects.toThrow();
+    expect(loaderMod.getCachedCodeMirrorSurface()).toBeNull();
+    vi.doMock("./CodeMirrorSurface", () => ({ default: FakeSurface }));
+    const Loaded = await loaderMod.loadCodeMirrorSurface();
+    expect(Loaded).toBe(FakeSurface);
+    expect(loaderMod.getCachedCodeMirrorSurface()).toBe(FakeSurface);
+  } finally {
+    vi.doUnmock("./CodeMirrorSurface");
+    vi.resetModules();
+  }
 });

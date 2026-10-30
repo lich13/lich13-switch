@@ -2,10 +2,7 @@ import { useEffect, useState, type ComponentType } from "react";
 import type { CodeMirrorSurfaceProps } from "./CodeMirrorSurface";
 
 export type CodeMirrorSurfaceComponent = ComponentType<CodeMirrorSurfaceProps>;
-type Loader = () => Promise<{ default: CodeMirrorSurfaceComponent }>;
 
-const defaultLoader: Loader = () => import("./CodeMirrorSurface");
-let loader: Loader = defaultLoader;
 let cached: CodeMirrorSurfaceComponent | null = null;
 let pending: Promise<CodeMirrorSurfaceComponent> | null = null;
 
@@ -16,7 +13,7 @@ export function getCachedCodeMirrorSurface(): CodeMirrorSurfaceComponent | null 
 export function loadCodeMirrorSurface(): Promise<CodeMirrorSurfaceComponent> {
   if (cached) return Promise.resolve(cached);
   if (!pending) {
-    pending = loader()
+    pending = import("./CodeMirrorSurface")
       .then((mod) => {
         cached = mod.default;
         return cached;
@@ -55,10 +52,4 @@ export function useCodeMirrorSurface(
     };
   }, [enabled, Surface, onError]);
   return enabled ? Surface ?? cached : Surface;
-}
-
-export function resetCodeMirrorLoaderForTests(custom?: Loader): void {
-  cached = null;
-  pending = null;
-  loader = custom ?? defaultLoader;
 }

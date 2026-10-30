@@ -698,9 +698,8 @@ impl Gateway {
             JOURNAL_LIMIT,
         )?;
         if let Err(e) = transaction.apply(&self.0.data) {
-            s.upgrade_error = Some(e.clone());
+            s.editable_mut().upgrade_error = Some(e.clone());
             s.error = Some(e.message.clone());
-            s.refresh_editable_digest(self.0.client);
             drop(pending);
             drop(s);
             self.changed();
@@ -708,8 +707,7 @@ impl Gateway {
         }
         self.replace_store(&mut s, next);
         s.revision = storage::digest(after.as_bytes());
-        s.home = Some(home.to_owned());
-        s.refresh_editable_digest(self.0.client);
+        s.editable_mut().home = Some(home.to_owned());
         self.0.admission.configure(&s.store.providers, false);
         *pending = None;
         drop(pending);

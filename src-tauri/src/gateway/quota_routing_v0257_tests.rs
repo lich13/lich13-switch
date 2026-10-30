@@ -344,7 +344,7 @@ async fn http_daily_limit_switches_before_retry_after_and_preserves_single_provi
             br#"{"provider":"backup"}"#.as_slice()
         );
         assert!(
-            elapsed < Duration::from_secs(15),
+            elapsed < Duration::from_secs(5),
             "daily quota waited {elapsed:?}"
         );
         assert_eq!(primary_hits.load(Ordering::SeqCst), 1);
@@ -374,7 +374,7 @@ async fn http_daily_limit_switches_before_retry_after_and_preserves_single_provi
     )
     .await;
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(body.as_ref(), DAILY_LIMIT.as_bytes());
     gateway.stop().await.unwrap();
     primary.stop().await;
@@ -589,7 +589,7 @@ async fn websocket_handshake_daily_limit_fails_over_without_waiting() {
     let second = next_frame(&mut client).await;
     assert_eq!(first.as_str(), CREATED);
     assert_eq!(second.as_str(), COMPLETED);
-    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(primary_hits.load(Ordering::SeqCst), 1);
     client
         .send(yawc::Frame::close(1000.into(), "fixture done"))

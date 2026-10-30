@@ -80,19 +80,44 @@ struct Runtime {
     window_visible: [AtomicBool; 2],
     pending_main: PendingMainEvents,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MainSignal {
+    ProviderTests,
+    PricingState,
+    UsageState,
+}
+impl MainSignal {
+    pub(crate) const fn event_name(self) -> &'static str {
+        match self {
+            Self::ProviderTests => "provider-tests",
+            Self::PricingState => "pricing-state",
+            Self::UsageState => "usage-state",
+        }
+    }
+}
+
+pub(crate) struct DrainedMainEvents {
+    app_event: Option<events::Change>,
+    provider_tests: bool,
+    pricing_state: bool,
+    usage_state: bool,
+    config_states: Vec<serde_json::Value>,
+}
+
 #[derive(Default)]
 pub(crate) struct PendingMainEvents {
     app_event: Mutex<Option<events::Change>>,
     config_states: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     provider_tests: AtomicBool,
     pricing_state: AtomicBool,
+    usage_state: AtomicBool,
 }
 impl PendingMainEvents {
-    fn record_signal(&self, event: &str) {
-        match event {
-            "provider-tests" => self.provider_tests.store(true, Ordering::Relaxed),
-            "pricing-state" => self.pricing_state.store(true, Ordering::Relaxed),
-            _ => {}
+    fn record_signal(&self, signal: MainSignal) {
+        match signal {
+            MainSignal::ProviderTests => self.provider_tests.store(true, Ordering::Relaxed),
+            MainSignal::PricingState => self.pricing_state.store(true, Ordering::Relaxed),
+            MainSignal::UsageState => self.usage_state.store(true, Ordering::Relaxed),
         }
     }
     fn record_app_event(&self, change: &events::Change) {
@@ -110,17 +135,24 @@ impl PendingMainEvents {
             map.insert(key.to_owned(), payload);
         }
     }
-    fn drain(&self) -> (Option<events::Change>, bool, bool, Vec<serde_json::Value>) {
+    fn drain(&self) -> DrainedMainEvents {
         let app_event = self.app_event.lock().ok().and_then(|mut s| s.take());
         let provider_tests = self.provider_tests.swap(false, Ordering::Relaxed);
         let pricing_state = self.pricing_state.swap(false, Ordering::Relaxed);
+        let usage_state = self.usage_state.swap(false, Ordering::Relaxed);
         let config_states = self
             .config_states
             .lock()
             .ok()
             .map(|mut map| std::mem::take(&mut *map).into_values().collect())
             .unwrap_or_default();
-        (app_event, provider_tests, pricing_state, config_states)
+        DrainedMainEvents {
+            app_event,
+            provider_tests,
+            pricing_state,
+            usage_state,
+            config_states,
+        }
     }
 }
 impl Runtime {
@@ -238,19 +270,19 @@ pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindo
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
         .collect()
 }
-fn main_visible_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+pub(crate) fn main_visible_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
     app.get_webview_window("main")
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
 }
 pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
     app: &tauri::AppHandle,
-    event: &str,
+    signal: MainSignal,
     payload: S,
 ) {
     if let Some(window) = main_visible_window(app) {
-        let _ = window.emit(event, payload);
+        let _ = window.emit(signal.event_name(), payload);
     } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.pending_main.record_signal(event);
+        r.pending_main.record_signal(signal);
     }
 }
 pub(crate) fn emit_main_app_event(app: &tauri::AppHandle, change: &events::Change) {
@@ -280,17 +312,20 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     };
     let was_visible = r.mark_window_visible(label, true);
     if label == "main" {
-        let (app_event, provider_tests, pricing_state, config_states) = r.pending_main.drain();
-        if let Some(change) = app_event {
+        let drained = r.pending_main.drain();
+        if let Some(change) = drained.app_event {
             let _ = window.emit("app-event", &change);
         }
-        if provider_tests {
-            let _ = window.emit("provider-tests", ());
+        if drained.provider_tests {
+            let _ = window.emit(MainSignal::ProviderTests.event_name(), ());
         }
-        if pricing_state && was_visible {
-            let _ = window.emit("pricing-state", ());
+        if drained.pricing_state && was_visible {
+            let _ = window.emit(MainSignal::PricingState.event_name(), ());
         }
-        for payload in config_states {
+        if drained.usage_state && was_visible {
+            let _ = window.emit(MainSignal::UsageState.event_name(), ());
+        }
+        for payload in drained.config_states {
             let _ = window.emit("config-state", payload);
         }
     }
@@ -408,33 +443,99 @@ fn open_main(
         show(&app, page.as_deref())
     }
 }
-fn publish(app: &tauri::AppHandle, state: ViewState) {
-    if state.error.is_some()
+const VISIBLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const HIDDEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn wait_next_background_poll(has_visible_windows: bool, wake: &tokio::sync::Notify) {
+    if has_visible_windows {
+        tokio::time::sleep(VISIBLE_POLL_INTERVAL).await;
+    } else {
+        tokio::select! {
+            _ = tokio::time::sleep(HIDDEN_POLL_INTERVAL) => {}
+            _ = wake.notified() => {}
+        }
+    }
+}
+
+const fn should_poll_editor_configs(has_visible_windows: bool, background_active: bool) -> bool {
+    has_visible_windows || background_active
+}
+
+fn emit_account_sync_diagnostic(diagnostics: &events::Service, state: &ViewState) -> bool {
+    let should_emit = state.error.is_some()
         || state
             .auth_sync
             .as_ref()
-            .is_some_and(|s| matches!(s.state.as_str(), "invalid" | "missing" | "error"))
-    {
-        if let Some(r) = app.try_state::<Arc<Runtime>>() {
-            r.diagnostics.emit(events::Record::new(
-                Some(gateway::ClientId::Codex),
-                None,
-                None,
-                events::Reason::AccountSync,
-                events::Action::Stopped,
-                None,
-                None,
-            ));
+            .is_some_and(|s| matches!(s.state.as_str(), "invalid" | "missing" | "error"));
+    if should_emit {
+        diagnostics.emit(events::Record::new(
+            Some(gateway::ClientId::Codex),
+            None,
+            None,
+            events::Reason::AccountSync,
+            events::Action::Stopped,
+            None,
+            None,
+        ));
+    }
+    should_emit
+}
+
+fn tray_tooltip_text(state: &ViewState) -> String {
+    let current = state
+        .accounts
+        .iter()
+        .find(|a| a.current)
+        .map(|a| a.name.as_str())
+        .unwrap_or("未保存账号");
+    format!("lich13-switch · {current}")
+}
+
+enum PollStateUpdate {
+    Unchanged,
+    StateChanged(ViewState),
+    ErrorChanged(ViewState),
+}
+
+fn poll_account_state_step(
+    data: &std::path::Path,
+    core: &Mutex<Core>,
+    gateway: &gateway::Gateway,
+    last: &mut Option<ViewState>,
+) -> PollStateUpdate {
+    let result = lock(core).and_then(|mut c| {
+        let mut s = c.state()?;
+        let home = c.home();
+        s.official_mode = official::view(data, &home);
+        Ok((s, home))
+    });
+    match result {
+        Ok((s, home)) => {
+            if last.as_ref() != Some(&s) {
+                gateway.observe_home(&home);
+                *last = Some(s.clone());
+                return PollStateUpdate::StateChanged(s);
+            }
+        }
+        Err(e) => {
+            if let Some(mut s) = last.clone() {
+                if s.error.as_ref() != Some(&e.message) {
+                    s.error = Some(e.message);
+                    *last = Some(s.clone());
+                    return PollStateUpdate::ErrorChanged(s);
+                }
+            }
         }
     }
+    PollStateUpdate::Unchanged
+}
+
+fn publish(app: &tauri::AppHandle, state: ViewState) {
+    if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        emit_account_sync_diagnostic(&r.diagnostics, &state);
+    }
     if let Some(tray) = app.tray_by_id("switch") {
-        let current = state
-            .accounts
-            .iter()
-            .find(|a| a.current)
-            .map(|a| a.name.as_str())
-            .unwrap_or("未保存账号");
-        let _ = tray.set_tooltip(Some(format!("lich13-switch · {current}")));
+        let _ = tray.set_tooltip(Some(tray_tooltip_text(&state)));
     }
     for window in visible_windows(app) {
         let _ = window.emit("switch-state", &state);
@@ -447,7 +548,7 @@ fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     publish(app, state.clone());
     Ok(state)
 }
-fn coalesce_gateway_events(events: &mut tokio::sync::broadcast::Receiver<()>) {
+pub(crate) fn coalesce_gateway_events(events: &mut tokio::sync::broadcast::Receiver<()>) {
     // Drain only the backlog observed now. A busy producer cannot postpone
     // publishing the latest view or the periodic final zero indefinitely.
     let pending = events.len();
@@ -2116,69 +2217,66 @@ pub fn run() {
                 #[cfg(windows)]
                 let mut last_tray_dark: Option<bool> = None;
                 loop {
-                    if visible_windows(&handle).is_empty() {
-                        if runtime.background_poll_active() {
-                            tokio::select! {
-                                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
-                                _ = runtime.window_wake.notified() => {}
-                            }
-                        } else {
-                            runtime.window_wake.notified().await;
-                        }
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    }
+                    let has_visible = !visible_windows(&handle).is_empty();
+                    wait_next_background_poll(has_visible, &runtime.window_wake).await;
                     if runtime.quitting.load(Ordering::Relaxed) {
                         break;
                     }
-                    let result = state_for(&runtime);
-                    match result {
-                        Ok(s) => {
-                            if last.as_ref() != Some(&s) {
-                                runtime.gateway.observe_home(
-                                    &lock(&runtime.core).map(|c| c.home()).unwrap_or_default(),
-                                );
-                                publish_gateway(&handle, &runtime.gateway);
-                                last = Some(s.clone());
-                                publish(&handle, s);
-                            }
+                    match poll_account_state_step(
+                        &runtime.data,
+                        &runtime.core,
+                        &runtime.gateway,
+                        &mut last,
+                    ) {
+                        PollStateUpdate::StateChanged(s) => {
+                            publish_gateway(&handle, &runtime.gateway);
+                            publish(&handle, s);
                         }
-                        Err(e) => {
-                            if let Some(mut s) = last.clone() {
-                                if s.error.as_ref() != Some(&e.message) {
-                                    s.error = Some(e.message);
-                                    last = Some(s.clone());
-                                    publish(&handle, s);
+                        PollStateUpdate::ErrorChanged(s) => {
+                            publish(&handle, s);
+                        }
+                        PollStateUpdate::Unchanged => {}
+                    }
+                    if should_poll_editor_configs(
+                        !visible_windows(&handle).is_empty(),
+                        runtime.background_poll_active(),
+                    ) {
+                        for client in [
+                            gateway::ClientId::Codex,
+                            gateway::ClientId::Claude,
+                            gateway::ClientId::Grok,
+                            gateway::ClientId::Dsh,
+                        ] {
+                            if let Ok(stamp) = runtime.home(client).and_then(|home| {
+                                runtime
+                                    .gateway(client)
+                                    .config_stamp(&home, config_cache.entry(client).or_default())
+                            }) {
+                                if config_versions.get(&client) != Some(&stamp) {
+                                    let key = serde_json::to_string(&client).unwrap_or_default();
+                                    emit_main_config_state(
+                                        &handle,
+                                        &key,
+                                        serde_json::json!({"clientId":client,"revision":stamp.1,"guarded":stamp.2}),
+                                    );
+                                    config_versions.insert(client, stamp);
+                                    if client != gateway::ClientId::Codex {
+                                        publish_gateway(&handle, runtime.gateway(client));
+                                    }
                                 }
                             }
                         }
-                    }
-                    for client in [gateway::ClientId::Codex, gateway::ClientId::Claude, gateway::ClientId::Grok, gateway::ClientId::Dsh] {
-                        if let Ok(stamp) = runtime.home(client).and_then(|home| runtime.gateway(client).config_stamp(&home, config_cache.entry(client).or_default())) {
-                            if config_versions.get(&client) != Some(&stamp) {
-                                let key = serde_json::to_string(&client).unwrap_or_default();
+                        if let Ok(rev) = antigravity::home()
+                            .and_then(|home| antigravity::config_stamp(&home, &mut agy_config_cache))
+                        {
+                            if agy_config_version.as_ref() != Some(&rev) {
                                 emit_main_config_state(
                                     &handle,
-                                    &key,
-                                    serde_json::json!({"clientId":client,"revision":stamp.1,"guarded":stamp.2}),
+                                    "antigravity",
+                                    serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false}),
                                 );
-                                config_versions.insert(client, stamp);
-                                if client != gateway::ClientId::Codex {
-                                    publish_gateway(&handle, runtime.gateway(client));
-                                }
+                                agy_config_version = Some(rev);
                             }
-                        }
-                    }
-                    if let Ok(rev) = antigravity::home()
-                        .and_then(|home| antigravity::config_stamp(&home, &mut agy_config_cache))
-                    {
-                        if agy_config_version.as_ref() != Some(&rev) {
-                            emit_main_config_state(
-                                &handle,
-                                "antigravity",
-                                serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false}),
-                            );
-                            agy_config_version = Some(rev);
                         }
                     }
                     #[cfg(windows)]
@@ -2407,7 +2505,14 @@ pub fn run() {
 
 #[cfg(test)]
 mod page_whitelist_tests {
-    use super::{events, valid_main_page, PendingMainEvents};
+    use super::{
+        core::Core, emit_account_sync_diagnostic, events, gateway, poll_account_state_step,
+        should_poll_editor_configs, tray_tooltip_text, valid_main_page, wait_next_background_poll,
+        MainSignal, PendingMainEvents, PollStateUpdate, HIDDEN_POLL_INTERVAL,
+        VISIBLE_POLL_INTERVAL,
+    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn allows_usage_and_all_primary_pages_while_rejecting_unknown_pages() {
@@ -2420,9 +2525,11 @@ mod page_whitelist_tests {
     #[test]
     fn pending_main_events_coalesce_while_hidden_and_drain_once_on_show() {
         let pending = PendingMainEvents::default();
-        pending.record_signal("provider-tests");
-        pending.record_signal("provider-tests");
-        pending.record_signal("pricing-state");
+        pending.record_signal(MainSignal::ProviderTests);
+        pending.record_signal(MainSignal::ProviderTests);
+        pending.record_signal(MainSignal::PricingState);
+        pending.record_signal(MainSignal::UsageState);
+        pending.record_signal(MainSignal::UsageState);
         pending.record_config_state(
             "claude",
             serde_json::json!({"clientId":"claude","revision":"r1","guarded":false}),
@@ -2446,22 +2553,136 @@ mod page_whitelist_tests {
             notify: true,
         });
 
-        let (app_event, provider_tests, pricing_state, configs) = pending.drain();
-        assert!(provider_tests);
-        assert!(pricing_state);
-        assert_eq!(app_event.unwrap().error.as_deref(), Some("second"));
-        assert_eq!(configs.len(), 2);
-        assert!(configs
+        let drained = pending.drain();
+        assert!(drained.provider_tests);
+        assert!(drained.pricing_state);
+        assert!(drained.usage_state);
+        assert_eq!(drained.app_event.unwrap().error.as_deref(), Some("second"));
+        assert_eq!(drained.config_states.len(), 2);
+        assert!(drained
+            .config_states
             .iter()
             .any(|v| v["clientId"] == "claude" && v["revision"] == "r2" && v["guarded"] == true));
-        assert!(configs
+        assert!(drained
+            .config_states
             .iter()
             .any(|v| v["clientId"] == "antigravity" && v["revision"] == "a1"));
 
-        let (app_event_2, provider_tests_2, pricing_state_2, configs_2) = pending.drain();
-        assert!(app_event_2.is_none());
-        assert!(!provider_tests_2);
-        assert!(!pricing_state_2);
-        assert!(configs_2.is_empty());
+        let drained_again = pending.drain();
+        assert!(drained_again.app_event.is_none());
+        assert!(!drained_again.provider_tests);
+        assert!(!drained_again.pricing_state);
+        assert!(!drained_again.usage_state);
+        assert!(drained_again.config_states.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_poll_uses_two_speed_interval_and_wakes_immediately_on_window_show() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+
+        // Visible mode polls every 2s.
+        let wake_visible = wake.clone();
+        let visible_wait =
+            tokio::spawn(async move { wait_next_background_poll(true, &wake_visible).await });
+        tokio::time::advance(Duration::from_millis(1900)).await;
+        tokio::task::yield_now().await;
+        assert!(!visible_wait.is_finished());
+        tokio::time::advance(Duration::from_millis(150)).await;
+        assert_eq!(VISIBLE_POLL_INTERVAL, Duration::from_secs(2));
+        visible_wait.await.unwrap();
+
+        // Hidden tray-resident mode never hangs forever: it completes after 10s even when idle.
+        let wake_hidden = wake.clone();
+        let hidden_wait =
+            tokio::spawn(async move { wait_next_background_poll(false, &wake_hidden).await });
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+        assert!(!hidden_wait.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(HIDDEN_POLL_INTERVAL, Duration::from_secs(10));
+        hidden_wait.await.unwrap();
+
+        // Showing a window notifies wake and interrupts the 10s hidden sleep immediately.
+        let wake_early = wake.clone();
+        let early_wait =
+            tokio::spawn(async move { wait_next_background_poll(false, &wake_early).await });
+        tokio::task::yield_now().await;
+        wake.notify_one();
+        tokio::time::timeout(Duration::from_millis(50), early_wait)
+            .await
+            .expect("window wake should interrupt hidden sleep immediately")
+            .unwrap();
+
+        // UI-only editor config stamps skip only when hidden AND idle.
+        assert!(!should_poll_editor_configs(false, false));
+        assert!(should_poll_editor_configs(true, false));
+        assert!(should_poll_editor_configs(false, true));
+    }
+
+    #[test]
+    fn hidden_poll_step_still_syncs_external_auth_updates_tooltip_and_emits_account_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let core = Mutex::new(Core::new(data.clone(), home.clone()).unwrap());
+        let gateway = gateway::Gateway::new(data.join("gateway")).unwrap();
+        let diagnostics = events::Service::new(&data);
+        let mut last = None;
+
+        // Initial missing auth.json poll updates state without importing an account.
+        match poll_account_state_step(&data, &core, &gateway, &mut last) {
+            PollStateUpdate::StateChanged(initial) => {
+                assert_eq!(tray_tooltip_text(&initial), "lich13-switch · 未保存账号");
+            }
+            _ => panic!("expected initial state update"),
+        }
+
+        // External terminal login writes a valid API key auth.json while windows remain hidden.
+        crate::storage::atomic_write(
+            &home.join("auth.json"),
+            br#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-fixture-external-login"}"#,
+            None,
+        )
+        .unwrap();
+        let synced = loop {
+            match poll_account_state_step(&data, &core, &gateway, &mut last) {
+                PollStateUpdate::StateChanged(state) => break state,
+                PollStateUpdate::ErrorChanged(_) => continue,
+                PollStateUpdate::Unchanged => panic!("expected external auth.json sync"),
+            }
+        };
+        assert_eq!(synced.accounts.len(), 1);
+        assert!(synced.accounts[0].current);
+        assert_eq!(tray_tooltip_text(&synced), "lich13-switch · API Key");
+        assert!(!emit_account_sync_diagnostic(&diagnostics, &synced));
+
+        // Corrupting auth.json while hidden triggers AccountSync diagnostic emission.
+        crate::storage::atomic_write(&home.join("auth.json"), b"{invalid-json", None).unwrap();
+        let broken = loop {
+            match poll_account_state_step(&data, &core, &gateway, &mut last) {
+                PollStateUpdate::StateChanged(state) => break state,
+                PollStateUpdate::ErrorChanged(_) => continue,
+                PollStateUpdate::Unchanged => panic!("expected invalid auth.json state update"),
+            }
+        };
+        assert!(emit_account_sync_diagnostic(&diagnostics, &broken));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let page = diagnostics.query(events::Filter::default());
+            if page
+                .items
+                .iter()
+                .any(|item| item.record.reason == events::Reason::AccountSync)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "AccountSync diagnostic was not persisted"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

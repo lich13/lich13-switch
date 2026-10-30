@@ -89,29 +89,8 @@ pub struct AccountSubscription {
     pub label: String,
     pub stale: bool,
 }
-#[derive(Clone, Debug)]
-struct CachedSubscriptionMeta {
-    plan_type: Option<String>,
-    label: String,
-    exp: Option<u64>,
-}
-impl CachedSubscriptionMeta {
-    fn to_subscription(&self, current_now: u64) -> AccountSubscription {
-        AccountSubscription {
-            plan_type: self.plan_type.clone(),
-            label: self.label.clone(),
-            stale: self.exp.is_some_and(|exp| exp <= current_now),
-        }
-    }
-}
-struct CachedProfileMeta {
-    auth: String,
-    kind: String,
-    credential_revision: String,
-    subscription: Option<CachedSubscriptionMeta>,
-}
 // Display metadata only: never used to authenticate an account or select a route.
-fn account_subscription_meta(raw: &str) -> Option<CachedSubscriptionMeta> {
+fn account_subscription(raw: &str) -> Option<AccountSubscription> {
     let doc: Value = serde_json::from_str(raw).ok()?;
     if doc["auth_mode"] == "apikey"
         || (doc.get("auth_mode").is_none()
@@ -148,16 +127,15 @@ fn account_subscription_meta(raw: &str) -> Option<CachedSubscriptionMeta> {
         None => "未识别",
     }
     .to_owned();
-    let exp = token.as_ref().and_then(|v| v["exp"].as_u64());
-    Some(CachedSubscriptionMeta {
+    let stale = token
+        .as_ref()
+        .and_then(|v| v["exp"].as_u64())
+        .is_some_and(|exp| exp <= now());
+    Some(AccountSubscription {
         plan_type,
         label,
-        exp,
+        stale,
     })
-}
-#[cfg(test)]
-fn account_subscription(raw: &str) -> Option<AccountSubscription> {
-    account_subscription_meta(raw).map(|meta| meta.to_subscription(now()))
 }
 /// A login may only replace the account and disk version explicitly selected
 /// when it started. This guard never crosses IPC or contains credentials.
@@ -214,9 +192,21 @@ pub struct Core {
     auth_sync: Option<AuthSync>,
     checked_auth: Option<(String, String)>,
     auth_cache: crate::auth_cache::Cache<PolledAuth>,
-    profile_meta_cache: std::collections::HashMap<String, CachedProfileMeta>,
+    config_cache: crate::auth_cache::Cache<PolledConfig>,
     exchange: exchange::Service,
     normalization_revision: std::cell::RefCell<Option<String>>,
+}
+struct PolledConfig {
+    revision: String,
+    auth_source: AuthSource,
+}
+impl PolledConfig {
+    fn parse(bytes: Option<Vec<u8>>) -> Self {
+        Self {
+            revision: storage::revision(bytes.as_deref()),
+            auth_source: source(bytes.as_deref()),
+        }
+    }
 }
 #[derive(Clone)]
 struct AuthInfo {
@@ -604,7 +594,7 @@ impl Core {
             auth_sync: None,
             checked_auth: None,
             auth_cache: Default::default(),
-            profile_meta_cache: std::collections::HashMap::new(),
+            config_cache: Default::default(),
             exchange: exchange::Service::default(),
             normalization_revision: std::cell::RefCell::new(Some(normalization_revision)),
         };
@@ -921,8 +911,10 @@ impl Core {
             .auth_cache
             .read(&self.home().join("auth.json"), PolledAuth::parse)?;
         let auth = &polled.bytes;
-        let config = storage::read_optional(&self.home().join("config.toml"))?;
-        let auth_source = source(config.as_deref());
+        let polled_config = self
+            .config_cache
+            .read(&self.home().join("config.toml"), PolledConfig::parse)?;
+        let auth_source = polled_config.auth_source.clone();
         let optional_auth = auth.is_none() && auth_source.inline_token;
         if optional_auth {
             self.auth_sync = None;
@@ -1083,58 +1075,24 @@ impl Core {
         } else {
             matched
         };
-        if self.profile_meta_cache.len() > self.store.profiles.len() {
-            let live: std::collections::HashSet<&str> =
-                self.store.profiles.iter().map(|p| p.id.as_str()).collect();
-            self.profile_meta_cache
-                .retain(|id, _| live.contains(id.as_str()));
-        }
-        let current_now = now();
-        let mut accounts = Vec::with_capacity(self.store.profiles.len());
-        for (index, p) in self.store.profiles.iter().enumerate() {
-            let (credential_revision, subscription) = match self
-                .profile_meta_cache
-                .get(&p.id)
-                .filter(|entry| entry.auth == p.auth && entry.kind == p.kind)
-            {
-                Some(entry) => (
-                    entry.credential_revision.clone(),
-                    entry
-                        .subscription
-                        .as_ref()
-                        .map(|meta| meta.to_subscription(current_now)),
-                ),
-                None => {
-                    let credential_revision = storage::digest(p.auth.as_bytes());
-                    let subscription_meta = (p.kind == "chatgpt")
-                        .then(|| account_subscription_meta(&p.auth))
-                        .flatten();
-                    let subscription = subscription_meta
-                        .as_ref()
-                        .map(|meta| meta.to_subscription(current_now));
-                    self.profile_meta_cache.insert(
-                        p.id.clone(),
-                        CachedProfileMeta {
-                            auth: p.auth.clone(),
-                            kind: p.kind.clone(),
-                            credential_revision: credential_revision.clone(),
-                            subscription: subscription_meta,
-                        },
-                    );
-                    (credential_revision, subscription)
-                }
-            };
-            accounts.push(Account {
+        let accounts: Vec<_> = self
+            .store
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(index, p)| Account {
                 id: p.id.clone(),
                 name: p.name.clone(),
                 kind: p.kind.clone(),
                 email: p.email.clone(),
                 current: matched == Some(index),
                 updated_at: p.updated_at,
-                credential_revision,
-                subscription,
-            });
-        }
+                credential_revision: storage::digest(p.auth.as_bytes()),
+                subscription: (p.kind == "chatgpt")
+                    .then(|| account_subscription(&p.auth))
+                    .flatten(),
+            })
+            .collect();
         let status = if managed {
             "gateway"
         } else if auth.is_none() {
@@ -1149,7 +1107,7 @@ impl Core {
         Ok(ViewState {
             accounts,
             auth_revision,
-            config_revision: storage::revision(config.as_deref()),
+            config_revision: polled_config.revision.clone(),
             current_state: status.into(),
             auth_source,
             preferences: self.preferences(),

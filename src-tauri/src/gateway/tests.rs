@@ -1367,8 +1367,7 @@ fn view_reads_without_routing_lock_and_retries_only_once_on_configuration_change
                 .try_lock()
                 .expect("config reads must release routing lock");
             if reads.get() == 0 {
-                state.store.mode = "auto".into();
-                state.refresh_editable_digest(gateway.0.client);
+                state.editable_mut().store.mode = "auto".into();
             }
             reads.set(reads.get() + 1);
             drop(state);
@@ -1382,13 +1381,12 @@ fn view_reads_without_routing_lock_and_retries_only_once_on_configuration_change
     let error = gateway
         .try_view_read(|gateway, _, _, _| {
             let mut state = gateway.0.inner.try_lock().unwrap();
-            state.store.mode = if state.store.mode == "auto" {
+            let next_mode = if state.store.mode == "auto" {
                 "manual"
             } else {
                 "auto"
-            }
-            .into();
-            state.refresh_editable_digest(gateway.0.client);
+            };
+            state.editable_mut().store.mode = next_mode.into();
             reads.set(reads.get() + 1);
         })
         .err()

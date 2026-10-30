@@ -90,7 +90,7 @@ pub fn connect(app: &tauri::AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) = events.recv().await {
-            crate::emit_if_main_visible(&handle, "provider-tests", ());
+            crate::emit_if_main_visible(&handle, crate::MainSignal::ProviderTests, ());
         }
     });
     service.run_scheduler();

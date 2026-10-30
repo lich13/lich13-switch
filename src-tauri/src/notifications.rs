@@ -69,25 +69,29 @@ pub fn on_manual_open(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = state(&app, true);
-        let _ = app.emit("notification-state", value);
+        if let Some(window) = crate::main_visible_window(&app) {
+            let _ = window.emit("notification-state", value);
+        }
         ASKING.store(false, Ordering::Release);
     });
 }
 fn publish_delivery(app: &tauri::AppHandle, status: delivery::Status, error: Option<String>) {
     *DELIVERY.lock().unwrap() = status;
     *LAST_ERROR.lock().unwrap() = error;
-    let _ = app.emit(
-        "notification-state",
-        State {
-            permission: LAST_PERMISSION
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| "unknown".into()),
-            error: LAST_ERROR.lock().unwrap().clone(),
-            delivery: status,
-        },
-    );
+    if let Some(window) = crate::main_visible_window(app) {
+        let _ = window.emit(
+            "notification-state",
+            State {
+                permission: LAST_PERMISSION
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "unknown".into()),
+                error: LAST_ERROR.lock().unwrap().clone(),
+                delivery: status,
+            },
+        );
+    }
 }
 async fn submit(app: tauri::AppHandle, body: String) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {

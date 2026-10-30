@@ -184,7 +184,14 @@ fn receiver_policy_filters_unqueued_disabled_late_and_model_mismatch() {
     let late = provider(NEWER, true, Some("fixture-main"), true);
     let old = provider(OLD, true, Some("fixture-main"), true);
     let queued = vec![new.clone(), disabled, mismatch, old.clone(), late];
-    gateway.0.inner.lock().unwrap().store.providers = queued.clone();
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers = queued.clone();
     let lease = registry
         .prepare_request(
             session,
@@ -203,6 +210,7 @@ fn receiver_policy_filters_unqueued_disabled_late_and_model_mismatch() {
         .inner
         .lock()
         .unwrap()
+        .editable_mut()
         .store
         .providers
         .iter_mut()

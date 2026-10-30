@@ -159,7 +159,14 @@ fn live_receiver_policy_rejects_disabled_or_reordered_handoff_admission() {
         provider(NEW, None, true),
         provider(OLD, Some("fixture-main"), true),
     ];
-    gateway.0.inner.lock().unwrap().store.providers = queued.clone();
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers = queued.clone();
     let mut compacted = compacted_hints(&boundary);
     compacted.compacted_window = Some(boundary.clone());
     let lease = registry
@@ -174,7 +181,15 @@ fn live_receiver_policy_rejects_disabled_or_reordered_handoff_admission() {
         .unwrap();
     assert!(lease.handoff);
 
-    gateway.0.inner.lock().unwrap().store.providers[0].handoff_after_compaction = false;
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers[0]
+        .handoff_after_compaction = false;
     let disabled = lease
         .admit_request(&gateway, &queued[0], &Requirement::Resource, false)
         .unwrap_err();
@@ -182,7 +197,14 @@ fn live_receiver_policy_rejects_disabled_or_reordered_handoff_admission() {
 
     let mut reordered = queued.clone();
     reordered.swap(0, 1);
-    gateway.0.inner.lock().unwrap().store.providers = reordered;
+    gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .editable_mut()
+        .store
+        .providers = reordered;
     let after_owner = lease
         .admit_request(&gateway, &queued[0], &Requirement::Resource, false)
         .unwrap_err();
