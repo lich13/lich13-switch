@@ -1237,12 +1237,21 @@ describe("usage pricing", () => {
   });
 
   it("returns focus to the price editor and sync entry points after cancellation", async () => {
+    const original = mock.command.getMockImplementation()!;
+    mock.command.mockImplementation(async (name, args) => {
+      if (name === "get_pricing") await new Promise((r) => setTimeout(r, 10));
+      return original(name, args);
+    });
     render(<Pricing />);
     const modelButton = await screen.findByRole("button", {
       name: "gpt-alpha",
     });
     fireEvent.click(modelButton);
     const editor = await screen.findByRole("dialog");
+    await act(async () => {
+      mock.listeners.get("pricing-state")?.(pricing);
+    });
+    await flush();
     cancelDialog(editor);
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),

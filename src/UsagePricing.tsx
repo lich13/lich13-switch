@@ -72,8 +72,8 @@ export default function Pricing({
     };
   }, []);
   useEffect(() => {
+    if (!view) return;
     const generation = ++searchGeneration.current;
-    setPage({ rows: [], total: 0 });
     setLoading(true);
     void command("search_pricing", { query: search, offset: 0, limit: 50 })
       .then((result) => {
