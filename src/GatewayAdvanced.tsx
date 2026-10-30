@@ -109,10 +109,12 @@ export default function Advanced({
   ];
   const groups: {
     name: string;
+    tone: "rate" | "quota" | "service";
     fields: [Exclude<keyof GatewaySettings, "customFailureRules">, string][];
   }[] = [
     {
       name: "限流与容量",
+      tone: "rate",
       fields: [
         ["rateLimitSeconds", "限流基础等待 / 秒"],
         ["capacityRetrySeconds", "容量错误等待 / 秒"],
@@ -120,10 +122,12 @@ export default function Advanced({
     },
     {
       name: "额度与认证",
+      tone: "quota",
       fields: [["hardFailureCooldownSeconds", "额度／认证冷却 / 秒"]],
     },
     {
       name: "服务与网络故障",
+      tone: "service",
       fields: [
         ["maxRetries", "最大重试次数"],
         ["retryBudgetSeconds", "等待与重试预算 / 秒"],
@@ -262,6 +266,7 @@ export default function Advanced({
                 type="button"
                 role="tab"
                 key={value}
+                data-origin={value}
                 aria-selected={origin === value}
                 onClick={() => setOrigin(value)}
               >
@@ -279,7 +284,11 @@ export default function Advanced({
               >
                 {origin === "upstream" ? (
                   groups.map((group) => (
-                    <section className="failure-policy-group" key={group.name}>
+                    <section
+                      className="failure-policy-group"
+                      data-policy-group={group.tone}
+                      key={group.name}
+                    >
                       <h3>
                         {group.name === "服务与网络故障"
                           ? "服务与请求错误"
@@ -296,7 +305,10 @@ export default function Advanced({
                     </section>
                   ))
                 ) : (
-                  <section className="failure-policy-group">
+                  <section
+                    className="failure-policy-group"
+                    data-policy-group="gateway"
+                  >
                     <FailurePolicyCatalog
                       catalog={catalog.filter((c) => c.origin === "gateway")}
                       clientId={clientId}
@@ -322,6 +334,7 @@ export default function Advanced({
               </div>
               <section
                 className="failure-policy-group policy-shared"
+                data-policy-group="shared"
                 aria-label="共享重试与熔断参数"
               >
                 <h3>共享重试与熔断参数</h3>

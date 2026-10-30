@@ -640,6 +640,52 @@ describe("quota display and refresh", () => {
       screen.getByRole("button", { name: `刷新 ${provider.name} 额度` }),
     ).toBeDisabled();
   });
+
+  it("assigns semantic health tones on compact quota capsules while keeping unknown states neutral", () => {
+    const view = render(
+      <QuotaInfo provider={provider} compact refresh={() => {}} />,
+    );
+    const capsule = () =>
+      screen.getByLabelText(`${provider.name} 额度`);
+
+    expect(capsule()).toHaveAttribute("data-tone", "neutral");
+
+    view.rerender(
+      <QuotaInfo
+        provider={provider}
+        compact
+        quota={quotaFixture(provider, {
+          plans: [quotaPlan({ remaining: 8, used: 2, total: 10 })],
+        })}
+        refresh={() => {}}
+      />,
+    );
+    expect(capsule()).toHaveAttribute("data-tone", "good");
+
+    view.rerender(
+      <QuotaInfo
+        provider={provider}
+        compact
+        quota={quotaFixture(provider, {
+          plans: [quotaPlan({ remaining: 2, used: 8, total: 10 })],
+        })}
+        refresh={() => {}}
+      />,
+    );
+    expect(capsule()).toHaveAttribute("data-tone", "warn");
+
+    view.rerender(
+      <QuotaInfo
+        provider={provider}
+        compact
+        quota={quotaFixture(provider, {
+          plans: [quotaPlan({ remaining: 0, used: 10, total: 10 })],
+        })}
+        refresh={() => {}}
+      />,
+    );
+    expect(capsule()).toHaveAttribute("data-tone", "critical");
+  });
 });
 
 it("waits the configured interval after failed automatic refreshes and preserves cached data", async () => {

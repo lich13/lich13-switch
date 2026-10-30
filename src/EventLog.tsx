@@ -682,6 +682,7 @@ export default function EventLog({
             type="button"
             role="tab"
             key={value}
+            data-origin={value}
             aria-selected={origin === value}
             onClick={() => {
               setOrigin(value);
@@ -815,8 +816,10 @@ export default function EventLog({
           <tbody>
             {data.items
               .filter((r) => r.reason !== "recovered")
-              .map((r) => (
-                <tr key={r.id}>
+              .map((r) => {
+                const cat = category(r);
+                return (
+                <tr key={r.id} data-category={cat}>
                   <td>
                     <time title={new Date(r.lastAt * 1000).toISOString()}>
                       {time(r.lastAt)
@@ -827,7 +830,9 @@ export default function EventLog({
                     </time>
                   </td>
                   <td>
-                    <span>{client(r.clientId)}</span>
+                    <span data-client={r.clientId ?? undefined}>
+                      {client(r.clientId)}
+                    </span>
                     <strong title={name(r)}>{name(r)}</strong>
                   </td>
                   <td>
@@ -840,6 +845,7 @@ export default function EventLog({
                             : "client"
                           : statusTone(r.status))
                       }
+                      data-ws={r.details?.wsCloseCode != null ? "true" : undefined}
                       title={wireStatus(r)}
                     >
                       {r.status != null && <span>{statusText(r.status)}</span>}
@@ -855,6 +861,7 @@ export default function EventLog({
                     <div className="event-error-cell">
                       <button
                         className={"event-code " + r.level}
+                        data-category={cat}
                         aria-label={reasonText(r)}
                         title={summary(r)}
                         onClick={(e) => {
@@ -906,7 +913,8 @@ export default function EventLog({
                     </span>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
           </tbody>
         </table>
         {data.items.length === 0 && <div className="event-empty">暂无日志</div>}
@@ -996,10 +1004,12 @@ function EventDetail({
     };
   }, []);
 
+  const eventCategory = category(r);
   return (
     <dialog
       ref={ref}
       className="event-drawer"
+      data-category={eventCategory}
       aria-labelledby="event-title"
       onCancel={(e) => {
         e.preventDefault();
@@ -1276,7 +1286,10 @@ function EventDetail({
             ["最近发生", time(r.lastAt)],
             ["合并次数", r.count],
           ].map(([key, value]) => (
-            <div key={key}>
+            <div
+              key={key}
+              data-field={key === "类别" ? "category" : undefined}
+            >
               <dt>{key}</dt>
               <dd>{value}</dd>
             </div>

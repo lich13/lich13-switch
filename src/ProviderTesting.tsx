@@ -565,6 +565,7 @@ export default function ProviderTesting({
             key={id}
             type="button"
             id={`${tabsId}-${id}`}
+            data-tab={id}
             role="tab"
             aria-selected={tab === id}
             aria-controls={`${tabsId}-panel`}
@@ -823,7 +824,16 @@ export default function ProviderTesting({
               <div>
                 <dt>状态</dt>
                 <dd>
-                  {status ? (statuses[status.status] ?? status.status) : "—"}
+                  {status ? (
+                    <span
+                      className="provider-test-status-pill"
+                      data-status={status.status}
+                    >
+                      {statuses[status.status] ?? status.status}
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </dd>
               </div>
               <div>
@@ -1170,7 +1180,11 @@ function ConnectionReply({
     <section className="provider-test-reply" aria-label="模型回复">
       <div className="provider-test-reply-heading">
         <h3>模型回复</h3>
-        {job && <span>{statuses[job.status] ?? job.status}</span>}
+        {job && (
+          <span className="provider-test-status-pill" data-status={job.status}>
+            {statuses[job.status] ?? job.status}
+          </span>
+        )}
         <button
           type="button"
           className="text-button"
@@ -1240,15 +1254,28 @@ function TestResult({
             <div>
               <dt>结论</dt>
               <dd>
-                {active(job)
-                  ? "检测中"
-                  : job.report?.disposition === "downgrade"
-                    ? "判定降智"
-                    : job.report?.disposition === "notDowngrade"
-                      ? "未命中降智规则"
-                      : job.report?.ambiguous
-                        ? "无法确定"
-                        : "无法判定"}
+                <span
+                  className="provider-test-verdict"
+                  data-verdict={
+                    active(job)
+                      ? "running"
+                      : job.report?.disposition === "downgrade"
+                        ? "downgrade"
+                        : job.report?.disposition === "notDowngrade"
+                          ? "pass"
+                          : "ambiguous"
+                  }
+                >
+                  {active(job)
+                    ? "检测中"
+                    : job.report?.disposition === "downgrade"
+                      ? "判定降智"
+                      : job.report?.disposition === "notDowngrade"
+                        ? "未命中降智规则"
+                        : job.report?.ambiguous
+                          ? "无法确定"
+                          : "无法判定"}
+                </span>
                 {job.report?.initial && (
                   <span className="provider-test-inline-meta">初步判断</span>
                 )}

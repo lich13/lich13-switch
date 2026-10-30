@@ -351,6 +351,7 @@ export default function App() {
         </div>
         <nav aria-label="主导航">
           <button
+            data-nav="accounts"
             className={page === "accounts" ? "nav-item active" : "nav-item"}
             onClick={() => navigate("accounts")}
           >
@@ -358,6 +359,7 @@ export default function App() {
             账号
           </button>
           <button
+            data-nav="config"
             className={page === "config" ? "nav-item active" : "nav-item"}
             onClick={() => navigate("config")}
           >
@@ -365,6 +367,7 @@ export default function App() {
             配置
           </button>
           <button
+            data-nav="gateway"
             className={page === "gateway" ? "nav-item active" : "nav-item"}
             onClick={() => navigate("gateway")}
           >
@@ -372,6 +375,7 @@ export default function App() {
             网关
           </button>
           <button
+            data-nav="usage"
             className={page === "usage" ? "nav-item active" : "nav-item"}
             onClick={() => navigate("usage")}
           >
@@ -379,6 +383,7 @@ export default function App() {
             用量
           </button>
           <button
+            data-nav="logs"
             className={page === "logs" ? "nav-item active" : "nav-item"}
             onClick={() => navigate("logs")}
           >
@@ -389,6 +394,8 @@ export default function App() {
         <div className="sidebar-bottom">
           <QuickFreeze surface="main" />
           <button
+            data-nav="settings"
+            data-open={dialog === "settings" ? "true" : undefined}
             className="nav-item"
             onClick={() => {
               setThemePreview(null);

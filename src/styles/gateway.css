@@ -886,10 +886,62 @@
 
 /* Failure policy inspector & custom rules */
 .failure-policy-group {
+  --policy-tone: var(--accent-blue);
+  --policy-soft: var(--accent-blue-soft);
   border: 0;
   margin: 16px 0 0;
   padding: 0;
   min-width: 0;
+}
+
+.failure-policy-group[data-policy-group] {
+  position: relative;
+  padding: 12px 14px 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--policy-tone) 22%, var(--line));
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--policy-soft) 45%, var(--surface-subtle)) 0%,
+      var(--surface) 64%
+    );
+  box-shadow: var(--surface-highlight);
+}
+
+.failure-policy-group[data-policy-group]::before {
+  position: absolute;
+  content: "";
+  left: 4px;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--policy-tone);
+}
+
+.failure-policy-group[data-policy-group="rate"] {
+  --policy-tone: var(--accent-amber);
+  --policy-soft: var(--accent-amber-soft);
+}
+
+.failure-policy-group[data-policy-group="quota"] {
+  --policy-tone: var(--accent-rose);
+  --policy-soft: var(--accent-rose-soft);
+}
+
+.failure-policy-group[data-policy-group="service"] {
+  --policy-tone: var(--accent-blue);
+  --policy-soft: var(--accent-blue-soft);
+}
+
+.failure-policy-group[data-policy-group="gateway"] {
+  --policy-tone: var(--accent-teal);
+  --policy-soft: var(--accent-teal-soft);
+}
+
+.failure-policy-group[data-policy-group="shared"] {
+  --policy-tone: var(--accent-violet);
+  --policy-soft: var(--accent-violet-soft);
 }
 
 .failure-policy-group legend {
@@ -899,6 +951,24 @@
 .failure-policy-group h3 {
   font-size: 13px;
   margin: 20px 0 8px;
+}
+
+.failure-policy-group[data-policy-group] > h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  color: var(--policy-tone);
+  font-weight: 620;
+}
+
+.failure-policy-group[data-policy-group] > h3::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px color-mix(in srgb, currentColor 55%, transparent);
 }
 
 .failure-search {
@@ -927,13 +997,25 @@
   resize: vertical;
   box-sizing: border-box;
   padding: 10px 12px;
-  background: var(--canvas);
+  background: var(--surface-subtle);
   color: var(--ink);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   font-family: inherit;
   font-size: 13px;
   line-height: 1.5;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.failure-search-message textarea:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+.failure-search-message textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .policy-tabs {
@@ -948,6 +1030,8 @@
 }
 
 .policy-tabs button {
+  --origin-tone: var(--accent);
+  --origin-soft: var(--accent-soft);
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -957,16 +1041,31 @@
   font-weight: 540;
 }
 
+.policy-tabs button[data-origin="upstream"] {
+  --origin-tone: var(--accent-amber);
+  --origin-soft: var(--accent-amber-soft);
+}
+
+.policy-tabs button[data-origin="gateway"] {
+  --origin-tone: var(--accent-teal);
+  --origin-soft: var(--accent-teal-soft);
+}
+
 .policy-tabs button:hover:not([aria-selected="true"]) {
   color: var(--ink);
-  background: var(--hover);
+  background: color-mix(in srgb, var(--origin-soft) 45%, var(--hover));
 }
 
 .policy-tabs button[aria-selected="true"] {
-  color: var(--accent);
-  background: var(--surface);
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
-  box-shadow: var(--shadow-sm);
+  color: var(--origin-tone);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--origin-soft) 68%, var(--surface)) 0%,
+      var(--surface) 100%
+    );
+  border-color: color-mix(in srgb, var(--origin-tone) 34%, var(--line));
+  box-shadow: var(--surface-highlight), var(--shadow-sm);
   font-weight: 600;
 }
 
@@ -974,6 +1073,10 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   margin: 12px 0 16px;
+}
+
+.failure-policy-group[data-policy-group] > .policy-parameters:last-child {
+  margin-bottom: 0;
 }
 
 .policy-parameter {
@@ -987,6 +1090,10 @@
   font-size: 13px;
 }
 
+.failure-policy-group[data-policy-group] .policy-parameter:last-child {
+  border-bottom: 0;
+}
+
 .policy-parameter input {
   width: 100%;
   min-width: 0;
@@ -995,10 +1102,22 @@
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-xs);
-  background: var(--canvas);
+  background: var(--surface-subtle);
   color: var(--ink);
   font: inherit;
   font-variant-numeric: tabular-nums;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.policy-parameter input:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+.policy-parameter input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .policy-parameter.is-relevant input {

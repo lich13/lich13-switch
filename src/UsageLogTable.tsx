@@ -289,7 +289,7 @@ export default function UsageLogTable({
                     title={`${name(a.provider)} · ${clientName(r.client)}`}
                   >
                     <strong>{name(a.provider)}</strong>
-                    <small>{clientName(r.client)}</small>
+                    <small data-client={r.client}>{clientName(r.client)}</small>
                   </span>
                 ),
                 model: (

@@ -12,10 +12,6 @@
   margin-bottom: 20px;
 }
 
-.config-page h1 {
-  font-size: 24px;
-}
-
 .config-page > .banner {
   margin: 0 0 12px;
   border-radius: var(--radius-md);
@@ -260,10 +256,20 @@
   font: inherit;
   font-size: 13px;
   min-width: 0;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
-.settings-content input:not([type="checkbox"]):focus {
+.settings-content input:not([type="checkbox"]):hover:not(:disabled),
+.settings-content select:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+.settings-content input:not([type="checkbox"]):focus,
+.settings-content select:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .settings-content input:disabled {
@@ -292,7 +298,22 @@
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 65%, var(--surface));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-blue-soft) 32%, var(--surface-subtle)) 0%,
+      color-mix(in srgb, var(--surface-subtle) 65%, var(--surface)) 100%
+    );
+  box-shadow: var(--surface-highlight);
+}
+
+.antigravity-settings .settings-list-group {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-violet-soft) 36%, var(--surface-subtle)) 0%,
+      color-mix(in srgb, var(--surface-subtle) 65%, var(--surface)) 100%
+    );
 }
 
 .settings-list-group h3 {
@@ -455,7 +476,13 @@
   margin-bottom: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 72%, var(--surface));
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent-emerald-soft) 32%, var(--surface-subtle)) 0%,
+      color-mix(in srgb, var(--surface-subtle) 72%, var(--surface)) 100%
+    );
+  box-shadow: var(--surface-highlight);
   display: flex;
   flex-wrap: wrap;
   gap: 12px;

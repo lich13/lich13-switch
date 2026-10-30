@@ -673,6 +673,13 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--accent-violet) 26%, var(--line));
+  background: var(--accent-violet-soft);
+  color: var(--accent-violet);
+  font-size: 11px;
+  font-weight: 550;
 }
 
 /* Shared Quota Compact, Provider Name Editor, Sortable Providers & Provider Controls */
@@ -689,6 +696,44 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  line-height: 18px;
+}
+
+.quota-compact[data-tone="neutral"] .quota-value {
+  color: var(--muted);
+  padding: 1px 4px;
+}
+
+.quota-compact[data-tone="good"] .quota-value {
+  color: var(--accent-emerald);
+  background: var(--accent-emerald-soft);
+  border-color: color-mix(in srgb, var(--accent-emerald) 30%, var(--line));
+}
+
+.quota-compact[data-tone="normal"] .quota-value {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+
+.quota-compact[data-tone="warn"] .quota-value {
+  color: var(--accent-amber);
+  background: var(--accent-amber-soft);
+  border-color: color-mix(in srgb, var(--accent-amber) 34%, var(--line));
+}
+
+.quota-compact[data-tone="critical"] .quota-value {
+  color: var(--accent-rose);
+  background: var(--accent-rose-soft);
+  border-color: color-mix(in srgb, var(--accent-rose) 36%, var(--line));
+}
+
+.quota-compact[data-tone]:not([data-tone="neutral"]) .quota-value:not(:disabled):hover {
+  filter: brightness(1.06);
+  border-color: currentColor;
 }
 
 .quota-value {

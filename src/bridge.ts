@@ -14,7 +14,7 @@ export async function command<K extends CommandName>(
 ): Promise<CommandResult<K>> {
   const args = params[0] ?? {};
   if (native) return invoke<CommandResult<K>>(name, args);
-  if (preview)
+  if (import.meta.env.DEV && preview)
     return (await import("./preview")).run(name, args) as Promise<
       CommandResult<K>
     >;
@@ -25,6 +25,7 @@ export async function subscribe<K extends keyof EventMap>(
   fn: (payload: EventMap[K]) => void,
 ): Promise<() => void> {
   if (native) return listen<EventMap[K]>(event, (e) => fn(e.payload));
-  if (preview) return (await import("./preview")).subscribe(event, fn);
+  if (import.meta.env.DEV && preview)
+    return (await import("./preview")).subscribe(event, fn);
   return () => {};
 }

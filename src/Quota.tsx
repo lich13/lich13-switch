@@ -178,6 +178,42 @@ const samePlan = (a: QuotaPlan, b: QuotaPlan) =>
   a.used === b.used && a.total === b.total && a.unlimited === b.unlimited &&
   a.resetAt === b.resetAt;
 
+function quotaTone(
+  quota?: ProviderQuota,
+  keyStatus?: string | null,
+): "good" | "normal" | "warn" | "critical" | "neutral" {
+  if (
+    !quota ||
+    quota.state === "idle" ||
+    quota.state === "loading" ||
+    quota.state === "unsupported"
+  )
+    return "neutral";
+  if (
+    (quota.state === "error" && quota.plans.length === 0) ||
+    keyStatus === "已到期"
+  )
+    return "critical";
+  const primary = quota.plans[0];
+  if (!primary) return keyStatus ? "normal" : "neutral";
+  if (primary.unlimited) return "good";
+  if (primary.remaining == null) return "neutral";
+  if (primary.remaining <= 0) return "critical";
+  const total =
+    primary.total != null && primary.total > 0
+      ? primary.total
+      : primary.used != null && primary.used + primary.remaining > 0
+        ? primary.used + primary.remaining
+        : null;
+  if (total != null) {
+    const ratio = primary.remaining / total;
+    if (ratio <= 0.08) return "critical";
+    if (ratio <= 0.25) return "warn";
+    if (ratio >= 0.6) return "good";
+  }
+  return "normal";
+}
+
 function QuotaPlans({ plans, label = "周期" }: { plans: QuotaPlan[]; label?: string }) {
   if (!plans.length) return null;
   const unit = plans.every((p) => p.unit === plans[0].unit) ? plans[0].unit : null;
@@ -253,10 +289,15 @@ export function QuotaInfo({
     if (!repeatedSubscriptionSummary) return true;
     return index !== 0 && !subscriptions[0].plans.some((p) => samePlan(p, plan));
   });
+  const tone = quotaTone(quota, keyStatus);
   if (compact)
     return (
       <>
-      <div className="quota-compact" aria-label={`${provider.name} 额度`}>
+      <div
+        className="quota-compact"
+        data-tone={tone}
+        aria-label={`${provider.name} 额度`}
+      >
         {subscriptionLabel && <span className="quota-subscription" title={subscriptionLabel}>{subscriptionLabel}</span>}
           <button className="quota-value" title={headline} onClick={details ?? (() => setShowDetails(true))}>
             {headline}

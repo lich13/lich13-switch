@@ -1,4 +1,3 @@
-import ProviderTesting from "./ProviderTesting";
 import ConnectionTestIcon from "./ConnectionTestIcon";
 import Advanced from "./GatewayAdvanced";
 import type { FailureFocus } from "./failure-policy-types";
@@ -30,7 +29,16 @@ import {
   providerFault,
 } from "./provider-status";
 import { QuotaInfo, useProviderQuota } from "./Quota";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+const ProviderTesting = lazy(() => import("./ProviderTesting"));
 import {
   Plus,
   Power,
@@ -704,15 +712,18 @@ function GatewayContent({
         />
       )}
       {dialog?.kind === "testing" && (
-        <ProviderTesting
-          key={`${clientId}:${dialog.item.id}:${dialogVersion}`}
-          onDirtyChange={markDialog}
-          gateway={state}
-          provider={
-            state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item
-          }
-          close={() => setDialog(null)}
-        />
+        <Suspense fallback={null}>
+          <ProviderTesting
+            key={`${clientId}:${dialog.item.id}:${dialogVersion}`}
+            onDirtyChange={markDialog}
+            gateway={state}
+            provider={
+              state.providers.find((p) => p.id === dialog.item.id) ??
+              dialog.item
+            }
+            close={() => setDialog(null)}
+          />
+        </Suspense>
       )}
       {dialog?.kind === "quota" && (
         <Modal
