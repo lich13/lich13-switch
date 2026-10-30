@@ -36,7 +36,7 @@ dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 toml = "0.9"
-tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "net", "fs", "rt-multi-thread", "test-util"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "net", "fs", "rt-multi-thread"] }
 open = "5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 hyper = { version = "1", features = ["client", "server", "http1"] }
@@ -74,6 +74,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["NSA
 block2 = "0.6"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 tokio-tungstenite = "0.29"
 
 [target.'cfg(unix)'.dependencies]
