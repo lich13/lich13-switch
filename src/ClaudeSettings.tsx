@@ -87,7 +87,15 @@ function Scalar({
     />
   );
 }
-export function Setting({ field, editing }: { field: Field; editing: Editing }) {
+export function Setting({
+  field,
+  editing,
+  flagUnknown,
+}: {
+  field: Field;
+  editing: Editing;
+  flagUnknown?: boolean;
+}) {
   const path =
     field.override && get(editing.text, field.override) !== undefined
       ? field.override
@@ -97,6 +105,12 @@ export function Setting({ field, editing }: { field: Field; editing: Editing }) 
     field.kind === "select" &&
     value !== undefined &&
     !field.options?.some(([v]) => v === value);
+  const unknownText =
+    flagUnknown && typeof value === "string" && value.endsWith("_UNSPECIFIED")
+      ? "未指定（默认）"
+      : flagUnknown
+        ? `未知当前值（${String(value)}）`
+        : String(value);
   return (
     <div className="setting-row">
       <label htmlFor={path.join(".")}>{field.label}</label>
@@ -114,7 +128,7 @@ export function Setting({ field, editing }: { field: Field; editing: Editing }) 
             }
           >
             <option value="__default__">默认</option>
-            {unknown && <option value={String(value)}>{String(value)}</option>}
+            {unknown && <option value={String(value)}>{unknownText}</option>}
             {field.options?.map(([v, label]) => (
               <option key={v} value={v}>
                 {label}

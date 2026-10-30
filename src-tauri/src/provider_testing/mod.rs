@@ -233,11 +233,47 @@ impl Service {
     }
     pub fn state(&self, client: ClientId, provider: &str) -> Result<State> {
         self.gateway(client).test_endpoint(provider, None)?;
+        let search_only = self
+            .gateway(client)
+            .test_candidates()
+            .ok()
+            .and_then(|list| list.into_iter().find(|p| p.id == provider))
+            .is_some_and(|p| p.search_only);
         let mut data = lock(&self.0.data);
         let updating = data.bank_updating;
         let saved_bank = data.saved.bank.clone();
         let model_trace_status = data.ensure_bank().status(&saved_bank, updating);
         let scope = |job: &&Job| job.client_id == client && job.provider_id == provider;
+        let key = scope_key(client, provider);
+        let detection = data
+            .saved
+            .detection
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Detection::for_client(client));
+        let mut detection_status: Vec<DetectionStatus> = data
+            .detection_status
+            .get(&key)
+            .cloned()
+            .into_iter()
+            .collect();
+        if detection_status.is_empty() && !detection.enabled && !search_only {
+            detection_status.push(DetectionStatus {
+                provider_id: provider.to_owned(),
+                status: "disabled".into(),
+                model: detection.model.clone(),
+                recent_requests: None,
+                last_started_at: data
+                    .saved
+                    .detection_timing
+                    .get(&key)
+                    .and_then(|t| t.last_started_at),
+                interval_minutes: None,
+                next_at: None,
+                cooldown_until: None,
+                error: None,
+            });
+        }
         Ok(State {
             revision: config_revision(&data.saved, client, provider),
             connection_prompt: data.saved.connection_prompt.clone(),
@@ -256,25 +292,15 @@ impl Service {
                 .filter(scope)
                 .cloned()
                 .collect(),
-            detection: data
-                .saved
-                .detection
-                .get(&scope_key(client, provider))
-                .cloned()
-                .unwrap_or_else(|| Detection::for_client(client)),
+            detection,
             degraded: data
                 .saved
                 .degraded
                 .iter()
-                .filter(|(id, _)| id.as_str() == scope_key(client, provider))
+                .filter(|(id, _)| id.as_str() == key)
                 .map(|(_, value)| (provider.to_owned(), value.clone()))
                 .collect(),
-            detection_status: data
-                .detection_status
-                .iter()
-                .filter(|(key, _)| **key == scope_key(client, provider))
-                .map(|(_, s)| s.clone())
-                .collect(),
+            detection_status,
             error: data.error.clone(),
         })
     }

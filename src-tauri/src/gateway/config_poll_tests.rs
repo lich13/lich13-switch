@@ -30,3 +30,40 @@ fn cached_poll_tracks_replacement_guard_and_invalid_text_without_weakening_save_
     std::fs::remove_file(&path).unwrap();
     assert_eq!(g.config_stamp(&home, &mut cache).unwrap().1, "missing");
 }
+
+#[tokio::test]
+async fn endpoint_probe_wake_ignores_request_events_and_wakes_on_store_or_lifecycle_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let g = Gateway::new(dir.path().join("data")).unwrap();
+
+    // Request activity (Active::new / Active::drop -> g.changed()) must NOT wake the endpoint prober.
+    {
+        let _active = Active::new(g.clone());
+    }
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            g.wait_endpoint_probe_wake(),
+        )
+        .await
+        .is_err()
+    );
+
+    // Store mutation wakes the dedicated prober immediately (even if notified before awaiting).
+    let rev = g.view().revision;
+    let args = serde_json::json!({
+        "op": "saveProvider",
+        "name": "Fixture",
+        "baseUrl": "https://example.invalid/v1",
+        "token": "fixture-token",
+    });
+    g.edit(serde_json::from_value(args).unwrap(), &rev, &home)
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(25),
+        g.wait_endpoint_probe_wake(),
+    )
+    .await
+    .expect("store mutation should wake endpoint prober");
+}

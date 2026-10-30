@@ -1391,6 +1391,7 @@ impl Gateway {
                     .admission
                     .configure_retention(s.store.settings.thread_idle_release_seconds);
                 self.0.compaction.provider_names(&s.store.providers);
+                self.wake_endpoint_prober();
                 Ok(())
             },
         )?;
@@ -1454,6 +1455,7 @@ impl Gateway {
             s.running = false;
             s.error = None;
             self.0.admission.configure(&s.store.providers, false);
+            self.wake_endpoint_prober();
         }
         self.0.registry.listener.deactivate(self.0.client).await?;
         self.0.clients.lock().unwrap().clear();

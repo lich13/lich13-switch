@@ -305,16 +305,7 @@ impl Service {
                 let wall = now();
                 let suspended = wall - last_wall > 90_000 || wall < last_wall;
                 last_wall = wall;
-                let idle = !suspended && {
-                    let data = lock(&service.0.data);
-                    !data.saved.detection.values().any(|c| c.enabled)
-                        && !data.saved.jobs.iter().any(|j| j.automatic && !j.terminal())
-                        && data
-                            .detection_status
-                            .values()
-                            .all(|s| s.status == "disabled")
-                };
-                if idle {
+                if !suspended && service.sync_disabled_if_idle() {
                     continue;
                 }
                 let tick_service = service.clone();
@@ -333,6 +324,77 @@ impl Service {
                 }
             }
         });
+    }
+    pub(super) fn sync_disabled_if_idle(&self) -> bool {
+        {
+            let data = lock(&self.0.data);
+            if data.saved.detection.values().any(|c| c.enabled)
+                || data.saved.jobs.iter().any(|j| j.automatic && !j.terminal())
+            {
+                return false;
+            }
+        }
+        let mut live_candidates = Vec::new();
+        for client in [
+            ClientId::Codex,
+            ClientId::Claude,
+            ClientId::Grok,
+            ClientId::Dsh,
+        ] {
+            let Ok(candidates) = self.gateway(client).test_candidates() else {
+                return false;
+            };
+            for provider in candidates.into_iter().filter(|p| !p.search_only) {
+                live_candidates.push((client, provider.id));
+            }
+        }
+        let mut data = lock(&self.0.data);
+        if data.saved.detection.values().any(|c| c.enabled)
+            || data.saved.jobs.iter().any(|j| j.automatic && !j.terminal())
+        {
+            return false;
+        }
+        let mut next_statuses = HashMap::with_capacity(live_candidates.len());
+        for (client, provider_id) in live_candidates {
+            let key = scope_key(client, &provider_id);
+            let config = data
+                .saved
+                .detection
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| Detection::for_client(client));
+            if config.enabled {
+                return false;
+            }
+            let last_started_at = data
+                .saved
+                .detection_timing
+                .get(&key)
+                .and_then(|t| t.last_started_at);
+            next_statuses.insert(
+                key,
+                DetectionStatus {
+                    provider_id,
+                    status: "disabled".into(),
+                    model: config.model,
+                    recent_requests: None,
+                    last_started_at,
+                    interval_minutes: None,
+                    next_at: None,
+                    cooldown_until: None,
+                    error: None,
+                },
+            );
+        }
+        let changed = data.detection_status != next_statuses;
+        if changed {
+            data.detection_status = next_statuses;
+        }
+        drop(data);
+        if changed {
+            self.changed();
+        }
+        true
     }
     pub(super) fn tick(&self, at: i64, suspended: bool) -> Result<()> {
         #[cfg(test)]

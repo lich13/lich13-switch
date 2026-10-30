@@ -232,6 +232,7 @@ struct Shared {
     pending_requests: wait_budget::Registry,
     active: AtomicUsize,
     events: broadcast::Sender<()>,
+    probe_wake: tokio::sync::Notify,
     quota: quota::Service,
     catalog: catalog::Service,
     model_list: model_list::Service,
@@ -296,6 +297,12 @@ fn pkey(p: &Provider) -> String {
 impl Gateway {
     pub fn freeze_gate(&self) -> freeze::Gate {
         self.0.registry.freeze.clone()
+    }
+    pub async fn wait_endpoint_probe_wake(&self) {
+        self.0.probe_wake.notified().await;
+    }
+    pub(super) fn wake_endpoint_prober(&self) {
+        self.0.probe_wake.notify_one();
     }
     pub fn cancel_wait(&self, request_id: &str) -> bool {
         self.0.pending_requests.cancel(request_id)
@@ -525,6 +532,7 @@ impl Gateway {
             pending_requests: wait_budget::Registry::new(events.clone()),
             active: AtomicUsize::new(0),
             events,
+            probe_wake: tokio::sync::Notify::new(),
             quota: quota::Service::new(),
             admission,
         }));
@@ -555,6 +563,7 @@ impl Gateway {
         self.0
             .registry
             .publish_token(&self.0, &state.store.local_token);
+        self.wake_endpoint_prober();
         #[cfg(test)]
         if !self.0.discover_new_providers.load(Ordering::Relaxed) {
             return;
@@ -1622,6 +1631,7 @@ impl Gateway {
                         .admission
                         .configure_retention(s.store.settings.thread_idle_release_seconds);
                     self.0.compaction.provider_names(&s.store.providers);
+                    self.wake_endpoint_prober();
                     Ok(())
                 },
             )?;
@@ -1740,6 +1750,7 @@ impl Gateway {
                     state.running = false;
                     state.error = Some(error.message.clone());
                     peer.admission.configure(&state.store.providers, false);
+                    peer.probe_wake.notify_one();
                 }
             }
             let _ = self.0.registry.listener.deactivate(self.0.client).await;
@@ -1839,6 +1850,7 @@ impl Gateway {
                 .admission
                 .configure_retention(s.store.settings.thread_idle_release_seconds);
             self.0.compaction.provider_names(&s.store.providers);
+            self.wake_endpoint_prober();
             s.error = None;
         };
         let stopped = self.0.registry.listener.deactivate(self.0.client).await;

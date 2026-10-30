@@ -3117,3 +3117,37 @@ async fn lm_retry_retains_its_resource_and_releases_context_after_success() {
     assert!(!lock(&service.0.data).contexts.contains_key(&job.id));
     assert!(old.upgrade().is_none());
 }
+
+#[test]
+fn populates_disabled_detection_status_at_startup_and_when_providers_change_while_all_disabled() {
+    let (dir, service) = fixture();
+    let first = add(&service, dir.path(), ClientId::Codex, 18080, "responses");
+
+    // Before the first scheduler tick, state() already synthesizes "disabled" instead of empty status.
+    assert!(lock(&service.0.data).detection_status.is_empty());
+    let initial = service.state(ClientId::Codex, &first).unwrap();
+    assert_eq!(initial.detection_status.len(), 1);
+    assert_eq!(initial.detection_status[0].status, "disabled");
+
+    // First idle scheduler check populates detection_status in memory and emits change once.
+    let mut events = service.subscribe();
+    assert!(service.sync_disabled_if_idle());
+    assert!(events.try_recv().is_ok());
+    assert_eq!(
+        lock(&service.0.data).detection_status[&scope_key(ClientId::Codex, &first)].status,
+        "disabled"
+    );
+
+    // Subsequent idle checks short-circuit with zero spurious change events.
+    assert!(service.sync_disabled_if_idle());
+    assert!(events.try_recv().is_err());
+
+    // Adding a second provider while all detections remain disabled populates its "disabled" entry too.
+    let second = add(&service, dir.path(), ClientId::Claude, 18081, "messages");
+    assert!(service.sync_disabled_if_idle());
+    assert!(events.try_recv().is_ok());
+    assert_eq!(
+        lock(&service.0.data).detection_status[&scope_key(ClientId::Claude, &second)].status,
+        "disabled"
+    );
+}

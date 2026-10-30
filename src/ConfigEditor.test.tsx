@@ -194,12 +194,27 @@ it("restores previous configuration only into the draft and confirms client chan
 it("edits Antigravity app config across visual and JSON modes, diffs, restores backup, and guards conflicts", async () => {
   const u = userEvent.setup();
   localStorage.setItem("lich13-switch.config.client", "antigravity");
+  const validEnums: Record<string, string[]> = {
+    themeMode: [
+      "THEME_MODE_UNSPECIFIED",
+      "THEME_MODE_INHERIT",
+      "THEME_MODE_DARK",
+      "THEME_MODE_LIGHT",
+    ],
+    autoExecutionPolicy: [
+      "CASCADE_COMMANDS_AUTO_EXECUTION_UNSPECIFIED",
+      "CASCADE_COMMANDS_AUTO_EXECUTION_OFF",
+      "CASCADE_COMMANDS_AUTO_EXECUTION_AUTO",
+      "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
+      "CASCADE_COMMANDS_AUTO_EXECUTION_EAGER",
+    ],
+  };
   const appDoc: ConfigDocument = {
     ...doc,
     clientId: "antigravity",
     path: "/fixture/config.json",
     canRestore: true,
-    text: '{"userSettings":{"themeMode":"dark","autoExecutionPolicy":"custom-future"},"plugins":{"example.invalid":{"enabled":true}},"future":7}',
+    text: '{"userSettings":{"themeMode":"THEME_MODE_DARK","conversationWidth":"CONVERSATION_WIDTH_UNSPECIFIED","autoExecutionPolicy":"eager"},"plugins":{"example.invalid":{"enabled":true}},"future":7}',
   };
   mocks.command.mockImplementation(async (name, args) => {
     if (name === "read_antigravity_config") return { ...appDoc };
@@ -216,23 +231,46 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
       ) {
         throw { code: "CONFIG_TYPE", message: "userSettings 必须是对象" };
       }
+      const settings = (parsed.userSettings ?? {}) as Record<string, unknown>;
+      for (const [key, allowed] of Object.entries(validEnums)) {
+        if (
+          settings[key] !== undefined &&
+          (typeof settings[key] !== "string" ||
+            !allowed.includes(settings[key] as string))
+        ) {
+          throw {
+            code: "CONFIG_TYPE",
+            message: `userSettings.${key} 枚举值无效`,
+          };
+        }
+      }
       return;
     }
     if (name === "read_previous_antigravity_config")
-      return '{"userSettings":{"themeMode":"system"},"future":7}';
+      return '{"userSettings":{"themeMode":"THEME_MODE_INHERIT"},"future":7}';
     if (name === "save_antigravity_config")
       throw { code: "CONFLICT", message: "配置已变化，草稿已保留" };
   });
   mount();
   const theme = await screen.findByLabelText("主题模式");
   expect(screen.getByText("config.json")).toBeInTheDocument();
-  expect(theme).toHaveValue("dark");
-  await u.selectOptions(theme, "light");
+  expect(theme).toHaveValue("THEME_MODE_DARK");
+  expect(screen.getByLabelText("对话宽度")).toHaveValue(
+    "CONVERSATION_WIDTH_UNSPECIFIED",
+  );
+  expect(screen.getByRole("option", { name: "未指定（默认）" })).toBeInTheDocument();
+  await u.selectOptions(theme, "THEME_MODE_LIGHT");
 
-  // Unknown enum values on disk are preserved in visual mode.
+  // Historical/unknown enum values on disk are visibly flagged and preserved until reselected.
   await u.click(screen.getByRole("button", { name: "执行与安全" }));
-  expect(screen.getByLabelText("命令自动执行策略")).toHaveValue(
-    "custom-future",
+  const execPolicy = screen.getByLabelText("命令自动执行策略");
+  expect(execPolicy).toHaveValue("eager");
+  expect(
+    screen.getByRole("option", { name: "未知当前值（eager）" }),
+  ).toBeInTheDocument();
+  await u.selectOptions(
+    execPolicy,
+    "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
   );
   await u.selectOptions(screen.getByLabelText("终端沙盒"), "true");
 
@@ -248,20 +286,30 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
   ).toBeInTheDocument();
   await u.click(within(diffDialog).getByLabelText("关闭"));
 
-  // Switch to JSON mode: unknown fields and plugins remain intact.
+  // Switch to JSON mode: official enum values, unknown fields, and plugins remain intact.
   await u.click(screen.getByRole("button", { name: "JSON" }));
   const source = screen.getByLabelText("JSON 编辑器") as HTMLTextAreaElement;
   expect(JSON.parse(source.value)).toEqual({
     userSettings: {
-      themeMode: "light",
-      autoExecutionPolicy: "custom-future",
+      themeMode: "THEME_MODE_LIGHT",
+      conversationWidth: "CONVERSATION_WIDTH_UNSPECIFIED",
+      autoExecutionPolicy:
+        "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
       enableTerminalSandbox: true,
     },
     plugins: { "example.invalid": { enabled: true } },
     future: 7,
   });
 
-  // Invalid userSettings type prevents returning to visual mode.
+  // Bogus short enum values (like "dark") and invalid userSettings types are rejected when returning to visual mode.
+  fireEvent.change(source, {
+    target: { value: '{"userSettings":{"themeMode":"dark"}}' },
+  });
+  await u.click(screen.getByRole("button", { name: "可视化" }));
+  expect(
+    await screen.findByText("userSettings.themeMode 枚举值无效"),
+  ).toBeInTheDocument();
+
   fireEvent.change(source, { target: { value: '{"userSettings":0}' } });
   await u.click(screen.getByRole("button", { name: "可视化" }));
   expect(await screen.findByText("userSettings 必须是对象")).toBeInTheDocument();
@@ -276,7 +324,7 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
   );
   await waitFor(() =>
     expect(source).toHaveValue(
-      '{"userSettings":{"themeMode":"system"},"future":7}',
+      '{"userSettings":{"themeMode":"THEME_MODE_INHERIT"},"future":7}',
     ),
   );
 
@@ -293,11 +341,11 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
   // Save uses save_antigravity_config and preserves draft on CONFLICT.
   await u.click(screen.getByRole("button", { name: "保存" }));
   expect(mocks.command).toHaveBeenCalledWith("save_antigravity_config", {
-    text: '{"userSettings":{"themeMode":"system"},"future":7}',
+    text: '{"userSettings":{"themeMode":"THEME_MODE_INHERIT"},"future":7}',
     expectedRevision: "r1",
   });
   expect(source).toHaveValue(
-    '{"userSettings":{"themeMode":"system"},"future":7}',
+    '{"userSettings":{"themeMode":"THEME_MODE_INHERIT"},"future":7}',
   );
   expect(await screen.findByText("配置已变化，草稿已保留")).toBeInTheDocument();
   expect(

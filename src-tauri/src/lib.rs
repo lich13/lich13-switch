@@ -262,6 +262,9 @@ enum ProviderAction {
     Settings,
     Testing,
 }
+fn valid_main_page(page: &str) -> bool {
+    ["accounts", "config", "gateway", "logs", "usage", "settings"].contains(&page)
+}
 #[tauri::command]
 fn open_main(
     app: tauri::AppHandle,
@@ -271,9 +274,7 @@ fn open_main(
     event_id: Option<String>,
     provider_action: Option<ProviderAction>,
 ) -> Result<()> {
-    if page.as_ref().is_some_and(|p| {
-        !["accounts", "config", "gateway", "logs", "settings"].contains(&p.as_str())
-    }) {
+    if page.as_deref().is_some_and(|p| !valid_main_page(p)) {
         return Err(AppError::new(code::WINDOW, "无效页面"));
     }
     quick::hide_quick(app.clone())?;
@@ -1815,40 +1816,26 @@ pub fn run() {
                     }
                 });
             }
-            {
-                let gateways = [
-                    runtime.gateway.clone(),
-                    runtime.claude.clone(),
-                    runtime.grok.clone(),
-                    runtime.dsh.clone(),
-                ];
-                let mut rx0 = gateways[0].subscribe();
-                let mut rx1 = gateways[1].subscribe();
-                let mut rx2 = gateways[2].subscribe();
-                let mut rx3 = gateways[3].subscribe();
-                let mut probe_freeze = gateways[0].freeze_gate().subscribe();
+            for probe_gateway in [
+                runtime.gateway.clone(),
+                runtime.claude.clone(),
+                runtime.grok.clone(),
+                runtime.dsh.clone(),
+            ] {
+                let mut probe_freeze = probe_gateway.freeze_gate().subscribe();
                 tauri::async_runtime::spawn(async move {
                     loop {
-                        let mut min_wait: Option<std::time::Duration> = None;
-                        for g in &gateways {
-                            if let Some(wait) = g.next_endpoint_probe_wait() {
-                                if wait.is_zero() {
-                                    g.probe_due_endpoints().await;
-                                }
-                            }
-                            if let Some(wait) = g.next_endpoint_probe_wait() {
-                                min_wait = Some(match min_wait {
-                                    Some(cur) => cur.min(wait),
-                                    None => wait,
-                                });
-                            }
+                        if probe_gateway
+                            .next_endpoint_probe_wait()
+                            .is_some_and(|w| w.is_zero())
+                        {
+                            probe_gateway.probe_due_endpoints().await;
                         }
-                        let sleep_for = min_wait.map(|w| w.max(std::time::Duration::from_secs(1)));
+                        let sleep_for = probe_gateway
+                            .next_endpoint_probe_wait()
+                            .map(|w| w.max(std::time::Duration::from_secs(1)));
                         tokio::select! {
-                            res = rx0.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
-                            res = rx1.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
-                            res = rx2.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
-                            res = rx3.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
+                            _ = probe_gateway.wait_endpoint_probe_wake() => {}
                             res = probe_freeze.changed() => if res.is_err() { break; },
                             _ = async {
                                 if let Some(d) = sleep_for {
@@ -2290,4 +2277,17 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod page_whitelist_tests {
+    use super::valid_main_page;
+
+    #[test]
+    fn allows_usage_and_all_primary_pages_while_rejecting_unknown_pages() {
+        for page in ["accounts", "config", "gateway", "logs", "usage", "settings"] {
+            assert!(valid_main_page(page), "{page} should be allowed");
+        }
+        assert!(!valid_main_page("invalid"));
+    }
 }

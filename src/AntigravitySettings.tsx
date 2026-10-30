@@ -17,9 +17,9 @@ export const antigravityFields: Record<string, Field[]> = {
       label: "主题模式",
       kind: "select",
       options: [
-        ["system", "跟随系统"],
-        ["dark", "深色"],
-        ["light", "浅色"],
+        ["THEME_MODE_INHERIT", "跟随系统"],
+        ["THEME_MODE_DARK", "深色"],
+        ["THEME_MODE_LIGHT", "浅色"],
       ],
     },
     {
@@ -27,9 +27,9 @@ export const antigravityFields: Record<string, Field[]> = {
       label: "对话宽度",
       kind: "select",
       options: [
-        ["normal", "标准"],
-        ["wide", "宽屏"],
-        ["compact", "紧凑"],
+        ["CONVERSATION_WIDTH_DEFAULT", "标准"],
+        ["CONVERSATION_WIDTH_WIDE", "宽屏"],
+        ["CONVERSATION_WIDTH_NARROW", "紧凑"],
       ],
     },
     {
@@ -37,9 +37,9 @@ export const antigravityFields: Record<string, Field[]> = {
       label: "产物审阅模式",
       kind: "select",
       options: [
-        ["always", "始终审阅"],
-        ["auto", "自动"],
-        ["never", "跳过审阅"],
+        ["ARTIFACT_REVIEW_MODE_ALWAYS", "始终审阅"],
+        ["ARTIFACT_REVIEW_MODE_AUTO", "自动判断"],
+        ["ARTIFACT_REVIEW_MODE_TURBO", "极速免审"],
       ],
     },
     {
@@ -54,11 +54,10 @@ export const antigravityFields: Record<string, Field[]> = {
       label: "命令自动执行策略",
       kind: "select",
       options: [
-        ["off", "关闭自动执行"],
-        ["safe", "安全命令自动执行"],
-        ["review", "需确认后执行"],
-        ["eager", "积极执行"],
-        ["always", "始终自动执行"],
+        ["CASCADE_COMMANDS_AUTO_EXECUTION_OFF", "关闭自动执行"],
+        ["CASCADE_COMMANDS_AUTO_EXECUTION_AUTO", "模型按风险判断"],
+        ["CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX", "沙盒内自动执行"],
+        ["CASCADE_COMMANDS_AUTO_EXECUTION_EAGER", "积极自动执行"],
       ],
     },
     {
@@ -71,9 +70,9 @@ export const antigravityFields: Record<string, Field[]> = {
       label: "工作区外文件访问",
       kind: "select",
       options: [
-        ["ask", "每次询问"],
-        ["allow", "允许访问"],
-        ["deny", "禁止访问"],
+        ["AGENT_SETTING_POLICY_ASK", "每次询问"],
+        ["AGENT_SETTING_POLICY_ALLOW", "允许访问"],
+        ["AGENT_SETTING_POLICY_DENY", "禁止访问"],
       ],
     },
     {
@@ -81,9 +80,10 @@ export const antigravityFields: Record<string, Field[]> = {
       label: "浏览器脚本执行",
       kind: "select",
       options: [
-        ["ask", "每次询问"],
-        ["allow", "允许执行"],
-        ["deny", "禁止执行"],
+        ["BROWSER_JS_EXECUTION_POLICY_DISABLED", "禁用"],
+        ["BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK", "每次询问"],
+        ["BROWSER_JS_EXECUTION_POLICY_MODEL_DECIDES", "模型自动判断"],
+        ["BROWSER_JS_EXECUTION_POLICY_TURBO", "自动允许"],
       ],
     },
   ],
@@ -188,7 +188,7 @@ export default function AntigravitySettings({
           </div>
         )}
         {(antigravityFields[group] ?? []).map((f) => (
-          <Setting key={f.label} field={f} editing={editing} />
+          <Setting key={f.label} field={f} editing={editing} flagUnknown />
         ))}
         {group === "远程与插件" && <PluginsOverview text={text} />}
         {group === "高级" && (

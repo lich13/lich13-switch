@@ -603,6 +603,20 @@ function assertModelRequest(model, run, expectedModelId = model.modelId) {
   return matchedRequests;
 }
 
+let detectedGrokVersion = '';
+
+function assertMinSemver(version, minimum = [1, 0, 52]) {
+  const parts = version.split('.').map((part) => Number.parseInt(part, 10));
+  assert.equal(parts.length, 3, `unexpected grok semver: ${version}`);
+  assert.ok(parts.every(Number.isInteger), `non-numeric grok semver: ${version}`);
+  for (let i = 0; i < 3; i += 1) {
+    if (parts[i] > minimum[i]) return;
+    if (parts[i] < minimum[i]) {
+      assert.fail(`native grok version ${version} is older than ${minimum.join('.')}`);
+    }
+  }
+}
+
 before(async () => {
   assert.equal(process.platform, 'darwin', 'this native CLI check is only prepared for macOS');
   assert.ok(existsSync(GROK_BIN), 'native Grok binary not found at the configured test path');
@@ -630,7 +644,11 @@ before(async () => {
   const version = await runGrok(['version']);
   assert.equal(version.timedOut, false, 'native Grok version check timed out');
   assert.equal(version.code, 0, safeOutput(version.stderr || version.stdout));
-  assert.match(`${version.stdout}\n${version.stderr}`, /grok 1\.0\.52 \(0920c8169e27\)/i);
+  const versionOutput = `${version.stdout}\n${version.stderr}`;
+  const match = versionOutput.match(/grok (\d+\.\d+\.\d+)\s+\([0-9a-f]+\)/i);
+  assert.ok(match, `unexpected grok version output: ${safeOutput(versionOutput)}`);
+  detectedGrokVersion = match[1];
+  assertMinSemver(detectedGrokVersion);
 });
 
 after(async () => {
@@ -664,7 +682,7 @@ test('native inspector reports only the isolated config layer', async () => {
   } catch {
     assert.fail('grok inspect --json did not return JSON');
   }
-  assert.equal(inspection.grokVersion, '1.0.52');
+  assert.equal(inspection.grokVersion, detectedGrokVersion);
   const layers = inspection.configSources?.layers ?? [];
   assert.equal(layers.length, 1, 'inspector should report only the isolated user config layer');
   assert.equal(layers[0].role, 'user', 'inspector should report the isolated user config layer');

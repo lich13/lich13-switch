@@ -226,7 +226,9 @@ export default function App() {
             setDialog("settings");
           })()
         : navigate(
-            p === "config" || p === "gateway" || p === "logs" ? p : "accounts",
+            p === "config" || p === "gateway" || p === "logs" || p === "usage"
+              ? p
+              : "accounts",
           ),
     );
     events.watch("provider-settings", async (p) => {

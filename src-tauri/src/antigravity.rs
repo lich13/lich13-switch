@@ -15,15 +15,78 @@ use std::{
 
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 
-const STRING_SETTINGS: &[&str] = &[
-    "themeMode",
-    "conversationWidth",
-    "artifactReviewMode",
-    "autoExecutionPolicy",
-    "browserJsExecutionPolicy",
-    "nonWorkspaceFileAccessPolicy",
-    "remoteControlHostname",
+const ENUM_SETTINGS: &[(&str, &[&str])] = &[
+    (
+        "themeMode",
+        &[
+            "THEME_MODE_UNSPECIFIED",
+            "THEME_MODE_INHERIT",
+            "THEME_MODE_DARK",
+            "THEME_MODE_LIGHT",
+        ],
+    ),
+    (
+        "conversationWidth",
+        &[
+            "CONVERSATION_WIDTH_UNSPECIFIED",
+            "CONVERSATION_WIDTH_DEFAULT",
+            "CONVERSATION_WIDTH_WIDE",
+            "CONVERSATION_WIDTH_NARROW",
+        ],
+    ),
+    (
+        "artifactReviewMode",
+        &[
+            "ARTIFACT_REVIEW_MODE_UNSPECIFIED",
+            "ARTIFACT_REVIEW_MODE_ALWAYS",
+            "ARTIFACT_REVIEW_MODE_AUTO",
+            "ARTIFACT_REVIEW_MODE_TURBO",
+        ],
+    ),
+    (
+        "autoExecutionPolicy",
+        &[
+            "CASCADE_COMMANDS_AUTO_EXECUTION_UNSPECIFIED",
+            "CASCADE_COMMANDS_AUTO_EXECUTION_OFF",
+            "CASCADE_COMMANDS_AUTO_EXECUTION_AUTO",
+            "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
+            "CASCADE_COMMANDS_AUTO_EXECUTION_EAGER",
+        ],
+    ),
+    (
+        "browserJsExecutionPolicy",
+        &[
+            "BROWSER_JS_EXECUTION_POLICY_UNSPECIFIED",
+            "BROWSER_JS_EXECUTION_POLICY_DISABLED",
+            "BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK",
+            "BROWSER_JS_EXECUTION_POLICY_MODEL_DECIDES",
+            "BROWSER_JS_EXECUTION_POLICY_TURBO",
+        ],
+    ),
+    (
+        "nonWorkspaceFileAccessPolicy",
+        &[
+            "AGENT_SETTING_POLICY_UNSPECIFIED",
+            "AGENT_SETTING_POLICY_ASK",
+            "AGENT_SETTING_POLICY_ALLOW",
+            "AGENT_SETTING_POLICY_DENY",
+        ],
+    ),
+    (
+        "permissionPreset",
+        &[
+            "AGENT_PERMISSION_PRESET_UNSPECIFIED",
+            "AGENT_PERMISSION_PRESET_REQUEST_REVIEW",
+            "AGENT_PERMISSION_PRESET_DEFAULT",
+            "AGENT_PERMISSION_PRESET_VETTED",
+            "AGENT_PERMISSION_PRESET_TURBO",
+            "AGENT_PERMISSION_PRESET_AUTO",
+            "AGENT_PERMISSION_PRESET_NONE",
+        ],
+    ),
 ];
+
+const STRING_SETTINGS: &[&str] = &["remoteControlHostname"];
 
 const BOOL_SETTINGS: &[&str] = &[
     "enableTerminalSandbox",
@@ -64,6 +127,22 @@ pub fn validate_text(text: &str) -> Result<Value> {
         let Some(settings) = user_settings.as_object() else {
             return Err(AppError::new(code::CONFIG_TYPE, "userSettings 必须是对象"));
         };
+        for (key, allowed) in ENUM_SETTINGS {
+            if let Some(raw) = settings.get(*key) {
+                let Some(val) = raw.as_str() else {
+                    return Err(AppError::new(
+                        code::CONFIG_TYPE,
+                        &format!("userSettings.{key} 必须是字符串"),
+                    ));
+                };
+                if !allowed.contains(&val) {
+                    return Err(AppError::new(
+                        code::CONFIG_TYPE,
+                        &format!("userSettings.{key} 枚举值无效"),
+                    ));
+                }
+            }
+        }
         for key in STRING_SETTINGS {
             if settings.get(*key).is_some_and(|v| !v.is_string()) {
                 return Err(AppError::new(
@@ -167,13 +246,13 @@ mod tests {
         assert!(!first.can_restore);
         assert_eq!(previous_at(data.path()).unwrap_err().code, code::RESTORE);
 
-        let text = "{\"userSettings\":{\"themeMode\":\"dark\",\"future\":false},\"plugins\":{\"example.invalid\":{\"enabled\":true}}}";
+        let text = "{\"userSettings\":{\"themeMode\":\"THEME_MODE_DARK\",\"future\":false},\"plugins\":{\"example.invalid\":{\"enabled\":true}}}";
         let saved = save_at(home.path(), data.path(), text, &first.revision).unwrap();
         assert_eq!(saved.text, text);
         // First write created config.json from missing state, so no prior file existed yet.
         assert!(!saved.can_restore);
 
-        let updated = "{\"userSettings\":{\"themeMode\":\"light\",\"enableTerminalSandbox\":true,\"future\":false},\"plugins\":{\"example.invalid\":{\"enabled\":true}}}";
+        let updated = "{\"userSettings\":{\"themeMode\":\"THEME_MODE_LIGHT\",\"enableTerminalSandbox\":true,\"future\":false},\"plugins\":{\"example.invalid\":{\"enabled\":true}}}";
         let saved_second = save_at(home.path(), data.path(), updated, &saved.revision).unwrap();
         assert!(saved_second.can_restore);
         assert_eq!(previous_at(data.path()).unwrap(), text);
@@ -199,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_known_field_types_and_never_leaks_values_in_json_errors() {
+    fn validates_known_field_types_enums_and_never_leaks_values_in_json_errors() {
         assert_eq!(
             validate_text("{\"plugins\":[]}").unwrap_err().code,
             code::CONFIG_TYPE
@@ -210,6 +289,21 @@ mod tests {
                 .code,
             code::CONFIG_TYPE
         );
+        for invalid in [
+            "{\"userSettings\":{\"themeMode\":\"dark\"}}",
+            "{\"userSettings\":{\"conversationWidth\":\"wide\"}}",
+            "{\"userSettings\":{\"artifactReviewMode\":\"always\"}}",
+            "{\"userSettings\":{\"autoExecutionPolicy\":\"eager\"}}",
+            "{\"userSettings\":{\"browserJsExecutionPolicy\":\"always_ask\"}}",
+            "{\"userSettings\":{\"nonWorkspaceFileAccessPolicy\":\"allow\"}}",
+            "{\"userSettings\":{\"permissionPreset\":\"turbo\"}}",
+        ] {
+            assert_eq!(validate_text(invalid).unwrap_err().code, code::CONFIG_TYPE);
+        }
+        assert!(validate_text(
+            "{\"userSettings\":{\"themeMode\":\"THEME_MODE_INHERIT\",\"conversationWidth\":\"CONVERSATION_WIDTH_WIDE\",\"artifactReviewMode\":\"ARTIFACT_REVIEW_MODE_TURBO\",\"autoExecutionPolicy\":\"CASCADE_COMMANDS_AUTO_EXECUTION_EAGER\",\"browserJsExecutionPolicy\":\"BROWSER_JS_EXECUTION_POLICY_MODEL_DECIDES\",\"nonWorkspaceFileAccessPolicy\":\"AGENT_SETTING_POLICY_ALLOW\",\"permissionPreset\":\"AGENT_PERMISSION_PRESET_DEFAULT\"}}"
+        )
+        .is_ok());
         assert_eq!(
             validate_text("{\"userSettings\":{\"enableTerminalSandbox\":\"yes\"}}")
                 .unwrap_err()
@@ -228,12 +322,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let first = read_at(home.path(), data.path()).unwrap();
-        let initial = "{\"userSettings\":{\"themeMode\":\"dark\"}}";
+        let initial = "{\"userSettings\":{\"themeMode\":\"THEME_MODE_DARK\"}}";
         let saved = save_at(home.path(), data.path(), initial, &first.revision).unwrap();
 
         // Replace backup file path with a directory so backup atomic_write fails.
         std::fs::create_dir_all(backup(data.path())).unwrap();
-        let next = "{\"userSettings\":{\"themeMode\":\"light\"}}";
+        let next = "{\"userSettings\":{\"themeMode\":\"THEME_MODE_LIGHT\"}}";
         assert!(save_at(home.path(), data.path(), next, &saved.revision).is_err());
         assert_eq!(read_at(home.path(), data.path()).unwrap().text, initial);
     }
@@ -250,7 +344,7 @@ mod tests {
         let saved = save_at(
             home.path(),
             data.path(),
-            "{\"userSettings\":{\"conversationWidth\":\"wide\"}}",
+            "{\"userSettings\":{\"conversationWidth\":\"CONVERSATION_WIDTH_WIDE\"}}",
             &first.revision,
         )
         .unwrap();
