@@ -72,7 +72,7 @@ struct Context {
     detection_revision: Option<String>,
 }
 struct Data {
-    bank: bank::Resource,
+    bank: Option<bank::Resource>,
     saved: Persisted,
     revision: String,
     outputs: HashMap<String, Output>,
@@ -87,6 +87,12 @@ struct Data {
     lm_updating: bool,
     lm_error: Option<String>,
     lm_status: Value,
+}
+impl Data {
+    pub(super) fn ensure_bank(&mut self) -> &bank::Resource {
+        let saved = &self.saved.bank;
+        self.bank.get_or_insert_with(|| bank::Resource::load(saved))
+    }
 }
 struct Shared {
     path: PathBuf,
@@ -170,7 +176,7 @@ impl Service {
             #[cfg(test)]
             clock: std::sync::atomic::AtomicI64::new(0),
             data: Mutex::new(Data {
-                bank: bank::Resource::load(&saved.bank),
+                bank: None,
                 saved,
                 revision,
                 outputs: HashMap::new(),
@@ -227,7 +233,10 @@ impl Service {
     }
     pub fn state(&self, client: ClientId, provider: &str) -> Result<State> {
         self.gateway(client).test_endpoint(provider, None)?;
-        let data = lock(&self.0.data);
+        let mut data = lock(&self.0.data);
+        let updating = data.bank_updating;
+        let saved_bank = data.saved.bank.clone();
+        let model_trace_status = data.ensure_bank().status(&saved_bank, updating);
         let scope = |job: &&Job| job.client_id == client && job.provider_id == provider;
         Ok(State {
             revision: config_revision(&data.saved, client, provider),
@@ -238,7 +247,7 @@ impl Service {
                 .get(client_key(client))
                 .cloned()
                 .unwrap_or_else(|| PlatformSettings::for_client(client)),
-            banks: json!({"modelTrace":data.bank.status(&data.saved.bank, data.bank_updating),"lmDetector":lm_detector::status(&data)}),
+            banks: json!({"modelTrace":model_trace_status,"lmDetector":lm_detector::status(&data)}),
             jobs: data
                 .saved
                 .jobs
@@ -388,7 +397,7 @@ impl Service {
         }
         let snapshot = if request.kind == Kind::Fingerprint && platform.engine == Engine::ModelTrace
         {
-            Some(data.bank.snapshot.clone()?)
+            Some(data.ensure_bank().snapshot.clone()?)
         } else {
             None
         };
@@ -724,9 +733,10 @@ impl Service {
         }
         self.save(&mut data, next)?;
         if let Some(resource) = resource {
-            data.bank = resource;
+            data.bank = Some(resource);
         }
-        let result = data.bank.status(&data.saved.bank, false);
+        let saved_bank = data.saved.bank.clone();
+        let result = data.ensure_bank().status(&saved_bank, false);
         drop(data);
         self.changed();
         Ok(result)

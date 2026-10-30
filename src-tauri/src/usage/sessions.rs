@@ -38,6 +38,8 @@ struct Cursor {
     message_usage: BTreeMap<String, String>,
     replay_index: usize,
     meta_loaded: bool,
+    modified: String,
+    complete: bool,
 }
 #[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,17 +61,33 @@ fn timestamp(v: &Value) -> Option<i64> {
         .map(|d| d.timestamp_millis())
         .or_else(|| v.as_i64())
 }
-fn identity(file: &File) -> Result<String> {
-    let m = file.metadata().map_err(storage::io_error)?;
+fn identity_meta(m: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        Ok(safe_id(&format!("{}:{}", m.dev(), m.ino())))
+        safe_id(&format!("{}:{}", m.dev(), m.ino()))
     }
     #[cfg(not(unix))]
     {
-        Ok(safe_id(&format!("{:?}", m.created().ok())))
+        safe_id(&format!("{:?}", m.created().ok()))
     }
+}
+fn file_modified(m: &std::fs::Metadata) -> String {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| format!("{}:{}", d.as_secs(), d.subsec_nanos()))
+        .unwrap_or_default()
+}
+fn file_settled(m: &std::fs::Metadata) -> bool {
+    m.modified()
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age >= std::time::Duration::from_secs(2))
+}
+fn identity(file: &File) -> Result<String> {
+    let m = file.metadata().map_err(storage::io_error)?;
+    Ok(identity_meta(&m))
 }
 fn tail(file: &mut File, offset: u64) -> Result<String> {
     let start = offset.saturating_sub(4096);
@@ -297,19 +315,37 @@ pub fn sync(
                 .cursor(&key)?
                 .and_then(|s| serde_json::from_str::<Cursor>(&s).ok())
                 .filter(|c| c.generation == generation);
-            let mut file = File::open(p).map_err(storage::io_error)?;
-            let id = identity(&file)?;
-            let size = file.metadata().map_err(storage::io_error)?.len();
-            let stable = saved
-                .as_ref()
-                .filter(|c| c.meta_loaded && c.identity == id && size >= c.offset)
-                .map(|c| tail(&mut file, c.offset).map(|v| v == c.tail))
-                .transpose()?
-                .unwrap_or(false);
-            let value = if let Some(c) = saved.filter(|_| stable) {
+            let st = std::fs::metadata(p).map_err(storage::io_error)?;
+            let id = identity_meta(&st);
+            let modified = file_modified(&st);
+            let settled_match = !rebuild
+                && saved.as_ref().is_some_and(|c| {
+                    c.meta_loaded
+                        && c.complete
+                        && !modified.is_empty()
+                        && c.identity == id
+                        && st.len() == c.offset
+                        && c.modified == modified
+                        && file_settled(&st)
+                });
+            let value = if settled_match {
+                let c = saved.unwrap();
                 (c.session, c.parent, c.fork_at)
             } else {
-                meta(p)?
+                let mut file = File::open(p).map_err(storage::io_error)?;
+                let id = identity(&file)?;
+                let size = file.metadata().map_err(storage::io_error)?.len();
+                let stable = saved
+                    .as_ref()
+                    .filter(|c| c.meta_loaded && c.identity == id && size >= c.offset)
+                    .map(|c| tail(&mut file, c.offset).map(|v| v == c.tail))
+                    .transpose()?
+                    .unwrap_or(false);
+                if let Some(c) = saved.filter(|_| stable) {
+                    (c.session, c.parent, c.fork_at)
+                } else {
+                    meta(p)?
+                }
             };
             if let Some(id) = &value.0 {
                 parents.insert(id.clone(), p.clone());
@@ -323,23 +359,58 @@ pub fn sync(
     }
     for path in paths {
         let key = safe_id(&format!("{client}:{}", path.to_string_lossy()));
+        let saved_raw = if rebuild { None } else { store.cursor(&key)? };
+        if !rebuild && !store.requires_complete_history() {
+            if let (Ok(st), Some(c)) = (
+                std::fs::metadata(&path),
+                saved_raw
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
+                    .filter(|c| c.generation == generation),
+            ) {
+                let modified = file_modified(&st);
+                if c.complete
+                    && !modified.is_empty()
+                    && c.identity == identity_meta(&st)
+                    && st.len() == c.offset
+                    && c.modified == modified
+                    && file_settled(&st)
+                {
+                    report.files += 1;
+                    if report.files % 16 == 0 {
+                        store.progress(&report);
+                    }
+                    continue;
+                }
+            }
+        }
         let result = (|| -> Result<(Vec<Record>, String)> {
             let mut file = File::open(&path).map_err(storage::io_error)?;
-            let id = identity(&file)?;
+            let file_meta = file.metadata().map_err(storage::io_error)?;
+            let file_len = file_meta.len();
+            let modified = file_modified(&file_meta);
+            let id = identity_meta(&file_meta);
             let mut c = if rebuild {
                 Cursor::default()
             } else {
-                store
-                    .cursor(&key)?
-                    .and_then(|s| serde_json::from_str::<Cursor>(&s).ok())
+                saved_raw
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
                     .filter(|c| c.generation == generation)
                     .unwrap_or_default()
             };
-            if c.identity != id
-                || file.metadata().map_err(storage::io_error)?.len() < c.offset
-                || tail(&mut file, c.offset)? != c.tail
-            {
+            let mut verified_tail = None;
+            let valid_prefix = c.identity == id && file_len >= c.offset && {
+                let digest = tail(&mut file, c.offset)?;
+                let ok = digest == c.tail;
+                if ok {
+                    verified_tail = Some(digest);
+                }
+                ok
+            };
+            if !valid_prefix {
                 c = Cursor::default();
+                verified_tail = None;
             }
             c.identity = id;
             c.source = client.into();
@@ -375,18 +446,23 @@ pub fn sync(
             let mut reader = BufReader::new(file);
             let mut rows = BTreeMap::<String, Record>::new();
             let batch_start = c.offset;
+            let mut partial_tail = false;
             while rebuild || c.offset - batch_start < 64 * 1024 * 1024 {
                 let line_start = reader.stream_position().map_err(storage::io_error)?;
                 let Some((value, newline)) = line(&mut reader)? else {
-                    if store.requires_complete_history()
-                        && reader.stream_position().map_err(storage::io_error)? > line_start
-                    {
-                        return Err(failure("会话历史仍在写入，未导出、未清理，请稍后重试"));
+                    let current_pos = reader.stream_position().map_err(storage::io_error)?;
+                    if current_pos > line_start {
+                        partial_tail = true;
+                        if store.requires_complete_history() {
+                            return Err(failure("会话历史仍在写入，未导出、未清理，请稍后重试"));
+                        }
                     }
                     break;
                 };
                 let complete_tail = !newline;
-                if !complete_tail {
+                if complete_tail {
+                    partial_tail = true;
+                } else {
                     c.offset = reader.stream_position().map_err(storage::io_error)?;
                 }
                 let Some(v) = value else {
@@ -449,7 +525,12 @@ pub fn sync(
                     break;
                 }
             }
-            c.tail = tail(reader.get_mut(), c.offset)?;
+            c.tail = match verified_tail.filter(|_| c.offset == batch_start) {
+                Some(digest) => digest,
+                None => tail(reader.get_mut(), c.offset)?,
+            };
+            c.complete = !partial_tail && c.offset == file_len;
+            c.modified = if c.complete { modified } else { String::new() };
             Ok((
                 rows.into_values().collect(),
                 serde_json::to_string(&c).map_err(|_| failure("同步游标保存失败"))?,
@@ -464,7 +545,7 @@ pub fn sync(
                         store.stage_rebuild(client, batch, None)?;
                     }
                     store.stage_rebuild(client, &[], Some((&key, &cursor)))?;
-                } else {
+                } else if !rows.is_empty() || saved_raw.as_deref() != Some(cursor.as_str()) {
                     store.write_batch(&rows, Some((&key, &cursor)))?;
                 }
             }

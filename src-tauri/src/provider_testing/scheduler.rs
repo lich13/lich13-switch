@@ -305,6 +305,18 @@ impl Service {
                 let wall = now();
                 let suspended = wall - last_wall > 90_000 || wall < last_wall;
                 last_wall = wall;
+                let idle = !suspended && {
+                    let data = lock(&service.0.data);
+                    !data.saved.detection.values().any(|c| c.enabled)
+                        && !data.saved.jobs.iter().any(|j| j.automatic && !j.terminal())
+                        && data
+                            .detection_status
+                            .values()
+                            .all(|s| s.status == "disabled")
+                };
+                if idle {
+                    continue;
+                }
                 let tick_service = service.clone();
                 let result =
                     tokio::task::spawn_blocking(move || tick_service.tick(wall, suspended))

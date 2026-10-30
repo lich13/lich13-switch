@@ -657,6 +657,71 @@ fn load(path: &Path) -> Journal {
     }
     j
 }
+fn append_lines(path: &Path, rows: &[Record]) -> Result<()> {
+    use std::io::Write;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(storage::io_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(storage::io_error(std::io::Error::other(
+            "invalid journal file",
+        )));
+    }
+    let mut buf = Vec::new();
+    for record in rows {
+        serde_json::to_writer(&mut buf, record)
+            .map_err(|_| AppError::new(code::LOG_WRITE, "日志写入失败，请检查文件权限与空间"))?;
+        buf.push(b'\n');
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(storage::io_error)?;
+    file.write_all(&buf).map_err(storage::io_error)?;
+    storage::protect(path, false)?;
+    Ok(())
+}
+fn resolve_cause_id<'a, I>(r: &mut Record, aliases: &VecDeque<(String, String)>, records: I)
+where
+    I: DoubleEndedIterator<Item = &'a Record> + Clone,
+{
+    if let Some((_, target)) = aliases
+        .iter()
+        .rev()
+        .find(|(id, _)| r.details.cause_id.as_ref() == Some(id))
+    {
+        r.details.cause_id = Some(target.clone());
+    }
+    if matches!(r.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
+        && r.details
+            .cause_id
+            .as_ref()
+            .is_none_or(|id| !records.clone().any(|old| &old.id == id))
+    {
+        // A repeated cause may already have been merged into an earlier row.
+        r.details.cause_id = records
+            .rev()
+            .find(|old| {
+                !matches!(old.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
+                    && (r.reason != Reason::CircuitOpen
+                        || old.details.counted_failure == Some(true))
+                    && old.client_id == r.client_id
+                    && old.provider_id == r.provider_id
+                    && old.model == r.model
+                    && old.status == r.status
+                    && old.details.upstream_code == r.details.upstream_code
+                    && old.details.upstream_reason == r.details.upstream_reason
+                    && old.details.error_basis == r.details.error_basis
+                    && old.details.quota_check == r.details.quota_check
+                    && old.details.rpm_wait_reason == r.details.rpm_wait_reason
+                    && old.details.local_code == r.details.local_code
+                    && old.details.message == r.details.message
+                    && old.details.phase == r.details.phase
+            })
+            .map(|cause| cause.id.clone());
+    }
+}
 fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
     let cutoff = now().saturating_sub(RETENTION);
     if !changed && !j.needs_write(path) {
@@ -723,16 +788,6 @@ impl Service {
                         continue;
                     }
                 }
-                let mut journal = j.lock().unwrap().clone();
-                // Only Clear promises rollback after a failed write. Append keeps
-                // its in-memory evidence so the next write can retry it.
-                let previous = matches!(&job, Job::Clear(_)).then(|| {
-                    (
-                        std::mem::take(&mut journal.records),
-                        std::mem::take(&mut journal.aliases),
-                    )
-                });
-                let mut done = None;
                 let cleanup = matches!(&job, Job::Clear(_) | Job::Prune);
                 let prune_only = matches!(&job, Job::Prune);
                 let append = matches!(&job, Job::Append(_));
@@ -748,7 +803,83 @@ impl Service {
                             Err(_) => break,
                         }
                     }
+                    let fast_batch = {
+                        let guard = j.lock().unwrap();
+                        if !guard.needs_write(&path)
+                            && !jobs
+                                .iter()
+                                .any(|job| matches!(job, Job::Append(r) if r.details.raw.is_some()))
+                        {
+                            let mut staged: Vec<(Record, bool)> = Vec::with_capacity(jobs.len());
+                            let mut pure_append = true;
+                            for job in &jobs {
+                                let Job::Append(boxed) = job else {
+                                    pure_append = false;
+                                    break;
+                                };
+                                let mut r = (**boxed).clone();
+                                resolve_cause_id(
+                                    &mut r,
+                                    &guard.aliases,
+                                    guard
+                                        .records
+                                        .iter()
+                                        .chain(staged.iter().map(|(rec, _)| rec)),
+                                );
+                                if guard
+                                    .records
+                                    .iter()
+                                    .chain(staged.iter().map(|(rec, _)| rec))
+                                    .rev()
+                                    .any(|old| {
+                                        old.same(&r)
+                                            && r.last_at.saturating_sub(old.first_at)
+                                                < r.merge_seconds()
+                                    })
+                                {
+                                    pure_append = false;
+                                    break;
+                                }
+                                let notify = r.reason.notifiable(r.action);
+                                staged.push((r, notify));
+                            }
+                            pure_append.then_some(staged)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(staged) = fast_batch {
+                        let rows: Vec<Record> = staged.iter().map(|(r, _)| r.clone()).collect();
+                        let result = append_lines(&path, &rows);
+                        let error = {
+                            let mut guard = j.lock().unwrap();
+                            guard.records.extend(rows);
+                            if result.is_err() {
+                                guard.dirty = true;
+                                guard.error = Some("日志写入失败，请检查文件权限与空间".into());
+                            }
+                            guard.error.clone()
+                        };
+                        for (record, notify) in staged {
+                            let _ = events_copy.send(Change {
+                                record: Some(record),
+                                error: error.clone(),
+                                notify,
+                            });
+                        }
+                        continue;
+                    }
                 }
+                let mut journal = j.lock().unwrap().clone();
+                // Only Clear promises rollback after a failed write. Append keeps
+                // its in-memory evidence so the next write can retry it.
+                let previous = matches!(jobs.first(), Some(Job::Clear(_))).then(|| {
+                    (
+                        std::mem::take(&mut journal.records),
+                        std::mem::take(&mut journal.aliases),
+                    )
+                });
+                let mut done = None;
                 let mut changes = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let mut changed = None;
@@ -773,47 +904,7 @@ impl Service {
                                     *value = value.chars().take(512).collect();
                                 }
                             }
-                            if let Some((_, target)) = journal
-                                .aliases
-                                .iter()
-                                .rev()
-                                .find(|(id, _)| r.details.cause_id.as_ref() == Some(id))
-                            {
-                                r.details.cause_id = Some(target.clone());
-                            }
-                            if matches!(r.reason, Reason::CircuitOpen | Reason::FailoverExhausted)
-                                && r.details.cause_id.as_ref().is_none_or(|id| {
-                                    !journal.records.iter().any(|old| &old.id == id)
-                                })
-                            {
-                                // A repeated cause may already have been merged into an earlier row.
-                                r.details.cause_id = journal
-                                    .records
-                                    .iter()
-                                    .rev()
-                                    .find(|old| {
-                                        !matches!(
-                                            old.reason,
-                                            Reason::CircuitOpen | Reason::FailoverExhausted
-                                        ) && (r.reason != Reason::CircuitOpen
-                                            || old.details.counted_failure == Some(true))
-                                            && old.client_id == r.client_id
-                                            && old.provider_id == r.provider_id
-                                            && old.model == r.model
-                                            && old.status == r.status
-                                            && old.details.upstream_code == r.details.upstream_code
-                                            && old.details.upstream_reason
-                                                == r.details.upstream_reason
-                                            && old.details.error_basis == r.details.error_basis
-                                            && old.details.quota_check == r.details.quota_check
-                                            && old.details.rpm_wait_reason
-                                                == r.details.rpm_wait_reason
-                                            && old.details.local_code == r.details.local_code
-                                            && old.details.message == r.details.message
-                                            && old.details.phase == r.details.phase
-                                    })
-                                    .map(|cause| cause.id.clone());
-                            }
+                            resolve_cause_id(&mut r, &journal.aliases, journal.records.iter());
                             notify = r.reason.notifiable(r.action);
                             if let Some(old) = journal.records.iter_mut().rev().find(|old| {
                                 old.same(&r)
@@ -1291,5 +1382,49 @@ mod routing_visibility_tests {
             5
         );
         assert!(service.detail(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn incremental_append_adds_new_lines_and_merge_rewrites_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.jsonl");
+        let service = Service::new(dir.path());
+        let mut rx = service.subscribe();
+
+        let first = Record::new(
+            Some(ClientId::Codex),
+            None,
+            Some("fixture-model-a"),
+            Reason::RateLimit,
+            Action::TryingNext,
+            Some(429),
+            Some(1),
+        );
+        service.emit(first);
+        rx.recv().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+        let second = Record::new(
+            Some(ClientId::Codex),
+            None,
+            Some("fixture-model-b"),
+            Reason::UpstreamService,
+            Action::Returned,
+            Some(502),
+            Some(1),
+        );
+        service.emit(second.clone());
+        rx.recv().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+
+        let mut repeated = second;
+        repeated.id = uuid::Uuid::new_v4().to_string();
+        service.emit(repeated);
+        let merged = rx.recv().await.unwrap().record.unwrap();
+        assert_eq!(merged.count, 2);
+        let reloaded = load(&path);
+        assert!(reloaded.error.is_none());
+        assert_eq!(reloaded.records.len(), 2);
+        assert_eq!(reloaded.records[1].count, 2);
     }
 }

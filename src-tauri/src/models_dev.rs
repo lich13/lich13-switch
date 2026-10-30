@@ -85,6 +85,7 @@ pub struct Search {
 }
 #[derive(Clone, Default)]
 struct State {
+    loaded: bool,
     index: Option<Arc<Index>>,
     version: Option<String>,
     error: Option<String>,
@@ -182,8 +183,21 @@ fn crop(value: Value) -> Result<Index> {
 }
 impl Catalog {
     pub fn new(dir: &Path) -> Self {
-        let path = dir.join("models-dev-index.json");
-        let loaded = storage::read_bounded(&path, CACHE_LIMIT).and_then(|bytes| {
+        Self {
+            path: dir.join("models-dev-index.json"),
+            state: Arc::new(RwLock::new(State::default())),
+            sync: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+    fn ensure_loaded(&self) {
+        if self.state.read().unwrap().loaded {
+            return;
+        }
+        let mut state = self.state.write().unwrap();
+        if state.loaded {
+            return;
+        }
+        let loaded = storage::read_bounded(&self.path, CACHE_LIMIT).and_then(|bytes| {
             let index = bytes
                 .as_ref()
                 .map(|bytes| {
@@ -196,24 +210,20 @@ impl Catalog {
             }
             Ok((index, bytes.map(|bytes| storage::digest(&bytes))))
         });
-        let state = match loaded {
-            Ok((index, version)) => State {
-                index: index.map(Arc::new),
-                version,
-                ..State::default()
-            },
-            Err(_) => State {
-                error: Some("models.dev 缓存不可用，可手动刷新".into()),
-                ..State::default()
-            },
-        };
-        Self {
-            path,
-            state: Arc::new(RwLock::new(state)),
-            sync: Arc::new(tokio::sync::Mutex::new(())),
+        match loaded {
+            Ok((index, version)) => {
+                state.index = index.map(Arc::new);
+                state.version = version;
+                state.error = None;
+            }
+            Err(_) => {
+                state.error = Some("models.dev 缓存不可用，可手动刷新".into());
+            }
         }
+        state.loaded = true;
     }
     pub fn frozen(&self) -> Self {
+        self.ensure_loaded();
         Self {
             path: self.path.clone(),
             state: Arc::new(RwLock::new(self.state.read().unwrap().clone())),
@@ -221,6 +231,7 @@ impl Catalog {
         }
     }
     pub fn view(&self) -> View {
+        self.ensure_loaded();
         let state = self.state.read().unwrap();
         View {
             updated_at: state.index.as_ref().map(|i| i.updated_at),
@@ -239,6 +250,7 @@ impl Catalog {
     async fn refresh_from(&self, force: bool, source: &str) -> Result<View> {
         let began = Instant::now();
         let _guard = self.sync.lock().await;
+        self.ensure_loaded();
         let skip = {
             let state = self.state.read().unwrap();
             state.attempted.is_some_and(|t| t >= began)
@@ -262,6 +274,7 @@ impl Catalog {
             Ok((index, storage::digest(&bytes)))
         });
         let mut state = self.state.write().unwrap();
+        state.loaded = true;
         state.attempted = Some(Instant::now());
         match result {
             Ok((index, version)) => {
@@ -279,6 +292,7 @@ impl Catalog {
         self.metadata_from(id, None)
     }
     pub fn metadata_from(&self, id: &str, source: Option<&str>) -> Option<Metadata> {
+        self.ensure_loaded();
         let state = self.state.read().unwrap();
         let (matches, basis) = resolve_source(state.index.as_deref()?, id, false, source)?;
         let (_, first_id, first) = *matches.first()?;
@@ -330,6 +344,7 @@ impl Catalog {
         self.price_from(id, None)
     }
     pub fn price_from(&self, id: &str, source: Option<&str>) -> Option<(Value, String)> {
+        self.ensure_loaded();
         let state = self.state.read().unwrap();
         let (matches, basis) = resolve_source(state.index.as_deref()?, id, true, source)?;
         let (_, source_model, first) = *matches.first()?;
@@ -349,6 +364,7 @@ impl Catalog {
         ))
     }
     pub fn has_source(&self, source: &str) -> bool {
+        self.ensure_loaded();
         self.state
             .read()
             .unwrap()
@@ -357,6 +373,7 @@ impl Catalog {
             .is_some_and(|index| qualified(index, source).is_some())
     }
     pub fn search(&self, query: &str, limit: usize) -> Search {
+        self.ensure_loaded();
         let state = self.state.read().unwrap();
         let Some(index) = &state.index else {
             return Search {
@@ -401,6 +418,7 @@ impl Catalog {
         }
     }
     pub(crate) fn pricing_names(&self) -> BTreeMap<String, Option<String>> {
+        self.ensure_loaded();
         let state = self.state.read().unwrap();
         let mut names = BTreeMap::new();
         if let Some(index) = &state.index {

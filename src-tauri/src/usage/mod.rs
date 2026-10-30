@@ -66,9 +66,11 @@ struct Inner {
     settings: RwLock<Settings>,
     path: PathBuf,
     directory: PathBuf,
-    writer: mpsc::SyncSender<Record>,
+    writer: mpsc::SyncSender<Option<Record>>,
     overflow: mpsc::SyncSender<Record>,
     dropped_records: std::sync::atomic::AtomicU64,
+    has_pending: std::sync::atomic::AtomicBool,
+    repairs_active: std::sync::atomic::AtomicBool,
     spool_lock: Mutex<()>,
     price_hint: tokio::sync::Notify,
     backfilling: std::sync::atomic::AtomicU8,
@@ -130,7 +132,12 @@ impl Inner {
         {
             return Err(failure("用量待写缓冲已满，请恢复数据库写入后重试同步"));
         }
-        storage::atomic_write(&path, &bytes, None)
+        storage::atomic_write(&path, &bytes, None)?;
+        self.has_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        drop(_guard);
+        let _ = self.writer.try_send(None);
+        Ok(())
     }
     fn pending_records(&self, limit: usize) -> Vec<(PathBuf, Record)> {
         let _guard = self.spool_lock.lock().unwrap();
@@ -138,7 +145,10 @@ impl Inner {
         let entries = match std::fs::read_dir(self.directory.join("pending")) {
             Ok(entries) => entries,
             Err(error) => {
-                if error.kind() != std::io::ErrorKind::NotFound {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    self.has_pending
+                        .store(false, std::sync::atomic::Ordering::Release);
+                } else {
                     *self.pending_error.lock().unwrap() = Some("用量待写目录无法读取".into());
                 }
                 return vec![];
@@ -176,6 +186,10 @@ impl Inner {
                         Some("用量待写记录无法读取，已保留现场".into())
                 }
             }
+        }
+        if records.is_empty() && self.pending_error.lock().unwrap().is_none() {
+            self.has_pending
+                .store(false, std::sync::atomic::Ordering::Release);
         }
         records
     }
@@ -215,9 +229,10 @@ impl Service {
         }
         let path = dir.join("settings.json");
         let (settings, settings_error) = load_settings(&path);
-        let (writer, receiver) = mpsc::sync_channel::<Record>(256);
+        let (writer, receiver) = mpsc::sync_channel::<Option<Record>>(256);
         let (overflow, pending) = mpsc::sync_channel::<Record>(64);
         let (events, _) = broadcast::channel(32);
+        let initial_pending = dir.join("pending").exists();
         let inner = Arc::new(Inner {
             store: Mutex::new(opened.ok()),
             overview_cache: Default::default(),
@@ -228,6 +243,8 @@ impl Service {
             writer,
             overflow,
             dropped_records: std::sync::atomic::AtomicU64::new(0),
+            has_pending: std::sync::atomic::AtomicBool::new(initial_pending),
+            repairs_active: std::sync::atomic::AtomicBool::new(true),
             spool_lock: Mutex::new(()),
             price_hint: tokio::sync::Notify::new(),
             backfilling: std::sync::atomic::AtomicU8::new(0),
@@ -271,48 +288,78 @@ impl Service {
         });
         let weak = Arc::downgrade(&inner);
         std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
             loop {
-                let first = receiver.recv_timeout(std::time::Duration::from_secs(1));
+                let needs_poll = match weak.upgrade() {
+                    Some(inner) => {
+                        inner.repairs_active.load(Ordering::Acquire)
+                            || inner.has_pending.load(Ordering::Acquire)
+                    }
+                    None => break,
+                };
+                let first = if needs_poll {
+                    match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                        Ok(item) => item,
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                } else {
+                    match receiver.recv() {
+                        Ok(item) => item,
+                        Err(_) => break,
+                    }
+                };
                 let Some(inner) = weak.upgrade() else {
                     break;
                 };
-                let mut batch: Vec<Record> = first.ok().into_iter().collect();
+                let mut batch: Vec<Record> = first.into_iter().collect();
                 // Reserve half a batch for persisted retries so a continuous
                 // stream of new requests cannot starve the overflow spool.
-                batch.extend(receiver.try_iter().take(63));
-                let old_pending_error = inner.pending_error.lock().unwrap().clone();
-                let pending = inner.pending_records(128usize.saturating_sub(batch.len()));
-                if old_pending_error != *inner.pending_error.lock().unwrap() {
-                    let _ = inner.events.send(());
-                }
-                batch.extend(pending.iter().map(|(_, r)| r.clone()));
-                // One bounded metadata batch per writer iteration, including idle periods.
-                let repair = inner.store.lock().unwrap().as_mut().map(|store| {
-                    let changed = store.repair_metadata_batch()? | store.repair_finish_times()?;
-                    let migrated = store.compact_storage_batch()?;
-                    let correlated = store.repair_correlations_batch()?;
-                    Ok::<_, storage::AppError>(changed || migrated || correlated)
-                });
-                if inner
-                    .store
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|store| store.deferred_backfill())
-                {
-                    // Do not hold the write lock while traversing historical batches.
-                    if inner.backfilling.load(std::sync::atomic::Ordering::Acquire) == 0 {
-                        Service(inner.clone()).schedule_price_backfill();
+                batch.extend(receiver.try_iter().take(63).flatten());
+                let pending = if inner.has_pending.load(Ordering::Acquire) {
+                    let old_pending_error = inner.pending_error.lock().unwrap().clone();
+                    let loaded = inner.pending_records(128usize.saturating_sub(batch.len()));
+                    if old_pending_error != *inner.pending_error.lock().unwrap() {
+                        let _ = inner.events.send(());
                     }
-                }
-                let repair_failed = repair
-                    .as_ref()
-                    .and_then(|v| v.as_ref().err())
-                    .map(|e| e.message.clone());
-                let repair_changed = *inner.repair_error.lock().unwrap() != repair_failed;
-                *inner.repair_error.lock().unwrap() = repair_failed;
-                if repair_changed || matches!(repair, Some(Ok(true))) {
-                    let _ = inner.events.send(());
+                    batch.extend(loaded.iter().map(|(_, r)| r.clone()));
+                    loaded
+                } else {
+                    Vec::new()
+                };
+                if inner.repairs_active.load(Ordering::Acquire) {
+                    // One bounded metadata batch per writer iteration until complete.
+                    let repair = inner.store.lock().unwrap().as_mut().map(|store| {
+                        let changed =
+                            store.repair_metadata_batch()? | store.repair_finish_times()?;
+                        let migrated = store.compact_storage_batch()?;
+                        let correlated = store.repair_correlations_batch()?;
+                        Ok::<_, storage::AppError>(changed || migrated || correlated)
+                    });
+                    if matches!(repair, Some(Ok(false))) {
+                        inner.repairs_active.store(false, Ordering::Release);
+                    }
+                    if inner
+                        .store
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|store| store.deferred_backfill())
+                    {
+                        // Do not hold the write lock while traversing historical batches.
+                        if inner.backfilling.load(Ordering::Acquire) == 0 {
+                            Service(inner.clone()).schedule_price_backfill();
+                        }
+                    }
+                    let repair_failed = repair
+                        .as_ref()
+                        .and_then(|v| v.as_ref().err())
+                        .map(|e| e.message.clone());
+                    let repair_changed = *inner.repair_error.lock().unwrap() != repair_failed;
+                    *inner.repair_error.lock().unwrap() = repair_failed;
+                    if repair_changed || matches!(repair, Some(Ok(true))) {
+                        let _ = inner.events.send(());
+                    }
                 }
                 if batch.is_empty() {
                     continue;
@@ -321,18 +368,36 @@ impl Service {
                     let mut store = inner.store.lock().unwrap();
                     if store.is_none() {
                         *store = Some(store::Store::open(&inner.directory)?);
+                        inner.repairs_active.store(true, Ordering::Release);
                     }
                     store
                         .as_mut()
                         .ok_or_else(|| failure("用量数据库不可用"))?
-                        .write_batch(&batch, None)
+                        .write_batch(&batch, None)?;
+                    *inner.write_error.lock().unwrap() = None;
+                    let _ = inner.events.send(());
+                    Ok::<_, storage::AppError>(())
                 })();
                 match result {
                     Ok(()) => {
-                        *inner.write_error.lock().unwrap() = None;
-                        let _guard = inner.spool_lock.lock().unwrap();
-                        for (path, _) in pending {
-                            let _ = std::fs::remove_file(path);
+                        if !pending.is_empty() {
+                            let _guard = inner.spool_lock.lock().unwrap();
+                            for (path, _) in pending {
+                                let _ = std::fs::remove_file(path);
+                            }
+                            let any_left = std::fs::read_dir(inner.directory.join("pending"))
+                                .ok()
+                                .is_some_and(|mut it| {
+                                    it.any(|e| {
+                                        e.ok().is_some_and(|e| {
+                                            e.path().extension().and_then(|v| v.to_str())
+                                                == Some("json")
+                                        })
+                                    })
+                                });
+                            if !any_left && inner.pending_error.lock().unwrap().is_none() {
+                                inner.has_pending.store(false, Ordering::Release);
+                            }
                         }
                     }
                     Err(e) => {
@@ -342,10 +407,10 @@ impl Service {
                                 *inner.write_error.lock().unwrap() = Some(e.message);
                             }
                         }
+                        let _ = inner.events.send(());
                         std::thread::sleep(std::time::Duration::from_secs(1));
                     }
                 }
-                let _ = inner.events.send(());
             }
         });
         Self(inner)
@@ -673,9 +738,11 @@ impl Drop for TraceInner {
             completed,
             ..Record::default()
         };
-        if let Err(error) = self.service.0.writer.try_send(record) {
+        if let Err(error) = self.service.0.writer.try_send(Some(record)) {
             let record = match error {
-                mpsc::TrySendError::Full(r) | mpsc::TrySendError::Disconnected(r) => r,
+                mpsc::TrySendError::Full(r) | mpsc::TrySendError::Disconnected(r) => {
+                    r.expect("Some(record)")
+                }
             };
             if self.service.0.overflow.try_send(record).is_err() {
                 self.service

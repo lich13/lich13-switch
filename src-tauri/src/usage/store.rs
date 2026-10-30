@@ -576,19 +576,19 @@ impl Store {
             return Ok(false);
         }
         let tx = db(self.connection.transaction())?;
-        if after.is_none() {
+        let rows = {
+            let mut stmt = db(tx.prepare("SELECT id,body FROM records WHERE source='antigravity' AND id>?1 ORDER BY id LIMIT 128"))?;
+            let rows = db(stmt.query_map([after.as_deref().unwrap_or("")], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+        };
+        if after.is_none() && !rows.is_empty() {
             db(tx.execute(
                 "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
                 [],
             ))?;
         }
-        let rows = {
-            let mut stmt = db(tx.prepare("SELECT id,body FROM records WHERE source='antigravity' AND id>?1 ORDER BY id LIMIT 128"))?;
-            let rows = db(stmt.query_map([after.unwrap_or_default()], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }))?;
-            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-        };
         let mut changed = false;
         for (id, body) in &rows {
             let mut r: Record = bodies::decode(&tx, body)?;
@@ -719,6 +719,13 @@ impl Store {
         ))
     }
     pub fn write_batch(&mut self, records: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
+        if records.is_empty() {
+            match cursor {
+                None => return Ok(()),
+                Some((id, body)) if self.cursor(id)?.as_deref() == Some(body) => return Ok(()),
+                _ => {}
+            }
+        }
         let tx = db(self.connection.transaction())?;
         let mut changed = false;
         for r in records {

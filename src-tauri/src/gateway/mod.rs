@@ -149,7 +149,7 @@ pub struct ProviderView {
     model_health: Vec<model_health::ModelHealth>,
     quota_version: String,
     has_quota_access_token: bool,
-    quota: Option<QuotaView>,
+    pub(crate) quota: Option<QuotaView>,
     quota_checking: bool,
     quota_check: Option<crate::events::QuotaCheck>,
     pub max_concurrency: u32,

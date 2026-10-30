@@ -163,13 +163,25 @@ impl Service {
             .unwrap_or_else(|| provider.base_url.clone())
     }
     pub fn due(&self, provider: &Provider, urls: &[String], seconds: u64) -> bool {
-        urls.len() > 1
-            && Self::fresh(
-                &super::locks::cache(&self.samples),
-                &provider.id,
-                &Self::config(provider, urls),
-            )
-            .is_none_or(|b| b.checked.elapsed() >= Duration::from_secs(seconds))
+        self.wait_until_due(provider, urls, seconds) == Some(Duration::ZERO)
+    }
+    pub fn wait_until_due(
+        &self,
+        provider: &Provider,
+        urls: &[String],
+        seconds: u64,
+    ) -> Option<Duration> {
+        if urls.len() <= 1 {
+            return None;
+        }
+        let interval = Duration::from_secs(seconds);
+        let samples = super::locks::cache(&self.samples);
+        Some(
+            match Self::fresh(&samples, &provider.id, &Self::config(provider, urls)) {
+                Some(batch) => interval.saturating_sub(batch.checked.elapsed()),
+                None => Duration::ZERO,
+            },
+        )
     }
     pub fn retain(&self, providers: &[Provider]) {
         let contains = |id: &String| providers.iter().any(|p| &p.id == id);
@@ -588,6 +600,26 @@ impl Gateway {
         drop(s);
         self.changed();
         self.try_view()
+    }
+    pub fn next_endpoint_probe_wait(&self) -> Option<Duration> {
+        if self.0.registry.freeze.is_frozen() {
+            return None;
+        }
+        let s = self.request_state().ok()?;
+        if !s.running {
+            return None;
+        }
+        s.store
+            .providers
+            .iter()
+            .filter_map(|p| {
+                self.0.endpoints.wait_until_due(
+                    p,
+                    &Self::endpoint_urls(&s.store, p),
+                    s.store.settings.endpoint_probe_seconds,
+                )
+            })
+            .min()
     }
     pub async fn probe_due_endpoints(&self) {
         if self.0.registry.freeze.is_frozen() {

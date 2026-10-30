@@ -710,6 +710,46 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
         .iter()
         .filter(|(m, _)| m == "GetCascadeTrajectorySteps")
         .all(|(_, b)| b["trajectoryVerbosity"] == 2));
+    assert_eq!(
+        f.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, b)| {
+                m == "GetCascadeTrajectoryGeneratorMetadata" && b["cascadeId"] == "local-only"
+            })
+            .count(),
+        3
+    );
+    let local_transcript = dir
+        .path()
+        .join("antigravity/brain/local-only/.system_generated/logs/transcript.jsonl");
+    let mut existing = std::fs::read_to_string(&local_transcript).unwrap();
+    existing.push_str("{\"step_index\":2,\"input_tokens\":50}\n");
+    std::fs::write(&local_transcript, existing).unwrap();
+    let mut report = Report::default();
+    f.api
+        .collect(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, b)| {
+                m == "GetCascadeTrajectoryGeneratorMetadata" && b["cascadeId"] == "local-only"
+            })
+            .count(),
+        5
+    );
 }
 
 #[tokio::test]

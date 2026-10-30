@@ -31,6 +31,56 @@ struct FileCursor {
     offset: u64,
     tail: String,
     identity: String,
+    modified: String,
+    complete: bool,
+}
+fn file_identity(meta: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}", meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        format!("{:?}", meta.created().ok())
+    }
+}
+fn file_modified(meta: &std::fs::Metadata) -> Option<String> {
+    let modified = meta.modified().ok()?;
+    let d = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{}:{}", d.as_secs(), d.subsec_nanos()))
+}
+fn file_settled(meta: &std::fs::Metadata) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|m| std::time::SystemTime::now().duration_since(m).ok())
+        .is_some_and(|age| age >= std::time::Duration::from_secs(2))
+}
+fn local_file_stamp(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(meta) => format!(
+            "local:{}:{}:{}",
+            file_identity(&meta),
+            meta.len(),
+            file_modified(&meta).unwrap_or_default()
+        ),
+        Err(_) => "local:missing".into(),
+    }
+}
+fn loopback_client() -> Result<reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let built = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| failure("Antigravity 本地连接初始化失败"))?;
+    let _ = CLIENT.set(built.clone());
+    Ok(built)
 }
 fn number(v: &Value) -> Option<u64> {
     v.as_u64()
@@ -514,13 +564,7 @@ impl Api {
             .and_then(|s| s.parse::<u16>().ok())
             .filter(|p| *p > 0)
             .ok_or_else(|| failure("Antigravity 本地端口无效"))?;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .danger_accept_invalid_certs(true)
-            .timeout(std::time::Duration::from_secs(20))
-            .build()
-            .map_err(|_| failure("Antigravity 本地连接初始化失败"))?;
+        let http = loopback_client()?;
         let pages: Value = serde_json::from_slice(
             &Self::bytes(http.get(format!("http://127.0.0.1:{port}/json/list"))).await?,
         )
@@ -603,7 +647,10 @@ impl Api {
         transcript_files(&brain, &mut files, 0)?;
         for path in files {
             let id = cascade_id(&brain, &path)?;
-            summaries.entry(id.to_owned()).or_insert_with(|| json!({}));
+            let stamp = local_file_stamp(&path);
+            summaries
+                .entry(id.to_owned())
+                .or_insert_with(|| json!({"localModifiedStamp": stamp}));
         }
         report.total_files = summaries.len() as u64;
         for (id, summary) in &summaries {
@@ -643,7 +690,11 @@ impl Api {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default()
         };
-        let modified = summary["lastModifiedTime"].as_str().unwrap_or("");
+        let modified = summary["lastModifiedTime"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| summary["localModifiedStamp"].as_str())
+            .unwrap_or("");
         if !modified.is_empty() && cursor.modified == modified {
             return Ok(());
         }
@@ -853,29 +904,34 @@ fn scan_file(
     report: &mut Report,
     repair: bool,
 ) -> Result<()> {
+    let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
+    let saved_raw = if repair { None } else { store.cursor(&key)? };
+    let mut c: FileCursor = saved_raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let meta = std::fs::metadata(path).map_err(storage::io_error)?;
+    let identity = file_identity(&meta);
+    let modified = file_modified(&meta).unwrap_or_default();
+    if !repair
+        && c.complete
+        && !modified.is_empty()
+        && c.identity == identity
+        && meta.len() == c.offset
+        && c.modified == modified
+        && file_settled(&meta)
+    {
+        return Ok(());
+    }
     let cascade = cascade_id(brain, path)?;
     let rpc: Cursor = store
         .cursor(&safe_id(&format!("antigravity:rpc:{cascade}")))?
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
-    let mut c: FileCursor = if repair {
-        FileCursor::default()
-    } else {
-        store
-            .cursor(&key)?
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    };
     let mut file = File::open(path).map_err(storage::io_error)?;
     let meta = file.metadata().map_err(storage::io_error)?;
-    #[cfg(unix)]
-    let identity = {
-        use std::os::unix::fs::MetadataExt;
-        format!("{}:{}", meta.dev(), meta.ino())
-    };
-    #[cfg(not(unix))]
-    let identity = format!("{:?}", meta.created().ok());
+    let identity = file_identity(&meta);
+    let modified = file_modified(&meta).unwrap_or_default();
     let tail = |file: &mut File, offset: u64| -> Result<String> {
         use std::io::Read;
         file.seek(SeekFrom::Start(offset.saturating_sub(4096)))
@@ -884,16 +940,28 @@ fn scan_file(
         file.read_exact(&mut b).map_err(storage::io_error)?;
         Ok(storage::digest(&b))
     };
-    if c.identity != identity || meta.len() < c.offset || tail(&mut file, c.offset)? != c.tail {
+    let mut verified_tail = None;
+    let valid_prefix = c.identity == identity && meta.len() >= c.offset && {
+        let digest = tail(&mut file, c.offset)?;
+        let ok = digest == c.tail;
+        if ok {
+            verified_tail = Some(digest);
+        }
+        ok
+    };
+    if !valid_prefix {
         c = FileCursor::default();
+        verified_tail = None;
     }
     c.identity = identity;
+    let start_offset = c.offset;
     file.seek(SeekFrom::Start(c.offset))
         .map_err(storage::io_error)?;
     let mut reader = BufReader::new(file);
     let mut rows = Vec::new();
     let mut bytes = Vec::new();
     let mut gap = false;
+    let mut partial_tail = false;
     loop {
         bytes.clear();
         use std::io::Read;
@@ -913,6 +981,7 @@ fn scan_file(
                     "Antigravity 历史仍在写入，未导出、未清理，请稍后重试",
                 ));
             }
+            partial_tail = true;
             break;
         }
         let parsed = (|| -> Result<Option<Record>> {
@@ -996,9 +1065,16 @@ fn scan_file(
         }
     }
     report.imported += rows.len() as u64;
-    c.tail = tail(reader.get_mut(), c.offset)?;
+    c.tail = match verified_tail.filter(|_| c.offset == start_offset) {
+        Some(digest) => digest,
+        None => tail(reader.get_mut(), c.offset)?,
+    };
+    c.complete = !gap && !partial_tail && c.offset == meta.len();
+    c.modified = if c.complete { modified } else { String::new() };
     let cursor = serde_json::to_string(&c).map_err(|_| failure("Antigravity 历史同步位置无效"))?;
-    store.write_batch(&rows, Some((&key, &cursor)))?;
+    if !rows.is_empty() || saved_raw.as_deref() != Some(cursor.as_str()) {
+        store.write_batch(&rows, Some((&key, &cursor)))?;
+    }
     Ok(())
 }
 

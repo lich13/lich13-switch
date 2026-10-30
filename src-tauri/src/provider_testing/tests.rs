@@ -2921,7 +2921,13 @@ async fn tokenizer_completes_serial_probes_with_two_controls_and_bounded_request
 
 fn replace_modeltrace_resource(service: &Service) {
     let mut data = lock(&service.0.data);
-    let (bank, mut version) = data.bank.snapshot.as_ref().unwrap().as_ref().clone();
+    let (bank, mut version) = data
+        .ensure_bank()
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .clone();
     version["revision"] = "fixture-updated-resource".into();
     let manifest = modeltrace::manifest();
     let saved = SavedBank {
@@ -2934,7 +2940,7 @@ fn replace_modeltrace_resource(service: &Service) {
         version: Some(version),
         ..Default::default()
     };
-    data.bank = bank::Resource::load(&saved);
+    data.bank = Some(bank::Resource::load(&saved));
 }
 
 #[tokio::test]

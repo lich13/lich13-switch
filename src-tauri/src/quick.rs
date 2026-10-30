@@ -113,6 +113,7 @@ impl Panel {
                 .set_focus()
                 .map_err(|_| AppError::new(code::PANEL, "无法聚焦快捷面板"))?;
             let _ = window.emit("panel-visibility", true);
+            crate::sync_window_on_show(app, "quick");
             Ok(())
         })();
         let mut life = panel.lifecycle.lock().unwrap();
@@ -265,6 +266,9 @@ pub fn hide_quick(app: tauri::AppHandle) -> Result<()> {
         w.hide()
             .map_err(|_| AppError::new(code::PANEL, "无法关闭快捷面板"))?;
         let _ = w.emit("panel-visibility", false);
+    }
+    if let Some(r) = app.try_state::<std::sync::Arc<crate::Runtime>>() {
+        r.mark_window_visible("quick", false);
     }
     Ok(())
 }

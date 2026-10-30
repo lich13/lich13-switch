@@ -76,8 +76,23 @@ struct Runtime {
     startup_error: Mutex<Option<AppError>>,
     cleanup_error: Mutex<Option<AppError>>,
     official_tx: tokio::sync::Mutex<()>,
+    window_wake: tokio::sync::Notify,
+    window_visible: [AtomicBool; 2],
 }
 impl Runtime {
+    pub(crate) fn mark_window_visible(&self, label: &str, visible: bool) -> bool {
+        let slot = match label {
+            "main" => &self.window_visible[0],
+            "quick" => &self.window_visible[1],
+            _ => return visible,
+        };
+        let was_visible = slot.swap(visible, Ordering::Relaxed);
+        if visible && !was_visible {
+            self.window_wake.notify_one();
+        }
+        was_visible
+    }
+
     fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
         if let Some(record) = events::Record::configuration_failure(client, &error, false) {
             self.diagnostics.emit(record);
@@ -156,6 +171,42 @@ fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
     m.lock()
         .map_err(|_| AppError::new(code::STATE, "应用状态异常，请重新启动 lich13-switch"))
 }
+pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindow> {
+    ["main", "quick"]
+        .into_iter()
+        .filter_map(|name| app.get_webview_window(name))
+        .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+        .collect()
+}
+pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    let Some(r) = app.try_state::<Arc<Runtime>>() else {
+        return;
+    };
+    if r.mark_window_visible(label, true) {
+        return;
+    }
+    if let Ok(state) = state_for(&r) {
+        let _ = window.emit("switch-state", &state);
+    }
+    for g in [&r.gateway, &r.claude, &r.grok, &r.dsh] {
+        if let Ok(view) = g.try_view() {
+            let _ = window.emit("gateway-state", &view);
+            let client_id = g.client_id();
+            for quota in view.providers.iter().filter_map(|p| p.quota.as_ref()) {
+                let _ = window.emit(
+                    "provider-quota",
+                    serde_json::json!({"clientId": client_id, "quota": quota}),
+                );
+            }
+        }
+    }
+    if label == "main" {
+        let _ = window.emit("usage-state", ());
+    }
+}
 fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
     notifications::on_manual_open(app);
     #[cfg(target_os = "macos")]
@@ -167,6 +218,7 @@ fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
             .map_err(|_| AppError::new(code::WINDOW, "无法显示主窗口"))?;
         let _ = w.set_focus();
         let _ = w.emit("app-visibility", true);
+        sync_window_on_show(app, "main");
         if let Some(page) = page {
             let _ = w.emit("navigate", page);
         }
@@ -273,7 +325,9 @@ fn publish(app: &tauri::AppHandle, state: ViewState) {
             .unwrap_or("未保存账号");
         let _ = tray.set_tooltip(Some(format!("lich13-switch · {current}")));
     }
-    let _ = app.emit("switch-state", &state);
+    for window in visible_windows(app) {
+        let _ = window.emit("switch-state", &state);
+    }
 }
 fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     let state = state_for(r)?;
@@ -321,11 +375,7 @@ mod gateway_broadcast_tests {
     }
 }
 fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
-    let windows: Vec<_> = ["main", "quick"]
-        .into_iter()
-        .filter_map(|name| app.get_webview_window(name))
-        .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
-        .collect();
+    let windows = visible_windows(app);
     if windows.is_empty() {
         return;
     }
@@ -1700,6 +1750,8 @@ pub fn run() {
                 startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error)),
                 cleanup_error: Mutex::new(cleanup_error),
                 official_tx: tokio::sync::Mutex::new(()),
+                window_wake: tokio::sync::Notify::new(),
+                window_visible: [AtomicBool::new(!start_silently), AtomicBool::new(false)],
             });
             runtime.gateway.observe_home(&lock(&runtime.core)?.home());
             runtime
@@ -1743,10 +1795,8 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 while freeze_events.changed().await.is_ok() {
                     let view = freeze.view();
-                    for name in ["main", "quick"] {
-                        if let Some(window) = freeze_app.get_webview_window(name).filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false)) {
-                            let _ = window.emit("gateway-freeze", &view);
-                        }
+                    for window in visible_windows(&freeze_app) {
+                        let _ = window.emit("gateway-freeze", &view);
                     }
                 }
             });
@@ -1765,16 +1815,53 @@ pub fn run() {
                     }
                 });
             }
-            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
-                let probes = g.clone();
+            {
+                let gateways = [
+                    runtime.gateway.clone(),
+                    runtime.claude.clone(),
+                    runtime.grok.clone(),
+                    runtime.dsh.clone(),
+                ];
+                let mut rx0 = gateways[0].subscribe();
+                let mut rx1 = gateways[1].subscribe();
+                let mut rx2 = gateways[2].subscribe();
+                let mut rx3 = gateways[3].subscribe();
+                let mut probe_freeze = gateways[0].freeze_gate().subscribe();
                 tauri::async_runtime::spawn(async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
-                        interval.tick().await;
-                        probes.probe_due_endpoints().await;
+                        let mut min_wait: Option<std::time::Duration> = None;
+                        for g in &gateways {
+                            if let Some(wait) = g.next_endpoint_probe_wait() {
+                                if wait.is_zero() {
+                                    g.probe_due_endpoints().await;
+                                }
+                            }
+                            if let Some(wait) = g.next_endpoint_probe_wait() {
+                                min_wait = Some(match min_wait {
+                                    Some(cur) => cur.min(wait),
+                                    None => wait,
+                                });
+                            }
+                        }
+                        let sleep_for = min_wait.map(|w| w.max(std::time::Duration::from_secs(1)));
+                        tokio::select! {
+                            res = rx0.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
+                            res = rx1.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
+                            res = rx2.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
+                            res = rx3.recv() => if matches!(res, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; },
+                            res = probe_freeze.changed() => if res.is_err() { break; },
+                            _ = async {
+                                if let Some(d) = sleep_for {
+                                    tokio::time::sleep(d).await;
+                                } else {
+                                    std::future::pending::<()>().await;
+                                }
+                            } => {}
+                        }
                     }
                 });
+            }
+            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
                 let mut quota_events = g.quota_events();
                 let quota_app = app.handle().clone();
                 let client_id = g.client_id();
@@ -1782,10 +1869,13 @@ pub fn run() {
                     loop {
                         match quota_events.recv().await {
                             Ok(view) => {
-                                let _ = quota_app.emit(
-                                    "provider-quota",
-                                    serde_json::json!({"clientId":client_id,"quota":view}),
-                                );
+                                let windows = visible_windows(&quota_app);
+                                if !windows.is_empty() {
+                                    let payload = serde_json::json!({"clientId":client_id,"quota":view});
+                                    for window in windows {
+                                        let _ = window.emit("provider-quota", &payload);
+                                    }
+                                }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(_) => break,
@@ -1795,9 +1885,7 @@ pub fn run() {
                 let mut events = g.subscribe();
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut clock = tokio::time::interval(std::time::Duration::from_secs(1));
-                    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    let mut waiting = false;
+                    let mut waiting = g.has_health_wait();
                     loop {
                         tokio::select! {
                             event = events.recv() => {
@@ -1807,7 +1895,7 @@ pub fn run() {
                                 coalesce_gateway_events(&mut events);
                                 waiting = g.has_health_wait();
                             }
-                            _ = clock.tick() => {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if waiting => {
                                 let current = g.has_health_wait();
                                 let refresh = waiting || current;
                                 waiting = current;
@@ -1920,8 +2008,17 @@ pub fn run() {
                 let mut last = Some(state);
                 let mut config_versions = std::collections::HashMap::new();
                 let mut config_cache = std::collections::HashMap::new();
+                #[cfg(windows)]
+                let mut last_tray_dark: Option<bool> = None;
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if visible_windows(&handle).is_empty() {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+                            _ = runtime.window_wake.notified() => {}
+                        }
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
                     if runtime.quitting.load(Ordering::Relaxed) {
                         break;
                     }
@@ -1959,14 +2056,21 @@ pub fn run() {
                         }
                     }
                     #[cfg(windows)]
-                    if let Some(tray) = handle.tray_by_id("switch") {
-                        let bytes = if tray_is_dark() {
-                            include_bytes!("../icons/tray-white.png").as_slice()
-                        } else {
-                            include_bytes!("../icons/tray-black.png").as_slice()
-                        };
-                        if let Ok(image) = tauri::image::Image::from_bytes(bytes) {
-                            let _ = tray.set_icon(Some(image));
+                    {
+                        let dark = tray_is_dark();
+                        if last_tray_dark != Some(dark) {
+                            if let Some(tray) = handle.tray_by_id("switch") {
+                                let bytes = if dark {
+                                    include_bytes!("../icons/tray-white.png").as_slice()
+                                } else {
+                                    include_bytes!("../icons/tray-black.png").as_slice()
+                                };
+                                if let Ok(image) = tauri::image::Image::from_bytes(bytes) {
+                                    if tray.set_icon(Some(image)).is_ok() {
+                                        last_tray_dark = Some(dark);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1984,6 +2088,11 @@ pub fn run() {
                 || (matches!(event, tauri::WindowEvent::Resized(_)) && w.is_minimized().unwrap_or(false)) {
                 let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
                 let _ = w.emit(if w.label() == "quick" { "panel-visibility" } else { "app-visibility" }, visible);
+                if visible {
+                    sync_window_on_show(w.app_handle(), w.label());
+                } else if let Some(r) = w.app_handle().try_state::<Arc<Runtime>>() {
+                    r.mark_window_visible(w.label(), false);
+                }
             }
             if w.label() == "quick" {
                 match event {
@@ -2004,6 +2113,7 @@ pub fn run() {
                     api.prevent_close();
                     let _ = w.hide();
                     let _ = w.emit("app-visibility", false);
+                    r.mark_window_visible("main", false);
                     #[cfg(target_os = "macos")]
                     let _ = w
                         .app_handle()

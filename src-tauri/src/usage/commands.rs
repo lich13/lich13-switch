@@ -167,7 +167,9 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
         while let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
             events.recv().await
         {
-            let _ = handle.emit("usage-state", ());
+            for window in crate::visible_windows(&handle) {
+                let _ = window.emit("usage-state", ());
+            }
         }
     });
     // Price checks must not wait behind a session scan or historical compaction.
