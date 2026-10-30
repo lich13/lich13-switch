@@ -193,7 +193,7 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                         usage.schedule_price_backfill();
                     }
                     if before.checked_at != after.checked_at {
-                        let _ = price_handle.emit("pricing-state", ());
+                        crate::emit_if_main_visible(&price_handle, "pricing-state", ());
                     }
                 }
             }

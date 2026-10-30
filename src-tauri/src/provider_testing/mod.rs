@@ -32,6 +32,8 @@ use types::*;
 pub const DEFAULT_DETECTION_MODEL: &str = "gpt-6-luna";
 pub const DEFAULT_CONNECTION_PROMPT: &str = "Reply with a short greeting.";
 const STATE_LIMIT: u64 = 32 * 1024 * 1024;
+const MAX_RETAINED_TERMINAL_OUTPUTS: usize = 64;
+const MAX_RETAINED_RETRY_CONTEXTS: usize = 16;
 fn failure(message: &str) -> AppError {
     AppError::new(crate::errors::code::PROVIDER_TEST, message)
 }
@@ -218,6 +220,17 @@ impl Service {
                 true
             }
         });
+        let mut kept_retry = 0usize;
+        for job in next.jobs.iter_mut().rev() {
+            if job.terminal() && job.can_retry {
+                if !data.contexts.contains_key(&job.id) || kept_retry >= MAX_RETAINED_RETRY_CONTEXTS
+                {
+                    job.can_retry = false;
+                } else {
+                    kept_retry += 1;
+                }
+            }
+        }
         if next.history.len() > 500 {
             next.history.drain(..next.history.len() - 500);
         }
@@ -225,10 +238,29 @@ impl Service {
         storage::atomic_write_bounded(&self.0.path, &bytes, Some(&data.revision), STATE_LIMIT)?;
         data.revision = storage::digest(&bytes);
         data.saved = next;
+        let mut keep_outputs = std::collections::HashSet::new();
+        let mut kept_terminal_outputs = 0usize;
+        for job in data.saved.jobs.iter().rev() {
+            if !job.terminal() || data.cancel.contains_key(&job.id) {
+                keep_outputs.insert(job.id.as_str());
+            } else if data.outputs.contains_key(&job.id)
+                && kept_terminal_outputs < MAX_RETAINED_TERMINAL_OUTPUTS
+            {
+                keep_outputs.insert(job.id.as_str());
+                kept_terminal_outputs += 1;
+            }
+        }
+        let keep_contexts: std::collections::HashSet<&str> = data
+            .saved
+            .jobs
+            .iter()
+            .filter(|job| !job.terminal() || job.can_retry || data.cancel.contains_key(&job.id))
+            .map(|job| job.id.as_str())
+            .collect();
         data.outputs
-            .retain(|id, _| data.saved.jobs.iter().any(|j| &j.id == id));
+            .retain(|id, _| keep_outputs.contains(id.as_str()));
         data.contexts
-            .retain(|id, _| data.saved.jobs.iter().any(|j| &j.id == id));
+            .retain(|id, _| keep_contexts.contains(id.as_str()));
         Ok(())
     }
     pub fn state(&self, client: ClientId, provider: &str) -> Result<State> {
@@ -634,6 +666,10 @@ impl Service {
                     .any(|g| g.status == "failed" && g.retryable && !g.uncertain);
         });
         let mut data = lock(&self.0.data);
+        let detection_revision = data
+            .contexts
+            .get(id)
+            .and_then(|c| c.detection_revision.clone());
         data.cancel.remove(id);
         if let Err(error) = result {
             data.error = Some(error.message);
@@ -642,10 +678,7 @@ impl Service {
             if let Some(job) = data.saved.jobs.iter().find(|j| j.id == id).cloned() {
                 let mut next = data.saved.clone();
                 if job.started_at.is_some()
-                    && data
-                        .contexts
-                        .get(id)
-                        .and_then(|c| c.detection_revision.as_deref())
+                    && detection_revision.as_deref()
                         == Some(
                             config_revision(&data.saved, job.client_id, &job.provider_id).as_str(),
                         )

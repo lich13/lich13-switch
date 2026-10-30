@@ -178,6 +178,18 @@ pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindo
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
         .collect()
 }
+pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
+    app: &tauri::AppHandle,
+    event: &str,
+    payload: S,
+) {
+    if let Some(window) = app
+        .get_webview_window("main")
+        .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+    {
+        let _ = window.emit(event, payload);
+    }
+}
 pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
@@ -205,6 +217,7 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     }
     if label == "main" {
         let _ = window.emit("usage-state", ());
+        let _ = window.emit("pricing-state", ());
     }
 }
 fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {

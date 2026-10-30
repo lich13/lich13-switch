@@ -3151,3 +3151,143 @@ fn populates_disabled_detection_status_at_startup_and_when_providers_change_whil
         "disabled"
     );
 }
+
+#[test]
+fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summaries_and_active_jobs()
+{
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Claude, 18081, "messages");
+    ua(&service, ClientId::Claude);
+    let target = service
+        .gateway(ClientId::Claude)
+        .test_target_at(&id, None, None)
+        .unwrap();
+    let req = request(&service, ClientId::Claude, &id);
+    let make_context = || Context {
+        request: req.clone(),
+        target: target.clone(),
+        challenges: vec![],
+        bank: None,
+        lm: None,
+        engine: Engine::ModelTrace,
+        sample_count: 1,
+        detection_revision: None,
+    };
+
+    let mut data = lock(&service.0.data);
+    let mut next = data.saved.clone();
+    for index in 0..200 {
+        let job_id = format!("terminal-{index}");
+        let retryable = index < 40;
+        next.jobs.push(Job {
+            id: job_id.clone(),
+            client_id: ClientId::Codex,
+            provider_id: id.clone(),
+            provider_name: "Fixture".into(),
+            provider_version: target.version.clone(),
+            endpoint: Some(target.base_url.clone()),
+            kind: Kind::Connection,
+            mode: Mode::Text,
+            requested_model: "gpt-6-luna".into(),
+            forwarded_model: "gpt-6-luna".into(),
+            returned_model: None,
+            status: if retryable { "failed" } else { "completed" }.into(),
+            created_at: index as i64,
+            started_at: Some(index as i64),
+            completed_at: Some(index as i64 + 1),
+            elapsed_ms: 10,
+            first_byte_ms: Some(5),
+            error: None,
+            report: None,
+            groups: vec![],
+            automatic: false,
+            batch_id: None,
+            can_retry: retryable,
+            completion_reason: None,
+            engine: Engine::ModelTrace,
+            sample_count: 1,
+            resource_version: Value::Null,
+            tokenizer: false,
+            tokenizer_result: None,
+        });
+        data.outputs.insert(
+            job_id.clone(),
+            Output {
+                text: "x".repeat(16 * 1024),
+                ..Default::default()
+            },
+        );
+        if retryable {
+            data.contexts.insert(job_id, make_context());
+        }
+    }
+    let active_id = "active-running".to_owned();
+    next.jobs.push(Job {
+        id: active_id.clone(),
+        client_id: ClientId::Codex,
+        provider_id: id,
+        provider_name: "Fixture".into(),
+        provider_version: target.version.clone(),
+        endpoint: Some(target.base_url.clone()),
+        kind: Kind::Connection,
+        mode: Mode::Text,
+        requested_model: "gpt-6-luna".into(),
+        forwarded_model: "gpt-6-luna".into(),
+        returned_model: None,
+        status: "running".into(),
+        created_at: 300,
+        started_at: Some(300),
+        completed_at: None,
+        elapsed_ms: 0,
+        first_byte_ms: None,
+        error: None,
+        report: None,
+        groups: vec![],
+        automatic: false,
+        batch_id: None,
+        can_retry: false,
+        completion_reason: None,
+        engine: Engine::ModelTrace,
+        sample_count: 1,
+        resource_version: Value::Null,
+        tokenizer: false,
+        tokenizer_result: None,
+    });
+    data.outputs.insert(active_id.clone(), Output::default());
+    data.contexts.insert(active_id.clone(), make_context());
+
+    let before_output_bytes: usize = data.outputs.values().map(|o| o.text.len()).sum();
+    assert_eq!(before_output_bytes, 200 * 16 * 1024);
+    assert_eq!(data.contexts.len(), 41);
+
+    service.save(&mut data, next).unwrap();
+
+    let after_output_bytes: usize = data.outputs.values().map(|o| o.text.len()).sum();
+    assert_eq!(after_output_bytes, MAX_RETAINED_TERMINAL_OUTPUTS * 16 * 1024);
+
+    // All 200 terminal job summaries + 1 active job remain persisted.
+    assert_eq!(data.saved.jobs.len(), 201);
+    // In-memory outputs keep the active job + newest 64 terminal jobs (136..200), evicting 0..136.
+    assert_eq!(data.outputs.len(), MAX_RETAINED_TERMINAL_OUTPUTS + 1);
+    assert!(data.outputs.contains_key(&active_id));
+    assert!(!data.outputs.contains_key("terminal-135"));
+    assert!(data.outputs.contains_key("terminal-136"));
+    assert!(data.outputs.contains_key("terminal-199"));
+
+    // In-memory retry contexts keep the active job + newest 16 retryable jobs (24..40),
+    // and clear `can_retry` on older evicted retryable jobs (0..24).
+    assert_eq!(data.contexts.len(), MAX_RETAINED_RETRY_CONTEXTS + 1);
+    assert!(data.contexts.contains_key(&active_id));
+    for evicted in 0..24 {
+        let key = format!("terminal-{evicted}");
+        assert!(!data.contexts.contains_key(&key));
+        let saved_job = data.saved.jobs.iter().find(|j| j.id == key).unwrap();
+        assert!(!saved_job.can_retry);
+    }
+    for retained in 24..40 {
+        let key = format!("terminal-{retained}");
+        assert!(data.contexts.contains_key(&key));
+        let saved_job = data.saved.jobs.iter().find(|j| j.id == key).unwrap();
+        assert!(saved_job.can_retry);
+    }
+}

@@ -116,6 +116,19 @@ fn connect_error(error: &(dyn std::error::Error + 'static)) -> ConnectError {
     }
     ConnectError::TargetConnect
 }
+fn shared_tls() -> TlsConnector {
+    static SHARED_TLS: std::sync::OnceLock<TlsConnector> = std::sync::OnceLock::new();
+    SHARED_TLS
+        .get_or_init(|| {
+            let roots =
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let tls = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            TlsConnector::from(Arc::new(tls))
+        })
+        .clone()
+}
 #[derive(Clone)]
 pub struct Connector {
     pub timeout: Duration,
@@ -125,16 +138,11 @@ pub struct Connector {
 }
 impl Connector {
     pub fn new(timeout: Duration, gateway_port: u16) -> Self {
-        let roots =
-            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
         Self {
             ports: None,
             timeout,
             gateway_port,
-            tls: TlsConnector::from(Arc::new(tls)),
+            tls: shared_tls(),
         }
     }
     pub fn with_ports(mut self, ports: Arc<std::sync::Mutex<Vec<u16>>>) -> Self {

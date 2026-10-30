@@ -1,6 +1,6 @@
 use super::*;
 use crate::Runtime;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 #[tauri::command]
 pub fn provider_test_state(r: R<'_>, client_id: ClientId, provider_id: String) -> Result<State> {
@@ -90,7 +90,7 @@ pub fn connect(app: &tauri::AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) = events.recv().await {
-            let _ = handle.emit("provider-tests", ());
+            crate::emit_if_main_visible(&handle, "provider-tests", ());
         }
     });
     service.run_scheduler();

@@ -340,11 +340,10 @@ impl Gateway {
     }
 
     pub fn report_diagnostics(&self) {
-        let Ok(view) = self.try_view() else {
-            return;
-        };
         let circuits: Vec<_> = {
-            let state = self.0.inner.lock().unwrap();
+            let Ok(state) = self.request_state() else {
+                return;
+            };
             state
                 .circuits
                 .values()
@@ -357,16 +356,29 @@ impl Gateway {
                 )
                 .collect()
         };
+        let mut pending = Vec::new();
         for circuit in circuits {
-            if let Some(mut event) = circuit.take_open_event() {
-                event.notification_provider = view
+            if let Some(event) = circuit.take_open_event() {
+                pending.push(event);
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        {
+            let state = self.0.inner.lock().unwrap();
+            for event in &mut pending {
+                event.notification_provider = state
+                    .store
                     .providers
                     .iter()
                     .find(|p| Some(&p.id) == event.provider_id.as_ref())
                     .and_then(|p| crate::events::safe_message(&p.name));
-                if let Some(events) = locks::published(&self.0.diagnostics).as_ref() {
-                    events.emit(event);
-                }
+            }
+        }
+        if let Some(events) = locks::published(&self.0.diagnostics).as_ref() {
+            for event in pending {
+                events.emit(event);
             }
         }
     }
