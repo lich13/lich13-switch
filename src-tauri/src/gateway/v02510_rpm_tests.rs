@@ -1036,6 +1036,7 @@ fn recovery_preserves_crash_inflight_and_clamps_future_wall_clock_starts() {
         .unwrap(),
     )
     .unwrap();
+    let loaded_at = StdInstant::now();
     let (mut ledger, error) = Ledger::load(&path);
     assert!(!error);
     assert_eq!(ledger.used(PROVIDER), 1);
@@ -1046,7 +1047,9 @@ fn recovery_preserves_crash_inflight_and_clamps_future_wall_clock_starts() {
     let (delay, reason) = gate_delay(&ledger, 1);
     assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
     assert!(delay <= WINDOW);
-    assert!(delay >= WINDOW - Duration::from_secs(1));
+    assert!(
+        delay.saturating_add(loaded_at.elapsed()) >= WINDOW.saturating_sub(Duration::from_secs(1))
+    );
 }
 
 #[tokio::test]

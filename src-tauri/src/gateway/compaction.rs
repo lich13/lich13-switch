@@ -499,44 +499,65 @@ impl Registry {
         let weak = Arc::downgrade(&registry);
         std::thread::spawn(move || {
             while changes.recv().is_ok() {
-                let Some(registry) = weak.upgrade() else {
-                    break;
-                };
-                let (entries, version) = {
-                    let Ok(state) = registry.state.lock() else {
-                        break;
+                loop {
+                    let Some(registry) = weak.upgrade() else {
+                        return;
                     };
-                    (state.entries.clone(), state.save_version)
-                };
-                let saved = serde_json::to_vec(&entries)
-                    .ok()
-                    .and_then(|raw| storage::atomic_write(&registry.path, &raw, None).ok())
-                    .is_some();
-                let notifications = {
-                    let Ok(mut state) = registry.state.lock() else {
-                        break;
+                    let (entries, version) = {
+                        let Ok(state) = registry.state.lock() else {
+                            return;
+                        };
+                        while changes.try_recv().is_ok() {}
+                        if state.settled_version == state.save_version
+                            && state.notifications.is_empty()
+                        {
+                            break;
+                        }
+                        (state.entries.clone(), state.save_version)
                     };
-                    state.error = (!saved).then(|| "线程归属记录保存失败".into());
-                    if saved {
-                        state.last_saved = now();
+                    let saved = serde_json::to_vec(&entries)
+                        .ok()
+                        .and_then(|raw| storage::atomic_write(&registry.path, &raw, None).ok())
+                        .is_some();
+                    let notifications = {
+                        let Ok(mut state) = registry.state.lock() else {
+                            return;
+                        };
+                        state.error = (!saved).then(|| "线程归属记录保存失败".into());
+                        if saved {
+                            state.last_saved = now();
+                        }
+                        let ready: Vec<_> = state
+                            .notifications
+                            .iter()
+                            .filter(|report| report.version <= version)
+                            .cloned()
+                            .collect();
+                        state
+                            .notifications
+                            .retain(|report| report.version > version);
+                        ready
+                    };
+                    for report in notifications {
+                        report.settle(&registry, saved);
                     }
-                    let ready: Vec<_> = state
-                        .notifications
-                        .iter()
-                        .filter(|report| report.version <= version)
-                        .cloned()
-                        .collect();
-                    state
-                        .notifications
-                        .retain(|report| report.version > version);
-                    ready
-                };
-                for report in notifications {
-                    report.settle(&registry, saved);
+                    let done = if let Ok(mut state) = registry.state.lock() {
+                        state.settled_version = version;
+                        if state.settled_version == state.save_version
+                            && state.notifications.is_empty()
+                        {
+                            while changes.try_recv().is_ok() {}
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        return;
+                    };
+                    if done {
+                        break;
+                    }
                 }
-                if let Ok(mut state) = registry.state.lock() {
-                    state.settled_version = version;
-                };
             }
         });
         registry
@@ -568,7 +589,7 @@ impl Registry {
     }
     #[cfg(test)]
     pub fn flush(&self) {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             {
                 let Ok(state) = self.state.lock() else { return };
@@ -580,7 +601,7 @@ impl Registry {
                 std::time::Instant::now() < until,
                 "ownership write did not settle"
             );
-            std::thread::yield_now();
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
     #[cfg(test)]

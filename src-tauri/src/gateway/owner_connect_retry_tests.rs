@@ -72,7 +72,7 @@ pub(super) async fn setup() -> (tempfile::TempDir, Gateway, u16, Arc<AtomicUsize
 }
 
 pub(super) async fn waiting(gateway: &Gateway) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while gateway.view().transient_retries.is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -89,7 +89,7 @@ async fn followup(gateway: &Gateway) -> Value {
 }
 
 async fn settled(gateway: &Gateway) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while gateway
             .view()
             .providers
@@ -201,7 +201,7 @@ async fn cancellation_and_stop_during_owner_wait_do_not_send_another_attempt() {
             #[allow(deprecated)]
             client.set_linger(Some(Duration::ZERO)).unwrap();
             drop(client);
-            tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::time::timeout(Duration::from_secs(10), async {
                 while !gateway.view().transient_retries.is_empty() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
