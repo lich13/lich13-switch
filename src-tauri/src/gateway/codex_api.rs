@@ -172,12 +172,15 @@ pub fn base(text: &str, id: &str) -> Result<Option<String>> {
             .ok_or_else(|| invalid("base_url 必须是字符串")),
     }
 }
+pub(super) fn auth_api_key(raw: Option<&[u8]>) -> Result<Option<String>> {
+    api_key(&auth(raw)?)
+}
 pub fn read(home: &Path, id: &str) -> Result<(String, Pair)> {
     let config = text(home)?;
     let raw = storage::read_bounded(&home.join("auth.json"), LIMIT)?;
     let pair = Pair {
         base_url: base(&config, id)?,
-        token: api_key(&auth(raw.as_deref())?)?,
+        token: auth_api_key(raw.as_deref())?,
     };
     let revision = storage::digest(
         &serde_json::to_vec(&(

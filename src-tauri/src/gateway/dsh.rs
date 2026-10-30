@@ -1131,6 +1131,7 @@ impl Gateway {
             self.replace_store(&mut state, store);
             state.revision = revision;
             state.upgrade_error = None;
+            state.refresh_editable_digest(self.0.client);
         }
         Ok(())
     }
@@ -1386,6 +1387,7 @@ impl Gateway {
                 s.running = true;
                 s.home = Some(home.to_owned());
                 s.error = listener.notice;
+                s.refresh_editable_digest(self.0.client);
                 self.0.admission.configure(&s.store.providers, true);
                 self.0
                     .admission
@@ -1454,6 +1456,7 @@ impl Gateway {
             }
             s.running = false;
             s.error = None;
+            s.refresh_editable_digest(self.0.client);
             self.0.admission.configure(&s.store.providers, false);
             self.wake_endpoint_prober();
         }
@@ -1816,6 +1819,7 @@ mod tests {
                 .persist(&gateway.0.data.join("gateway.json"), &state.revision)
                 .unwrap();
             state.store = store;
+            state.refresh_editable_digest(gateway.0.client);
         }
         let preview = gateway
             .preview_dsh(dir.path(), Some("default"), Protocol::ChatCompletions)

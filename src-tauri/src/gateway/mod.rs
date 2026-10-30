@@ -204,6 +204,7 @@ pub struct View {
 struct Inner {
     store: Store,
     revision: String,
+    editable_digest: String,
     running: bool,
     upgrade_error: Option<AppError>,
     shutdown: Option<watch::Sender<bool>>,
@@ -213,6 +214,54 @@ struct Inner {
     affinity: HashMap<String, (String, Option<String>, Instant)>,
     last_successful: Option<String>,
     home: Option<PathBuf>,
+}
+impl Inner {
+    fn compute_editable_digest(
+        client: ClientId,
+        store: &Store,
+        running: bool,
+        home: Option<&Path>,
+        has_upgrade_error: bool,
+    ) -> String {
+        let editable = (
+            client,
+            (&store.providers, &store.quota_access_tokens),
+            &store.provider_endpoints,
+            &store.grok_connections,
+            &store.dsh_models,
+            &store.grok_api_model,
+            &store.connection,
+            &store.settings,
+            &store.mode,
+            &store.selected,
+            &store.local_token,
+            running,
+            home,
+            has_upgrade_error,
+        );
+        storage::digest(&serde_json::to_vec(&editable).expect("serializable gateway configuration"))
+    }
+    pub(super) fn refresh_editable_digest(&mut self, client: ClientId) {
+        self.editable_digest = Self::compute_editable_digest(
+            client,
+            &self.store,
+            self.running,
+            self.home.as_deref(),
+            self.upgrade_error.is_some(),
+        );
+    }
+}
+type CachedConfigPair = Result<(String, takeover::Pair)>;
+type CachedCodexApiToml = Result<(String, Option<String>)>;
+type CachedCodexApiAuth = (String, Result<Option<String>>);
+
+#[derive(Default)]
+struct ViewConfigCache {
+    claude: crate::auth_cache::Cache<(CachedConfigPair, Option<String>)>,
+    codex_bearer: crate::auth_cache::Cache<CachedConfigPair>,
+    codex_api_toml: (String, crate::auth_cache::Cache<CachedCodexApiToml>),
+    codex_api_auth: crate::auth_cache::Cache<CachedCodexApiAuth>,
+    grok: crate::auth_cache::Cache<(Option<Vec<u8>>, CachedConfigPair)>,
 }
 struct Shared {
     // Scripted routing fixtures have no discovery endpoint. Catalog tests opt in
@@ -225,6 +274,7 @@ struct Shared {
     usage: Mutex<Option<crate::usage::Service>>,
     registry: Arc<registry::Registry>,
     inner: Mutex<Inner>,
+    view_config_cache: Mutex<ViewConfigCache>,
     lifecycle: tokio::sync::Mutex<()>,
     clients: Mutex<HashMap<String, HttpClient>>,
     data: PathBuf,
@@ -512,6 +562,8 @@ impl Gateway {
         admission.configure(&store.providers, false);
         admission.configure_retention(store.settings.thread_idle_release_seconds);
         let local_token = store.local_token.clone();
+        let editable_digest =
+            Inner::compute_editable_digest(client, &store, false, None, upgrade_error.is_some());
         let gateway = Self(Arc::new(Shared {
             #[cfg(test)]
             discover_new_providers: std::sync::atomic::AtomicBool::new(false),
@@ -523,6 +575,7 @@ impl Gateway {
             inner: Mutex::new(Inner {
                 store,
                 revision,
+                editable_digest,
                 running: false,
                 upgrade_error,
                 shutdown: None,
@@ -533,6 +586,7 @@ impl Gateway {
                 last_successful: None,
                 home: None,
             }),
+            view_config_cache: Mutex::new(ViewConfigCache::default()),
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
@@ -572,6 +626,7 @@ impl Gateway {
             state.error = Some(e.message);
         }
         state.store = store;
+        state.refresh_editable_digest(self.0.client);
         self.0
             .registry
             .publish_token(&self.0, &state.store.local_token);
@@ -595,6 +650,7 @@ impl Gateway {
         let _guard = self.0.registry.mutation.lock().unwrap();
         let mut s = self.0.inner.lock().unwrap();
         s.home = Some(home.to_owned());
+        s.refresh_editable_digest(self.0.client);
         // Grok discovery is read-only. Its explicit import preview owns migration.
         if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             return Ok(());
@@ -724,27 +780,21 @@ impl Gateway {
         // File revisions also include resume checkpoints, which change after successful
         // auto-routing. Only configuration/lifecycle changes invalidate an editor.
         // Keep s.revision separate for the on-disk transaction checks below.
-        let editable = (
-            self.0.client,
-            (&s.store.providers, &s.store.quota_access_tokens),
-            &s.store.provider_endpoints,
-            &s.store.grok_connections,
-            &s.store.dsh_models,
-            &s.store.grok_api_model,
-            &s.store.connection,
-            &s.store.settings,
-            &s.store.mode,
-            &s.store.selected,
-            &s.store.local_token,
-            s.running,
-            &s.home,
-            s.upgrade_error.is_some(),
-            // Hash the listener revision separately below (serde tuples are bounded).
+        debug_assert_eq!(
+            s.editable_digest,
+            Inner::compute_editable_digest(
+                self.0.client,
+                &s.store,
+                s.running,
+                s.home.as_deref(),
+                s.upgrade_error.is_some(),
+            )
         );
-        storage::digest(
-            &serde_json::to_vec(&(editable, listener_revision))
-                .expect("serializable gateway configuration"),
-        )
+        let mut buf = Vec::with_capacity(s.editable_digest.len() + 1 + listener_revision.len());
+        buf.extend_from_slice(s.editable_digest.as_bytes());
+        buf.push(b':');
+        buf.extend_from_slice(listener_revision.as_bytes());
+        storage::digest(&buf)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<()> {
         self.0.events.subscribe()
@@ -952,18 +1002,103 @@ impl Gateway {
     }
     fn read_view_config(&self, view: &mut View, home: Option<&Path>, store: &Store) {
         let resolve = |name: &str| std::env::var(name).ok();
-        let raw = home
-            .filter(|_| matches!(self.0.client, ClientId::Grok | ClientId::Claude))
-            .map(|home| storage::read_optional(&self.0.client.config(home)));
-        let config = match &raw {
-            Some(raw) => Some(
-                raw.as_ref()
-                    .map_err(Clone::clone)
-                    .and_then(|bytes| takeover::read_raw(self.0.client, bytes.as_deref())),
-            ),
-            None => home
-                .filter(|_| self.0.client == ClientId::Codex)
-                .map(|home| takeover::read_connection(self.0.client, home, &store.connection)),
+        let (grok_raw, config, claude_warning) = {
+            let mut cache = self.0.view_config_cache.lock().unwrap();
+            match (self.0.client, home) {
+                (ClientId::Claude, Some(home)) => {
+                    match cache.claude.read(&self.0.client.config(home), |bytes| {
+                        (
+                            takeover::read_raw(ClientId::Claude, bytes.as_deref()),
+                            bytes.as_deref().and_then(claude_config::warning),
+                        )
+                    }) {
+                        Ok(entry) => (None, Some(entry.0.clone()), entry.1.clone()),
+                        Err(e) => (None, Some(Err(e)), None),
+                    }
+                }
+                (ClientId::Grok, Some(home)) => {
+                    match cache.grok.read(&self.0.client.config(home), |bytes| {
+                        let parsed = takeover::read_raw(ClientId::Grok, bytes.as_deref());
+                        (bytes, parsed)
+                    }) {
+                        Ok(entry) => (Some(Ok(entry.clone())), Some(entry.1.clone()), None),
+                        Err(e) => (Some(Err(e.clone())), Some(Err(e)), None),
+                    }
+                }
+                (ClientId::Codex, Some(home)) => {
+                    let parsed = match &store.connection {
+                        codex_api::Connection::ApiKey { provider } => {
+                            if cache.codex_api_toml.0 != *provider {
+                                cache.codex_api_toml.0.clone_from(provider);
+                                cache.codex_api_toml.1.clear();
+                            }
+                            let provider_id = provider.clone();
+                            match cache.codex_api_toml.1.read(
+                                &home.join("config.toml"),
+                                move |bytes| {
+                                    let raw = bytes.ok_or_else(|| {
+                                        AppError::new(code::CODEX_AUTH, "未找到 Codex config.toml")
+                                    })?;
+                                    let text = String::from_utf8(raw).map_err(|_| {
+                                        AppError::new(code::CODEX_AUTH, "Codex 配置必须使用 UTF-8")
+                                    })?;
+                                    let base_url = codex_api::base(&text, &provider_id)?;
+                                    Ok((storage::digest(text.as_bytes()), base_url))
+                                },
+                            ) {
+                                Ok(toml_entry) => match toml_entry.as_ref() {
+                                    Ok((config_digest, base_url)) => {
+                                        match cache.codex_api_auth.read(
+                                            &home.join("auth.json"),
+                                            |bytes| {
+                                                (
+                                                    storage::revision(bytes.as_deref()),
+                                                    codex_api::auth_api_key(bytes.as_deref()),
+                                                )
+                                            },
+                                        ) {
+                                            Ok(auth_entry) => match &auth_entry.1 {
+                                                Ok(token) => {
+                                                    let revision = storage::digest(
+                                                        &serde_json::to_vec(&(
+                                                            config_digest,
+                                                            &auth_entry.0,
+                                                        ))
+                                                        .unwrap(),
+                                                    );
+                                                    Ok((
+                                                        revision,
+                                                        takeover::Pair {
+                                                            base_url: base_url.clone(),
+                                                            token: token.clone(),
+                                                        },
+                                                    ))
+                                                }
+                                                Err(e) => Err(e.clone()),
+                                            },
+                                            Err(e) => Err(e),
+                                        }
+                                    }
+                                    Err(e) => Err(e.clone()),
+                                },
+                                Err(e) => Err(e),
+                            }
+                        }
+                        codex_api::Connection::Bearer => {
+                            match cache
+                                .codex_bearer
+                                .read(&self.0.client.config(home), |bytes| {
+                                    takeover::read_raw(ClientId::Codex, bytes.as_deref())
+                                }) {
+                                Ok(entry) => entry.as_ref().clone(),
+                                Err(e) => Err(e),
+                            }
+                        }
+                    };
+                    (None, Some(parsed), None)
+                }
+                _ => (None, None, None),
+            }
         };
         view.config_revision = config
             .as_ref()
@@ -972,12 +1107,12 @@ impl Gateway {
         let ports = [view.listener.port, store.settings.port];
         let mut current = match (self.0.client, home) {
             (ClientId::Grok, Some(home)) => {
-                let effective = raw
+                let effective = grok_raw
                     .as_ref()
                     .expect("Grok config snapshot")
                     .as_ref()
                     .map_err(Clone::clone)
-                    .and_then(|raw| grok_layers::read_with_config(home, &resolve, raw));
+                    .and_then(|entry| grok_layers::read_with_config(home, &resolve, &entry.0));
                 match effective {
                     Ok(effective) => {
                         view.grok_models = grok_import::discover(&effective.text, &|name| {
@@ -1001,11 +1136,7 @@ impl Gateway {
             },
         };
         if self.0.client == ClientId::Claude {
-            current.warning = raw
-                .as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .and_then(|bytes| bytes.as_deref())
-                .and_then(claude_config::warning);
+            current.warning = claude_warning;
         }
         let (state, provider) = current.legacy();
         view.config_state = state.into();
@@ -1065,6 +1196,10 @@ impl Gateway {
             }
         }
         state.home = Some(home.to_owned());
+        state.refresh_editable_digest(self.0.client);
+    }
+    pub fn is_running(&self) -> bool {
+        self.0.inner.lock().map(|s| s.running).unwrap_or(false)
     }
     pub fn read_config(&self, home: &Path) -> Result<crate::configuration::Document> {
         if self.0.client == ClientId::Dsh {
@@ -1487,6 +1622,7 @@ impl Gateway {
         s.model_circuits.retain(|key, _| keys.contains(key));
         s.revision = revision;
         s.home = Some(home.to_owned());
+        s.refresh_editable_digest(self.0.client);
         self.sync_single_protection(&s);
         self.0.admission.configure(&s.store.providers, s.running);
         self.0
@@ -1638,6 +1774,7 @@ impl Gateway {
                     s.running = true;
                     s.shutdown = Some(tx);
                     s.error = listener.notice;
+                    s.refresh_editable_digest(self.0.client);
                     self.0.admission.configure(&s.store.providers, true);
                     self.0
                         .admission
@@ -1761,6 +1898,7 @@ impl Gateway {
                     }
                     state.running = false;
                     state.error = Some(error.message.clone());
+                    state.refresh_editable_digest(peer.client);
                     peer.admission.configure(&state.store.providers, false);
                     peer.probe_wake.notify_one();
                 }
@@ -1857,6 +1995,7 @@ impl Gateway {
             }
             s.running = false;
             s.upgrade_error = None;
+            s.refresh_editable_digest(self.0.client);
             self.0.admission.configure(&s.store.providers, false);
             self.0
                 .admission

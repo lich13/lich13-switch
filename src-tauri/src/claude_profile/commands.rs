@@ -152,6 +152,7 @@ pub async fn start_claude_login(r: R<'_>, app: tauri::AppHandle) -> Result<login
         session.state = state.clone();
         session.cancel = Some(cancel);
     }
+    r.window_wake.notify_one();
     let runtime = r.inner().clone();
     tauri::async_runtime::spawn(async move {
         let result = login::run(&home, receiver).await;

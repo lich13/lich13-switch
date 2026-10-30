@@ -137,6 +137,22 @@ impl Runtime {
         was_visible
     }
 
+    fn background_poll_active(&self) -> bool {
+        [&self.gateway, &self.claude, &self.grok, &self.dsh]
+            .into_iter()
+            .any(gateway::Gateway::is_running)
+            || self
+                .login
+                .lock()
+                .map(|s| login_active(&s.state))
+                .unwrap_or(false)
+            || self
+                .claude_login
+                .lock()
+                .map(|s| matches!(s.state.phase.as_str(), "waiting" | "cancelling"))
+                .unwrap_or(false)
+    }
+
     fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
         if let Some(record) = events::Record::configuration_failure(client, &error, false) {
             self.diagnostics.emit(record);
@@ -899,6 +915,7 @@ fn start_login(
     };
     let initial = session.state.clone();
     drop(session);
+    r.window_wake.notify_one();
     let runtime = r.inner().clone();
     tauri::async_runtime::spawn(async move {
         let (sender, mut events) = tokio::sync::mpsc::channel(8);
@@ -1065,6 +1082,7 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                     *result = Some(Err(e));
                 }
                 runtime.quitting.store(true, Ordering::Relaxed);
+                runtime.window_wake.notify_one();
                 app.exit(1);
                 return;
             }
@@ -1074,6 +1092,7 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
             return;
         }
         runtime.quitting.store(true, Ordering::Relaxed);
+        runtime.window_wake.notify_one();
         if let Ok(mut s) = runtime.login.lock() {
             if let Some(tx) = s.cancel.take() {
                 let _ = tx.send(());
@@ -1434,6 +1453,7 @@ async fn start_gateway(
         )
         .await
         .map_err(|e| r.config_failure(client_id, e))?;
+    r.window_wake.notify_one();
     let _ = refresh(&app, &r);
     let _ = app.emit(
         "switch-notice",
@@ -1454,6 +1474,7 @@ async fn stop_gateway(
         .stop_checked(expected_config_revision.as_deref())
         .await
         .map_err(|e| r.config_failure(client_id, e))?;
+    r.window_wake.notify_one();
     let _ = refresh(&app, &r);
     let _ = app.emit(
         "switch-notice",
@@ -2096,9 +2117,13 @@ pub fn run() {
                 let mut last_tray_dark: Option<bool> = None;
                 loop {
                     if visible_windows(&handle).is_empty() {
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
-                            _ = runtime.window_wake.notified() => {}
+                        if runtime.background_poll_active() {
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+                                _ = runtime.window_wake.notified() => {}
+                            }
+                        } else {
+                            runtime.window_wake.notified().await;
                         }
                     } else {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

@@ -305,6 +305,7 @@ fn save_local(gateway: &Gateway, token: &str) {
         .store
         .persist(&gateway.0.data.join("gateway.json"), &state.revision)
         .unwrap();
+    state.refresh_editable_digest(gateway.0.client);
 }
 
 fn provider(gateway: &Gateway, home: &Path) {

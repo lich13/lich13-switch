@@ -49,7 +49,9 @@ impl Fixture {
 
 fn set_local_token(gateway: &Gateway, token: &str) {
     {
-        gateway.0.inner.lock().unwrap().store.local_token = token.to_owned();
+        let mut state = gateway.0.inner.lock().unwrap();
+        state.store.local_token = token.to_owned();
+        state.refresh_editable_digest(gateway.0.client);
     }
     gateway.0.registry.publish_token(&gateway.0, token);
 }

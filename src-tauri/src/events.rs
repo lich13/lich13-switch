@@ -518,7 +518,7 @@ pub struct Change {
     #[serde(skip)]
     pub notify: bool,
 }
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct Journal {
     records: VecDeque<Record>,
     // Runtime health can refer to a just-merged event. Keep bounded aliases for
@@ -788,7 +788,36 @@ impl Service {
                         continue;
                     }
                 }
-                let cleanup = matches!(&job, Job::Clear(_) | Job::Prune);
+                if let Job::Clear(tx) = job {
+                    let result = storage::atomic_write_stream(&path, |_| Ok(()));
+                    let raw_pruned = if result.is_ok() {
+                        prune_raw_ids(&raw_path, &HashSet::new())
+                    } else {
+                        Ok(())
+                    };
+                    let error = {
+                        let mut current = j.lock().unwrap();
+                        if result.is_ok() {
+                            current.records.clear();
+                            current.aliases.clear();
+                            current.dirty = false;
+                            current.error =
+                                raw_pruned.err().map(|_| "日志原文清理失败，请重试".into());
+                        } else {
+                            current.dirty = true;
+                            current.error = Some("日志写入失败，请检查文件权限与空间".into());
+                        }
+                        current.error.clone()
+                    };
+                    let _ = events_copy.send(Change {
+                        record: None,
+                        error,
+                        notify: false,
+                    });
+                    let _ = tx.send(result);
+                    continue;
+                }
+                let cleanup = matches!(&job, Job::Prune);
                 let prune_only = matches!(&job, Job::Prune);
                 let append = matches!(&job, Job::Append(_));
                 let mut jobs = vec![job];
@@ -870,16 +899,6 @@ impl Service {
                         continue;
                     }
                 }
-                let mut journal = j.lock().unwrap().clone();
-                // Only Clear promises rollback after a failed write. Append keeps
-                // its in-memory evidence so the next write can retry it.
-                let previous = matches!(jobs.first(), Some(Job::Clear(_))).then(|| {
-                    (
-                        std::mem::take(&mut journal.records),
-                        std::mem::take(&mut journal.aliases),
-                    )
-                });
-                let mut done = None;
                 let mut changes = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let mut changed = None;
@@ -904,83 +923,142 @@ impl Service {
                                     *value = value.chars().take(512).collect();
                                 }
                             }
-                            resolve_cause_id(&mut r, &journal.aliases, journal.records.iter());
                             notify = r.reason.notifiable(r.action);
-                            if let Some(old) = journal.records.iter_mut().rev().find(|old| {
-                                old.same(&r)
-                                    && r.last_at.saturating_sub(old.first_at) < r.merge_seconds()
-                            }) {
-                                old.last_at = r.last_at;
-                                old.count = old.count.saturating_add(1);
-                                old.status = r.status;
-                                old.action = r.action;
-                                old.attempt = r.attempt;
-                                if r.reason == Reason::RequestInterrupted {
-                                    old.details.delivery = r.details.delivery;
-                                    old.details.last_progress_ms = r.details.last_progress_ms;
+                            let outcome = {
+                                let mut journal = j.lock().unwrap();
+                                resolve_cause_id(&mut r, &journal.aliases, journal.records.iter());
+                                if let Some(old) = journal.records.iter_mut().rev().find(|old| {
+                                    old.same(&r)
+                                        && r.last_at.saturating_sub(old.first_at)
+                                            < r.merge_seconds()
+                                }) {
+                                    old.last_at = r.last_at;
+                                    old.count = old.count.saturating_add(1);
+                                    old.status = r.status;
+                                    old.action = r.action;
+                                    old.attempt = r.attempt;
+                                    if r.reason == Reason::RequestInterrupted {
+                                        old.details.delivery = r.details.delivery;
+                                        old.details.last_progress_ms = r.details.last_progress_ms;
+                                    }
+                                    let snapshot = old.clone();
+                                    let target = snapshot.id.clone();
+                                    journal.aliases.push_back((r.id, target));
+                                    while journal.aliases.len() > 4096 {
+                                        journal.aliases.pop_front();
+                                    }
+                                    Ok(snapshot)
+                                } else if raw.is_none() {
+                                    let snapshot = r.clone();
+                                    journal.records.push_back(r);
+                                    Ok(snapshot)
+                                } else {
+                                    Err(r)
                                 }
-                                changed = Some(old.clone());
-                                let target = old.id.clone();
-                                journal.aliases.push_back((r.id, target));
-                                while journal.aliases.len() > 4096 {
-                                    journal.aliases.pop_front();
+                            };
+                            match outcome {
+                                Ok(snapshot) => {
+                                    changed = Some(snapshot);
                                 }
-                            } else {
-                                if let Some(raw) = raw {
-                                    if raw.save(&raw_path, &r.id).is_err() {
+                                Err(mut r) => {
+                                    let raw_failed = raw
+                                        .as_ref()
+                                        .is_some_and(|raw| raw.save(&raw_path, &r.id).is_err());
+                                    if raw_failed {
                                         if let Some(reference) = &mut r.details.raw_error {
                                             reference.incomplete = Some("错误原文保存失败".into());
                                         }
+                                    }
+                                    let mut journal = j.lock().unwrap();
+                                    if raw_failed {
                                         journal.error =
                                             Some("错误原文保存失败，请检查文件权限与空间".into());
                                     }
+                                    changed = Some(r.clone());
+                                    journal.records.push_back(r);
                                 }
-                                changed = Some(r.clone());
-                                journal.records.push_back(r);
                             }
                         }
-                        Job::Clear(tx) => {
-                            journal.records.clear();
-                            journal.aliases.clear();
-                            journal.error = None;
-                            done = Some(tx);
-                        }
                         Job::NotificationAccepted(id) => {
+                            let mut journal = j.lock().unwrap();
                             if let Some(r) = journal.records.iter_mut().find(|r| r.id == id) {
                                 r.notified_at = now();
                                 changed = Some(r.clone());
                             }
                         }
-                        Job::Prune => (),
+                        Job::Clear(_) | Job::Prune => (),
                     }
                     changes.push((changed, notify));
                 }
-                let before_retention = journal.records.len();
-                let result = persist(&mut journal, &path, !prune_only);
-                if result.is_err() {
-                    if let Some((records, aliases)) = previous {
-                        journal.records = records;
-                        journal.aliases = aliases;
+                let (payload, retained_raw_ids) = {
+                    let mut guard = j.lock().unwrap();
+                    let journal = &mut *guard;
+                    let before_retention = journal.records.len();
+                    let cutoff = now().saturating_sub(RETENTION);
+                    let payload = if !prune_only || journal.needs_write(&path) {
+                        journal.records.retain(|r| r.last_at >= cutoff);
+                        let retained: HashSet<_> =
+                            journal.records.iter().map(|r| r.id.as_str()).collect();
+                        journal
+                            .aliases
+                            .retain(|(_, target)| retained.contains(target.as_str()));
+                        journal.dirty = true;
+                        let mut buf = Vec::with_capacity(journal.records.len() * 256);
+                        for record in &journal.records {
+                            serde_json::to_writer(&mut buf, record)
+                                .expect("serializable diagnostic record");
+                            buf.push(b'\n');
+                        }
+                        Some(buf)
+                    } else {
+                        None
+                    };
+                    let retained_raw =
+                        (cleanup || journal.records.len() != before_retention).then(|| {
+                            journal
+                                .records
+                                .iter()
+                                .filter_map(|r| r.details.raw_error.as_ref().map(|r| r.id.clone()))
+                                .collect::<HashSet<_>>()
+                        });
+                    (payload, retained_raw)
+                };
+                let result = match &payload {
+                    Some(bytes) => storage::atomic_write_stream(&path, |writer| {
+                        writer.write_all(bytes)?;
+                        Ok(())
+                    }),
+                    None => Ok(()),
+                };
+                let raw_pruned = if result.is_ok() {
+                    if let Some(retained) = &retained_raw_ids {
+                        prune_raw_ids(&raw_path, retained)
+                    } else {
+                        Ok(())
                     }
-                    journal.error = Some("日志写入失败，请检查文件权限与空间".into());
-                }
-                if (cleanup || journal.records.len() != before_retention)
-                    && result.is_ok()
-                    && prune_raw(&raw_path, &journal).is_err()
-                {
-                    journal.error = Some("日志原文清理失败，请重试".into());
-                }
-                let error = journal.error.clone();
-                *j.lock().unwrap() = journal;
+                } else {
+                    Ok(())
+                };
+                let error = {
+                    let mut journal = j.lock().unwrap();
+                    if result.is_ok() {
+                        if payload.is_some() {
+                            journal.dirty = false;
+                        }
+                        if raw_pruned.is_err() {
+                            journal.error = Some("日志原文清理失败，请重试".into());
+                        }
+                    } else {
+                        journal.error = Some("日志写入失败，请检查文件权限与空间".into());
+                    }
+                    journal.error.clone()
+                };
                 for (record, notify) in changes {
                     let _ = events_copy.send(Change {
                         record,
                         error: error.clone(),
                         notify,
                     });
-                }
-                if let Some(tx) = done {
-                    let _ = tx.send(result);
                 }
             }
         });
@@ -1105,8 +1183,12 @@ fn prune_raw(directory: &Path, journal: &Journal) -> std::io::Result<()> {
     let retained: HashSet<_> = journal
         .records
         .iter()
-        .filter_map(|r| r.details.raw_error.as_ref().map(|r| r.id.as_str()))
+        .filter_map(|r| r.details.raw_error.as_ref().map(|r| r.id.clone()))
         .collect();
+    prune_raw_ids(directory, &retained)
+}
+
+fn prune_raw_ids(directory: &Path, retained: &HashSet<String>) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1426,5 +1508,48 @@ mod routing_visibility_tests {
         assert!(reloaded.error.is_none());
         assert_eq!(reloaded.records.len(), 2);
         assert_eq!(reloaded.records[1].count, 2);
+    }
+
+    #[tokio::test]
+    async fn clear_write_failure_preserves_in_memory_records_and_merged_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.jsonl");
+        let service = Service::new(dir.path());
+        let mut rx = service.subscribe();
+
+        let base = Record::new(
+            Some(ClientId::Codex),
+            None,
+            Some("fixture-model"),
+            Reason::UpstreamService,
+            Action::Returned,
+            Some(502),
+            Some(1),
+        );
+        let canonical_id = base.id.clone();
+        service.emit(base.clone());
+        rx.recv().await.unwrap();
+
+        let mut dup = base;
+        let alias_id = uuid::Uuid::new_v4().to_string();
+        dup.id = alias_id.clone();
+        service.emit(dup);
+        rx.recv().await.unwrap();
+        assert_eq!(service.detail(&alias_id).unwrap().record.id, canonical_id);
+
+        // Replace diagnostics.jsonl with a directory so atomic rename fails during Clear.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("blocker"), b"x").unwrap();
+
+        assert!(service.clear().await.is_err());
+        assert_eq!(service.query(Filter::default()).total, 1);
+        assert_eq!(service.detail(&alias_id).unwrap().record.id, canonical_id);
+
+        // Restore path and confirm normal clear empties records and aliases.
+        std::fs::remove_dir_all(&path).unwrap();
+        service.clear().await.unwrap();
+        assert_eq!(service.query(Filter::default()).total, 0);
+        assert!(service.detail(&alias_id).is_none());
     }
 }

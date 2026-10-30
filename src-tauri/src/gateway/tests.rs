@@ -1368,6 +1368,7 @@ fn view_reads_without_routing_lock_and_retries_only_once_on_configuration_change
                 .expect("config reads must release routing lock");
             if reads.get() == 0 {
                 state.store.mode = "auto".into();
+                state.refresh_editable_digest(gateway.0.client);
             }
             reads.set(reads.get() + 1);
             drop(state);
@@ -1387,6 +1388,7 @@ fn view_reads_without_routing_lock_and_retries_only_once_on_configuration_change
                 "auto"
             }
             .into();
+            state.refresh_editable_digest(gateway.0.client);
             reads.set(reads.get() + 1);
         })
         .err()

@@ -1212,3 +1212,123 @@ fn missing_or_unmatched_claims_are_read_only_unknown_metadata() {
     assert_eq!(value.label, "Team");
     assert_eq!(before, copy);
 }
+
+#[test]
+fn core_state_caches_credential_metadata_and_invalidates_on_rotation_or_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let home = dir.path().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let auth_v1 = credential_from_claims(
+        {
+            let mut c = identity_claims(
+                "sub-1",
+                "user@example.invalid",
+                Some("u-1"),
+                Some("ws-1"),
+                Some("plus"),
+                1_700_000_000,
+                "m1",
+            );
+            c["exp"] = json!(super::now() + 3600);
+            c
+        },
+        identity_claims(
+            "sub-1",
+            "user@example.invalid",
+            Some("u-1"),
+            Some("ws-1"),
+            Some("plus"),
+            1_700_000_000,
+            "m1a",
+        ),
+        Some("ws-1"),
+        "m1",
+        1_700_000_000,
+    );
+    std::fs::write(home.join("auth.json"), &auth_v1).unwrap();
+
+    let mut core = super::Core::new(data, home.clone()).unwrap();
+    let id = core.import_raw(&auth_v1, Some("Primary".into())).unwrap();
+    let saved = core.state().unwrap();
+    let rev_v1 = saved.accounts[0].credential_revision.clone();
+    assert_eq!(
+        saved.accounts[0]
+            .subscription
+            .as_ref()
+            .and_then(|s| s.plan_type.as_deref()),
+        Some("plus")
+    );
+    assert_eq!(
+        saved.accounts[0].subscription.as_ref().map(|s| s.stale),
+        Some(false)
+    );
+    assert_eq!(core.profile_meta_cache.len(), 1);
+
+    // Expiration staleness is dynamically recomputed from cached exp without re-decoding JWT.
+    core.profile_meta_cache
+        .get_mut(&id)
+        .unwrap()
+        .subscription
+        .as_mut()
+        .unwrap()
+        .exp = Some(super::now().saturating_sub(1));
+    let expired_state = core.state().unwrap();
+    assert_eq!(
+        expired_state.accounts[0]
+            .subscription
+            .as_ref()
+            .map(|s| s.stale),
+        Some(true)
+    );
+
+    // Credential rotation invalidates the cached revision & plan immediately.
+    let auth_v2 = credential_from_claims(
+        {
+            let mut c = identity_claims(
+                "sub-1",
+                "user@example.invalid",
+                Some("u-1"),
+                Some("ws-1"),
+                Some("pro"),
+                1_700_000_100,
+                "m2",
+            );
+            c["exp"] = json!(super::now() + 7200);
+            c
+        },
+        identity_claims(
+            "sub-1",
+            "user@example.invalid",
+            Some("u-1"),
+            Some("ws-1"),
+            Some("pro"),
+            1_700_000_100,
+            "m2a",
+        ),
+        Some("ws-1"),
+        "m2",
+        1_700_000_100,
+    );
+    std::fs::write(home.join("auth.json"), &auth_v2).unwrap();
+    let rotated = core.state().unwrap();
+    assert_ne!(rotated.accounts[0].credential_revision, rev_v1);
+    assert_eq!(
+        rotated.accounts[0]
+            .subscription
+            .as_ref()
+            .and_then(|s| s.plan_type.as_deref()),
+        Some("pro")
+    );
+    assert_eq!(
+        rotated.accounts[0].subscription.as_ref().map(|s| s.stale),
+        Some(false)
+    );
+
+    // Deleting the profile prunes its cached metadata entry on the next state() call.
+    core.delete(&id).unwrap();
+    let after_delete = core.state().unwrap();
+    assert!(after_delete.accounts.is_empty());
+    assert!(core.profile_meta_cache.is_empty());
+}

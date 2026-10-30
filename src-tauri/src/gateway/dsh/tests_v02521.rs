@@ -84,6 +84,7 @@ async fn legacy_routes_and_full_snapshots_upgrade_without_false_conflicts() {
         let mut state = gateway.0.inner.lock().unwrap();
         state.store = store;
         state.revision = revision;
+        state.refresh_editable_digest(gateway.0.client);
     }
     gateway
         .restart_dsh(home.path(), &gateway.view().revision)
