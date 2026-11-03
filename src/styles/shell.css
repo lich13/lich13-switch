@@ -277,6 +277,11 @@ label.search input:focus-visible {
     var(--shadow-sm);
 }
 
+.account-row:has(.account-menu[open]),
+.provider-row:has(.row-menu[open]) {
+  z-index: 30;
+}
+
 .account-row.selected {
   background:
     linear-gradient(

@@ -1,12 +1,19 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AntigravityAccounts from "./AntigravityAccounts";
 import type { AntigravityAuthState } from "./bridge-contracts";
 
 const mockCommand = vi.fn();
+const listeners = new Map<string, (payload: unknown) => void>();
 
 vi.mock("./bridge", () => ({
   command: (...args: unknown[]) => mockCommand(...args),
+  subscribe: vi.fn(async (event: string, cb: (payload: unknown) => void) => {
+    listeners.set(event, cb);
+    return () => {
+      listeners.delete(event);
+    };
+  }),
 }));
 
 const initialState: AntigravityAuthState = {
@@ -14,15 +21,12 @@ const initialState: AntigravityAuthState = {
   mode: "oauth",
   enableAdc: false,
   oauthPresent: true,
-  oauthSaved: true,
   oauthEmail: "user1@example.invalid",
   oauthAuthMethod: "google-oauth",
   adcStatus: "disabled",
-  adcSaved: true,
   adcType: "authorized_user",
   adcEmail: "user1@example.invalid",
   adcProject: "demo-project",
-  backupCount: 2,
   appRestarted: false,
   accounts: [
     {
@@ -65,9 +69,10 @@ describe("AntigravityAccounts", () => {
   afterEach(() => {
     cleanup();
     mockCommand.mockReset();
+    listeners.clear();
   });
 
-  it("renders multi-OAuth and multi-ADC credentials and switches modes and accounts", async () => {
+  it("renders multi-OAuth and multi-ADC credentials and switches modes and accounts without redundant manual buttons", async () => {
     const notify = vi.fn();
     const setError = vi.fn();
 
@@ -85,7 +90,7 @@ describe("AntigravityAccounts", () => {
           appRestarted: true,
         };
       }
-      if (name === "switch_antigravity_oauth") {
+      if (name === "switch_antigravity_account") {
         return {
           ...initialState,
           revision: "rev-3",
@@ -106,6 +111,9 @@ describe("AntigravityAccounts", () => {
     expect(await screen.findByText("OAuth 主号")).toBeTruthy();
     expect(screen.getByText("OAuth 备号")).toBeTruthy();
     expect(screen.getByText("ADC 生产环境")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "备份当前" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "读取当前 OAuth" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存当前 ADC" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "ADC 模式" }));
     await waitFor(() => {
@@ -117,15 +125,14 @@ describe("AntigravityAccounts", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "切换到 OAuth 备号" }));
     await waitFor(() => {
-      expect(mockCommand).toHaveBeenCalledWith("switch_antigravity_oauth", {
+      expect(mockCommand).toHaveBeenCalledWith("switch_antigravity_account", {
         id: "oauth-2",
         expectedRevision: "rev-2",
-        disableAdc: true,
       });
     });
   });
 
-  it("imports current OAuth login and validates ADC JSON before submission", async () => {
+  it("auto-updates accounts from antigravity-auth-state events and validates ADC JSON before submission", async () => {
     const notify = vi.fn();
     const setError = vi.fn();
 
@@ -134,10 +141,29 @@ describe("AntigravityAccounts", () => {
     render(<AntigravityAccounts notify={notify} setError={setError} />);
     await screen.findByText("OAuth 主号");
 
-    fireEvent.click(screen.getByRole("button", { name: "读取当前 OAuth" }));
-    await waitFor(() => {
-      expect(mockCommand).toHaveBeenCalledWith("import_current_antigravity_oauth", {});
+    act(() => {
+      listeners.get("antigravity-auth-state")?.({
+        ...initialState,
+        revision: "rev-auto",
+        mode: "mixed_adc_file_without_flag",
+        accounts: [
+          ...initialState.accounts,
+          {
+            id: "oauth-3",
+            name: "user3@example.invalid",
+            kind: "oauth",
+            email: "user3@example.invalid",
+            projectId: null,
+            sourceType: "google-oauth",
+            updatedAt: 1710000099,
+            current: true,
+            credentialRevision: "cred-auto",
+          },
+        ],
+      });
     });
+    expect((await screen.findAllByText("user3@example.invalid")).length).toBeGreaterThan(0);
+    expect(screen.getByText(/不一致（存在 ADC 文件但未启用设置）/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "导入 ADC" }));
     const submitBtn = screen.getByRole("button", { name: "导入保存" });

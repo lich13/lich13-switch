@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ArrowLeftRight,
   Check,
-  Download,
   FolderOpen,
   KeyRound,
   LoaderCircle,
@@ -11,12 +10,11 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Save,
   Shield,
   Trash2,
   UserRound,
 } from "lucide-react";
-import { command } from "./bridge";
+import { command, subscribe } from "./bridge";
 import type {
   AntigravityAccountItem,
   AntigravityAuthState,
@@ -59,14 +57,13 @@ function parseAdcPreview(raw: string): {
     if (type === "service_account") {
       const email = typeof obj.client_email === "string" ? obj.client_email.trim() : "";
       const pk = typeof obj.private_key === "string" ? obj.private_key.trim() : "";
-      const uri = typeof obj.token_uri === "string" ? obj.token_uri.trim() : "";
-      if (!pk.includes("PRIVATE KEY") || !email || !uri) {
+      if (!pk.includes("PRIVATE KEY") || !email || !project) {
         return {
           valid: false,
           type,
           identity: email || null,
           project,
-          hint: "service_account 需包含 private_key、client_email 与 token_uri",
+          hint: "service_account 需包含 private_key、client_email 与 project_id",
         };
       }
       return { valid: true, type, identity: email, project, hint: null };
@@ -121,6 +118,13 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
 
   useEffect(() => {
     void load();
+    let off: (() => void) | undefined;
+    void subscribe("antigravity-auth-state", (next) => {
+      setState(next);
+    }).then((fn) => {
+      off = fn;
+    });
+    return () => off?.();
   }, [load]);
 
   const runAction = async (
@@ -165,23 +169,28 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
   );
   const oauthCount = (state?.accounts ?? []).filter((a) => a.kind === "oauth").length;
   const adcCount = (state?.accounts ?? []).filter((a) => a.kind === "adc").length;
+  const isMixed =
+    state?.mode === "mixed_adc_file_without_flag" ||
+    state?.mode === "mixed_flag_without_adc_file";
 
   return (
     <div className="antigravity-accounts">
       <div
-        className={"ag-status-card" + (state?.mode === "mixed" ? " warning" : "")}
+        className={"ag-status-card" + (isMixed ? " warning" : "")}
         aria-label="Antigravity 认证状态"
       >
         <div className="ag-status-main">
           <div className="ag-status-header">
-            {state?.mode === "mixed" ? <AlertTriangle size={16} /> : <Shield size={16} />}
+            {isMixed ? <AlertTriangle size={16} /> : <Shield size={16} />}
             <strong>
               当前模式：
               {state?.mode === "adc"
                 ? "ADC 模式（已启用 ADC）"
-                : state?.mode === "mixed"
-                  ? "混合状态（配置与 ADC 文件不一致）"
-                  : "OAuth 模式（已禁用 ADC）"}
+                : state?.mode === "mixed_adc_file_without_flag"
+                  ? "不一致（存在 ADC 文件但未启用设置）"
+                  : state?.mode === "mixed_flag_without_adc_file"
+                    ? "不一致（已启用设置但缺少 ADC 文件）"
+                    : "OAuth 模式（已禁用 ADC）"}
             </strong>
           </div>
           <div className="ag-status-pills">
@@ -198,12 +207,11 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
               {state?.adcStatus === "active"
                 ? `已启用 (${state.adcType ?? "ADC"}${state.adcProject ? ` · ${state.adcProject}` : ""})`
                 : state?.adcStatus === "disabled"
-                  ? "已禁用 (.disabled)"
+                  ? "已禁用"
                   : state?.adcStatus === "backup_only"
-                    ? "仅备份 (agswitch)"
+                    ? "仅备份 (.vela.bak)"
                     : "未检测到"}
             </span>
-            <span className="ag-pill">自动备份: {state?.backupCount ?? 0}/10</span>
           </div>
         </div>
         <div className="ag-status-actions">
@@ -253,20 +261,6 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           </div>
           <button
             type="button"
-            className="text-button"
-            disabled={!state || busy}
-            onClick={() =>
-              void runAction(
-                () => command("backup_antigravity_auth"),
-                () => "已备份当前 Antigravity 认证配置",
-              )
-            }
-          >
-            <Save size={14} />
-            备份当前
-          </button>
-          <button
-            type="button"
             className="icon-button"
             aria-label="刷新 Antigravity 认证状态"
             disabled={busy}
@@ -305,36 +299,6 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           </button>
         </div>
         <div className="account-actions">
-          <button
-            type="button"
-            className="secondary"
-            disabled={busy || !state?.oauthPresent}
-            onClick={() =>
-              void runAction(
-                () => command("import_current_antigravity_oauth", {}),
-                () => "已从当前登录读取并保存 OAuth 账号",
-              )
-            }
-          >
-            <Download size={15} />
-            读取当前 OAuth
-          </button>
-          {state && state.adcStatus !== "missing" && !state.adcSaved && (
-            <button
-              type="button"
-              className="secondary"
-              disabled={busy}
-              onClick={() =>
-                void runAction(
-                  () => command("import_current_antigravity_adc", {}),
-                  () => "已保存当前磁盘上的 ADC 凭据",
-                )
-              }
-            >
-              <Download size={15} />
-              保存当前 ADC
-            </button>
-          )}
           <button type="button" className="primary" disabled={busy} onClick={openAddAdc}>
             <Plus size={15} />
             导入 ADC
@@ -352,7 +316,7 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           <div className="empty">
             <KeyRound size={30} />
             <h3>尚无已保存的 Antigravity 凭据</h3>
-            <p>可点击「读取当前 OAuth」保存当前登录账号，或「导入 ADC」添加 Google Cloud ADC JSON。</p>
+            <p>在 Antigravity 登录 OAuth 账号后会自动识别并保存在此处，也可点击「导入 ADC」添加 Google Cloud ADC JSON。</p>
           </div>
         ) : (
           items.map((item) => {
@@ -398,17 +362,10 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                       onClick={() =>
                         void runAction(
                           () =>
-                            item.kind === "oauth"
-                              ? command("switch_antigravity_oauth", {
-                                  id: item.id,
-                                  expectedRevision: state.revision,
-                                  disableAdc: true,
-                                })
-                              : command("switch_antigravity_adc", {
-                                  id: item.id,
-                                  expectedRevision: state.revision,
-                                  enableAdc: true,
-                                }),
+                            command("switch_antigravity_account", {
+                              id: item.id,
+                              expectedRevision: state.revision,
+                            }),
                           (next) =>
                             next.appRestarted
                               ? `已切换到 ${item.name} 并自动重启 Antigravity`
@@ -495,28 +452,9 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                 <p>
                   支持导入 <code>gcloud auth application-default login</code> 生成的{" "}
                   <code>authorized_user</code> JSON，或包含完整{" "}
-                  <code>private_key / client_email / token_uri</code> 的{" "}
+                  <code>private_key / client_email / project_id</code> 的{" "}
                   <code>service_account</code> 密钥文件。
                 </p>
-                {state.adcStatus !== "missing" && (
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() =>
-                      void runAction(
-                        () =>
-                          command("import_current_antigravity_adc", {
-                            name: name.trim() || null,
-                          }),
-                        () => "已导入当前磁盘上的 ADC 凭据",
-                      )
-                    }
-                  >
-                    <Download size={14} />
-                    直接导入本机当前 ADC ({state.adcProject ?? state.adcType ?? "已检测"})
-                  </button>
-                )}
               </div>
 
               <label>
