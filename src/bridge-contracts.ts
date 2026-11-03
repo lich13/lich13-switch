@@ -79,6 +79,50 @@ export type ClaudeLoginState = {
   authenticated: boolean;
   error: string | null;
 };
+export type AntigravityAccountItem = {
+  id: string;
+  name: string;
+  kind: "oauth" | "adc";
+  sourceType: string;
+  email: string | null;
+  projectId: string | null;
+  current: boolean;
+  updatedAt: number;
+  credentialRevision: string;
+};
+export type AntigravityAuthState = {
+  accounts: AntigravityAccountItem[];
+  mode: "oauth" | "adc" | "both";
+  enableAdc: boolean;
+  oauthPresent: boolean;
+  oauthSaved: boolean;
+  adcStatus: "active" | "disabled" | "backup_only" | "missing";
+  adcSaved: boolean;
+  adcType: string | null;
+  adcProject: string | null;
+  backupCount: number;
+  revision: string;
+};
+export type AddAntigravityOAuthInput = {
+  name?: string | null;
+  inputMode: "json" | "key";
+  jsonText?: string | null;
+  key?: string | null;
+  refreshToken?: string | null;
+  email?: string | null;
+  activate: boolean;
+};
+export type AddAntigravityAdcInput = {
+  name?: string | null;
+  inputMode: "json" | "key";
+  jsonText?: string | null;
+  key?: string | null;
+  clientId?: string | null;
+  clientSecret?: string | null;
+  projectId?: string | null;
+  clientEmail?: string | null;
+  activate: boolean;
+};
 export type ProviderTestMode =
   | "text"
   | "compact"
@@ -482,6 +526,45 @@ export type CommandMap = {
   save_antigravity_config: Call<{ text: string } & Revision, ConfigDocument>;
   read_previous_antigravity_config: Call<None, string>;
   validate_antigravity_config: Call<{ text: string }, void>;
+  get_antigravity_auth_state: Call<None, AntigravityAuthState>;
+  import_current_antigravity_oauth: Call<
+    { name?: string | null },
+    AntigravityAuthState
+  >;
+  import_current_antigravity_adc: Call<
+    { name?: string | null },
+    AntigravityAuthState
+  >;
+  add_antigravity_oauth: Call<
+    { input: AddAntigravityOAuthInput },
+    AntigravityAuthState
+  >;
+  add_antigravity_adc: Call<
+    { input: AddAntigravityAdcInput },
+    AntigravityAuthState
+  >;
+  pick_antigravity_credential_file: Call<None, string | null>;
+  switch_antigravity_oauth: Call<
+    { id: string; disableAdc: boolean } & Revision,
+    AntigravityAuthState
+  >;
+  switch_antigravity_adc: Call<
+    { id: string; enableAdc: boolean } & Revision,
+    AntigravityAuthState
+  >;
+  set_antigravity_auth_mode: Call<
+    { mode: "oauth" | "adc" | "both" } & Revision,
+    AntigravityAuthState
+  >;
+  backup_antigravity_auth: Call<None, AntigravityAuthState>;
+  rename_antigravity_account: Call<
+    { id: string; name: string } & Revision,
+    AntigravityAuthState
+  >;
+  delete_antigravity_account: Call<
+    { id: string } & Revision,
+    AntigravityAuthState
+  >;
   read_config: Call<{ clientId?: ClientId }, ConfigDocument>;
   read_previous_config: Call<Client, string>;
   validate_config: Call<{ clientId?: ClientId; text: string }, void>;

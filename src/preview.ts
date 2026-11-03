@@ -706,7 +706,55 @@ export async function run(
       return;
     case "pick_path":
     case "import_auth_file":
+    case "pick_antigravity_credential_file":
       return null;
+    case "get_antigravity_auth_state":
+    case "import_current_antigravity_oauth":
+    case "import_current_antigravity_adc":
+    case "add_antigravity_oauth":
+    case "add_antigravity_adc":
+    case "switch_antigravity_oauth":
+    case "switch_antigravity_adc":
+    case "set_antigravity_auth_mode":
+    case "backup_antigravity_auth":
+    case "rename_antigravity_account":
+    case "delete_antigravity_account":
+      return {
+        accounts: [
+          {
+            id: "ag-oauth-1",
+            name: "Antigravity OAuth",
+            kind: "oauth",
+            sourceType: "oauth_json",
+            email: "dev@example.invalid",
+            projectId: null,
+            current: true,
+            updatedAt: Math.floor(Date.now() / 1000) - 600,
+            credentialRevision: "rev-oauth-1",
+          },
+          {
+            id: "ag-adc-1",
+            name: "GCP Project Alpha",
+            kind: "adc",
+            sourceType: "authorized_user",
+            email: "dev@example.invalid",
+            projectId: "gcp-alpha-demo",
+            current: true,
+            updatedAt: Math.floor(Date.now() / 1000) - 300,
+            credentialRevision: "rev-adc-1",
+          },
+        ],
+        mode: "oauth",
+        enableAdc: false,
+        oauthPresent: true,
+        oauthSaved: true,
+        adcStatus: "disabled",
+        adcSaved: true,
+        adcType: "authorized_user",
+        adcProject: "gcp-alpha-demo",
+        backupCount: 2,
+        revision: "ag-preview-rev",
+      };
     case "import_current":
       break;
     default:

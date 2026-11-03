@@ -37,12 +37,16 @@ fn valid_enum_value(value: &str, prefix: &str) -> bool {
 const STRING_SETTINGS: &[&str] = &["remoteControlHostname"];
 
 const BOOL_SETTINGS: &[&str] = &[
+    "enableAdc",
     "enableTerminalSandbox",
     "enableSoundsForSpecialEvents",
     "remoteControlEnabled",
     "permissionGrantsV2Migrated",
     "sandboxEnabledAtV2Migration",
 ];
+
+#[path = "antigravity_auth.rs"]
+pub mod auth;
 
 pub fn home() -> Result<PathBuf> {
     dirs::home_dir()

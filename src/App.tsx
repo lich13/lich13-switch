@@ -40,6 +40,7 @@ import { AccountEdit, AddAccount, AppModal, SettingsForm } from "./AppDialogs";
 import AuthSyncNotice from "./AuthSyncNotice";
 import AccountPlan from "./AccountPlan";
 import ProviderImports from "./ProviderImports";
+import AntigravityAccounts from "./AntigravityAccounts";
 import { version } from "../package.json";
 import type { ProviderAction } from "./bridge-contracts";
 import {
@@ -72,6 +73,9 @@ const emptyLogin: LoginState = {
 export default function App() {
   const [exchangeMode, setExchangeMode] = useState<"import" | "export" | null>(
     null,
+  );
+  const [accountClient, setAccountClient] = useState<"codex" | "antigravity">(
+    "codex",
   );
   const [state, setState] = useState<ViewState | null>(null),
     [page, setPage] = useState<
@@ -436,42 +440,76 @@ export default function App() {
         ) : page === "accounts" ? (
           <section className="accounts-page">
             <div className="page-heading">
-              <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <h1>账号</h1>
-              </div>
-              <div className="account-actions">
                 <div
                   className="exchange-button-group"
                   role="group"
-                  aria-label="账号导入导出"
+                  aria-label="账号客户端"
                 >
                   <button
-                    className="exchange-button"
-                    disabled={!state}
-                    onClick={() => setExchangeMode("import")}
+                    type="button"
+                    className={
+                      "exchange-button" +
+                      (accountClient === "codex" ? " active" : "")
+                    }
+                    aria-pressed={accountClient === "codex"}
+                    onClick={() => setAccountClient("codex")}
                   >
-                    <FileInput size={16} />
-                    导入
+                    Codex
                   </button>
                   <button
-                    className="exchange-button"
-                    disabled={!state?.accounts.length}
-                    onClick={() => setExchangeMode("export")}
+                    type="button"
+                    className={
+                      "exchange-button" +
+                      (accountClient === "antigravity" ? " active" : "")
+                    }
+                    aria-pressed={accountClient === "antigravity"}
+                    onClick={() => setAccountClient("antigravity")}
                   >
-                    <FileOutput size={16} />
-                    导出
+                    Antigravity
                   </button>
                 </div>
-                <button
-                  className="primary"
-                  onClick={() => setDialog("add")}
-                  disabled={!state}
-                >
-                  <Plus size={16} />
-                  添加账号
-                </button>
               </div>
+              {accountClient === "codex" && (
+                <div className="account-actions">
+                  <div
+                    className="exchange-button-group"
+                    role="group"
+                    aria-label="账号导入导出"
+                  >
+                    <button
+                      className="exchange-button"
+                      disabled={!state}
+                      onClick={() => setExchangeMode("import")}
+                    >
+                      <FileInput size={16} />
+                      导入
+                    </button>
+                    <button
+                      className="exchange-button"
+                      disabled={!state?.accounts.length}
+                      onClick={() => setExchangeMode("export")}
+                    >
+                      <FileOutput size={16} />
+                      导出
+                    </button>
+                  </div>
+                  <button
+                    className="primary"
+                    onClick={() => setDialog("add")}
+                    disabled={!state}
+                  >
+                    <Plus size={16} />
+                    添加账号
+                  </button>
+                </div>
+              )}
             </div>
+            {accountClient === "antigravity" ? (
+              <AntigravityAccounts notify={notify} setError={setError} />
+            ) : (
+              <>
             {(state?.currentState === "unsaved" ||
               state?.currentState === "missing" ||
               state?.currentState === "invalid") && (
@@ -693,6 +731,8 @@ export default function App() {
                 ))
               )}
             </div>
+              </>
+            )}
           </section>
         ) : page === "gateway" ? (
           <Suspense fallback={<div className="empty">正在打开网关…</div>}>

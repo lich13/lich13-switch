@@ -89,6 +89,11 @@ export const antigravityFields: Record<string, Field[]> = {
   ],
   远程与插件: [
     {
+      path: ["userSettings", "enableAdc"],
+      label: "启用 Google Cloud ADC 认证",
+      kind: "boolean",
+    },
+    {
       path: ["userSettings", "remoteControlEnabled"],
       label: "远程控制",
       kind: "boolean",

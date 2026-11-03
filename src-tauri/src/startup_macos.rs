@@ -116,6 +116,10 @@ fn legacy_document(bytes: &[u8], executable: &Path) -> bool {
             super::startup::LEGACY_LICH13_LOGIN_ARG,
         ),
         (
+            "lich13-Switch.app/Contents/MacOS/lich13-switch",
+            super::startup::LEGACY_LICH13_LOGIN_ARG,
+        ),
+        (
             "gpt-Switch.app/Contents/MacOS/gpt-switch",
             super::startup::LEGACY_LOGIN_ARG,
         ),
@@ -290,6 +294,10 @@ mod tests {
             ),
             (
                 "/Applications/lich13-switch.app/Contents/MacOS/lich13-switch",
+                crate::startup::LEGACY_LICH13_LOGIN_ARG,
+            ),
+            (
+                "/Applications/lich13-Switch.app/Contents/MacOS/lich13-switch",
                 crate::startup::LEGACY_LICH13_LOGIN_ARG,
             ),
         ] {
