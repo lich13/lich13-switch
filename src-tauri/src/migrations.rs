@@ -4,152 +4,186 @@
 use crate::{startup, storage::Result};
 use std::path::{Path, PathBuf};
 
-/// v0.26.14: migrate legacy app data directory (`com.lich13.gpt-switch`) into `~/.vela`.
+/// Migrate legacy app data directory into `~/.vela` with SHA-256 content verification.
 pub fn migrate_to_vela_home(data: &Path, legacy_dirs: &[PathBuf]) -> Result<()> {
     crate::storage::private_dir(data)?;
+    let canonical_data = std::fs::canonicalize(data).unwrap_or_else(|_| data.to_path_buf());
     for legacy in legacy_dirs {
-        if legacy == data || !legacy.exists() {
+        let Ok(meta) = std::fs::symlink_metadata(legacy) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(crate::storage::AppError::new(
+                crate::errors::code::STORE,
+                &format!("旧数据目录类型异常，已停止迁移：{}", legacy.display()),
+            ));
+        }
+        let canonical_legacy =
+            std::fs::canonicalize(legacy).unwrap_or_else(|_| legacy.to_path_buf());
+        if canonical_legacy == canonical_data {
             continue;
         }
-        migrate_tree(legacy, data)?;
+        migrate_tree(legacy, data, Path::new(""))?;
     }
     Ok(())
 }
 
-fn migrate_tree(src: &Path, dst: &Path) -> Result<()> {
+fn file_digest(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let meta = std::fs::symlink_metadata(path).map_err(crate::storage::io_error)?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(crate::storage::AppError::new(
+            crate::errors::code::STORE,
+            "迁移目标不是普通文件",
+        ));
+    }
+    let mut file = std::fs::File::open(path).map_err(crate::storage::io_error)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(crate::storage::io_error)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn migrate_tree(src: &Path, dst: &Path, rel_prefix: &Path) -> Result<()> {
     crate::storage::private_dir(dst)?;
-    let entries = std::fs::read_dir(src).map_err(crate::storage::io_error)?;
+    let mut entries: Vec<_> = std::fs::read_dir(src)
+        .map_err(crate::storage::io_error)?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(crate::storage::io_error)?;
+    entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        let entry = entry.map_err(crate::storage::io_error)?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         let src_path = entry.path();
+        let rel_path = if rel_prefix.as_os_str().is_empty() {
+            PathBuf::from(&name)
+        } else {
+            rel_prefix.join(&name)
+        };
+        let meta = std::fs::symlink_metadata(&src_path).map_err(crate::storage::io_error)?;
+        if meta.file_type().is_symlink() {
+            return Err(crate::storage::AppError::new(
+                crate::errors::code::STORE,
+                &format!(
+                    "旧数据目录含符号链接，已停止迁移并保留残留：{}",
+                    rel_path.display()
+                ),
+            ));
+        }
         if name_str == ".DS_Store" || name_str.starts_with(".tmp") {
-            let _ = std::fs::remove_file(&src_path);
-            continue;
-        }
-        if name_str.starts_with("gateway-spool-") {
-            let _ = std::fs::remove_dir_all(&src_path);
-            continue;
-        }
-        let file_type = entry.file_type().map_err(crate::storage::io_error)?;
-        let dst_path = dst.join(&name);
-        if file_type.is_dir() {
-            migrate_tree(&src_path, &dst_path)?;
-        } else if file_type.is_file() {
-            if !dst_path.exists() {
-                copy_private_file(&src_path, &dst_path)?;
-            }
             std::fs::remove_file(&src_path).map_err(crate::storage::io_error)?;
+            continue;
+        }
+        if name_str.starts_with("gateway-spool-") && meta.is_dir() {
+            std::fs::remove_dir_all(&src_path).map_err(crate::storage::io_error)?;
+            continue;
+        }
+        let dst_path = dst.join(&name);
+        if meta.is_dir() {
+            migrate_tree(&src_path, &dst_path, &rel_path)?;
+        } else if meta.is_file() {
+            let src_digest = file_digest(&src_path)?;
+            if dst_path.exists() {
+                let dst_digest = file_digest(&dst_path).map_err(|_| {
+                    crate::storage::AppError::new(
+                        crate::errors::code::CONFLICT,
+                        &format!(
+                            "数据迁移冲突：目标路径已存在且不可核验（{}），已保留旧目录原文件",
+                            rel_path.display()
+                        ),
+                    )
+                })?;
+                if dst_digest != src_digest {
+                    return Err(crate::storage::AppError::new(
+                        crate::errors::code::CONFLICT,
+                        &format!(
+                            "数据迁移冲突：目标文件已存在且内容不一致（{}），已停止删除并保留旧目录原文件",
+                            rel_path.display()
+                        ),
+                    ));
+                }
+                crate::storage::protect(&dst_path, false)?;
+            } else {
+                copy_verified_private_file(&src_path, &dst_path, &src_digest, &rel_path)?;
+            }
+            std::fs::remove_file(&src_path).map_err(|e| {
+                crate::storage::AppError::new(
+                    crate::errors::code::STORE,
+                    &format!(
+                        "旧数据文件清理失败，已停止后续删除（残留 {}）：{e}",
+                        rel_path.display()
+                    ),
+                )
+            })?;
+        } else {
+            return Err(crate::storage::AppError::new(
+                crate::errors::code::STORE,
+                &format!("不支持的数据文件类型（{}），已停止迁移", rel_path.display()),
+            ));
         }
     }
-    let _ = std::fs::remove_dir(src);
-    Ok(())
+    std::fs::remove_dir(src).map_err(|e| {
+        crate::storage::AppError::new(
+            crate::errors::code::STORE,
+            &format!("旧数据目录尚未清空（{}）：{e}", src.display()),
+        )
+    })
 }
 
-fn copy_private_file(src: &Path, dst: &Path) -> Result<()> {
+fn copy_verified_private_file(
+    src: &Path,
+    dst: &Path,
+    expected_digest: &str,
+    rel_path: &Path,
+) -> Result<()> {
     let parent = dst.parent().ok_or_else(|| {
         crate::storage::AppError::new(crate::errors::code::STORE, "无效的目标文件路径")
     })?;
     crate::storage::private_dir(parent)?;
     let temp = parent.join(format!(".vela-migrate-{}", uuid::Uuid::new_v4()));
-    let copied = std::fs::copy(src, &temp).map_err(crate::storage::io_error)?;
-    let expected = std::fs::metadata(src)
-        .map_err(crate::storage::io_error)?
-        .len();
-    if copied != expected {
+    if let Err(e) = std::fs::copy(src, &temp) {
         let _ = std::fs::remove_file(&temp);
-        return Err(crate::storage::AppError::new(
-            crate::errors::code::STORE,
-            "数据文件迁移校验不一致",
-        ));
+        return Err(crate::storage::io_error(e));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-            .map_err(crate::storage::io_error)?;
-    }
-    std::fs::rename(&temp, dst).map_err(crate::storage::io_error)
-}
-
-/// v0.26.14: migrate legacy `lich13-switch` / `LICH13_SWITCH_GATEWAY_KEY` managed markers to `vela`.
-pub fn migrate_legacy_markers(
-    data: &Path,
-    codex_home: &Path,
-    grok_home: &Path,
-    dsh_home: &Path,
-) -> Result<()> {
-    for rel in [
-        "grok/gateway.json",
-        "grok/gateway-recovery.json",
-        "dsh/gateway.json",
-        "dsh/dsh-recovery.json",
-    ] {
-        replace_text_file(
-            &data.join(rel),
-            &[
-                ("lich13-switch", "vela"),
-                ("LICH13_SWITCH_GATEWAY_KEY", "VELA_GATEWAY_KEY"),
-            ],
-        )?;
-    }
-    replace_text_file(&grok_home.join("config.toml"), &[("lich13-switch", "vela")])?;
-    for path in [
-        codex_home.join("config.toml"),
-        data.join("previous-config.toml"),
-    ] {
-        replace_text_file(&path, &[("# lich13-switch:official ", "# vela:official ")])?;
-    }
-    for rel in [
-        ".env",
-        ".credentials.yaml",
-        "cordis.patch.yml",
-        "settings.yaml",
-    ] {
-        replace_text_file(
-            &dsh_home.join(rel),
-            &[
-                ("lich13-switch", "vela"),
-                ("LICH13_SWITCH_GATEWAY_KEY", "VELA_GATEWAY_KEY"),
-            ],
-        )?;
-    }
-    let profiles_dir = dsh_home.join("profiles");
-    if profiles_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
-            for entry in entries.flatten() {
-                let patch = entry.path().join("cordis.patch.yml");
-                if patch.is_file() {
-                    replace_text_file(
-                        &patch,
-                        &[
-                            ("lich13-switch", "vela"),
-                            ("LICH13_SWITCH_GATEWAY_KEY", "VELA_GATEWAY_KEY"),
-                        ],
-                    )?;
-                }
-            }
+        if let Err(e) = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(crate::storage::io_error(e));
         }
     }
-    Ok(())
-}
-
-fn replace_text_file(path: &Path, replacements: &[(&str, &str)]) -> Result<()> {
-    let Some(raw) = crate::storage::read_optional(path)? else {
-        return Ok(());
-    };
-    let Ok(text) = std::str::from_utf8(&raw) else {
-        return Ok(());
-    };
-    let mut next = text.to_owned();
-    for (from, to) in replacements {
-        if next.contains(from) {
-            next = next.replace(from, to);
+    let temp_digest = match file_digest(&temp) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
         }
+    };
+    if temp_digest != expected_digest {
+        let _ = std::fs::remove_file(&temp);
+        return Err(crate::storage::AppError::new(
+            crate::errors::code::STORE,
+            &format!("数据文件迁移摘要校验不一致（{}）", rel_path.display()),
+        ));
     }
-    if next != text {
-        crate::storage::atomic_write(path, next.as_bytes(), Some(&crate::storage::digest(&raw)))?;
+    if let Err(e) = std::fs::rename(&temp, dst) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(crate::storage::io_error(e));
+    }
+    let final_digest = file_digest(dst)?;
+    if final_digest != expected_digest {
+        return Err(crate::storage::AppError::new(
+            crate::errors::code::STORE,
+            &format!("数据文件落盘摘要校验不一致（{}）", rel_path.display()),
+        ));
     }
     Ok(())
 }

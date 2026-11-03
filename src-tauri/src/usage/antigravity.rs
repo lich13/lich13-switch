@@ -1177,7 +1177,7 @@ impl Api {
         let mut resolved_owner = owner.is_some();
         let mut steps = Steps::default();
         let mut failed_steps = BTreeSet::new();
-        let mut session_rows = Vec::new();
+        let mut wrote_any = false;
         let mut fallback_loaded = false;
         let mut offset = if store.requires_complete_history() {
             0
@@ -1314,6 +1314,7 @@ impl Api {
             }
             fallback_loaded |= fallback;
             for batch in entries.chunks(128) {
+                let mut rows = Vec::new();
                 for entry in batch {
                     let mut indices: Vec<_> = entry["stepIndices"]
                         .as_array()
@@ -1342,7 +1343,7 @@ impl Api {
                                 && r.final_attempt()
                                     .is_some_and(|a| a.outcome != "in_progress");
                             price(&mut r, pricing, settings);
-                            session_rows.push(r);
+                            rows.push(r);
                             complete
                         }
                         None => entry.get("chatModel").is_none(),
@@ -1384,12 +1385,17 @@ impl Api {
                     }
                     offset += 1;
                 }
+                if !rows.is_empty() {
+                    store.write_batch(&rows, None)?;
+                    report.imported += rows.len() as u64;
+                    wrote_any = true;
+                }
             }
         }
         for s in &failed_steps {
             cursor.covered.remove(s);
         }
-        let superseded: Vec<String> = if session_rows.is_empty() {
+        let superseded: Vec<String> = if !wrote_any {
             Vec::new()
         } else {
             cursor
@@ -1408,12 +1414,7 @@ impl Api {
         };
         let cursor =
             serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
-        store.write_batch_with_superseded(
-            &session_rows,
-            &superseded,
-            Some((&cursor_id, &cursor)),
-        )?;
-        report.imported += session_rows.len() as u64;
+        store.write_batch_with_superseded(&[], &superseded, Some((&cursor_id, &cursor)))?;
         Ok(())
     }
 }

@@ -181,76 +181,108 @@ fn request_budget_migration_replaces_legacy_values_once() {
 }
 
 #[test]
-fn migrate_to_vela_home_and_legacy_markers_move_files_and_rewrite_managed_names() {
+fn migrate_to_vela_home_verifies_sha256_and_cleans_up_legacy_tree() {
     let root = tempfile::tempdir().unwrap();
-    let legacy = root.path().join("com.lich13.gpt-switch");
+    let legacy = root.path().join("legacy-app-data");
     let vela = root.path().join(".vela");
-    let codex = root.path().join(".codex");
-    let grok = root.path().join(".grok");
-    let dsh = root.path().join(".dsh");
     fs::create_dir_all(legacy.join("grok")).unwrap();
-    fs::create_dir_all(legacy.join("dsh")).unwrap();
-    fs::create_dir_all(&codex).unwrap();
-    fs::create_dir_all(&grok).unwrap();
-    fs::create_dir_all(dsh.join("profiles/desktop")).unwrap();
-
+    fs::create_dir_all(legacy.join("gateway-spool-123")).unwrap();
+    fs::write(legacy.join("gateway-spool-123/spool.sqlite3"), b"temp").unwrap();
     fs::write(legacy.join("accounts.json"), b"{\"schema\":1}").unwrap();
-    fs::write(legacy.join(".DS_Store"), b"junk").unwrap();
-    fs::write(legacy.join(".tmpabc"), b"junk").unwrap();
     fs::write(
         legacy.join("grok/gateway.json"),
-        b"{\"grokApiModel\":\"lich13-switch\"}",
+        b"{\"grokApiModel\":\"vela\"}",
     )
     .unwrap();
-    fs::write(
-        legacy.join("dsh/gateway.json"),
-        b"{\"dsh\":{\"patch\":{\"after\":\"lich13-switch LICH13_SWITCH_GATEWAY_KEY\"}}}",
-    )
-    .unwrap();
-    fs::write(
-        codex.join("config.toml"),
-        b"# lich13-switch:official base_url = 'https://example.invalid'\n",
-    )
-    .unwrap();
-    fs::write(
-        grok.join("config.toml"),
-        b"[models]\ndefault = \"lich13-switch\"\n[model.lich13-switch]\nbase_url = \"http://127.0.0.1:43721/v1\"\n",
-    )
-    .unwrap();
-    fs::write(dsh.join(".env"), b"LICH13_SWITCH_GATEWAY_KEY=fixture\n").unwrap();
-    fs::write(
-        dsh.join("profiles/desktop/cordis.patch.yml"),
-        b"- id: llm-pi-ai\n  config:\n    providers:\n      lich13-switch:\n        apiKeyEnv: LICH13_SWITCH_GATEWAY_KEY\n",
-    )
-    .unwrap();
+    fs::write(legacy.join(".DS_Store"), b"junk").unwrap();
+    fs::write(legacy.join(".tmpabc"), b"junk").unwrap();
 
     migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap();
     assert!(!legacy.exists());
-    assert!(vela.join("accounts.json").exists());
-    assert!(!vela.join(".DS_Store").exists());
-    assert!(!vela.join(".tmpabc").exists());
-
-    migrate_legacy_markers(&vela, &codex, &grok, &dsh).unwrap();
+    assert_eq!(
+        fs::read_to_string(vela.join("accounts.json")).unwrap(),
+        "{\"schema\":1}"
+    );
     assert_eq!(
         fs::read_to_string(vela.join("grok/gateway.json")).unwrap(),
         "{\"grokApiModel\":\"vela\"}"
     );
-    assert!(fs::read_to_string(vela.join("dsh/gateway.json"))
-        .unwrap()
-        .contains("vela VELA_GATEWAY_KEY"));
-    assert!(fs::read_to_string(codex.join("config.toml"))
-        .unwrap()
-        .contains("# vela:official "));
-    assert!(fs::read_to_string(grok.join("config.toml"))
-        .unwrap()
-        .contains("[model.vela]"));
+    assert!(!vela.join(".DS_Store").exists());
+    assert!(!vela.join(".tmpabc").exists());
+}
+
+#[test]
+fn migrate_to_vela_home_stops_on_conflicting_destination_and_preserves_legacy_files() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("legacy-app-data");
+    let vela = root.path().join(".vela");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::create_dir_all(&vela).unwrap();
+
+    let legacy_db = b"real-usage-database-bytes-with-history";
+    fs::write(legacy.join("a_accounts.json"), b"{\"schema\":1}").unwrap();
+    fs::write(legacy.join("b_usage.sqlite"), legacy_db).unwrap();
+    fs::write(legacy.join("c_tail.json"), b"{\"tail\":true}").unwrap();
+
+    // Simulate an empty usage.sqlite created in ~/.vela after an earlier failed run:
+    // even if someone padded it to the same or different length, SHA-256 differs.
+    let conflicting_dst = vec![b'0'; legacy_db.len()];
+    fs::write(vela.join("b_usage.sqlite"), &conflicting_dst).unwrap();
+
+    let err = migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap_err();
+    assert_eq!(err.code, crate::errors::code::CONFLICT);
+    assert!(err.message.contains("b_usage.sqlite"));
+
+    // Source conflicting file and subsequent file must NOT be deleted!
+    assert_eq!(fs::read(legacy.join("b_usage.sqlite")).unwrap(), legacy_db);
     assert_eq!(
-        fs::read_to_string(dsh.join(".env")).unwrap(),
-        "VELA_GATEWAY_KEY=fixture\n"
+        fs::read(legacy.join("c_tail.json")).unwrap(),
+        b"{\"tail\":true}"
     );
-    assert!(
-        fs::read_to_string(dsh.join("profiles/desktop/cordis.patch.yml"))
-            .unwrap()
-            .contains("vela:")
+    // Destination file must NOT be overwritten!
+    assert_eq!(
+        fs::read(vela.join("b_usage.sqlite")).unwrap(),
+        conflicting_dst
     );
+}
+
+#[test]
+fn migrate_to_vela_home_resumes_idempotently_when_destination_has_identical_sha256() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("legacy-app-data");
+    let vela = root.path().join(".vela");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::create_dir_all(&vela).unwrap();
+
+    let db_bytes = b"identical-usage-sqlite-content";
+    fs::write(legacy.join("usage.sqlite"), db_bytes).unwrap();
+    fs::write(legacy.join("gateway.json"), b"{\"schema\":2}").unwrap();
+    fs::write(vela.join("usage.sqlite"), db_bytes).unwrap();
+
+    migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap();
+    assert!(!legacy.exists());
+    assert_eq!(fs::read(vela.join("usage.sqlite")).unwrap(), db_bytes);
+    assert_eq!(
+        fs::read(vela.join("gateway.json")).unwrap(),
+        b"{\"schema\":2}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_to_vela_home_aborts_on_midway_symlink_and_retains_remaining_files() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("legacy-app-data");
+    let vela = root.path().join(".vela");
+    fs::create_dir_all(&legacy).unwrap();
+
+    fs::write(legacy.join("01_first.json"), b"first").unwrap();
+    symlink(root.path().join("outside"), legacy.join("02_bad_link")).unwrap();
+    fs::write(legacy.join("03_after.json"), b"after").unwrap();
+
+    let err = migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap_err();
+    assert!(err.message.contains("02_bad_link"));
+    assert_eq!(fs::read(vela.join("01_first.json")).unwrap(), b"first");
+    assert_eq!(fs::read(legacy.join("03_after.json")).unwrap(), b"after");
 }

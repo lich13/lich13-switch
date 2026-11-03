@@ -83,7 +83,7 @@ impl Spool {
         let path = directory.path().join("spool.sqlite3");
         let connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
-        db(connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; CREATE TABLE sources(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE superseded(id TEXT PRIMARY KEY); CREATE TABLE cleanup_snapshot(id TEXT PRIMARY KEY,digest TEXT NOT NULL); CREATE TABLE bill(id TEXT PRIMARY KEY,body TEXT NOT NULL,effective INTEGER NOT NULL,original_digest TEXT);"))?;
+        db(connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; CREATE TABLE sources(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cleanup_snapshot(id TEXT PRIMARY KEY,digest TEXT NOT NULL); CREATE TABLE bill(id TEXT PRIMARY KEY,body TEXT NOT NULL,effective INTEGER NOT NULL,original_digest TEXT);"))?;
         Ok(Self {
             connection,
             _directory: directory,
@@ -142,7 +142,6 @@ impl Repository for Spool {
         let tx = db(self.connection.transaction())?;
         for id in ids {
             db(tx.execute("DELETE FROM sources WHERE id=?1", [id]))?;
-            db(tx.execute("INSERT OR IGNORE INTO superseded VALUES(?1)", [id]))?;
         }
         db(tx.commit())
     }
@@ -1154,5 +1153,33 @@ mod tests {
         // Exactly 2 requests exported: the RPC record for step 1 and the transcript record for step 2 (step 1 is not double-imported).
         assert_eq!(exported.requests, 2);
         assert_eq!(exported.attempts, 2);
+    }
+
+    #[test]
+    fn spool_remove_superseded_does_not_delete_history_file_records_from_main_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(&dir.path().join("store"));
+        let hist_id = safe_id("antigravity:request:cascade-keep:step:1");
+        let mut hist = row(&hist_id, "antigravity", BASE);
+        hist.session_id = Some(safe_id("cascade-keep"));
+        hist.attempts[0].transport = "history_file".into();
+        service
+            .query(|s| s.write_batch(&[hist.clone()], None))
+            .unwrap();
+
+        let mut spool = Spool::new(dir.path()).unwrap();
+        spool.write_batch(&[hist], None).unwrap();
+        assert!(spool.source(&hist_id).unwrap().is_some());
+
+        // Deduplicating inside the export spool removes from spool.sources only;
+        // main Store still retains the history_file record untouched.
+        spool
+            .write_batch_with_superseded(&[], std::slice::from_ref(&hist_id), None)
+            .unwrap();
+        assert!(spool.source(&hist_id).unwrap().is_none());
+        let retained_in_store = service
+            .read(|s| super::super::storage_v12::record(&s.connection, &hist_id))
+            .unwrap();
+        assert!(retained_in_store.is_some());
     }
 }
