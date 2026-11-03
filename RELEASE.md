@@ -2,6 +2,27 @@
 
 最新版本置顶。每个版本只记录用户可感知的变化、迁移影响和验证范围；下载文件请以对应 GitHub Release 为准。
 
+## v0.26.13 · 2026-11-03
+
+### 修复与调整
+
+- 新增 Antigravity 多 OAuth 账号与多 ADC 凭据管理：账号页支持切换至 Antigravity 视图，管理多个 OAuth 令牌（`~/.gemini/jetski-standalone-oauth-token`）与 Google Cloud ADC 凭据（`~/.config/gcloud/application_default_credentials.json`），支持导入 JSON 文件或直接输入 Token／Key，支持 OAuth 模式、ADC 模式与混合模式一键切换及自动滚动备份（最多保留 10 份）。配置页 Antigravity 面板同步支持 `enableAdc` 开关。
+- 收紧 Antigravity 历史与账单导出：仅接受结构化 `USER_SETTINGS_CHANGE` 模型标识，缺失模型时按残缺记录报错而不再回退为 `antigravity-unknown`；文件扫描导入的步骤在后续 RPC 同步覆盖时自动去重，账单导出快照复制 RPC 覆盖游标以避免重复导出；新增 `v02614` 迁移清理仅思考模型被误标为 `high` 的历史推理强度。
+- 修正配额卡片状态判断：仅“已过期”状态标红告警，“已禁用”等非过期状态保持常规提示且前端不再二次改写后端状态文案。
+- 优化官方账号视图缓存与隐藏窗口通知：官方视图缓存移入实例状态并在配置或存储变化时精确失效；主窗口隐藏期间产生的新通知在恢复显示时补发且不泄漏至快捷面板。
+- 兼容旧版 `lich13-Switch.app` 升级至 `Vela.app`：macOS 开机自启识别旧版签名路径，本地升级安装按 Bundle ID 自动接管并原地替换为 `Vela.app`。
+
+### 兼容性与迁移
+
+- 自动执行 `antigravity_fields_v02614` 历史字段清洗，保留已有请求身份、价格快照与清理凭据。
+- Antigravity 多账号库独立存储于应用数据目录 `antigravity-accounts.json`，切换凭据前自动备份现有文件并在写入失败时回滚，禁止直接删除当前生效的凭据。
+
+### 验证与下载
+
+- 已完成受影响模块测试、前端类型检查、构建、格式检查。macOS Apple Silicon 与 Windows x64 的完整回归、构建及安装冒烟由本版本标签 CI 执行。
+- Antigravity 多 OAuth／ADC 切换（JSON 导入与 Key 录入）、账单导出与 `Vela.app` 升级体验待用户验收。
+- 下载对应 GitHub Release 的 `.dmg` 或 `.exe` 安装包，使用同页 `SHA256SUMS` 核对。
+
 ## v0.26.12 · 2026-10-30
 
 ### 修复与调整
