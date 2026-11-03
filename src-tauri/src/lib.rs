@@ -1897,7 +1897,10 @@ pub fn run() {
                 });
             if smoke.is_none() {
                 if let Some(dir) = dirs::data_dir() {
-                    let legacy_dirs = [dir.join("com.lich13.vela-legacy")];
+                    let legacy_dirs = [
+                        dir.join("com.lich13.gpt-switch"),
+                        dir.join("com.lich13.lich13-switch"),
+                    ];
                     migrations::migrate_to_vela_home(&data, &legacy_dirs)?;
                 }
             }

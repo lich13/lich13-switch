@@ -7,6 +7,7 @@ use winreg::{
 
 const PROGRAM: &str = "Vela.CCSwitch.0";
 const CAPABILITIES: &str = "Software\\Vela\\LinkHandlers\\0\\Capabilities";
+const LEGACY_CAPABILITIES: &str = "Software\\gpt-Switch\\LinkHandlers\\0\\Capabilities";
 const REGISTERED: &str = "Vela Link Vela";
 const USER_CHOICE: &str =
     "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\ccswitch\\UserChoice";
@@ -31,25 +32,34 @@ pub fn installed() -> bool {
     [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
         .into_iter()
         .any(|hive| {
-            let Ok(key) = RegKey::predef(hive)
-                .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Vela")
-            else {
-                return false;
-            };
-            key.get_value::<String, _>("InstallLocation")
-                .ok()
-                .is_some_and(|path| same_path(&Path::new(&path).join("vela.exe"), &exe))
-                || key
-                    .get_value::<String, _>("DisplayIcon")
+            [
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Vela",
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gpt-Switch",
+            ]
+            .into_iter()
+            .any(|subkey| {
+                let Ok(key) = RegKey::predef(hive).open_subkey(subkey) else {
+                    return false;
+                };
+                key.get_value::<String, _>("InstallLocation")
                     .ok()
-                    .and_then(|s| executable(&s))
-                    .is_some_and(|path| same_path(&path, &exe))
+                    .is_some_and(|path| same_path(&Path::new(&path).join("vela.exe"), &exe))
+                    || key
+                        .get_value::<String, _>("DisplayIcon")
+                        .ok()
+                        .and_then(|s| executable(&s))
+                        .is_some_and(|path| same_path(&path, &exe))
+            })
         })
 }
 fn owned_external_capability(value: &str) -> bool {
-    [1, 2].iter().any(|n| {
-        value.eq_ignore_ascii_case(&format!("Software\\Vela\\LinkHandlers\\{n}\\Capabilities"))
-    })
+    value.eq_ignore_ascii_case(LEGACY_CAPABILITIES)
+        || [1, 2].iter().any(|n| {
+            value.eq_ignore_ascii_case(&format!("Software\\Vela\\LinkHandlers\\{n}\\Capabilities"))
+                || value.eq_ignore_ascii_case(&format!(
+                    "Software\\gpt-Switch\\LinkHandlers\\{n}\\Capabilities"
+                ))
+        })
 }
 fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
     if let Ok(registered) =
@@ -68,16 +78,36 @@ fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
         for name in names {
             registered.delete_value(name)?;
         }
-    }
-    for n in [1, 2] {
-        for path in [
-            format!("Software\\Classes\\Vela.CCSwitch.{n}"),
-            format!("Software\\Vela\\LinkHandlers\\{n}"),
+        for legacy in [
+            "gpt-Switch Link gpt-Switch",
+            "lich13-switch Link lich13-switch",
         ] {
-            if let Err(error) = root.delete_subkey_all(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(error);
-                }
+            if registered
+                .get_value::<String, _>(legacy)
+                .is_ok_and(|value| {
+                    value.eq_ignore_ascii_case(CAPABILITIES)
+                        || value.eq_ignore_ascii_case(LEGACY_CAPABILITIES)
+                })
+            {
+                registered.delete_value(legacy)?;
+            }
+        }
+    }
+    for path in [
+        "Software\\Classes\\Vela.CCSwitch.1",
+        "Software\\Classes\\Vela.CCSwitch.2",
+        "Software\\Vela\\LinkHandlers\\1",
+        "Software\\Vela\\LinkHandlers\\2",
+        "Software\\Classes\\gptSwitch.CCSwitch.0",
+        "Software\\Classes\\gptSwitch.CCSwitch.1",
+        "Software\\Classes\\gptSwitch.CCSwitch.2",
+        "Software\\gpt-Switch\\LinkHandlers\\0",
+        "Software\\gpt-Switch\\LinkHandlers\\1",
+        "Software\\gpt-Switch\\LinkHandlers\\2",
+    ] {
+        if let Err(error) = root.delete_subkey_all(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
             }
         }
     }
@@ -152,12 +182,19 @@ mod tests {
         assert!(owned_external_capability(
             "Software\\Vela\\LinkHandlers\\1\\Capabilities"
         ));
+        assert!(owned_external_capability(
+            "Software\\gpt-Switch\\LinkHandlers\\1\\Capabilities"
+        ));
+        assert!(owned_external_capability(LEGACY_CAPABILITIES));
         assert!(!owned_external_capability(CAPABILITIES));
         assert!(!owned_external_capability(
             "Software\\AnotherApp\\Capabilities"
         ));
         assert!(!owned_external_capability(
             "Software\\Vela\\LinkHandlers\\10\\Capabilities"
+        ));
+        assert!(!owned_external_capability(
+            "Software\\gpt-Switch\\LinkHandlers\\10\\Capabilities"
         ));
     }
 }

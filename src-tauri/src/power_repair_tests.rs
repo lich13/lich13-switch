@@ -412,7 +412,9 @@ fn disable_if_enabled_turns_off_active_clamshell_and_skips_when_already_off_or_h
     for not_ready in ["missing", "needsRepair"] {
         let unready = state(not_ready, true, 0, "application", "fixture-unready");
         let (_dir, service, helper) = fixture(unready);
-        assert_eq!(service.disable_if_enabled().unwrap(), None);
+        let err = service.disable_if_enabled().unwrap_err();
+        assert_eq!(err.code, "POWER_HELPER");
+        assert!(err.message.contains("电源助手未就绪"));
         assert_eq!(helper.repair_count(), 0);
         assert!(helper.calls.lock().unwrap().is_empty());
     }

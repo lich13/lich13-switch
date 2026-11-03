@@ -708,11 +708,11 @@ pub fn recover(data: &Path) -> Result<()> {
     let old = parse(applied)?;
     let managed = old
         .get("model_providers")
-        .and_then(|p| p.get("vela_gateway"))
+        .and_then(|p| p.get("gpt_switch_gateway").or_else(|| p.get("vela_gateway")))
         .ok_or_else(|| AppError::new(code::RECOVERY, "无法确认旧恢复记录的来源，已保留现场"))?;
     let still_managed = doc
         .get("model_providers")
-        .and_then(|p| p.get("vela_gateway"))
+        .and_then(|p| p.get("gpt_switch_gateway").or_else(|| p.get("vela_gateway")))
         .is_some()
         || managed.get("base_url").and_then(Item::as_str) == current.base_url.as_deref()
         || managed
@@ -883,7 +883,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("config.toml");
         fs::write(&path, ORIGINAL).unwrap();
-        let applied="model_provider='vela_gateway'\n[model_providers.vela_gateway]\nbase_url='http://127.0.0.1:15722/v1'\nexperimental_bearer_token='gs_local'\n";
+        let applied="model_provider='gpt_switch_gateway'\n[model_providers.gpt_switch_gateway]\nbase_url='http://127.0.0.1:15722/v1'\nexperimental_bearer_token='gs_local'\n";
         let old =
             serde_json::json!({"path":path,"original":ORIGINAL,"applied":applied,"profile":null});
         fs::write(t.path().join(FILE), old.to_string()).unwrap();

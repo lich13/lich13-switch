@@ -89,8 +89,14 @@ impl Service {
             .try_lock()
             .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
         let before = self.state()?;
-        if !before.supported || !before.enabled || before.helper != "ready" {
+        if !before.supported || !before.enabled {
             return Ok(None);
+        }
+        if before.helper != "ready" {
+            return Err(AppError::new(
+                code::POWER_HELPER,
+                "电源助手未就绪，未能自动关闭合盖不休眠，请在设置中处理",
+            ));
         }
         self.system.apply(&before, false, before.battery_sleep)?;
         let actual = self.state()?;

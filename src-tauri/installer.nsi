@@ -78,6 +78,7 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var RenamedUpgrade
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -235,6 +236,9 @@ Function PageReinstall
 
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
+  ${If} $RenamedUpgrade = 1
+    Abort ; Rename upgrades proceed in place without running the legacy uninstaller.
+  ${EndIf}
   ; Reinstalling the same version
   ${If} $R0 = 0
     StrCpy $R1 "$(alreadyInstalledLong)"
@@ -498,6 +502,26 @@ Function .onInit
   !endif
 
   !insertmacro SetContext
+
+  ReadRegStr $0 SHCTX "${UNINSTKEY}" "DisplayName"
+  ReadRegStr $1 SHCTX "${UNINSTKEY}" "Publisher"
+  ReadRegStr $2 SHCTX "${UNINSTKEY}" "DisplayVersion"
+  ${If} $0 == ""
+    ReadRegStr $0 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch" "DisplayName"
+    ReadRegStr $1 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch" "Publisher"
+    ReadRegStr $2 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch" "DisplayVersion"
+  ${EndIf}
+  ${If} $1 == "${MANUFACTURER}"
+    ${If} $0 == "gpt-Switch"
+    ${OrIf} $0 == "lich13-switch"
+      nsis_tauri_utils::SemverCompare "${VERSION}" $2
+      Pop $3
+      ${If} $3 = 1
+        StrCpy $RenamedUpgrade 1
+        StrCpy $UpdateMode 1
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
 
   ${If} $INSTDIR == "${PLACEHOLDER_INSTALL_DIR}"
     ; Set default install location

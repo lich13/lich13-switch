@@ -8,8 +8,10 @@ use std::{
     sync::Mutex,
 };
 pub const LOGIN_ARG: &str = "--vela-login-startup";
+pub const LEGACY_LOGIN_ARG: &str = "--gpt-switch-login-startup";
+pub const LEGACY_LICH13_LOGIN_ARG: &str = "--lich13-switch-login-startup";
 pub fn is_login_argument(arg: &str) -> bool {
-    arg == LOGIN_ARG
+    [LOGIN_ARG, LEGACY_LOGIN_ARG, LEGACY_LICH13_LOGIN_ARG].contains(&arg)
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -73,8 +75,30 @@ impl Service {
             }
         }
         #[cfg(windows)]
-        if auto_launch(true)?.is_enabled().map_err(system_error)? {
-            register(true)?;
+        {
+            use winreg::{
+                enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE},
+                RegKey,
+            };
+            let legacy_present = RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run")
+                .is_ok_and(|key| {
+                    key.get_value::<String, _>("gpt-Switch").is_ok()
+                        || key.get_value::<String, _>("lich13-switch").is_ok()
+                });
+            if legacy_present || auto_launch(true)?.is_enabled().map_err(system_error)? {
+                register(true)?;
+                if !registered()? {
+                    return Err(AppError::new(code::STARTUP, "启动项迁移失败"));
+                }
+                if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+                    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+                    KEY_READ | KEY_WRITE,
+                ) {
+                    let _ = key.delete_value("gpt-Switch");
+                    let _ = key.delete_value("lich13-switch");
+                }
+            }
         }
         let (prefs, rev) = self.read()?;
         if rev != "missing" {
@@ -312,6 +336,8 @@ mod tests {
         let _: Preferences =
             serde_json::from_str(r#"{"launchToTray":false,"restoreGateway":true}"#).unwrap();
         assert!(silent(&[LOGIN_ARG.into()]));
+        assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
+        assert!(silent(&[LEGACY_LICH13_LOGIN_ARG.into()]));
         assert!(is_login_event(
             u32::from_be_bytes(*b"oapp"),
             Some(u32::from_be_bytes(*b"lgit"))
@@ -326,6 +352,8 @@ mod tests {
             r#""C:\Program Files\Vela\vela.exe""#
         );
         assert!(silent(&[LOGIN_ARG.into()]));
+        assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
+        assert!(silent(&[LEGACY_LICH13_LOGIN_ARG.into()]));
     }
 }
 
