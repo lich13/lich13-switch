@@ -2312,10 +2312,12 @@ pub fn run() {
                         }
                         if let Some(stamp) = antigravity::auth::disk_stamp() {
                             if agy_auth_stamp.as_ref() != Some(&stamp) {
-                                if let Ok(auth_state) = antigravity::auth::current_state(&runtime.data) {
+                                if let Ok((auth_state, clean)) = antigravity::auth::poll_state(&runtime.data) {
                                     let _ = handle.emit("antigravity-auth-state", auth_state);
+                                    if clean {
+                                        agy_auth_stamp = Some(stamp);
+                                    }
                                 }
-                                agy_auth_stamp = Some(stamp);
                             }
                         }
                     }

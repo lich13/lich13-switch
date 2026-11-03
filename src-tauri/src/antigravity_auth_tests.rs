@@ -30,6 +30,7 @@ impl AppLifecycle for MockLifecycle {
     }
 
     fn quit(&self) -> Result<()> {
+        drop(AUTH_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
         self.events.lock().unwrap().push("quit");
         if self.fail_quit {
             return Err(AppError::new(code::PROCESS, "模拟退出 Antigravity 失败"));
@@ -39,6 +40,7 @@ impl AppLifecycle for MockLifecycle {
     }
 
     fn launch(&self) -> Result<()> {
+        drop(AUTH_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
         self.events.lock().unwrap().push("launch");
         if self.fail_launch {
             return Err(AppError::new(code::PROCESS, "模拟重启 Antigravity 失败"));
@@ -122,18 +124,56 @@ fn oauth_auto_recognizes_disk_login_and_deduplicates_on_token_refresh() {
 }
 
 #[test]
-fn oauth_validation_rejects_id_token_email_without_token() {
+fn oauth_validation_requires_access_or_refresh_token_and_disk_read_tolerates_corrupt_files() {
     let (_tmp, paths) = setup_paths();
-    let invalid = serde_json::json!({
-        "id_token_email": "only-email@example.invalid"
-    });
+    for bad in [
+        serde_json::json!({ "id_token_email": "only-email@example.invalid" }),
+        serde_json::json!({ "id_token": "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InVAZXhhbXBsZS5pbnZhbGlkIn0." }),
+        serde_json::json!({ "oauth_token": "legacy-only" }),
+    ] {
+        let err = parse_oauth_metadata(&bad.to_string()).expect_err("must require access_token or refresh_token");
+        assert_eq!(err.code, code::AUTH);
+    }
+
+    // Half-written OAuth file and unsupported external_account ADC on disk must not break state_at,
+    // while state_with_health marks clean = false so polling retries on next tick.
+    write_private_file(&paths.oauth_file(), b"{\"access_token\":\"half").unwrap();
+    write_private_file(&paths.adc_file(), br#"{"type":"external_account"}"#).unwrap();
+    let (state, clean) = state_with_health(&paths).unwrap();
+    assert!(!clean);
+    assert!(!state.oauth_present);
+    assert!(state.accounts.is_empty());
+}
+
+#[test]
+fn no_email_oauth_refresh_updates_in_place_and_observed_revisions_cap_at_64() {
+    let (_tmp, paths) = setup_paths();
     write_private_file(
         &paths.oauth_file(),
-        serde_json::to_string(&invalid).unwrap().as_bytes(),
+        br#"{"access_token":"ya29.no-email-1","refresh_token":"1//rt-1"}"#,
     )
     .unwrap();
-    let err = state_at(&paths).expect_err("tokenless oauth should fail");
-    assert_eq!(err.code, code::AUTH);
+    let s1 = state_at(&paths).unwrap();
+    assert_eq!(s1.accounts.len(), 1);
+    let id1 = s1.accounts[0].id.clone();
+
+    // Refresh without email (even if refresh_token is omitted on refresh write) updates in place
+    write_private_file(&paths.oauth_file(), br#"{"access_token":"ya29.no-email-2"}"#).unwrap();
+    let s2 = state_at(&paths).unwrap();
+    assert_eq!(s2.accounts.len(), 1);
+    assert_eq!(s2.accounts[0].id, id1);
+    assert!(s2.accounts[0].current);
+    let (vault, _) = load_vault(&paths).unwrap();
+    assert!(vault.observed_revisions.is_empty());
+
+    // Cap observed_revisions at 64 when deleting entries
+    let mut v = vault;
+    for i in 0..70 {
+        remember_observed(&mut v, &format!("rev-{i}"));
+    }
+    assert_eq!(v.observed_revisions.len(), 64);
+    assert_eq!(v.observed_revisions[0], "rev-6");
+    assert_eq!(v.observed_revisions[63], "rev-69");
 }
 
 #[test]
