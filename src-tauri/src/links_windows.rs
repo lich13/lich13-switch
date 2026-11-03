@@ -5,9 +5,8 @@ use winreg::{
     RegKey,
 };
 
-const PROGRAM: &str = "Vela.CCSwitch.0";
-const CAPABILITIES: &str = "Software\\Vela\\LinkHandlers\\0\\Capabilities";
-const LEGACY_CAPABILITIES: &str = "Software\\gpt-Switch\\LinkHandlers\\0\\Capabilities";
+const PROGRAM: &str = "gptSwitch.CCSwitch.0";
+const CAPABILITIES: &str = "Software\\gpt-Switch\\LinkHandlers\\0\\Capabilities";
 const REGISTERED: &str = "Vela Link Vela";
 const USER_CHOICE: &str =
     "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\ccswitch\\UserChoice";
@@ -53,13 +52,11 @@ pub fn installed() -> bool {
         })
 }
 fn owned_external_capability(value: &str) -> bool {
-    value.eq_ignore_ascii_case(LEGACY_CAPABILITIES)
-        || [1, 2].iter().any(|n| {
-            value.eq_ignore_ascii_case(&format!("Software\\Vela\\LinkHandlers\\{n}\\Capabilities"))
-                || value.eq_ignore_ascii_case(&format!(
-                    "Software\\gpt-Switch\\LinkHandlers\\{n}\\Capabilities"
-                ))
-        })
+    [1, 2].iter().any(|n| {
+        value.eq_ignore_ascii_case(&format!(
+            "Software\\gpt-Switch\\LinkHandlers\\{n}\\Capabilities"
+        ))
+    })
 }
 fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
     if let Ok(registered) =
@@ -84,24 +81,15 @@ fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
         ] {
             if registered
                 .get_value::<String, _>(legacy)
-                .is_ok_and(|value| {
-                    value.eq_ignore_ascii_case(CAPABILITIES)
-                        || value.eq_ignore_ascii_case(LEGACY_CAPABILITIES)
-                })
+                .is_ok_and(|value| value.eq_ignore_ascii_case(CAPABILITIES))
             {
                 registered.delete_value(legacy)?;
             }
         }
     }
     for path in [
-        "Software\\Classes\\Vela.CCSwitch.1",
-        "Software\\Classes\\Vela.CCSwitch.2",
-        "Software\\Vela\\LinkHandlers\\1",
-        "Software\\Vela\\LinkHandlers\\2",
-        "Software\\Classes\\gptSwitch.CCSwitch.0",
         "Software\\Classes\\gptSwitch.CCSwitch.1",
         "Software\\Classes\\gptSwitch.CCSwitch.2",
-        "Software\\gpt-Switch\\LinkHandlers\\0",
         "Software\\gpt-Switch\\LinkHandlers\\1",
         "Software\\gpt-Switch\\LinkHandlers\\2",
     ] {
@@ -180,18 +168,14 @@ mod tests {
     #[test]
     fn cleanup_is_limited_to_our_retired_capabilities() {
         assert!(owned_external_capability(
-            "Software\\Vela\\LinkHandlers\\1\\Capabilities"
-        ));
-        assert!(owned_external_capability(
             "Software\\gpt-Switch\\LinkHandlers\\1\\Capabilities"
         ));
-        assert!(owned_external_capability(LEGACY_CAPABILITIES));
+        assert!(owned_external_capability(
+            "Software\\gpt-Switch\\LinkHandlers\\2\\Capabilities"
+        ));
         assert!(!owned_external_capability(CAPABILITIES));
         assert!(!owned_external_capability(
             "Software\\AnotherApp\\Capabilities"
-        ));
-        assert!(!owned_external_capability(
-            "Software\\Vela\\LinkHandlers\\10\\Capabilities"
         ));
         assert!(!owned_external_capability(
             "Software\\gpt-Switch\\LinkHandlers\\10\\Capabilities"

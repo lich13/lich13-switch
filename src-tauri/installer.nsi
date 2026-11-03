@@ -506,14 +506,19 @@ Function .onInit
   ReadRegStr $0 SHCTX "${UNINSTKEY}" "DisplayName"
   ReadRegStr $1 SHCTX "${UNINSTKEY}" "Publisher"
   ReadRegStr $2 SHCTX "${UNINSTKEY}" "DisplayVersion"
+  StrCpy $4 0
   ${If} $0 == ""
     ReadRegStr $0 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch" "DisplayName"
     ReadRegStr $1 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch" "Publisher"
     ReadRegStr $2 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch" "DisplayVersion"
+    ${If} $0 != ""
+      StrCpy $4 1
+    ${EndIf}
   ${EndIf}
   ${If} $1 == "${MANUFACTURER}"
     ${If} $0 == "gpt-Switch"
     ${OrIf} $0 == "lich13-switch"
+    ${OrIf} $4 = 1
       nsis_tauri_utils::SemverCompare "${VERSION}" $2
       Pop $3
       ${If} $3 = 1
@@ -716,6 +721,9 @@ Section Install
 
   ; Remove old main binary if it doesn't match new main binary name
   ReadRegStr $OldMainBinaryName SHCTX "${UNINSTKEY}" "MainBinaryName"
+  ${If} $OldMainBinaryName == ""
+    ReadRegStr $OldMainBinaryName SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch" "MainBinaryName"
+  ${EndIf}
   ${If} $OldMainBinaryName != ""
   ${AndIf} $OldMainBinaryName != "${MAINBINARYNAME}.exe"
     Delete "$INSTDIR\$OldMainBinaryName"
@@ -733,6 +741,11 @@ Section Install
   WriteRegStr SHCTX "${UNINSTKEY}" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoModify" "1"
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoRepair" "1"
+
+  DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\gpt-Switch"
+  DeleteRegKey SHCTX "Software\${MANUFACTURER}\gpt-Switch"
+  DeleteRegKey HKCU "Software\${MANUFACTURER}\gpt-Switch"
 
   ${GetSize} "$INSTDIR" "/M=uninstall.exe /S=0K /G=0" $0 $1 $2
   IntOp $0 $0 + ${ESTIMATEDSIZE}
@@ -923,6 +936,9 @@ SectionEnd
 
 Function RestorePreviousInstallLocation
   ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
+  ${If} $4 == ""
+    ReadRegStr $4 SHCTX "Software\${MANUFACTURER}\gpt-Switch" ""
+  ${EndIf}
   StrCmp $4 "" +2 0
     StrCpy $INSTDIR $4
 FunctionEnd
