@@ -363,9 +363,9 @@ impl Record {
         bytes[6] = (bytes[6] & 0x0f) | 0x40;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         let details = Details {
-            upstream_type: Some("antigravity_log".into()),
+            upstream_type: None,
             upstream_code: Some(code_label.into()),
-            message: safe_message(raw_error),
+            message: raw_log_message(raw_error),
             ..Default::default()
         };
         let t = timestamp.min(now());
@@ -572,6 +572,76 @@ impl Record {
 }
 fn safe_id(s: &str) -> Option<String> {
     uuid::Uuid::parse_str(s).ok().map(|v| v.to_string())
+}
+fn raw_log_message(value: &str) -> Option<String> {
+    let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then(|| text.chars().take(4096).collect())
+}
+fn is_antigravity_log_record(r: &Record) -> bool {
+    r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity))
+        && r.provider_id.is_none()
+        && matches!(
+            r.details.upstream_code.as_deref(),
+            Some(
+                "STREAM_INTERRUPTED"
+                    | "RESOURCE_EXHAUSTED"
+                    | "UNAUTHENTICATED"
+                    | "MODEL_UNAVAILABLE"
+                    | "ANTIGRAVITY_ERROR"
+            )
+        )
+}
+fn scan_antigravity_file_lines(
+    path: &Path,
+    file_len: u64,
+    file_secs: u64,
+    cursors: &mut std::collections::HashMap<std::path::PathBuf, (u64, u64, u64)>,
+    mut on_line: impl FnMut(u64, &[u8]),
+) {
+    use std::io::{Seek, SeekFrom};
+    let start_offset = match cursors.get(path) {
+        Some(&(prev_len, prev_secs, prev_off))
+            if prev_len == file_len && prev_secs == file_secs && prev_off == file_len =>
+        {
+            return;
+        }
+        Some(&(_, _, prev_off)) if file_len >= prev_off => prev_off,
+        _ => 0,
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut offset = start_offset;
+    let mut discard_first = false;
+    if start_offset == 0 && file_len > 4 * 1024 * 1024 {
+        offset = file_len - 4 * 1024 * 1024;
+        discard_first = true;
+    }
+    if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
+        return;
+    }
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    if discard_first {
+        let Ok(discarded) = reader.read_until(b'\n', &mut line) else {
+            return;
+        };
+        if discarded == 0 || !line.ends_with(b"\n") {
+            return;
+        }
+        offset = offset.saturating_add(discarded as u64);
+        line.clear();
+    }
+    while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
+        if read_bytes == 0 || !line.ends_with(b"\n") {
+            break;
+        }
+        let line_offset = offset;
+        offset = offset.saturating_add(read_bytes as u64);
+        on_line(line_offset, &line);
+        line.clear();
+    }
+    cursors.insert(path.to_path_buf(), (file_len, file_secs, offset));
 }
 fn has_status_token(lower: &str, code: &str) -> bool {
     let bytes = lower.as_bytes();
@@ -868,8 +938,19 @@ fn load(path: &Path) -> Journal {
                         let sanitized = r.details.clone().sanitized();
                         j.dirty |= sanitized != r.details;
                         r.details = sanitized;
-                        if r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity))
-                            && r.details.upstream_type.as_deref() != Some("antigravity_log")
+                        if r.details.upstream_type.as_deref() == Some("antigravity_log") {
+                            r.details.upstream_type = None;
+                            j.dirty = true;
+                        }
+                        let redacted_agy = r.client_id
+                            == Some(JournalClient::Retired(RetiredClient::Antigravity))
+                            && r.details
+                                .message
+                                .as_deref()
+                                .is_some_and(|m| m.contains("[已隐去]"));
+                        if (r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity))
+                            && !is_antigravity_log_record(&r))
+                            || redacted_agy
                         {
                             j.dirty = true;
                         } else if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
@@ -1365,7 +1446,6 @@ impl Service {
         }
     }
     pub fn sync_antigravity_logs(&self, home: &Path) {
-        use std::io::{Seek, SeekFrom};
         let cutoff = now().saturating_sub(RETENTION);
         let existing: HashSet<String> = {
             let guard = self.journal.lock().unwrap();
@@ -1395,95 +1475,62 @@ impl Service {
             }
             transcripts.sort_by_key(|(secs, _, _, _)| std::cmp::Reverse(*secs));
             for (file_secs, file_len, conv_name, path) in transcripts.into_iter().take(48) {
-                let start_offset = match cursors.get(&path) {
-                    Some(&(prev_len, prev_secs, prev_off))
-                        if prev_len == file_len && prev_secs == file_secs && prev_off == file_len =>
-                    {
-                        continue;
-                    }
-                    Some(&(_, _, prev_off)) if file_len >= prev_off => prev_off,
-                    _ => 0,
-                };
                 let conv = conv_name.to_string_lossy();
-                let Ok(mut file) = std::fs::File::open(&path) else {
-                    continue;
-                };
-                let mut offset = start_offset;
-                let mut discard_first = false;
-                if start_offset == 0 && file_len > 4 * 1024 * 1024 {
-                    offset = file_len - 4 * 1024 * 1024;
-                    discard_first = true;
-                }
-                if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
-                    continue;
-                }
-                let mut reader = BufReader::new(file);
-                let mut line = Vec::new();
-                if discard_first {
-                    let Ok(discarded) = reader.read_until(b'\n', &mut line) else {
-                        continue;
-                    };
-                    if discarded == 0 || !line.ends_with(b"\n") {
-                        continue;
-                    }
-                    offset = offset.saturating_add(discarded as u64);
-                    line.clear();
-                }
-                while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
-                    if read_bytes == 0 || !line.ends_with(b"\n") {
-                        break;
-                    }
-                    let line_offset = offset;
-                    offset = offset.saturating_add(read_bytes as u64);
-                    if line.len() <= 512 * 1024 {
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&line) {
-                            let step_type = v["type"].as_str().unwrap_or("");
-                            let raw_err = v["errorMessage"]
-                                .as_str()
-                                .or_else(|| v["error"]["message"].as_str())
-                                .or_else(|| v["error"].as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty());
-                            let is_err =
-                                !matches!(step_type, "GENERIC" | "TOOL_RESPONSE" | "USER_INPUT")
-                                    && (step_type.eq_ignore_ascii_case("ERROR_MESSAGE")
-                                        || raw_err.is_some());
-                            if is_err {
-                                let step_key = v["step_index"]
-                                    .as_u64()
-                                    .map(|n| n.to_string())
-                                    .unwrap_or_else(|| {
-                                        format!(
-                                            "off:{line_offset}:{}",
-                                            &storage::digest(&line)[..12]
-                                        )
-                                    });
-                                let ts = v["created_at"]
+                scan_antigravity_file_lines(
+                    &path,
+                    file_len,
+                    file_secs,
+                    &mut cursors,
+                    |line_offset, line| {
+                        if line.len() <= 512 * 1024 {
+                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                                let step_type = v["type"].as_str().unwrap_or("");
+                                let raw_err = v["errorMessage"]
                                     .as_str()
-                                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                    .and_then(|dt| u64::try_from(dt.timestamp()).ok())
-                                    .unwrap_or(file_secs);
-                                if ts >= cutoff {
-                                    let raw = raw_err.unwrap_or("Antigravity step error");
-                                    let model = v["model"]
+                                    .or_else(|| v["error"]["message"].as_str())
+                                    .or_else(|| v["error"].as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty());
+                                let is_err = !matches!(
+                                    step_type,
+                                    "GENERIC" | "TOOL_RESPONSE" | "USER_INPUT"
+                                ) && (step_type.eq_ignore_ascii_case("ERROR_MESSAGE")
+                                    || raw_err.is_some());
+                                if is_err {
+                                    let step_key = v["step_index"]
+                                        .as_u64()
+                                        .map(|n| n.to_string())
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "off:{line_offset}:{}",
+                                                &storage::digest(line)[..12]
+                                            )
+                                        });
+                                    let ts = v["created_at"]
                                         .as_str()
-                                        .or_else(|| v["response_model"].as_str());
-                                    let r = Record::antigravity_error(
-                                        &format!("transcript:{conv}:{step_key}"),
-                                        ts,
-                                        model,
-                                        raw,
-                                    );
-                                    if !existing.contains(&r.id) {
-                                        discovered.push(r);
+                                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                        .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+                                        .unwrap_or(file_secs);
+                                    if ts >= cutoff {
+                                        let raw = raw_err.unwrap_or("Antigravity step error");
+                                        let model = v["model"]
+                                            .as_str()
+                                            .or_else(|| v["response_model"].as_str());
+                                        let r = Record::antigravity_error(
+                                            &format!("transcript:{conv}:{step_key}"),
+                                            ts,
+                                            model,
+                                            raw,
+                                        );
+                                        if !existing.contains(&r.id) {
+                                            discovered.push(r);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    line.clear();
-                }
-                cursors.insert(path, (file_len, file_secs, offset));
+                    },
+                );
             }
         }
         for log_dir in [
@@ -1511,67 +1558,33 @@ impl Service {
                     continue;
                 }
                 let file_len = meta.len();
-                let start_offset = match cursors.get(&path) {
-                    Some(&(prev_len, prev_secs, prev_off))
-                        if prev_len == file_len && prev_secs == file_secs && prev_off == file_len =>
-                    {
-                        continue;
-                    }
-                    Some(&(_, _, prev_off)) if file_len >= prev_off => prev_off,
-                    _ => 0,
-                };
-                let Ok(mut file) = std::fs::File::open(&path) else {
-                    continue;
-                };
-                let mut offset = start_offset;
-                let mut discard_first = false;
-                if start_offset == 0 && file_len > 4 * 1024 * 1024 {
-                    offset = file_len - 4 * 1024 * 1024;
-                    discard_first = true;
-                }
-                if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
-                    continue;
-                }
                 let fname = entry.file_name();
                 let fname = fname.to_string_lossy();
-                let mut reader = BufReader::new(file);
-                let mut line = Vec::new();
-                if discard_first {
-                    let Ok(discarded) = reader.read_until(b'\n', &mut line) else {
-                        continue;
-                    };
-                    if discarded == 0 || !line.ends_with(b"\n") {
-                        continue;
-                    }
-                    offset = offset.saturating_add(discarded as u64);
-                    line.clear();
-                }
-                while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
-                    if read_bytes == 0 || !line.ends_with(b"\n") {
-                        break;
-                    }
-                    let line_offset = offset;
-                    offset = offset.saturating_add(read_bytes as u64);
-                    if line.len() <= 64 * 1024 {
-                        let line_str = String::from_utf8_lossy(&line);
-                        if let Some((line_ts, body)) =
-                            parse_antigravity_log_line(&line_str, file_secs)
-                        {
-                            if line_ts >= cutoff {
-                                let key = format!(
-                                    "logfile:{fname}:{line_offset}:{}",
-                                    &storage::digest(body.as_bytes())[..16]
-                                );
-                                let r = Record::antigravity_error(&key, line_ts, None, body);
-                                if !existing.contains(&r.id) {
-                                    discovered.push(r);
+                scan_antigravity_file_lines(
+                    &path,
+                    file_len,
+                    file_secs,
+                    &mut cursors,
+                    |line_offset, line| {
+                        if line.len() <= 64 * 1024 {
+                            let line_str = String::from_utf8_lossy(line);
+                            if let Some((line_ts, body)) =
+                                parse_antigravity_log_line(&line_str, file_secs)
+                            {
+                                if line_ts >= cutoff {
+                                    let key = format!(
+                                        "logfile:{fname}:{line_offset}:{}",
+                                        &storage::digest(body.as_bytes())[..16]
+                                    );
+                                    let r = Record::antigravity_error(&key, line_ts, None, body);
+                                    if !existing.contains(&r.id) {
+                                        discovered.push(r);
+                                    }
                                 }
                             }
                         }
-                    }
-                    line.clear();
-                }
-                cursors.insert(path, (file_len, file_secs, offset));
+                    },
+                );
             }
         }
         drop(cursors);
@@ -2016,7 +2029,9 @@ mod routing_visibility_tests {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        let log_dir = dir.path().join(".gemini/antigravity/brain/conv-1/.system_generated/logs");
+        let log_dir = dir
+            .path()
+            .join(".gemini/antigravity/brain/conv-1/.system_generated/logs");
         std::fs::create_dir_all(&log_dir).unwrap();
         let transcript = log_dir.join("transcript.jsonl");
 
@@ -2027,7 +2042,10 @@ mod routing_visibility_tests {
         service.sync_antigravity_logs(dir.path());
         assert_eq!(service.query(Filter::default()).total, 0);
 
-        let mut f = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
         f.write_all(part2).unwrap();
         drop(f);
         service.sync_antigravity_logs(dir.path());
@@ -2050,8 +2068,14 @@ mod routing_visibility_tests {
         service.sync_antigravity_logs(dir.path());
         let page = service.query(Filter::default());
         assert_eq!(page.total, 2);
-        assert!(page.items.iter().any(|r| r.reason == Reason::UpstreamService));
-        assert!(!page.items.iter().any(|r| r.reason == Reason::Authentication));
+        assert!(page
+            .items
+            .iter()
+            .any(|r| r.reason == Reason::UpstreamService));
+        assert!(!page
+            .items
+            .iter()
+            .any(|r| r.reason == Reason::Authentication));
     }
 
     #[test]
@@ -2072,11 +2096,27 @@ mod routing_visibility_tests {
             "transcript:conv-1:1",
             now(),
             Some("gemini-2.5-pro"),
+            "429 Too Many Requests for \"gemini-2.5-pro\" at https://example.invalid/v1/models",
+        );
+        assert!(log_record.details.upstream_type.is_none());
+        assert_eq!(
+            log_record.details.message.as_deref(),
+            Some(
+                "429 Too Many Requests for \"gemini-2.5-pro\" at https://example.invalid/v1/models"
+            )
+        );
+        let mut old_redacted = Record::antigravity_error(
+            "transcript:conv-1:2",
+            now(),
+            Some("gemini-2.5-pro"),
             "429 Too Many Requests",
         );
+        old_redacted.details.upstream_type = Some("antigravity_log".into());
+        old_redacted.details.message = Some("429 Too Many Requests [已隐去]".into());
         let content = format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
             serde_json::to_string(&legacy).unwrap(),
+            serde_json::to_string(&old_redacted).unwrap(),
             serde_json::to_string(&log_record).unwrap()
         );
         std::fs::write(&path, content).unwrap();
@@ -2085,9 +2125,6 @@ mod routing_visibility_tests {
         assert!(loaded.dirty);
         assert_eq!(loaded.records.len(), 1);
         assert_eq!(loaded.records[0].id, log_record.id);
-        assert_eq!(
-            loaded.records[0].details.upstream_type.as_deref(),
-            Some("antigravity_log")
-        );
+        assert!(loaded.records[0].details.upstream_type.is_none());
     }
 }
