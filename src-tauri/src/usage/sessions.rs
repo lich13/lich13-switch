@@ -242,6 +242,9 @@ pub trait Repository {
     fn cursor(&self, id: &str) -> Result<Option<String>>;
     fn generation(&self, source: &str) -> Result<u64>;
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()>;
+    fn remove_superseded(&mut self, _ids: &[String]) -> Result<()> {
+        Ok(())
+    }
     fn begin_rebuild(&mut self, source: &str) -> Result<()>;
     fn stage_rebuild(
         &mut self,
@@ -261,6 +264,9 @@ impl Repository for Store {
     }
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
         Store::write_batch(self, rows, cursor)
+    }
+    fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
+        Store::remove_superseded(self, ids)
     }
     fn begin_rebuild(&mut self, source: &str) -> Result<()> {
         Store::begin_rebuild(self, source)

@@ -9,10 +9,17 @@ fn cached_poll_tracks_replacement_guard_and_invalid_text_without_weakening_save_
     storage::atomic_write(&path, b"model='fixture-one'", None).unwrap();
     let mut cache = crate::auth_cache::Cache::default();
     let first = g.config_stamp(&home, &mut cache).unwrap();
-    let first_arc = cache.entry.as_ref().unwrap().2.clone();
+    let first_arc = cache
+        .read(&path, |_| panic!("expected config_stamp cache hit"))
+        .unwrap();
     assert_eq!(first.1, g.read_config(&home).unwrap().revision);
     assert_eq!(first, g.config_stamp(&home, &mut cache).unwrap());
-    assert!(Arc::ptr_eq(&first_arc, &cache.entry.as_ref().unwrap().2));
+    assert!(Arc::ptr_eq(
+        &first_arc,
+        &cache
+            .read(&path, |_| panic!("expected config_stamp cache hit"))
+            .unwrap()
+    ));
     storage::atomic_write(&path, b"model='fixture-two'", None).unwrap();
     let second = g.config_stamp(&home, &mut cache).unwrap();
     assert_ne!(first.1, second.1);
@@ -129,11 +136,8 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
         .lock()
         .unwrap()
         .codex_bearer
-        .entry
-        .as_ref()
-        .unwrap()
-        .2
-        .clone();
+        .read(&codex_cfg, |_| panic!("expected codex_bearer cache hit"))
+        .unwrap();
     let cached_view = codex.try_view().unwrap();
     assert!(Arc::ptr_eq(
         &bearer_arc_v1,
@@ -143,10 +147,8 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
             .lock()
             .unwrap()
             .codex_bearer
-            .entry
-            .as_ref()
+            .read(&codex_cfg, |_| panic!("expected codex_bearer cache hit"))
             .unwrap()
-            .2
     ));
     assert_eq!(cached_view.revision, second.revision);
     assert_eq!(cached_view.config_revision, second.config_revision);
@@ -315,10 +317,15 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
     );
     // Steady-state cache hit reuses the same Arc pointers in codex_api_toml and codex_api_auth.
     let (toml_arc_v1, auth_arc_v1) = {
-        let vc = codex.0.view_config_cache.lock().unwrap();
+        let mut vc = codex.0.view_config_cache.lock().unwrap();
         (
-            vc.codex_api_toml.1.entry.as_ref().unwrap().2.clone(),
-            vc.codex_api_auth.entry.as_ref().unwrap().2.clone(),
+            vc.codex_api_toml
+                .1
+                .read(&codex_cfg, |_| panic!("expected codex_api_toml cache hit"))
+                .unwrap(),
+            vc.codex_api_auth
+                .read(&codex_auth, |_| panic!("expected codex_api_auth cache hit"))
+                .unwrap(),
         )
     };
     assert_eq!(
@@ -326,14 +333,19 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
         v1.config_revision
     );
     {
-        let vc = codex.0.view_config_cache.lock().unwrap();
+        let mut vc = codex.0.view_config_cache.lock().unwrap();
         assert!(Arc::ptr_eq(
             &toml_arc_v1,
-            &vc.codex_api_toml.1.entry.as_ref().unwrap().2
+            &vc.codex_api_toml
+                .1
+                .read(&codex_cfg, |_| panic!("expected codex_api_toml cache hit"))
+                .unwrap()
         ));
         assert!(Arc::ptr_eq(
             &auth_arc_v1,
-            &vc.codex_api_auth.entry.as_ref().unwrap().2
+            &vc.codex_api_auth
+                .read(&codex_auth, |_| panic!("expected codex_api_auth cache hit"))
+                .unwrap()
         ));
     }
 
@@ -398,11 +410,8 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
         .lock()
         .unwrap()
         .grok
-        .entry
-        .as_ref()
-        .unwrap()
-        .2
-        .clone();
+        .read(&grok_cfg, |_| panic!("expected grok cache hit"))
+        .unwrap();
     assert_eq!(
         grok.try_view().unwrap().config_revision,
         grok_v1.config_revision
@@ -415,10 +424,8 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
             .lock()
             .unwrap()
             .grok
-            .entry
-            .as_ref()
+            .read(&grok_cfg, |_| panic!("expected grok cache hit"))
             .unwrap()
-            .2
     ));
 
     storage::atomic_write(

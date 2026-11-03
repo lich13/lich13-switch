@@ -1375,8 +1375,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
     };
     let mut single_off_peak = UsageStatsAggregator::new(&Filter::default(), "1", peak_ms + 1_000);
     single_off_peak.ingest(build_row(off_peak_ms), &pricing);
-    let off_peak_saving =
-        decimal(&single_off_peak.finish().token_mix.cache_savings_usd).unwrap();
+    let off_peak_saving = decimal(&single_off_peak.finish().token_mix.cache_savings_usd).unwrap();
     assert!(off_peak_saving > rust_decimal::Decimal::ZERO);
 
     let mut combined = UsageStatsAggregator::new(&Filter::default(), "1", peak_ms + 1_000);
@@ -1384,5 +1383,186 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
     combined.ingest(build_row(peak_ms), &pricing);
     let combined_saving = decimal(&combined.finish().token_mix.cache_savings_usd).unwrap();
     // Peak tariff is 2x off-peak for deepseek-chat, so combined savings must be 3x off_peak_saving (not 2x).
-    assert_eq!(combined_saving, off_peak_saving * rust_decimal::Decimal::from(3));
+    assert_eq!(
+        combined_saving,
+        off_peak_saving * rust_decimal::Decimal::from(3)
+    );
+}
+
+#[tokio::test]
+async fn file_imported_planner_step_is_deduplicated_when_later_covered_by_rpc_sync() {
+    let f = fixture(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("antigravity/brain/z-good/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rows = concat!(
+        "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"content\":\"<USER_REQUEST>\\nhello\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Claude Opus 4.6 (Thinking). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}\n",
+        "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:01Z\",\"input_tokens\":100,\"cache_read_tokens\":40,\"output_tokens\":20}\n",
+    );
+    std::fs::write(&path, rows).unwrap();
+
+    for native in [false, true] {
+        let db_dir = dir.path().join(if native { "db-v12" } else { "db-v11" });
+        let mut store = if native {
+            Store::open(&db_dir)
+        } else {
+            Store::open_v11_fixture(&db_dir)
+        }
+        .unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let pricing = Pricing::new(&db_dir).unwrap();
+
+        // 1. Offline file scan imports step 1 with synthetic step ID.
+        let mut file_report = Report::default();
+        scan_home(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut file_report,
+            false,
+        )
+        .unwrap();
+        assert_eq!(file_report.imported, 1);
+        let synthetic_id = safe_id("antigravity:request:z-good:step:1");
+        assert!(store.detail(&synthetic_id).is_ok());
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            1
+        );
+
+        // 2. Later RPC sync covers steps 0 and 1 of z-good and supersedes the synthetic step 1 record.
+        let mut rpc_report = Report::default();
+        collect_home(
+            &f.api,
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut rpc_report,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            store.detail(&synthetic_id).is_err(),
+            "synthetic history_file step record should be removed once RPC covers the step"
+        );
+        // z-good has 2 RPC entries ("first" at step 0 and "second" at step 1), not 3!
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            2
+        );
+    }
+}
+
+#[test]
+fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_match_batch() {
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let pricing = Pricing::new(dir.path()).unwrap();
+
+        // Simulate a record that already ran v02611/v02613 where model_display_name was stripped
+        // to "Claude Opus 4.6" and reasoning_effort was mistakenly persisted as "high".
+        let mut polluted = parsed(&entry("polluted-opus", 0));
+        polluted.attempts[0].requested_model = Some("claude-opus-4-6".into());
+        polluted.attempts[0].response_model = Some("claude-opus-4-6".into());
+        polluted.attempts[0].pricing_model = Some("claude-opus-4-6".into());
+        polluted.attempts[0].model_display_name = Some("Claude Opus 4.6".into());
+        polluted.attempts[0].reasoning_effort = Some("high".into());
+
+        // Legitimate Gemini 3.1 Pro (High) must keep reasoning_effort = "high".
+        let mut gemini_high = parsed(&entry("gemini-high", 0));
+        gemini_high.attempts[0].requested_model = Some("gemini-3.1-pro".into());
+        gemini_high.attempts[0].response_model = Some("gemini-3.1-pro".into());
+        gemini_high.attempts[0].pricing_model = Some("gemini-3.1-pro".into());
+        gemini_high.attempts[0].model_display_name = Some("Gemini 3.1 Pro".into());
+        gemini_high.attempts[0].reasoning_effort = Some("high".into());
+
+        store
+            .write_batch(&[polluted.clone(), gemini_high.clone()], None)
+            .unwrap();
+        // Force the polluted "high" onto disk and mark v02611 as already done.
+        store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02611','done')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "DELETE FROM metadata WHERE key='antigravity_fields_v02614'",
+                [],
+            )
+            .unwrap();
+        let mut raw_polluted = store.detail(&polluted.id).unwrap();
+        raw_polluted.attempts[0].reasoning_effort = Some("high".into());
+        crate::usage::storage_v12::update(&store.connection, &raw_polluted).unwrap();
+        assert_eq!(
+            store.detail(&polluted.id).unwrap().attempts[0]
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
+
+        while store.repair_metadata_batch().unwrap() {}
+        assert_eq!(
+            store.detail(&polluted.id).unwrap().attempts[0].reasoning_effort,
+            None
+        );
+        assert_eq!(
+            store.detail(&gemini_high.id).unwrap().attempts[0]
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
+
+        // Verify streaming stats match batch stats over identical rows.
+        let now_ms = polluted.started_at + 10_000;
+        let filter = Filter {
+            end: Some(now_ms),
+            ..Filter::default()
+        };
+        let streamed = store
+            .antigravity_stats(&filter, &pricing, "1", now_ms)
+            .unwrap();
+        if native {
+            let mut batch_rows = Vec::new();
+            crate::usage::storage_v12::scan_antigravity_attempts(
+                &store.connection,
+                filter.start.unwrap_or(i64::MIN),
+                filter.end.unwrap_or(i64::MAX),
+                |row| {
+                    batch_rows.push(row);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let mut batch_agg = UsageStatsAggregator::new(&filter, "1", now_ms);
+            let frozen = pricing.frozen();
+            for row in batch_rows {
+                batch_agg.ingest(row, &frozen);
+            }
+            let batched = batch_agg.finish();
+            assert_eq!(
+                serde_json::to_value(&streamed).unwrap(),
+                serde_json::to_value(&batched).unwrap()
+            );
+        }
+    }
 }

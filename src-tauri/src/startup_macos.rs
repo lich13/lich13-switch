@@ -293,10 +293,9 @@ mod tests {
                 crate::startup::LEGACY_LICH13_LOGIN_ARG,
             ),
         ] {
-            let mut legacy = plist::Value::from_reader_xml(
-                document(Path::new(old_app)).unwrap().as_slice(),
-            )
-            .unwrap();
+            let mut legacy =
+                plist::Value::from_reader_xml(document(Path::new(old_app)).unwrap().as_slice())
+                    .unwrap();
             legacy
                 .as_dictionary_mut()
                 .unwrap()

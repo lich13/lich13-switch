@@ -344,106 +344,105 @@ fn verify_record(text: &str, record: &Record) -> Result<Scan> {
 }
 
 #[derive(Default)]
-struct OfficialViewCache {
+pub struct ViewCache {
     record: crate::auth_cache::Cache<Option<Result<Record>>>,
     config: crate::auth_cache::Cache<Option<Result<Scan>>>,
 }
 
-static VIEW_CACHE: std::sync::OnceLock<std::sync::Mutex<OfficialViewCache>> =
-    std::sync::OnceLock::new();
-
-pub fn view(data: &Path, home: &Path) -> OfficialModeView {
-    let mut cache = VIEW_CACHE
-        .get_or_init(|| std::sync::Mutex::new(OfficialViewCache::default()))
-        .lock()
-        .unwrap();
-    let rec_entry = match cache
-        .record
-        .read(&record_path(data), |raw| raw.as_deref().map(parse_record))
-    {
-        Ok(entry) => entry,
-        Err(e) => {
-            return OfficialModeView {
-                state: "unavailable".into(),
-                error: Some(e.message),
-                ..Default::default()
+impl ViewCache {
+    pub fn view(&mut self, data: &Path, home: &Path) -> OfficialModeView {
+        let rec_entry = match self
+            .record
+            .read(&record_path(data), |raw| raw.as_deref().map(parse_record))
+        {
+            Ok(entry) => entry,
+            Err(e) => {
+                return OfficialModeView {
+                    state: "unavailable".into(),
+                    error: Some(e.message),
+                    ..Default::default()
+                }
             }
-        }
-    };
-    let record = match rec_entry.as_ref() {
-        Some(Ok(record)) => record,
-        None => return OfficialModeView::default(),
-        Some(Err(e)) => {
-            return OfficialModeView {
-                state: "unavailable".into(),
-                error: Some(e.message.clone()),
-                ..Default::default()
-            }
-        }
-    };
-    let cfg_entry = match cache.config.read(&record.path, |raw| {
-        raw.map(|bytes| {
-            String::from_utf8(bytes)
-                .map_err(|_| AppError::new(code::CONFLICT, "Codex 配置不是 UTF-8"))
-                .and_then(|text| scan(&text))
-        })
-    }) {
-        Ok(entry) => entry,
-        Err(e) => {
-            return OfficialModeView {
-                enabled: record.enabled,
-                state: "unavailable".into(),
-                account_id: Some(record.account_id.clone()),
-                error: Some(e.message),
-            }
-        }
-    };
-    let Some(cfg_res) = cfg_entry.as_ref() else {
-        return OfficialModeView {
-            enabled: record.enabled,
-            state: "conflict".into(),
-            account_id: Some(record.account_id.clone()),
-            error: Some("Codex 配置不存在".into()),
         };
-    };
-    if record.path != home.join("config.toml") {
-        return OfficialModeView {
-            enabled: record.enabled,
-            state: "conflict".into(),
-            account_id: Some(record.account_id.clone()),
-            error: Some("Codex 配置目录已变化".into()),
+        let record = match rec_entry.as_ref() {
+            Some(Ok(record)) => record,
+            None => return OfficialModeView::default(),
+            Some(Err(e)) => {
+                return OfficialModeView {
+                    state: "unavailable".into(),
+                    error: Some(e.message.clone()),
+                    ..Default::default()
+                }
+            }
         };
-    }
-    let scan = match cfg_res {
-        Ok(scan) => scan,
-        Err(e) => {
+        let cfg_entry = match self.config.read(&record.path, |raw| {
+            raw.map(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| AppError::new(code::CONFLICT, "Codex 配置不是 UTF-8"))
+                    .and_then(|text| scan(&text))
+            })
+        }) {
+            Ok(entry) => entry,
+            Err(e) => {
+                return OfficialModeView {
+                    enabled: record.enabled,
+                    state: "unavailable".into(),
+                    account_id: Some(record.account_id.clone()),
+                    error: Some(e.message),
+                }
+            }
+        };
+        let Some(cfg_res) = cfg_entry.as_ref() else {
             return OfficialModeView {
                 enabled: record.enabled,
                 state: "conflict".into(),
                 account_id: Some(record.account_id.clone()),
-                error: Some(if e.message == "Codex 配置不是 UTF-8" {
-                    "Codex 配置不是 UTF-8".into()
-                } else {
-                    "官方账号配置已被外部修改".into()
-                }),
+                error: Some("Codex 配置不存在".into()),
+            };
+        };
+        if record.path != home.join("config.toml") {
+            return OfficialModeView {
+                enabled: record.enabled,
+                state: "conflict".into(),
+                account_id: Some(record.account_id.clone()),
+                error: Some("Codex 配置目录已变化".into()),
             };
         }
-    };
-    if record.enabled && record.stage == "enabled" && verify_scan(scan, record).is_ok() {
-        OfficialModeView {
-            enabled: true,
-            state: "enabled".into(),
-            account_id: Some(record.account_id.clone()),
-            error: None,
-        }
-    } else {
-        OfficialModeView {
-            enabled: record.enabled,
-            state: "conflict".into(),
-            account_id: Some(record.account_id.clone()),
-            error: Some("官方账号配置已被外部修改".into()),
+        let scan = match cfg_res {
+            Ok(scan) => scan,
+            Err(e) => {
+                return OfficialModeView {
+                    enabled: record.enabled,
+                    state: "conflict".into(),
+                    account_id: Some(record.account_id.clone()),
+                    error: Some(if e.message == "Codex 配置不是 UTF-8" {
+                        "Codex 配置不是 UTF-8".into()
+                    } else {
+                        "官方账号配置已被外部修改".into()
+                    }),
+                };
+            }
+        };
+        if record.enabled && record.stage == "enabled" && verify_scan(scan, record).is_ok() {
+            OfficialModeView {
+                enabled: true,
+                state: "enabled".into(),
+                account_id: Some(record.account_id.clone()),
+                error: None,
+            }
+        } else {
+            OfficialModeView {
+                enabled: record.enabled,
+                state: "conflict".into(),
+                account_id: Some(record.account_id.clone()),
+                error: Some("官方账号配置已被外部修改".into()),
+            }
         }
     }
+}
+
+pub fn view(data: &Path, home: &Path) -> OfficialModeView {
+    ViewCache::default().view(data, home)
 }
 
 /// Both the old and retained IDs exist in the pre-migration vault. Updating
@@ -800,5 +799,71 @@ mod tests {
         assert_eq!(error.code, code::ACCOUNT);
         assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), TEXT);
         assert!(!record_path(&data).exists());
+    }
+
+    #[test]
+    fn view_cache_reuses_parsed_entries_and_invalidates_on_config_or_record_change() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("codex");
+        let data = t.path().join("data");
+        fs::create_dir_all(&home).unwrap();
+        storage::private_dir(&data).unwrap();
+        let cfg_path = home.join("config.toml");
+        fs::write(&cfg_path, TEXT).unwrap();
+        let before = storage::revision(Some(TEXT.as_bytes()));
+        enable(&data, &home, "acct", &before).unwrap();
+
+        let mut cache = ViewCache::default();
+        let first = cache.view(&data, &home);
+        assert!(first.enabled);
+        assert_eq!(first.state, "enabled");
+        let rec_v1 = cache
+            .record
+            .read(&record_path(&data), |_| {
+                panic!("record cache should hit without re-parsing")
+            })
+            .unwrap();
+        let cfg_v1 = cache
+            .config
+            .read(&cfg_path, |_| {
+                panic!("config cache should hit without re-parsing")
+            })
+            .unwrap();
+        let second = cache.view(&data, &home);
+        assert_eq!(second, first);
+        let rec_v2 = cache
+            .record
+            .read(&record_path(&data), |_| {
+                panic!("record cache should still hit")
+            })
+            .unwrap();
+        let cfg_v2 = cache
+            .config
+            .read(&cfg_path, |_| panic!("config cache should still hit"))
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&rec_v1, &rec_v2));
+        assert!(std::sync::Arc::ptr_eq(&cfg_v1, &cfg_v2));
+
+        // External modification of controlled field invalidates config cache immediately.
+        let tampered = format!(
+            "model_provider = 'tampered'\n{}",
+            fs::read_to_string(&cfg_path).unwrap()
+        );
+        storage::atomic_write(&cfg_path, tampered.as_bytes(), None).unwrap();
+        let conflict = cache.view(&data, &home);
+        assert_eq!(conflict.state, "conflict");
+        let cfg_v3 = cache
+            .config
+            .read(&cfg_path, |_| {
+                panic!("updated config cache should hit after refresh")
+            })
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&cfg_v1, &cfg_v3));
+
+        // Removing official-mode.json invalidates record cache and returns disabled view.
+        fs::remove_file(record_path(&data)).unwrap();
+        let disabled = cache.view(&data, &home);
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.state, "disabled");
     }
 }

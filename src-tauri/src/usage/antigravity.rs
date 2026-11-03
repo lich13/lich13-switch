@@ -162,7 +162,9 @@ fn resolve_model_alias(raw: Option<&str>) -> Option<ResolvedModelAlias> {
         "MODEL_PLACEHOLDER_M7"
         | "MODEL_CHAT_20706"
         | "MODEL_GOOGLE_GEMINI_2_5_FLASH"
-        | "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING" => ("gemini-2.5-flash", "Gemini 2.5 Flash", None),
+        | "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING" => {
+            ("gemini-2.5-flash", "Gemini 2.5 Flash", None)
+        }
         "MODEL_PLACEHOLDER_M9" | "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE" => {
             ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", None)
         }
@@ -221,23 +223,51 @@ fn label(v: Option<&str>) -> Option<String> {
         })
         .map(str::to_owned)
 }
+fn is_thinking_only_canonical_model(model: Option<&str>) -> bool {
+    matches!(
+        model,
+        Some(
+            "claude-opus-4-6"
+                | "claude-sonnet-4-6"
+                | "claude-opus-4-5"
+                | "claude-sonnet-4-5"
+                | "claude-sonnet-4-20250514"
+                | "gemini-2.5-pro"
+                | "gemini-2.5-flash"
+        )
+    )
+}
+
+fn strip_display_effort_suffix(name: &str) -> Option<(&str, Option<String>)> {
+    let (base, suffix) = name.strip_suffix(')')?.rsplit_once(" (")?;
+    let raw = suffix.to_ascii_lowercase();
+    let effort = match raw.as_str() {
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => {
+            Some(Some(raw))
+        }
+        "thinking" => Some(None),
+        _ => None,
+    }?;
+    (!base.is_empty()).then_some((base, effort))
+}
+
 pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
     let mut changed = false;
-    if let Some((name, effort)) = a.model_display_name.as_deref().and_then(|name| {
-        let (name, suffix) = name.strip_suffix(')')?.rsplit_once(" (")?;
-        let raw = suffix.to_ascii_lowercase();
-        let effort = match raw.as_str() {
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => {
-                Some(Some(raw))
-            }
-            "thinking" => Some(None),
-            _ => None,
-        }?;
-        (!name.is_empty()).then(|| (name.to_owned(), effort))
-    }) {
+    if let Some((name, effort)) = a
+        .model_display_name
+        .as_deref()
+        .and_then(strip_display_effort_suffix)
+        .map(|(n, e)| (n.to_owned(), e))
+    {
         a.model_display_name = Some(name);
-        if let Some(effort) = effort {
-            a.reasoning_effort.get_or_insert(effort);
+        match effort {
+            Some(effort) => {
+                a.reasoning_effort.get_or_insert(effort);
+            }
+            None if a.reasoning_effort.as_deref() == Some("high") => {
+                a.reasoning_effort = None;
+            }
+            None => {}
         }
         changed = true;
     }
@@ -290,6 +320,13 @@ pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
             }
             changed = true;
         }
+    }
+    if a.reasoning_effort.as_deref() == Some("high")
+        && (is_thinking_only_canonical_model(a.response_model.as_deref())
+            || is_thinking_only_canonical_model(a.requested_model.as_deref()))
+    {
+        a.reasoning_effort = None;
+        changed = true;
     }
     if let Some(total) = a
         .first_token_ms
@@ -1107,6 +1144,7 @@ impl Api {
             fallback_loaded |= fallback;
             for batch in entries.chunks(128) {
                 let mut rows = Vec::new();
+                let mut superseded = Vec::new();
                 for entry in batch {
                     let mut indices: Vec<_> = entry["stepIndices"]
                         .as_array()
@@ -1150,9 +1188,12 @@ impl Api {
                         if stable == offset {
                             stable += 1;
                         }
-                        cursor
-                            .covered
-                            .extend(indices.into_iter().filter(|i| !failed_steps.contains(i)));
+                        for step_idx in indices.into_iter().filter(|i| !failed_steps.contains(i)) {
+                            cursor.covered.insert(step_idx);
+                            superseded.push(safe_id(&format!(
+                                "antigravity:request:{id}:step:{step_idx}"
+                            )));
+                        }
                     } else if entry.get("chatModel").is_some() {
                         let has_reported_tokens = entry["chatModel"].get("usage").is_some()
                             || entry["chatModel"]["retryInfos"]
@@ -1168,13 +1209,19 @@ impl Api {
                             }
                             report.errors += 1;
                         } else {
-                            cursor
-                                .covered
-                                .extend(indices.into_iter().filter(|i| !failed_steps.contains(i)));
+                            for step_idx in
+                                indices.into_iter().filter(|i| !failed_steps.contains(i))
+                            {
+                                cursor.covered.insert(step_idx);
+                                superseded.push(safe_id(&format!(
+                                    "antigravity:request:{id}:step:{step_idx}"
+                                )));
+                            }
                         }
                     }
                     offset += 1;
                 }
+                store.remove_superseded(&superseded)?;
                 store.write_batch(&rows, None)?;
                 report.imported += rows.len() as u64;
             }
@@ -1256,6 +1303,16 @@ pub(super) fn scan_file_list(
     }
     Ok(())
 }
+fn is_known_settings_model(raw: &str) -> bool {
+    if resolve_model_alias(Some(raw)).is_some() || resolve_display_name_model(raw).is_some() {
+        return true;
+    }
+    if let Some((base, _)) = strip_display_effort_suffix(raw) {
+        return resolve_display_name_model(base).is_some();
+    }
+    false
+}
+
 fn extract_settings_model(content: &str) -> Option<String> {
     let scope = content
         .rsplit_once("</USER_REQUEST>")
@@ -1270,8 +1327,10 @@ fn extract_settings_model(content: &str) -> Option<String> {
         .next()?
         .trim()
         .trim_end_matches('.');
-    let (_, model) = sentence.rsplit_once(" to ")?;
-    label(Some(model))
+    let rest = sentence.strip_prefix("The user changed setting `Model Selection` from ")?;
+    let (_, model) = rest.rsplit_once(" to ")?;
+    let candidate = label(Some(model))?;
+    is_known_settings_model(&candidate).then_some(candidate)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1395,9 +1454,7 @@ fn scan_file(
                     .flatten();
                 let explicit_model = text(&v, &["model", "response_model"]);
                 let request = text(&v, &["request_id"]).or(step_request.as_deref());
-                let model = explicit_model
-                    .or(c.model.as_deref())
-                    .or(is_planner.then_some("antigravity-unknown"));
+                let model = explicit_model.or(c.model.as_deref());
                 let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
                 let (Some(request), Some(model), Some(at)) = (request, model, at) else {
                     return Err(failure(
@@ -2028,10 +2085,7 @@ impl UsageStatsAggregator {
                     family,
                     total_tokens: acc.total_tokens,
                     reasoning_tokens: acc.reasoning_tokens,
-                    cache_hit_percent: round_pct(
-                        acc.cache_read_eligible,
-                        acc.cache_input_eligible,
-                    ),
+                    cache_hit_percent: round_pct(acc.cache_read_eligible, acc.cache_input_eligible),
                     duration_ms: acc.duration_ms,
                     cost_usd: fmt_usd(acc.cost),
                     unpriced_requests: acc.unpriced_requests,
@@ -2289,8 +2343,10 @@ mod history_tests {
             .join("antigravity/brain/cascade-real/.system_generated/logs/transcript.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let rows = concat!(
-            "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"content\":\"<USER_REQUEST>\\nhello\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Claude Opus 4.6 (High). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}\n",
+            "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"content\":\"<USER_REQUEST>\\nhello\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Gemini 3.1 Pro (High). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}\n",
             "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:01Z\",\"input_tokens\":1000,\"cache_read_tokens\":200,\"output_tokens\":80}\n",
+            "{\"step_index\":2,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:02Z\",\"content\":\"<USER_REQUEST>\\nswitch\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from Gemini 3.1 Pro (High) to Claude Opus 4.6 (Thinking). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}\n",
+            "{\"step_index\":3,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:03Z\",\"input_tokens\":800,\"cache_read_tokens\":100,\"output_tokens\":60}\n",
         );
         std::fs::write(&path, rows).unwrap();
         let mut store = Store::open(&dir.path().join("db")).unwrap();
@@ -2307,19 +2363,60 @@ mod history_tests {
         )
         .unwrap();
         assert_eq!(report.errors, 0);
-        assert_eq!(report.imported, 1);
-        let saved = store
+        assert_eq!(report.imported, 2);
+        let gemini = store
             .detail(&safe_id("antigravity:request:cascade-real:step:1"))
             .unwrap();
         assert_eq!(
-            saved.attempts[0].model_display_name.as_deref(),
+            gemini.attempts[0].model_display_name.as_deref(),
+            Some("Gemini 3.1 Pro")
+        );
+        assert_eq!(gemini.attempts[0].reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            gemini.attempts[0].response_model.as_deref(),
+            Some("gemini-3.1-pro")
+        );
+        assert!(gemini.attempts[0].price.is_some());
+
+        let opus = store
+            .detail(&safe_id("antigravity:request:cascade-real:step:3"))
+            .unwrap();
+        assert_eq!(
+            opus.attempts[0].model_display_name.as_deref(),
             Some("Claude Opus 4.6")
         );
-        assert_eq!(saved.attempts[0].reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(opus.attempts[0].reasoning_effort, None);
         assert_eq!(
-            saved.attempts[0].response_model.as_deref(),
+            opus.attempts[0].response_model.as_deref(),
             Some("claude-opus-4-6")
         );
-        assert!(saved.attempts[0].price.is_some());
+        assert!(opus.attempts[0].price.is_some());
+
+        // Missing or arbitrary natural-language settings text must fail rather than fabricate "antigravity-unknown".
+        let bad_path = dir.path().join(
+            "antigravity/brain/cascade-missing-model/.system_generated/logs/transcript.jsonl",
+        );
+        std::fs::create_dir_all(bad_path.parent().unwrap()).unwrap();
+        let bad_rows = concat!(
+            "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"content\":\"<USER_REQUEST>\\nhello\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed something else to random-words.\\n</USER_SETTINGS_CHANGE>\"}\n",
+            "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:01Z\",\"input_tokens\":500,\"output_tokens\":40}\n",
+        );
+        std::fs::write(&bad_path, bad_rows).unwrap();
+        let mut bad_report = Report::default();
+        scan_file_list(
+            &mut store,
+            &dir.path().join("antigravity/brain"),
+            std::slice::from_ref(&bad_path),
+            &pricing,
+            &Settings::default(),
+            &mut bad_report,
+            false,
+        )
+        .unwrap();
+        assert_eq!(bad_report.errors, 1);
+        assert_eq!(bad_report.imported, 0);
+        assert!(store
+            .detail(&safe_id("antigravity:request:cascade-missing-model:step:1"))
+            .is_err());
     }
 }

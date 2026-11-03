@@ -1273,16 +1273,36 @@ fn core_state_caches_config_and_updates_credential_metadata_on_rotation_or_delet
         Some(false)
     );
     // Steady-state repeat poll hits config_cache and auth_cache (same Arc pointers) and returns identical revision and auth_source.
-    let cfg_arc_v1 = core.config_cache.entry.as_ref().unwrap().2.clone();
-    let auth_arc_v1 = core.auth_cache.entry.as_ref().unwrap().2.clone();
+    let cfg_arc_v1 = core
+        .config_cache
+        .read(&home.join("config.toml"), |_| {
+            panic!("expected config_cache hit")
+        })
+        .unwrap();
+    let auth_arc_v1 = core
+        .auth_cache
+        .read(&home.join("auth.json"), |_| {
+            panic!("expected auth_cache hit")
+        })
+        .unwrap();
     let cached_poll = core.state().unwrap();
     assert!(std::sync::Arc::ptr_eq(
         &cfg_arc_v1,
-        &core.config_cache.entry.as_ref().unwrap().2
+        &core
+            .config_cache
+            .read(&home.join("config.toml"), |_| {
+                panic!("expected config_cache hit")
+            })
+            .unwrap()
     ));
     assert!(std::sync::Arc::ptr_eq(
         &auth_arc_v1,
-        &core.auth_cache.entry.as_ref().unwrap().2
+        &core
+            .auth_cache
+            .read(&home.join("auth.json"), |_| {
+                panic!("expected auth_cache hit")
+            })
+            .unwrap()
     ));
     assert_eq!(cached_poll.config_revision, cfg_rev_v1);
     assert_eq!(cached_poll.auth_source, saved.auth_source);

@@ -83,7 +83,7 @@ impl Spool {
         let path = directory.path().join("spool.sqlite3");
         let connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
-        db(connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; CREATE TABLE sources(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cleanup_snapshot(id TEXT PRIMARY KEY,digest TEXT NOT NULL); CREATE TABLE bill(id TEXT PRIMARY KEY,body TEXT NOT NULL,effective INTEGER NOT NULL,original_digest TEXT);"))?;
+        db(connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; CREATE TABLE sources(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE superseded(id TEXT PRIMARY KEY); CREATE TABLE cleanup_snapshot(id TEXT PRIMARY KEY,digest TEXT NOT NULL); CREATE TABLE bill(id TEXT PRIMARY KEY,body TEXT NOT NULL,effective INTEGER NOT NULL,original_digest TEXT);"))?;
         Ok(Self {
             connection,
             _directory: directory,
@@ -135,6 +135,17 @@ impl Repository for Spool {
         }
         Ok(())
     }
+    fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tx = db(self.connection.transaction())?;
+        for id in ids {
+            db(tx.execute("DELETE FROM sources WHERE id=?1", [id]))?;
+            db(tx.execute("INSERT OR IGNORE INTO superseded VALUES(?1)", [id]))?;
+        }
+        db(tx.commit())
+    }
     fn begin_rebuild(&mut self, _: &str) -> Result<()> {
         Ok(())
     }
@@ -167,9 +178,9 @@ fn append(spool: &Connection, r: &Record, effective: i64, digest: Option<&str>) 
 fn capture_cleanup_snapshot(store: &Store, spool: &Spool, request: &Request) -> Result<()> {
     let tx = db(spool.connection.unchecked_transaction())?;
     if request.clients.iter().any(|c| c == "antigravity") {
-        let mut cursors = db(store
-            .connection
-            .prepare("SELECT id,body FROM cursors WHERE id LIKE 'antigravity:rpc:%'"))?;
+        let mut cursors = db(store.connection.prepare(
+            "SELECT id,body FROM cursors WHERE CASE WHEN json_valid(body) THEN json_type(body,'$.covered') END='array'",
+        ))?;
         let rows =
             db(cursors.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
         for row in rows {
@@ -630,6 +641,16 @@ impl Service {
             }
             // Newly discovered history uses the normal dedup path. Receipts
             // suppress already summarized records and retain existing snapshots.
+            {
+                let mut stmt = db(spool
+                    .connection
+                    .prepare("SELECT id FROM superseded ORDER BY id"))?;
+                let rows = db(stmt.query_map([], |r| r.get::<_, String>(0)))?;
+                let superseded = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
+                if !superseded.is_empty() {
+                    self.query(|s| s.remove_superseded(&superseded))?;
+                }
+            }
             let mut after = String::new();
             loop {
                 let mut statement = db(spool
@@ -1045,5 +1066,94 @@ mod tests {
         assert_eq!(saved.attempts[0].outcome, "failed");
         assert_eq!(saved.attempts[1].tokens.output, Some(20));
         assert_eq!(saved.attempts[1].cost_multiplier, "1.25");
+    }
+    #[test]
+    fn antigravity_export_copies_rpc_cursors_and_suppresses_covered_transcript_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(&dir.path().join("store"));
+        let rpc_record = Record {
+            id: safe_id("antigravity:cascade-b1:exec-1:0"),
+            client: "antigravity".into(),
+            source: "antigravity".into(),
+            session_id: Some(safe_id("cascade-b1")),
+            started_at: BASE - 1000,
+            finished_at: Some(BASE + 200),
+            completed: true,
+            attempts: vec![Attempt {
+                id: safe_id("antigravity:cascade-b1:exec-1:0:final"),
+                requested_model: Some("claude-opus-4-6".into()),
+                response_model: Some("claude-opus-4-6".into()),
+                model_display_name: Some("Claude Opus 4.6".into()),
+                started_at: BASE - 1000,
+                duration_ms: 1200,
+                outcome: "success".into(),
+                transport: "local_api".into(),
+                usage_status: "reported".into(),
+                tokens: Tokens {
+                    input: Some(500),
+                    output: Some(80),
+                    ..Tokens::default()
+                },
+                ..Attempt::default()
+            }],
+            ..Record::default()
+        };
+        let cursor_key = safe_id("antigravity:rpc:cascade-b1");
+        let cursor_body = r#"{"modified":"2026-01-01T00:00:05Z","count":1,"covered":[1]}"#;
+        service
+            .query(|s| s.write_batch(&[rpc_record], Some((&cursor_key, cursor_body))))
+            .unwrap();
+
+        let ag_home = dir.path().join("ag-home");
+        let transcript =
+            ag_home.join("antigravity/brain/cascade-b1/.system_generated/logs/transcript.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        // Step 1 is already covered by RPC cursor; step 2 is new in the transcript.
+        let end_iso = chrono::DateTime::from_timestamp_millis(BASE + 500)
+            .unwrap()
+            .to_rfc3339();
+        let rows = format!(
+            "{{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"{end_iso}\",\"content\":\"<USER_REQUEST>\\nhi\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Claude Opus 4.6 (Thinking). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}}\n\
+             {{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"{end_iso}\",\"input_tokens\":500,\"output_tokens\":80}}\n\
+             {{\"step_index\":2,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"{end_iso}\",\"input_tokens\":300,\"output_tokens\":40}}\n"
+        );
+        std::fs::write(&transcript, rows).unwrap();
+
+        let mut req = request();
+        req.clients = vec!["antigravity".into()];
+        let mut spool = Spool::new(dir.path()).unwrap();
+        service
+            .read(|s| capture_cleanup_snapshot(s, &spool, &req))
+            .unwrap();
+        assert_eq!(
+            spool.cursor(&cursor_key).unwrap().as_deref(),
+            Some(cursor_body)
+        );
+        let pricing = service.prices().unwrap().frozen();
+        let settings = service.settings();
+        let mut report = sessions::Report::default();
+        super::super::antigravity::scan_file_list(
+            &mut spool,
+            &ag_home.join("antigravity/brain"),
+            &[transcript],
+            &pricing,
+            &settings,
+            &mut report,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.errors, 0);
+        assert_eq!(report.imported, 1);
+        let step2_id = safe_id("antigravity:request:cascade-b1:step:2");
+        let step2 = spool.source(&step2_id).unwrap().unwrap();
+        service.query(|s| s.write_batch(&[step2], None)).unwrap();
+        service
+            .read(|s| snapshot(s, &spool, &req, &pricing, &settings))
+            .unwrap();
+        let mut csv = Vec::new();
+        let exported = write_csv(&spool, &req, &mut csv).unwrap();
+        // Exactly 2 requests exported: the RPC record for step 1 and the transcript record for step 2 (step 1 is not double-imported).
+        assert_eq!(exported.requests, 2);
+        assert_eq!(exported.attempts, 2);
     }
 }

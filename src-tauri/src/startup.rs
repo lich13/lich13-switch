@@ -307,9 +307,7 @@ mod tests {
     #[test]
     fn installed_path_and_legacy_preferences() {
         assert_eq!(
-            bundle_path(Path::new(
-                "/Applications/Vela.app/Contents/MacOS/vela"
-            )),
+            bundle_path(Path::new("/Applications/Vela.app/Contents/MacOS/vela")),
             PathBuf::from("/Applications/Vela.app")
         );
         let _: Preferences = serde_json::from_str("{}").unwrap();

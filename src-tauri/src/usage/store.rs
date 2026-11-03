@@ -567,7 +567,7 @@ impl Store {
         let after: Option<String> = db(self
             .connection
             .query_row(
-                "SELECT value FROM metadata WHERE key='antigravity_fields_v02611'",
+                "SELECT value FROM metadata WHERE key='antigravity_fields_v02614'",
                 [],
                 |r| r.get(0),
             )
@@ -606,7 +606,7 @@ impl Store {
             }
         }
         db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02611',?1)",
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02614',?1)",
             [rows.last().map_or("done", |(id, _)| id.as_str())],
         ))?;
         if changed {
@@ -1141,6 +1141,41 @@ impl Store {
             cursor.daily = true;
         }
         Ok(!done)
+    }
+    pub fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tx = db(self.connection.transaction())?;
+        let mut changed = false;
+        for id in ids {
+            let Some(existing) = storage_v12::record(&tx, id)? else {
+                continue;
+            };
+            if existing.source != "antigravity"
+                || existing.attempts.is_empty()
+                || !existing
+                    .attempts
+                    .iter()
+                    .all(|a| a.transport == "history_file")
+            {
+                continue;
+            }
+            if storage_v12::active(&tx) {
+                storage_v12::remove_record(&tx, id)?;
+            } else {
+                db(tx.execute(
+                    "DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner=?1",
+                    [id],
+                ))?;
+                db(tx.execute("DELETE FROM records WHERE id=?1", [id]))?;
+            }
+            changed = true;
+        }
+        if changed {
+            query::changed(&tx)?;
+        }
+        db(tx.commit())
     }
     pub fn begin_rebuild(&mut self, source: &str) -> Result<()> {
         if !matches!(source, "codex" | "claude" | "grok") {

@@ -167,6 +167,9 @@ impl PendingMainEvents {
             config_states,
         }
     }
+    fn drain_for_window(&self, label: &str) -> Option<DrainedMainEvents> {
+        (label == "main").then(|| self.drain())
+    }
 }
 impl Runtime {
     pub(crate) fn mark_window_visible(&self, label: &str, visible: bool) -> bool {
@@ -257,13 +260,7 @@ fn application_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::hide_others(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(
-                app,
-                "app-quit",
-                "退出 Vela",
-                true,
-                Some("CmdOrCtrl+Q"),
-            )?,
+            &MenuItem::with_id(app, "app-quit", "退出 Vela", true, Some("CmdOrCtrl+Q"))?,
         ],
     )?;
     menu.insert(&application, 0)?;
@@ -331,8 +328,7 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
         return;
     };
     let was_visible = r.mark_window_visible(label, true);
-    if label == "main" {
-        let drained = r.pending_main.drain();
+    if let Some(drained) = r.pending_main.drain_for_window(label) {
         if let Some(change) = drained.app_event {
             let _ = window.emit("app-event", &change);
         }
@@ -521,15 +517,14 @@ enum PollStateUpdate {
 }
 
 fn poll_account_state_step(
-    data: &std::path::Path,
+    _data: &std::path::Path,
     core: &Mutex<Core>,
     gateway: &gateway::Gateway,
     last: &mut Option<ViewState>,
 ) -> PollStateUpdate {
     let result = lock(core).and_then(|mut c| {
-        let mut s = c.state()?;
+        let s = c.state()?;
         let home = c.home();
-        s.official_mode = official::view(data, &home);
         Ok((s, home))
     });
     match result {
@@ -626,14 +621,7 @@ fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
     }
 }
 fn state_for(r: &Runtime) -> Result<ViewState> {
-    let (mut state, home) = {
-        let mut core = lock(&r.core)?;
-        let state = core.state()?;
-        let home = core.home();
-        (state, home)
-    };
-    state.official_mode = official::view(&r.data, &home);
-    Ok(state)
+    lock(&r.core)?.state()
 }
 #[tauri::command]
 async fn list_provider_models(
@@ -668,10 +656,8 @@ async fn switch_account(
     let result = lock(&r.core)?.switch_account(&id, &expected_revision);
     match result {
         Ok(s) => {
-            let mut next = s.clone();
-            next.official_mode = official::view(&r.data, &r.home(gateway::ClientId::Codex)?);
-            publish(&app, next.clone());
-            Ok(next)
+            publish(&app, s.clone());
+            Ok(s)
         }
         Err(e) => {
             let _ = refresh(&app, &r);
@@ -737,9 +723,7 @@ async fn use_official_account(
             .switch_account(&account_id, &auth_revision)
             .map(|_| ())
     })?;
-    let mut next = refresh(&app, &r)?;
-    next.official_mode = official::view(&r.data, &home);
-    publish(&app, next.clone());
+    let next = refresh(&app, &r)?;
     let _ = app.emit("switch-notice", "官方账号已启用，请重新打开 Codex");
     Ok(next)
 }
@@ -753,9 +737,7 @@ async fn disable_official_account(
     let _official_guard = r.official_tx.lock().await;
     let home = r.home(gateway::ClientId::Codex)?;
     official::disable(&r.data, &home, &expected_config_revision)?;
-    let mut next = refresh(&app, &r)?;
-    next.official_mode = official::view(&r.data, &home);
-    publish(&app, next.clone());
+    let next = refresh(&app, &r)?;
     let _ = app.emit("switch-notice", "官方连接已关闭，配置已恢复");
     Ok(next)
 }
@@ -2617,6 +2599,55 @@ mod page_whitelist_tests {
         assert!(!drained_again.pricing_state);
         assert!(!drained_again.usage_state);
         assert!(drained_again.config_states.is_empty());
+    }
+
+    #[test]
+    fn hidden_main_window_buffers_notification_state_without_leaking_to_quick_window() {
+        let pending = PendingMainEvents::default();
+        pending.record_notification_state(crate::notifications::State {
+            permission: "granted".into(),
+            error: None,
+            delivery: crate::notifications::delivery::Status::Pending,
+        });
+        pending.record_notification_state(crate::notifications::State {
+            permission: "denied".into(),
+            error: Some("请在系统设置开启通知".into()),
+            delivery: crate::notifications::delivery::Status::Failed,
+        });
+        pending.record_app_event(&events::Change {
+            record: None,
+            error: Some("background-notice".into()),
+            notify: true,
+        });
+
+        // Showing the quick window must not consume notification_state or app_event buffered for main.
+        assert!(pending.drain_for_window("quick").is_none());
+
+        // Showing the main window replays the latest notification_state and strips notify=true on app_event.
+        let main_drained = pending
+            .drain_for_window("main")
+            .expect("main window should drain pending notifications");
+        assert_eq!(
+            main_drained.notification_state,
+            Some(crate::notifications::State {
+                permission: "denied".into(),
+                error: Some("请在系统设置开启通知".into()),
+                delivery: crate::notifications::delivery::Status::Failed,
+            })
+        );
+        let replayed_event = main_drained
+            .app_event
+            .expect("app_event should be replayed");
+        assert_eq!(replayed_event.error.as_deref(), Some("background-notice"));
+        assert!(
+            !replayed_event.notify,
+            "replayed hidden app_event must not re-trigger system notifications"
+        );
+        assert!(pending
+            .drain_for_window("main")
+            .unwrap()
+            .notification_state
+            .is_none());
     }
 
     #[tokio::test(start_paused = true)]

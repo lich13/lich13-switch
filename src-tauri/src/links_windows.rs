@@ -71,7 +71,10 @@ fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
             registered.delete_value(name)?;
         }
         // The old self registration shared the same capabilities path.
-        for legacy in ["gpt-Switch Link gpt-Switch", "lich13-switch Link lich13-switch"] {
+        for legacy in [
+            "gpt-Switch Link gpt-Switch",
+            "lich13-switch Link lich13-switch",
+        ] {
             if registered
                 .get_value::<String, _>(legacy)
                 .is_ok_and(|value| value.eq_ignore_ascii_case(CAPABILITIES))

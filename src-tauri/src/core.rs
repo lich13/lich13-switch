@@ -193,6 +193,7 @@ pub struct Core {
     checked_auth: Option<(String, String)>,
     auth_cache: crate::auth_cache::Cache<PolledAuth>,
     config_cache: crate::auth_cache::Cache<PolledConfig>,
+    official_cache: crate::official::ViewCache,
     exchange: exchange::Service,
     normalization_revision: std::cell::RefCell<Option<String>>,
 }
@@ -595,6 +596,7 @@ impl Core {
             checked_auth: None,
             auth_cache: Default::default(),
             config_cache: Default::default(),
+            official_cache: Default::default(),
             exchange: exchange::Service::default(),
             normalization_revision: std::cell::RefCell::new(Some(normalization_revision)),
         };
@@ -1117,7 +1119,10 @@ impl Core {
             } else {
                 self.auth_sync.clone()
             },
-            official_mode: crate::official::OfficialModeView::default(),
+            official_mode: {
+                let home = self.home();
+                self.official_cache.view(&self.data_dir, &home)
+            },
         })
     }
     fn set_sync(&mut self, state: &str, account_id: Option<String>, message: &str) {

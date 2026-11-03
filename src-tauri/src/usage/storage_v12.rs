@@ -433,9 +433,7 @@ fn diagnostic_u64(
                     return Ok(*index);
                 }
                 let shape = unpack(&bytes)?;
-                let index = shape[field]
-                    .as_u64()
-                    .and_then(|n| usize::try_from(n).ok());
+                let index = shape[field].as_u64().and_then(|n| usize::try_from(n).ok());
                 if cache.len() == 8 {
                     cache.pop_front();
                 }
@@ -1612,6 +1610,25 @@ pub(super) fn encode_stage(r: &Record) -> Result<Vec<u8>> {
 }
 pub(super) fn decode_stage(bytes: &[u8]) -> Result<Record> {
     serde_json::from_value(unpack(bytes)?).map_err(json_error)
+}
+pub(super) fn remove_record(c: &Connection, id: &str) -> Result<()> {
+    let Some(rid) = owner(c, id)? else {
+        return Ok(());
+    };
+    for table in [
+        "v12_attempt_rows",
+        "v12_session_rows",
+        "v12_original",
+        "v12_links",
+    ] {
+        db(c.execute(&format!("DELETE FROM {table} WHERE owner=?1"), [rid]))?;
+    }
+    db(c.execute(
+        "UPDATE v12_records SET effective=1,duplicate=NULL,archived_duplicate=NULL WHERE duplicate=?1",
+        [rid],
+    ))?;
+    db(c.execute("DELETE FROM v12_records WHERE rid=?1", [rid]))?;
+    Ok(())
 }
 pub(super) fn remove_source(c: &Connection, source: &str) -> Result<()> {
     for table in [

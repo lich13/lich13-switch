@@ -424,16 +424,27 @@ describe("quota display and refresh", () => {
     expect(within(usage as HTMLDetailsElement).getByText("1.23K")).toBeInTheDocument();
     expect(within(usage as HTMLDetailsElement).getByText("9.6M")).toBeInTheDocument();
   });
-  it("labels a real expired key as 已到期", () => {
-    const q = quotaFixture(provider, {
-      keyStatus: "已过期",
+  it("labels a real expired key as 已到期 and keeps non-expired keyStatus normal", () => {
+    const expired = quotaFixture(provider, {
+      keyStatus: "已到期",
+      expiresAtUnix: Math.floor(Date.now() / 1000) - 60,
       plans: [],
     });
 
-    render(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+    const { container, rerender } = render(
+      <QuotaInfo provider={provider} quota={expired} refresh={() => {}} compact />,
+    );
 
     expect(screen.getByText("已到期")).toBeInTheDocument();
-    expect(screen.queryByText("已过期")).not.toBeInTheDocument();
+    expect(container.querySelector(".quota-compact")).toHaveAttribute("data-tone", "critical");
+
+    const disabled = quotaFixture(provider, {
+      keyStatus: "已禁用",
+      plans: [],
+    });
+    rerender(<QuotaInfo provider={provider} quota={disabled} refresh={() => {}} compact />);
+    expect(screen.getByText("已禁用")).toBeInTheDocument();
+    expect(container.querySelector(".quota-compact")).toHaveAttribute("data-tone", "normal");
   });
   it("does not label an elapsed compact cache as a real quota expiry", () => {
     const q = {
