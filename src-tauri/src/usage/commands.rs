@@ -22,9 +22,8 @@ pub async fn get_antigravity_usage_stats(
     let prices = s.prices()?.frozen();
     let multiplier = s.settings().multiplier;
     let now_ms = now();
-    let live = super::antigravity::probe_live_quotas().await;
     tokio::task::spawn_blocking(move || {
-        s.read(|db| db.antigravity_stats(&filter, &prices, &multiplier, now_ms, live))
+        s.read(|db| db.antigravity_stats(&filter, &prices, &multiplier, now_ms))
     })
     .await
     .map_err(|_| failure("Antigravity 统计查询中断"))?

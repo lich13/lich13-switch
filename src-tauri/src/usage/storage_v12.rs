@@ -399,15 +399,20 @@ fn unpack_diagnostic(c: &Connection, body: rusqlite::types::Value, anchor: i64) 
     Ok(v)
 }
 
-fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<u64>> {
+fn diagnostic_u64(
+    c: &Connection,
+    body: rusqlite::types::Value,
+    field: &'static str,
+) -> Result<Option<u64>> {
     // Resolve only this scalar; no absolute clock restoration or full diagnostic
     // object copy is needed for aggregation. Cache templates by their bytes so
     // old WAL snapshots and different databases cannot reuse a stale ID.
+    type CachedTemplate = (&'static str, Vec<u8>, Option<usize>);
     thread_local! {
-        static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<(Vec<u8>, Option<usize>)>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+        static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<CachedTemplate>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     }
     diagnostics::inspect(c, body, |tag, value| {
-        let ms = if tag == 4 {
+        let num = if tag == 4 {
             let values = value
                 .as_array()
                 .ok_or_else(|| failure("用量诊断字段无效"))?;
@@ -421,17 +426,20 @@ fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<
             .query_row([id], |r| r.get(0)))?;
             let index = TEMPLATES.with(|cache| -> Result<Option<usize>> {
                 let mut cache = cache.borrow_mut();
-                if let Some((_, index)) = cache.iter().find(|(saved, _)| *saved == bytes) {
+                if let Some((_, _, index)) = cache
+                    .iter()
+                    .find(|(f, saved, _)| *f == field && *saved == bytes)
+                {
                     return Ok(*index);
                 }
                 let shape = unpack(&bytes)?;
-                let index = shape["generationMs"]
+                let index = shape[field]
                     .as_u64()
                     .and_then(|n| usize::try_from(n).ok());
-                if cache.len() == 4 {
+                if cache.len() == 8 {
                     cache.pop_front();
                 }
-                cache.push_back((bytes, index));
+                cache.push_back((field, bytes, index));
                 Ok(index)
             })?;
             index
@@ -443,10 +451,14 @@ fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<
                 })
                 .transpose()?
         } else {
-            value["generationMs"].as_u64()
+            value[field].as_u64()
         };
-        Ok(ms.filter(|ms| *ms > 50))
+        Ok(num)
     })
+}
+
+fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<u64>> {
+    Ok(diagnostic_u64(c, body, "generationMs")?.filter(|ms| *ms > 50))
 }
 
 pub(super) struct AntigravityAttemptRow {
@@ -467,83 +479,53 @@ pub(super) struct AntigravityAttemptRow {
     pub duration_ms: u64,
 }
 
-fn reasoning_tokens(c: &Connection, body: rusqlite::types::Value) -> Result<Option<u64>> {
-    thread_local! {
-        static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<(Vec<u8>, Option<usize>)>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-    }
-    diagnostics::inspect(c, body, |tag, value| {
-        let count = if tag == 4 {
-            let values = value
-                .as_array()
-                .ok_or_else(|| failure("用量诊断字段无效"))?;
-            let id = values
-                .first()
-                .and_then(Value::as_i64)
-                .ok_or_else(|| failure("用量诊断结构缺失"))?;
-            let bytes: Vec<u8> = db(db(
-                c.prepare_cached("SELECT body FROM v12_templates WHERE id=?1")
-            )?
-            .query_row([id], |r| r.get(0)))?;
-            let index = TEMPLATES.with(|cache| -> Result<Option<usize>> {
-                let mut cache = cache.borrow_mut();
-                if let Some((_, index)) = cache.iter().find(|(saved, _)| *saved == bytes) {
-                    return Ok(*index);
-                }
-                let shape = unpack(&bytes)?;
-                let index = shape["reasoningTokens"]
-                    .as_u64()
-                    .and_then(|n| usize::try_from(n).ok());
-                if cache.len() == 4 {
-                    cache.pop_front();
-                }
-                cache.push_back((bytes, index));
-                Ok(index)
-            })?;
-            index
-                .map(|i| {
-                    values
-                        .get(i + 1)
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| failure("用量诊断字段缺失"))
-                })
-                .transpose()?
-        } else {
-            value["reasoningTokens"].as_u64()
-        };
-        Ok(count)
-    })
-}
-
 pub(super) fn scan_antigravity_attempts(
     c: &Connection,
     min_time: i64,
     max_time: i64,
     mut visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
 ) -> Result<()> {
-    let mut stmt = db(c.prepare(
+    let mut stmt = db(c.prepare_cached(
         "SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
-         usage_value(m.value),shape_value.value,a.body,
+         usage_value(m.value),a.shape,shape_value.value,a.body,
          a.inclusive_input,a.input,a.output,a.cache_read,a.cache_write,a.cost,a.unpriced,
          CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END
          FROM v12_records r
-         JOIN v12_all_attempts a ON a.owner=r.rid
+         JOIN v12_sessions a ON a.owner=r.rid
          LEFT JOIN v12_dictionary m ON m.id=a.model
          LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape
          WHERE r.client=usage_label('antigravity') AND r.effective=1 AND r.time>=?1 AND r.time<=?2
          ORDER BY r.rid,a.ordinal",
     ))?;
+    let mut shape_display_cache: std::collections::BTreeMap<i64, Option<String>> =
+        std::collections::BTreeMap::new();
     let mut rows = db(stmt.query(params![min_time, max_time]))?;
     while let Some(row) = db(rows.next())? {
         let opt_u64 = |idx: usize| -> Result<Option<u64>> {
             Ok(db(row.get::<_, Option<i64>>(idx))?.and_then(|n| u64::try_from(n).ok()))
         };
-        let shape_bytes = db(row.get::<_, Option<Vec<u8>>>(6))?;
-        let display_name = shape_bytes
-            .as_deref()
-            .and_then(shared_value)
-            .and_then(|v| v["modelDisplayName"].as_str().map(str::to_owned));
-        let body = db(row.get::<_, rusqlite::types::Value>(7))?;
-        let reasoning = reasoning_tokens(c, body)?;
+        let shape_id = db(row.get::<_, Option<i64>>(6))?;
+        let display_name = if let Some(sid) = shape_id {
+            if let Some(cached) = shape_display_cache.get(&sid) {
+                cached.clone()
+            } else {
+                let decoded = db(row.get::<_, Option<Vec<u8>>>(7))?
+                    .as_deref()
+                    .and_then(shared_value)
+                    .and_then(|v| v["modelDisplayName"].as_str().map(str::to_owned));
+                shape_display_cache.insert(sid, decoded.clone());
+                decoded
+            }
+        } else {
+            None
+        };
+        let output = opt_u64(11)?;
+        let reasoning = if output.is_some_and(|n| n > 0) {
+            let body = db(row.get::<_, rusqlite::types::Value>(8))?;
+            diagnostic_u64(c, body, "reasoningTokens")?
+        } else {
+            None
+        };
         visit(AntigravityAttemptRow {
             session_id: identifier(db(row.get(1))?)?,
             time: db(row.get(2))?,
@@ -551,15 +533,15 @@ pub(super) fn scan_antigravity_attempts(
             is_final: db(row.get::<_, i64>(4))? != 0,
             model: db(row.get(5))?,
             display_name,
-            inclusive_input: opt_u64(8)?,
-            input: opt_u64(9)?,
-            output: opt_u64(10)?,
+            inclusive_input: opt_u64(9)?,
+            input: opt_u64(10)?,
+            output,
             reasoning,
-            cache_read: opt_u64(11)?,
-            cache_write: opt_u64(12)?,
-            cost: db(row.get(13))?,
-            unpriced: u64::try_from(db(row.get::<_, i64>(14))?).unwrap_or(0),
-            duration_ms: u64::try_from(db(row.get::<_, i64>(15))?).unwrap_or(0),
+            cache_read: opt_u64(12)?,
+            cache_write: opt_u64(13)?,
+            cost: db(row.get(14))?,
+            unpriced: u64::try_from(db(row.get::<_, i64>(15))?).unwrap_or(0),
+            duration_ms: u64::try_from(db(row.get::<_, i64>(16))?).unwrap_or(0),
         })?;
     }
     Ok(())

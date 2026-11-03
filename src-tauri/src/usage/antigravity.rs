@@ -140,40 +140,29 @@ fn resolve_model_alias(raw: Option<&str>) -> Option<ResolvedModelAlias> {
             ("gemini-3-pro-preview", "Gemini 3 Pro", Some("low"))
         }
         "MODEL_GOOGLE_GEMINI_3_PRO" => ("gemini-3-pro-preview", "Gemini 3 Pro", None),
-        "MODEL_PLACEHOLDER_M26" | "MODEL_CLAUDE_4_6_OPUS_THINKING" => {
-            ("claude-opus-4-6", "Claude Opus 4.6", Some("high"))
+        "MODEL_PLACEHOLDER_M26" | "MODEL_CLAUDE_4_6_OPUS_THINKING" | "MODEL_CLAUDE_4_6_OPUS" => {
+            ("claude-opus-4-6", "Claude Opus 4.6", None)
         }
-        "MODEL_CLAUDE_4_6_OPUS" => ("claude-opus-4-6", "Claude Opus 4.6", None),
-        "MODEL_PLACEHOLDER_M35" | "MODEL_CLAUDE_4_6_SONNET" => {
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6", None)
-        }
-        "MODEL_CLAUDE_4_6_SONNET_THINKING" => {
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6", Some("high"))
-        }
-        "MODEL_PLACEHOLDER_M12" | "MODEL_CLAUDE_4_5_OPUS" => {
+        "MODEL_PLACEHOLDER_M35"
+        | "MODEL_CLAUDE_4_6_SONNET"
+        | "MODEL_CLAUDE_4_6_SONNET_THINKING" => ("claude-sonnet-4-6", "Claude Sonnet 4.6", None),
+        "MODEL_PLACEHOLDER_M12" | "MODEL_CLAUDE_4_5_OPUS" | "MODEL_CLAUDE_4_5_OPUS_THINKING" => {
             ("claude-opus-4-5", "Claude Opus 4.5", None)
         }
-        "MODEL_CLAUDE_4_5_OPUS_THINKING" => ("claude-opus-4-5", "Claude Opus 4.5", Some("high")),
-        "MODEL_CLAUDE_4_5_SONNET" => ("claude-sonnet-4-5", "Claude Sonnet 4.5", None),
-        "MODEL_CLAUDE_4_5_SONNET_THINKING" => {
-            ("claude-sonnet-4-5", "Claude Sonnet 4.5", Some("high"))
+        "MODEL_CLAUDE_4_5_SONNET" | "MODEL_CLAUDE_4_5_SONNET_THINKING" => {
+            ("claude-sonnet-4-5", "Claude Sonnet 4.5", None)
         }
-        "MODEL_CLAUDE_4_SONNET" => ("claude-sonnet-4-20250514", "Claude Sonnet 4", None),
-        "MODEL_CLAUDE_4_SONNET_THINKING" => {
-            ("claude-sonnet-4-20250514", "Claude Sonnet 4", Some("high"))
+        "MODEL_CLAUDE_4_SONNET" | "MODEL_CLAUDE_4_SONNET_THINKING" => {
+            ("claude-sonnet-4-20250514", "Claude Sonnet 4", None)
         }
-        "MODEL_PLACEHOLDER_M8" | "MODEL_CHAT_23310" | "MODEL_GOOGLE_GEMINI_2_5_PRO" => {
-            ("gemini-2.5-pro", "Gemini 2.5 Pro", None)
-        }
-        "MODEL_GOOGLE_GEMINI_2_5_PRO_THINKING" => {
-            ("gemini-2.5-pro", "Gemini 2.5 Pro", Some("high"))
-        }
-        "MODEL_PLACEHOLDER_M7" | "MODEL_CHAT_20706" | "MODEL_GOOGLE_GEMINI_2_5_FLASH" => {
-            ("gemini-2.5-flash", "Gemini 2.5 Flash", None)
-        }
-        "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING" => {
-            ("gemini-2.5-flash", "Gemini 2.5 Flash", Some("high"))
-        }
+        "MODEL_PLACEHOLDER_M8"
+        | "MODEL_CHAT_23310"
+        | "MODEL_GOOGLE_GEMINI_2_5_PRO"
+        | "MODEL_GOOGLE_GEMINI_2_5_PRO_THINKING" => ("gemini-2.5-pro", "Gemini 2.5 Pro", None),
+        "MODEL_PLACEHOLDER_M7"
+        | "MODEL_CHAT_20706"
+        | "MODEL_GOOGLE_GEMINI_2_5_FLASH"
+        | "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING" => ("gemini-2.5-flash", "Gemini 2.5 Flash", None),
         "MODEL_PLACEHOLDER_M9" | "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE" => {
             ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", None)
         }
@@ -238,14 +227,18 @@ pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
         let (name, suffix) = name.strip_suffix(')')?.rsplit_once(" (")?;
         let raw = suffix.to_ascii_lowercase();
         let effort = match raw.as_str() {
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => Some(raw),
-            "thinking" => Some("high".to_owned()),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => {
+                Some(Some(raw))
+            }
+            "thinking" => Some(None),
             _ => None,
         }?;
         (!name.is_empty()).then(|| (name.to_owned(), effort))
     }) {
         a.model_display_name = Some(name);
-        a.reasoning_effort.get_or_insert(effort);
+        if let Some(effort) = effort {
+            a.reasoning_effort.get_or_insert(effort);
+        }
         changed = true;
     }
     let mut resolved_alias = None;
@@ -871,44 +864,8 @@ impl Api {
         .await?;
         serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
     }
-    async fn call_on_timeout(
-        &self,
-        endpoint: &Endpoint,
-        method: &str,
-        body: &Value,
-        timeout: std::time::Duration,
-    ) -> Result<Value> {
-        let bytes = Self::bytes(
-            self.http
-                .post(format!(
-                    "{}/exa.language_server_pb.LanguageServerService/{method}",
-                    endpoint.origin
-                ))
-                .timeout(timeout)
-                .header("Connect-Protocol-Version", "1")
-                .header("x-codeium-csrf-token", &endpoint.token)
-                .json(body),
-        )
-        .await?;
-        serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
-    }
-    #[cfg(test)]
-    async fn collect(
-        &self,
-        store: &mut impl Repository,
-        home: &Path,
-        pricing: &Pricing,
-        settings: &Settings,
-        report: &mut Report,
-        repair: bool,
-    ) -> Result<()> {
-        let brain = home.join("antigravity/brain");
-        let files = collect_transcript_files(&brain)?;
-        self.collect_with_files(store, &brain, &files, pricing, settings, report, repair)
-            .await
-    }
     #[allow(clippy::too_many_arguments)]
-    async fn collect_with_files(
+    pub(super) async fn collect_with_files(
         &self,
         store: &mut impl Repository,
         brain: &Path,
@@ -1012,6 +969,7 @@ impl Api {
         let mut active_endpoint = owner.unwrap_or(0);
         let mut resolved_owner = owner.is_some();
         let mut steps = Steps::default();
+        let mut failed_steps = BTreeSet::new();
         let mut fallback_loaded = false;
         let mut offset = if store.requires_complete_history() {
             0
@@ -1150,11 +1108,21 @@ impl Api {
             for batch in entries.chunks(128) {
                 let mut rows = Vec::new();
                 for entry in batch {
+                    let mut indices: Vec<_> = entry["stepIndices"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(number)
+                        .collect();
                     let parsed = match record(id, entry, &steps, offset) {
                         Ok(parsed) => parsed,
                         Err(error) => {
                             if store.requires_complete_history() {
                                 return Err(error);
+                            }
+                            failed_steps.extend(indices);
+                            for s in &failed_steps {
+                                cursor.covered.remove(s);
                             }
                             report.errors += 1;
                             offset += 1;
@@ -1172,12 +1140,6 @@ impl Api {
                         }
                         None => entry.get("chatModel").is_none(),
                     };
-                    let mut indices: Vec<_> = entry["stepIndices"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(number)
-                        .collect();
                     if let Some(exec_indices) = entry["executionId"]
                         .as_str()
                         .and_then(|id| steps.executions.get(id))
@@ -1188,18 +1150,27 @@ impl Api {
                         if stable == offset {
                             stable += 1;
                         }
-                        cursor.covered.extend(indices);
+                        cursor
+                            .covered
+                            .extend(indices.into_iter().filter(|i| !failed_steps.contains(i)));
                     } else if entry.get("chatModel").is_some() {
-                        cursor.covered.extend(indices);
                         let has_reported_tokens = entry["chatModel"].get("usage").is_some()
                             || entry["chatModel"]["retryInfos"]
                                 .as_array()
                                 .is_some_and(|a| !a.is_empty());
                         if has_reported_tokens {
+                            failed_steps.extend(indices);
+                            for s in &failed_steps {
+                                cursor.covered.remove(s);
+                            }
                             if store.requires_complete_history() {
                                 return Err(failure("Antigravity 历史用量尚未完整，请稍后重试"));
                             }
                             report.errors += 1;
+                        } else {
+                            cursor
+                                .covered
+                                .extend(indices.into_iter().filter(|i| !failed_steps.contains(i)));
                         }
                     }
                     offset += 1;
@@ -1230,7 +1201,7 @@ fn cascade_id<'a>(brain: &Path, path: &'a Path) -> Result<&'a str> {
         .ok_or_else(|| failure("Antigravity 历史路径无效"))
 }
 
-fn collect_transcript_files(brain: &Path) -> Result<Vec<PathBuf>> {
+pub(super) fn collect_transcript_files(brain: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     transcript_files(brain, &mut files, 0)?;
     Ok(files)
@@ -1265,20 +1236,8 @@ fn transcript_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result
     }
     Ok(())
 }
-#[cfg(test)]
-pub(super) fn scan_files(
-    store: &mut impl Repository,
-    home: &Path,
-    pricing: &Pricing,
-    settings: &Settings,
-    report: &mut Report,
-    repair: bool,
-) -> Result<()> {
-    let brain = home.join("antigravity/brain");
-    let files = collect_transcript_files(&brain)?;
-    scan_file_list(store, &brain, &files, pricing, settings, report, repair)
-}
-fn scan_file_list(
+
+pub(super) fn scan_file_list(
     store: &mut impl Repository,
     brain: &Path,
     files: &[PathBuf],
@@ -1614,21 +1573,11 @@ pub struct AntigravityTrackWindow {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AntigravityLiveQuota {
-    pub label: String,
-    pub remaining_percent: Option<f64>,
-    pub used_percent: Option<f64>,
-    pub reset_at: Option<i64>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct AntigravityQuotaTrack {
     pub id: String,
     pub label: String,
     pub burst_5h: AntigravityTrackWindow,
     pub weekly_7d: AntigravityTrackWindow,
-    pub live_quota: Option<AntigravityLiveQuota>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1672,8 +1621,6 @@ pub struct AntigravityUsageStats {
     pub tracks: Vec<AntigravityQuotaTrack>,
     pub families: Vec<AntigravityFamilyGroup>,
     pub top_sessions: Vec<AntigravitySessionRow>,
-    pub live_quotas: Vec<AntigravityLiveQuota>,
-    pub live_connected: bool,
 }
 
 fn classify_model_family(
@@ -1725,387 +1672,146 @@ fn classify_model_family(
     (resolved, family, family_label, track)
 }
 
-fn sanitize_quota_label(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    let looks_like_path = trimmed.starts_with('/')
-        || trimmed.starts_with("~/")
-        || trimmed.contains('\\')
-        || trimmed.contains("://")
-        || (trimmed.len() >= 3
-            && trimmed.as_bytes()[0].is_ascii_alphabetic()
-            && trimmed.as_bytes()[1] == b':'
-            && trimmed.as_bytes()[2] == b'/');
-    if trimmed.is_empty()
-        || trimmed.len() > 64
-        || trimmed.chars().any(char::is_control)
-        || trimmed.contains('@')
-        || looks_like_path
-    {
-        return None;
+fn fmt_usd(d: rust_decimal::Decimal) -> String {
+    if d.is_zero() {
+        "0".into()
+    } else {
+        d.normalize().to_string()
     }
-    let humanized = match trimmed {
-        "geminiQuota" | "gemini_quota" | "geminiModels" => "Gemini",
-        "claudeQuota" | "claude_quota" | "claudeModels" => "Claude / GPT",
-        "premiumQuota" | "premium_quota" | "premiumModels" => "Premium",
-        "flowCredits" | "flow_credits" => "Flow Credits",
-        "promptCredits" | "prompt_credits" => "Prompt Credits",
-        other => other,
-    };
-    Some(humanized.to_owned())
 }
 
-fn float_field(v: &Value, keys: &[&str]) -> Option<f64> {
-    keys.iter().find_map(|k| {
-        let cell = v.get(*k)?;
-        cell.as_f64()
-            .or_else(|| cell.as_str()?.trim().trim_end_matches('%').parse().ok())
-            .filter(|n| n.is_finite() && *n >= 0.0)
-    })
+fn round_pct(num: u64, den: u64) -> Option<f64> {
+    (den > 0).then(|| ((num as f64 * 100.0) / den as f64 * 10.0).round() / 10.0)
 }
 
-fn reset_timestamp(v: &Value) -> Option<i64> {
-    for key in [
-        "resetTime",
-        "resetsAt",
-        "nextResetTime",
-        "windowEndTime",
-        "expiresAt",
-        "resetAt",
-    ] {
-        let Some(cell) = v.get(key) else {
-            continue;
-        };
-        if let Some(ts) = time(cell) {
-            return Some(ts);
-        }
-        if let Some(raw) = cell.as_i64().or_else(|| cell.as_str()?.parse().ok()) {
-            if (1_577_836_800..=4_102_444_800).contains(&raw) {
-                return Some(raw * 1000);
-            }
-            if (1_577_836_800_000..=4_102_444_800_000).contains(&raw) {
-                return Some(raw);
-            }
-        }
-    }
-    None
+#[derive(Default)]
+struct WindowAcc {
+    requests: u64,
+    tokens: u64,
+    reasoning_tokens: u64,
+    cost: rust_decimal::Decimal,
+    unpriced_requests: u64,
 }
 
-fn parse_single_quota_entry(v: &Value, fallback_key: Option<&str>) -> Option<AntigravityLiveQuota> {
-    let obj = v.as_object()?;
-    let raw_label = text(
-        v,
-        &[
-            "label",
-            "displayName",
-            "title",
-            "name",
-            "track",
-            "modelFamily",
-            "category",
-            "quotaType",
-            "modelOrAlias",
-        ],
-    )
-    .or(fallback_key)?;
-    let label = sanitize_quota_label(raw_label)?;
-    let mut remaining =
-        float_field(v, &["remainingPercentage", "remainingPercent"]).or_else(|| {
-            float_field(v, &["remainingFraction", "remainingRatio"]).map(|f| {
-                if f <= 1.0 {
-                    f * 100.0
-                } else {
-                    f
-                }
-            })
-        });
-    let mut used = float_field(
-        v,
-        &[
-            "usedPercentage",
-            "usedPercent",
-            "usagePercentage",
-            "percentUsed",
-        ],
-    )
-    .or_else(|| {
-        float_field(v, &["usedFraction", "usageFraction", "usedRatio"]).map(|f| {
-            if f <= 1.0 {
-                f * 100.0
+impl WindowAcc {
+    fn into_view(self, hours: f64) -> AntigravityTrackWindow {
+        AntigravityTrackWindow {
+            requests: self.requests,
+            tokens: self.tokens,
+            reasoning_tokens: self.reasoning_tokens,
+            cost_usd: fmt_usd(self.cost),
+            unpriced_requests: self.unpriced_requests,
+            tokens_per_hour: if hours > 0.0 {
+                ((self.tokens as f64 / hours) * 10.0).round() / 10.0
             } else {
-                f
-            }
-        })
-    });
-    if remaining.is_none() && used.is_none() {
-        let limit = float_field(
-            v,
-            &["limit", "max", "total", "quotaLimit", "monthlyLimit", "cap"],
-        )
-        .filter(|n| *n > 0.0);
-        if let Some(limit) = limit {
-            if let Some(rem_count) =
-                float_field(v, &["remaining", "available", "left", "remainingCount"])
-            {
-                remaining = Some(((rem_count / limit) * 100.0).clamp(0.0, 100.0));
-            } else if let Some(used_count) =
-                float_field(v, &["used", "consumed", "usage", "usedCount"])
-            {
-                used = Some(((used_count / limit) * 100.0).clamp(0.0, 100.0));
-            }
+                0.0
+            },
         }
     }
-    if remaining.is_none() && used.is_none() && !obj.contains_key("quotaInfo") {
-        return None;
-    }
-    if let Some(nested) = v.get("quotaInfo").filter(|q| q.is_object()) {
-        if let Some(mut inner) = parse_single_quota_entry(nested, Some(&label)) {
-            inner.label = label;
-            if inner.reset_at.is_none() {
-                inner.reset_at = reset_timestamp(v);
-            }
-            return Some(inner);
-        }
-    }
-    let remaining_percent = remaining
-        .map(|n| n.clamp(0.0, 100.0))
-        .or_else(|| used.map(|u| (100.0 - u.clamp(0.0, 100.0)).clamp(0.0, 100.0)));
-    let used_percent = used
-        .map(|n| n.clamp(0.0, 100.0))
-        .or_else(|| remaining_percent.map(|r| (100.0 - r).clamp(0.0, 100.0)));
-    if remaining_percent.is_none() && used_percent.is_none() {
-        return None;
-    }
-    Some(AntigravityLiveQuota {
-        label,
-        remaining_percent,
-        used_percent,
-        reset_at: reset_timestamp(v),
-    })
 }
 
-pub(super) fn parse_quota_summary(root: &Value) -> Vec<AntigravityLiveQuota> {
-    fn walk(
-        node: &Value,
-        key_hint: Option<&str>,
-        depth: usize,
-        out: &mut Vec<AntigravityLiveQuota>,
+#[derive(Default)]
+struct FamilyAcc {
+    label: &'static str,
+    requests: u64,
+    tokens: u64,
+    reasoning_tokens: u64,
+    cost: rust_decimal::Decimal,
+}
+
+#[derive(Default)]
+struct SessionAcc {
+    requests: u64,
+    models: BTreeMap<String, u64>,
+    family_counts: BTreeMap<&'static str, u64>,
+    total_tokens: u64,
+    reasoning_tokens: u64,
+    cache_read_eligible: u64,
+    cache_input_eligible: u64,
+    duration_ms: u64,
+    cost: rust_decimal::Decimal,
+    unpriced_requests: u64,
+    started_at: Option<i64>,
+    last_active_at: Option<i64>,
+}
+
+pub(super) struct UsageStatsAggregator {
+    filter_start: i64,
+    filter_end: i64,
+    anchor: i64,
+    start_5h: i64,
+    start_7d: i64,
+    model_filter: Option<String>,
+    session_filter: Option<String>,
+    multiplier: String,
+    requests: u64,
+    unpriced_requests: u64,
+    total_cost: rust_decimal::Decimal,
+    mix_input: u64,
+    mix_cache_read: u64,
+    mix_cache_write: u64,
+    mix_output: u64,
+    mix_visible_output: u64,
+    mix_reasoning: u64,
+    cache_read_eligible: u64,
+    cache_input_eligible: u64,
+    cache_savings: rust_decimal::Decimal,
+    gemini_5h: WindowAcc,
+    gemini_7d: WindowAcc,
+    claude_5h: WindowAcc,
+    claude_7d: WindowAcc,
+    families: BTreeMap<&'static str, FamilyAcc>,
+    sessions: BTreeMap<String, SessionAcc>,
+    quote_cache: BTreeMap<(String, i64), super::pricing::Quote>,
+}
+
+impl UsageStatsAggregator {
+    pub(super) fn new(filter: &Filter, multiplier: &str, now_ms: i64) -> Self {
+        let anchor = filter.end.unwrap_or(now_ms);
+        Self {
+            filter_start: filter.start.unwrap_or(0),
+            filter_end: anchor,
+            anchor,
+            start_5h: anchor.saturating_sub(5 * 3_600_000),
+            start_7d: anchor.saturating_sub(7 * 86_400_000),
+            model_filter: filter
+                .model
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            session_filter: filter
+                .session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            multiplier: multiplier.to_owned(),
+            requests: 0,
+            unpriced_requests: 0,
+            total_cost: rust_decimal::Decimal::ZERO,
+            mix_input: 0,
+            mix_cache_read: 0,
+            mix_cache_write: 0,
+            mix_output: 0,
+            mix_visible_output: 0,
+            mix_reasoning: 0,
+            cache_read_eligible: 0,
+            cache_input_eligible: 0,
+            cache_savings: rust_decimal::Decimal::ZERO,
+            gemini_5h: WindowAcc::default(),
+            gemini_7d: WindowAcc::default(),
+            claude_5h: WindowAcc::default(),
+            claude_7d: WindowAcc::default(),
+            families: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            quote_cache: BTreeMap::new(),
+        }
+    }
+
+    pub(super) fn ingest(
+        &mut self,
+        row: super::storage_v12::AntigravityAttemptRow,
+        pricing: &Pricing,
     ) {
-        if depth > 5 || out.len() >= 16 {
-            return;
-        }
-        match node {
-            Value::Array(items) => {
-                for item in items {
-                    if let Some(parsed) = parse_single_quota_entry(item, None) {
-                        out.push(parsed);
-                    } else {
-                        walk(item, None, depth + 1, out);
-                    }
-                }
-            }
-            Value::Object(map) => {
-                if depth > 0 {
-                    if let Some(parsed) = parse_single_quota_entry(node, key_hint) {
-                        out.push(parsed);
-                        return;
-                    }
-                }
-                for (k, child) in map {
-                    if matches!(
-                        k.as_str(),
-                        "email"
-                            | "userEmail"
-                            | "apiKey"
-                            | "token"
-                            | "accessToken"
-                            | "refreshToken"
-                            | "csrfToken"
-                    ) {
-                        continue;
-                    }
-                    let hint = matches!(
-                        k.as_str(),
-                        "geminiQuota"
-                            | "gemini_quota"
-                            | "geminiModels"
-                            | "claudeQuota"
-                            | "claude_quota"
-                            | "claudeModels"
-                            | "premiumQuota"
-                            | "premium_quota"
-                            | "premiumModels"
-                            | "flowCredits"
-                            | "promptCredits"
-                    )
-                    .then_some(k.as_str());
-                    walk(child, hint, depth + 1, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut raw = Vec::new();
-    walk(root, None, 0, &mut raw);
-    let mut seen = BTreeSet::new();
-    let mut deduped = Vec::new();
-    for item in raw {
-        let key = item.label.to_ascii_lowercase();
-        if seen.insert(key) {
-            deduped.push(item);
-        }
-    }
-    deduped
-}
-
-async fn probe_live_quotas_with_api(api: &Api) -> (bool, Vec<AntigravityLiveQuota>) {
-    let mut connected = false;
-    let mut merged = Vec::new();
-    let mut seen = BTreeSet::new();
-    let body = json!({});
-    let timeout = std::time::Duration::from_secs(2);
-    for endpoint in &api.endpoints {
-        if let Ok(payload) = api
-            .call_on_timeout(endpoint, "RetrieveUserQuotaSummary", &body, timeout)
-            .await
-        {
-            connected = true;
-            for item in parse_quota_summary(&payload) {
-                let key = item.label.to_ascii_lowercase();
-                if seen.insert(key) {
-                    merged.push(item);
-                }
-            }
-            if !merged.is_empty() {
-                break;
-            }
-        }
-    }
-    (connected, merged)
-}
-
-pub async fn probe_live_quotas() -> (bool, Vec<AntigravityLiveQuota>) {
-    let connect = tokio::time::timeout(std::time::Duration::from_secs(2), Api::connect()).await;
-    let Ok(Ok(Some(api))) = connect else {
-        return (false, Vec::new());
-    };
-    probe_live_quotas_with_api(&api).await
-}
-
-fn match_track_live_quota(
-    track_id: &str,
-    live_quotas: &[AntigravityLiveQuota],
-) -> Option<AntigravityLiveQuota> {
-    live_quotas
-        .iter()
-        .find(|q| {
-            let lower = q.label.to_ascii_lowercase();
-            if track_id == "gemini" {
-                lower.contains("gemini")
-            } else {
-                lower.contains("claude")
-                    || lower.contains("sonnet")
-                    || lower.contains("opus")
-                    || lower.contains("gpt")
-                    || lower.contains("openai")
-                    || lower.contains("anthropic")
-            }
-        })
-        .cloned()
-}
-
-pub(super) fn compute_usage_stats(
-    rows: impl IntoIterator<Item = Result<super::storage_v12::AntigravityAttemptRow>>,
-    filter: &Filter,
-    pricing: &Pricing,
-    multiplier: &str,
-    now_ms: i64,
-    live: (bool, Vec<AntigravityLiveQuota>),
-) -> Result<AntigravityUsageStats> {
-    use rust_decimal::Decimal;
-    let filter_start = filter.start.unwrap_or(0);
-    let filter_end = filter.end.unwrap_or(now_ms);
-    let anchor = filter.end.unwrap_or(now_ms);
-    let start_5h = anchor.saturating_sub(5 * 3_600_000);
-    let start_7d = anchor.saturating_sub(7 * 86_400_000);
-    let model_filter = filter.model.as_deref().filter(|s| !s.is_empty());
-    let session_filter = filter.session_id.as_deref().filter(|s| !s.is_empty());
-
-    #[derive(Default)]
-    struct WindowAcc {
-        requests: u64,
-        tokens: u64,
-        reasoning_tokens: u64,
-        cost: Decimal,
-        unpriced_requests: u64,
-    }
-    impl WindowAcc {
-        fn into_view(self, hours: f64) -> AntigravityTrackWindow {
-            AntigravityTrackWindow {
-                requests: self.requests,
-                tokens: self.tokens,
-                reasoning_tokens: self.reasoning_tokens,
-                cost_usd: if self.cost.is_zero() {
-                    "0".into()
-                } else {
-                    self.cost.normalize().to_string()
-                },
-                unpriced_requests: self.unpriced_requests,
-                tokens_per_hour: if hours > 0.0 {
-                    ((self.tokens as f64 / hours) * 10.0).round() / 10.0
-                } else {
-                    0.0
-                },
-            }
-        }
-    }
-    #[derive(Default)]
-    struct FamilyAcc {
-        label: &'static str,
-        requests: u64,
-        tokens: u64,
-        reasoning_tokens: u64,
-        cost: Decimal,
-    }
-    #[derive(Default)]
-    struct SessionAcc {
-        requests: u64,
-        models: BTreeMap<String, u64>,
-        family_counts: BTreeMap<&'static str, u64>,
-        total_tokens: u64,
-        reasoning_tokens: u64,
-        cache_read_eligible: u64,
-        cache_input_eligible: u64,
-        duration_ms: u64,
-        cost: Decimal,
-        unpriced_requests: u64,
-        started_at: Option<i64>,
-        last_active_at: Option<i64>,
-    }
-
-    let mut requests = 0u64;
-    let mut unpriced_requests = 0u64;
-    let mut total_cost = Decimal::ZERO;
-    let mut mix_input = 0u64;
-    let mut mix_cache_read = 0u64;
-    let mut mix_cache_write = 0u64;
-    let mut mix_output = 0u64;
-    let mut mix_visible_output = 0u64;
-    let mut mix_reasoning = 0u64;
-    let mut cache_read_eligible = 0u64;
-    let mut cache_input_eligible = 0u64;
-    let mut cache_savings = Decimal::ZERO;
-
-    let mut gemini_5h = WindowAcc::default();
-    let mut gemini_7d = WindowAcc::default();
-    let mut claude_5h = WindowAcc::default();
-    let mut claude_7d = WindowAcc::default();
-
-    let mut families: BTreeMap<&'static str, FamilyAcc> = BTreeMap::new();
-    let mut sessions: BTreeMap<String, SessionAcc> = BTreeMap::new();
-    let mut quote_cache: BTreeMap<String, super::pricing::Quote> = BTreeMap::new();
-
-    for item in rows {
-        let row = item?;
         let (resolved_model, family, family_label, track) =
             classify_model_family(row.model.as_deref(), row.display_name.as_deref());
         let attempt_tokens = Tokens {
@@ -2123,11 +1829,10 @@ pub(super) fn compute_usage_stats(
             .cost
             .as_deref()
             .and_then(decimal)
-            .unwrap_or(Decimal::ZERO);
+            .unwrap_or(rust_decimal::Decimal::ZERO);
         let is_unpriced_final = row.is_final && row.cost.is_none() && row.unpriced > 0;
 
-        // Dual-Track 5h & 7d rolling windows relative to anchor
-        if row.time >= start_7d && row.time <= anchor {
+        if row.time >= self.start_7d && row.time <= self.anchor {
             if let Some(track_id) = track {
                 let add_win = |win: &mut WindowAcc| {
                     if row.is_final {
@@ -2141,67 +1846,72 @@ pub(super) fn compute_usage_stats(
                     win.cost += row_cost;
                 };
                 if track_id == "gemini" {
-                    add_win(&mut gemini_7d);
-                    if row.time >= start_5h {
-                        add_win(&mut gemini_5h);
+                    add_win(&mut self.gemini_7d);
+                    if row.time >= self.start_5h {
+                        add_win(&mut self.gemini_5h);
                     }
                 } else {
-                    add_win(&mut claude_7d);
-                    if row.time >= start_5h {
-                        add_win(&mut claude_5h);
+                    add_win(&mut self.claude_7d);
+                    if row.time >= self.start_5h {
+                        add_win(&mut self.claude_5h);
                     }
                 }
             }
         }
 
-        // Main filtered range breakdown
-        if row.time < filter_start || row.time > filter_end {
-            continue;
+        if row.time < self.filter_start || row.time > self.filter_end {
+            return;
         }
-        if let Some(wanted_session) = session_filter {
+        if let Some(wanted_session) = self.session_filter.as_deref() {
             if row.session_id.as_deref() != Some(wanted_session) {
-                continue;
+                return;
             }
         }
-        if let Some(wanted_model) = model_filter {
+        if let Some(wanted_model) = self.model_filter.as_deref() {
             if resolved_model.as_deref() != Some(wanted_model)
                 && row.model.as_deref() != Some(wanted_model)
             {
-                continue;
+                return;
             }
         }
 
         if row.is_final {
-            requests += 1;
+            self.requests += 1;
             if is_unpriced_final {
-                unpriced_requests += 1;
+                self.unpriced_requests += 1;
             }
         }
-        total_cost += row_cost;
+        self.total_cost += row_cost;
 
         let inp = row.input.unwrap_or(0);
         let cr = row.cache_read.unwrap_or(0);
         let cw = row.cache_write.unwrap_or(0);
         let out = row.output.unwrap_or(0);
         let capped_reasoning = tok_reasoning.min(out);
-        mix_input = mix_input.saturating_add(inp);
-        mix_cache_read = mix_cache_read.saturating_add(cr);
-        mix_cache_write = mix_cache_write.saturating_add(cw);
-        mix_output = mix_output.saturating_add(out);
-        mix_visible_output =
-            mix_visible_output.saturating_add(out.saturating_sub(capped_reasoning));
-        mix_reasoning = mix_reasoning.saturating_add(tok_reasoning);
+        self.mix_input = self.mix_input.saturating_add(inp);
+        self.mix_cache_read = self.mix_cache_read.saturating_add(cr);
+        self.mix_cache_write = self.mix_cache_write.saturating_add(cw);
+        self.mix_output = self.mix_output.saturating_add(out);
+        self.mix_visible_output = self
+            .mix_visible_output
+            .saturating_add(out.saturating_sub(capped_reasoning));
+        self.mix_reasoning = self.mix_reasoning.saturating_add(tok_reasoning);
 
         if let Some((elig_read, elig_input)) = attempt_tokens.cache_sample() {
-            cache_read_eligible = cache_read_eligible.saturating_add(elig_read);
-            cache_input_eligible = cache_input_eligible.saturating_add(elig_input);
+            self.cache_read_eligible = self.cache_read_eligible.saturating_add(elig_read);
+            self.cache_input_eligible = self.cache_input_eligible.saturating_add(elig_input);
         }
 
         if cr > 0 && row.cost.is_some() {
             if let Some(model_name) = resolved_model.as_deref() {
-                let quote = quote_cache.entry(model_name.to_owned()).or_insert_with(|| {
-                    pricing.quote_at(Some(model_name), multiplier, row.started_at)
-                });
+                let hour_bucket = row.started_at.div_euclid(3_600_000);
+                let multiplier = &self.multiplier;
+                let quote = self
+                    .quote_cache
+                    .entry((model_name.to_owned(), hour_bucket))
+                    .or_insert_with(|| {
+                        pricing.quote_at(Some(model_name), multiplier, row.started_at)
+                    });
                 let uncached_tokens = Tokens {
                     input: Some(inp.saturating_add(cr)),
                     output: Some(out),
@@ -2212,14 +1922,14 @@ pub(super) fn compute_usage_stats(
                 if let Some(uncached_snap) = quote.calculate(&uncached_tokens, None) {
                     if let Some(uncached_cost) = decimal(&uncached_snap.cost) {
                         if uncached_cost > row_cost {
-                            cache_savings += uncached_cost - row_cost;
+                            self.cache_savings += uncached_cost - row_cost;
                         }
                     }
                 }
             }
         }
 
-        let fam = families.entry(family).or_insert_with(|| FamilyAcc {
+        let fam = self.families.entry(family).or_insert_with(|| FamilyAcc {
             label: family_label,
             ..FamilyAcc::default()
         });
@@ -2231,7 +1941,7 @@ pub(super) fn compute_usage_stats(
         fam.cost += row_cost;
 
         if let Some(sid) = row.session_id.filter(|s| !s.is_empty()) {
-            let sess = sessions.entry(sid).or_default();
+            let sess = self.sessions.entry(sid).or_default();
             if row.is_final {
                 sess.requests += 1;
                 sess.duration_ms = sess.duration_ms.saturating_add(row.duration_ms);
@@ -2261,148 +1971,123 @@ pub(super) fn compute_usage_stats(
         }
     }
 
-    let mix_total = mix_input
-        .saturating_add(mix_cache_read)
-        .saturating_add(mix_cache_write)
-        .saturating_add(mix_output);
-    let thinking_share_percent = (mix_output > 0).then(|| {
-        ((mix_reasoning.min(mix_output) as f64 * 100.0) / mix_output as f64 * 10.0).round() / 10.0
-    });
-    let cache_hit_percent = (cache_input_eligible > 0).then(|| {
-        ((cache_read_eligible as f64 * 100.0) / cache_input_eligible as f64 * 10.0).round() / 10.0
-    });
+    pub(super) fn finish(self) -> AntigravityUsageStats {
+        let mix_total = self
+            .mix_input
+            .saturating_add(self.mix_cache_read)
+            .saturating_add(self.mix_cache_write)
+            .saturating_add(self.mix_output);
+        let thinking_share_percent =
+            round_pct(self.mix_reasoning.min(self.mix_output), self.mix_output);
+        let cache_hit_percent = round_pct(self.cache_read_eligible, self.cache_input_eligible);
 
-    let mut family_rows: Vec<AntigravityFamilyGroup> = families
-        .into_iter()
-        .map(|(family, acc)| AntigravityFamilyGroup {
-            family: family.to_owned(),
-            label: acc.label.to_owned(),
-            requests: acc.requests,
-            tokens: acc.tokens,
-            reasoning_tokens: acc.reasoning_tokens,
-            cost_usd: if acc.cost.is_zero() {
-                "0".into()
-            } else {
-                acc.cost.normalize().to_string()
-            },
-            share_percent: if mix_total > 0 {
-                ((acc.tokens as f64 * 100.0) / mix_total as f64 * 10.0).round() / 10.0
-            } else {
-                0.0
-            },
-        })
-        .collect();
-    family_rows.sort_by(|a, b| {
-        b.tokens
-            .cmp(&a.tokens)
-            .then_with(|| b.requests.cmp(&a.requests))
-            .then_with(|| a.family.cmp(&b.family))
-    });
-
-    let total_sessions = sessions.len() as u64;
-    let mut top_sessions: Vec<AntigravitySessionRow> = sessions
-        .into_iter()
-        .map(|(session_id, acc)| {
-            let short_hash: String = session_id.chars().take(8).collect();
-            let primary_model = acc
-                .models
-                .into_iter()
-                .max_by(|(ma, ca), (mb, cb)| ca.cmp(cb).then_with(|| mb.cmp(ma)))
-                .map(|(m, _)| m)
-                .unwrap_or_else(|| "未识别".into());
-            let family = acc
-                .family_counts
-                .into_iter()
-                .max_by(|(fa, ca), (fb, cb)| ca.cmp(cb).then_with(|| fb.cmp(fa)))
-                .map(|(f, _)| f)
-                .unwrap_or("other")
-                .to_owned();
-            let sess_cache_hit = (acc.cache_input_eligible > 0).then(|| {
-                ((acc.cache_read_eligible as f64 * 100.0) / acc.cache_input_eligible as f64 * 10.0)
-                    .round()
-                    / 10.0
-            });
-            AntigravitySessionRow {
-                session_id,
-                short_hash,
+        let mut family_rows: Vec<AntigravityFamilyGroup> = self
+            .families
+            .into_iter()
+            .map(|(family, acc)| AntigravityFamilyGroup {
+                family: family.to_owned(),
+                label: acc.label.to_owned(),
                 requests: acc.requests,
-                primary_model,
-                family,
-                total_tokens: acc.total_tokens,
+                tokens: acc.tokens,
                 reasoning_tokens: acc.reasoning_tokens,
-                cache_hit_percent: sess_cache_hit,
-                duration_ms: acc.duration_ms,
-                cost_usd: if acc.cost.is_zero() {
-                    "0".into()
-                } else {
-                    acc.cost.normalize().to_string()
-                },
-                unpriced_requests: acc.unpriced_requests,
-                started_at: acc.started_at.unwrap_or(0),
-                last_active_at: acc.last_active_at.unwrap_or(0),
-            }
-        })
-        .collect();
-    top_sessions.sort_by(|a, b| {
-        b.total_tokens
-            .cmp(&a.total_tokens)
-            .then_with(|| b.requests.cmp(&a.requests))
-            .then_with(|| b.last_active_at.cmp(&a.last_active_at))
-            .then_with(|| a.session_id.cmp(&b.session_id))
-    });
-    top_sessions.truncate(20);
+                cost_usd: fmt_usd(acc.cost),
+                share_percent: round_pct(acc.tokens, mix_total).unwrap_or(0.0),
+            })
+            .collect();
+        family_rows.sort_by(|a, b| {
+            b.tokens
+                .cmp(&a.tokens)
+                .then_with(|| b.requests.cmp(&a.requests))
+                .then_with(|| a.family.cmp(&b.family))
+        });
 
-    let (live_connected, live_quotas) = live;
-    let tracks = vec![
-        AntigravityQuotaTrack {
-            id: "gemini".into(),
-            label: "Gemini".into(),
-            burst_5h: gemini_5h.into_view(5.0),
-            weekly_7d: gemini_7d.into_view(168.0),
-            live_quota: match_track_live_quota("gemini", &live_quotas),
-        },
-        AntigravityQuotaTrack {
-            id: "claude_gpt".into(),
-            label: "Claude / GPT".into(),
-            burst_5h: claude_5h.into_view(5.0),
-            weekly_7d: claude_7d.into_view(168.0),
-            live_quota: match_track_live_quota("claude_gpt", &live_quotas),
-        },
-    ];
+        let total_sessions = self.sessions.len() as u64;
+        let mut top_sessions: Vec<AntigravitySessionRow> = self
+            .sessions
+            .into_iter()
+            .map(|(session_id, acc)| {
+                let short_hash: String = session_id.chars().take(8).collect();
+                let primary_model = acc
+                    .models
+                    .into_iter()
+                    .max_by(|(ma, ca), (mb, cb)| ca.cmp(cb).then_with(|| mb.cmp(ma)))
+                    .map(|(m, _)| m)
+                    .unwrap_or_else(|| "未识别".into());
+                let family = acc
+                    .family_counts
+                    .into_iter()
+                    .max_by(|(fa, ca), (fb, cb)| ca.cmp(cb).then_with(|| fb.cmp(fa)))
+                    .map(|(f, _)| f)
+                    .unwrap_or("other")
+                    .to_owned();
+                AntigravitySessionRow {
+                    session_id,
+                    short_hash,
+                    requests: acc.requests,
+                    primary_model,
+                    family,
+                    total_tokens: acc.total_tokens,
+                    reasoning_tokens: acc.reasoning_tokens,
+                    cache_hit_percent: round_pct(
+                        acc.cache_read_eligible,
+                        acc.cache_input_eligible,
+                    ),
+                    duration_ms: acc.duration_ms,
+                    cost_usd: fmt_usd(acc.cost),
+                    unpriced_requests: acc.unpriced_requests,
+                    started_at: acc.started_at.unwrap_or(0),
+                    last_active_at: acc.last_active_at.unwrap_or(0),
+                }
+            })
+            .collect();
+        top_sessions.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| b.requests.cmp(&a.requests))
+                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        top_sessions.truncate(20);
 
-    Ok(AntigravityUsageStats {
-        requests,
-        sessions: total_sessions,
-        cost_usd: if total_cost.is_zero() {
-            "0".into()
-        } else {
-            total_cost.normalize().to_string()
-        },
-        unpriced_requests,
-        token_mix: AntigravityTokenMix {
-            input: mix_input,
-            cache_read: mix_cache_read,
-            cache_write: mix_cache_write,
-            output: mix_output,
-            visible_output: mix_visible_output,
-            reasoning: mix_reasoning,
-            total: mix_total,
-            thinking_share_percent,
-            cache_hit_percent,
-            cache_read_eligible,
-            cache_input_eligible,
-            cache_savings_usd: if cache_savings.is_zero() {
-                "0".into()
-            } else {
-                cache_savings.normalize().to_string()
+        let tracks = vec![
+            AntigravityQuotaTrack {
+                id: "gemini".into(),
+                label: "Gemini".into(),
+                burst_5h: self.gemini_5h.into_view(5.0),
+                weekly_7d: self.gemini_7d.into_view(168.0),
             },
-        },
-        tracks,
-        families: family_rows,
-        top_sessions,
-        live_quotas,
-        live_connected,
-    })
+            AntigravityQuotaTrack {
+                id: "claude_gpt".into(),
+                label: "Claude / GPT".into(),
+                burst_5h: self.claude_5h.into_view(5.0),
+                weekly_7d: self.claude_7d.into_view(168.0),
+            },
+        ];
+
+        AntigravityUsageStats {
+            requests: self.requests,
+            sessions: total_sessions,
+            cost_usd: fmt_usd(self.total_cost),
+            unpriced_requests: self.unpriced_requests,
+            token_mix: AntigravityTokenMix {
+                input: self.mix_input,
+                cache_read: self.mix_cache_read,
+                cache_write: self.mix_cache_write,
+                output: self.mix_output,
+                visible_output: self.mix_visible_output,
+                reasoning: self.mix_reasoning,
+                total: mix_total,
+                thinking_share_percent,
+                cache_hit_percent,
+                cache_read_eligible: self.cache_read_eligible,
+                cache_input_eligible: self.cache_input_eligible,
+                cache_savings_usd: fmt_usd(self.cache_savings),
+            },
+            tracks,
+            families: family_rows,
+            top_sessions,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2508,9 +2193,8 @@ mod history_tests {
     #[test]
     fn history_is_incremental_and_correlates_rpc_steps_without_duplicates() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir
-            .path()
-            .join("antigravity/brain/cascade/.system_generated/logs/transcript.jsonl");
+        let brain = dir.path().join("antigravity/brain");
+        let path = brain.join("cascade/.system_generated/logs/transcript.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut store = Store::open(&dir.path().join("db")).unwrap();
         let pricing = Pricing::new(&dir.path().join("db")).unwrap();
@@ -2525,9 +2209,11 @@ mod history_tests {
             .unwrap();
         let rows=concat!("{\"step_index\":3,\"input_tokens\":10,\"output_tokens\":2}\n", "{\"request_id\":\"request-fixture\",\"model\":\"fixture-model\",\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":10,\"output_tokens\":3}\n");
         std::fs::write(&path, rows).unwrap();
-        scan_files(
+        let files = vec![path.clone()];
+        scan_file_list(
             &mut store,
-            dir.path(),
+            &brain,
+            &files,
             &pricing,
             &Settings::default(),
             &mut report,
@@ -2540,9 +2226,10 @@ mod history_tests {
             .unwrap();
         assert_eq!(saved.known_success(), None);
         assert_eq!(saved.attempts[0].measured_duration_ms(), None);
-        scan_files(
+        scan_file_list(
             &mut store,
-            dir.path(),
+            &brain,
+            &files,
             &pricing,
             &Settings::default(),
             &mut report,
@@ -2561,9 +2248,10 @@ mod history_tests {
             .unwrap();
         file.write_all(b"{\"step_index\":99,\"input_tokens\":10}\n")
             .unwrap();
-        assert!(scan_files(
+        assert!(scan_file_list(
             &mut store,
-            dir.path(),
+            &brain,
+            &files,
             &pricing,
             &Settings::default(),
             &mut report,

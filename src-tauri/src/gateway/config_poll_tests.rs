@@ -9,8 +9,10 @@ fn cached_poll_tracks_replacement_guard_and_invalid_text_without_weakening_save_
     storage::atomic_write(&path, b"model='fixture-one'", None).unwrap();
     let mut cache = crate::auth_cache::Cache::default();
     let first = g.config_stamp(&home, &mut cache).unwrap();
+    let first_arc = cache.entry.as_ref().unwrap().2.clone();
     assert_eq!(first.1, g.read_config(&home).unwrap().revision);
     assert_eq!(first, g.config_stamp(&home, &mut cache).unwrap());
+    assert!(Arc::ptr_eq(&first_arc, &cache.entry.as_ref().unwrap().2));
     storage::atomic_write(&path, b"model='fixture-two'", None).unwrap();
     let second = g.config_stamp(&home, &mut cache).unwrap();
     assert_ne!(first.1, second.1);
@@ -120,8 +122,32 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     let alpha_id = second.providers[0].id.clone();
     let beta_id = second.providers[1].id.clone();
     assert_eq!(second.config_provider.as_deref(), Some(alpha_id.as_str()));
-    // Cached repeat view returns identical revision and config_revision.
+    // Cached repeat view reuses the same Arc in view_config_cache.codex_bearer.
+    let bearer_arc_v1 = codex
+        .0
+        .view_config_cache
+        .lock()
+        .unwrap()
+        .codex_bearer
+        .entry
+        .as_ref()
+        .unwrap()
+        .2
+        .clone();
     let cached_view = codex.try_view().unwrap();
+    assert!(Arc::ptr_eq(
+        &bearer_arc_v1,
+        &codex
+            .0
+            .view_config_cache
+            .lock()
+            .unwrap()
+            .codex_bearer
+            .entry
+            .as_ref()
+            .unwrap()
+            .2
+    ));
     assert_eq!(cached_view.revision, second.revision);
     assert_eq!(cached_view.config_revision, second.config_revision);
 
@@ -287,11 +313,29 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
         v1.config_revision.as_deref(),
         Some(codex_api::read(&codex_home, "relay_a").unwrap().0.as_str())
     );
-    // Steady-state cache hit returns identical config_revision.
+    // Steady-state cache hit reuses the same Arc pointers in codex_api_toml and codex_api_auth.
+    let (toml_arc_v1, auth_arc_v1) = {
+        let vc = codex.0.view_config_cache.lock().unwrap();
+        (
+            vc.codex_api_toml.1.entry.as_ref().unwrap().2.clone(),
+            vc.codex_api_auth.entry.as_ref().unwrap().2.clone(),
+        )
+    };
     assert_eq!(
         codex.try_view().unwrap().config_revision,
         v1.config_revision
     );
+    {
+        let vc = codex.0.view_config_cache.lock().unwrap();
+        assert!(Arc::ptr_eq(
+            &toml_arc_v1,
+            &vc.codex_api_toml.1.entry.as_ref().unwrap().2
+        ));
+        assert!(Arc::ptr_eq(
+            &auth_arc_v1,
+            &vc.codex_api_auth.entry.as_ref().unwrap().2
+        ));
+    }
 
     // Modifying only auth.json invalidates codex_api_auth and updates config_revision.
     storage::atomic_write(
@@ -348,10 +392,34 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
         )
         .unwrap();
     assert!(grok_v1.config_revision.is_some());
+    let grok_arc_v1 = grok
+        .0
+        .view_config_cache
+        .lock()
+        .unwrap()
+        .grok
+        .entry
+        .as_ref()
+        .unwrap()
+        .2
+        .clone();
     assert_eq!(
         grok.try_view().unwrap().config_revision,
         grok_v1.config_revision
     );
+    assert!(Arc::ptr_eq(
+        &grok_arc_v1,
+        &grok
+            .0
+            .view_config_cache
+            .lock()
+            .unwrap()
+            .grok
+            .entry
+            .as_ref()
+            .unwrap()
+            .2
+    ));
 
     storage::atomic_write(
         &grok_cfg,

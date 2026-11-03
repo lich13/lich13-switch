@@ -212,12 +212,6 @@ function buildStats(
           unpricedRequests: 0,
           tokensPerHour: 1_041.7,
         },
-        liveQuota: {
-          label: "Gemini Pro",
-          remainingPercent: 72.5,
-          usedPercent: 27.5,
-          resetAt: Date.UTC(2026, 9, 30, 12, 0, 0),
-        },
       },
       {
         id: "claude_gpt",
@@ -237,12 +231,6 @@ function buildStats(
           costUsd: "0.5600",
           unpricedRequests: 0,
           tokensPerHour: 506.0,
-        },
-        liveQuota: {
-          label: "Claude / GPT",
-          remainingPercent: 18.0,
-          usedPercent: 82.0,
-          resetAt: Date.UTC(2026, 9, 30, 18, 0, 0),
         },
       },
     ],
@@ -283,8 +271,6 @@ function buildStats(
         lastActiveAt: Date.UTC(2026, 9, 30, 8, 30, 0),
       },
     ],
-    liveQuotas: [],
-    liveConnected: true,
     ...overrides,
   };
 }
@@ -445,8 +431,6 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();
 
     const tracks = screen.getByLabelText("双轨 5 小时与 7 天滚动窗口");
-    expect(within(tracks).getByText("剩余 72.5%")).toBeInTheDocument();
-    expect(within(tracks).getByText("剩余 18%")).toBeInTheDocument();
     expect(within(tracks).getAllByText("5h 突发窗口")).toHaveLength(2);
     expect(within(tracks).getAllByText("7d 周滚动")).toHaveLength(2);
 
@@ -482,20 +466,31 @@ describe("Usage Antigravity statistics tab", () => {
     });
   });
 
-  it("degrades silently without error banner or quota badges when Antigravity app is offline", async () => {
+  it("formats unpriced requests as 未定价 across summary, track windows, and session rows", async () => {
     statsPayload = buildStats({
-      liveConnected: false,
-      tracks: buildStats().tracks.map((t) => ({ ...t, liveQuota: null })),
-      liveQuotas: [],
+      costUsd: "0",
+      unpricedRequests: 15,
+      tracks: buildStats().tracks.map((t) => ({
+        ...t,
+        burst5h: { ...t.burst5h, costUsd: "0", unpricedRequests: t.burst5h.requests },
+        weekly7d: { ...t.weekly7d, costUsd: "0", unpricedRequests: t.weekly7d.requests },
+      })),
+      topSessions: buildStats().topSessions.map((s) => ({
+        ...s,
+        costUsd: "0",
+        unpricedRequests: s.requests,
+      })),
     });
     const user = userEvent.setup();
     render(<Usage />);
 
     await user.click(screen.getByRole("tab", { name: "Antigravity" }));
 
-    const tracks = await screen.findByLabelText("双轨 5 小时与 7 天滚动窗口");
-    expect(within(tracks).getAllByText("5h 突发窗口")).toHaveLength(2);
-    expect(within(tracks).queryByText(/剩余/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    const summary = await screen.findByLabelText("Token 构成与缓存节省");
+    expect(within(summary).getByText("未定价")).toBeInTheDocument();
+    const tracks = screen.getByLabelText("双轨 5 小时与 7 天滚动窗口");
+    expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
+    const sessions = screen.getByLabelText("脱敏会话排行");
+    expect(within(sessions).getByText("未定价")).toBeInTheDocument();
   });
 });

@@ -8,7 +8,7 @@ use std::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Fingerprint([u64; 8]);
+pub(crate) struct Fingerprint([u64; 8]);
 
 #[cfg(unix)]
 fn fingerprint(path: &Path) -> Option<Fingerprint> {
@@ -87,7 +87,7 @@ fn fingerprint(path: &Path) -> Option<Fingerprint> {
 }
 
 pub struct Cache<T> {
-    entry: Option<(PathBuf, Fingerprint, Arc<T>)>,
+    pub(crate) entry: Option<(PathBuf, Fingerprint, Arc<T>)>,
 }
 impl<T> Default for Cache<T> {
     fn default() -> Self {

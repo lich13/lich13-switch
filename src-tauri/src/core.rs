@@ -955,7 +955,6 @@ impl Core {
             && !optional_auth
             && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
                 || newer_token);
-        let old = self.store.clone();
         if changed {
             // A valid intermediate JSON document can still be part of a non-atomic write.
             if self.checked_auth.as_ref() != Some(&(root.clone(), auth_revision.clone())) {
@@ -973,6 +972,7 @@ impl Core {
                 &info,
                 auth.as_deref().and_then(|b| std::str::from_utf8(b).ok()),
             ) {
+                let old = self.store.clone();
                 let (kind, id, message) = if let Some(index) = matched {
                     let profile = &mut self.store.profiles[index];
                     if older_times(incoming_times, credential_times(&profile.auth)) {

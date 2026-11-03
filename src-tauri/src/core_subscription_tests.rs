@@ -1214,7 +1214,7 @@ fn missing_or_unmatched_claims_are_read_only_unknown_metadata() {
 }
 
 #[test]
-fn core_state_caches_credential_metadata_and_invalidates_on_rotation_or_deletion() {
+fn core_state_caches_config_and_updates_credential_metadata_on_rotation_or_deletion() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     let home = dir.path().join("codex-home");
@@ -1272,8 +1272,18 @@ fn core_state_caches_credential_metadata_and_invalidates_on_rotation_or_deletion
         saved.accounts[0].subscription.as_ref().map(|s| s.stale),
         Some(false)
     );
-    // Steady-state repeat poll hits config_cache and returns identical revision and auth_source.
+    // Steady-state repeat poll hits config_cache and auth_cache (same Arc pointers) and returns identical revision and auth_source.
+    let cfg_arc_v1 = core.config_cache.entry.as_ref().unwrap().2.clone();
+    let auth_arc_v1 = core.auth_cache.entry.as_ref().unwrap().2.clone();
     let cached_poll = core.state().unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &cfg_arc_v1,
+        &core.config_cache.entry.as_ref().unwrap().2
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &auth_arc_v1,
+        &core.auth_cache.entry.as_ref().unwrap().2
+    ));
     assert_eq!(cached_poll.config_revision, cfg_rev_v1);
     assert_eq!(cached_poll.auth_source, saved.auth_source);
 

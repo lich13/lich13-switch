@@ -3,19 +3,9 @@ import {
   compact,
   money,
   numeric,
-  type AntigravityLiveQuota,
   type AntigravityTrackWindow,
   type AntigravityUsageStats,
 } from "./usage-types";
-
-function quotaTone(q: AntigravityLiveQuota): string {
-  const rem = q.remainingPercent;
-  if (rem == null) return "neutral";
-  if (rem <= 5) return "critical";
-  if (rem < 25) return "warn";
-  if (rem >= 60) return "good";
-  return "normal";
-}
 
 function formatDuration(ms: number): string {
   if (!ms || ms <= 0) return "—";
@@ -25,31 +15,19 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
-function windowCost(w: AntigravityTrackWindow): string {
+function formatCostOrUnpriced(
+  costUsd: string,
+  unpricedRequests: number,
+  requests: number,
+): string {
   if (
-    Number(w.costUsd) === 0 &&
-    w.unpricedRequests > 0 &&
-    w.unpricedRequests >= w.requests
+    Number(costUsd) === 0 &&
+    unpricedRequests > 0 &&
+    unpricedRequests >= requests
   ) {
     return "未定价";
   }
-  return money(w.costUsd);
-}
-
-function QuotaBadge({ quota }: { quota: AntigravityLiveQuota }) {
-  const pct =
-    quota.remainingPercent != null
-      ? `剩余 ${quota.remainingPercent.toFixed(1).replace(/\.0$/, "")}%`
-      : quota.usedPercent != null
-        ? `已用 ${quota.usedPercent.toFixed(1).replace(/\.0$/, "")}%`
-        : null;
-  if (!pct) return null;
-  return (
-    <span className="usage-ag-quota-pill" data-tone={quotaTone(quota)}>
-      <strong>{pct}</strong>
-      {quota.resetAt != null && <small>重置 {date(quota.resetAt)}</small>}
-    </span>
-  );
+  return money(costUsd);
 }
 
 function TrackWindowBlock({
@@ -63,7 +41,9 @@ function TrackWindowBlock({
     <div className="usage-ag-window">
       <div className="usage-ag-window-head">
         <span>{title}</span>
-        <strong title={w.costUsd}>{windowCost(w)}</strong>
+        <strong title={w.costUsd}>
+          {formatCostOrUnpriced(w.costUsd, w.unpricedRequests, w.requests)}
+        </strong>
       </div>
       <dl className="usage-ag-window-stats">
         <div>
@@ -118,19 +98,11 @@ export default function UsageAntigravity({
   ];
   const segmentTotal = segments.reduce((sum, item) => sum + item.value, 0);
 
-  const attachedLabels = new Set(
-    stats.tracks.map((t) => t.liveQuota?.label).filter(Boolean),
+  const totalCostLabel = formatCostOrUnpriced(
+    stats.costUsd,
+    stats.unpricedRequests,
+    stats.requests,
   );
-  const extraQuotas = stats.liveConnected
-    ? stats.liveQuotas.filter((q) => !attachedLabels.has(q.label))
-    : [];
-
-  const totalCostLabel =
-    Number(stats.costUsd) === 0 &&
-    stats.unpricedRequests > 0 &&
-    stats.unpricedRequests >= stats.requests
-      ? "未定价"
-      : money(stats.costUsd);
 
   return (
     <div className="usage-ag-panel" aria-busy={busy}>
@@ -229,9 +201,6 @@ export default function UsageAntigravity({
           >
             <header className="usage-ag-track-head">
               <h2>{track.label}</h2>
-              {stats.liveConnected && track.liveQuota && (
-                <QuotaBadge quota={track.liveQuota} />
-              )}
             </header>
             <div className="usage-ag-windows">
               <TrackWindowBlock title="5h 突发窗口" window={track.burst5h} />
@@ -240,17 +209,6 @@ export default function UsageAntigravity({
           </article>
         ))}
       </section>
-
-      {extraQuotas.length > 0 && (
-        <div className="usage-ag-extra-quotas" aria-label="实时配额明细">
-          {extraQuotas.map((q) => (
-            <div key={q.label} className="usage-ag-extra-quota">
-              <span>{q.label}</span>
-              <QuotaBadge quota={q} />
-            </div>
-          ))}
-        </div>
-      )}
 
       {stats.families.length > 0 && (
         <section className="usage-ag-card" aria-label="模型家族分布">
@@ -327,11 +285,11 @@ export default function UsageAntigravity({
                     </td>
                     <td>{formatDuration(row.durationMs)}</td>
                     <td title={row.costUsd}>
-                      {Number(row.costUsd) === 0 &&
-                      row.unpricedRequests > 0 &&
-                      row.unpricedRequests >= row.requests
-                        ? "未定价"
-                        : money(row.costUsd)}
+                      {formatCostOrUnpriced(
+                        row.costUsd,
+                        row.unpricedRequests,
+                        row.requests,
+                      )}
                     </td>
                     <td>{date(row.lastActiveAt)}</td>
                     <td>

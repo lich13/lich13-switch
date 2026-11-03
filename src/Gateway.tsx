@@ -37,8 +37,6 @@ import {
   useRef,
   useState,
 } from "react";
-
-const ProviderTesting = lazy(() => import("./ProviderTesting"));
 import {
   Plus,
   Power,
@@ -52,6 +50,8 @@ import {
 } from "lucide-react";
 import { command } from "./bridge";
 import { errorOf, type GatewayState, type Provider } from "./types";
+
+const ProviderTesting = lazy(() => import("./ProviderTesting"));
 
 type Edit = GatewayEdit;
 type Dialog =

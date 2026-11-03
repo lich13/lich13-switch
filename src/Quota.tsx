@@ -178,6 +178,17 @@ const samePlan = (a: QuotaPlan, b: QuotaPlan) =>
   a.used === b.used && a.total === b.total && a.unlimited === b.unlimited &&
   a.resetAt === b.resetAt;
 
+function isQuotaExpired(quota: ProviderQuota): boolean {
+  if (quota.expiresAtUnix != null && quota.expiresAtUnix > 0) {
+    return quota.expiresAtUnix * 1000 <= Date.now();
+  }
+  if (quota.expiresAt) {
+    const parsed = Date.parse(quota.expiresAt);
+    if (!Number.isNaN(parsed)) return parsed <= Date.now();
+  }
+  return false;
+}
+
 function quotaTone(
   quota?: ProviderQuota,
   keyStatus?: string | null,
@@ -191,11 +202,12 @@ function quotaTone(
     return "neutral";
   if (
     (quota.state === "error" && quota.plans.length === 0) ||
-    keyStatus === "已到期"
+    Boolean(keyStatus) ||
+    isQuotaExpired(quota)
   )
     return "critical";
   const primary = quota.plans[0];
-  if (!primary) return keyStatus ? "normal" : "neutral";
+  if (!primary) return "neutral";
   if (primary.unlimited) return "good";
   if (primary.remaining == null) return "neutral";
   if (primary.remaining <= 0) return "critical";

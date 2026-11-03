@@ -1130,29 +1130,29 @@
 
 @keyframes freeze-card-thaw {
   0% {
-    border-color: rgba(125, 211, 252, 0.56);
+    border-color: color-mix(in srgb, var(--accent-sky) 56%, var(--line));
     background:
       radial-gradient(
         125% 135% at 0% 0%,
-        rgba(56, 189, 248, 0.22),
+        color-mix(in srgb, var(--accent-sky) 22%, transparent),
         transparent 62%
       ),
       radial-gradient(
         115% 125% at 100% 100%,
-        rgba(52, 211, 153, 0.18),
+        color-mix(in srgb, var(--accent-teal) 18%, transparent),
         transparent 64%
       ),
       var(--surface);
     box-shadow:
-      0 0 0 1px rgba(125, 211, 252, 0.45),
-      0 0 24px rgba(52, 211, 153, 0.26),
+      0 0 0 1px color-mix(in srgb, var(--accent-sky) 45%, transparent),
+      0 0 24px color-mix(in srgb, var(--accent-teal) 26%, transparent),
       var(--surface-highlight),
       var(--shadow-sm);
   }
   45% {
     border-color: color-mix(in srgb, var(--accent-teal) 44%, var(--line));
     box-shadow:
-      0 0 16px rgba(45, 212, 191, 0.2),
+      0 0 16px color-mix(in srgb, var(--accent-teal) 20%, transparent),
       var(--surface-highlight),
       var(--shadow-sm);
   }
@@ -1163,13 +1163,13 @@
 
 @keyframes freeze-light-thaw {
   0% {
-    background: #7dd3fc;
-    box-shadow: 0 0 16px rgba(125, 211, 252, 0.85);
+    background: var(--accent-sky);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--accent-sky) 85%, transparent);
     transform: scale(1.22);
   }
   50% {
     background: var(--accent-teal);
-    box-shadow: 0 0 14px rgba(45, 212, 191, 0.72);
+    box-shadow: 0 0 14px color-mix(in srgb, var(--accent-teal) 72%, transparent);
   }
   100% {
     background: currentColor;

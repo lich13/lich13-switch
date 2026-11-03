@@ -754,14 +754,6 @@ fn write_records_stream(path: &Path, records: &[Arc<Record>]) -> Result<()> {
         Ok(())
     })
 }
-#[cfg(test)]
-fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
-    if let Some(snapshot) = j.prepare_rewrite(path, changed) {
-        write_records_stream(path, &snapshot)?;
-        j.dirty = false;
-    }
-    Ok(())
-}
 impl Service {
     pub fn new(data: &Path) -> Self {
         let path = data.join("diagnostics.jsonl");
@@ -1344,6 +1336,14 @@ mod v02512_tests;
 mod routing_visibility_tests {
     use super::*;
     use crate::usage::model::{RoutingDecision, RoutingEvidence};
+
+    fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
+        if let Some(snapshot) = j.prepare_rewrite(path, changed) {
+            write_records_stream(path, &snapshot)?;
+            j.dirty = false;
+        }
+        Ok(())
+    }
 
     #[test]
     fn loaded_retention_and_sanitization_remain_dirty_until_persisted() {

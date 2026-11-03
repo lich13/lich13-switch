@@ -501,12 +501,6 @@ export function usagePreview(
             unpricedRequests: 0,
             tokensPerHour: 1702.4,
           },
-          liveQuota: {
-            label: "Gemini Pro",
-            remainingPercent: 76,
-            usedPercent: 24,
-            resetAt: now + 3 * 3600000,
-          },
         },
         {
           id: "claude_gpt",
@@ -526,12 +520,6 @@ export function usagePreview(
             costUsd: "0.6986",
             unpricedRequests: 0,
             tokensPerHour: 782.1,
-          },
-          liveQuota: {
-            label: "Claude / GPT",
-            remainingPercent: 62,
-            usedPercent: 38,
-            resetAt: now + 11 * 3600000,
           },
         },
       ],
@@ -573,21 +561,6 @@ export function usagePreview(
           lastActiveAt: now - 600000,
         },
       ],
-      liveQuotas: [
-        {
-          label: "Gemini Pro",
-          remainingPercent: 76,
-          usedPercent: 24,
-          resetAt: now + 3 * 3600000,
-        },
-        {
-          label: "Claude / GPT",
-          remainingPercent: 62,
-          usedPercent: 38,
-          resetAt: now + 11 * 3600000,
-        },
-      ],
-      liveConnected: true,
     };
     return previewStats;
   }

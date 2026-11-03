@@ -252,19 +252,11 @@ export type AntigravityTrackWindow = {
   tokensPerHour: number;
 };
 
-export type AntigravityLiveQuota = {
-  label: string;
-  remainingPercent: number | null;
-  usedPercent: number | null;
-  resetAt: number | null;
-};
-
 export type AntigravityQuotaTrack = {
   id: string;
   label: string;
   burst5h: AntigravityTrackWindow;
   weekly7d: AntigravityTrackWindow;
-  liveQuota: AntigravityLiveQuota | null;
 };
 
 export type AntigravityFamilyGroup = {
@@ -302,8 +294,6 @@ export type AntigravityUsageStats = {
   tracks: AntigravityQuotaTrack[];
   families: AntigravityFamilyGroup[];
   topSessions: AntigravitySessionRow[];
-  liveQuotas: AntigravityLiveQuota[];
-  liveConnected: boolean;
 };
 export type Dashboard = {
   dataVersion?: number;

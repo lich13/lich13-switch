@@ -475,6 +475,34 @@ async fn fixture(broken: bool) -> Fixture {
     }
 }
 
+async fn collect_home(
+    api: &Api,
+    store: &mut impl Repository,
+    home: &Path,
+    pricing: &Pricing,
+    settings: &Settings,
+    report: &mut Report,
+    repair: bool,
+) -> Result<()> {
+    let brain = home.join("antigravity/brain");
+    let files = collect_transcript_files(&brain)?;
+    api.collect_with_files(store, &brain, &files, pricing, settings, report, repair)
+        .await
+}
+
+fn scan_home(
+    store: &mut impl Repository,
+    home: &Path,
+    pricing: &Pricing,
+    settings: &Settings,
+    report: &mut Report,
+    repair: bool,
+) -> Result<()> {
+    let brain = home.join("antigravity/brain");
+    let files = collect_transcript_files(&brain)?;
+    scan_file_list(store, &brain, &files, pricing, settings, report, repair)
+}
+
 #[tokio::test]
 async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_steps() {
     let f = fixture(false).await;
@@ -482,47 +510,47 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
     let mut store = Store::open(dir.path()).unwrap();
     let pricing = Pricing::new(dir.path()).unwrap();
     let settings = Settings::default();
-    f.api
-        .collect(
-            &mut store,
-            dir.path(),
-            &pricing,
-            &settings,
-            &mut Report::default(),
-            false,
-        )
-        .await
-        .unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut Report::default(),
+        false,
+    )
+    .await
+    .unwrap();
     let id = parsed(&entry("first", 0)).id;
     let mut old = store.detail(&id).unwrap();
     old.attempts[0].model_display_name = None;
     store.write_batch(&[old], None).unwrap();
-    f.api
-        .collect(
-            &mut store,
-            dir.path(),
-            &pricing,
-            &settings,
-            &mut Report::default(),
-            false,
-        )
-        .await
-        .unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut Report::default(),
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         store.detail(&id).unwrap().attempts[0].model_display_name,
         None
     );
-    f.api
-        .collect(
-            &mut store,
-            dir.path(),
-            &pricing,
-            &settings,
-            &mut Report::default(),
-            true,
-        )
-        .await
-        .unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut Report::default(),
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         store.detail(&id).unwrap().attempts[0]
             .model_display_name
@@ -539,17 +567,17 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
             |r| r.get::<_, String>(0).map(|s| s.parse().unwrap()),
         )
         .unwrap();
-    f.api
-        .collect(
-            &mut store,
-            dir.path(),
-            &pricing,
-            &settings,
-            &mut Report::default(),
-            false,
-        )
-        .await
-        .unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut Report::default(),
+        false,
+    )
+    .await
+    .unwrap();
     let next: i64 = store
         .connection
         .query_row(
@@ -577,17 +605,17 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
     let mut store = Store::open(dir.path()).unwrap();
     let pricing = Pricing::new(dir.path()).unwrap();
     let mut report = Report::default();
-    f.api
-        .collect(
-            &mut store,
-            dir.path(),
-            &pricing,
-            &Settings::default(),
-            &mut report,
-            false,
-        )
-        .await
-        .unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!((report.errors, report.files, report.imported), (1, 1, 2));
     assert_eq!(
         store.cursor(&safe_id("antigravity:rpc:a-broken")).unwrap(),
@@ -626,18 +654,17 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
             self.0.finish_rebuild(source)
         }
     }
-    assert!(f
-        .api
-        .collect(
-            &mut Complete(&mut store),
-            dir.path(),
-            &pricing,
-            &Settings::default(),
-            &mut Report::default(),
-            false
-        )
-        .await
-        .is_err());
+    assert!(collect_home(
+        &f.api,
+        &mut Complete(&mut store),
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut Report::default(),
+        false
+    )
+    .await
+    .is_err());
     assert_eq!(
         store.dashboard(&Filter::default()).unwrap().totals.requests,
         2
@@ -667,18 +694,18 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
     let pricing = Pricing::new(&dir.path().join("db")).unwrap();
     for _ in 0..2 {
         let mut report = Report::default();
-        f.api
-            .collect(
-                &mut store,
-                dir.path(),
-                &pricing,
-                &Settings::default(),
-                &mut report,
-                false,
-            )
-            .await
-            .unwrap();
-        scan_files(
+        collect_home(
+            &f.api,
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .await
+        .unwrap();
+        scan_home(
             &mut store,
             dir.path(),
             &pricing,
@@ -728,17 +755,17 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
     existing.push_str("{\"step_index\":2,\"input_tokens\":50}\n");
     std::fs::write(&local_transcript, existing).unwrap();
     let mut report = Report::default();
-    f.api
-        .collect(
-            &mut store,
-            dir.path(),
-            &pricing,
-            &Settings::default(),
-            &mut report,
-            false,
-        )
-        .await
-        .unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         f.calls
             .lock()
@@ -768,17 +795,17 @@ async fn missing_identity_keeps_gap_but_saves_later_requests_and_repairs_after_r
     let pricing = Pricing::new(dir.path()).unwrap();
     let mut store = Store::open(dir.path()).unwrap();
     let mut report = Report::default();
-    f.api
-        .collect(
-            &mut store,
-            dir.path(),
-            &pricing,
-            &Settings::default(),
-            &mut report,
-            false,
-        )
-        .await
-        .unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(report.errors, 1);
     assert_eq!(
         store.dashboard(&Filter::default()).unwrap().totals.requests,
@@ -799,17 +826,17 @@ async fn missing_identity_keeps_gap_but_saves_later_requests_and_repairs_after_r
     let mut store = Store::open(dir.path()).unwrap();
     for _ in 0..2 {
         let mut report = Report::default();
-        f.api
-            .collect(
-                &mut store,
-                dir.path(),
-                &pricing,
-                &Settings::default(),
-                &mut report,
-                false,
-            )
-            .await
-            .unwrap();
+        collect_home(
+            &f.api,
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.errors, 0);
         assert_eq!(
             store.dashboard(&Filter::default()).unwrap().totals.requests,
@@ -836,7 +863,7 @@ fn file_gap_does_not_hide_later_usage_or_advance_past_unresolved_history() {
     let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
     for _ in 0..2 {
         let mut report = Report::default();
-        scan_files(
+        scan_home(
             &mut store,
             dir.path(),
             &pricing,
@@ -864,7 +891,7 @@ fn file_gap_does_not_hide_later_usage_or_advance_past_unresolved_history() {
         .write_batch(&[], Some((&safe_id("antigravity:rpc:fixture"), &rpc)))
         .unwrap();
     let mut report = Report::default();
-    scan_files(
+    scan_home(
         &mut store,
         dir.path(),
         &pricing,
@@ -915,7 +942,7 @@ fn known_placeholders_and_enums_resolve_pricing_and_effort_while_unknown_stays_u
             "MODEL_PLACEHOLDER_M26",
             Some("claude-opus-4-6"),
             Some("Claude Opus 4.6"),
-            Some("high"),
+            None,
             true,
         ),
         (
@@ -929,7 +956,7 @@ fn known_placeholders_and_enums_resolve_pricing_and_effort_while_unknown_stays_u
             "MODEL_CLAUDE_4_5_SONNET_THINKING",
             Some("claude-sonnet-4-5"),
             Some("Claude Sonnet 4.5"),
-            Some("high"),
+            None,
             true,
         ),
         (
@@ -976,7 +1003,7 @@ fn known_placeholders_and_enums_resolve_pricing_and_effort_while_unknown_stays_u
         assert_eq!(a.price.is_some(), expects_priced, "{raw}");
     }
 
-    // Historical attempt with only display name or raw enum recovers canonical model via normalize_attempt.
+    // Historical attempt with only display name recovers canonical model without fabricating effort for "(Thinking)".
     let mut legacy = Attempt {
         model_display_name: Some("Claude Opus 4.6 (Thinking)".into()),
         duration_ms: 1000,
@@ -987,7 +1014,7 @@ fn known_placeholders_and_enums_resolve_pricing_and_effort_while_unknown_stays_u
         legacy.model_display_name.as_deref(),
         Some("Claude Opus 4.6")
     );
-    assert_eq!(legacy.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(legacy.reasoning_effort.as_deref(), None);
     assert_eq!(legacy.response_model.as_deref(), Some("claude-opus-4-6"));
     assert_eq!(legacy.pricing_model.as_deref(), Some("claude-opus-4-6"));
 }
@@ -1105,7 +1132,8 @@ async fn multi_window_endpoints_merge_fresher_trajectories_and_fallback_for_brai
     let mut store = Store::open(dir.path()).unwrap();
     let pricing = Pricing::new(dir.path()).unwrap();
     let mut report = Report::default();
-    api.collect(
+    collect_home(
+        &api,
         &mut store,
         dir.path(),
         &pricing,
@@ -1135,54 +1163,8 @@ async fn multi_window_endpoints_merge_fresher_trajectories_and_fallback_for_brai
         .is_ok());
 }
 
-#[tokio::test]
-async fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_sessions_and_live_quotas() {
-    let quota_payload = json!({
-        "email": "private-user@example.invalid",
-        "userQuotaSummary": {
-            "quotas": [
-                {
-                    "label": "Gemini Pro",
-                    "remainingPercentage": 72.5,
-                    "resetTime": "2026-10-30T15:00:00Z"
-                },
-                {
-                    "displayName": "Claude / GPT",
-                    "usedFraction": 0.4,
-                    "resetTime": "2026-10-30T16:00:00Z"
-                },
-                {
-                    "label": "leak@example.invalid",
-                    "remainingPercentage": 50.0
-                },
-                {
-                    "label": "~/workspace/secret",
-                    "remainingPercentage": 50.0
-                }
-            ]
-        }
-    });
-    let parsed_quotas = parse_quota_summary(&quota_payload);
-    assert_eq!(parsed_quotas.len(), 2);
-    assert_eq!(parsed_quotas[0].label, "Gemini Pro");
-    assert_eq!(parsed_quotas[0].remaining_percent, Some(72.5));
-    assert_eq!(parsed_quotas[0].used_percent, Some(27.5));
-    assert!(parsed_quotas[0].reset_at.is_some());
-    assert_eq!(parsed_quotas[1].label, "Claude / GPT");
-    assert_eq!(parsed_quotas[1].used_percent, Some(40.0));
-    assert_eq!(parsed_quotas[1].remaining_percent, Some(60.0));
-
-    // Offline / closed endpoint degrades silently without error.
-    let closed_api = Api::from_single(
-        reqwest::Client::builder().no_proxy().build().unwrap(),
-        "http://127.0.0.1:9".into(),
-        "fixture".into(),
-    );
-    assert_eq!(
-        probe_live_quotas_with_api(&closed_api).await,
-        (false, vec![])
-    );
-
+#[test]
+fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
     let now_ms = 1_760_000_000_000i64;
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -1298,7 +1280,6 @@ async fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_sessions_and_
                 &pricing,
                 "1",
                 now_ms,
-                (true, parsed_quotas.clone()),
             )
             .unwrap();
 
@@ -1316,23 +1297,9 @@ async fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_sessions_and_
         assert_eq!(stats.tracks[0].id, "gemini");
         assert_eq!(stats.tracks[0].burst_5h.requests, 1);
         assert_eq!(stats.tracks[0].weekly_7d.requests, 2);
-        assert_eq!(
-            stats.tracks[0]
-                .live_quota
-                .as_ref()
-                .and_then(|q| q.remaining_percent),
-            Some(72.5)
-        );
         assert_eq!(stats.tracks[1].id, "claude_gpt");
         assert_eq!(stats.tracks[1].burst_5h.requests, 1);
         assert_eq!(stats.tracks[1].weekly_7d.requests, 1);
-        assert_eq!(
-            stats.tracks[1]
-                .live_quota
-                .as_ref()
-                .and_then(|q| q.remaining_percent),
-            Some(60.0)
-        );
 
         assert_eq!(stats.families.len(), 2);
         assert_eq!(stats.top_sessions.len(), 2);
@@ -1349,4 +1316,73 @@ async fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_sessions_and_
             .unwrap();
         assert_eq!(alpha_logs.total, 2);
     }
+
+    // F7: Verify cache_savings_usd uses each row's own started_at tariff rather than reusing the first row's timestamp.
+    let dir = tempfile::tempdir().unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap().frozen();
+    let settings = Settings::default();
+    let off_peak_ms = chrono::DateTime::parse_from_rfc3339("2026-10-25T02:00:00Z")
+        .unwrap()
+        .timestamp_millis();
+    let peak_ms = chrono::DateTime::parse_from_rfc3339("2026-10-26T02:00:00Z")
+        .unwrap()
+        .timestamp_millis();
+    let build_row = |at: i64| {
+        let mut r = Record {
+            id: safe_id(&format!("antigravity:request:ds-{at}")),
+            client: "antigravity".into(),
+            source: "antigravity".into(),
+            started_at: at,
+            finished_at: Some(at),
+            completed: true,
+            attempts: vec![Attempt {
+                id: safe_id(&format!("antigravity:request:ds-{at}:final")),
+                requested_model: Some("deepseek-chat".into()),
+                response_model: Some("deepseek-chat".into()),
+                started_at: at,
+                duration_ms: 1000,
+                outcome: "success".into(),
+                usage_status: "reported".into(),
+                tokens: Tokens {
+                    input: Some(1_000),
+                    cache_read: Some(10_000),
+                    output: Some(100),
+                    ..Tokens::default()
+                },
+                ..Attempt::default()
+            }],
+            ..Record::default()
+        };
+        price(&mut r, &pricing, &settings);
+        let a = &r.attempts[0];
+        crate::usage::storage_v12::AntigravityAttemptRow {
+            session_id: None,
+            time: at,
+            started_at: at,
+            is_final: true,
+            model: a.response_model.clone(),
+            display_name: None,
+            inclusive_input: None,
+            input: a.tokens.input,
+            output: a.tokens.output,
+            reasoning: None,
+            cache_read: a.tokens.cache_read,
+            cache_write: None,
+            cost: a.price.as_ref().map(|p| p.cost.clone()),
+            unpriced: 0,
+            duration_ms: 1000,
+        }
+    };
+    let mut single_off_peak = UsageStatsAggregator::new(&Filter::default(), "1", peak_ms + 1_000);
+    single_off_peak.ingest(build_row(off_peak_ms), &pricing);
+    let off_peak_saving =
+        decimal(&single_off_peak.finish().token_mix.cache_savings_usd).unwrap();
+    assert!(off_peak_saving > rust_decimal::Decimal::ZERO);
+
+    let mut combined = UsageStatsAggregator::new(&Filter::default(), "1", peak_ms + 1_000);
+    combined.ingest(build_row(off_peak_ms), &pricing);
+    combined.ingest(build_row(peak_ms), &pricing);
+    let combined_saving = decimal(&combined.finish().token_mix.cache_savings_usd).unwrap();
+    // Peak tariff is 2x off-peak for deepseek-chat, so combined savings must be 3x off_peak_saving (not 2x).
+    assert_eq!(combined_saving, off_peak_saving * rust_decimal::Decimal::from(3));
 }

@@ -1008,15 +1008,15 @@ mod tests {
         assert!(!path.exists());
         assert!(service.read(|s| s.detail("retained")).is_ok());
 
-        let history = dir
-            .path()
-            .join("antigravity/brain/fixture/.system_generated/logs/transcript.jsonl");
+        let brain = dir.path().join("antigravity/brain");
+        let history = brain.join("fixture/.system_generated/logs/transcript.jsonl");
         std::fs::create_dir_all(history.parent().unwrap()).unwrap();
-        std::fs::write(history, b"{\"input_tokens\":").unwrap();
+        std::fs::write(&history, b"{\"input_tokens\":").unwrap();
         let mut spool = Spool::new(dir.path()).unwrap();
-        assert!(super::super::antigravity::scan_files(
+        assert!(super::super::antigravity::scan_file_list(
             &mut spool,
-            dir.path(),
+            &brain,
+            &[history],
             &service.prices().unwrap().frozen(),
             &service.settings(),
             &mut sessions::Report::default(),

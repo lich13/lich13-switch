@@ -277,11 +277,8 @@ fn record_path(data: &Path) -> PathBuf {
     data.join(FILE)
 }
 
-fn load(data: &Path) -> Result<Option<Record>> {
-    let Some(raw) = storage::read_optional(&record_path(data))? else {
-        return Ok(None);
-    };
-    let record: Record = serde_json::from_slice(&raw)
+fn parse_record(raw: &[u8]) -> Result<Record> {
+    let record: Record = serde_json::from_slice(raw)
         .map_err(|_| AppError::new(code::OFFICIAL_MODE, "官方账号事务记录损坏，请保留现场"))?;
     if record.version != 1
         || record.fields.len() != KEYS.len()
@@ -298,7 +295,14 @@ fn load(data: &Path) -> Result<Option<Record>> {
             "官方账号事务记录格式无效，请保留现场",
         ));
     }
-    Ok(Some(record))
+    Ok(record)
+}
+
+fn load(data: &Path) -> Result<Option<Record>> {
+    storage::read_optional(&record_path(data))?
+        .as_deref()
+        .map(parse_record)
+        .transpose()
 }
 
 fn save(data: &Path, record: &Record) -> Result<()> {
@@ -312,8 +316,7 @@ fn save(data: &Path, record: &Record) -> Result<()> {
     )
 }
 
-fn verify_record(text: &str, record: &Record) -> Result<Scan> {
-    let scan = scan(text)?;
+fn verify_scan(scan: &Scan, record: &Record) -> Result<()> {
     for (n, field) in record.fields.iter().enumerate() {
         match (
             &field.original,
@@ -331,13 +334,34 @@ fn verify_record(text: &str, record: &Record) -> Result<Scan> {
             }
         }
     }
+    Ok(())
+}
+
+fn verify_record(text: &str, record: &Record) -> Result<Scan> {
+    let scan = scan(text)?;
+    verify_scan(&scan, record)?;
     Ok(scan)
 }
 
+#[derive(Default)]
+struct OfficialViewCache {
+    record: crate::auth_cache::Cache<Option<Result<Record>>>,
+    config: crate::auth_cache::Cache<Option<Result<Scan>>>,
+}
+
+static VIEW_CACHE: std::sync::OnceLock<std::sync::Mutex<OfficialViewCache>> =
+    std::sync::OnceLock::new();
+
 pub fn view(data: &Path, home: &Path) -> OfficialModeView {
-    let record = match load(data) {
-        Ok(Some(record)) => record,
-        Ok(None) => return OfficialModeView::default(),
+    let mut cache = VIEW_CACHE
+        .get_or_init(|| std::sync::Mutex::new(OfficialViewCache::default()))
+        .lock()
+        .unwrap();
+    let rec_entry = match cache
+        .record
+        .read(&record_path(data), |raw| raw.as_deref().map(parse_record))
+    {
+        Ok(entry) => entry,
         Err(e) => {
             return OfficialModeView {
                 state: "unavailable".into(),
@@ -346,56 +370,77 @@ pub fn view(data: &Path, home: &Path) -> OfficialModeView {
             }
         }
     };
-    let raw = match storage::read_optional(&record.path) {
-        Ok(Some(raw)) => raw,
-        Ok(None) => {
+    let record = match rec_entry.as_ref() {
+        Some(Ok(record)) => record,
+        None => return OfficialModeView::default(),
+        Some(Err(e)) => {
             return OfficialModeView {
-                enabled: record.enabled,
-                state: "conflict".into(),
-                account_id: Some(record.account_id),
-                error: Some("Codex 配置不存在".into()),
+                state: "unavailable".into(),
+                error: Some(e.message.clone()),
+                ..Default::default()
             }
         }
+    };
+    let cfg_entry = match cache.config.read(&record.path, |raw| {
+        raw.map(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|_| AppError::new(code::CONFLICT, "Codex 配置不是 UTF-8"))
+                .and_then(|text| scan(&text))
+        })
+    }) {
+        Ok(entry) => entry,
         Err(e) => {
             return OfficialModeView {
                 enabled: record.enabled,
                 state: "unavailable".into(),
-                account_id: Some(record.account_id),
+                account_id: Some(record.account_id.clone()),
                 error: Some(e.message),
             }
         }
+    };
+    let Some(cfg_res) = cfg_entry.as_ref() else {
+        return OfficialModeView {
+            enabled: record.enabled,
+            state: "conflict".into(),
+            account_id: Some(record.account_id.clone()),
+            error: Some("Codex 配置不存在".into()),
+        };
     };
     if record.path != home.join("config.toml") {
         return OfficialModeView {
             enabled: record.enabled,
             state: "conflict".into(),
-            account_id: Some(record.account_id),
+            account_id: Some(record.account_id.clone()),
             error: Some("Codex 配置目录已变化".into()),
         };
     }
-    let text = match String::from_utf8(raw) {
-        Ok(v) => v,
-        Err(_) => {
+    let scan = match cfg_res {
+        Ok(scan) => scan,
+        Err(e) => {
             return OfficialModeView {
                 enabled: record.enabled,
                 state: "conflict".into(),
-                account_id: Some(record.account_id),
-                error: Some("Codex 配置不是 UTF-8".into()),
-            }
+                account_id: Some(record.account_id.clone()),
+                error: Some(if e.message == "Codex 配置不是 UTF-8" {
+                    "Codex 配置不是 UTF-8".into()
+                } else {
+                    "官方账号配置已被外部修改".into()
+                }),
+            };
         }
     };
-    if record.enabled && record.stage == "enabled" && verify_record(&text, &record).is_ok() {
+    if record.enabled && record.stage == "enabled" && verify_scan(scan, record).is_ok() {
         OfficialModeView {
             enabled: true,
             state: "enabled".into(),
-            account_id: Some(record.account_id),
+            account_id: Some(record.account_id.clone()),
             error: None,
         }
     } else {
         OfficialModeView {
             enabled: record.enabled,
             state: "conflict".into(),
-            account_id: Some(record.account_id),
+            account_id: Some(record.account_id.clone()),
             error: Some("官方账号配置已被外部修改".into()),
         }
     }
