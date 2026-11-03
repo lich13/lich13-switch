@@ -1,6 +1,6 @@
-# lich13-switch
+# Vela
 
-<img src="assets/icon.svg" alt="Prism Relay icon" width="96" />
+<img src="assets/icon.svg" alt="Vela icon" width="96" />
 
 面向 **macOS** 与 **Windows** 的本地多客户端 AI 账号、配置与 API 网关工作台（基于 **Tauri 2 + Rust + React** 构建）。统一管理 **Codex**、**Claude Code**、**Grok Build**、**DSH** 的独立供应商队列与本地流量调度，并原生支持 **Antigravity app** 的双模配置编辑、增量会话用量核算与账单导出。
 
@@ -51,7 +51,7 @@
 | **Claude Code** | `127.0.0.1:43721` | `settings.json` 环境变量接入；官方／API 配置档隔离切换 | `settings.json` **可视化（5 分组）+ JSON** 双模编辑 | 网关实时计量 + 主／子代理会话去重 + **账单导出** |
 | **Grok Build** | `127.0.0.1:43721/v1` | 独立受管 API 模型接入，保留原生官方 OAuth 模型自由切换 | `config.toml` 原文校验与 `endpoint.env` 导入预览 | 网关实时计量 + 原生多模型轮次独立统计 |
 | **DSH** | `127.0.0.1:43721/v1` | Chat Completions 协议；全 profile 事务同步与官方模型目录映射 | `desktop` / 各 profile YAML patch 编辑与恢复 | 网关实时请求与模型调用计量 |
-| **Antigravity app** | —（不经过本地网关） | 本机应用直连上游；`lich13-switch` 本地只读协同 | `config.json` **可视化（4 分组）+ JSON** 双模编辑与备份恢复 | 本机 RPC／`brain` 会话增量采集 + **账单导出与清理** |
+| **Antigravity app** | —（不经过本地网关） | 本机应用直连上游；`Vela` 本地只读协同 | `config.json` **可视化（4 分组）+ JSON** 双模编辑与备份恢复 | 本机 RPC／`brain` 会话增量采集 + **账单导出与清理** |
 
 ---
 
@@ -67,7 +67,7 @@ flowchart LR
     AG["Antigravity app"]
   end
 
-  subgraph Core["lich13-switch (Tauri 2 / Rust)"]
+  subgraph Core["Vela (Tauri 2 / Rust)"]
     GW["共享回环网关\n127.0.0.1:43721"]
     Watch["配置事务与文件监听"]
     Sync["会话增量同步与去重引擎"]
@@ -106,7 +106,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\lich13-switch_*.exe -Algorithm SHA256
+Get-FileHash .\Vela_*.exe -Algorithm SHA256
 ```
 
 历史版本演进详见 [发布说明 (RELEASE.md)](RELEASE.md)。

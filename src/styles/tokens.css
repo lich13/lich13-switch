@@ -96,6 +96,38 @@
     --shadow-md: 0 10px 28px rgba(3, 8, 20, 0.38);
     --shadow-lg: 0 24px 60px rgba(2, 6, 17, 0.58);
 
+    /* Vela starry nebula chart & bar tokens */
+    --nebula-cyan: #38bdf8;
+    --nebula-indigo: #6366f1;
+    --nebula-violet: #a855f7;
+    --nebula-aurora: #f472b6;
+    --nebula-gradient: linear-gradient(
+      90deg,
+      #38bdf8 0%,
+      #6366f1 46%,
+      #a855f7 78%,
+      #f472b6 100%
+    );
+    --stardust-overlay:
+      radial-gradient(
+        circle at 18% 34%,
+        rgba(224, 242, 254, 0.22) 0.75px,
+        transparent 1.45px
+      ),
+      radial-gradient(
+        circle at 62% 68%,
+        rgba(192, 132, 252, 0.2) 0.85px,
+        transparent 1.55px
+      ),
+      radial-gradient(
+        circle at 86% 28%,
+        rgba(125, 211, 252, 0.24) 0.7px,
+        transparent 1.35px
+      );
+    --star-corona:
+      0 0 12px rgba(56, 189, 248, 0.28),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22);
+
     color: var(--ink);
     background: var(--canvas);
   }
@@ -177,6 +209,37 @@
     --shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.045);
     --shadow-md: 0 10px 26px rgba(15, 23, 42, 0.085);
     --shadow-lg: 0 24px 56px rgba(15, 23, 42, 0.16);
+
+    --nebula-cyan: #0284c7;
+    --nebula-indigo: #4f46e5;
+    --nebula-violet: #7c3aed;
+    --nebula-aurora: #db2777;
+    --nebula-gradient: linear-gradient(
+      90deg,
+      #0284c7 0%,
+      #4f46e5 48%,
+      #7c3aed 80%,
+      #db2777 100%
+    );
+    --stardust-overlay:
+      radial-gradient(
+        circle at 18% 34%,
+        rgba(2, 132, 199, 0.16) 0.75px,
+        transparent 1.45px
+      ),
+      radial-gradient(
+        circle at 62% 68%,
+        rgba(124, 58, 237, 0.14) 0.85px,
+        transparent 1.55px
+      ),
+      radial-gradient(
+        circle at 86% 28%,
+        rgba(79, 70, 229, 0.16) 0.7px,
+        transparent 1.35px
+      );
+    --star-corona:
+      0 0 10px rgba(79, 70, 229, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.52);
 
     color: var(--ink);
     background: var(--canvas);

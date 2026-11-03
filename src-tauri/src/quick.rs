@@ -71,7 +71,7 @@ impl Panel {
             "quick",
             WebviewUrl::App("index.html?panel=quick".into()),
         )
-        .title("lich13-switch 快捷面板")
+        .title("Vela 快捷面板")
         .inner_size(420., QUICK_DEFAULT_HEIGHT)
         .decorations(false)
         .resizable(false)

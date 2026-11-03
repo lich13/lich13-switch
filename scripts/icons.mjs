@@ -15,7 +15,7 @@ for (const size of sizes) {
     ["black", "#000"],
     ["white", "#fff"],
   ])
-    await sharp(Buffer.from(tray.replace("#000", hex)))
+    await sharp(Buffer.from(tray.replaceAll("#000", hex)))
       .resize(size, size)
       .png()
       .toFile(`assets/png/tray-${color}-${size}.png`);
@@ -72,4 +72,4 @@ const h = Buffer.alloc(8);
 h.write("icns");
 h.writeUInt32BE(8 + chunks.reduce((s, b) => s + b.length, 0), 4);
 await writeFile("src-tauri/icons/icon.icns", Buffer.concat([h, ...chunks]));
-console.log("Prism Relay: SVG, 27 PNGs, ICNS and ICO generated");
+console.log("Vela Pulsar: SVG, 27 PNGs, ICNS and ICO generated");

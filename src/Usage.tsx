@@ -1036,6 +1036,18 @@ function Ranking({
       return av == null ? (bv == null ? a.id.localeCompare(b.id) : 1) : -1;
     return (av - bv) * (view.asc ? 1 : -1) || a.id.localeCompare(b.id);
   });
+  const metricOf = (g: Group) =>
+    view.sort === "cost"
+      ? Number(g.totals.cost)
+      : view.sort === "tokens"
+        ? (tokenTotal(g.totals.tokens) ?? 0)
+        : view.sort === "firstToken"
+          ? (averageFirstToken(g.totals) ?? 0)
+          : g.totals.requests;
+  const maxMetric = sorted.reduce(
+    (max, g) => Math.max(max, metricOf(g) || 0),
+    0,
+  );
   const page = Math.min(view.page, Math.max(1, Math.ceil(sorted.length / 20)));
   return (
     <>
@@ -1096,26 +1108,40 @@ function Ranking({
           <tbody>
             {sorted
               .slice((page - 1) * 20, page * 20)
-              .map(({ id, totals: t }) => (
-                <tr key={id}>
-                  <td title={name(id)}>{name(id)}</td>
-                  <td>
-                    <NumberValue value={t.requests} />
-                  </td>
-                  <td>
-                    <NumberValue value={tokenTotal(t.tokens)} />
-                  </td>
-                  <td title={t.cost}>{money(t.cost)}</td>
-                  <td>
-                    {t.statusKnown
-                      ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
-                      : "—"}
-                  </td>
-                  <td>
-                    <FirstTokenValue totals={t} />
-                  </td>
-                </tr>
-              ))}
+              .map((group) => {
+                const { id, totals: t } = group;
+                const ratio =
+                  maxMetric > 0
+                    ? Math.min(100, Math.max(2, (metricOf(group) / maxMetric) * 100))
+                    : 0;
+                return (
+                  <tr key={id}>
+                    <td title={name(id)}>
+                      <div className="usage-rank-cell">
+                        <span>{name(id)}</span>
+                        <i className="usage-rank-bar" aria-hidden="true">
+                          <b style={{ width: `${ratio}%` }} />
+                        </i>
+                      </div>
+                    </td>
+                    <td>
+                      <NumberValue value={t.requests} />
+                    </td>
+                    <td>
+                      <NumberValue value={tokenTotal(t.tokens)} />
+                    </td>
+                    <td title={t.cost}>{money(t.cost)}</td>
+                    <td>
+                      {t.statusKnown
+                        ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
+                        : "—"}
+                    </td>
+                    <td>
+                      <FirstTokenValue totals={t} />
+                    </td>
+                  </tr>
+                );
+              })}
           </tbody>
         </table>
         {!sorted.length && <div className="usage-empty">暂无数据</div>}

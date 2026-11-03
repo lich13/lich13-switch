@@ -8,7 +8,7 @@ use std::{
     path::Path,
     process::Command,
 };
-const APP: &str = "/Applications/lich13-switch.app/Contents/MacOS/lich13-switch";
+const APP: &str = "/Applications/Vela.app/Contents/MacOS/vela";
 const HELPER: &str = "/Library/PrivilegedHelperTools/com.lich13.gpt-switch.power-helper";
 const IMAGE: &[u8] = include_bytes!(env!("GPT_POWER_HELPER"));
 unsafe extern "C" {

@@ -128,16 +128,17 @@
   min-height: 78px;
   gap: 4px;
   padding: 10px 10px 9px;
-  border: 1px solid color-mix(in srgb, var(--metric-tone) 24%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--metric-tone) 26%, var(--line));
   border-radius: var(--radius-md);
   background:
+    var(--stardust-overlay),
     radial-gradient(
-      115% 95% at 50% 0%,
-      color-mix(in srgb, var(--metric-tone) 13%, transparent),
-      transparent 68%
+      120% 96% at 50% 0%,
+      color-mix(in srgb, var(--metric-tone) 16%, transparent),
+      transparent 70%
     ),
     var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--surface-highlight), var(--shadow-sm);
   color: var(--ink);
   font: inherit;
   text-align: center;
@@ -735,6 +736,30 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.usage-rank-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.usage-rank-cell > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-rank-bar {
+  display: block;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface-subtle) 88%, var(--line));
+  overflow: hidden;
+}
+.usage-rank-bar > b {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--nebula-gradient);
+  box-shadow: var(--star-corona);
+}
 .usage-ranking th button {
   border: 0;
   background: none;
@@ -1326,17 +1351,22 @@
 }
 .usage-ag-mix-bar {
   display: flex;
-  height: 10px;
+  height: 11px;
   border-radius: var(--radius-pill);
   overflow: hidden;
-  background: var(--surface-subtle);
-  border: 1px solid var(--line);
+  background:
+    var(--stardust-overlay),
+    color-mix(in srgb, var(--surface-subtle) 92%, var(--canvas));
+  border: 1px solid color-mix(in srgb, var(--accent-violet) 22%, var(--line));
+  box-shadow: inset 0 1px 2px rgba(2, 6, 23, 0.35);
   margin-bottom: 10px;
 }
 .usage-ag-mix-seg {
+  position: relative;
   display: block;
   min-width: 3px;
   height: 100%;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 .usage-ag-mix-empty {
   display: block;
@@ -1346,23 +1376,39 @@
 }
 .usage-ag-mix-seg.is-input,
 .usage-ag-dot.is-input {
-  background: var(--accent);
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-blue) 100%);
 }
 .usage-ag-mix-seg.is-cacheRead,
 .usage-ag-dot.is-cacheRead {
-  background: var(--success);
+  background: linear-gradient(
+    90deg,
+    var(--accent-teal) 0%,
+    var(--success) 100%
+  );
 }
 .usage-ag-mix-seg.is-cacheWrite,
 .usage-ag-dot.is-cacheWrite {
-  background: var(--warning);
+  background: linear-gradient(
+    90deg,
+    var(--warning) 0%,
+    var(--latency-slow) 100%
+  );
 }
 .usage-ag-mix-seg.is-visibleOutput,
 .usage-ag-dot.is-visibleOutput {
-  background: var(--accent-blue);
+  background: linear-gradient(
+    90deg,
+    var(--accent-blue) 0%,
+    var(--nebula-indigo) 100%
+  );
 }
 .usage-ag-mix-seg.is-reasoning,
 .usage-ag-dot.is-reasoning {
-  background: var(--accent-violet);
+  background: linear-gradient(
+    90deg,
+    var(--accent-violet) 0%,
+    var(--nebula-aurora) 100%
+  );
 }
 .usage-ag-mix-legend {
   display: flex;
@@ -1394,12 +1440,13 @@
 }
 .usage-ag-track-card {
   --track-tone: var(--accent-blue);
-  border-color: color-mix(in srgb, var(--track-tone) 24%, var(--line));
+  border-color: color-mix(in srgb, var(--track-tone) 28%, var(--line));
   background:
+    var(--stardust-overlay),
     radial-gradient(
-      120% 85% at 0% 0%,
-      color-mix(in srgb, var(--track-tone) 10%, transparent),
-      transparent 65%
+      125% 90% at 0% 0%,
+      color-mix(in srgb, var(--track-tone) 14%, transparent),
+      transparent 68%
     ),
     var(--surface);
 }
@@ -1529,8 +1576,15 @@
   --fam-tone: var(--accent);
   padding: 9px 11px;
   border-radius: var(--radius-sm);
-  border: 1px solid color-mix(in srgb, var(--fam-tone) 24%, var(--line));
-  background: var(--surface-subtle);
+  border: 1px solid color-mix(in srgb, var(--fam-tone) 26%, var(--line));
+  background:
+    var(--stardust-overlay),
+    radial-gradient(
+      110% 85% at 100% 0%,
+      color-mix(in srgb, var(--fam-tone) 10%, transparent),
+      transparent 70%
+    ),
+    var(--surface-subtle);
 }
 .usage-ag-family-item[data-family="gemini"] {
   --fam-tone: var(--accent-blue);
@@ -1555,6 +1609,25 @@
 .usage-ag-family-top span {
   font-size: 12px;
   color: var(--muted);
+}
+.usage-ag-family-bar {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface) 75%, var(--line));
+  overflow: hidden;
+  margin-bottom: 7px;
+}
+.usage-ag-family-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--fam-tone) 75%, var(--nebula-cyan)) 0%,
+    var(--fam-tone) 70%,
+    color-mix(in srgb, var(--fam-tone) 65%, #ffffff) 100%
+  );
+  box-shadow: 0 0 10px color-mix(in srgb, var(--fam-tone) 42%, transparent);
 }
 .usage-ag-family-meta {
   display: flex;

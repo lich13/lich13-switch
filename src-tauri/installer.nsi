@@ -506,13 +506,15 @@ Function .onInit
   ReadRegStr $0 SHCTX "${UNINSTKEY}" "DisplayName"
   ReadRegStr $1 SHCTX "${UNINSTKEY}" "Publisher"
   ReadRegStr $2 SHCTX "${UNINSTKEY}" "DisplayVersion"
-  ${If} $0 == "gpt-Switch"
-  ${AndIf} $1 == "${MANUFACTURER}"
-    nsis_tauri_utils::SemverCompare "${VERSION}" $2
-    Pop $3
-    ${If} $3 = 1
-      StrCpy $RenamedUpgrade 1
-      StrCpy $UpdateMode 1
+  ${If} $1 == "${MANUFACTURER}"
+    ${If} $0 == "gpt-Switch"
+    ${OrIf} $0 == "lich13-switch"
+      nsis_tauri_utils::SemverCompare "${VERSION}" $2
+      Pop $3
+      ${If} $3 = 1
+        StrCpy $RenamedUpgrade 1
+        StrCpy $UpdateMode 1
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 

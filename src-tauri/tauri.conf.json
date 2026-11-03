@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "lich13-switch",
+  "productName": "Vela",
   "version": "0.26.12",
   "identifier": "com.lich13.gpt-switch",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "lich13-switch",
+        "title": "Vela",
         "width": 960,
         "height": 680,
         "minWidth": 760,

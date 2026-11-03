@@ -7,7 +7,7 @@ use winreg::{
 
 const PROGRAM: &str = "gptSwitch.CCSwitch.0";
 const CAPABILITIES: &str = "Software\\gpt-Switch\\LinkHandlers\\0\\Capabilities";
-const REGISTERED: &str = "lich13-switch Link lich13-switch";
+const REGISTERED: &str = "Vela Link Vela";
 const USER_CHOICE: &str =
     "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\ccswitch\\UserChoice";
 fn executable(command: &str) -> Option<PathBuf> {
@@ -38,7 +38,7 @@ pub fn installed() -> bool {
             };
             key.get_value::<String, _>("InstallLocation")
                 .ok()
-                .is_some_and(|path| same_path(&Path::new(&path).join("lich13-switch.exe"), &exe))
+                .is_some_and(|path| same_path(&Path::new(&path).join("vela.exe"), &exe))
                 || key
                     .get_value::<String, _>("DisplayIcon")
                     .ok()
@@ -71,11 +71,13 @@ fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
             registered.delete_value(name)?;
         }
         // The old self registration shared the same capabilities path.
-        if registered
-            .get_value::<String, _>("gpt-Switch Link gpt-Switch")
-            .is_ok_and(|value| value.eq_ignore_ascii_case(CAPABILITIES))
-        {
-            registered.delete_value("gpt-Switch Link gpt-Switch")?;
+        for legacy in ["gpt-Switch Link gpt-Switch", "lich13-switch Link lich13-switch"] {
+            if registered
+                .get_value::<String, _>(legacy)
+                .is_ok_and(|value| value.eq_ignore_ascii_case(CAPABILITIES))
+            {
+                registered.delete_value(legacy)?;
+            }
         }
     }
     for n in [1, 2] {
@@ -114,14 +116,14 @@ pub fn ensure(tx: tokio::sync::oneshot::Sender<Result<()>>) {
             cleanup_owned_aliases(&root)?;
             for program in [PROGRAM, "ccswitch"] {
                 let (key, _) = root.create_subkey(format!("Software\\Classes\\{program}"))?;
-                key.set_value("", &"lich13-switch CC Switch Link")?;
+                key.set_value("", &"Vela CC Switch Link")?;
                 key.set_value("URL Protocol", &"")?;
                 key.create_subkey("shell\\open\\command")?
                     .0
                     .set_value("", &format!("\"{}\" \"%1\"", exe.display()))?;
             }
             let (caps, _) = root.create_subkey(CAPABILITIES)?;
-            caps.set_value("ApplicationName", &"lich13-switch")?;
+            caps.set_value("ApplicationName", &"Vela")?;
             caps.set_value("ApplicationDescription", &"CC Switch links")?;
             caps.create_subkey("URLAssociations")?
                 .0
@@ -148,7 +150,7 @@ pub fn ensure(tx: tokio::sync::oneshot::Sender<Result<()>>) {
         open::that(format!("ms-settings:defaultapps?{query}"))
             .map_err(|_| invalid("无法打开系统默认应用设置，请手动关联 CC Switch 链接"))?;
         Err(invalid(
-            "系统需要确认：请在已打开的默认应用设置中，将 CC Switch 链接关联到 lich13-switch",
+            "系统需要确认：请在已打开的默认应用设置中，将 CC Switch 链接关联到 Vela",
         ))
     })();
     let _ = tx.send(result);

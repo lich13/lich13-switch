@@ -346,7 +346,7 @@ export default function App() {
         <div className="brand">
           <img src="/icon.svg" alt="" />
           <div>
-            <strong>lich13-switch</strong>
+            <strong>Vela</strong>
           </div>
         </div>
         <nav aria-label="主导航">

@@ -71,19 +71,19 @@ jobs:
           New-ItemProperty $registered -Name 'fixture-retired-link' -Value 'Software\gpt-Switch\LinkHandlers\2\Capabilities' -PropertyType String -Force | Out-Null
           $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw 'Installer failed' }
-          $exe = Get-ChildItem $installDir -Filter 'lich13-switch.exe' -Recurse | Select-Object -First 1
+          $exe = Get-ChildItem $installDir -Filter 'vela.exe' -Recurse | Select-Object -First 1
           if (!$exe) { throw 'Installed executable missing' }
           if (Test-Path "$installDir/gpt-switch.exe") { throw 'Legacy binary remains' }
           $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
           $entry = Get-ItemProperty "$uninstall/gpt-Switch"
-          if ($entry.DisplayName -ne 'lich13-switch' -or $entry.DisplayVersion -ne $expectedVersion -or (Test-Path "$uninstall/lich13-switch")) { throw 'Duplicate or invalid upgrade registration' }
+          if ($entry.DisplayName -ne 'Vela' -or $entry.DisplayVersion -ne $expectedVersion -or (Test-Path "$uninstall/Vela") -or (Test-Path "$uninstall/lich13-switch")) { throw 'Duplicate or invalid upgrade registration' }
           if ((Get-Content $marker).Trim() -ne 'preserve-user-data' -or (Get-Item $protocol).GetValue('') -ne $beforeProtocol) { throw 'Upgrade changed user data or default protocol' }
           if ((Get-Item $registered).GetValue('fixture-retired-link')) { throw 'Retired link receiver remains' }
           $selfCommand = 'HKCU:\Software\Classes\gptSwitch.CCSwitch.0\shell\open\command'
           if ((Get-Item $selfCommand).GetValue('') -ne ('"' + $exe.FullName + '" "%1"')) { throw 'Self link registration is missing' }
           $notice = Get-Content (Join-Path $installDir 'THIRD_PARTY_NOTICES.md') -Raw
           if (!$notice.Contains('Copyright (c) 2025 Jason Young')) { throw 'Third-party notice missing' }
-          $report = Join-Path $env:RUNNER_TEMP 'lich13-switch-smoke.json'
+          $report = Join-Path $env:RUNNER_TEMP 'vela-smoke.json'
           $process = Start-Process -FilePath $exe.FullName -ArgumentList @('--smoke-test', $report) -PassThru
           if (!$process.WaitForExit(60000)) { $process.Kill(); throw 'Smoke timed out' }
           $result = Get-Content $report -Raw | ConvertFrom-Json
@@ -97,17 +97,17 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          report="$RUNNER_TEMP/lich13-switch-smoke.json"
+          report="$RUNNER_TEMP/vela-smoke.json"
           dmg=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name '*.dmg' -print -quit)
-          mount="$RUNNER_TEMP/lich13-switch-volume"
+          mount="$RUNNER_TEMP/vela-volume"
           mkdir -p "$mount"
           hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
-          ditto "$mount/lich13-switch.app" "$RUNNER_TEMP/lich13-switch.app"
+          ditto "$mount/Vela.app" "$RUNNER_TEMP/Vela.app"
           hdiutil detach "$mount"
-          executable="$RUNNER_TEMP/lich13-switch.app/Contents/MacOS/lich13-switch"
+          executable="$RUNNER_TEMP/Vela.app/Contents/MacOS/vela"
           test -x "$executable"
           test "$(lipo -archs "$executable")" = "arm64"
-          python3 -c 'import pathlib,sys; assert "Copyright (c) 2025 Jason Young" in pathlib.Path(sys.argv[1]).read_text()' "$RUNNER_TEMP/lich13-switch.app/Contents/Resources/THIRD_PARTY_NOTICES.md"
+          python3 -c 'import pathlib,sys; assert "Copyright (c) 2025 Jason Young" in pathlib.Path(sys.argv[1]).read_text()' "$RUNNER_TEMP/Vela.app/Contents/Resources/THIRD_PARTY_NOTICES.md"
           "$executable" --smoke-test "$report" &
           pid=$!
           for attempt in {1..60}; do

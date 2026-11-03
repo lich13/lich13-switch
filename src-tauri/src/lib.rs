@@ -247,10 +247,10 @@ fn application_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     menu.remove_at(0)?;
     let application = tauri::menu::Submenu::with_items(
         app,
-        "lich13-switch",
+        "Vela",
         true,
         &[
-            &PredefinedMenuItem::about(app, Some("关于 lich13-switch"), None)?,
+            &PredefinedMenuItem::about(app, Some("关于 Vela"), None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -260,7 +260,7 @@ fn application_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(
                 app,
                 "app-quit",
-                "退出 lich13-switch",
+                "退出 Vela",
                 true,
                 Some("CmdOrCtrl+Q"),
             )?,
@@ -274,7 +274,7 @@ fn login_active(s: &login::LoginState) -> bool {
 }
 fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
     m.lock()
-        .map_err(|_| AppError::new(code::STATE, "应用状态异常，请重新启动 lich13-switch"))
+        .map_err(|_| AppError::new(code::STATE, "应用状态异常，请重新启动 Vela"))
 }
 pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindow> {
     ["main", "quick"]
@@ -396,13 +396,13 @@ fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
 fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     for (id, label) in [
-        ("open", "打开 lich13-switch"),
+        ("open", "打开 Vela"),
         ("config", "编辑配置"),
         ("gateway", "打开网关"),
         ("settings", "设置"),
         ("check_update", "检查更新"),
         ("github", "GitHub"),
-        ("quit", "退出 lich13-switch"),
+        ("quit", "退出 Vela"),
     ] {
         if id == "quit" {
             menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -511,7 +511,7 @@ fn tray_tooltip_text(state: &ViewState) -> String {
         .find(|a| a.current)
         .map(|a| a.name.as_str())
         .unwrap_or("未保存账号");
-    format!("lich13-switch · {current}")
+    format!("Vela · {current}")
 }
 
 enum PollStateUpdate {
@@ -2139,7 +2139,7 @@ pub fn run() {
             let mut tray = TrayIconBuilder::with_id("switch")
                 .menu(&tray_menu(app.handle())?)
                 .show_menu_on_left_click(false)
-                .tooltip("lich13-switch");
+                .tooltip("Vela");
             #[cfg(target_os = "macos")]
             {
                 tray = tray
@@ -2496,7 +2496,7 @@ pub fn run() {
             frontend_ready
         ])
         .build(context)
-        .expect("lich13-switch initialization failed")
+        .expect("Vela initialization failed")
         .run(|app, event| {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &event {
@@ -2677,7 +2677,7 @@ mod page_whitelist_tests {
         // Initial missing auth.json poll updates state without importing an account.
         match poll_account_state_step(&data, &core, &gateway, &mut last) {
             PollStateUpdate::StateChanged(initial) => {
-                assert_eq!(tray_tooltip_text(&initial), "lich13-switch · 未保存账号");
+                assert_eq!(tray_tooltip_text(&initial), "Vela · 未保存账号");
             }
             _ => panic!("expected initial state update"),
         }
@@ -2698,7 +2698,7 @@ mod page_whitelist_tests {
         };
         assert_eq!(synced.accounts.len(), 1);
         assert!(synced.accounts[0].current);
-        assert_eq!(tray_tooltip_text(&synced), "lich13-switch · API Key");
+        assert_eq!(tray_tooltip_text(&synced), "Vela · API Key");
         assert!(!emit_account_sync_diagnostic(&diagnostics, &synced));
 
         // Corrupting auth.json while hidden triggers AccountSync diagnostic emission.

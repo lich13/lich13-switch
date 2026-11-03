@@ -18,7 +18,7 @@ export async function command<K extends CommandName>(
     return (await import("./preview")).run(name, args) as Promise<
       CommandResult<K>
     >;
-  throw new Error("请在 lich13-switch 桌面客户端中打开");
+  throw new Error("请在 Vela 桌面客户端中打开");
 }
 export async function subscribe<K extends keyof EventMap>(
   event: K,

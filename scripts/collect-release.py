@@ -4,7 +4,7 @@ import shutil
 import sys
 source, destination = map(pathlib.Path, sys.argv[1:3])
 version = sys.argv[3]
-expected = {f"lich13-switch_{version}_aarch64.dmg", f"lich13-switch_{version}_x64-setup.exe"}
+expected = {f"Vela_{version}_aarch64.dmg", f"Vela_{version}_x64-setup.exe"}
 files = [p for p in source.rglob("*") if p.is_file()]
 if len(files) != 2 or {p.name for p in files} != expected:
     raise SystemExit(f"Unexpected release assets: {[p.name for p in files]}")

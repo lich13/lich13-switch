@@ -585,7 +585,7 @@ impl Core {
         if store.schema != 1 {
             return Err(AppError::new(
                 code::STORE_VERSION,
-                "账号库版本较新，请更新 lich13-switch",
+                "账号库版本较新，请更新 Vela",
             ));
         }
         let mut core = Self {

@@ -106,16 +106,27 @@ fn legacy_document(bytes: &[u8], executable: &Path) -> bool {
     let Some(old_path) = args.first().and_then(plist::Value::as_string) else {
         return false;
     };
-    let expected_old = executable.to_string_lossy().replace(
-        "lich13-switch.app/Contents/MacOS/lich13-switch",
-        "gpt-Switch.app/Contents/MacOS/gpt-switch",
-    );
-    if old_path != expected_old
-        || args.len() != 2
-        || args[1].as_string() != Some(super::startup::LEGACY_LOGIN_ARG)
-    {
+    if args.len() != 2 {
         return false;
     }
+    let current = executable.to_string_lossy();
+    let Some((_, old_arg)) = [
+        (
+            "lich13-switch.app/Contents/MacOS/lich13-switch",
+            super::startup::LEGACY_LICH13_LOGIN_ARG,
+        ),
+        (
+            "gpt-Switch.app/Contents/MacOS/gpt-switch",
+            super::startup::LEGACY_LOGIN_ARG,
+        ),
+    ]
+    .into_iter()
+    .find(|(old_bundle, old_arg)| {
+        let expected_old = current.replace("Vela.app/Contents/MacOS/vela", old_bundle);
+        old_path == expected_old && args[1].as_string() == Some(*old_arg)
+    }) else {
+        return false;
+    };
     let Ok(bytes) = document(Path::new(old_path)) else {
         return false;
     };
@@ -128,7 +139,7 @@ fn legacy_document(bytes: &[u8], executable: &Path) -> bool {
         .get_mut("ProgramArguments")
         .unwrap()
         .as_array_mut()
-        .unwrap()[1] = plist::Value::String(super::startup::LEGACY_LOGIN_ARG.into());
+        .unwrap()[1] = plist::Value::String(old_arg.into());
     expected == value
 }
 pub fn migrate(executable: &Path) -> Result<()> {
@@ -261,7 +272,7 @@ mod tests {
     #[test]
     fn launch_arguments_are_separate_and_disable_parser_is_exact() {
         let bytes = document(Path::new(
-            "/Applications/Some Folder/lich13-switch.app/Contents/MacOS/lich13-switch",
+            "/Applications/Some Folder/Vela.app/Contents/MacOS/vela",
         ))
         .unwrap();
         let value = plist::Value::from_reader_xml(bytes.as_slice()).unwrap();
@@ -272,30 +283,37 @@ mod tests {
         assert_eq!(args[1].as_string(), Some(crate::startup::LOGIN_ARG));
         assert!(!disabled("\"com.lich13.gpt-switch-other\" => true"));
         assert!(disabled("\"com.lich13.gpt-switch\" => true"));
-        let mut legacy = plist::Value::from_reader_xml(
-            document(Path::new(
+        for (old_app, old_arg) in [
+            (
                 "/Applications/gpt-Switch.app/Contents/MacOS/gpt-switch",
-            ))
-            .unwrap()
-            .as_slice(),
-        )
-        .unwrap();
-        legacy
-            .as_dictionary_mut()
-            .unwrap()
-            .get_mut("ProgramArguments")
-            .unwrap()
-            .as_array_mut()
-            .unwrap()[1] = plist::Value::String(crate::startup::LEGACY_LOGIN_ARG.into());
-        let mut bytes = Vec::new();
-        legacy.to_writer_xml(&mut bytes).unwrap();
-        assert!(legacy_document(
-            &bytes,
-            Path::new("/Applications/lich13-switch.app/Contents/MacOS/lich13-switch")
-        ));
-        assert!(!legacy_document(
-            &bytes,
-            Path::new("/tmp/lich13-switch.app/Contents/MacOS/lich13-switch")
-        ));
+                crate::startup::LEGACY_LOGIN_ARG,
+            ),
+            (
+                "/Applications/lich13-switch.app/Contents/MacOS/lich13-switch",
+                crate::startup::LEGACY_LICH13_LOGIN_ARG,
+            ),
+        ] {
+            let mut legacy = plist::Value::from_reader_xml(
+                document(Path::new(old_app)).unwrap().as_slice(),
+            )
+            .unwrap();
+            legacy
+                .as_dictionary_mut()
+                .unwrap()
+                .get_mut("ProgramArguments")
+                .unwrap()
+                .as_array_mut()
+                .unwrap()[1] = plist::Value::String(old_arg.into());
+            let mut bytes = Vec::new();
+            legacy.to_writer_xml(&mut bytes).unwrap();
+            assert!(legacy_document(
+                &bytes,
+                Path::new("/Applications/Vela.app/Contents/MacOS/vela")
+            ));
+            assert!(!legacy_document(
+                &bytes,
+                Path::new("/tmp/Vela.app/Contents/MacOS/vela")
+            ));
+        }
     }
 }

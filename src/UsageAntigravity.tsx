@@ -224,6 +224,13 @@ export default function UsageAntigravity({
                   <strong>{fam.label}</strong>
                   <span>{fam.sharePercent.toFixed(1)}%</span>
                 </div>
+                <div className="usage-ag-family-bar" aria-hidden="true">
+                  <span
+                    style={{
+                      width: `${Math.min(100, Math.max(0, fam.sharePercent))}%`,
+                    }}
+                  />
+                </div>
                 <div className="usage-ag-family-meta">
                   <span title={`${numeric(fam.requests)} 次请求`}>
                     {compact(fam.requests)} 请求

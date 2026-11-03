@@ -16,7 +16,7 @@ static NSString *const Root = @"/Library/Application Support/gpt-Switch Power";
 static NSString *const Manifest = @"/Library/Application Support/gpt-Switch Power/client.json";
 static NSString *const Restore = @"/Library/Application Support/gpt-Switch Power/restore.json";
 static NSString *const InstallReady = @"/Library/Application Support/gpt-Switch Power/install-ready.json";
-static NSString *const AppBinary = @"/Applications/lich13-switch.app/Contents/MacOS/lich13-switch";
+static NSString *const AppBinary = @"/Applications/Vela.app/Contents/MacOS/vela";
 static NSDictionary *Approved;
 #ifdef POWER_TEST
 static NSDictionary *TestState;
@@ -373,7 +373,7 @@ int main(void) {
         NSDictionary *approved=@{@"uid":@501,@"path":AppBinary};
         CHECK(identityMatches(501,AppBinary,YES,approved));
         CHECK(!identityMatches(502,AppBinary,YES,approved));
-        CHECK(!identityMatches(501,@"/tmp/lich13-switch",YES,approved));
+        CHECK(!identityMatches(501,@"/tmp/vela",YES,approved));
         CHECK(!identityMatches(501,AppBinary,NO,approved));
         testReset(NO,0);
         TestFiles[Manifest]=@{@"transaction":@"fresh-install"};

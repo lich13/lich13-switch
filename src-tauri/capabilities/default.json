@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "Local lich13-switch window",
+  "description": "Local Vela window",
   "windows": ["main", "quick"],
   "permissions": ["core:default"]
 }

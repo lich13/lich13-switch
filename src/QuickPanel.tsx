@@ -581,7 +581,7 @@ function QuickContent({
       <QuickControls visible={visible} notify={setNotice} error={setError} />
       <footer className="quick-footer">
         <button onClick={() => open()}>
-          打开 lich13-switch <ArrowUpRight size={12} />
+          打开 Vela <ArrowUpRight size={12} />
         </button>
         <button
           onClick={() =>

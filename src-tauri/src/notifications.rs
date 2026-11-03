@@ -96,7 +96,7 @@ async fn submit(app: tauri::AppHandle, body: String) -> Result<()> {
         if current != "granted" {
             return Err(AppError::new(code::NOTIFICATION_DENIED, "系统未允许通知"));
         }
-        native::send(&app.config().identifier, "lich13-switch", &body)
+        native::send(&app.config().identifier, "Vela", &body)
     })
     .await
     .map_err(|_| AppError::new(code::NOTIFICATION, "通知发送任务中断"))?

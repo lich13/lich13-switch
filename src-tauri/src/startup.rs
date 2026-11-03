@@ -7,10 +7,11 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-pub const LOGIN_ARG: &str = "--lich13-switch-login-startup";
+pub const LOGIN_ARG: &str = "--vela-login-startup";
 pub const LEGACY_LOGIN_ARG: &str = "--gpt-switch-login-startup";
+pub const LEGACY_LICH13_LOGIN_ARG: &str = "--lich13-switch-login-startup";
 pub fn is_login_argument(arg: &str) -> bool {
-    [LOGIN_ARG, LEGACY_LOGIN_ARG].contains(&arg)
+    [LOGIN_ARG, LEGACY_LOGIN_ARG, LEGACY_LICH13_LOGIN_ARG].contains(&arg)
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -193,7 +194,7 @@ fn auto_launch(silent: bool) -> Result<AutoLaunch> {
     if cfg!(target_os = "macos") && path.extension().is_none_or(|e| e != "app") {
         return Err(AppError::new(
             code::STARTUP,
-            "请在安装后的 lich13-switch.app 中设置开机启动",
+            "请在安装后的 Vela.app 中设置开机启动",
         ));
     }
     let path = path
@@ -307,15 +308,16 @@ mod tests {
     fn installed_path_and_legacy_preferences() {
         assert_eq!(
             bundle_path(Path::new(
-                "/Applications/lich13-switch.app/Contents/MacOS/lich13-switch"
+                "/Applications/Vela.app/Contents/MacOS/vela"
             )),
-            PathBuf::from("/Applications/lich13-switch.app")
+            PathBuf::from("/Applications/Vela.app")
         );
         let _: Preferences = serde_json::from_str("{}").unwrap();
         let _: Preferences =
             serde_json::from_str(r#"{"launchToTray":false,"restoreGateway":true}"#).unwrap();
         assert!(silent(&[LOGIN_ARG.into()]));
         assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
+        assert!(silent(&[LEGACY_LICH13_LOGIN_ARG.into()]));
         assert!(is_login_event(
             u32::from_be_bytes(*b"oapp"),
             Some(u32::from_be_bytes(*b"lgit"))
@@ -326,8 +328,8 @@ mod tests {
         ));
         assert!(!is_login_event(u32::from_be_bytes(*b"oapp"), None));
         assert_eq!(
-            registration_path(r"C:\Program Files\lich13-switch\lich13-switch.exe", true),
-            r#""C:\Program Files\lich13-switch\lich13-switch.exe""#
+            registration_path(r"C:\Program Files\Vela\vela.exe", true),
+            r#""C:\Program Files\Vela\vela.exe""#
         );
         assert!(silent(&[LOGIN_ARG.into()]));
     }
