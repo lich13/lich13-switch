@@ -2,6 +2,26 @@
 
 最新版本置顶。每个版本只记录用户可感知的变化、迁移影响和验证范围；下载文件请以对应 GitHub Release 为准。
 
+## v0.26.17 · 2026-11-04
+
+### 修复与调整
+
+- 修复账单导出与本地历史完整性校验：导出账单直接基于应用本地数据库（`usage.sqlite`）中的请求明细生成，不再在导出时额外触发外部 RPC 接口或历史文件重同步（避免已删除线程或本地接口拒绝读取导致导出失败），且导出后保留主库明细记录；遇到旧版已清理且无法恢复的历史回执时明确报错阻断，历史会话末尾未写完的半行不再误判为历史残缺。
+- 修正 Antigravity 用量按请求发生时间归属账号／凭据：在切换凭据或认证模式退出 Antigravity 前先执行一次增量用量同步，并在凭据库记录激活时间轴（`activations`），按每条请求的 `started_at` 时间匹配当时生效的 OAuth 账号或 ADC 凭据；清理 `v0.26.16` 误将更早历史统一回填为当前账号的记录，并在切换至 Antigravity 统计分栏时同步展示账号／凭据筛选列表。
+- 优化 Antigravity 无邮箱 OAuth 去重与轮询状态推送：无邮箱 OAuth 令牌刷新仅在 `refresh_token` 不冲突时就地更新当前激活或唯一的无邮箱条目，避免覆盖其他无邮箱账号；区分 JSON 写盘半行（等待下一轮重试）与永久不支持的外部凭据类型（如 `external_account` ADC，正常更新文件指纹且仅在 `revision` 变化时推送前端状态）。
+- 保留 Antigravity 原始报错日志全文与清理冗余代码：Antigravity 报错日志不再将邮箱、路径、令牌或键值对替换为 `[已隐去]`，启动时自动重扫曾被隐去的历史日志行并清除误借用的 `upstream_type = "antigravity_log"` 标记；合并超过 4MB 日志文件的尾部起扫公共逻辑，移除未依据的占位符模型名与残留的 `get_usage_interruptions` 接口。
+- 修复 Windows 升级卸载残留与发布流水线门禁：Windows 安装程序兼容识别 `DisplayName` 为 `Vela` 的旧 `Uninstall\gpt-Switch` 注册表项并在升级后自动清理，恢复 `gptSwitch.CCSwitch.0` 协议关联键名；发布流水线补齐 `cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 门禁。
+
+### 兼容性与迁移
+
+- 升级启动自动执行 `antigravity_fields_v02617` 修正历史账号归属回填，并重扫曾包含 `[已隐去]` 的 Antigravity 本地报错日志。
+
+### 验证与下载
+
+- 已完成受影响模块测试、前端类型检查、构建、Clippy 与格式检查。macOS Apple Silicon 与 Windows x64 的完整回归、构建及安装冒烟由本版本标签 CI 执行。
+- Antigravity 账单直接从本地数据库导出、按请求时间归属账号／凭据筛选及原始报错日志全文展示待用户验收。
+- 下载对应 GitHub Release 的 `.dmg` 或 `.exe` 安装包，使用同页 `SHA256SUMS` 核对。
+
 ## v0.26.16 · 2026-11-03
 
 ### 修复与调整
