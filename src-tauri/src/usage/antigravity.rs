@@ -33,6 +33,7 @@ struct FileCursor {
     identity: String,
     modified: String,
     complete: bool,
+    model: Option<String>,
 }
 fn file_identity(meta: &std::fs::Metadata) -> String {
     #[cfg(unix)]
@@ -1000,7 +1001,8 @@ impl Api {
             .filter(|s| !s.is_empty())
             .or_else(|| summary["localModifiedStamp"].as_str())
             .unwrap_or("");
-        if !modified.is_empty() && cursor.modified == modified {
+        if !store.requires_complete_history() && !modified.is_empty() && cursor.modified == modified
+        {
             return Ok(());
         }
         let total = number(&summary["stepCount"]);
@@ -1011,7 +1013,11 @@ impl Api {
         let mut resolved_owner = owner.is_some();
         let mut steps = Steps::default();
         let mut fallback_loaded = false;
-        let mut offset = cursor.count.saturating_sub(1);
+        let mut offset = if store.requires_complete_history() {
+            0
+        } else {
+            cursor.count.saturating_sub(1)
+        };
         let mut stable = offset;
         loop {
             let meta_req =
@@ -1166,31 +1172,35 @@ impl Api {
                         }
                         None => entry.get("chatModel").is_none(),
                     };
+                    let mut indices: Vec<_> = entry["stepIndices"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(number)
+                        .collect();
+                    if let Some(exec_indices) = entry["executionId"]
+                        .as_str()
+                        .and_then(|id| steps.executions.get(id))
+                    {
+                        indices.extend(exec_indices.iter().copied());
+                    }
                     if complete {
                         if stable == offset {
                             stable += 1;
                         }
-                        let indices: Vec<_> = entry["stepIndices"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(number)
-                            .collect();
-                        if indices.is_empty() {
-                            if let Some(indices) = entry["executionId"]
-                                .as_str()
-                                .and_then(|id| steps.executions.get(id))
-                            {
-                                cursor.covered.extend(indices);
-                            }
-                        } else {
-                            cursor.covered.extend(indices);
-                        }
+                        cursor.covered.extend(indices);
                     } else if entry.get("chatModel").is_some() {
-                        if store.requires_complete_history() {
-                            return Err(failure("Antigravity 历史用量尚未完整，请稍后重试"));
+                        cursor.covered.extend(indices);
+                        let has_reported_tokens = entry["chatModel"].get("usage").is_some()
+                            || entry["chatModel"]["retryInfos"]
+                                .as_array()
+                                .is_some_and(|a| !a.is_empty());
+                        if has_reported_tokens {
+                            if store.requires_complete_history() {
+                                return Err(failure("Antigravity 历史用量尚未完整，请稍后重试"));
+                            }
+                            report.errors += 1;
                         }
-                        report.errors += 1;
                     }
                     offset += 1;
                 }
@@ -1287,6 +1297,24 @@ fn scan_file_list(
     }
     Ok(())
 }
+fn extract_settings_model(content: &str) -> Option<String> {
+    let scope = content
+        .rsplit_once("</USER_REQUEST>")
+        .map_or(content, |(_, tail)| tail);
+    let (_, after_open) = scope.rsplit_once("<USER_SETTINGS_CHANGE>")?;
+    let (inner, _) = after_open.split_once("</USER_SETTINGS_CHANGE>")?;
+    let sentence = inner
+        .trim()
+        .lines()
+        .next()?
+        .split(". ")
+        .next()?
+        .trim()
+        .trim_end_matches('.');
+    let (_, model) = sentence.rsplit_once(" to ")?;
+    label(Some(model))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_file(
     store: &mut impl Repository,
@@ -1380,6 +1408,11 @@ fn scan_file(
         let parsed = (|| -> Result<Option<Record>> {
             let v: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| failure("Antigravity 历史文件存在无效完整行"))?;
+            if v["type"].as_str() == Some("USER_INPUT") {
+                if let Some(model) = v["content"].as_str().and_then(extract_settings_model) {
+                    c.model = Some(model);
+                }
+            }
             let has_usage = [
                 "input_tokens",
                 "output_tokens",
@@ -1389,8 +1422,23 @@ fn scan_file(
             .iter()
             .any(|k| number(&v[*k]).is_some());
             if has_usage && !number(&v["step_index"]).is_some_and(|i| rpc.covered.contains(&i)) {
-                let request = text(&v, &["request_id"]);
-                let model = text(&v, &["model", "response_model"]);
+                let is_planner = v["type"].as_str() == Some("PLANNER_RESPONSE");
+                if is_planner
+                    && matches!(
+                        v["status"].as_str(),
+                        Some("RUNNING" | "IN_PROGRESS" | "PENDING")
+                    )
+                {
+                    return Err(failure("Antigravity 历史用量尚未完整，请稍后重试"));
+                }
+                let step_request = is_planner
+                    .then(|| number(&v["step_index"]).map(|i| format!("{cascade}:step:{i}")))
+                    .flatten();
+                let explicit_model = text(&v, &["model", "response_model"]);
+                let request = text(&v, &["request_id"]).or(step_request.as_deref());
+                let model = explicit_model
+                    .or(c.model.as_deref())
+                    .or(is_planner.then_some("antigravity-unknown"));
                 let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
                 let (Some(request), Some(model), Some(at)) = (request, model, at) else {
                     return Err(failure(
@@ -1399,13 +1447,15 @@ fn scan_file(
                 };
                 let id = safe_id(&format!("antigravity:request:{request}"));
                 let alias = resolve_model_alias(Some(model));
+                let model_for_id = explicit_model.or_else(|| alias.map(|a| a.canonical));
                 let mut attempt = Attempt {
                     id: safe_id(&format!("{id}:final")),
                     response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
-                    requested_model: actual_model(Some(model)),
-                    response_model: actual_model(Some(model)),
+                    requested_model: actual_model(model_for_id),
+                    response_model: actual_model(model_for_id),
                     model_display_name: label(text(&v, &["model_display_name"]))
-                        .or_else(|| alias.map(|a| a.display_name.to_owned())),
+                        .or_else(|| alias.map(|a| a.display_name.to_owned()))
+                        .or_else(|| explicit_model.is_none().then(|| c.model.clone()).flatten()),
                     reasoning_effort: alias.and_then(|a| a.effort).map(str::to_owned),
                     started_at: at,
                     outcome: "unknown".into(),
@@ -2541,5 +2591,47 @@ mod history_tests {
         }
         let discovered = collect_transcript_files(&brain).unwrap();
         assert_eq!(discovered, vec![valid]);
+    }
+
+    #[test]
+    fn real_planner_response_transcript_imports_with_settings_model_for_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("antigravity/brain/cascade-real/.system_generated/logs/transcript.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let rows = concat!(
+            "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"content\":\"<USER_REQUEST>\\nhello\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Claude Opus 4.6 (High). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}\n",
+            "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:01Z\",\"input_tokens\":1000,\"cache_read_tokens\":200,\"output_tokens\":80}\n",
+        );
+        std::fs::write(&path, rows).unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+        let mut report = Report::default();
+        scan_file_list(
+            &mut store,
+            &dir.path().join("antigravity/brain"),
+            std::slice::from_ref(&path),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.errors, 0);
+        assert_eq!(report.imported, 1);
+        let saved = store
+            .detail(&safe_id("antigravity:request:cascade-real:step:1"))
+            .unwrap();
+        assert_eq!(
+            saved.attempts[0].model_display_name.as_deref(),
+            Some("Claude Opus 4.6")
+        );
+        assert_eq!(saved.attempts[0].reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            saved.attempts[0].response_model.as_deref(),
+            Some("claude-opus-4-6")
+        );
+        assert!(saved.attempts[0].price.is_some());
     }
 }

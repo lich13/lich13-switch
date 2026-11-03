@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Status {
     Idle,

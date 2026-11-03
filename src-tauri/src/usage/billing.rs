@@ -166,6 +166,20 @@ fn append(spool: &Connection, r: &Record, effective: i64, digest: Option<&str>) 
 }
 fn capture_cleanup_snapshot(store: &Store, spool: &Spool, request: &Request) -> Result<()> {
     let tx = db(spool.connection.unchecked_transaction())?;
+    if request.clients.iter().any(|c| c == "antigravity") {
+        let mut cursors = db(store
+            .connection
+            .prepare("SELECT id,body FROM cursors WHERE id LIKE 'antigravity:rpc:%'"))?;
+        let rows =
+            db(cursors.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+        for row in rows {
+            let (id, body) = db(row)?;
+            db(tx.execute(
+                "INSERT INTO cursors VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                params![id, body],
+            ))?;
+        }
+    }
     for client in &request.clients {
         let mut after = String::new();
         loop {

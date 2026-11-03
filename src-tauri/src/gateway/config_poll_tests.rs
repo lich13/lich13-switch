@@ -200,11 +200,15 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
     // Resume checkpoint update preserves the cached editable_digest and view.revision.
     {
         let mut s = g.0.inner.lock().unwrap();
-        *s.store_resume_mut() = Some(model::Resume {
-            home: home.clone(),
-            desired: true,
-            pair_hash: "fixture-hash".into(),
-        });
+        let rev = s.revision.clone();
+        s.save_resume_checkpoint(
+            Some(model::Resume {
+                home: home.clone(),
+                desired: true,
+                pair_hash: "fixture-hash".into(),
+            }),
+            rev,
+        );
         assert!(s.has_cached_editable_digest());
     }
     assert_eq!(g.view().revision, v0);

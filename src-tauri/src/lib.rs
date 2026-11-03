@@ -98,6 +98,7 @@ impl MainSignal {
 
 pub(crate) struct DrainedMainEvents {
     app_event: Option<events::Change>,
+    notification_state: Option<notifications::State>,
     provider_tests: bool,
     pricing_state: bool,
     usage_state: bool,
@@ -107,6 +108,7 @@ pub(crate) struct DrainedMainEvents {
 #[derive(Default)]
 pub(crate) struct PendingMainEvents {
     app_event: Mutex<Option<events::Change>>,
+    notification_state: Mutex<Option<notifications::State>>,
     config_states: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     provider_tests: AtomicBool,
     pricing_state: AtomicBool,
@@ -130,6 +132,11 @@ impl PendingMainEvents {
             });
         }
     }
+    fn record_notification_state(&self, state: notifications::State) {
+        if let Ok(mut slot) = self.notification_state.lock() {
+            *slot = Some(state);
+        }
+    }
     fn record_config_state(&self, key: &str, payload: serde_json::Value) {
         if let Ok(mut map) = self.config_states.lock() {
             map.insert(key.to_owned(), payload);
@@ -137,6 +144,11 @@ impl PendingMainEvents {
     }
     fn drain(&self) -> DrainedMainEvents {
         let app_event = self.app_event.lock().ok().and_then(|mut s| s.take());
+        let notification_state = self
+            .notification_state
+            .lock()
+            .ok()
+            .and_then(|mut s| s.take());
         let provider_tests = self.provider_tests.swap(false, Ordering::Relaxed);
         let pricing_state = self.pricing_state.swap(false, Ordering::Relaxed);
         let usage_state = self.usage_state.swap(false, Ordering::Relaxed);
@@ -148,6 +160,7 @@ impl PendingMainEvents {
             .unwrap_or_default();
         DrainedMainEvents {
             app_event,
+            notification_state,
             provider_tests,
             pricing_state,
             usage_state,
@@ -292,6 +305,13 @@ pub(crate) fn emit_main_app_event(app: &tauri::AppHandle, change: &events::Chang
         r.pending_main.record_app_event(change);
     }
 }
+pub(crate) fn emit_main_notification_state(app: &tauri::AppHandle, state: notifications::State) {
+    if let Some(window) = main_visible_window(app) {
+        let _ = window.emit("notification-state", state);
+    } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        r.pending_main.record_notification_state(state);
+    }
+}
 pub(crate) fn emit_main_config_state(
     app: &tauri::AppHandle,
     client_key: &str,
@@ -315,6 +335,9 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
         let drained = r.pending_main.drain();
         if let Some(change) = drained.app_event {
             let _ = window.emit("app-event", &change);
+        }
+        if let Some(state) = drained.notification_state {
+            let _ = window.emit("notification-state", state);
         }
         if drained.provider_tests {
             let _ = window.emit(MainSignal::ProviderTests.event_name(), ());
@@ -2553,12 +2576,30 @@ mod page_whitelist_tests {
             error: Some("second".into()),
             notify: true,
         });
+        pending.record_notification_state(crate::notifications::State {
+            permission: "granted".into(),
+            error: None,
+            delivery: crate::notifications::delivery::Status::Pending,
+        });
+        pending.record_notification_state(crate::notifications::State {
+            permission: "granted".into(),
+            error: None,
+            delivery: crate::notifications::delivery::Status::Accepted,
+        });
 
         let drained = pending.drain();
         assert!(drained.provider_tests);
         assert!(drained.pricing_state);
         assert!(drained.usage_state);
         assert_eq!(drained.app_event.unwrap().error.as_deref(), Some("second"));
+        assert_eq!(
+            drained.notification_state,
+            Some(crate::notifications::State {
+                permission: "granted".into(),
+                error: None,
+                delivery: crate::notifications::delivery::Status::Accepted,
+            })
+        );
         assert_eq!(drained.config_states.len(), 2);
         assert!(drained
             .config_states
@@ -2571,6 +2612,7 @@ mod page_whitelist_tests {
 
         let drained_again = pending.drain();
         assert!(drained_again.app_event.is_none());
+        assert!(drained_again.notification_state.is_none());
         assert!(!drained_again.provider_tests);
         assert!(!drained_again.pricing_state);
         assert!(!drained_again.usage_state);

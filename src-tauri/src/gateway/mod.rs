@@ -296,8 +296,15 @@ mod inner_state {
             &mut self.editable
         }
 
-        pub(in crate::gateway) fn store_resume_mut(&mut self) -> &mut Option<model::Resume> {
-            &mut self.editable.store.resume
+        // Auto-routing checkpoints only record the recovery target on disk; they do
+        // not alter editable provider/listener configuration or require endpoint re-probing.
+        pub(in crate::gateway) fn save_resume_checkpoint(
+            &mut self,
+            resume: Option<model::Resume>,
+            revision: String,
+        ) {
+            self.editable.store.resume = resume;
+            self.revision = revision;
         }
 
         pub(in crate::gateway) fn editable_digest(&self, client: ClientId) -> &str {
@@ -2066,8 +2073,7 @@ impl Gateway {
                     true,
                     None,
                 )?;
-                *s.store_resume_mut() = next.resume;
-                s.revision = storage::digest(after.as_bytes());
+                s.save_resume_checkpoint(next.resume, storage::digest(after.as_bytes()));
                 Ok(())
             })();
             if let Err(e) = update {

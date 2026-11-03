@@ -9,8 +9,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use tauri::{Emitter, Manager};
-mod delivery;
+use tauri::Manager;
+pub(crate) mod delivery;
 mod native;
 #[cfg(test)]
 #[path = "events_notification_scope_tests.rs"]
@@ -20,7 +20,7 @@ static ASKING: AtomicBool = AtomicBool::new(false);
 static DELIVERY: Mutex<delivery::Status> = Mutex::new(delivery::Status::Idle);
 static LAST_PERMISSION: Mutex<Option<String>> = Mutex::new(None);
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
     pub permission: String,
@@ -69,29 +69,25 @@ pub fn on_manual_open(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = state(&app, true);
-        if let Some(window) = crate::main_visible_window(&app) {
-            let _ = window.emit("notification-state", value);
-        }
+        crate::emit_main_notification_state(&app, value);
         ASKING.store(false, Ordering::Release);
     });
 }
 fn publish_delivery(app: &tauri::AppHandle, status: delivery::Status, error: Option<String>) {
     *DELIVERY.lock().unwrap() = status;
-    *LAST_ERROR.lock().unwrap() = error;
-    if let Some(window) = crate::main_visible_window(app) {
-        let _ = window.emit(
-            "notification-state",
-            State {
-                permission: LAST_PERMISSION
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .unwrap_or_else(|| "unknown".into()),
-                error: LAST_ERROR.lock().unwrap().clone(),
-                delivery: status,
-            },
-        );
-    }
+    *LAST_ERROR.lock().unwrap() = error.clone();
+    crate::emit_main_notification_state(
+        app,
+        State {
+            permission: LAST_PERMISSION
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+            error,
+            delivery: status,
+        },
+    );
 }
 async fn submit(app: tauri::AppHandle, body: String) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
