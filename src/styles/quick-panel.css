@@ -242,42 +242,43 @@
   gap: 8px;
 }
 
-.quick-scroll .client-selection {
+.quick-panel .client-selection {
   display: flex;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   max-width: 100%;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   margin: 0;
-  padding: 3px;
+  padding: 2px;
   border-radius: var(--radius-pill);
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  background: var(--surface-subtle);
 }
 
-.quick-scroll .client-selection button {
+.quick-panel .client-selection button {
   flex: 1 1 auto;
   text-align: center;
-  padding: 5px 10px;
+  padding: 5px 8px;
   border-radius: var(--radius-pill);
+  white-space: nowrap;
 }
 
-.quick-scroll .client-selection button[data-client="codex"][aria-pressed="true"] {
+.quick-panel .client-selection button[data-client="codex"][aria-pressed="true"] {
   color: var(--accent);
 }
 
-.quick-scroll .client-selection button[data-client="claude"][aria-pressed="true"] {
+.quick-panel .client-selection button[data-client="claude"][aria-pressed="true"] {
   color: var(--accent-blue);
 }
 
-.quick-scroll .client-selection button[data-client="antigravity"][aria-pressed="true"] {
+.quick-panel .client-selection button[data-client="antigravity"][aria-pressed="true"] {
   color: var(--accent-violet);
 }
 
-.quick-scroll .client-selection button[data-client="grok"][aria-pressed="true"] {
+.quick-panel .client-selection button[data-client="grok"][aria-pressed="true"] {
   color: var(--accent-amber);
 }
 
-.quick-scroll .client-selection button[data-client="dsh"][aria-pressed="true"] {
+.quick-panel .client-selection button[data-client="dsh"][aria-pressed="true"] {
   color: var(--accent-emerald);
 }
 
@@ -429,8 +430,9 @@
 .quick-provider-main {
   display: flex;
   align-items: center;
-  gap: 5px;
-  flex-wrap: wrap;
+  gap: 4px;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .quick-priority {
@@ -478,8 +480,8 @@
 }
 
 .quick-provider-main .quick-name {
-  flex: 1 1 88px;
-  min-width: 48px;
+  flex: 1 1 40px;
+  min-width: 36px;
 }
 
 .quick-provider-main .quick-name:not(.provider-name-editor) {
@@ -490,22 +492,28 @@
 }
 
 .quick-name.provider-name-editor {
-  flex: 1 1 140px;
+  flex: 1 1 96px;
   min-width: 0;
-  overflow: visible;
-  white-space: normal;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .quick-name.provider-name-editor input {
-  width: min(180px, 100%);
+  width: min(140px, 100%);
 }
 
 .quick-provider-main .quota-compact {
-  flex: 0 1 auto;
-  min-width: 48px;
+  flex: 0 0 auto;
+  min-width: 0;
   padding: 0;
   gap: 4px;
   font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.quick-provider-main .quota-compact .quota-value {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .quick-provider-main .quota-compact .icon-button {
@@ -516,6 +524,8 @@
 
 .quick-provider-main .quota-subscription {
   max-width: 64px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .quick-select {
@@ -525,15 +535,16 @@
   gap: 4px;
   flex: 0 0 auto;
   width: auto;
-  min-width: 46px;
+  min-width: 42px;
   height: 26px;
-  padding: 0 10px;
+  padding: 0 8px;
   border-radius: var(--radius-pill);
   border: 1px solid var(--line);
   background: var(--surface-subtle);
   font-size: 11.5px;
   font-weight: 560;
   color: var(--ink);
+  white-space: nowrap;
 }
 
 .quick-select:hover:not(:disabled) {

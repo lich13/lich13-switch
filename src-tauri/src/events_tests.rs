@@ -166,7 +166,7 @@ async fn sensitive_models_are_omitted_and_pages_are_filtered_and_bounded() {
         .await;
     }
     let page_one = service.query(Filter {
-        client_id: Some(ClientId::Codex),
+        client_id: Some(ClientId::Codex.into()),
         page: Some(1),
         ..Filter::default()
     });
@@ -272,4 +272,44 @@ fn record_ids_are_unique_for_distinct_events() {
         Reason::Network,
     );
     assert_ne!(a.id, b.id);
+}
+
+#[test]
+fn sync_antigravity_logs_ingests_and_deduplicates_app_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let transcript_dir = home.join(".gemini/antigravity/brain/conv-1/.system_generated/logs");
+    fs::create_dir_all(&transcript_dir).unwrap();
+    fs::write(
+        transcript_dir.join("transcript.jsonl"),
+        r#"{"step_index":3,"type":"PLANNER_RESPONSE","status":"ERROR","model":"claude-opus-4-6","errorMessage":"stream was interrupted after 5m0s"}
+"#,
+    )
+    .unwrap();
+    let log_dir = home.join("Library/Logs/Antigravity");
+    fs::create_dir_all(&log_dir).unwrap();
+    fs::write(
+        log_dir.join("main.log"),
+        "[error] RESOURCE_EXHAUSTED: quota exceeded for project\n",
+    )
+    .unwrap();
+
+    let service = Service::new(&temp.path().join("data"));
+    service.sync_antigravity_logs(&home);
+    service.sync_antigravity_logs(&home);
+
+    let antigravity_filter = Filter {
+        client_id: Some(crate::events::JournalClient::Retired(
+            crate::events::RetiredClient::Antigravity,
+        )),
+        origin: Some(crate::events::Origin::Upstream),
+        ..Filter::default()
+    };
+    let page = service.query(antigravity_filter);
+    assert_eq!(page.total, 2);
+    assert!(page
+        .items
+        .iter()
+        .any(|r| r.reason == Reason::RequestInterrupted));
+    assert!(page.items.iter().any(|r| r.reason == Reason::RateLimit));
 }

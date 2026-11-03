@@ -107,8 +107,10 @@ pub trait AppLifecycle {
     fn relaunch(&self) -> Result<()>;
 }
 
+#[cfg(test)]
 pub struct NoopLifecycle;
 
+#[cfg(test)]
 impl AppLifecycle for NoopLifecycle {
     fn stop_if_running(&self) -> Result<bool> {
         Ok(false)
@@ -302,7 +304,7 @@ fn clean_opt(raw: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn map_str<'a>(map: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+fn map_str(map: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|k| map.get(*k).and_then(Value::as_str))
         .and_then(|s| clean_opt(Some(s)))
@@ -939,6 +941,7 @@ pub fn add_adc_at_with_lifecycle(
     }
 }
 
+#[cfg(test)]
 pub fn add_adc_at(paths: &Paths, input: AddAdcInput) -> Result<AntigravityAuthState> {
     add_adc_at_with_lifecycle(paths, input, &NoopLifecycle)
 }
@@ -975,6 +978,7 @@ pub fn switch_oauth_at_with_lifecycle(
     })
 }
 
+#[cfg(test)]
 pub fn switch_oauth_at(
     paths: &Paths,
     id: &str,
@@ -1016,6 +1020,7 @@ pub fn switch_adc_at_with_lifecycle(
     })
 }
 
+#[cfg(test)]
 pub fn switch_adc_at(
     paths: &Paths,
     id: &str,
@@ -1078,6 +1083,7 @@ pub fn set_mode_at_with_lifecycle(
     })
 }
 
+#[cfg(test)]
 pub fn set_mode_at(
     paths: &Paths,
     mode: AuthMode,

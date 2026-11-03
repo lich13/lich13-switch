@@ -159,12 +159,30 @@ function emptyQuota(p: Provider): ProviderQuota {
 }
 const number = (n: number) =>
   n.toLocaleString(undefined, { maximumFractionDigits: 3 });
+const compactNumberValue = (n: number) => {
+  const abs = Math.abs(n);
+  if (abs >= 1000) return compactNumber(n);
+  return n.toLocaleString(undefined, {
+    maximumFractionDigits: abs >= 100 ? 1 : 2,
+  });
+};
 const amount = (p: QuotaPlan) =>
   p.unlimited
     ? "无限制"
     : p.remaining == null
       ? "未返回剩余额度"
       : `${number(p.remaining)} ${p.unit}`;
+const compactAmount = (p: QuotaPlan) =>
+  p.unlimited
+    ? "无限制"
+    : p.remaining == null
+      ? "未返回剩余额度"
+      : `${compactNumberValue(p.remaining)} ${p.unit}`;
+const isWalletPlaceholderName = (name?: string | null) =>
+  !name ||
+  /^(钱包余额|账户余额|余额|钱包|未识别套餐|订阅|wallet(\s*balance)?|account\s*balance|balance)$/i.test(
+    name.trim(),
+  );
 const date = (value: string | number) => {
   const d = new Date(value);
   return Number.isNaN(d.valueOf()) ? "" : d.toLocaleString();
@@ -265,16 +283,23 @@ export function QuotaInfo({
   const loading = quota?.state === "loading";
   const keyStatus = quota?.keyStatus === "已过期" ? "已到期" : quota?.keyStatus;
   const keyOnly = quota?.source === "newapi" && quota.plans[0]?.name === "Key 额度";
-  const headline = quota?.plans[0]
-    ? keyOnly ? quota.plans[0].unlimited ? "Key 配额无限制" : `Key 剩余 ${amount(quota.plans[0])}` : `${quota.plans[0].unlimited ? "" : "剩余 "}${amount(quota.plans[0])}`
-    : (keyStatus ??
-      (quota?.state === "unsupported"
-        ? "不可查询"
-        : quota?.state === "error"
-          ? "查询失败"
-          : loading
-            ? "查询中…"
-            : "未查询"));
+  const formatHeadline = (fmt: (p: QuotaPlan) => string) =>
+    quota?.plans[0]
+      ? keyOnly
+        ? quota.plans[0].unlimited
+          ? "Key 配额无限制"
+          : `Key 剩余 ${fmt(quota.plans[0])}`
+        : `${quota.plans[0].unlimited ? "" : "剩余 "}${fmt(quota.plans[0])}`
+      : (keyStatus ??
+        (quota?.state === "unsupported"
+          ? "不可查询"
+          : quota?.state === "error"
+            ? "查询失败"
+            : loading
+              ? "查询中…"
+              : "未查询"));
+  const headline = formatHeadline(amount);
+  const compactHeadline = formatHeadline(compactAmount);
   const source =
     quota?.source === "sub2api"
       ? "Sub2API"
@@ -289,7 +314,11 @@ export function QuotaInfo({
   const subscriptions = quota?.subscriptions ?? [];
   const activeSubscriptions = subscriptions.filter((s) => s.active === true);
   const currentSubscription = activeSubscriptions.length === 1 ? activeSubscriptions[0] : subscriptions.length === 1 ? subscriptions[0] : null;
-  const subscriptionLabel = currentSubscription?.name || (subscriptions.length > 1 ? `${subscriptions.length} 个套餐` : null);
+  const subscriptionName =
+    currentSubscription?.name && !isWalletPlaceholderName(currentSubscription.name)
+      ? currentSubscription.name
+      : null;
+  const subscriptionLabel = subscriptionName || (subscriptions.length > 1 ? `${subscriptions.length} 个套餐` : null);
   const repeatedSubscriptionSummary = quota?.source === "sub2api" && subscriptions.length === 1 &&
     subscriptions[0].plans.length > 0 && quota.plans[0]?.name === (subscriptions[0].name ?? "订阅");
   const standalonePlans = (quota?.plans ?? []).filter((plan, index) => {
@@ -310,7 +339,7 @@ export function QuotaInfo({
       >
         {subscriptionLabel && <span className="quota-subscription" title={subscriptionLabel}>{subscriptionLabel}</span>}
           <button className="quota-value" title={headline} onClick={details ?? (() => setShowDetails(true))}>
-            {headline}
+            {compactHeadline}
           </button>
         {quota?.error &&
           quota.state !== "unsupported" &&

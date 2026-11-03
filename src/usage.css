@@ -53,7 +53,8 @@
 }
 .usage-filters {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: center;
   gap: 7px;
   padding: 8px 10px;
   margin-bottom: 10px;
@@ -71,15 +72,13 @@
 .usage-filters input,
 .usage-filters select,
 .usage-time-button {
+  height: 32px;
   min-height: 32px;
-  padding: 3px 8px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  line-height: 18px;
 }
-.usage-filters select {
-  background: var(--surface-subtle);
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
-}
+.usage-filters select,
 .usage-filters input {
   background: var(--surface-subtle);
   color: var(--ink);
@@ -198,6 +197,9 @@
   border-radius: 2px;
 }
 .usage-tabs {
+  align-items: center;
+  min-height: 36px;
+  padding-bottom: 4px;
   border-bottom: 1px solid var(--line);
   gap: 6px;
   margin: 8px 0 0;
@@ -205,13 +207,19 @@
 .usage-tabs > button {
   --tab-tone: var(--accent);
   --tab-soft: var(--accent-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  min-height: 32px;
   border: 0;
   border-radius: var(--radius-xs) var(--radius-xs) 0 0;
   background: transparent;
   color: var(--muted);
-  padding: 7px 12px;
+  padding: 0 12px;
   border-bottom: 2px solid transparent;
   font-weight: 540;
+  box-sizing: border-box;
 }
 .usage-tabs > button[data-tab="providers"] {
   --tab-tone: var(--accent-blue);
@@ -246,12 +254,20 @@
   gap: 8px;
   flex-wrap: wrap;
 }
-.usage-toolbar > select {
-  width: 140px;
-  padding: 5px 9px;
+.usage-toolbar > select,
+.usage-log-controls select,
+.usage-heading select {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--surface-subtle);
+  color: var(--ink);
+  box-sizing: border-box;
+}
+.usage-toolbar > select {
+  width: 140px;
 }
 .usage-table-scroll {
   min-width: 0;
@@ -1153,6 +1169,9 @@
   min-width: 670px;
 }
 @container (max-width: 660px) {
+  .usage-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .usage-request-table tbody tr {
     column-gap: 6px;
   }
@@ -1206,7 +1225,14 @@
 }
 .usage-log-controls summary,
 .usage-pricing-toolbar summary {
-  padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  color: var(--ink);
 }
 .usage-performance-grid .usage-token-item {
   line-height: 16px;
@@ -1285,8 +1311,10 @@
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  height: 32px;
   min-height: 32px;
-  padding: 3px 10px;
+  padding: 0 10px;
+  box-sizing: border-box;
   border-radius: var(--radius-sm);
   border: 1px solid color-mix(in srgb, var(--accent-violet) 36%, var(--line));
   background: var(--accent-violet-soft);

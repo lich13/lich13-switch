@@ -157,6 +157,7 @@ pub enum JournalClient {
 #[serde(rename_all = "lowercase")]
 pub enum RetiredClient {
     Agy,
+    Antigravity,
 }
 impl From<ClientId> for JournalClient {
     fn from(value: ClientId) -> Self {
@@ -173,7 +174,8 @@ impl JournalClient {
     fn name(self) -> &'static str {
         match self {
             Self::Active(client) => client.name(),
-            Self::Retired(_) => "Antigravity CLI（历史）",
+            Self::Retired(RetiredClient::Agy) => "Antigravity CLI（历史）",
+            Self::Retired(RetiredClient::Antigravity) => "Antigravity app",
         }
     }
 }
@@ -289,6 +291,9 @@ impl Record {
         })
     }
     pub fn origin(&self) -> Origin {
+        if self.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity)) {
+            return Origin::Upstream;
+        }
         let response_error = matches!(
             self.reason,
             Reason::ModelUnavailable
@@ -310,6 +315,83 @@ impl Record {
             Origin::Upstream
         } else {
             Origin::Gateway
+        }
+    }
+    pub fn antigravity_error(
+        key: &str,
+        timestamp: u64,
+        model: Option<&str>,
+        raw_error: &str,
+    ) -> Self {
+        let lower = raw_error.to_ascii_lowercase();
+        let (reason, status, code_label) = if lower.contains("stream was interrupted")
+            || lower.contains("5m0s")
+            || lower.contains("deadline_exceeded")
+            || lower.contains("context deadline exceeded")
+            || lower.contains("timed out")
+        {
+            (Reason::RequestInterrupted, None, "STREAM_TIMEOUT")
+        } else if lower.contains("resource_exhausted")
+            || lower.contains("quota")
+            || lower.contains("rate limit")
+            || lower.contains("too many requests")
+            || lower.contains("429")
+        {
+            (Reason::RateLimit, Some(429), "RESOURCE_EXHAUSTED")
+        } else if lower.contains("unauthenticated")
+            || lower.contains("permission_denied")
+            || lower.contains("invalid_grant")
+            || lower.contains("401")
+            || lower.contains("403")
+        {
+            (Reason::Authentication, Some(401), "UNAUTHENTICATED")
+        } else if lower.contains("model")
+            && (lower.contains("not found")
+                || lower.contains("unavailable")
+                || lower.contains("not supported"))
+        {
+            (Reason::ModelUnavailable, Some(404), "MODEL_UNAVAILABLE")
+        } else {
+            (Reason::UpstreamService, Some(502), "ANTIGRAVITY_ERROR")
+        };
+        let digest = storage::digest(format!("antigravity-event:{key}").as_bytes());
+        let mut bytes = [0u8; 16];
+        for (i, slot) in bytes.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&digest[i * 2..i * 2 + 2], 16).unwrap_or(0);
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let details = Details {
+            upstream_code: Some(code_label.into()),
+            message: safe_message(raw_error),
+            ..Default::default()
+        };
+        let t = timestamp.min(now());
+        Self {
+            notification_message: None,
+            notification_provider: None,
+            id: uuid::Uuid::from_bytes(bytes).to_string(),
+            first_at: t,
+            last_at: t,
+            count: 1,
+            client_id: Some(JournalClient::Retired(RetiredClient::Antigravity)),
+            provider_id: None,
+            model: model.and_then(safe_model),
+            reason,
+            action: Action::Returned,
+            level: if matches!(
+                reason,
+                Reason::ModelUnavailable | Reason::RateLimit | Reason::Capacity
+            ) {
+                Level::Warning
+            } else {
+                Level::Error
+            },
+            status,
+            attempt: Some(1),
+            error_code: Some(reason.code()),
+            notified_at: 0,
+            details: details.sanitized(),
         }
     }
     fn merge_seconds(&self) -> u64 {
@@ -580,7 +662,7 @@ pub struct Filter {
     pub origin: Option<Origin>,
     pub from: Option<u64>,
     pub to: Option<u64>,
-    pub client_id: Option<ClientId>,
+    pub client_id: Option<JournalClient>,
     pub provider_id: Option<String>,
     pub level: Option<Level>,
     pub category: Option<Category>,
@@ -1127,7 +1209,7 @@ impl Service {
                     && r.last_at >= cutoff
                     && f.from.is_none_or(|t| r.last_at >= t)
                     && f.to.is_none_or(|t| r.first_at <= t)
-                    && f.client_id.is_none_or(|v| r.client_id == Some(v.into()))
+                    && f.client_id.is_none_or(|v| r.client_id == Some(v))
                     && f.provider_id
                         .as_ref()
                         .is_none_or(|v| r.provider_id.as_ref() == Some(v))
@@ -1154,6 +1236,152 @@ impl Service {
             total,
             page,
             error: j.error.clone(),
+        }
+    }
+    pub fn sync_antigravity_logs(&self, home: &Path) {
+        let cutoff = now().saturating_sub(RETENTION);
+        let existing: HashSet<String> = {
+            let guard = self.journal.lock().unwrap();
+            guard.records.iter().map(|r| r.id.clone()).collect()
+        };
+        let mut discovered = Vec::new();
+        let brain = home.join(".gemini/antigravity/brain");
+        if let Ok(entries) = std::fs::read_dir(&brain) {
+            let mut transcripts = Vec::new();
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(".system_generated/logs/transcript.jsonl");
+                if let Ok(meta) = std::fs::metadata(&candidate) {
+                    if let Ok(modified) = meta.modified() {
+                        let secs = modified
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        if secs >= cutoff && meta.is_file() {
+                            transcripts.push((secs, entry.file_name(), candidate));
+                        }
+                    }
+                }
+            }
+            transcripts.sort_by_key(|(secs, _, _)| std::cmp::Reverse(*secs));
+            for (file_secs, conv_name, path) in transcripts.into_iter().take(48) {
+                let conv = conv_name.to_string_lossy();
+                let Ok(file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                let mut reader = BufReader::new(file);
+                let mut line = Vec::new();
+                while reader.read_until(b'\n', &mut line).unwrap_or(0) > 0 {
+                    if line.len() <= 512 * 1024 {
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&line) {
+                            let is_err = v["status"]
+                                .as_str()
+                                .is_some_and(|s| s.eq_ignore_ascii_case("ERROR"))
+                                || v.get("error").is_some_and(|e| {
+                                    !e.is_null() && e != "" && e != &serde_json::json!({})
+                                })
+                                || v["errorMessage"]
+                                    .as_str()
+                                    .is_some_and(|s| !s.trim().is_empty());
+                            if is_err {
+                                let step_idx = v["step_index"].as_u64().unwrap_or(0);
+                                let ts = v["created_at"]
+                                    .as_str()
+                                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                    .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+                                    .unwrap_or(file_secs);
+                                if ts >= cutoff {
+                                    let raw = v["errorMessage"]
+                                        .as_str()
+                                        .or_else(|| v["error"]["message"].as_str())
+                                        .or_else(|| v["error"].as_str())
+                                        .or_else(|| v["content"].as_str())
+                                        .unwrap_or("Antigravity step error");
+                                    let model = v["model"]
+                                        .as_str()
+                                        .or_else(|| v["response_model"].as_str());
+                                    let r = Record::antigravity_error(
+                                        &format!("transcript:{conv}:{step_idx}"),
+                                        ts,
+                                        model,
+                                        raw,
+                                    );
+                                    if !existing.contains(&r.id) {
+                                        discovered.push(r);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    line.clear();
+                }
+            }
+        }
+        for log_dir in [
+            home.join("Library/Logs/Antigravity"),
+            home.join(".gemini/antigravity/logs"),
+        ] {
+            let Ok(entries) = std::fs::read_dir(&log_dir) else {
+                continue;
+            };
+            for entry in entries.flatten().take(24) {
+                let path = entry.path();
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                let secs = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if secs < cutoff {
+                    continue;
+                }
+                let Ok(Some(bytes)) = storage::read_bounded(&path, 256 * 1024) else {
+                    continue;
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                let fname = entry.file_name();
+                let fname = fname.to_string_lossy();
+                for (idx, line) in text.lines().enumerate() {
+                    let lower = line.to_ascii_lowercase();
+                    if lower.contains("[error]")
+                        || lower.contains("level=error")
+                        || lower.contains("unauthenticated")
+                        || lower.contains("resource_exhausted")
+                        || lower.contains("permission_denied")
+                        || lower.contains("deadline_exceeded")
+                        || lower.contains("stream was interrupted")
+                    {
+                        let r = Record::antigravity_error(
+                            &format!("logfile:{fname}:{idx}:{line}"),
+                            secs,
+                            None,
+                            line,
+                        );
+                        if !existing.contains(&r.id) {
+                            discovered.push(r);
+                        }
+                    }
+                }
+            }
+        }
+        if !discovered.is_empty() {
+            let mut guard = self.journal.lock().unwrap();
+            let mut added = false;
+            for r in discovered {
+                if !guard.records.iter().any(|existing| existing.id == r.id) {
+                    guard.records.push_back(Arc::new(r));
+                    added = true;
+                }
+            }
+            if added {
+                guard.dirty = true;
+                let _ = self.sender.try_send(Job::Prune);
+            }
         }
     }
     pub fn detail(&self, id: &str) -> Option<ClassifiedRecord> {

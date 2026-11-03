@@ -106,40 +106,51 @@ it.each(["codex", "claude", "grok", "dsh"] as const)(
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   },
 );
-it("shows ChatGPT subscription labels in the quick account list and hides API-key plans", async () => {
-  const user = userEvent.setup();
-  const accounts = structuredClone(demo);
-  accounts.accounts = [
-    {
-      ...accounts.accounts[0],
-      subscription: { planType: "pro", label: "Pro", stale: false },
-    },
-    {
-      ...accounts.accounts[2],
-      subscription: {
-        planType: "api-secret",
-        label: "API Secret Plan",
-        stale: false,
+it("omits the provider/account tab row, hides wallet placeholder badges, and compacts large balances", async () => {
+  const gateway = structuredClone(gatewayDemo);
+  const p = gateway.providers[0];
+  p.quota = {
+    providerId: p.id,
+    version: p.quotaVersion,
+    state: "ok",
+    source: "sub2api",
+    checkedAt: 1,
+    successAt: 1,
+    retryAt: null,
+    stale: false,
+    error: null,
+    keyStatus: null,
+    plans: [
+      {
+        name: "钱包余额",
+        remaining: 87495.917,
+        used: null,
+        total: null,
+        unit: "USD",
+        unlimited: false,
+        resetAt: null,
       },
-    },
-    {
-      id: "unknown",
-      name: "未知账号",
-      kind: "chatgpt" as const,
-      email: null,
-      current: false,
-      updatedAt: 0,
-      subscription: { planType: null, label: "未识别", stale: true },
-    },
-  ];
+    ],
+    subscriptions: [
+      {
+        name: "钱包余额",
+        status: "active",
+        expiresAt: null,
+        active: true,
+        plans: [],
+      },
+    ],
+    expiresAt: null,
+    expiresAtUnix: null,
+    today: null,
+    totalUsage: null,
+  } as ProviderQuota;
   mock.command.mockImplementation(
     async (name: string, args: Record<string, unknown> = {}) => {
       if (name === "get_state" || name === "switch_account")
-        return structuredClone(accounts);
+        return structuredClone(demo);
       if (name === "get_gateway" || name === "update_gateway")
-        return structuredClone(
-          args?.clientId === "claude" ? claudeGatewayDemo : gatewayDemo,
-        );
+        return structuredClone(gateway);
       if (name === "get_quick")
         return { pinned: false, tab: "providers", visible: true };
       if (name === "set_quick")
@@ -147,74 +158,16 @@ it("shows ChatGPT subscription labels in the quick account list and hides API-ke
     },
   );
   render(<QuickPanel />);
-  await user.click(await screen.findByRole("button", { name: "账号" }));
-
-  const known = await screen.findByRole("button", { name: "切换到 日常开发" });
-  expect(within(known).getByText("Pro")).toHaveClass("account-plan");
-  const unknown = screen.getByRole("button", { name: "切换到 未知账号" });
-  const unknownPlan = within(unknown).getByText("未识别");
-  expect(unknownPlan).toHaveClass("account-plan");
-  expect(unknownPlan).toHaveAttribute(
-    "title",
-    expect.stringContaining("凭据需刷新"),
-  );
-  const api = screen.getByRole("button", { name: "切换到 API 开发账号" });
-  expect(within(api).queryByText("API Secret Plan")).not.toBeInTheDocument();
-});
-
-it("keeps an updated current account when the initial quick state read resolves late", async () => {
-  const user = userEvent.setup();
-  const staleState = structuredClone(demo);
-  staleState.accounts = [
-    {
-      ...staleState.accounts[0],
-      id: "fixture-shared-account",
-      current: true,
-      subscription: { planType: "pro", label: "Pro", stale: false },
-    },
-  ];
-  const updatedState = structuredClone(staleState);
-  updatedState.accounts[0] = {
-    ...updatedState.accounts[0],
-    subscription: { planType: "plus", label: "Plus", stale: false },
-  };
-  let resolveInitialState!: (value: typeof staleState) => void;
-  const initialState = new Promise<typeof staleState>((resolve) => {
-    resolveInitialState = resolve;
+  const quota = await screen.findByLabelText(`${p.name} 额度`);
+  expect(
+    screen.queryByRole("navigation", { name: "快捷面板" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "账号" })).not.toBeInTheDocument();
+  expect(within(quota).queryByText("钱包余额")).not.toBeInTheDocument();
+  const valueButton = within(quota).getByRole("button", {
+    name: "剩余 87.5K USD",
   });
-  const original = mock.command.getMockImplementation()!;
-  mock.command.mockImplementation(
-    (name: string, args: Record<string, unknown> = {}) => {
-      if (name === "get_state") return initialState;
-      if (name === "get_quick")
-        return { pinned: false, tab: "accounts", visible: true };
-      return original(name, args);
-    },
-  );
-
-  render(<QuickPanel />);
-  await waitFor(() =>
-    expect(mock.listeners.get("switch-state")).toBeTypeOf("function"),
-  );
-  act(() => mock.listeners.get("switch-state")?.(updatedState));
-  await user.click(screen.getByRole("button", { name: "账号" }));
-  await screen.findByRole("button", { name: "切换到 日常开发" });
-
-  const expectCurrentPlus = () => {
-    const row = screen.getByRole("button", { name: "切换到 日常开发" });
-    expect(row).toBeDisabled();
-    expect(within(row).getByText("Plus")).toHaveClass("account-plan");
-    expect(within(row).queryByText("Pro")).not.toBeInTheDocument();
-    expect(within(row).getByText(/当前文件/)).toBeInTheDocument();
-    expect(document.querySelectorAll(".quick-account")).toHaveLength(1);
-  };
-  expectCurrentPlus();
-
-  await act(async () => {
-    resolveInitialState(staleState);
-    await initialState;
-  });
-  await waitFor(expectCurrentPlus);
+  expect(valueButton).toHaveAttribute("title", "剩余 87,495.917 USD");
 });
 
 it("uses current revisions for quick actions without initializing the main window", async () => {
@@ -242,23 +195,6 @@ it("uses current revisions for quick actions without initializing the main windo
     "frontend_ready",
     expect.anything(),
   );
-  await user.click(screen.getByRole("button", { name: "账号" }));
-  await user.type(screen.getByRole("textbox", { name: "搜索账号" }), "工作");
-  expect(
-    screen.getByRole("button", { name: "切换到 工作空间" }),
-  ).toBeInTheDocument();
-  expect(screen.queryByText("日常开发")).not.toBeInTheDocument();
-  act(() =>
-    mock.listeners.get("switch-state")!({
-      ...demo,
-      authRevision: "external-auth",
-    }),
-  );
-  await user.click(screen.getByRole("button", { name: "切换到 工作空间" }));
-  expect(mock.command).toHaveBeenCalledWith("switch_account", {
-    id: "work",
-    expectedRevision: "external-auth",
-  });
 });
 
 it("keeps the fixed tall panel without dynamic resize commands", async () => {
@@ -296,31 +232,6 @@ it("keeps provider naming separate from selection and exposes reset in the quick
     clientId: "codex",
     edit: { op: "reset", id: "primary" },
     expectedRevision: gatewayDemo.revision,
-  });
-});
-it("can restore a newer saved credential without auto-writing the auth file", async () => {
-  const user = userEvent.setup();
-  render(<QuickPanel />);
-  await screen.findByText("api.example.com");
-  await user.click(screen.getByRole("button", { name: "账号" }));
-  act(() =>
-    mock.listeners.get("switch-state")!({
-      ...demo,
-      authSync: {
-        state: "older",
-        accountId: "personal",
-        message: "检测到旧凭据，已保留已保存版本",
-        at: 1,
-      },
-    }),
-  );
-  expect(
-    mock.command.mock.calls.some(([name]) => name === "switch_account"),
-  ).toBe(false);
-  await user.click(screen.getByRole("button", { name: "使用已保存版本" }));
-  expect(mock.command).toHaveBeenCalledWith("switch_account", {
-    id: "personal",
-    expectedRevision: demo.authRevision,
   });
 });
 it("keeps provider settings HTTP/SSE-only and opens shared policy settings", async () => {

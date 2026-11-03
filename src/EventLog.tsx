@@ -92,7 +92,7 @@ export type EventRecord = {
   firstAt: number;
   lastAt: number;
   count: number;
-  clientId: ClientId | "agy" | null;
+  clientId: ClientId | "agy" | "antigravity" | null;
   providerId: string | null;
   model: string | null;
   reason: keyof typeof reasons;
@@ -166,18 +166,20 @@ type StatusGroup =
   | "server_error"
   | "no_status";
 
-const client = (id: ClientId | "agy" | null) =>
-  id === "agy"
-    ? "Antigravity CLI"
-    : id === "codex"
-      ? "Codex"
-      : id === "claude"
-        ? "Claude Code"
-        : id === "dsh"
-          ? "DSH"
-          : id === "grok"
-            ? "Grok Build"
-            : "应用";
+const client = (id: ClientId | "agy" | "antigravity" | null) =>
+  id === "antigravity"
+    ? "Antigravity app"
+    : id === "agy"
+      ? "Antigravity CLI"
+      : id === "codex"
+        ? "Codex"
+        : id === "claude"
+          ? "Claude Code"
+          : id === "dsh"
+            ? "DSH"
+            : id === "grok"
+              ? "Grok Build"
+              : "应用";
 
 const time = (seconds: number) =>
   new Date(seconds * 1000).toLocaleString("zh-CN", {
@@ -442,6 +444,7 @@ export default function EventLog({
         request !== detailSequence.current ||
         !event.clientId ||
         event.clientId === "agy" ||
+        event.clientId === "antigravity" ||
         eventOrigin(event) !== "upstream"
       )
         return;
@@ -731,6 +734,7 @@ export default function EventLog({
           <option value="claude">Claude Code</option>
           <option value="grok">Grok Build</option>
           <option value="dsh">DeepSeek Harness</option>
+          <option value="antigravity">Antigravity app</option>
         </select>
         <select
           aria-label="供应商"
@@ -1020,7 +1024,10 @@ function EventDetail({
       }}
     >
       <div className="event-drawer-inner">
-        {addingRule && r.clientId && r.clientId !== "agy" && (
+        {addingRule &&
+          r.clientId &&
+          r.clientId !== "agy" &&
+          r.clientId !== "antigravity" && (
           <FailureRuleDialog
             clientId={r.clientId}
             initial={{

@@ -1216,10 +1216,20 @@ fn get_gateway_freeze(r: tauri::State<'_, Arc<Runtime>>) -> gateway::freeze::Vie
 }
 #[tauri::command]
 fn set_gateway_frozen(
+    app: tauri::AppHandle,
     frozen: bool,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::freeze::View> {
-    r.gateway.freeze_gate().set(frozen)
+    let view = r.gateway.freeze_gate().set(frozen)?;
+    if view.frozen && view.draining == 0 {
+        let r = r.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Ok(Some(state)) = r.power.disable_if_enabled() {
+                let _ = app.emit("clamshell-state", state);
+            }
+        });
+    }
+    Ok(view)
 }
 #[tauri::command]
 fn get_gateway(
@@ -2014,11 +2024,21 @@ pub fn run() {
             let freeze = runtime.gateway.freeze_gate();
             let mut freeze_events = freeze.subscribe();
             let freeze_app = app.handle().clone();
+            let freeze_runtime = runtime.clone();
             tauri::async_runtime::spawn(async move {
                 while freeze_events.changed().await.is_ok() {
                     let view = freeze.view();
                     for window in visible_windows(&freeze_app) {
                         let _ = window.emit("gateway-freeze", &view);
+                    }
+                    if view.frozen && view.draining == 0 {
+                        let r = freeze_runtime.clone();
+                        let app_handle = freeze_app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if let Ok(Some(state)) = r.power.disable_if_enabled() {
+                                let _ = app_handle.emit("clamshell-state", state);
+                            }
+                        });
                     }
                 }
             });

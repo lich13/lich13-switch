@@ -83,6 +83,17 @@ impl Service {
             .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
         self.set_locked(enabled, expected)
     }
+    pub fn disable_if_enabled(&self) -> Result<Option<State>> {
+        let _lock = self
+            .lock
+            .try_lock()
+            .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
+        let before = self.state()?;
+        if !before.supported || !before.enabled {
+            return Ok(None);
+        }
+        self.set_locked(false, &before.revision).map(Some)
+    }
     fn set_locked(&self, enabled: bool, expected: &str) -> Result<State> {
         let before = self.state()?;
         if !before.supported {

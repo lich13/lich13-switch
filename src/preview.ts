@@ -1,6 +1,10 @@
 import { eventOrigin, type EventRecord } from "./EventLog";
 import { usageCommands, usagePreview } from "./usage-preview";
-import { powerCommands, powerPreview } from "./power-preview";
+import {
+  disableClamshellOnFreeze,
+  powerCommands,
+  powerPreview,
+} from "./power-preview";
 import { gatewayPreview } from "./gateway-preview";
 import { providerTestingPreview } from "./provider-testing-preview";
 import type { ViewState, ConfigDocument, LoginState } from "./types";
@@ -216,6 +220,9 @@ export async function run(
       queued: args.frozen ? freezeState.queued : 0,
     };
     emit("gateway-freeze", { ...freezeState });
+    if (freezeState.frozen && freezeState.draining === 0) {
+      disableClamshellOnFreeze(emit);
+    }
     return { ...freezeState };
   }
   if (name.startsWith("provider_test_")) {

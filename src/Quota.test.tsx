@@ -235,6 +235,43 @@ describe("quota display and refresh", () => {
     expect(within(area).queryByText("订阅窗口")).not.toBeInTheDocument();
     expect(within(area).queryByText("Key 配额")).not.toBeInTheDocument();
   });
+  it("hides wallet placeholder subscription badges and compacts large balances in compact mode", () => {
+    const q = {
+      ...result(),
+      plans: [
+        {
+          ...result().plans[0],
+          name: "钱包余额",
+          remaining: 87495.917,
+        },
+      ],
+      subscriptions: [
+        {
+          name: "钱包余额",
+          status: "active",
+          expiresAt: null,
+          active: true,
+          plans: [],
+        },
+      ],
+    };
+    const { rerender } = render(
+      <QuotaInfo
+        provider={provider}
+        quota={q}
+        compact
+        details={() => {}}
+        refresh={() => {}}
+      />,
+    );
+    const area = screen.getByLabelText(`${provider.name} 额度`);
+    expect(within(area).queryByText("钱包余额")).not.toBeInTheDocument();
+    const button = within(area).getByRole("button", { name: "剩余 87.5K USD" });
+    expect(button).toHaveAttribute("title", "剩余 87,495.917 USD");
+
+    rerender(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
+    expect(screen.getByText("剩余 87,495.917 USD")).toBeInTheDocument();
+  });
   it("summarizes multiple subscriptions and keeps their plans in on-demand details", () => {
     const q = {
       ...result(),

@@ -586,19 +586,75 @@ fn price(record: &mut Record, pricing: &Pricing, settings: &Settings) {
 fn response_id(u: &Value) -> Option<&str> {
     text(u, &["responseId", "messageId"])
 }
+fn classify_error_text(raw: &str) -> Option<&'static str> {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("stream was interrupted")
+        || lower.contains("5m0s")
+        || lower.contains("deadline_exceeded")
+        || lower.contains("context deadline exceeded")
+        || lower.contains("timed out")
+    {
+        Some("STREAM_TIMEOUT")
+    } else if lower.contains("resource_exhausted")
+        || lower.contains("quota")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("429")
+    {
+        Some("RESOURCE_EXHAUSTED")
+    } else if lower.contains("unauthenticated")
+        || lower.contains("permission_denied")
+        || lower.contains("invalid_grant")
+        || lower.contains("401")
+        || lower.contains("403")
+    {
+        Some("UNAUTHENTICATED")
+    } else if lower.contains("unavailable")
+        || lower.contains("internal")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+    {
+        Some("UPSTREAM_ERROR")
+    } else {
+        None
+    }
+}
 fn failed(v: &Value) -> bool {
     v.get("error")
         .is_some_and(|e| !e.is_null() && e != "" && e != &json!({}))
+        || text(v, &["errorMessage", "errorCode", "failureReason"]).is_some()
+        || v["status"]
+            .as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("ERROR") || s.eq_ignore_ascii_case("FAILED"))
 }
 fn error_code(v: &Value) -> Option<String> {
     let e = &v["error"];
-    [&e["code"], &e["type"], &v["errorCode"]]
+    if let Some(code) = [&e["code"], &e["type"], &e["status"], &v["errorCode"]]
         .into_iter()
         .find_map(|code| {
             code.as_i64()
                 .map(|n| n.to_string())
                 .or_else(|| label(code.as_str()))
         })
+    {
+        return Some(code);
+    }
+    for msg in [
+        e.as_str(),
+        e["message"].as_str(),
+        v["errorMessage"].as_str(),
+        v["failureReason"].as_str(),
+        v["content"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(classified) = classify_error_text(msg) {
+            return Some(classified.into());
+        }
+    }
+    failed(v).then(|| "ANTIGRAVITY_ERROR".into())
 }
 
 /// Request IDs separate calls sharing one execution. A final usage envelope
@@ -1572,6 +1628,7 @@ fn scan_file(
                 let id = safe_id(&format!("antigravity:request:{request}"));
                 let alias = resolve_model_alias(Some(model));
                 let model_for_id = explicit_model.or_else(|| alias.map(|a| a.canonical));
+                let is_failed = failed(&v);
                 let mut attempt = Attempt {
                     id: safe_id(&format!("{id}:final")),
                     response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
@@ -1581,8 +1638,9 @@ fn scan_file(
                         .or_else(|| alias.map(|a| a.display_name.to_owned()))
                         .or_else(|| explicit_model.is_none().then(|| c.model.clone()).flatten()),
                     reasoning_effort: alias.and_then(|a| a.effort).map(str::to_owned),
+                    error_code: is_failed.then(|| error_code(&v)).flatten(),
                     started_at: at,
-                    outcome: "unknown".into(),
+                    outcome: if is_failed { "failed" } else { "unknown" }.into(),
                     transport: "history_file".into(),
                     tokens: Tokens {
                         input: number(&v["input_tokens"]),

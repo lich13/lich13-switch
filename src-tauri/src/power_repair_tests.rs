@@ -395,3 +395,16 @@ fn mismatched_state_after_apply_never_reports_a_successful_toggle() {
     assert_eq!(helper.calls.lock().unwrap().len(), 1);
     assert_legacy(&service);
 }
+
+#[test]
+fn disable_if_enabled_turns_off_active_clamshell_and_skips_when_already_off() {
+    let enabled = state("ready", true, 0, "application", "fixture-enabled");
+    let disabled = state("ready", false, 5, "none", "fixture-disabled");
+    let (_dir, service, helper) = fixture(enabled.clone());
+    helper.reply(disabled.clone(), None);
+
+    assert_eq!(service.disable_if_enabled().unwrap(), Some(disabled));
+    assert_eq!(*helper.calls.lock().unwrap(), [(enabled, false, 0)]);
+
+    assert_eq!(service.disable_if_enabled().unwrap(), None);
+}

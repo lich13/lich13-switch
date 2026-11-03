@@ -95,9 +95,18 @@ pub async fn get_app_events(
     filter: crate::events::Filter,
 ) -> Result<crate::events::Page> {
     let service = r.diagnostics.clone();
-    tauri::async_runtime::spawn_blocking(move || service.query(filter))
-        .await
-        .map_err(|_| AppError::new(code::LOG_READ, "日志读取失败"))
+    tauri::async_runtime::spawn_blocking(move || {
+        if filter.client_id.is_none_or(|c| {
+            c == crate::events::JournalClient::Retired(crate::events::RetiredClient::Antigravity)
+        }) {
+            if let Some(home) = dirs::home_dir() {
+                service.sync_antigravity_logs(&home);
+            }
+        }
+        service.query(filter)
+    })
+    .await
+    .map_err(|_| AppError::new(code::LOG_READ, "日志读取失败"))
 }
 #[tauri::command]
 pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::ClassifiedRecord> {

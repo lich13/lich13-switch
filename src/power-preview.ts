@@ -44,3 +44,15 @@ export async function powerPreview(
       return { terminated: 0, failed: 0 };
   }
 }
+
+export function disableClamshellOnFreeze(
+  emit: (name: string, payload: unknown) => void,
+) {
+  if (!power.enabled) return;
+  power = {
+    ...power,
+    enabled: false,
+    revision: crypto.randomUUID(),
+  };
+  emit("clamshell-state", power);
+}

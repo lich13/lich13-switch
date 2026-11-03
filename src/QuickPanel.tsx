@@ -15,7 +15,6 @@ import {
   Check,
   Pin,
   Power,
-  Search,
   X,
   Settings2,
   RotateCcw,
@@ -29,8 +28,6 @@ import {
   providerFault,
 } from "./provider-status";
 import QuickControls from "./QuickControls";
-import AuthSyncNotice from "./AuthSyncNotice";
-import AccountPlan from "./AccountPlan";
 import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
 import ConnectionTestIcon from "./ConnectionTestIcon";
@@ -63,7 +60,6 @@ function QuickContent({
     tab: "providers",
   });
   const [visible, setVisible] = useState(preview);
-  const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -79,7 +75,7 @@ function QuickContent({
   }, [clientVisible, visibleClients.join(","), onClientChange]);
   const quota = useProviderQuota(
     gateway?.providers ?? [],
-    visible && prefs.tab === "providers" && clientVisible,
+    visible && clientVisible,
     "panel-visibility",
     clientId,
     accounts?.preferences.quotaRefreshSeconds ?? 60,
@@ -210,16 +206,6 @@ function QuickContent({
       await edit({ op: "reset", id: provider.id });
       setNotice("已重置熔断");
     });
-  const account = async (id: string) => {
-    if (!accounts) return;
-    setAccounts(
-      await command("switch_account", {
-        id,
-        expectedRevision: accounts.authRevision,
-      }),
-    );
-    setNotice("文件已切换，请重新打开 Codex");
-  };
   const open = (page?: string) =>
     run(async () => {
       await command("open_main", { page: page ?? null });
@@ -227,22 +213,14 @@ function QuickContent({
   return (
     <>
       <header className="quick-toolbar">
-        <nav className="segmented" aria-label="快捷面板">
-          {(["providers", "accounts"] as const).map((tab) => (
-            <button
-              key={tab}
-              aria-pressed={prefs.tab === tab}
-              onClick={() =>
-                run(async () => {
-                  setPrefs(await command("set_quick", { tab }));
-                  setQuery("");
-                })
-              }
-            >
-              {tab === "providers" ? "供应商" : "账号"}
-            </button>
-          ))}
-        </nav>
+        {visibleClients.length > 0 && (
+          <ClientSelection
+            client={clientVisible ? clientId : visibleClients[0]}
+            visibleClients={visibleClients}
+            disabled={busy}
+            select={onClientChange}
+          />
+        )}
         <span className="quick-spacer" />
         <button
           className="icon-button"
@@ -270,14 +248,6 @@ function QuickContent({
       </header>
       <div className="quick-scroll">
         <div className="quick-body">
-          {prefs.tab === "providers" && visibleClients.length > 0 && (
-            <ClientSelection
-              client={clientVisible ? clientId : visibleClients[0]}
-              visibleClients={visibleClients}
-              disabled={busy}
-              select={onClientChange}
-            />
-          )}
           {(error || gateway?.error || accounts?.error) && (
             <div className="quick-feedback error" role="alert">
               {error || gateway?.error || accounts?.error}
@@ -288,19 +258,18 @@ function QuickContent({
               {notice}
             </div>
           )}
-          {prefs.tab === "providers" ? (
-            !clientVisible ? (
-              <div className="quick-empty">
-                未显示平台
-                <button
-                  className="text-button"
-                  onClick={() => open("settings")}
-                >
-                  设置平台
-                </button>
-              </div>
-            ) : (
-              <>
+          {!clientVisible ? (
+            <div className="quick-empty">
+              未显示平台
+              <button
+                className="text-button"
+                onClick={() => open("settings")}
+              >
+                设置平台
+              </button>
+            </div>
+          ) : (
+            <>
                 <div className="quick-status">
                   <span
                     className={`status-pill ${gateway?.running ? "online" : ""}`}
@@ -387,7 +356,7 @@ function QuickContent({
                     providers={gateway.providers}
                     revision={gateway.revision}
                     disabled={busy}
-                    visible={visible && prefs.tab === "providers"}
+                    visible={visible}
                     commit={providerEdit}
                     report={setError}
                     rowClass={(p) =>
@@ -507,7 +476,7 @@ function QuickContent({
                             provider={p}
                             revision={gateway.revision}
                             disabled={rowBusy}
-                            visible={visible && prefs.tab === "providers"}
+                            visible={visible}
                             commit={providerEdit}
                             report={setError}
                           />
@@ -516,64 +485,6 @@ function QuickContent({
                     )}
                   </SortableProviders>
                 )}
-              </>
-            )
-          ) : (
-            <>
-              <label className="quick-search">
-                <Search size={14} />
-                <input
-                  aria-label="搜索账号"
-                  placeholder="搜索账号"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
-              </label>
-              {accounts && (
-                <AuthSyncNotice
-                  state={accounts}
-                  busy={busy}
-                  apply={(id) => run(() => account(id))}
-                />
-              )}
-              {accounts?.accounts
-                .filter((a) =>
-                  `${a.name} ${a.email ?? ""}`
-                    .toLowerCase()
-                    .includes(query.toLowerCase()),
-                )
-                .map((a) => (
-                  <button
-                    className="quick-account"
-                    key={a.id}
-                    disabled={busy || a.current}
-                    onClick={() => run(() => account(a.id))}
-                    aria-label={`切换到 ${a.name}`}
-                  >
-                    <span className="quick-name">
-                      <span className="account-title">
-                        <strong title={a.name}>{a.name}</strong>
-                        <AccountPlan account={a} />
-                      </span>
-                      <span>
-                        {a.kind === "chatgpt" ? "ChatGPT" : "API Key"}
-                        {a.current ? " · 当前文件" : ""}
-                      </span>
-                    </span>
-                    {a.current && <Check size={15} />}
-                  </button>
-                ))}
-              {!accounts?.accounts.length && (
-                <div className="quick-empty">
-                  尚无已保存账号
-                  <button
-                    className="text-button"
-                    onClick={() => open("accounts")}
-                  >
-                    添加账号
-                  </button>
-                </div>
-              )}
             </>
           )}
         </div>
@@ -583,13 +494,7 @@ function QuickContent({
         <button onClick={() => open()}>
           打开 Vela <ArrowUpRight size={12} />
         </button>
-        <button
-          onClick={() =>
-            open(prefs.tab === "providers" ? "gateway" : "accounts")
-          }
-        >
-          {prefs.tab === "providers" ? "管理供应商" : "管理账号"}
-        </button>
+        <button onClick={() => open("gateway")}>管理供应商</button>
       </footer>
     </>
   );
