@@ -51,14 +51,7 @@ jobs:
           $installer = Get-ChildItem 'src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe' | Select-Object -First 1
           $installDir = Join-Path $env:RUNNER_TEMP 'vela-installed'
           $expectedVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $old = Join-Path $env:RUNNER_TEMP 'legacy-installer'
-          New-Item -ItemType Directory -Path $old | Out-Null
-          gh release download v0.7.2 --repo "$env:GITHUB_REPOSITORY" --pattern '*x64-setup.exe' --dir $old
-          if ($LASTEXITCODE -ne 0) { throw 'Legacy installer download failed' }
-          $legacy = Get-ChildItem $old -Filter '*.exe' | Select-Object -First 1
-          $legacyInstall = Start-Process $legacy.FullName -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
-          if ($legacyInstall.ExitCode -ne 0 -or !(Test-Path "$installDir/gpt-switch.exe")) { throw 'Legacy install failed' }
-          $data = Join-Path $env:APPDATA 'com.lich13.gpt-switch'
+          $data = Join-Path $HOME '.vela'
           New-Item -ItemType Directory -Path $data -Force | Out-Null
           $marker = Join-Path $data 'upgrade-fixture.txt'
           Set-Content $marker 'preserve-user-data'
@@ -68,18 +61,17 @@ jobs:
           $beforeProtocol = (Get-Item $protocol).GetValue('')
           $registered = 'HKCU:\Software\RegisteredApplications'
           New-Item $registered -Force | Out-Null
-          New-ItemProperty $registered -Name 'fixture-retired-link' -Value 'Software\gpt-Switch\LinkHandlers\2\Capabilities' -PropertyType String -Force | Out-Null
+          New-ItemProperty $registered -Name 'fixture-retired-link' -Value 'Software\Vela\LinkHandlers\2\Capabilities' -PropertyType String -Force | Out-Null
           $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw 'Installer failed' }
           $exe = Get-ChildItem $installDir -Filter 'vela.exe' -Recurse | Select-Object -First 1
           if (!$exe) { throw 'Installed executable missing' }
-          if (Test-Path "$installDir/gpt-switch.exe") { throw 'Legacy binary remains' }
           $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
-          $entry = Get-ItemProperty "$uninstall/gpt-Switch"
-          if ($entry.DisplayName -ne 'Vela' -or $entry.DisplayVersion -ne $expectedVersion -or (Test-Path "$uninstall/Vela") -or (Test-Path "$uninstall/lich13-switch")) { throw 'Duplicate or invalid upgrade registration' }
-          if ((Get-Content $marker).Trim() -ne 'preserve-user-data' -or (Get-Item $protocol).GetValue('') -ne $beforeProtocol) { throw 'Upgrade changed user data or default protocol' }
+          $entry = Get-ItemProperty "$uninstall/Vela"
+          if ($entry.DisplayName -ne 'Vela' -or $entry.DisplayVersion -ne $expectedVersion) { throw 'Invalid install registration' }
+          if ((Get-Content $marker).Trim() -ne 'preserve-user-data' -or (Get-Item $protocol).GetValue('') -ne $beforeProtocol) { throw 'Install changed user data or default protocol' }
           if ((Get-Item $registered).GetValue('fixture-retired-link')) { throw 'Retired link receiver remains' }
-          $selfCommand = 'HKCU:\Software\Classes\gptSwitch.CCSwitch.0\shell\open\command'
+          $selfCommand = 'HKCU:\Software\Classes\Vela.CCSwitch.0\shell\open\command'
           if ((Get-Item $selfCommand).GetValue('') -ne ('"' + $exe.FullName + '" "%1"')) { throw 'Self link registration is missing' }
           $notice = Get-Content (Join-Path $installDir 'THIRD_PARTY_NOTICES.md') -Raw
           if (!$notice.Contains('Copyright (c) 2025 Jason Young')) { throw 'Third-party notice missing' }
@@ -91,7 +83,7 @@ jobs:
           if (!$result.ok -or !$result.webview -or !$result.tray -or !$result.gateway -or !$result.safeExit -or $result.revision -ne $env:GITHUB_SHA) { throw 'Smoke failed' }
           if ((Get-Item $protocol).GetValue('') -ne $beforeProtocol) { throw 'Smoke changed the real system association' }
           $remove = Start-Process "$installDir/uninstall.exe" -ArgumentList '/S' -Wait -PassThru
-          if ($remove.ExitCode -ne 0 -or (Test-Path "$uninstall/gpt-Switch") -or (Test-Path $exe.FullName)) { throw 'Uninstall failed' }
+          if ($remove.ExitCode -ne 0 -or (Test-Path "$uninstall/Vela") -or (Test-Path $exe.FullName)) { throw 'Uninstall failed' }
           if ((Get-Item $protocol).GetValue('') -ne $beforeProtocol -or !(Test-Path $marker)) { throw 'Uninstall damaged other app or data' }
       - name: Installed macOS DMG smoke test
         if: runner.os == 'macOS'

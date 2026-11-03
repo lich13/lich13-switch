@@ -26,20 +26,9 @@ export function useClientSelection(
 ];
 export function useClientSelection(surface: "main" | "quick" | "config") {
   const key = `vela.${surface}.client`;
-  const legacyKey = ["lich13", "-switch.", surface, ".client"].join("");
   const [client, setClient] = useState<ConfigClientId>(() => {
     try {
-      let stored = localStorage.getItem(key);
-      if (!stored) {
-        const legacy = localStorage.getItem(legacyKey);
-        if (legacy) {
-          stored = legacy;
-          localStorage.setItem(key, legacy);
-          localStorage.removeItem(legacyKey);
-        }
-      } else {
-        localStorage.removeItem(legacyKey);
-      }
+      const stored = localStorage.getItem(key);
       return stored === "claude" ||
         stored === "grok" ||
         stored === "dsh" ||
@@ -61,14 +50,13 @@ export function useClientSelection(surface: "main" | "quick" | "config") {
         return false;
       try {
         localStorage.setItem(key, next);
-        localStorage.removeItem(legacyKey);
       } catch {
         /* Selection remains usable without storage. */
       }
       setClient(next);
       return true;
     },
-    [client, key, legacyKey],
+    [client, key],
   );
   return [client, select] as const;
 }

@@ -1216,20 +1216,10 @@ fn get_gateway_freeze(r: tauri::State<'_, Arc<Runtime>>) -> gateway::freeze::Vie
 }
 #[tauri::command]
 fn set_gateway_frozen(
-    app: tauri::AppHandle,
     frozen: bool,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::freeze::View> {
-    let view = r.gateway.freeze_gate().set(frozen)?;
-    if view.frozen && view.draining == 0 {
-        let r = r.inner().clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            if let Ok(Some(state)) = r.power.disable_if_enabled() {
-                let _ = app.emit("clamshell-state", state);
-            }
-        });
-    }
-    Ok(view)
+    r.gateway.freeze_gate().set(frozen)
 }
 #[tauri::command]
 fn get_gateway(
@@ -1730,7 +1720,7 @@ fn report_exit_smoke(app: &tauri::AppHandle, r: &Runtime, restored: Result<()>) 
         }
         Ok(())
     })();
-    let data = serde_json::json!({"safeExit":result.is_ok(),"gateway":result.is_ok(),"ok":result.is_ok(),"version":env!("CARGO_PKG_VERSION"),"revision":env!("GPT_SWITCH_REVISION"),"webview":true,"tray":app.tray_by_id("switch").is_some(),"platform":std::env::consts::OS,"error":result.err()});
+    let data = serde_json::json!({"safeExit":result.is_ok(),"gateway":result.is_ok(),"ok":result.is_ok(),"version":env!("CARGO_PKG_VERSION"),"revision":env!("VELA_REVISION"),"webview":true,"tray":app.tray_by_id("switch").is_some(),"platform":std::env::consts::OS,"error":result.err()});
     storage::atomic_write(
         r.smoke.as_ref().unwrap(),
         serde_json::to_string_pretty(&data).unwrap().as_bytes(),
@@ -1890,39 +1880,31 @@ pub fn run() {
             } else {
                 None
             };
+            let user_home = dirs::home_dir()
+                .ok_or_else(|| AppError::new(code::PATH, "无法定位用户主目录"))?;
             let data = fixture
                 .as_ref()
                 .map(|t| t.path().join("data"))
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vela"));
+                .unwrap_or_else(|| user_home.join(".vela"));
+            storage::private_dir(&data)?;
             let home = fixture
                 .as_ref()
                 .map(|t| t.path().join("codex"))
                 .unwrap_or_else(|| {
                     std::env::var_os("CODEX_HOME")
                         .map(PathBuf::from)
-                        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
+                        .unwrap_or_else(|| user_home.join(".codex"))
                 });
             if smoke.is_none() {
-                let mut legacy_dirs = Vec::new();
                 if let Some(dir) = dirs::data_dir() {
-                    legacy_dirs.push(dir.join("com.lich13.gpt-switch"));
-                    legacy_dirs.push(dir.join("com.lich13.lich13-switch"));
+                    let legacy_dirs = [dir.join("com.lich13.vela-legacy")];
+                    migrations::migrate_to_vela_home(&data, &legacy_dirs)?;
                 }
-                let _ = migrations::migrate_to_vela_home(&data, &legacy_dirs);
             }
             // Single-instance registration has completed; no current spool exists yet.
             cleanup_spool::clean(&data);
             let cleanup_error = migrations::before_services(&data).err();
             let mut core = Core::new(data.clone(), home)?;
-            if smoke.is_none() {
-                let prefs = core.preferences();
-                let _ = migrations::migrate_legacy_markers(
-                    &data,
-                    &core.home(),
-                    std::path::Path::new(&prefs.grok_home),
-                    std::path::Path::new(&prefs.dsh_home),
-                );
-            }
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
             let grok = gateway.grok_companion(data.join("grok"))?;
@@ -2052,8 +2034,14 @@ pub fn run() {
                         let r = freeze_runtime.clone();
                         let app_handle = freeze_app.clone();
                         tauri::async_runtime::spawn_blocking(move || {
-                            if let Ok(Some(state)) = r.power.disable_if_enabled() {
-                                let _ = app_handle.emit("clamshell-state", state);
+                            match r.power.disable_if_enabled() {
+                                Ok(Some(state)) => {
+                                    let _ = app_handle.emit("clamshell-state", state);
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    let _ = app_handle.emit("switch-error", err);
+                                }
                             }
                         });
                     }
@@ -2255,6 +2243,7 @@ pub fn run() {
                 let mut config_cache = std::collections::HashMap::new();
                 let mut agy_config_version: Option<String> = None;
                 let mut agy_config_cache = auth_cache::Cache::default();
+                let mut agy_auth_stamp: Option<String> = None;
                 #[cfg(windows)]
                 let mut last_tray_dark: Option<bool> = None;
                 loop {
@@ -2316,6 +2305,14 @@ pub fn run() {
                                     serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false}),
                                 );
                                 agy_config_version = Some(rev);
+                            }
+                        }
+                        if let Some(stamp) = antigravity::auth::disk_stamp() {
+                            if agy_auth_stamp.as_ref() != Some(&stamp) {
+                                if let Ok(auth_state) = antigravity::auth::current_state(&runtime.data) {
+                                    let _ = handle.emit("antigravity-auth-state", auth_state);
+                                }
+                                agy_auth_stamp = Some(stamp);
                             }
                         }
                     }
@@ -2391,14 +2388,10 @@ pub fn run() {
             antigravity::read_previous_antigravity_config,
             antigravity::validate_antigravity_config,
             antigravity::auth::get_antigravity_auth_state,
-            antigravity::auth::import_current_antigravity_oauth,
-            antigravity::auth::import_current_antigravity_adc,
             antigravity::auth::add_antigravity_adc,
             antigravity::auth::pick_antigravity_credential_file,
-            antigravity::auth::switch_antigravity_oauth,
-            antigravity::auth::switch_antigravity_adc,
+            antigravity::auth::switch_antigravity_account,
             antigravity::auth::set_antigravity_auth_mode,
-            antigravity::auth::backup_antigravity_auth,
             antigravity::auth::rename_antigravity_account,
             antigravity::auth::delete_antigravity_account,
             usage::commands::get_usage_state,

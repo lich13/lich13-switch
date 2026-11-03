@@ -8,10 +8,8 @@ use std::{
     sync::Mutex,
 };
 pub const LOGIN_ARG: &str = "--vela-login-startup";
-pub const LEGACY_LOGIN_ARG: &str = "--gpt-switch-login-startup";
-pub const LEGACY_LICH13_LOGIN_ARG: &str = "--lich13-switch-login-startup";
 pub fn is_login_argument(arg: &str) -> bool {
-    [LOGIN_ARG, LEGACY_LOGIN_ARG, LEGACY_LICH13_LOGIN_ARG].contains(&arg)
+    arg == LOGIN_ARG
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -131,7 +129,7 @@ fn registered() -> Result<bool> {
             use winreg::{enums::HKEY_CURRENT_USER, RegKey};
             let actual: String = RegKey::predef(HKEY_CURRENT_USER)
                 .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run")
-                .and_then(|key| key.get_value("gpt-Switch"))
+                .and_then(|key| key.get_value("Vela"))
                 .map_err(storage::io_error)?;
             if actual != format!("{} {LOGIN_ARG}", launch.get_app_path()) {
                 return Err(AppError::new(
@@ -219,7 +217,7 @@ fn auto_launch(silent: bool) -> Result<AutoLaunch> {
     // auto-launch writes its Windows path verbatim into the Run command.
     let path = registration_path(path, cfg!(target_os = "windows"));
     AutoLaunchBuilder::new()
-        .set_app_name("gpt-Switch")
+        .set_app_name("Vela")
         .set_app_path(&path)
         .set_use_launch_agent(false)
         .set_args(&args)
@@ -244,7 +242,7 @@ pub fn smoke_registration() -> Result<()> {
         use winreg::{enums::HKEY_CURRENT_USER, RegKey};
         let value: String = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run")
-            .and_then(|key| key.get_value("gpt-Switch"))
+            .and_then(|key| key.get_value("Vela"))
             .map_err(storage::io_error)?;
         let expected = format!("{} {LOGIN_ARG}", entry.get_app_path());
         if value != expected || !entry.is_enabled().map_err(system_error)? {
@@ -314,8 +312,6 @@ mod tests {
         let _: Preferences =
             serde_json::from_str(r#"{"launchToTray":false,"restoreGateway":true}"#).unwrap();
         assert!(silent(&[LOGIN_ARG.into()]));
-        assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
-        assert!(silent(&[LEGACY_LICH13_LOGIN_ARG.into()]));
         assert!(is_login_event(
             u32::from_be_bytes(*b"oapp"),
             Some(u32::from_be_bytes(*b"lgit"))

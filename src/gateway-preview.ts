@@ -273,7 +273,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         } else input.message = text;
       }
     }
-    const local = input.upstreamType === "gpt_switch_gateway";
+    const local = input.upstreamType === "vela_gateway";
     const catalog = failureCatalogPreview.filter((c) =>
       c.origin === "gateway" ? local || !explicit : !local,
     );

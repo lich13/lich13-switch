@@ -251,8 +251,8 @@ async fn retired_credentials_migrate_once_without_changing_provider_or_other_fil
 #[ignore = "Explicit real Claude CLI and provider acceptance; reads a supplied private settings file and uses an isolated home"]
 async fn real_claude_http_and_cli_stream_isolated() {
     let settings =
-        std::env::var_os("LICH13_SWITCH_CLAUDE_SETTINGS").expect("private settings path required");
-    let cli = std::env::var_os("LICH13_SWITCH_CLAUDE_CLI").expect("official CLI path required");
+        std::env::var_os("VELA_CLAUDE_SETTINGS").expect("private settings path required");
+    let cli = std::env::var_os("VELA_CLAUDE_CLI").expect("official CLI path required");
     let original = std::fs::read(&settings).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
     let base = value["env"]["ANTHROPIC_BASE_URL"].as_str().unwrap();

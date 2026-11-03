@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use url::Url;
 
-pub const REPOSITORY_URL: &str = "https://github.com/lich13/lich13-switch";
-pub const RELEASES_URL: &str = "https://github.com/lich13/lich13-switch/releases";
-const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/lich13/lich13-switch/releases/latest";
+pub const REPOSITORY_URL: &str = "https://github.com/lich13/vela";
+pub const RELEASES_URL: &str = "https://github.com/lich13/vela/releases";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/lich13/vela/releases/latest";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -98,8 +97,8 @@ fn select_asset(assets: &[ReleaseAsset], platform: &str) -> Option<Asset> {
             .unwrap_or_default()
             .to_ascii_lowercase();
         let url = asset.browser_download_url.as_deref().unwrap_or_default();
-        let valid = !trusted_github_url(Some(url), "", "/lich13/lich13-switch/releases/download/")
-            .is_empty();
+        let valid =
+            !trusted_github_url(Some(url), "", "/lich13/vela/releases/download/").is_empty();
         if !valid {
             return false;
         }
@@ -114,7 +113,7 @@ fn select_asset(assets: &[ReleaseAsset], platform: &str) -> Option<Asset> {
             !trusted_github_url(
                 asset.browser_download_url.as_deref(),
                 "",
-                "/lich13/lich13-switch/releases/download/",
+                "/lich13/vela/releases/download/",
             )
             .is_empty()
         })
@@ -123,7 +122,7 @@ fn select_asset(assets: &[ReleaseAsset], platform: &str) -> Option<Asset> {
     let url = trusted_github_url(
         asset.browser_download_url.as_deref(),
         "",
-        "/lich13/lich13-switch/releases/download/",
+        "/lich13/vela/releases/download/",
     );
     (!name.is_empty() && !url.is_empty()).then(|| Asset {
         name: name.to_string(),
@@ -140,7 +139,7 @@ fn build_info(current_version: &str, platform: &str, release: Release) -> Info {
     let release_url = trusted_github_url(
         release.html_url.as_deref(),
         RELEASES_URL,
-        "/lich13/lich13-switch/releases/",
+        "/lich13/vela/releases/",
     );
     Info {
         has_update: latest_version
@@ -286,7 +285,7 @@ mod tests {
             trusted_github_url(
                 Some("https://example.invalid/download"),
                 RELEASES_URL,
-                "/lich13/lich13-switch/releases/"
+                "/lich13/vela/releases/"
             ),
             RELEASES_URL
         );

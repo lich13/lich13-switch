@@ -43,7 +43,7 @@ fn config_with_model_fields(fields: &str) -> String {
 
 fn missing_environment_names(count: usize) -> Vec<String> {
     (0..4096)
-        .map(|index| format!("LICH13_SWITCH_GROK_CONFIG_TEST_MISSING_{index}"))
+        .map(|index| format!("VELA_GROK_CONFIG_TEST_MISSING_{index}"))
         .filter(|name| std::env::var_os(name).is_none())
         .take(count)
         .collect()

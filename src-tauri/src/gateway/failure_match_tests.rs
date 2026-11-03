@@ -373,22 +373,22 @@ fn local_policies_use_a_separate_identity_and_do_not_reclassify_upstream_json() 
     for (query, expected) in [
         ("CONNECT_TIMEOUT", "connection"),
         (
-            r#"{"error":{"type":"gpt_switch_gateway","code":"NETWORK","message":"fixture connection failed"}}"#,
+            r#"{"error":{"type":"vela_gateway","code":"NETWORK","message":"fixture connection failed"}}"#,
             "connection",
         ),
         (
-            r#"{"error":{"type":"gpt_switch_gateway","code":"CAPACITY","message":"等待队列已满"}}"#,
+            r#"{"error":{"type":"vela_gateway","code":"CAPACITY","message":"等待队列已满"}}"#,
             "admission",
         ),
         ("TLS_HANDSHAKE_FAILED: fixture failure", "tls"),
         ("上游连接失败", "connection"),
         ("STREAM_INTERRUPTED fixture closed", "stream"),
         (
-            r#"{"error":{"type":"gpt_switch_gateway","code":"CONCURRENCY","message":"fixture busy"}}"#,
+            r#"{"error":{"type":"vela_gateway","code":"CONCURRENCY","message":"fixture busy"}}"#,
             "admission",
         ),
         (
-            r#"503 {"error":{"type":"gpt_switch_gateway","code":"NO_PROVIDER","message":"fixture missing"}}"#,
+            r#"503 {"error":{"type":"vela_gateway","code":"NO_PROVIDER","message":"fixture missing"}}"#,
             "routing",
         ),
     ] {
@@ -421,7 +421,7 @@ fn local_policies_use_a_separate_identity_and_do_not_reclassify_upstream_json() 
     .unwrap();
     assert_ne!(found.origin, Some(crate::events::Origin::Gateway));
     assert_eq!(found.policy_id, None);
-    let found = lookup(&Input { query: Some(r#"{"error":{"type":"gpt_switch_gateway","code":"FIXTURE_UNKNOWN","message":"fixture unknown"}}"#.into()), ..Default::default() }, &[]).unwrap();
+    let found = lookup(&Input { query: Some(r#"{"error":{"type":"vela_gateway","code":"FIXTURE_UNKNOWN","message":"fixture unknown"}}"#.into()), ..Default::default() }, &[]).unwrap();
     assert_eq!(found.origin, Some(crate::events::Origin::Gateway));
     assert_eq!(found.policy_id, None);
 }

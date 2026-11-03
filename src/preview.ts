@@ -287,7 +287,7 @@ export async function run(
       hasUpdate: false,
       currentVersion: "0.12.1",
       latestVersion: "0.12.1",
-      releaseUrl: "https://github.com/lich13/lich13-switch/releases",
+      releaseUrl: "https://github.com/lich13/vela/releases",
       asset: null,
     };
   if (name === "open_github" || name === "open_update_release") return;
@@ -716,13 +716,9 @@ export async function run(
     case "pick_antigravity_credential_file":
       return null;
     case "get_antigravity_auth_state":
-    case "import_current_antigravity_oauth":
-    case "import_current_antigravity_adc":
     case "add_antigravity_adc":
-    case "switch_antigravity_oauth":
-    case "switch_antigravity_adc":
+    case "switch_antigravity_account":
     case "set_antigravity_auth_mode":
-    case "backup_antigravity_auth":
     case "rename_antigravity_account":
     case "delete_antigravity_account":
       return {
@@ -753,15 +749,12 @@ export async function run(
         mode: "oauth",
         enableAdc: false,
         oauthPresent: true,
-        oauthSaved: true,
         oauthEmail: "dev@example.invalid",
         oauthAuthMethod: "google-oauth",
         adcStatus: "disabled",
-        adcSaved: true,
         adcType: "authorized_user",
         adcEmail: "dev@example.invalid",
         adcProject: "gcp-alpha-demo",
-        backupCount: 2,
         appRestarted: false,
         revision: "ag-preview-rev",
       };

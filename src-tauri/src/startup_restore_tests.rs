@@ -187,7 +187,6 @@ fn startup_view_and_silent_mode_have_no_restore_gateway_setting() {
         })
     );
     assert!(silent(&[LOGIN_ARG.into()]));
-    assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
 }
 
 #[tokio::test]

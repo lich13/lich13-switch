@@ -92,7 +92,7 @@ flowchart LR
 
 ## 安装与完整性校验
 
-从 [GitHub Releases](https://github.com/lich13/lich13-switch/releases) 下载对应平台安装包：
+从 [GitHub Releases](https://github.com/lich13/vela/releases) 下载对应平台安装包：
 
 - **macOS（Apple Silicon）**：`.dmg` 磁盘映像（采用 ad-hoc 签名，首次打开如遇系统拦截请按 macOS 提示在「系统设置 → 隐私与安全性」中确认打开）。
 - **Windows（x64）**：NSIS `.exe` 安装程序（未附带商业代码签名，SmartScreen 提示时确认运行即可）。
@@ -136,7 +136,7 @@ Get-FileHash .\Vela_*.exe -Algorithm SHA256
 - **零遥测与本地自治**：应用不含广告、统计埋点或云端账号同步。内部应用标识为 `com.lich13.vela`，本地私有数据目录统一位于 `~/.vela`（升级自动迁移旧目录数据）。
 - **明确的网络边界**：业务转发、额度刷新、模型目录拉取、无凭据多端点测速与模型指纹挑战仅发往用户显式配置的供应商地址；其余应用直接请求仅限用户检查更新（GitHub Releases API）、自动／手动同步公开模型价格（`Wei-Shaw/model-price-repo` / `models.dev`）以及用户手动更新公开指纹库资源。源码硬编码域名由 `scripts/check-network-hosts.py` 与 `scripts/network-hosts.json` 离线静态门禁严格校验。
 - **脱敏诊断与仓库规范**：诊断日志自动过滤敏感头与路径，不保存请求／响应正文或账号邮箱；仓库源码与测试统一使用 `example.invalid`、回环地址与 `fixture` 脱敏夹具。
-- 完整数据清单与网络矩阵请参阅 **[隐私与安全 (PRIVACY.md)](PRIVACY.md)**。发现安全隐患请通过 [GitHub Security Advisories](https://github.com/lich13/lich13-switch/security/advisories/new) 私下报告。
+- 完整数据清单与网络矩阵请参阅 **[隐私与安全 (PRIVACY.md)](PRIVACY.md)**。发现安全隐患请通过 [GitHub Security Advisories](https://github.com/lich13/vela/security/advisories/new) 私下报告。
 
 ---
 

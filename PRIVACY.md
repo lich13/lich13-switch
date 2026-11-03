@@ -35,7 +35,7 @@ Vela 面向本机使用。账号、供应商地址、访问令牌和客户端配
 
 - 启用网关后，业务请求只发送到用户配置的供应商地址；额度查询按用户保存的自动刷新间隔访问供应商（默认 60 秒，可关闭）；手动刷新和模型列表查询也只访问对应供应商。
 - 多端点测速只向已保存的主、副地址发出不带认证的 GET，不调用模型、不跟随重定向；结果只保存延迟、HTTP 状态及固定错误类别，不记录响应正文。自动测速仅在网关开启且存在辅助端点时进行，默认间隔五分钟。
-- “检查更新”只请求 [lich13/lich13-switch 的 GitHub Releases API](https://api.github.com/repos/lich13/lich13-switch/releases/latest)，并仅打开官方仓库或发布页。
+- “检查更新”只请求 [lich13/vela 的 GitHub Releases API](https://api.github.com/repos/lich13/vela/releases/latest)，并仅打开官方仓库或发布页。
 - 模型自动价格来自公开的 `Wei-Shaw/model-price-repo` JSON 和 SHA-256，启动检查、每 10 分钟更新，可关闭。请求不携带供应商凭据；哈希校验失败或离线时保留有效价格。检查时间不代表来源中的价格刚更新。
 - 应用不包含广告、遥测或使用行为上报服务。
 
@@ -45,7 +45,7 @@ Vela 面向本机使用。账号、供应商地址、访问令牌和客户端配
 - 发布包不包含用户的 `auth.json`、`settings.json`、供应商令牌、电源状态记录或应用私有数据。
 - 下载发布包后，可使用对应 Release 中的 `SHA256SUMS` 校验文件完整性。
 
-发现安全问题时，请通过 [GitHub Security Advisories](https://github.com/lich13/lich13-switch/security/advisories/new) 私下提交；请勿在公开 Issue、截图或日志中粘贴令牌、回调地址或完整配置。
+发现安全问题时，请通过 [GitHub Security Advisories](https://github.com/lich13/vela/security/advisories/new) 私下提交；请勿在公开 Issue、截图或日志中粘贴令牌、回调地址或完整配置。
 
 官方 Codex CLI 完成浏览器或设备码登录后，同一当前身份的凭据按版本校验原子更新；不同身份只保存到账号库。登录凭据、回调内容和 Token 时间比较的原始数据不进入日志或前端事件。搜索用量只保存操作类型、数量和价格快照，不保存 URL、查询文字或搜索结果。
 

@@ -5,8 +5,8 @@ use winreg::{
     RegKey,
 };
 
-const PROGRAM: &str = "gptSwitch.CCSwitch.0";
-const CAPABILITIES: &str = "Software\\gpt-Switch\\LinkHandlers\\0\\Capabilities";
+const PROGRAM: &str = "Vela.CCSwitch.0";
+const CAPABILITIES: &str = "Software\\Vela\\LinkHandlers\\0\\Capabilities";
 const REGISTERED: &str = "Vela Link Vela";
 const USER_CHOICE: &str =
     "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\ccswitch\\UserChoice";
@@ -32,7 +32,7 @@ pub fn installed() -> bool {
         .into_iter()
         .any(|hive| {
             let Ok(key) = RegKey::predef(hive)
-                .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gpt-Switch")
+                .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Vela")
             else {
                 return false;
             };
@@ -48,9 +48,7 @@ pub fn installed() -> bool {
 }
 fn owned_external_capability(value: &str) -> bool {
     [1, 2].iter().any(|n| {
-        value.eq_ignore_ascii_case(&format!(
-            "Software\\gpt-Switch\\LinkHandlers\\{n}\\Capabilities"
-        ))
+        value.eq_ignore_ascii_case(&format!("Software\\Vela\\LinkHandlers\\{n}\\Capabilities"))
     })
 }
 fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
@@ -70,23 +68,11 @@ fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
         for name in names {
             registered.delete_value(name)?;
         }
-        // The old self registration shared the same capabilities path.
-        for legacy in [
-            "gpt-Switch Link gpt-Switch",
-            "lich13-switch Link lich13-switch",
-        ] {
-            if registered
-                .get_value::<String, _>(legacy)
-                .is_ok_and(|value| value.eq_ignore_ascii_case(CAPABILITIES))
-            {
-                registered.delete_value(legacy)?;
-            }
-        }
     }
     for n in [1, 2] {
         for path in [
-            format!("Software\\Classes\\gptSwitch.CCSwitch.{n}"),
-            format!("Software\\gpt-Switch\\LinkHandlers\\{n}"),
+            format!("Software\\Classes\\Vela.CCSwitch.{n}"),
+            format!("Software\\Vela\\LinkHandlers\\{n}"),
         ] {
             if let Err(error) = root.delete_subkey_all(path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -164,14 +150,14 @@ mod tests {
     #[test]
     fn cleanup_is_limited_to_our_retired_capabilities() {
         assert!(owned_external_capability(
-            "Software\\gpt-Switch\\LinkHandlers\\1\\Capabilities"
+            "Software\\Vela\\LinkHandlers\\1\\Capabilities"
         ));
         assert!(!owned_external_capability(CAPABILITIES));
         assert!(!owned_external_capability(
             "Software\\AnotherApp\\Capabilities"
         ));
         assert!(!owned_external_capability(
-            "Software\\gpt-Switch\\LinkHandlers\\10\\Capabilities"
+            "Software\\Vela\\LinkHandlers\\10\\Capabilities"
         ));
     }
 }

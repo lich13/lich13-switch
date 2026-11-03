@@ -146,7 +146,7 @@ beforeEach(() => {
             hasUpdate: false,
             currentVersion: "0.12.1",
             latestVersion: "0.12.1",
-            releaseUrl: "https://github.com/lich13/lich13-switch/releases",
+            releaseUrl: "https://github.com/lich13/vela/releases",
             asset: null,
           };
         case "notification_permission":

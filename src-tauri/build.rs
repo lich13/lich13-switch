@@ -11,7 +11,7 @@ fn main() {
             .and_then(|output| String::from_utf8(output.stdout).ok())
     });
     println!(
-        "cargo:rustc-env=GPT_SWITCH_REVISION={}",
+        "cargo:rustc-env=VELA_REVISION={}",
         revision.as_deref().unwrap_or("unknown").trim()
     );
     build_power();

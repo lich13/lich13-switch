@@ -223,10 +223,7 @@ fn scan(text: &str) -> Result<Scan> {
     // multiline string or a user's comment is never treated as managed state.
     for (i, line) in all.iter().enumerate().take(end).skip(start + 1) {
         let trimmed = line.body.trim_start();
-        let Some(rest) = trimmed
-            .strip_prefix("# vela:official ")
-            .or_else(|| trimmed.strip_prefix("# lich13-switch:official "))
-        else {
+        let Some(rest) = trimmed.strip_prefix("# vela:official ") else {
             continue;
         };
         for (n, key) in KEYS.iter().enumerate() {

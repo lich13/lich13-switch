@@ -808,9 +808,9 @@ async fn idle_timeout_after_commit_never_splices_backup_and_slow_consumer_is_bou
 #[tokio::test]
 #[ignore = "Uses the user's installed Codex CLI with an isolated home and an explicitly supplied private fixture"]
 async fn real_codex_cli_with_isolated_home() {
-    let path = std::env::var_os("GPT_SWITCH_REAL_FIXTURE").expect("private fixture required");
+    let path = std::env::var_os("VELA_REAL_FIXTURE").expect("private fixture required");
     let private: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let cli = std::env::var_os("GPT_SWITCH_CODEX_CLI").expect("official CLI path required");
+    let cli = std::env::var_os("VELA_CODEX_CLI").expect("official CLI path required");
     let (t, g) = fixture(vec![]).await;
     update(
         &g,

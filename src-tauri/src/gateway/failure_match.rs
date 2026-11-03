@@ -251,8 +251,7 @@ pub(super) fn lookup(input: &Input, rules: &[failure_rules::Rule]) -> Result<Mat
     let (mut parsed, value, explicit) = input.parsed(rules)?;
     let envelope = failure_policy::envelope(&value, parsed.status.is_some_and(|s| s >= 400), 0)
         .unwrap_or(&value);
-    let gateway_envelope =
-        envelope.get("type").and_then(Value::as_str) == Some("gpt_switch_gateway");
+    let gateway_envelope = envelope.get("type").and_then(Value::as_str) == Some("vela_gateway");
     let local_code = parsed
         .code
         .as_deref()
