@@ -441,7 +441,7 @@ impl ViewCache {
     }
 }
 
-pub fn view(data: &Path, home: &Path) -> OfficialModeView {
+fn view(data: &Path, home: &Path) -> OfficialModeView {
     ViewCache::default().view(data, home)
 }
 
@@ -617,8 +617,9 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         }
         return Err(error);
     }
-    if view(data, home).enabled {
-        Ok(view(data, home))
+    let current = view(data, home);
+    if current.enabled {
+        Ok(current)
     } else {
         Err(AppError::new(
             code::VERIFY,

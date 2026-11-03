@@ -1566,3 +1566,197 @@ fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_ma
         }
     }
 }
+
+#[test]
+fn remove_superseded_rejects_invalid_ids_wrong_sources_missing_rpc_and_rolls_back_on_partial_failure(
+) {
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+
+        let session_with_rpc = safe_id("session-with-rpc");
+        let session_without_rpc = safe_id("session-without-rpc");
+
+        let make_record =
+            |raw_id: &str, source: &str, transport: &str, session_id: &str| -> Record {
+                Record {
+                    id: safe_id(raw_id),
+                    client: "antigravity".into(),
+                    source: source.into(),
+                    session_id: Some(session_id.into()),
+                    started_at: 1_767_225_600_000,
+                    finished_at: Some(1_767_225_601_000),
+                    completed: true,
+                    attempts: vec![Attempt {
+                        started_at: 1_767_225_600_000,
+                        outcome: "succeeded".into(),
+                        transport: transport.into(),
+                        usage_status: "reported".into(),
+                        tokens: Tokens {
+                            input: Some(10),
+                            output: Some(5),
+                            ..Tokens::default()
+                        },
+                        ..Attempt::default()
+                    }],
+                    ..Record::default()
+                }
+            };
+
+        let valid_history = make_record(
+            "antigravity:request:session-with-rpc:step:1",
+            "antigravity",
+            "history_file",
+            &session_with_rpc,
+        );
+        let replacing_rpc = make_record(
+            "antigravity:request:session-with-rpc:rpc:1",
+            "antigravity",
+            "local_api",
+            &session_with_rpc,
+        );
+        let orphan_history = make_record(
+            "antigravity:request:session-without-rpc:step:1",
+            "antigravity",
+            "history_file",
+            &session_without_rpc,
+        );
+        let codex_row = make_record(
+            "codex:request:1",
+            "codex",
+            "history_file",
+            &session_with_rpc,
+        );
+
+        store
+            .write_batch(
+                &[
+                    valid_history.clone(),
+                    replacing_rpc.clone(),
+                    orphan_history.clone(),
+                    codex_row.clone(),
+                ],
+                None,
+            )
+            .unwrap();
+
+        // 1. Out-of-bounds / invalid IDs are rejected.
+        assert!(store.remove_superseded(&["../bad-id".to_string()]).is_err());
+        assert!(store
+            .remove_superseded(&["not-64-hex".to_string()])
+            .is_err());
+
+        // 2. Non-history_file records (local_api / codex) are rejected and remain intact.
+        assert!(store
+            .remove_superseded(std::slice::from_ref(&replacing_rpc.id))
+            .is_err());
+        assert!(store.detail(&replacing_rpc.id).is_ok());
+        assert!(store
+            .remove_superseded(std::slice::from_ref(&codex_row.id))
+            .is_err());
+        assert!(store.detail(&codex_row.id).is_ok());
+
+        // 3. history_file record without replacing local_api in the same session is rejected.
+        assert!(store
+            .remove_superseded(std::slice::from_ref(&orphan_history.id))
+            .is_err());
+        assert!(store.detail(&orphan_history.id).is_ok());
+
+        // 4. Partial failure rolls back the entire transaction: valid_history must NOT be deleted
+        // when paired with an invalid/non-deletable target in the same batch.
+        assert!(store
+            .remove_superseded(&[valid_history.id.clone(), replacing_rpc.id.clone()])
+            .is_err());
+        assert!(
+            store.detail(&valid_history.id).is_ok(),
+            "valid_history must survive when a later target in the same batch fails validation"
+        );
+
+        // 5. Valid superseded history_file record with replacing local_api succeeds.
+        store
+            .remove_superseded(std::slice::from_ref(&valid_history.id))
+            .unwrap();
+        assert!(store.detail(&valid_history.id).is_err());
+        assert!(store.detail(&replacing_rpc.id).is_ok());
+    }
+}
+
+#[tokio::test]
+async fn rpc_sync_does_not_delete_history_step_when_later_entry_in_same_session_fails_that_step() {
+    let f = fixture(false).await;
+    {
+        let mut entries = f.entries.lock().unwrap();
+        let mut bad = entry("bad-second", 1);
+        bad["chatModel"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("responseId");
+        *entries = vec![entry("good-first", 1), bad];
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("antigravity/brain/z-good/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rows = concat!(
+        "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"content\":\"<USER_REQUEST>\\nhello\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Claude Opus 4.6 (Thinking). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}\n",
+        "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:01Z\",\"input_tokens\":100,\"output_tokens\":20}\n",
+    );
+    std::fs::write(&path, rows).unwrap();
+
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    scan_home(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut Report::default(),
+        false,
+    )
+    .unwrap();
+    let synthetic_id = safe_id("antigravity:request:z-good:step:1");
+    assert!(store.detail(&synthetic_id).is_ok());
+
+    let mut rpc_report = Report::default();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut rpc_report,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rpc_report.errors, 1);
+    assert!(
+        store.detail(&synthetic_id).is_ok(),
+        "step 1 must not be deleted when a later entry in the same session marks step 1 as failed"
+    );
+}
+
+#[test]
+fn extract_settings_model_accepts_unknown_new_models_and_rejects_malformed_blocks() {
+    let valid_new = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Claude Opus 4.6 (Thinking) to Opus 5.5. No need to comment on this change.\n</USER_SETTINGS_CHANGE>";
+    assert_eq!(
+        extract_settings_model(valid_new).as_deref(),
+        Some("Opus 5.5")
+    );
+    let valid_effort = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Argon (High). No need to comment on this change.\n</USER_SETTINGS_CHANGE>";
+    assert_eq!(
+        extract_settings_model(valid_effort).as_deref(),
+        Some("Gemini 4 Argon (High)")
+    );
+    let malformed = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from A to B\n</USER_SETTINGS_CHANGE>";
+    assert!(extract_settings_model(malformed).is_none());
+}

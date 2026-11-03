@@ -1611,6 +1611,36 @@ pub(super) fn encode_stage(r: &Record) -> Result<Vec<u8>> {
 pub(super) fn decode_stage(bytes: &[u8]) -> Result<Record> {
     serde_json::from_value(unpack(bytes)?).map_err(json_error)
 }
+pub(super) fn has_local_api_for_session(c: &Connection, session_id: &str) -> Result<bool> {
+    if session_id.trim().is_empty() {
+        return Ok(false);
+    }
+    if active(c) {
+        let mut stmt = db(c.prepare_cached(
+            "SELECT r.rid FROM v12_records r WHERE r.source=usage_label('antigravity') AND r.session=?1",
+        ))?;
+        let rids = db(stmt.query_map([key(session_id)], |r| r.get::<_, i64>(0)))?;
+        for rid in db(rids.collect::<rusqlite::Result<Vec<_>>>())? {
+            let loaded: Record = serde_json::from_value(load(c, rid)?).map_err(json_error)?;
+            if loaded.attempts.iter().any(|a| a.transport == "local_api") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    } else {
+        let mut stmt = db(c.prepare_cached("SELECT body FROM records WHERE source='antigravity'"))?;
+        let bodies = db(stmt.query_map([], |r| r.get::<_, String>(0)))?;
+        for body in db(bodies.collect::<rusqlite::Result<Vec<_>>>())? {
+            let loaded: Record = bodies::decode(c, &body)?;
+            if loaded.session_id.as_deref() == Some(session_id)
+                && loaded.attempts.iter().any(|a| a.transport == "local_api")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
 pub(super) fn remove_record(c: &Connection, id: &str) -> Result<()> {
     let Some(rid) = owner(c, id)? else {
         return Ok(());

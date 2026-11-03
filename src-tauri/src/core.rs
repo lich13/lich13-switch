@@ -1119,11 +1119,12 @@ impl Core {
             } else {
                 self.auth_sync.clone()
             },
-            official_mode: {
-                let home = self.home();
-                self.official_cache.view(&self.data_dir, &home)
-            },
+            official_mode: self.official_view(),
         })
+    }
+    pub fn official_view(&mut self) -> crate::official::OfficialModeView {
+        let home = self.home();
+        self.official_cache.view(&self.data_dir, &home)
     }
     fn set_sync(&mut self, state: &str, account_id: Option<String>, message: &str) {
         if self

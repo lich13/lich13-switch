@@ -186,7 +186,7 @@ function isQuotaExpired(quota: ProviderQuota): boolean {
     const parsed = Date.parse(quota.expiresAt);
     if (!Number.isNaN(parsed)) return parsed <= Date.now();
   }
-  return Boolean(quota.subscriptions?.some((s) => s.status === "expired"));
+  return false;
 }
 
 function quotaTone(
@@ -205,7 +205,7 @@ function quotaTone(
   )
     return "critical";
   const primary = quota.plans[0];
-  if (!primary) return quota.keyStatus ? "normal" : "neutral";
+  if (!primary) return "neutral";
   if (primary.unlimited) return "good";
   if (primary.remaining == null) return "neutral";
   if (primary.remaining <= 0) return "critical";
@@ -263,7 +263,7 @@ export function QuotaInfo({
     return () => window.clearTimeout(timer);
   }, [retryAt]);
   const loading = quota?.state === "loading";
-  const keyStatus = quota?.keyStatus;
+  const keyStatus = quota?.keyStatus === "已过期" ? "已到期" : quota?.keyStatus;
   const keyOnly = quota?.source === "newapi" && quota.plans[0]?.name === "Key 额度";
   const headline = quota?.plans[0]
     ? keyOnly ? quota.plans[0].unlimited ? "Key 配额无限制" : `Key 剩余 ${amount(quota.plans[0])}` : `${quota.plans[0].unlimited ? "" : "剩余 "}${amount(quota.plans[0])}`

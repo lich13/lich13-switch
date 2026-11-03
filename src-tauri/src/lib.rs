@@ -517,7 +517,6 @@ enum PollStateUpdate {
 }
 
 fn poll_account_state_step(
-    _data: &std::path::Path,
     core: &Mutex<Core>,
     gateway: &gateway::Gateway,
     last: &mut Option<ViewState>,
@@ -644,8 +643,9 @@ async fn switch_account(
     expected_revision: String,
 ) -> Result<ViewState> {
     let _connection_guard = r.official_tx.lock().await;
-    let official_view = official::view(&r.data, &r.home(gateway::ClientId::Codex)?);
-    if official::blocks_gateway(&r.data, &r.home(gateway::ClientId::Codex)?)
+    let mut core = lock(&r.core)?;
+    let official_view = core.official_view();
+    if official::blocks_gateway(&r.data, &core.home())
         && official_view.account_id.as_deref() != Some(id.as_str())
     {
         return Err(AppError::new(
@@ -653,7 +653,8 @@ async fn switch_account(
             "请先关闭官方账号连接，再切换其他账号",
         ));
     }
-    let result = lock(&r.core)?.switch_account(&id, &expected_revision);
+    let result = core.switch_account(&id, &expected_revision);
+    drop(core);
     match result {
         Ok(s) => {
             publish(&app, s.clone());
@@ -790,17 +791,15 @@ fn delete_account(
     r: tauri::State<'_, Arc<Runtime>>,
     id: String,
 ) -> Result<ViewState> {
-    if official::view(&r.data, &r.home(gateway::ClientId::Codex)?)
-        .account_id
-        .as_deref()
-        == Some(id.as_str())
-    {
+    let mut core = lock(&r.core)?;
+    if core.official_view().account_id.as_deref() == Some(id.as_str()) {
         return Err(AppError::new(
             code::OFFICIAL_MODE,
             "请先关闭官方账号连接，再删除该账号",
         ));
     }
-    lock(&r.core)?.delete(&id)?;
+    core.delete(&id)?;
+    drop(core);
     refresh(&app, &r)
 }
 #[tauri::command]
@@ -2228,7 +2227,6 @@ pub fn run() {
                         break;
                     }
                     match poll_account_state_step(
-                        &runtime.data,
                         &runtime.core,
                         &runtime.gateway,
                         &mut last,
@@ -2718,7 +2716,7 @@ mod page_whitelist_tests {
         let mut last = None;
 
         // Initial missing auth.json poll updates state without importing an account.
-        match poll_account_state_step(&data, &core, &gateway, &mut last) {
+        match poll_account_state_step(&core, &gateway, &mut last) {
             PollStateUpdate::StateChanged(initial) => {
                 assert_eq!(tray_tooltip_text(&initial), "Vela · 未保存账号");
             }
@@ -2733,7 +2731,7 @@ mod page_whitelist_tests {
         )
         .unwrap();
         let synced = loop {
-            match poll_account_state_step(&data, &core, &gateway, &mut last) {
+            match poll_account_state_step(&core, &gateway, &mut last) {
                 PollStateUpdate::StateChanged(state) => break state,
                 PollStateUpdate::ErrorChanged(_) => continue,
                 PollStateUpdate::Unchanged => panic!("expected external auth.json sync"),
@@ -2747,7 +2745,7 @@ mod page_whitelist_tests {
         // Corrupting auth.json while hidden triggers AccountSync diagnostic emission.
         crate::storage::atomic_write(&home.join("auth.json"), b"{invalid-json", None).unwrap();
         let broken = loop {
-            match poll_account_state_step(&data, &core, &gateway, &mut last) {
+            match poll_account_state_step(&core, &gateway, &mut last) {
                 PollStateUpdate::StateChanged(state) => break state,
                 PollStateUpdate::ErrorChanged(_) => continue,
                 PollStateUpdate::Unchanged => panic!("expected invalid auth.json state update"),

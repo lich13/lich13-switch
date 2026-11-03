@@ -116,85 +116,205 @@ struct ResolvedModelAlias {
     effort: Option<&'static str>,
 }
 
+struct ModelCatalogEntry {
+    aliases: &'static [&'static str],
+    display_names: &'static [&'static str],
+    canonical: &'static str,
+    display_name: &'static str,
+    effort: Option<&'static str>,
+    thinking_only: bool,
+}
+
+const MODEL_CATALOG: &[ModelCatalogEntry] = &[
+    ModelCatalogEntry {
+        aliases: &["MODEL_PLACEHOLDER_M37", "MODEL_GOOGLE_GEMINI_3_1_PRO_HIGH"],
+        display_names: &["gemini 3.1 pro"],
+        canonical: "gemini-3.1-pro",
+        display_name: "Gemini 3.1 Pro",
+        effort: Some("high"),
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_PLACEHOLDER_M36", "MODEL_GOOGLE_GEMINI_3_1_PRO_LOW"],
+        display_names: &[],
+        canonical: "gemini-3.1-pro",
+        display_name: "Gemini 3.1 Pro",
+        effort: Some("low"),
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_GOOGLE_GEMINI_3_1_PRO"],
+        display_names: &[],
+        canonical: "gemini-3.1-pro",
+        display_name: "Gemini 3.1 Pro",
+        effort: None,
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &[
+            "MODEL_PLACEHOLDER_M18",
+            "MODEL_GOOGLE_GEMINI_3_FLASH",
+            "MODEL_GOOGLE_GEMINI_3_0_FLASH",
+        ],
+        display_names: &["gemini 3 flash", "gemini 3.0 flash"],
+        canonical: "gemini-3-flash",
+        display_name: "Gemini 3 Flash",
+        effort: None,
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_PLACEHOLDER_M19", "MODEL_GOOGLE_GEMINI_3_PRO_HIGH"],
+        display_names: &["gemini 3 pro", "gemini 3.0 pro"],
+        canonical: "gemini-3-pro-preview",
+        display_name: "Gemini 3 Pro",
+        effort: Some("high"),
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_PLACEHOLDER_M17", "MODEL_GOOGLE_GEMINI_3_PRO_LOW"],
+        display_names: &[],
+        canonical: "gemini-3-pro-preview",
+        display_name: "Gemini 3 Pro",
+        effort: Some("low"),
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_GOOGLE_GEMINI_3_PRO"],
+        display_names: &[],
+        canonical: "gemini-3-pro-preview",
+        display_name: "Gemini 3 Pro",
+        effort: None,
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &[
+            "MODEL_PLACEHOLDER_M26",
+            "MODEL_CLAUDE_4_6_OPUS_THINKING",
+            "MODEL_CLAUDE_4_6_OPUS",
+        ],
+        display_names: &["claude opus 4.6", "claude 4.6 opus"],
+        canonical: "claude-opus-4-6",
+        display_name: "Claude Opus 4.6",
+        effort: None,
+        thinking_only: true,
+    },
+    ModelCatalogEntry {
+        aliases: &[
+            "MODEL_PLACEHOLDER_M35",
+            "MODEL_CLAUDE_4_6_SONNET",
+            "MODEL_CLAUDE_4_6_SONNET_THINKING",
+        ],
+        display_names: &["claude sonnet 4.6", "claude 4.6 sonnet"],
+        canonical: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        effort: None,
+        thinking_only: true,
+    },
+    ModelCatalogEntry {
+        aliases: &[
+            "MODEL_PLACEHOLDER_M12",
+            "MODEL_CLAUDE_4_5_OPUS",
+            "MODEL_CLAUDE_4_5_OPUS_THINKING",
+        ],
+        display_names: &["claude opus 4.5", "claude 4.5 opus"],
+        canonical: "claude-opus-4-5",
+        display_name: "Claude Opus 4.5",
+        effort: None,
+        thinking_only: true,
+    },
+    ModelCatalogEntry {
+        aliases: &[
+            "MODEL_CLAUDE_4_5_SONNET",
+            "MODEL_CLAUDE_4_5_SONNET_THINKING",
+        ],
+        display_names: &["claude sonnet 4.5", "claude 4.5 sonnet"],
+        canonical: "claude-sonnet-4-5",
+        display_name: "Claude Sonnet 4.5",
+        effort: None,
+        thinking_only: true,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_CLAUDE_4_SONNET", "MODEL_CLAUDE_4_SONNET_THINKING"],
+        display_names: &["claude sonnet 4", "claude 4 sonnet"],
+        canonical: "claude-sonnet-4-20250514",
+        display_name: "Claude Sonnet 4",
+        effort: None,
+        thinking_only: true,
+    },
+    ModelCatalogEntry {
+        aliases: &[
+            "MODEL_PLACEHOLDER_M8",
+            "MODEL_CHAT_23310",
+            "MODEL_GOOGLE_GEMINI_2_5_PRO",
+            "MODEL_GOOGLE_GEMINI_2_5_PRO_THINKING",
+        ],
+        display_names: &["gemini 2.5 pro"],
+        canonical: "gemini-2.5-pro",
+        display_name: "Gemini 2.5 Pro",
+        effort: None,
+        thinking_only: true,
+    },
+    ModelCatalogEntry {
+        aliases: &[
+            "MODEL_PLACEHOLDER_M7",
+            "MODEL_CHAT_20706",
+            "MODEL_GOOGLE_GEMINI_2_5_FLASH",
+            "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING",
+        ],
+        display_names: &["gemini 2.5 flash"],
+        canonical: "gemini-2.5-flash",
+        display_name: "Gemini 2.5 Flash",
+        effort: None,
+        thinking_only: true,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_PLACEHOLDER_M9", "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE"],
+        display_names: &["gemini 2.5 flash lite", "gemini 2.5 flash-lite"],
+        canonical: "gemini-2.5-flash-lite",
+        display_name: "Gemini 2.5 Flash Lite",
+        effort: None,
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_OPENAI_GPT_OSS_120B_MEDIUM"],
+        display_names: &["gpt-oss 120b", "gpt oss 120b"],
+        canonical: "gpt-oss-120b",
+        display_name: "GPT-OSS 120B",
+        effort: Some("medium"),
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_OPENAI_GPT_OSS_120B"],
+        display_names: &[],
+        canonical: "gpt-oss-120b",
+        display_name: "GPT-OSS 120B",
+        effort: None,
+        thinking_only: false,
+    },
+];
+
 fn resolve_model_alias(raw: Option<&str>) -> Option<ResolvedModelAlias> {
     let trimmed = raw?.trim();
     if trimmed.is_empty() {
         return None;
     }
     let key = trimmed.to_ascii_uppercase();
-    let (canonical, display_name, effort) = match key.as_str() {
-        "MODEL_PLACEHOLDER_M37" | "MODEL_GOOGLE_GEMINI_3_1_PRO_HIGH" => {
-            ("gemini-3.1-pro", "Gemini 3.1 Pro", Some("high"))
-        }
-        "MODEL_PLACEHOLDER_M36" | "MODEL_GOOGLE_GEMINI_3_1_PRO_LOW" => {
-            ("gemini-3.1-pro", "Gemini 3.1 Pro", Some("low"))
-        }
-        "MODEL_GOOGLE_GEMINI_3_1_PRO" => ("gemini-3.1-pro", "Gemini 3.1 Pro", None),
-        "MODEL_PLACEHOLDER_M18"
-        | "MODEL_GOOGLE_GEMINI_3_FLASH"
-        | "MODEL_GOOGLE_GEMINI_3_0_FLASH" => ("gemini-3-flash", "Gemini 3 Flash", None),
-        "MODEL_PLACEHOLDER_M19" | "MODEL_GOOGLE_GEMINI_3_PRO_HIGH" => {
-            ("gemini-3-pro-preview", "Gemini 3 Pro", Some("high"))
-        }
-        "MODEL_PLACEHOLDER_M17" | "MODEL_GOOGLE_GEMINI_3_PRO_LOW" => {
-            ("gemini-3-pro-preview", "Gemini 3 Pro", Some("low"))
-        }
-        "MODEL_GOOGLE_GEMINI_3_PRO" => ("gemini-3-pro-preview", "Gemini 3 Pro", None),
-        "MODEL_PLACEHOLDER_M26" | "MODEL_CLAUDE_4_6_OPUS_THINKING" | "MODEL_CLAUDE_4_6_OPUS" => {
-            ("claude-opus-4-6", "Claude Opus 4.6", None)
-        }
-        "MODEL_PLACEHOLDER_M35"
-        | "MODEL_CLAUDE_4_6_SONNET"
-        | "MODEL_CLAUDE_4_6_SONNET_THINKING" => ("claude-sonnet-4-6", "Claude Sonnet 4.6", None),
-        "MODEL_PLACEHOLDER_M12" | "MODEL_CLAUDE_4_5_OPUS" | "MODEL_CLAUDE_4_5_OPUS_THINKING" => {
-            ("claude-opus-4-5", "Claude Opus 4.5", None)
-        }
-        "MODEL_CLAUDE_4_5_SONNET" | "MODEL_CLAUDE_4_5_SONNET_THINKING" => {
-            ("claude-sonnet-4-5", "Claude Sonnet 4.5", None)
-        }
-        "MODEL_CLAUDE_4_SONNET" | "MODEL_CLAUDE_4_SONNET_THINKING" => {
-            ("claude-sonnet-4-20250514", "Claude Sonnet 4", None)
-        }
-        "MODEL_PLACEHOLDER_M8"
-        | "MODEL_CHAT_23310"
-        | "MODEL_GOOGLE_GEMINI_2_5_PRO"
-        | "MODEL_GOOGLE_GEMINI_2_5_PRO_THINKING" => ("gemini-2.5-pro", "Gemini 2.5 Pro", None),
-        "MODEL_PLACEHOLDER_M7"
-        | "MODEL_CHAT_20706"
-        | "MODEL_GOOGLE_GEMINI_2_5_FLASH"
-        | "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING" => {
-            ("gemini-2.5-flash", "Gemini 2.5 Flash", None)
-        }
-        "MODEL_PLACEHOLDER_M9" | "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE" => {
-            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", None)
-        }
-        "MODEL_OPENAI_GPT_OSS_120B_MEDIUM" => ("gpt-oss-120b", "GPT-OSS 120B", Some("medium")),
-        "MODEL_OPENAI_GPT_OSS_120B" => ("gpt-oss-120b", "GPT-OSS 120B", None),
-        _ => return None,
-    };
+    let entry = MODEL_CATALOG
+        .iter()
+        .find(|item| item.aliases.contains(&key.as_str()))?;
     Some(ResolvedModelAlias {
-        canonical,
-        display_name,
-        effort,
+        canonical: entry.canonical,
+        display_name: entry.display_name,
+        effort: entry.effort,
     })
 }
 
 fn resolve_display_name_model(display_name: &str) -> Option<&'static str> {
-    match display_name.trim().to_ascii_lowercase().as_str() {
-        "gemini 3.1 pro" => Some("gemini-3.1-pro"),
-        "gemini 3 flash" | "gemini 3.0 flash" => Some("gemini-3-flash"),
-        "gemini 3 pro" | "gemini 3.0 pro" => Some("gemini-3-pro-preview"),
-        "gemini 2.5 pro" => Some("gemini-2.5-pro"),
-        "gemini 2.5 flash" => Some("gemini-2.5-flash"),
-        "gemini 2.5 flash lite" | "gemini 2.5 flash-lite" => Some("gemini-2.5-flash-lite"),
-        "claude opus 4.6" | "claude 4.6 opus" => Some("claude-opus-4-6"),
-        "claude sonnet 4.6" | "claude 4.6 sonnet" => Some("claude-sonnet-4-6"),
-        "claude opus 4.5" | "claude 4.5 opus" => Some("claude-opus-4-5"),
-        "claude sonnet 4.5" | "claude 4.5 sonnet" => Some("claude-sonnet-4-5"),
-        "claude sonnet 4" | "claude 4 sonnet" => Some("claude-sonnet-4-20250514"),
-        "gpt-oss 120b" | "gpt oss 120b" => Some("gpt-oss-120b"),
-        _ => None,
-    }
+    let key = display_name.trim().to_ascii_lowercase();
+    MODEL_CATALOG
+        .iter()
+        .find(|item| item.display_names.contains(&key.as_str()))
+        .map(|item| item.canonical)
 }
 
 fn non_enum_model(v: Option<&str>) -> Option<String> {
@@ -224,18 +344,12 @@ fn label(v: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 fn is_thinking_only_canonical_model(model: Option<&str>) -> bool {
-    matches!(
-        model,
-        Some(
-            "claude-opus-4-6"
-                | "claude-sonnet-4-6"
-                | "claude-opus-4-5"
-                | "claude-sonnet-4-5"
-                | "claude-sonnet-4-20250514"
-                | "gemini-2.5-pro"
-                | "gemini-2.5-flash"
-        )
-    )
+    let Some(model) = model else {
+        return false;
+    };
+    MODEL_CATALOG
+        .iter()
+        .any(|item| item.canonical == model && item.thinking_only)
 }
 
 fn strip_display_effort_suffix(name: &str) -> Option<(&str, Option<String>)> {
@@ -1007,6 +1121,7 @@ impl Api {
         let mut resolved_owner = owner.is_some();
         let mut steps = Steps::default();
         let mut failed_steps = BTreeSet::new();
+        let mut session_rows = Vec::new();
         let mut fallback_loaded = false;
         let mut offset = if store.requires_complete_history() {
             0
@@ -1143,8 +1258,6 @@ impl Api {
             }
             fallback_loaded |= fallback;
             for batch in entries.chunks(128) {
-                let mut rows = Vec::new();
-                let mut superseded = Vec::new();
                 for entry in batch {
                     let mut indices: Vec<_> = entry["stepIndices"]
                         .as_array()
@@ -1173,7 +1286,7 @@ impl Api {
                                 && r.final_attempt()
                                     .is_some_and(|a| a.outcome != "in_progress");
                             price(&mut r, pricing, settings);
-                            rows.push(r);
+                            session_rows.push(r);
                             complete
                         }
                         None => entry.get("chatModel").is_none(),
@@ -1190,9 +1303,6 @@ impl Api {
                         }
                         for step_idx in indices.into_iter().filter(|i| !failed_steps.contains(i)) {
                             cursor.covered.insert(step_idx);
-                            superseded.push(safe_id(&format!(
-                                "antigravity:request:{id}:step:{step_idx}"
-                            )));
                         }
                     } else if entry.get("chatModel").is_some() {
                         let has_reported_tokens = entry["chatModel"].get("usage").is_some()
@@ -1213,19 +1323,25 @@ impl Api {
                                 indices.into_iter().filter(|i| !failed_steps.contains(i))
                             {
                                 cursor.covered.insert(step_idx);
-                                superseded.push(safe_id(&format!(
-                                    "antigravity:request:{id}:step:{step_idx}"
-                                )));
                             }
                         }
                     }
                     offset += 1;
                 }
-                store.remove_superseded(&superseded)?;
-                store.write_batch(&rows, None)?;
-                report.imported += rows.len() as u64;
             }
         }
+        for s in &failed_steps {
+            cursor.covered.remove(s);
+        }
+        let superseded: Vec<String> = if session_rows.is_empty() {
+            Vec::new()
+        } else {
+            cursor
+                .covered
+                .iter()
+                .map(|step_idx| safe_id(&format!("antigravity:request:{id}:step:{step_idx}")))
+                .collect()
+        };
         // Commit only after the whole session is readable. Failed sessions keep
         // their previous cursor, so already saved batches are safely replayed.
         cursor.count = stable;
@@ -1236,7 +1352,13 @@ impl Api {
         };
         let cursor =
             serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
-        store.write_batch(&[], Some((&cursor_id, &cursor)))
+        store.write_batch_with_superseded(
+            &session_rows,
+            &superseded,
+            Some((&cursor_id, &cursor)),
+        )?;
+        report.imported += session_rows.len() as u64;
+        Ok(())
     }
 }
 
@@ -1303,34 +1425,20 @@ pub(super) fn scan_file_list(
     }
     Ok(())
 }
-fn is_known_settings_model(raw: &str) -> bool {
-    if resolve_model_alias(Some(raw)).is_some() || resolve_display_name_model(raw).is_some() {
-        return true;
-    }
-    if let Some((base, _)) = strip_display_effort_suffix(raw) {
-        return resolve_display_name_model(base).is_some();
-    }
-    false
-}
-
 fn extract_settings_model(content: &str) -> Option<String> {
     let scope = content
         .rsplit_once("</USER_REQUEST>")
         .map_or(content, |(_, tail)| tail);
     let (_, after_open) = scope.rsplit_once("<USER_SETTINGS_CHANGE>")?;
     let (inner, _) = after_open.split_once("</USER_SETTINGS_CHANGE>")?;
-    let sentence = inner
-        .trim()
-        .lines()
-        .next()?
-        .split(". ")
-        .next()?
-        .trim()
-        .trim_end_matches('.');
+    let line = inner.trim().lines().next()?.trim();
+    let sentence = line
+        .strip_suffix(". No need to comment on this change.")
+        .or_else(|| line.strip_suffix(". No need to comment on this change"))?;
     let rest = sentence.strip_prefix("The user changed setting `Model Selection` from ")?;
     let (_, model) = rest.rsplit_once(" to ")?;
     let candidate = label(Some(model))?;
-    is_known_settings_model(&candidate).then_some(candidate)
+    (!candidate.eq_ignore_ascii_case("none")).then_some(candidate)
 }
 
 #[allow(clippy::too_many_arguments)]

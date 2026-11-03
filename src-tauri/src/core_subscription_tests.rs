@@ -969,7 +969,7 @@ fn legacy_duplicate_merge_remaps_the_official_mode_account_reference() {
     assert!(state.error.is_none());
     assert_eq!(core.store.profiles.len(), 1);
     assert_eq!(core.store.profiles[0].id, "fixture-official-retained-id");
-    let official_after = crate::official::view(&core.data_dir, &home);
+    let official_after = core.official_view();
     assert!(official_after.enabled);
     assert_eq!(
         official_after.account_id.as_deref(),
@@ -1044,7 +1044,7 @@ fn official_account_remap_directory_sync_failure_keeps_rows_and_retries() {
     assert!(failed.error.is_some());
     assert_eq!(core.store.profiles.len(), 2);
     assert_eq!(std::fs::read(&vault_path).unwrap(), original_vault);
-    let official_after_failure = crate::official::view(&core.data_dir, &home);
+    let official_after_failure = core.official_view();
     assert!(official_after_failure.enabled);
     assert_eq!(
         official_after_failure.account_id.as_deref(),

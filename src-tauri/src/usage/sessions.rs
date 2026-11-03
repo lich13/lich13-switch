@@ -245,6 +245,15 @@ pub trait Repository {
     fn remove_superseded(&mut self, _ids: &[String]) -> Result<()> {
         Ok(())
     }
+    fn write_batch_with_superseded(
+        &mut self,
+        rows: &[Record],
+        superseded_ids: &[String],
+        cursor: Option<(&str, &str)>,
+    ) -> Result<()> {
+        self.remove_superseded(superseded_ids)?;
+        self.write_batch(rows, cursor)
+    }
     fn begin_rebuild(&mut self, source: &str) -> Result<()>;
     fn stage_rebuild(
         &mut self,
@@ -267,6 +276,14 @@ impl Repository for Store {
     }
     fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
         Store::remove_superseded(self, ids)
+    }
+    fn write_batch_with_superseded(
+        &mut self,
+        rows: &[Record],
+        superseded_ids: &[String],
+        cursor: Option<(&str, &str)>,
+    ) -> Result<()> {
+        Store::write_batch_with_superseded(self, rows, superseded_ids, cursor)
     }
     fn begin_rebuild(&mut self, source: &str) -> Result<()> {
         Store::begin_rebuild(self, source)

@@ -719,7 +719,15 @@ impl Store {
         ))
     }
     pub fn write_batch(&mut self, records: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
-        if records.is_empty() {
+        self.write_batch_with_superseded(records, &[], cursor)
+    }
+    pub fn write_batch_with_superseded(
+        &mut self,
+        records: &[Record],
+        superseded_ids: &[String],
+        cursor: Option<(&str, &str)>,
+    ) -> Result<()> {
+        if records.is_empty() && superseded_ids.is_empty() {
             match cursor {
                 None => return Ok(()),
                 Some((id, body)) if self.cursor(id)?.as_deref() == Some(body) => return Ok(()),
@@ -732,6 +740,7 @@ impl Store {
             changed |= insert(&tx, r)?;
         }
         storage_v12::flush(&tx)?;
+        changed |= Self::remove_superseded_in_tx(&tx, superseded_ids)?;
         if let Some((id, body)) = cursor {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
         }
@@ -1142,14 +1151,18 @@ impl Store {
         }
         Ok(!done)
     }
-    pub fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
+    fn remove_superseded_in_tx(tx: &Connection, ids: &[String]) -> Result<bool> {
         if ids.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
-        let tx = db(self.connection.transaction())?;
         let mut changed = false;
-        for id in ids {
-            let Some(existing) = storage_v12::record(&tx, id)? else {
+        let mut verified_sessions = std::collections::BTreeSet::new();
+        for raw_id in ids {
+            let id = raw_id.trim();
+            if id.len() != 64 || !id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                return Err(failure("待清理的历史记录标识越界或格式无效"));
+            }
+            let Some(existing) = storage_v12::record(tx, id)? else {
                 continue;
             };
             if existing.source != "antigravity"
@@ -1159,10 +1172,19 @@ impl Store {
                     .iter()
                     .all(|a| a.transport == "history_file")
             {
-                continue;
+                return Err(failure("拒绝删除非 Antigravity 历史文件来源的用量记录"));
             }
-            if storage_v12::active(&tx) {
-                storage_v12::remove_record(&tx, id)?;
+            let Some(session_id) = existing.session_id.as_deref() else {
+                return Err(failure("待清理的历史记录缺少会话标识"));
+            };
+            if !verified_sessions.contains(session_id) {
+                if !storage_v12::has_local_api_for_session(tx, session_id)? {
+                    return Err(failure("未找到替代的本地接口用量记录，拒绝删除历史记录"));
+                }
+                verified_sessions.insert(session_id.to_owned());
+            }
+            if storage_v12::active(tx) {
+                storage_v12::remove_record(tx, id)?;
             } else {
                 db(tx.execute(
                     "DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner=?1",
@@ -1172,7 +1194,14 @@ impl Store {
             }
             changed = true;
         }
-        if changed {
+        Ok(changed)
+    }
+    pub fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tx = db(self.connection.transaction())?;
+        if Self::remove_superseded_in_tx(&tx, ids)? {
             query::changed(&tx)?;
         }
         db(tx.commit())

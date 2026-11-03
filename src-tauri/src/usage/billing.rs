@@ -146,6 +146,15 @@ impl Repository for Spool {
         }
         db(tx.commit())
     }
+    fn write_batch_with_superseded(
+        &mut self,
+        rows: &[Record],
+        superseded_ids: &[String],
+        cursor: Option<(&str, &str)>,
+    ) -> Result<()> {
+        self.remove_superseded(superseded_ids)?;
+        self.write_batch(rows, cursor)
+    }
     fn begin_rebuild(&mut self, _: &str) -> Result<()> {
         Ok(())
     }
@@ -641,16 +650,6 @@ impl Service {
             }
             // Newly discovered history uses the normal dedup path. Receipts
             // suppress already summarized records and retain existing snapshots.
-            {
-                let mut stmt = db(spool
-                    .connection
-                    .prepare("SELECT id FROM superseded ORDER BY id"))?;
-                let rows = db(stmt.query_map([], |r| r.get::<_, String>(0)))?;
-                let superseded = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-                if !superseded.is_empty() {
-                    self.query(|s| s.remove_superseded(&superseded))?;
-                }
-            }
             let mut after = String::new();
             loop {
                 let mut statement = db(spool
