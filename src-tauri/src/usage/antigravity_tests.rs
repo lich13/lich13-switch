@@ -1752,11 +1752,15 @@ fn extract_settings_model_accepts_unknown_new_models_and_rejects_malformed_block
         extract_settings_model(valid_new).as_deref(),
         Some("Opus 5.5")
     );
-    let valid_effort = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Argon (High). No need to comment on this change.\n</USER_SETTINGS_CHANGE>";
+    let valid_effort = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Argon (High). No need to comment on this change if the user doesn't ask about it, just be aware of it.\n</USER_SETTINGS_CHANGE>";
     assert_eq!(
         extract_settings_model(valid_effort).as_deref(),
         Some("Gemini 4 Argon (High)")
     );
+    let m417 = resolve_model_alias(Some("MODEL_PLACEHOLDER_M417")).unwrap();
+    assert_eq!((m417.canonical, m417.display_name, m417.effort), ("gemini-4-argon", "Gemini 4 Argon", Some("high")));
+    let m402 = resolve_model_alias(Some("MODEL_PLACEHOLDER_M402")).unwrap();
+    assert_eq!((m402.canonical, m402.display_name, m402.effort), ("claude-opus-5-5-high", "Claude Opus 5.5", Some("high")));
     let malformed = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from A to B\n</USER_SETTINGS_CHANGE>";
     assert!(extract_settings_model(malformed).is_none());
 }

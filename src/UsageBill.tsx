@@ -10,9 +10,15 @@ export const localSecond = (at: number) => {
     .toISOString()
     .slice(0, 19);
 };
-export function billTime(value: string) {
-  const at = new Date(value).getTime();
-  return Number.isFinite(at) && localSecond(at) === value ? at : null;
+export function billTime(value: string, bound: "start" | "end" = "start") {
+  const trimmed = value.trim().replace(" ", "T");
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? `${trimmed}T${bound === "end" ? "23:59:59" : "00:00:00"}`
+    : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(trimmed)
+      ? `${trimmed}:${bound === "end" ? "59" : "00"}`
+      : trimmed;
+  const at = new Date(normalized).getTime();
+  return Number.isFinite(at) && localSecond(at) === normalized ? at : null;
 }
 export default function UsageBill({
   start,
@@ -31,8 +37,8 @@ export default function UsageBill({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const first = billTime(from),
-    last = billTime(to);
+  const first = billTime(from, "start"),
+    last = billTime(to, "end");
   const valid = first !== null && last !== null && first >= 0 && last >= first;
   const display = (value: string) => value.replace("T", " ");
   return (
@@ -107,7 +113,7 @@ export default function UsageBill({
               onChange={(e) =>
                 setTo(
                   e.target.value.length === 16
-                    ? `${e.target.value}:00`
+                    ? `${e.target.value}:59`
                     : e.target.value,
                 )
               }

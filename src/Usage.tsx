@@ -678,7 +678,7 @@ export default function Usage({
       )}
       {billOpen && (
         <UsageBill
-          start={query().start}
+          start={query().start ?? (data?.detailSince || undefined)}
           end={query().end}
           close={() => setBillOpen(false)}
           saved={(result) => {

@@ -34,6 +34,7 @@ struct FileCursor {
     modified: String,
     complete: bool,
     model: Option<String>,
+    model_invalid: bool,
 }
 fn file_identity(meta: &std::fs::Metadata) -> String {
     #[cfg(unix)]
@@ -126,6 +127,22 @@ struct ModelCatalogEntry {
 }
 
 const MODEL_CATALOG: &[ModelCatalogEntry] = &[
+    ModelCatalogEntry {
+        aliases: &["MODEL_PLACEHOLDER_M417", "MODEL_GOOGLE_GEMINI_4_ARGON_HIGH"],
+        display_names: &["gemini 4 argon (high)", "gemini 4 argon"],
+        canonical: "gemini-4-argon",
+        display_name: "Gemini 4 Argon",
+        effort: Some("high"),
+        thinking_only: false,
+    },
+    ModelCatalogEntry {
+        aliases: &["MODEL_PLACEHOLDER_M402", "MODEL_CLAUDE_4_OPUS_55_HIGH"],
+        display_names: &["claude opus 5.5 (high)", "claude opus 5.5", "opus 5.5"],
+        canonical: "claude-opus-5-5-high",
+        display_name: "Claude Opus 5.5",
+        effort: Some("high"),
+        thinking_only: false,
+    },
     ModelCatalogEntry {
         aliases: &["MODEL_PLACEHOLDER_M37", "MODEL_GOOGLE_GEMINI_3_1_PRO_HIGH"],
         display_names: &["gemini 3.1 pro"],
@@ -1488,14 +1505,23 @@ fn extract_settings_model(content: &str) -> Option<String> {
         .map_or(content, |(_, tail)| tail);
     let (_, after_open) = scope.rsplit_once("<USER_SETTINGS_CHANGE>")?;
     let (inner, _) = after_open.split_once("</USER_SETTINGS_CHANGE>")?;
-    let line = inner.trim().lines().next()?.trim();
-    let sentence = line
-        .strip_suffix(". No need to comment on this change.")
-        .or_else(|| line.strip_suffix(". No need to comment on this change"))?;
-    let rest = sentence.strip_prefix("The user changed setting `Model Selection` from ")?;
-    let (_, model) = rest.rsplit_once(" to ")?;
-    let candidate = label(Some(model))?;
-    (!candidate.eq_ignore_ascii_case("none")).then_some(candidate)
+    for raw_line in inner.lines() {
+        let line = raw_line.trim();
+        let Some((sentence, _)) = line.split_once(". No need to comment on this change") else {
+            continue;
+        };
+        let Some(rest) = sentence.strip_prefix("The user changed setting `Model Selection` from ")
+        else {
+            continue;
+        };
+        let Some((_, model)) = rest.rsplit_once(" to ") else {
+            continue;
+        };
+        if let Some(candidate) = label(Some(model)).filter(|c| !c.eq_ignore_ascii_case("none")) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1588,12 +1614,19 @@ fn scan_file(
             partial_tail = true;
             break;
         }
+        let mut in_progress_step = false;
         let parsed = (|| -> Result<Option<Record>> {
             let v: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| failure("Antigravity 历史文件存在无效完整行"))?;
             if v["type"].as_str() == Some("USER_INPUT") {
-                if let Some(model) = v["content"].as_str().and_then(extract_settings_model) {
-                    c.model = Some(model);
+                if let Some(content) = v["content"].as_str() {
+                    if let Some(model) = extract_settings_model(content) {
+                        c.model = Some(model);
+                        c.model_invalid = false;
+                    } else if content.contains("<USER_SETTINGS_CHANGE>") {
+                        c.model = None;
+                        c.model_invalid = true;
+                    }
                 }
             }
             let has_usage = [
@@ -1612,7 +1645,8 @@ fn scan_file(
                         Some("RUNNING" | "IN_PROGRESS" | "PENDING")
                     )
                 {
-                    return Err(failure("Antigravity 历史用量尚未完整，请稍后重试"));
+                    in_progress_step = true;
+                    return Ok(None);
                 }
                 let step_request = is_planner
                     .then(|| number(&v["step_index"]).map(|i| format!("{cascade}:step:{i}")))
@@ -1621,13 +1655,18 @@ fn scan_file(
                 let request = text(&v, &["request_id"]).or(step_request.as_deref());
                 let model = explicit_model.or(c.model.as_deref());
                 let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
-                let (Some(request), Some(model), Some(at)) = (request, model, at) else {
+                let (Some(request), Some(at)) = (request, at) else {
                     return Err(failure(
                         "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
                     ));
                 };
+                if model.is_none() && (!is_planner || c.model_invalid) {
+                    return Err(failure(
+                        "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
+                    ));
+                }
                 let id = safe_id(&format!("antigravity:request:{request}"));
-                let alias = resolve_model_alias(Some(model));
+                let alias = resolve_model_alias(model);
                 let model_for_id = explicit_model.or_else(|| alias.map(|a| a.canonical));
                 let is_failed = failed(&v);
                 let mut attempt = Attempt {
@@ -1676,6 +1715,10 @@ fn scan_file(
             }
             Ok(None)
         })();
+        if in_progress_step {
+            partial_tail = true;
+            break;
+        }
         match parsed {
             Ok(Some(row)) => rows.push(row),
             Ok(None) => {}

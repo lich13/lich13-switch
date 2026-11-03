@@ -281,7 +281,7 @@ export function QuotaInfo({
     return () => window.clearTimeout(timer);
   }, [retryAt]);
   const loading = quota?.state === "loading";
-  const keyStatus = quota?.keyStatus;
+  const keyStatus = quota?.keyStatus === "已过期" ? "已到期" : quota?.keyStatus;
   const keyOnly = quota?.source === "newapi" && quota.plans[0]?.name === "Key 额度";
   const formatHeadline = (fmt: (p: QuotaPlan) => string) =>
     quota?.plans[0]

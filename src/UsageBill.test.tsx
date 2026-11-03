@@ -53,8 +53,20 @@ it("preserves the dialog after native cancellation or failed save", async () => 
   expect(await screen.findByRole("alert")).toHaveTextContent("保存失败");
   expect(saved).not.toHaveBeenCalled();
 });
-it("rejects invalid local times while retaining seconds", () => {
+it("rejects invalid local times while retaining seconds and fuzzy date/minute bounds", () => {
   expect(billTime("not-a-date")).toBeNull();
   const at = 1_740_000_023_000;
   expect(billTime(localSecond(at))).toBe(at);
+  expect(billTime("2026-11-03", "start")).toBe(
+    new Date("2026-11-03T00:00:00").getTime(),
+  );
+  expect(billTime("2026-11-03", "end")).toBe(
+    new Date("2026-11-03T23:59:59").getTime(),
+  );
+  expect(billTime("2026-11-03T17:20", "start")).toBe(
+    new Date("2026-11-03T17:20:00").getTime(),
+  );
+  expect(billTime("2026-11-03T17:20", "end")).toBe(
+    new Date("2026-11-03T17:20:59").getTime(),
+  );
 });
