@@ -363,6 +363,7 @@ impl Record {
         bytes[6] = (bytes[6] & 0x0f) | 0x40;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         let details = Details {
+            upstream_type: Some("antigravity_log".into()),
             upstream_code: Some(code_label.into()),
             message: safe_message(raw_error),
             ..Default::default()
@@ -867,7 +868,9 @@ fn load(path: &Path) -> Journal {
                         let sanitized = r.details.clone().sanitized();
                         j.dirty |= sanitized != r.details;
                         r.details = sanitized;
-                        if r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity)) {
+                        if r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity))
+                            && r.details.upstream_type.as_deref() != Some("antigravity_log")
+                        {
                             j.dirty = true;
                         } else if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
                             j.records.push_back(Arc::new(r))
@@ -1393,8 +1396,8 @@ impl Service {
             transcripts.sort_by_key(|(secs, _, _, _)| std::cmp::Reverse(*secs));
             for (file_secs, file_len, conv_name, path) in transcripts.into_iter().take(48) {
                 let start_offset = match cursors.get(&path) {
-                    Some(&(prev_len, prev_secs, _))
-                        if prev_len == file_len && prev_secs == file_secs =>
+                    Some(&(prev_len, prev_secs, prev_off))
+                        if prev_len == file_len && prev_secs == file_secs && prev_off == file_len =>
                     {
                         continue;
                     }
@@ -1405,14 +1408,29 @@ impl Service {
                 let Ok(mut file) = std::fs::File::open(&path) else {
                     continue;
                 };
-                if start_offset > 0 && file.seek(SeekFrom::Start(start_offset)).is_err() {
+                let mut offset = start_offset;
+                let mut discard_first = false;
+                if start_offset == 0 && file_len > 4 * 1024 * 1024 {
+                    offset = file_len - 4 * 1024 * 1024;
+                    discard_first = true;
+                }
+                if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
                     continue;
                 }
                 let mut reader = BufReader::new(file);
-                let mut offset = start_offset;
                 let mut line = Vec::new();
+                if discard_first {
+                    let Ok(discarded) = reader.read_until(b'\n', &mut line) else {
+                        continue;
+                    };
+                    if discarded == 0 || !line.ends_with(b"\n") {
+                        continue;
+                    }
+                    offset = offset.saturating_add(discarded as u64);
+                    line.clear();
+                }
                 while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
-                    if read_bytes == 0 {
+                    if read_bytes == 0 || !line.ends_with(b"\n") {
                         break;
                     }
                     let line_offset = offset;
@@ -1494,8 +1512,8 @@ impl Service {
                 }
                 let file_len = meta.len();
                 let start_offset = match cursors.get(&path) {
-                    Some(&(prev_len, prev_secs, _))
-                        if prev_len == file_len && prev_secs == file_secs =>
+                    Some(&(prev_len, prev_secs, prev_off))
+                        if prev_len == file_len && prev_secs == file_secs && prev_off == file_len =>
                     {
                         continue;
                     }
@@ -1505,16 +1523,31 @@ impl Service {
                 let Ok(mut file) = std::fs::File::open(&path) else {
                     continue;
                 };
-                if start_offset > 0 && file.seek(SeekFrom::Start(start_offset)).is_err() {
+                let mut offset = start_offset;
+                let mut discard_first = false;
+                if start_offset == 0 && file_len > 4 * 1024 * 1024 {
+                    offset = file_len - 4 * 1024 * 1024;
+                    discard_first = true;
+                }
+                if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
                     continue;
                 }
                 let fname = entry.file_name();
                 let fname = fname.to_string_lossy();
                 let mut reader = BufReader::new(file);
-                let mut offset = start_offset;
                 let mut line = Vec::new();
+                if discard_first {
+                    let Ok(discarded) = reader.read_until(b'\n', &mut line) else {
+                        continue;
+                    };
+                    if discarded == 0 || !line.ends_with(b"\n") {
+                        continue;
+                    }
+                    offset = offset.saturating_add(discarded as u64);
+                    line.clear();
+                }
                 while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
-                    if read_bytes == 0 {
+                    if read_bytes == 0 || !line.ends_with(b"\n") {
                         break;
                     }
                     let line_offset = offset;
@@ -1976,5 +2009,85 @@ mod routing_visibility_tests {
         service.clear().await.unwrap();
         assert_eq!(service.query(Filter::default()).total, 0);
         assert!(service.detail(&alias_id).is_none());
+    }
+
+    #[test]
+    fn antigravity_log_scan_preserves_unfinished_half_line_and_seeks_tail_over_4mb() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let log_dir = dir.path().join(".gemini/antigravity/brain/conv-1/.system_generated/logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let transcript = log_dir.join("transcript.jsonl");
+
+        // 1) Half-written line should not advance offset or lose the event once completed.
+        let part1 = br#"{"step_index":1,"type":"ERROR_MESSAGE","errorMessage":"429 Too Many "#;
+        let part2 = b"Requests from upstream\"}\n";
+        std::fs::write(&transcript, part1).unwrap();
+        service.sync_antigravity_logs(dir.path());
+        assert_eq!(service.query(Filter::default()).total, 0);
+
+        let mut f = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        f.write_all(part2).unwrap();
+        drop(f);
+        service.sync_antigravity_logs(dir.path());
+        assert_eq!(service.query(Filter::default()).total, 1);
+
+        // 2) Initial scan of >4MB file seeks to tail (file_len - 4MB) and skips early errors.
+        let log_dir2 = dir.path().join(".gemini/antigravity/logs");
+        std::fs::create_dir_all(&log_dir2).unwrap();
+        let big_log = log_dir2.join("language_server.log");
+        let mut big = std::fs::File::create(&big_log).unwrap();
+        writeln!(big, "[ERROR] 401 Unauthorized early error").unwrap();
+        let filler = vec![b'x'; 1024];
+        for _ in 0..(4 * 1024 + 64) {
+            big.write_all(&filler).unwrap();
+            big.write_all(b"\n").unwrap();
+        }
+        writeln!(big, "[ERROR] 503 Service Unavailable tail error").unwrap();
+        drop(big);
+
+        service.sync_antigravity_logs(dir.path());
+        let page = service.query(Filter::default());
+        assert_eq!(page.total, 2);
+        assert!(page.items.iter().any(|r| r.reason == Reason::UpstreamService));
+        assert!(!page.items.iter().any(|r| r.reason == Reason::Authentication));
+    }
+
+    #[test]
+    fn load_journal_retains_antigravity_log_events_and_purges_legacy_gateway_antigravity_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.jsonl");
+        let mut legacy = Record::new(
+            None,
+            None,
+            Some("gemini-2.5-pro"),
+            Reason::RateLimit,
+            Action::Returned,
+            Some(429),
+            Some(1),
+        );
+        legacy.client_id = Some(JournalClient::Retired(RetiredClient::Antigravity));
+        let log_record = Record::antigravity_error(
+            "transcript:conv-1:1",
+            now(),
+            Some("gemini-2.5-pro"),
+            "429 Too Many Requests",
+        );
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&legacy).unwrap(),
+            serde_json::to_string(&log_record).unwrap()
+        );
+        std::fs::write(&path, content).unwrap();
+
+        let loaded = load(&path);
+        assert!(loaded.dirty);
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.records[0].id, log_record.id);
+        assert_eq!(
+            loaded.records[0].details.upstream_type.as_deref(),
+            Some("antigravity_log")
+        );
     }
 }
