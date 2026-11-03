@@ -711,7 +711,6 @@ export async function run(
     case "get_antigravity_auth_state":
     case "import_current_antigravity_oauth":
     case "import_current_antigravity_adc":
-    case "add_antigravity_oauth":
     case "add_antigravity_adc":
     case "switch_antigravity_oauth":
     case "switch_antigravity_adc":
@@ -725,7 +724,7 @@ export async function run(
             id: "ag-oauth-1",
             name: "Antigravity OAuth",
             kind: "oauth",
-            sourceType: "oauth_json",
+            sourceType: "google-oauth",
             email: "dev@example.invalid",
             projectId: null,
             current: true,
@@ -748,11 +747,15 @@ export async function run(
         enableAdc: false,
         oauthPresent: true,
         oauthSaved: true,
+        oauthEmail: "dev@example.invalid",
+        oauthAuthMethod: "google-oauth",
         adcStatus: "disabled",
         adcSaved: true,
         adcType: "authorized_user",
+        adcEmail: "dev@example.invalid",
         adcProject: "gcp-alpha-demo",
         backupCount: 2,
+        appRestarted: false,
         revision: "ag-preview-rev",
       };
     case "import_current":

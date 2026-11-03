@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Mutex;
 
 fn test_paths(root: &Path) -> Paths {
     Paths {
@@ -9,113 +10,141 @@ fn test_paths(root: &Path) -> Paths {
     }
 }
 
+fn real_jetski_oauth_json(email: &str, auth_method: &str, access_token: &str) -> String {
+    serde_json::to_string_pretty(&json!({
+        "id_token_email": email,
+        "auth_method": auth_method,
+        "token": {
+            "access_token": access_token,
+            "refresh_token": format!("1//refresh-{access_token}"),
+            "token_type": "Bearer",
+            "expiry": "2026-12-31T00:00:00Z"
+        }
+    }))
+    .unwrap()
+}
+
+fn valid_authorized_user_adc(project: &str, refresh: &str) -> String {
+    serde_json::to_string_pretty(&json!({
+        "type": "authorized_user",
+        "client_id": "fixture-client.apps.googleusercontent.com",
+        "client_secret": "GOCSPX-fixture-secret",
+        "refresh_token": refresh,
+        "quota_project_id": project
+    }))
+    .unwrap()
+}
+
+fn valid_service_account_adc(project: &str, email: &str) -> String {
+    serde_json::to_string_pretty(&json!({
+        "type": "service_account",
+        "project_id": project,
+        "private_key_id": "key-1",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n",
+        "client_email": email,
+        "token_uri": "https://oauth2.googleapis.com/token"
+    }))
+    .unwrap()
+}
+
+#[derive(Default)]
+struct RecordingLifecycle {
+    events: Mutex<Vec<&'static str>>,
+    running: bool,
+    fail_stop: bool,
+}
+
+impl AppLifecycle for RecordingLifecycle {
+    fn stop_if_running(&self) -> Result<bool> {
+        self.events.lock().unwrap().push("stop");
+        if self.fail_stop {
+            return Err(AppError::new(code::PROCESS, "模拟退出超时"));
+        }
+        Ok(self.running)
+    }
+    fn relaunch(&self) -> Result<()> {
+        self.events.lock().unwrap().push("relaunch");
+        Ok(())
+    }
+}
+
 #[test]
-fn multi_oauth_and_multi_adc_support_json_and_key_switching_and_modes() {
+fn real_jetski_oauth_and_strict_adc_switching_with_mixed_mode_detection_and_app_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = test_paths(tmp.path());
     std::fs::create_dir_all(paths.config_file().parent().unwrap()).unwrap();
     storage::atomic_write(
         &paths.config_file(),
-        b"{\"userSettings\":{\"themeMode\":\"THEME_MODE_DARK\"}}\n",
+        b"{\"userSettings\":{\"themeMode\":\"THEME_MODE_DARK\",\"enableAdc\":false}}\n",
         None,
     )
     .unwrap();
 
-    // 1. Add OAuth via JSON and via Key
-    let s1 = add_oauth_at(
-        &paths,
-        AddOAuthInput {
-            name: Some("Work OAuth".into()),
-            input_mode: "json".into(),
-            json_text: Some(
-                "{\"access_token\":\"ya29.fixture-one\",\"refresh_token\":\"1//fixture-r1\",\"email\":\"work@example.invalid\"}"
-                    .into(),
-            ),
-            key: None,
-            refresh_token: None,
-            email: None,
-            activate: true,
-        },
-    )
-    .unwrap();
-    assert_eq!(s1.mode, "oauth");
+    // Write real Jetski OAuth token on disk and import from current login
+    let oauth_raw_1 = real_jetski_oauth_json("work@example.invalid", "google-oauth", "ya29.work");
+    storage::atomic_write(&paths.oauth_file(), oauth_raw_1.as_bytes(), None).unwrap();
+
+    let s1 = import_current_oauth_at(&paths, Some("Work OAuth".into())).unwrap();
+    assert_eq!(s1.mode, AuthMode::Oauth);
     assert!(!s1.enable_adc);
     assert!(s1.oauth_present);
     assert!(s1.oauth_saved);
+    assert_eq!(s1.oauth_email.as_deref(), Some("work@example.invalid"));
+    assert_eq!(s1.oauth_auth_method.as_deref(), Some("google-oauth"));
     assert_eq!(s1.accounts.len(), 1);
-    assert!(s1.accounts[0].current);
     assert_eq!(
         s1.accounts[0].email.as_deref(),
         Some("work@example.invalid")
     );
+    assert_eq!(s1.accounts[0].source_type, "google-oauth");
     let oauth_id_1 = s1.accounts[0].id.clone();
 
-    let s2 = add_oauth_at(
-        &paths,
-        AddOAuthInput {
-            name: Some("Personal Token".into()),
-            input_mode: "key".into(),
-            json_text: None,
-            key: Some("jetski-standalone-raw-key-two".into()),
-            refresh_token: None,
-            email: Some("personal@example.invalid".into()),
-            activate: false,
-        },
-    )
-    .unwrap();
+    // Import second OAuth login from disk
+    let oauth_raw_2 =
+        real_jetski_oauth_json("personal@example.invalid", "jetski-sso", "ya29.personal");
+    storage::atomic_write(&paths.oauth_file(), oauth_raw_2.as_bytes(), None).unwrap();
+    let s2 = import_current_oauth_at(&paths, Some("Personal OAuth".into())).unwrap();
     assert_eq!(s2.accounts.len(), 2);
     let oauth_id_2 = s2
         .accounts
         .iter()
-        .find(|a| a.name == "Personal Token")
+        .find(|a| a.name == "Personal OAuth")
         .unwrap()
         .id
         .clone();
 
-    // 2. Add ADC via JSON and via Key
-    let s3 = add_adc_at(
+    // Add valid authorized_user ADC and activate it with running app lifecycle
+    let lifecycle = RecordingLifecycle {
+        running: true,
+        ..Default::default()
+    };
+    let s3 = add_adc_at_with_lifecycle(
         &paths,
         AddAdcInput {
             name: Some("GCP Alpha ADC".into()),
-            input_mode: "json".into(),
-            json_text: Some(
-                "{\"type\":\"authorized_user\",\"client_id\":\"cid.example.invalid\",\"client_secret\":\"csec\",\"refresh_token\":\"1//adc-one\",\"quota_project_id\":\"proj-alpha\"}"
-                    .into(),
-            ),
-            key: None,
-            client_id: None,
-            client_secret: None,
-            project_id: None,
-            client_email: None,
+            json_text: valid_authorized_user_adc("proj-alpha", "1//adc-one"),
+            quota_project_id: None,
             activate: true,
         },
+        &lifecycle,
     )
     .unwrap();
-    // Both OAuth and ADC are now present and enableAdc is true => mode is "both"
-    assert_eq!(s3.mode, "both");
+    // Both OAuth file and ADC file exist on disk and enableAdc == true => normal AuthMode::Adc (NOT Mixed!)
+    assert_eq!(s3.mode, AuthMode::Adc);
     assert!(s3.enable_adc);
-    assert_eq!(s3.adc_status, "active");
+    assert_eq!(s3.adc_status, AdcStatus::Active);
+    assert_eq!(s3.adc_type, Some(AdcCredentialType::AuthorizedUser));
     assert_eq!(s3.adc_project.as_deref(), Some("proj-alpha"));
-    assert!(paths.agswitch_adc_file().is_file());
-    let adc_id_1 = s3
-        .accounts
-        .iter()
-        .find(|a| a.kind == "adc")
-        .unwrap()
-        .id
-        .clone();
+    assert!(s3.app_restarted);
+    assert_eq!(*lifecycle.events.lock().unwrap(), vec!["stop", "relaunch"]);
 
+    // Add valid service_account ADC with quota_project_id override
     let s4 = add_adc_at(
         &paths,
         AddAdcInput {
-            name: Some("GCP Beta Key".into()),
-            input_mode: "key".into(),
-            json_text: None,
-            key: Some("1//adc-key-two".into()),
-            client_id: Some("cid-beta.example.invalid".into()),
-            client_secret: Some("csec-beta".into()),
-            project_id: Some("proj-beta".into()),
-            client_email: None,
+            name: Some("GCP SA Beta".into()),
+            json_text: valid_service_account_adc("proj-raw", "sa@proj.iam.gserviceaccount.com"),
+            quota_project_id: Some("proj-override".into()),
             activate: false,
         },
     )
@@ -123,174 +152,187 @@ fn multi_oauth_and_multi_adc_support_json_and_key_switching_and_modes() {
     let adc_id_2 = s4
         .accounts
         .iter()
-        .find(|a| a.name == "GCP Beta Key")
+        .find(|a| a.name == "GCP SA Beta")
         .unwrap()
         .id
         .clone();
-
-    // 3. Switch ADC to Beta
     let s5 = switch_adc_at(&paths, &adc_id_2, &s4.revision, true).unwrap();
-    assert_eq!(s5.adc_project.as_deref(), Some("proj-beta"));
-    assert!(
-        s5.accounts
-            .iter()
-            .find(|a| a.id == adc_id_2)
-            .unwrap()
-            .current
-    );
+    assert_eq!(s5.mode, AuthMode::Adc);
+    assert_eq!(s5.adc_type, Some(AdcCredentialType::ServiceAccount));
+    assert_eq!(s5.adc_project.as_deref(), Some("proj-override"));
 
-    // 4. Switch OAuth to Personal Token with disable_adc=true (switches to pure OAuth mode)
-    let s6 = switch_oauth_at(&paths, &oauth_id_2, &s5.revision, true).unwrap();
-    assert_eq!(s6.mode, "oauth");
+    // Mixed mode is reported when enableAdc == false while ADC file still exists on disk
+    write_enable_adc(&paths, false).unwrap();
+    let mixed_state = state_at(&paths).unwrap();
+    assert_eq!(mixed_state.mode, AuthMode::Mixed);
+    assert!(set_mode_at(&paths, AuthMode::Mixed, &mixed_state.revision).is_err());
+
+    // Switch back to OAuth mode disables active ADC file (.disabled) and sets enableAdc=false
+    let s6 = switch_oauth_at(&paths, &oauth_id_1, &mixed_state.revision, true).unwrap();
+    assert_eq!(s6.mode, AuthMode::Oauth);
     assert!(!s6.enable_adc);
-    assert_eq!(s6.adc_status, "disabled");
+    assert_eq!(s6.adc_status, AdcStatus::Disabled);
     assert!(!paths.adc_file().exists());
     assert!(paths.adc_disabled_file().is_file());
+    assert_eq!(s6.oauth_email.as_deref(), Some("work@example.invalid"));
     assert!(
-        s6.accounts
+        !s6.accounts
             .iter()
             .find(|a| a.id == oauth_id_2)
             .unwrap()
             .current
     );
-    // Unrelated userSettings.themeMode in config.json is preserved!
-    let cfg_text = std::fs::read_to_string(paths.config_file()).unwrap();
-    assert!(cfg_text.contains("THEME_MODE_DARK"));
-    assert!(cfg_text.contains("\"enableAdc\": false"));
 
-    // 5. Switch mode to "both" restores disabled ADC and sets enableAdc=true
-    let s7 = set_mode_at(&paths, "both", &s6.revision).unwrap();
-    assert_eq!(s7.mode, "both");
-    assert!(s7.enable_adc);
-    assert_eq!(s7.adc_status, "active");
-    assert!(paths.adc_file().is_file());
-    assert!(!paths.adc_disabled_file().exists());
-
-    // Keep unused variable warning away and verify first OAuth & ADC are now inactive
-    assert!(
-        !s7.accounts
-            .iter()
-            .find(|a| a.id == oauth_id_1)
-            .unwrap()
-            .current
-    );
-    assert!(
-        !s7.accounts
-            .iter()
-            .find(|a| a.id == adc_id_1)
-            .unwrap()
-            .current
+    // If app fails to stop, switching aborts before touching any credential files
+    let failing_lifecycle = RecordingLifecycle {
+        running: true,
+        fail_stop: true,
+        ..Default::default()
+    };
+    assert!(switch_oauth_at_with_lifecycle(
+        &paths,
+        &oauth_id_2,
+        &s6.revision,
+        true,
+        &failing_lifecycle
+    )
+    .is_err());
+    assert_eq!(
+        state_at(&paths).unwrap().oauth_email.as_deref(),
+        Some("work@example.invalid")
     );
 }
 
 #[test]
-fn delete_protection_rejects_unknown_or_active_targets_and_switch_rolls_back_on_failure() {
+fn strict_adc_validation_rejects_incomplete_credentials_and_preserves_third_party_dir_permissions()
+{
     let tmp = tempfile::tempdir().unwrap();
     let paths = test_paths(tmp.path());
+    std::fs::create_dir_all(&paths.gemini_home).unwrap();
+    std::fs::create_dir_all(&paths.gcloud_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&paths.gemini_home, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::set_permissions(&paths.gcloud_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
 
-    let s1 = add_oauth_at(
+    // Missing client_secret in authorized_user must fail
+    assert!(add_adc_at(
         &paths,
-        AddOAuthInput {
-            name: Some("Active OAuth".into()),
-            input_mode: "key".into(),
-            json_text: None,
-            key: Some("oauth-live-token".into()),
-            refresh_token: None,
-            email: None,
+        AddAdcInput {
+            name: None,
+            json_text:
+                "{\"type\":\"authorized_user\",\"client_id\":\"cid\",\"refresh_token\":\"1//r\"}"
+                    .into(),
+            quota_project_id: None,
+            activate: false,
+        }
+    )
+    .is_err());
+
+    // Missing token_uri in service_account must fail
+    assert!(add_adc_at(
+        &paths,
+        AddAdcInput {
+            name: None,
+            json_text: "{\"type\":\"service_account\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\",\"client_email\":\"a@b.c\"}".into(),
+            quota_project_id: None,
+            activate: false,
+        }
+    )
+    .is_err());
+
+    // Adding & activating valid ADC does not alter 0755 permissions on ~/.gemini or ~/.config/gcloud
+    let s1 = add_adc_at(
+        &paths,
+        AddAdcInput {
+            name: Some("Valid ADC".into()),
+            json_text: valid_authorized_user_adc("proj-1", "1//r1"),
+            quota_project_id: None,
             activate: true,
         },
     )
     .unwrap();
-    let active_oauth_id = s1.accounts[0].id.clone();
-
-    let s2 = add_oauth_at(
-        &paths,
-        AddOAuthInput {
-            name: Some("Standby OAuth".into()),
-            input_mode: "key".into(),
-            json_text: None,
-            key: Some("oauth-standby-token".into()),
-            refresh_token: None,
-            email: None,
-            activate: false,
-        },
-    )
-    .unwrap();
-    let standby_oauth_id = s2
-        .accounts
-        .iter()
-        .find(|a| a.name == "Standby OAuth")
-        .unwrap()
-        .id
-        .clone();
-
-    // Out-of-bounds / unknown ID fails with code::ACCOUNT
-    assert_eq!(
-        delete_at(&paths, "non-existent-id", &s2.revision)
-            .unwrap_err()
-            .code,
-        code::ACCOUNT
-    );
-
-    // Deleting currently active OAuth account fails with code::CONFLICT and keeps both accounts
-    assert_eq!(
-        delete_at(&paths, &active_oauth_id, &s2.revision)
-            .unwrap_err()
-            .code,
-        code::CONFLICT
-    );
-    assert_eq!(state_at(&paths).unwrap().accounts.len(), 2);
-
-    // Deleting inactive Standby OAuth succeeds
-    let s3 = delete_at(&paths, &standby_oauth_id, &s2.revision).unwrap();
-    assert_eq!(s3.accounts.len(), 1);
-    assert_eq!(s3.accounts[0].id, active_oauth_id);
-
-    // Partial failure during switch rolls back oauth_file when config.json write fails
-    let s4 = add_oauth_at(
-        &paths,
-        AddOAuthInput {
-            name: Some("Second OAuth".into()),
-            input_mode: "key".into(),
-            json_text: None,
-            key: Some("oauth-second-token".into()),
-            refresh_token: None,
-            email: None,
-            activate: false,
-        },
-    )
-    .unwrap();
-    let second_id = s4
-        .accounts
-        .iter()
-        .find(|a| a.name == "Second OAuth")
-        .unwrap()
-        .id
-        .clone();
-    // Corrupt config.json into a directory so write_enable_adc fails after oauth_file was written
-    if paths.config_file().exists() {
-        std::fs::remove_file(paths.config_file()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&paths.gemini_home)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(&paths.gcloud_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
     }
-    std::fs::create_dir_all(paths.config_file()).unwrap();
-    assert!(switch_oauth_at(&paths, &second_id, &s4.revision, true).is_err());
-    // Live oauth_file must be rolled back to "oauth-live-token\n"
-    assert_eq!(
-        std::fs::read_to_string(paths.oauth_file()).unwrap(),
-        "oauth-live-token\n"
-    );
+
+    // Remove all disk ADC files; set_mode_at(Adc) must NOT silently pick from vault
+    std::fs::remove_file(paths.adc_file()).unwrap();
+    std::fs::remove_file(paths.agswitch_adc_file()).unwrap();
+    write_enable_adc(&paths, false).unwrap();
+    let s2 = state_at(&paths).unwrap();
+    assert_eq!(s2.accounts.len(), 1);
+    assert!(set_mode_at(&paths, AuthMode::Adc, &s2.revision).is_err());
+    let _ = s1;
 }
 
 #[test]
-fn backup_rotation_retains_at_most_ten_snapshots() {
+fn state_at_is_read_only_on_backups_and_delete_protection_rejects_active_or_unknown_ids() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = test_paths(tmp.path());
     std::fs::create_dir_all(&paths.gemini_home).unwrap();
-    storage::atomic_write(&paths.oauth_file(), b"tok\n", None).unwrap();
+    let oauth_1 = real_jetski_oauth_json("one@example.invalid", "oauth", "ya29.one");
+    let oauth_2 = real_jetski_oauth_json("two@example.invalid", "oauth", "ya29.two");
+    storage::atomic_write(&paths.oauth_file(), oauth_2.as_bytes(), None).unwrap();
+    let s_standby = import_current_oauth_at(&paths, Some("Standby".into())).unwrap();
+    let standby_id = s_standby.accounts[0].id.clone();
+
+    storage::atomic_write(&paths.oauth_file(), oauth_1.as_bytes(), None).unwrap();
+    let s_active = import_current_oauth_at(&paths, Some("Active".into())).unwrap();
+    let active_id = s_active
+        .accounts
+        .iter()
+        .find(|a| a.name == "Active")
+        .unwrap()
+        .id
+        .clone();
+
+    // Seed 13 backup directories: state_at must report 13 without pruning any; create_backup_at prunes to 10.
     for i in 0..13 {
         let snap = paths.backups_dir().join(format!("backup-{:04}", i));
         storage::private_dir(&snap).unwrap();
-        storage::atomic_write(&snap.join("jetski-standalone-oauth-token"), b"tok\n", None).unwrap();
+        storage::atomic_write(
+            &snap.join("jetski-standalone-oauth-token"),
+            oauth_1.as_bytes(),
+            None,
+        )
+        .unwrap();
     }
-    let count = create_backup_at(&paths).unwrap();
-    assert_eq!(count, MAX_BACKUPS);
+    let read_only_state = state_at(&paths).unwrap();
+    assert_eq!(read_only_state.backup_count, 13);
+    assert_eq!(create_backup_at(&paths).unwrap(), MAX_BACKUPS);
+
+    let rev = state_at(&paths).unwrap().revision;
+    assert_eq!(
+        delete_at(&paths, "non-existent", &rev).unwrap_err().code,
+        code::ACCOUNT
+    );
+    assert_eq!(
+        delete_at(&paths, &active_id, &rev).unwrap_err().code,
+        code::CONFLICT
+    );
+    let after_del = delete_at(&paths, &standby_id, &rev).unwrap();
+    assert_eq!(after_del.accounts.len(), 1);
+    assert_eq!(after_del.accounts[0].id, active_id);
 }

@@ -2356,7 +2356,6 @@ pub fn run() {
             antigravity::auth::get_antigravity_auth_state,
             antigravity::auth::import_current_antigravity_oauth,
             antigravity::auth::import_current_antigravity_adc,
-            antigravity::auth::add_antigravity_oauth,
             antigravity::auth::add_antigravity_adc,
             antigravity::auth::pick_antigravity_credential_file,
             antigravity::auth::switch_antigravity_oauth,

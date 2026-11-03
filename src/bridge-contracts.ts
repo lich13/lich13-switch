@@ -92,35 +92,25 @@ export type AntigravityAccountItem = {
 };
 export type AntigravityAuthState = {
   accounts: AntigravityAccountItem[];
-  mode: "oauth" | "adc" | "both";
+  mode: "oauth" | "adc" | "mixed";
   enableAdc: boolean;
   oauthPresent: boolean;
   oauthSaved: boolean;
+  oauthEmail: string | null;
+  oauthAuthMethod: string | null;
   adcStatus: "active" | "disabled" | "backup_only" | "missing";
   adcSaved: boolean;
-  adcType: string | null;
+  adcType: "service_account" | "authorized_user" | null;
+  adcEmail: string | null;
   adcProject: string | null;
   backupCount: number;
+  appRestarted?: boolean;
   revision: string;
-};
-export type AddAntigravityOAuthInput = {
-  name?: string | null;
-  inputMode: "json" | "key";
-  jsonText?: string | null;
-  key?: string | null;
-  refreshToken?: string | null;
-  email?: string | null;
-  activate: boolean;
 };
 export type AddAntigravityAdcInput = {
   name?: string | null;
-  inputMode: "json" | "key";
-  jsonText?: string | null;
-  key?: string | null;
-  clientId?: string | null;
-  clientSecret?: string | null;
-  projectId?: string | null;
-  clientEmail?: string | null;
+  jsonText: string;
+  quotaProjectId?: string | null;
   activate: boolean;
 };
 export type ProviderTestMode =
@@ -535,10 +525,6 @@ export type CommandMap = {
     { name?: string | null },
     AntigravityAuthState
   >;
-  add_antigravity_oauth: Call<
-    { input: AddAntigravityOAuthInput },
-    AntigravityAuthState
-  >;
   add_antigravity_adc: Call<
     { input: AddAntigravityAdcInput },
     AntigravityAuthState
@@ -553,7 +539,7 @@ export type CommandMap = {
     AntigravityAuthState
   >;
   set_antigravity_auth_mode: Call<
-    { mode: "oauth" | "adc" | "both" } & Revision,
+    { mode: "oauth" | "adc" } & Revision,
     AntigravityAuthState
   >;
   backup_antigravity_auth: Call<None, AntigravityAuthState>;

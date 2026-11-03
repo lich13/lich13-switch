@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   ArrowLeftRight,
   Check,
+  Download,
   FolderOpen,
   KeyRound,
   LoaderCircle,
@@ -29,9 +31,72 @@ type Props = {
 
 type DialogState =
   | null
-  | { type: "add"; kind: "oauth" | "adc" }
+  | { type: "add-adc" }
   | { type: "rename"; item: AntigravityAccountItem }
   | { type: "delete"; item: AntigravityAccountItem };
+
+function parseAdcPreview(raw: string): {
+  valid: boolean;
+  type: string | null;
+  identity: string | null;
+  project: string | null;
+  hint: string | null;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { valid: false, type: null, identity: null, project: null, hint: null };
+  }
+  try {
+    const obj = JSON.parse(trimmed) as Record<string, unknown>;
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      return { valid: false, type: null, identity: null, project: null, hint: "顶层必须是 JSON 对象" };
+    }
+    const type = typeof obj.type === "string" ? obj.type.trim() : "";
+    const project =
+      (typeof obj.quota_project_id === "string" && obj.quota_project_id.trim()) ||
+      (typeof obj.project_id === "string" && obj.project_id.trim()) ||
+      null;
+    if (type === "service_account") {
+      const email = typeof obj.client_email === "string" ? obj.client_email.trim() : "";
+      const pk = typeof obj.private_key === "string" ? obj.private_key.trim() : "";
+      const uri = typeof obj.token_uri === "string" ? obj.token_uri.trim() : "";
+      if (!pk.includes("PRIVATE KEY") || !email || !uri) {
+        return {
+          valid: false,
+          type,
+          identity: email || null,
+          project,
+          hint: "service_account 需包含 private_key、client_email 与 token_uri",
+        };
+      }
+      return { valid: true, type, identity: email, project, hint: null };
+    }
+    if (type === "authorized_user") {
+      const cid = typeof obj.client_id === "string" ? obj.client_id.trim() : "";
+      const csec = typeof obj.client_secret === "string" ? obj.client_secret.trim() : "";
+      const rt = typeof obj.refresh_token === "string" ? obj.refresh_token.trim() : "";
+      if (!cid || !csec || !rt) {
+        return {
+          valid: false,
+          type,
+          identity: cid || null,
+          project,
+          hint: "authorized_user 需包含 client_id、client_secret 与 refresh_token",
+        };
+      }
+      return { valid: true, type, identity: cid, project, hint: null };
+    }
+    return {
+      valid: false,
+      type: type || null,
+      identity: null,
+      project,
+      hint: "仅支持 service_account 或 authorized_user 类型",
+    };
+  } catch {
+    return { valid: false, type: null, identity: null, project: null, hint: "JSON 语法无效" };
+  }
+}
 
 export default function AntigravityAccounts({ notify, setError }: Props) {
   const [state, setState] = useState<AntigravityAuthState | null>(null);
@@ -39,17 +104,12 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
   const [tab, setTab] = useState<"all" | "oauth" | "adc">("all");
   const [dialog, setDialog] = useState<DialogState>(null);
 
-  const [inputMode, setInputMode] = useState<"json" | "key">("json");
   const [name, setName] = useState("");
   const [jsonText, setJsonText] = useState("");
-  const [keyVal, setKeyVal] = useState("");
-  const [refreshToken, setRefreshToken] = useState("");
-  const [email, setEmail] = useState("");
-  const [projectId, setProjectId] = useState("");
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [clientEmail, setClientEmail] = useState("");
+  const [quotaProjectId, setQuotaProjectId] = useState("");
   const [activate, setActivate] = useState(true);
+
+  const adcPreview = useMemo(() => parseAdcPreview(jsonText), [jsonText]);
 
   const load = useCallback(async () => {
     try {
@@ -63,13 +123,17 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
     void load();
   }, [load]);
 
-  const runAction = async (fn: () => Promise<AntigravityAuthState>, okMsg: string) => {
+  const runAction = async (
+    fn: () => Promise<AntigravityAuthState>,
+    formatNotice: (next: AntigravityAuthState) => string,
+  ) => {
     setBusy(true);
     setError("");
     try {
       const next = await fn();
       setState(next);
-      if (okMsg) notify(okMsg);
+      const msg = formatNotice(next);
+      if (msg) notify(msg);
       setDialog(null);
     } catch (e) {
       setError(errorOf(e).message);
@@ -79,19 +143,12 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
     }
   };
 
-  const openAdd = (kind: "oauth" | "adc") => {
-    setInputMode("json");
+  const openAddAdc = () => {
     setName("");
     setJsonText("");
-    setKeyVal("");
-    setRefreshToken("");
-    setEmail("");
-    setProjectId("");
-    setClientId("");
-    setClientSecret("");
-    setClientEmail("");
+    setQuotaProjectId("");
     setActivate(true);
-    setDialog({ type: "add", kind });
+    setDialog({ type: "add-adc" });
   };
 
   const pickFile = async () => {
@@ -111,89 +168,97 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
 
   return (
     <div className="antigravity-accounts">
-      <div className="banner" aria-label="Antigravity 认证状态">
-        <Shield size={16} />
-        <div style={{ flex: 1 }}>
-          <strong>
-            当前模式：
-            {state?.mode === "both"
-              ? "混合模式（OAuth + ADC）"
-              : state?.mode === "adc"
+      <div
+        className={"ag-status-card" + (state?.mode === "mixed" ? " warning" : "")}
+        aria-label="Antigravity 认证状态"
+      >
+        <div className="ag-status-main">
+          <div className="ag-status-header">
+            {state?.mode === "mixed" ? <AlertTriangle size={16} /> : <Shield size={16} />}
+            <strong>
+              当前模式：
+              {state?.mode === "adc"
                 ? "ADC 模式（已启用 ADC）"
-                : "OAuth 模式（已禁用 ADC）"}
-          </strong>
-          <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
-            enableAdc: {state?.enableAdc ? "true" : "false"} · OAuth:{" "}
-            {state?.oauthPresent ? "已存在" : "未检测到"} · ADC:{" "}
-            {state?.adcStatus === "active"
-              ? `已启用 (${state.adcType ?? "ADC"}${state.adcProject ? ` / ${state.adcProject}` : ""})`
-              : state?.adcStatus === "disabled"
-                ? "已禁用 (.disabled)"
-                : state?.adcStatus === "backup_only"
-                  ? "仅备份"
-                  : "未检测到"}{" "}
-            · 自动备份: {state?.backupCount ?? 0}/10
+                : state?.mode === "mixed"
+                  ? "混合状态（配置与 ADC 文件不一致）"
+                  : "OAuth 模式（已禁用 ADC）"}
+            </strong>
+          </div>
+          <div className="ag-status-pills">
+            <span className="ag-pill">
+              OAuth:{" "}
+              {state?.oauthPresent
+                ? state.oauthEmail
+                  ? `${state.oauthEmail}${state.oauthAuthMethod ? ` (${state.oauthAuthMethod})` : ""}`
+                  : "已登录"
+                : "未检测到"}
+            </span>
+            <span className="ag-pill">
+              ADC:{" "}
+              {state?.adcStatus === "active"
+                ? `已启用 (${state.adcType ?? "ADC"}${state.adcProject ? ` · ${state.adcProject}` : ""})`
+                : state?.adcStatus === "disabled"
+                  ? "已禁用 (.disabled)"
+                  : state?.adcStatus === "backup_only"
+                    ? "仅备份 (agswitch)"
+                    : "未检测到"}
+            </span>
+            <span className="ag-pill">自动备份: {state?.backupCount ?? 0}/10</span>
           </div>
         </div>
-        <div className="account-actions">
+        <div className="ag-status-actions">
+          <div className="exchange-button-group" role="group" aria-label="切换认证模式">
+            <button
+              type="button"
+              className={"exchange-button" + (state?.mode === "oauth" ? " active" : "")}
+              disabled={!state || busy || state.mode === "oauth"}
+              onClick={() =>
+                state &&
+                void runAction(
+                  () =>
+                    command("set_antigravity_auth_mode", {
+                      mode: "oauth",
+                      expectedRevision: state.revision,
+                    }),
+                  (next) =>
+                    next.appRestarted
+                      ? "已切换到 OAuth 模式并自动重启 Antigravity"
+                      : "已切换到 OAuth 模式（禁用 ADC）",
+                )
+              }
+            >
+              OAuth 模式
+            </button>
+            <button
+              type="button"
+              className={"exchange-button" + (state?.mode === "adc" ? " active" : "")}
+              disabled={!state || busy || state.mode === "adc"}
+              onClick={() =>
+                state &&
+                void runAction(
+                  () =>
+                    command("set_antigravity_auth_mode", {
+                      mode: "adc",
+                      expectedRevision: state.revision,
+                    }),
+                  (next) =>
+                    next.appRestarted
+                      ? "已切换到 ADC 模式并自动重启 Antigravity"
+                      : "已切换到 ADC 模式（启用 ADC）",
+                )
+              }
+            >
+              ADC 模式
+            </button>
+          </div>
           <button
-            className="text-button"
-            disabled={!state || busy || state.mode === "oauth"}
-            onClick={() =>
-              state &&
-              void runAction(
-                () =>
-                  command("set_antigravity_auth_mode", {
-                    mode: "oauth",
-                    expectedRevision: state.revision,
-                  }),
-                "已切换到 OAuth 模式（禁用 ADC），重启 Antigravity 后生效",
-              )
-            }
-          >
-            OAuth 模式
-          </button>
-          <button
-            className="text-button"
-            disabled={!state || busy || state.mode === "adc"}
-            onClick={() =>
-              state &&
-              void runAction(
-                () =>
-                  command("set_antigravity_auth_mode", {
-                    mode: "adc",
-                    expectedRevision: state.revision,
-                  }),
-                "已切换到 ADC 模式（启用 ADC），重启 Antigravity 后生效",
-              )
-            }
-          >
-            ADC 模式
-          </button>
-          <button
-            className="text-button"
-            disabled={!state || busy || state.mode === "both"}
-            onClick={() =>
-              state &&
-              void runAction(
-                () =>
-                  command("set_antigravity_auth_mode", {
-                    mode: "both",
-                    expectedRevision: state.revision,
-                  }),
-                "已启用混合模式（保留 OAuth + 启用 ADC），重启 Antigravity 后生效",
-              )
-            }
-          >
-            混合模式
-          </button>
-          <button
+            type="button"
             className="text-button"
             disabled={!state || busy}
             onClick={() =>
               void runAction(
                 () => command("backup_antigravity_auth"),
-                "已备份当前 Antigravity 认证配置",
+                () => "已备份当前 Antigravity 认证配置",
               )
             }
           >
@@ -201,6 +266,7 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
             备份当前
           </button>
           <button
+            type="button"
             className="icon-button"
             aria-label="刷新 Antigravity 认证状态"
             disabled={busy}
@@ -210,42 +276,6 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           </button>
         </div>
       </div>
-
-      {state && ((state.oauthPresent && !state.oauthSaved) || (state.adcStatus !== "missing" && !state.adcSaved)) && (
-        <div className="banner">
-          <span>检测到当前磁盘上的 Antigravity 凭据尚未保存到多账号库</span>
-          <div className="account-actions">
-            {state.oauthPresent && !state.oauthSaved && (
-              <button
-                className="text-button"
-                disabled={busy}
-                onClick={() =>
-                  void runAction(
-                    () => command("import_current_antigravity_oauth", {}),
-                    "已保存当前 OAuth 账号",
-                  )
-                }
-              >
-                保存当前 OAuth
-              </button>
-            )}
-            {state.adcStatus !== "missing" && !state.adcSaved && (
-              <button
-                className="text-button"
-                disabled={busy}
-                onClick={() =>
-                  void runAction(
-                    () => command("import_current_antigravity_adc", {}),
-                    "已保存当前 ADC 凭据",
-                  )
-                }
-              >
-                保存当前 ADC
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       <div className="list-tools">
         <div className="exchange-button-group" role="tablist" aria-label="凭据类型筛选">
@@ -275,13 +305,39 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           </button>
         </div>
         <div className="account-actions">
-          <button className="secondary" disabled={busy} onClick={() => openAdd("oauth")}>
-            <Plus size={15} />
-            添加 OAuth
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy || !state?.oauthPresent}
+            onClick={() =>
+              void runAction(
+                () => command("import_current_antigravity_oauth", {}),
+                () => "已从当前登录读取并保存 OAuth 账号",
+              )
+            }
+          >
+            <Download size={15} />
+            读取当前 OAuth
           </button>
-          <button className="primary" disabled={busy} onClick={() => openAdd("adc")}>
+          {state && state.adcStatus !== "missing" && !state.adcSaved && (
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy}
+              onClick={() =>
+                void runAction(
+                  () => command("import_current_antigravity_adc", {}),
+                  () => "已保存当前磁盘上的 ADC 凭据",
+                )
+              }
+            >
+              <Download size={15} />
+              保存当前 ADC
+            </button>
+          )}
+          <button type="button" className="primary" disabled={busy} onClick={openAddAdc}>
             <Plus size={15} />
-            添加 ADC
+            导入 ADC
           </button>
         </div>
       </div>
@@ -296,300 +352,236 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           <div className="empty">
             <KeyRound size={30} />
             <h3>尚无已保存的 Antigravity 凭据</h3>
-            <p>支持导入 OAuth / ADC JSON 文件，或直接输入 Token / Key。</p>
+            <p>可点击「读取当前 OAuth」保存当前登录账号，或「导入 ADC」添加 Google Cloud ADC JSON。</p>
           </div>
         ) : (
-          items.map((item) => (
-            <div
-              key={item.id}
-              className={"account-row" + (item.current ? " selected" : "")}
-            >
-              <div className={"avatar " + (item.kind === "oauth" ? "chatgpt" : "apikey")}>
-                {item.kind === "oauth" ? <UserRound size={20} /> : <KeyRound size={20} />}
-              </div>
-              <div className="account-copy">
-                <div className="account-title">
-                  <strong title={item.name}>{item.name}</strong>
-                  <span className="plan-badge">
-                    {item.kind === "oauth" ? "OAuth" : `ADC · ${item.sourceType}`}
-                  </span>
+          items.map((item) => {
+            const isEffective =
+              item.current &&
+              ((item.kind === "oauth" && state.mode === "oauth" && state.oauthPresent) ||
+                (item.kind === "adc" && state.mode === "adc" && state.adcStatus === "active"));
+            return (
+              <div
+                key={item.id}
+                className={"account-row" + (isEffective ? " selected" : "")}
+              >
+                <div className={"avatar " + (item.kind === "oauth" ? "chatgpt" : "apikey")}>
+                  {item.kind === "oauth" ? <UserRound size={20} /> : <KeyRound size={20} />}
                 </div>
-                <div>
-                  {item.email && <span title={item.email}>{item.email}</span>}
-                  {item.projectId && <span title={item.projectId}>项目: {item.projectId}</span>}
-                  {!item.email && !item.projectId && <span>{item.sourceType}</span>}
-                </div>
-              </div>
-              <div className="account-actions">
-                {item.current &&
-                ((item.kind === "oauth" && state.oauthPresent) ||
-                  (item.kind === "adc" && state.adcStatus === "active" && state.enableAdc)) ? (
-                  <span className="current-badge">
-                    <Check size={13} />
-                    当前生效
-                  </span>
-                ) : (
-                  <button
-                    className="switch-button"
-                    disabled={busy}
-                    aria-label={"切换到 " + item.name}
-                    onClick={() =>
-                      void runAction(
-                        () =>
-                          item.kind === "oauth"
-                            ? command("switch_antigravity_oauth", {
-                                id: item.id,
-                                expectedRevision: state.revision,
-                                disableAdc: state.mode === "oauth",
-                              })
-                            : command("switch_antigravity_adc", {
-                                id: item.id,
-                                expectedRevision: state.revision,
-                                enableAdc: true,
-                              }),
-                        `已切换到 ${item.name}，请完全退出并重开 Antigravity`,
-                      )
-                    }
-                  >
-                    切换
-                    <ArrowLeftRight size={13} />
-                  </button>
-                )}
-                <details className="account-menu">
-                  <summary aria-label={"管理 " + item.name}>
-                    <MoreHorizontal size={18} />
-                  </summary>
-                  <div className="menu-popover">
-                    <button
-                      onClick={(e) => {
-                        e.currentTarget.closest("details")?.removeAttribute("open");
-                        setName(item.name);
-                        setDialog({ type: "rename", item });
-                      }}
-                    >
-                      <Pencil size={14} />
-                      重命名
-                    </button>
-                    <button
-                      className="danger"
-                      onClick={(e) => {
-                        e.currentTarget.closest("details")?.removeAttribute("open");
-                        setDialog({ type: "delete", item });
-                      }}
-                    >
-                      <Trash2 size={14} />
-                      删除
-                    </button>
+                <div className="account-copy">
+                  <div className="account-title">
+                    <strong title={item.name}>{item.name}</strong>
+                    <span className="plan-badge">
+                      {item.kind === "oauth"
+                        ? `OAuth · ${item.sourceType}`
+                        : `ADC · ${item.sourceType}`}
+                    </span>
                   </div>
-                </details>
+                  <div className="ag-account-meta">
+                    {item.email && <span title={item.email}>{item.email}</span>}
+                    {item.projectId && <span title={item.projectId}>项目: {item.projectId}</span>}
+                    {!item.email && !item.projectId && <span>{item.sourceType}</span>}
+                  </div>
+                </div>
+                <div className="account-actions">
+                  {isEffective ? (
+                    <span className="current-badge">
+                      <Check size={13} />
+                      当前生效
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="switch-button"
+                      disabled={busy}
+                      aria-label={"切换到 " + item.name}
+                      onClick={() =>
+                        void runAction(
+                          () =>
+                            item.kind === "oauth"
+                              ? command("switch_antigravity_oauth", {
+                                  id: item.id,
+                                  expectedRevision: state.revision,
+                                  disableAdc: true,
+                                })
+                              : command("switch_antigravity_adc", {
+                                  id: item.id,
+                                  expectedRevision: state.revision,
+                                  enableAdc: true,
+                                }),
+                          (next) =>
+                            next.appRestarted
+                              ? `已切换到 ${item.name} 并自动重启 Antigravity`
+                              : `已切换到 ${item.name}`,
+                        )
+                      }
+                    >
+                      切换
+                      <ArrowLeftRight size={13} />
+                    </button>
+                  )}
+                  <details className="account-menu">
+                    <summary aria-label={"管理 " + item.name}>
+                      <MoreHorizontal size={18} />
+                    </summary>
+                    <div className="menu-popover">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.currentTarget.closest("details")?.removeAttribute("open");
+                          setName(item.name);
+                          setDialog({ type: "rename", item });
+                        }}
+                      >
+                        <Pencil size={14} />
+                        重命名
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={(e) => {
+                          e.currentTarget.closest("details")?.removeAttribute("open");
+                          setDialog({ type: "delete", item });
+                        }}
+                      >
+                        <Trash2 size={14} />
+                        删除
+                      </button>
+                    </div>
+                  </details>
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 
       {dialog && state && (
         <AppModal
           title={
-            dialog.type === "add"
-              ? dialog.kind === "oauth"
-                ? "添加 Antigravity OAuth 账号"
-                : "添加 Antigravity ADC 凭据"
+            dialog.type === "add-adc"
+              ? "导入 Google Cloud ADC 凭据"
               : dialog.type === "rename"
                 ? "重命名凭据"
                 : "删除凭据"
           }
           onClose={() => setDialog(null)}
         >
-          {dialog.type === "add" ? (
+          {dialog.type === "add-adc" ? (
             <form
-              className="modal-form"
+              className="modal-form ag-adc-form"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (dialog.kind === "oauth") {
-                  void runAction(
-                    () =>
-                      command("add_antigravity_oauth", {
-                        input: {
-                          name: name || null,
-                          inputMode,
-                          jsonText: inputMode === "json" ? jsonText : null,
-                          key: inputMode === "key" ? keyVal : null,
-                          refreshToken: inputMode === "key" ? refreshToken || null : null,
-                          email: email || null,
-                          activate,
-                        },
-                      }),
+                void runAction(
+                  () =>
+                    command("add_antigravity_adc", {
+                      input: {
+                        name: name.trim() || null,
+                        jsonText,
+                        quotaProjectId: quotaProjectId.trim() || null,
+                        activate,
+                      },
+                    }),
+                  (next) =>
                     activate
-                      ? "已添加并切换 OAuth 账号，请重启 Antigravity"
-                      : "已添加 OAuth 账号",
-                  );
-                } else {
-                  void runAction(
-                    () =>
-                      command("add_antigravity_adc", {
-                        input: {
-                          name: name || null,
-                          inputMode,
-                          jsonText: inputMode === "json" ? jsonText : null,
-                          key: inputMode === "key" ? keyVal : null,
-                          clientId: inputMode === "key" ? clientId || null : null,
-                          clientSecret: inputMode === "key" ? clientSecret || null : null,
-                          projectId: projectId || null,
-                          clientEmail: inputMode === "key" ? clientEmail || null : null,
-                          activate,
-                        },
-                      }),
-                    activate
-                      ? "已添加并启用 ADC 凭据，请重启 Antigravity"
-                      : "已添加 ADC 凭据",
-                  );
-                }
+                      ? next.appRestarted
+                        ? "已导入并启用 ADC 凭据，Antigravity 已自动重启"
+                        : "已导入并启用 ADC 凭据"
+                      : "已导入 ADC 凭据",
+                );
               }}
             >
-              <div className="exchange-button-group" role="tablist" aria-label="录入方式">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={inputMode === "json"}
-                  className={"exchange-button" + (inputMode === "json" ? " active" : "")}
-                  onClick={() => setInputMode("json")}
-                >
-                  导入 JSON
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={inputMode === "key"}
-                  className={"exchange-button" + (inputMode === "key" ? " active" : "")}
-                  onClick={() => setInputMode("key")}
-                >
-                  输入 Key
-                </button>
+              <div className="ag-adc-guide">
+                <p>
+                  支持导入 <code>gcloud auth application-default login</code> 生成的{" "}
+                  <code>authorized_user</code> JSON，或包含完整{" "}
+                  <code>private_key / client_email / token_uri</code> 的{" "}
+                  <code>service_account</code> 密钥文件。
+                </p>
+                {state.adcStatus !== "missing" && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() =>
+                      void runAction(
+                        () =>
+                          command("import_current_antigravity_adc", {
+                            name: name.trim() || null,
+                          }),
+                        () => "已导入当前磁盘上的 ADC 凭据",
+                      )
+                    }
+                  >
+                    <Download size={14} />
+                    直接导入本机当前 ADC ({state.adcProject ?? state.adcType ?? "已检测"})
+                  </button>
+                )}
               </div>
 
               <label>
-                名称（可选）
+                备注名称（可选）
                 <input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder={dialog.kind === "oauth" ? "例如：个人 OAuth" : "例如：GCP 生产 ADC"}
+                  placeholder="例如：Vertex AI 生产项目 ADC"
                 />
               </label>
 
-              {inputMode === "json" ? (
-                <>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span>JSON 内容</span>
-                    <button type="button" className="text-button" onClick={() => void pickFile()}>
-                      <FolderOpen size={14} />
-                      选择本地文件…
-                    </button>
-                  </div>
-                  <textarea
-                    rows={6}
-                    aria-label="凭据 JSON 内容"
-                    value={jsonText}
-                    onChange={(e) => setJsonText(e.target.value)}
-                    placeholder={
-                      dialog.kind === "oauth"
-                        ? '{"access_token":"...","refresh_token":"..."}'
-                        : '{"type":"authorized_user","client_id":"...","refresh_token":"..."}'
-                    }
-                  />
-                </>
-              ) : dialog.kind === "oauth" ? (
-                <>
-                  <label>
-                    OAuth Token / Key
-                    <input
-                      required
-                      aria-label="OAuth Token 或 Key"
-                      value={keyVal}
-                      onChange={(e) => setKeyVal(e.target.value)}
-                      placeholder="输入 jetski 独立令牌或 access_token"
-                    />
-                  </label>
-                  <label>
-                    Refresh Token（可选）
-                    <input
-                      value={refreshToken}
-                      onChange={(e) => setRefreshToken(e.target.value)}
-                      placeholder="1//..."
-                    />
-                  </label>
-                  <label>
-                    邮箱标识（可选）
-                    <input
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="user@example.invalid"
-                    />
-                  </label>
-                </>
-              ) : (
-                <>
-                  <label>
-                    ADC Key（Refresh Token / Private Key / API Key）
-                    <input
-                      required
-                      aria-label="ADC Key"
-                      value={keyVal}
-                      onChange={(e) => setKeyVal(e.target.value)}
-                      placeholder="输入 Refresh Token、API Key 或 Private Key"
-                    />
-                  </label>
-                  <label>
-                    GCP 项目 ID（可选）
-                    <input
-                      value={projectId}
-                      onChange={(e) => setProjectId(e.target.value)}
-                      placeholder="my-gcp-project"
-                    />
-                  </label>
-                  <label>
-                    Client ID（可选）
-                    <input
-                      value={clientId}
-                      onChange={(e) => setClientId(e.target.value)}
-                      placeholder="xxx.apps.googleusercontent.com"
-                    />
-                  </label>
-                  <label>
-                    Client Secret（可选）
-                    <input
-                      type="password"
-                      value={clientSecret}
-                      onChange={(e) => setClientSecret(e.target.value)}
-                      placeholder="GOCSPX-..."
-                    />
-                  </label>
-                  <label>
-                    Service Account 邮箱（可选）
-                    <input
-                      value={clientEmail}
-                      onChange={(e) => setClientEmail(e.target.value)}
-                      placeholder="sa@project.iam.gserviceaccount.com"
-                    />
-                  </label>
-                </>
+              <div className="ag-json-header">
+                <span>ADC JSON 内容</span>
+                <button type="button" className="text-button" onClick={() => void pickFile()}>
+                  <FolderOpen size={14} />
+                  选择 JSON 文件…
+                </button>
+              </div>
+              <textarea
+                rows={6}
+                required
+                aria-label="凭据 JSON 内容"
+                value={jsonText}
+                onChange={(e) => setJsonText(e.target.value)}
+                placeholder='{"type":"authorized_user","client_id":"...","client_secret":"...","refresh_token":"...","quota_project_id":"..."}'
+              />
+
+              {jsonText.trim() !== "" && (
+                <div className={"ag-json-preview" + (adcPreview.valid ? " ok" : " invalid")}>
+                  {adcPreview.valid ? (
+                    <>
+                      <span>类型: {adcPreview.type}</span>
+                      {adcPreview.identity && <span>标识: {adcPreview.identity}</span>}
+                      <span>项目: {quotaProjectId.trim() || adcPreview.project || "未指定"}</span>
+                    </>
+                  ) : (
+                    <span>{adcPreview.hint}</span>
+                  )}
+                </div>
               )}
 
-              <label className="checkbox-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label>
+                配额项目 ID 覆盖（quota_project_id，可选）
+                <input
+                  value={quotaProjectId}
+                  onChange={(e) => setQuotaProjectId(e.target.value)}
+                  placeholder={adcPreview.project ?? "例如：my-gcp-project"}
+                />
+              </label>
+
+              <label className="ag-checkbox-row">
                 <input
                   type="checkbox"
                   checked={activate}
                   onChange={(e) => setActivate(e.target.checked)}
                 />
-                添加后立即切换为当前生效凭据
+                导入后立即切换为当前生效 ADC（若 Antigravity 正在运行将自动重启）
               </label>
 
               <div className="modal-actions">
                 <button type="button" onClick={() => setDialog(null)}>
                   取消
                 </button>
-                <button type="submit" className="primary" disabled={busy}>
-                  保存
+                <button type="submit" className="primary" disabled={busy || !adcPreview.valid}>
+                  导入保存
                 </button>
               </div>
             </form>
@@ -605,17 +597,13 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                       name,
                       expectedRevision: state.revision,
                     }),
-                  "已重命名凭据",
+                  () => "已重命名凭据",
                 );
               }}
             >
               <label>
                 新名称
-                <input
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
+                <input required value={name} onChange={(e) => setName(e.target.value)} />
               </label>
               <div className="modal-actions">
                 <button type="button" onClick={() => setDialog(null)}>
@@ -646,7 +634,7 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                           id: dialog.item.id,
                           expectedRevision: state.revision,
                         }),
-                      "已删除凭据",
+                      () => "已删除凭据",
                     )
                   }
                 >
