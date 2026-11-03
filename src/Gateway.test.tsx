@@ -42,7 +42,7 @@ describe("gateway controls", () => {
   it.each(["codex", "claude"] as const)(
     "%s preserves a conflicting provider draft and retries only with a fresh version",
     async (client) => {
-      localStorage.setItem("lich13-switch.main.client", client);
+      localStorage.setItem("vela.main.client", client);
       const user = userEvent.setup();
       let current = client === "claude" ? claudeState : state;
       current.running = true;
@@ -629,7 +629,7 @@ describe("client isolation", () => {
         force: false,
       }),
     );
-    expect(localStorage.getItem("lich13-switch.main.client")).toBe("claude");
+    expect(localStorage.getItem("vela.main.client")).toBe("claude");
     act(() =>
       mock.listeners.get("gateway-state")!({
         ...state,
@@ -723,7 +723,7 @@ describe("client isolation", () => {
   });
 
   it("restores Claude selection and saves only its two credential fields with the Claude revision", async () => {
-    localStorage.setItem("lich13-switch.main.client", "claude");
+    localStorage.setItem("vela.main.client", "claude");
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
     await screen.findByLabelText(`${claudeState.providers[0].name} 操作`);
@@ -787,7 +787,7 @@ it("keeps one icon-bearing testing entry per provider and removes global testing
 it.each(["codex", "claude", "grok", "dsh"] as const)(
   "%s omits the connection summary and keeps client onboarding without file exchange",
   async (clientId) => {
-    localStorage.setItem("lich13-switch.main.client", clientId);
+    localStorage.setItem("vela.main.client", clientId);
     state.clientId = clientId;
     state.running = false;
     state.grokManaged = false;

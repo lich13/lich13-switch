@@ -74,7 +74,7 @@ async function openProviderEditor(
 }
 
 function selectInitialClient(clientId: ClientId) {
-  localStorage.setItem("lich13-switch.main.client", clientId);
+  localStorage.setItem("vela.main.client", clientId);
 }
 
 function deferred<T>() {

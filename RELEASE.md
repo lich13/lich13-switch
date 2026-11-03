@@ -1,6 +1,26 @@
-# lich13-switch 发布说明
+# Vela 发布说明
 
 最新版本置顶。每个版本只记录用户可感知的变化、迁移影响和验证范围；下载文件请以对应 GitHub Release 为准。
+
+## v0.26.14 · 2026-11-03
+
+### 修复与调整
+
+- 应用数据目录统一迁移至 `~/.vela` 并清理旧包名残留：默认数据路径固定为 `~/.vela`（权限 `0700`），应用标识更新为 `com.lich13.vela`，macOS 开机自启更新为 `com.lich13.vela.plist`，电源助手更新为 `com.lich13.vela.power-helper`（`/Library/Application Support/Vela Power`），Grok／DSH／Codex 受管配置标记与前端客户端偏好存储键统一更新为 `vela`。
+- 重构 Antigravity OAuth／ADC 凭据管理与自动重启切换：OAuth 改为直接快照本机当前登录的 `~/.gemini/jetski-standalone-oauth-token`（解析 `id_token_email` 与 `auth_method`），ADC 严格校验 Google Cloud 凭据字段（支持文件选择、粘贴 JSON 与一键读取当前生效 ADC）；修正 `OAuth`／`ADC`／`混合（配置与凭据文件不一致告警）` 模式判定；切换凭据与模式时自动优雅退出 `Antigravity.app`、完成原子替换与校验后再自动启动应用，消除退出回写覆盖与第三方目录权限篡改。
+- 修复账单导出与 RPC 去重事务安全：账单导出仅在查询侧排除已被 RPC 覆盖的历史文件记录而不再删除本地用量库记录；RPC 同步在会话最终提交阶段按存活游标在同一 SQLite 事务内原子执行覆盖清理与记录写入。
+- 精简快捷面板与对齐用量工具栏行高：移除快捷面板顶部“供应商 / 账号”行，过滤“钱包余额”等非订阅占位徽章并紧凑格式化大额余额以保持单行不换行；统一用量页筛选栏与请求日志工具栏的 32px 控件高度与边框样式。
+- 联动全局冻结自动关闭“合盖不休眠”并新增 Antigravity app 报错日志识别：启用全局冻结或进入“可休眠”状态时自动关闭 macOS 电池“合盖不休眠”开关并同步界面状态；用量扫描与日志页新增识别 `Antigravity app` 的流中断、认证失败、限流与模型输出报错。
+
+### 兼容性与迁移
+
+- 升级启动自动将旧应用数据目录（`~/Library/Application Support/com.lich13.gpt-switch` 或 `%APPDATA%/com.lich13.gpt-switch`）完整迁移至 `~/.vela` 并清理旧目录，同时平滑迁移 `grok/gateway.json`、`dsh/gateway.json`、`~/.grok/config.toml`、`~/.dsh` 与 `~/.codex/config.toml` 中的旧受管标识及旧 `LaunchAgent`。
+
+### 验证与下载
+
+- 已完成受影响模块测试、前端类型检查、构建、Clippy 与格式检查。macOS Apple Silicon 与 Windows x64 的完整回归、构建及安装冒烟由本版本标签 CI 执行。
+- Antigravity OAuth／ADC 自动重启切换、快捷面板单行额度、用量工具栏对齐、全局冻结联动关闭合盖不休眠、Antigravity 报错日志筛选及 `~/.vela` 迁移体验待用户验收。
+- 下载对应 GitHub Release 的 `.dmg` 或 `.exe` 安装包，使用同页 `SHA256SUMS` 核对。
 
 ## v0.26.13 · 2026-11-03
 

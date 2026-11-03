@@ -418,7 +418,7 @@ async fn request(
         return Err("INVALID_ENDPOINT");
     }
     let request = Request::get(url.as_str())
-        .header(header::USER_AGENT, "lich13-switch/endpoint-probe")
+        .header(header::USER_AGENT, "vela/endpoint-probe")
         .header(header::ACCEPT, "*/*")
         .body(replay::empty())
         .map_err(|_| "INVALID_ENDPOINT")?;

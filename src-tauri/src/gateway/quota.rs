@@ -311,7 +311,7 @@ async fn get_with_token(
             .header(header::ACCEPT_ENCODING, "identity")
             .header(
                 header::USER_AGENT,
-                concat!("lich13-switch/", env!("CARGO_PKG_VERSION")),
+                concat!("vela/", env!("CARGO_PKG_VERSION")),
             );
         if let Some(token) = token {
             req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));

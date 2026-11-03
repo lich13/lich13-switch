@@ -418,7 +418,7 @@ model = "fixture-official-model"
 base_url = "https://official.fixture.invalid/v1"
 api_key = "fixture-official-key"
 
-[model."lich13-switch"]
+[model."vela"]
 model = "fixture-managed-model"
 api_base_url = "https://managed.fixture.invalid/v1"
 api_key = "fixture-managed-api-key"
@@ -428,7 +428,7 @@ api_key = "fixture-managed-api-key"
     assert_eq!(managed.selected, grok_config::MANAGED);
     let message = grok_config::missing_recovery(text).message;
 
-    assert!(message.contains("模型 lich13-switch"), "{message}");
+    assert!(message.contains("模型 vela"), "{message}");
     assert!(message.contains("api_base_url"), "{message}");
     assert!(message.contains("api_key"), "{message}");
     assert!(message.contains("当前选择的 Grok 目录"), "{message}");
@@ -454,7 +454,7 @@ fn missing_grok_recovery_guides_env_key_without_echoing_path_or_secrets() {
         .next()
         .expect("a missing fixture environment variable should be available");
     let text = format!(
-        "[models]\ndefault = \"official-model\"\n\n[model.\"official-model\"]\nmodel = \"fixture-official-model\"\nbase_url = \"https://official.fixture.invalid/v1\"\napi_key = \"fixture-official-key\"\n\n[model.\"lich13-switch\"]\nmodel = \"fixture-managed-model\"\nbase_url = \"https://managed-env.fixture.invalid/v1\"\nenv_key = {:?}\n",
+        "[models]\ndefault = \"official-model\"\n\n[model.\"official-model\"]\nmodel = \"fixture-official-model\"\nbase_url = \"https://official.fixture.invalid/v1\"\napi_key = \"fixture-official-key\"\n\n[model.\"vela\"]\nmodel = \"fixture-managed-model\"\nbase_url = \"https://managed-env.fixture.invalid/v1\"\nenv_key = {:?}\n",
         env_name
     );
 
@@ -462,7 +462,7 @@ fn missing_grok_recovery_guides_env_key_without_echoing_path_or_secrets() {
     assert_eq!(managed.selected, grok_config::MANAGED);
     let message = grok_config::missing_recovery(&text).message;
 
-    assert!(message.contains("模型 lich13-switch"), "{message}");
+    assert!(message.contains("模型 vela"), "{message}");
     assert!(message.contains("base_url"), "{message}");
     assert!(message.contains("env_key 引用的环境变量"), "{message}");
     assert!(message.contains("当前选择的 Grok 目录"), "{message}");

@@ -300,7 +300,7 @@ async fn download(
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("lich13-switch fingerprint-bank")
+        .user_agent("vela fingerprint-bank")
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(90))
         .build()

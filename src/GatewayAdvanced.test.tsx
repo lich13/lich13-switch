@@ -124,7 +124,7 @@ describe("gateway advanced settings", () => {
     );
   });
   it("shows the Codex WebSocket retry default and persists edits", async () => {
-    localStorage.setItem("lich13-switch.main.client", "codex");
+    localStorage.setItem("vela.main.client", "codex");
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });
@@ -177,7 +177,7 @@ describe("gateway advanced settings", () => {
   });
 
   it("does not expose WebSocket retry settings to Claude", async () => {
-    localStorage.setItem("lich13-switch.main.client", "claude");
+    localStorage.setItem("vela.main.client", "claude");
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });

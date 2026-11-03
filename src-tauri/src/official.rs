@@ -223,7 +223,10 @@ fn scan(text: &str) -> Result<Scan> {
     // multiline string or a user's comment is never treated as managed state.
     for (i, line) in all.iter().enumerate().take(end).skip(start + 1) {
         let trimmed = line.body.trim_start();
-        let Some(rest) = trimmed.strip_prefix("# lich13-switch:official ") else {
+        let Some(rest) = trimmed
+            .strip_prefix("# vela:official ")
+            .or_else(|| trimmed.strip_prefix("# lich13-switch:official "))
+        else {
             continue;
         };
         for (n, key) in KEYS.iter().enumerate() {
@@ -256,7 +259,7 @@ fn comment_line(raw: &str) -> String {
     let body = raw.strip_suffix(newline).unwrap_or(raw);
     let indent = body.len() - body.trim_start().len();
     format!(
-        "{}# lich13-switch:official {}{}",
+        "{}# vela:official {}{}",
         &body[..indent],
         &body[indent..],
         newline
@@ -731,7 +734,7 @@ mod tests {
         let enabled = enable(&data, &home, "acct", &before).unwrap();
         assert!(enabled.enabled);
         let managed = fs::read_to_string(home.join("config.toml")).unwrap();
-        assert!(managed.contains("# lich13-switch:official base_url = 'https://x.test' # keep"));
+        assert!(managed.contains("# vela:official base_url = 'https://x.test' # keep"));
         disable(&data, &home, &storage::revision(Some(managed.as_bytes()))).unwrap();
         assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), TEXT);
     }

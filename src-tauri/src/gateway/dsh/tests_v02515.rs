@@ -362,7 +362,7 @@ async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
     extra_profile(home.path(), "c-profile");
     fs::write(
         home.path().join("profiles/b-profile").join(PATCH),
-        "- id: llm-pi-ai\n  config: {providers: {lich13-switch: {foreign: true}}}\n",
+        "- id: llm-pi-ai\n  config: {providers: {vela: {foreign: true}}}\n",
     )
     .unwrap();
     let gateway = gateway(home.path());

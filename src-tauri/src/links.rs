@@ -20,7 +20,7 @@ mod platform;
 mod platform;
 
 #[cfg(target_os = "macos")]
-pub const APP_ID: &str = "com.lich13.gpt-switch";
+pub const APP_ID: &str = "com.lich13.vela";
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preview {

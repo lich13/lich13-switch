@@ -303,7 +303,7 @@ pub async fn run_with_callbacks(
     events: mpsc::Sender<LoginState>,
     mut callbacks: mpsc::Receiver<CallbackRequest>,
 ) -> Result<Option<String>> {
-    let temp = storage::private_tempdir(&std::env::temp_dir(), "lich13-switch-login-")?;
+    let temp = storage::private_tempdir(&std::env::temp_dir(), "vela-login-")?;
     let mut cmd = command(cli)?;
     cmd.arg("login")
         .args(["-c", "cli_auth_credentials_store=\"file\""])
@@ -848,7 +848,7 @@ mod tests {
     }
     #[test]
     fn missing_cli_is_clear() {
-        assert!(resolve_cli("/missing/lich13-switch-codex").is_err());
+        assert!(resolve_cli("/missing/vela-codex").is_err());
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -865,7 +865,7 @@ mod tests {
         let raw = run(&script, "browser", rx, events).await.unwrap().unwrap();
         assert!(raw.contains("fixture-only"));
         let path = std::fs::read_to_string(marker).unwrap();
-        assert!(path.contains("lich13-switch-login-"));
+        assert!(path.contains("vela-login-"));
         assert!(!Path::new(&path).exists());
     }
     #[cfg(unix)]

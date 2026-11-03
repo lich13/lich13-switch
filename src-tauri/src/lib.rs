@@ -1884,7 +1884,7 @@ pub fn run() {
             let fixture = if smoke.is_some() {
                 Some(
                     tempfile::Builder::new()
-                        .prefix("lich13-switch-smoke-")
+                        .prefix("vela-smoke-")
                         .tempdir()?,
                 )
             } else {
@@ -1893,7 +1893,7 @@ pub fn run() {
             let data = fixture
                 .as_ref()
                 .map(|t| t.path().join("data"))
-                .unwrap_or(app.path().app_data_dir()?);
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vela"));
             let home = fixture
                 .as_ref()
                 .map(|t| t.path().join("codex"))
@@ -1902,9 +1902,27 @@ pub fn run() {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
                 });
+            if smoke.is_none() {
+                let mut legacy_dirs = Vec::new();
+                if let Some(dir) = dirs::data_dir() {
+                    legacy_dirs.push(dir.join("com.lich13.gpt-switch"));
+                    legacy_dirs.push(dir.join("com.lich13.lich13-switch"));
+                }
+                let _ = migrations::migrate_to_vela_home(&data, &legacy_dirs);
+            }
             // Single-instance registration has completed; no current spool exists yet.
             cleanup_spool::clean(&data);
             let cleanup_error = migrations::before_services(&data).err();
+            let mut core = Core::new(data.clone(), home)?;
+            if smoke.is_none() {
+                let prefs = core.preferences();
+                let _ = migrations::migrate_legacy_markers(
+                    &data,
+                    &core.home(),
+                    std::path::Path::new(&prefs.grok_home),
+                    std::path::Path::new(&prefs.dsh_home),
+                );
+            }
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
             let grok = gateway.grok_companion(data.join("grok"))?;
@@ -1913,7 +1931,6 @@ pub fn run() {
             let start_silently = smoke.is_none() && startup::silent(&args);
             app.manage(quick::Panel::new(&data)?);
             let power = power::Service::new(&data);
-            let mut core = Core::new(data.clone(), home)?;
             if let Some(fixture) = &fixture {
                 storage::private_dir(&core.home())?;
                 storage::private_dir(&fixture.path().join("claude"))?;

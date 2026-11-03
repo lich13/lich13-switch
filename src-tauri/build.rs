@@ -72,7 +72,7 @@ fn build_power() {
             "--sign",
             "-",
             "--identifier",
-            "com.lich13.gpt-switch.power-helper",
+            "com.lich13.vela.power-helper",
             helper.to_str().unwrap(),
         ],
     );

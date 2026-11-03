@@ -179,3 +179,78 @@ fn request_budget_migration_replaces_legacy_values_once() {
     gateway_wait_budget(&mut value);
     assert_eq!(value, saved);
 }
+
+#[test]
+fn migrate_to_vela_home_and_legacy_markers_move_files_and_rewrite_managed_names() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("com.lich13.gpt-switch");
+    let vela = root.path().join(".vela");
+    let codex = root.path().join(".codex");
+    let grok = root.path().join(".grok");
+    let dsh = root.path().join(".dsh");
+    fs::create_dir_all(legacy.join("grok")).unwrap();
+    fs::create_dir_all(legacy.join("dsh")).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    fs::create_dir_all(&grok).unwrap();
+    fs::create_dir_all(dsh.join("profiles/desktop")).unwrap();
+
+    fs::write(legacy.join("accounts.json"), b"{\"schema\":1}").unwrap();
+    fs::write(legacy.join(".DS_Store"), b"junk").unwrap();
+    fs::write(legacy.join(".tmpabc"), b"junk").unwrap();
+    fs::write(
+        legacy.join("grok/gateway.json"),
+        b"{\"grokApiModel\":\"lich13-switch\"}",
+    )
+    .unwrap();
+    fs::write(
+        legacy.join("dsh/gateway.json"),
+        b"{\"dsh\":{\"patch\":{\"after\":\"lich13-switch LICH13_SWITCH_GATEWAY_KEY\"}}}",
+    )
+    .unwrap();
+    fs::write(
+        codex.join("config.toml"),
+        b"# lich13-switch:official base_url = 'https://example.invalid'\n",
+    )
+    .unwrap();
+    fs::write(
+        grok.join("config.toml"),
+        b"[models]\ndefault = \"lich13-switch\"\n[model.lich13-switch]\nbase_url = \"http://127.0.0.1:43721/v1\"\n",
+    )
+    .unwrap();
+    fs::write(dsh.join(".env"), b"LICH13_SWITCH_GATEWAY_KEY=fixture\n").unwrap();
+    fs::write(
+        dsh.join("profiles/desktop/cordis.patch.yml"),
+        b"- id: llm-pi-ai\n  config:\n    providers:\n      lich13-switch:\n        apiKeyEnv: LICH13_SWITCH_GATEWAY_KEY\n",
+    )
+    .unwrap();
+
+    migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap();
+    assert!(!legacy.exists());
+    assert!(vela.join("accounts.json").exists());
+    assert!(!vela.join(".DS_Store").exists());
+    assert!(!vela.join(".tmpabc").exists());
+
+    migrate_legacy_markers(&vela, &codex, &grok, &dsh).unwrap();
+    assert_eq!(
+        fs::read_to_string(vela.join("grok/gateway.json")).unwrap(),
+        "{\"grokApiModel\":\"vela\"}"
+    );
+    assert!(fs::read_to_string(vela.join("dsh/gateway.json"))
+        .unwrap()
+        .contains("vela VELA_GATEWAY_KEY"));
+    assert!(fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .contains("# vela:official "));
+    assert!(fs::read_to_string(grok.join("config.toml"))
+        .unwrap()
+        .contains("[model.vela]"));
+    assert_eq!(
+        fs::read_to_string(dsh.join(".env")).unwrap(),
+        "VELA_GATEWAY_KEY=fixture\n"
+    );
+    assert!(
+        fs::read_to_string(dsh.join("profiles/desktop/cordis.patch.yml"))
+            .unwrap()
+            .contains("vela:")
+    );
+}

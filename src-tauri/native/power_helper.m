@@ -9,13 +9,13 @@
 #include <signal.h>
 #include <sys/file.h>
 
-static NSString *const Label = @"com.lich13.gpt-switch.power-helper";
-static NSString *const Binary = @"/Library/PrivilegedHelperTools/com.lich13.gpt-switch.power-helper";
-static NSString *const Plist = @"/Library/LaunchDaemons/com.lich13.gpt-switch.power-helper.plist";
-static NSString *const Root = @"/Library/Application Support/gpt-Switch Power";
-static NSString *const Manifest = @"/Library/Application Support/gpt-Switch Power/client.json";
-static NSString *const Restore = @"/Library/Application Support/gpt-Switch Power/restore.json";
-static NSString *const InstallReady = @"/Library/Application Support/gpt-Switch Power/install-ready.json";
+static NSString *const Label = @"com.lich13.vela.power-helper";
+static NSString *const Binary = @"/Library/PrivilegedHelperTools/com.lich13.vela.power-helper";
+static NSString *const Plist = @"/Library/LaunchDaemons/com.lich13.vela.power-helper.plist";
+static NSString *const Root = @"/Library/Application Support/Vela Power";
+static NSString *const Manifest = @"/Library/Application Support/Vela Power/client.json";
+static NSString *const Restore = @"/Library/Application Support/Vela Power/restore.json";
+static NSString *const InstallReady = @"/Library/Application Support/Vela Power/install-ready.json";
 static NSString *const AppBinary = @"/Applications/Vela.app/Contents/MacOS/vela";
 static NSDictionary *Approved;
 #ifdef POWER_TEST
@@ -300,7 +300,7 @@ int main(int argc, const char *argv[]) {
         if(argc!=1||geteuid()!=0||!safeRootPath(Root,YES)||!safeRootPath(Manifest,NO))return 1;
         Approved=readJSON(Manifest);
         if(!number(Approved[@"uid"],UINT32_MAX)||![Approved[@"path"] isEqual:AppBinary]||![Approved[@"requirement"] isKindOfClass:NSString.class])return 1;
-        dispatch_queue_t queue=dispatch_queue_create("com.lich13.gpt-switch.power",DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_t queue=dispatch_queue_create("com.lich13.vela.power",DISPATCH_QUEUE_SERIAL);
         xpc_connection_t service=xpc_connection_create_mach_service(Label.UTF8String,queue,XPC_CONNECTION_MACH_SERVICE_LISTENER);
         xpc_connection_set_event_handler(service,^(xpc_object_t event){
             if(xpc_get_type(event)!=XPC_TYPE_CONNECTION)return;

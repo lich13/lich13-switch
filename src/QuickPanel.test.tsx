@@ -81,7 +81,7 @@ it("keeps a newer hide event when the initial visibility read resolves late", as
 it.each(["codex", "claude", "grok", "dsh"] as const)(
   "opens %s connection testing in the main window instead of endpoints",
   async (clientId) => {
-    localStorage.setItem("lich13-switch.quick.client", clientId);
+    localStorage.setItem("vela.quick.client", clientId);
     const user = userEvent.setup();
     const provider = (clientId === "claude" ? claudeGatewayDemo : gatewayDemo)
       .providers[0];
@@ -345,7 +345,7 @@ it("quick concurrency editing keeps drafts during events and consumes Escape bef
 });
 
 it("switches and remembers the quick client independently and routes actions using only its events", async () => {
-  localStorage.setItem("lich13-switch.main.client", "codex");
+  localStorage.setItem("vela.main.client", "codex");
   const user = userEvent.setup();
   const view = render(<QuickPanel />);
   await screen.findByText(gatewayDemo.providers[0].name);
@@ -361,8 +361,8 @@ it("switches and remembers the quick client independently and routes actions usi
       force: false,
     }),
   );
-  expect(localStorage.getItem("lich13-switch.quick.client")).toBe("claude");
-  expect(localStorage.getItem("lich13-switch.main.client")).toBe("codex");
+  expect(localStorage.getItem("vela.quick.client")).toBe("claude");
+  expect(localStorage.getItem("vela.main.client")).toBe("codex");
   act(() =>
     mock.listeners.get("gateway-state")!({
       ...gatewayDemo,
@@ -403,7 +403,7 @@ it("switches and remembers the quick client independently and routes actions usi
     "aria-pressed",
     "true",
   );
-  expect(localStorage.getItem("lich13-switch.main.client")).toBe("codex");
+  expect(localStorage.getItem("vela.main.client")).toBe("codex");
 });
 
 it("protects an unsaved quick concurrency draft until a client switch is confirmed", async () => {

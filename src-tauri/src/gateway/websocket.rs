@@ -131,7 +131,7 @@ impl Peer {
         let (outgoing, mut rx) = mpsc::channel::<Outgoing>(1);
         let (closed_tx, closed) = watch::channel(false);
         let writer_closed = closed_tx.clone();
-        let ping = Bytes::from(format!("lich13-switch:{}", uuid::Uuid::new_v4()));
+        let ping = Bytes::from(format!("vela:{}", uuid::Uuid::new_v4()));
         let pong = ping.clone();
         let reader = tokio::spawn(async move {
             while let Some(frame) = stream.next().await {

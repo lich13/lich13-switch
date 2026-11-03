@@ -436,7 +436,7 @@ impl Catalog {
 async fn download(source: &str) -> Result<Index> {
     let client = reqwest::Client::builder()
         .no_proxy()
-        .user_agent(concat!("lich13-switch/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("vela/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()

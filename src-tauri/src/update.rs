@@ -161,7 +161,7 @@ pub async fn latest() -> Result<Info> {
         .map_err(|_| AppError::new(code::UPDATE, "无法初始化更新检查"))?;
     let response = client
         .get(LATEST_RELEASE_API)
-        .header(reqwest::header::USER_AGENT, "lich13-switch")
+        .header(reqwest::header::USER_AGENT, "vela")
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await

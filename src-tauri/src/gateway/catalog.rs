@@ -266,7 +266,7 @@ pub(super) fn local_list(
         }
     } else {
         serde_json::json!({"object":"list", "data":models.iter().map(|id| serde_json::json!({
-            "id":id,"object":"model","created":0,"owned_by":"lich13-switch"
+            "id":id,"object":"model","created":0,"owned_by":"vela"
         })).collect::<Vec<_>>()})
     };
     if anthropic {

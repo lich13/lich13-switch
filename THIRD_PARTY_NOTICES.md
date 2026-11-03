@@ -66,7 +66,7 @@ Unmodified WebSocket/deflate dependency, MPL-2.0. The full license is bundled in
 
 ## Tray interaction reference
 
-The separate quick panel, delayed blur handling and temporary macOS context-menu attachment follow the behavior of lich13/sub2api-ops-companion at 4d0eafc1e64385d1cdb6f6bd92eacb0b5c2e6f29. Adapted for lich13-switch's window-scoped lifecycle and shared account/gateway state.
+The separate quick panel, delayed blur handling and temporary macOS context-menu attachment follow the behavior of lich13/sub2api-ops-companion at 4d0eafc1e64385d1cdb6f6bd92eacb0b5c2e6f29. Adapted for Vela's window-scoped lifecycle and shared account/gateway state.
 
 https://github.com/lich13/sub2api-ops-companion/tree/4d0eafc1e64385d1cdb6f6bd92eacb0b5c2e6f29/desktop
 

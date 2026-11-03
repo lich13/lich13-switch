@@ -43,7 +43,7 @@ import { getCachedCodeMirrorSurface } from "./codeMirrorLoader";
 let doc: ConfigDocument;
 beforeEach(() => {
   localStorage.clear();
-  localStorage.setItem("lich13-switch.config.client", "claude");
+  localStorage.setItem("vela.config.client", "claude");
   mocks.events.clear();
   mocks.command.mockReset();
   doc = {
@@ -109,7 +109,7 @@ it("shares visual/source drafts, edits the effective model, and saves once with 
     "save_config",
     expect.objectContaining({ clientId: "claude", expectedRevision: "r1" }),
   );
-  expect(localStorage.getItem("lich13-switch.config.client")).toBe("claude");
+  expect(localStorage.getItem("vela.config.client")).toBe("claude");
   expect(Object.values(localStorage).join()).not.toContain("fixture-secret");
 });
 it("keeps invalid source, and protects drafts from other-client and external events", async () => {
@@ -198,7 +198,7 @@ it("restores previous configuration only into the draft and confirms client chan
 
 it("edits Antigravity app config across visual and JSON modes, diffs, restores backup, and guards conflicts", async () => {
   const u = userEvent.setup();
-  localStorage.setItem("lich13-switch.config.client", "antigravity");
+  localStorage.setItem("vela.config.client", "antigravity");
   const enumPrefixes: Record<string, string> = {
     themeMode: "THEME_MODE_",
     autoExecutionPolicy: "CASCADE_COMMANDS_AUTO_EXECUTION_",

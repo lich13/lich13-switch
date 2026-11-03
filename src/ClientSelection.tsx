@@ -25,10 +25,21 @@ export function useClientSelection(
   (next: ConfigClientId, dirty?: boolean) => Promise<boolean>,
 ];
 export function useClientSelection(surface: "main" | "quick" | "config") {
-  const key = `lich13-switch.${surface}.client`;
+  const key = `vela.${surface}.client`;
+  const legacyKey = ["lich13", "-switch.", surface, ".client"].join("");
   const [client, setClient] = useState<ConfigClientId>(() => {
     try {
-      const stored = localStorage.getItem(key);
+      let stored = localStorage.getItem(key);
+      if (!stored) {
+        const legacy = localStorage.getItem(legacyKey);
+        if (legacy) {
+          stored = legacy;
+          localStorage.setItem(key, legacy);
+          localStorage.removeItem(legacyKey);
+        }
+      } else {
+        localStorage.removeItem(legacyKey);
+      }
       return stored === "claude" ||
         stored === "grok" ||
         stored === "dsh" ||
@@ -50,13 +61,14 @@ export function useClientSelection(surface: "main" | "quick" | "config") {
         return false;
       try {
         localStorage.setItem(key, next);
+        localStorage.removeItem(legacyKey);
       } catch {
         /* Selection remains usable without storage. */
       }
       setClient(next);
       return true;
     },
-    [client, key],
+    [client, key, legacyKey],
   );
   return [client, select] as const;
 }

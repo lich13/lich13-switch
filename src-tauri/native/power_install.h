@@ -112,7 +112,7 @@ static NSDictionary *install(uid_t uid, NSString *path, NSString *hash, NSString
        ![[NSUUID alloc] initWithUUIDString:transaction])return installFailure(@"SIGNATURE",@"安装参数无效",@"unchanged");
     for(NSString *directory in @[@"/Library/PrivilegedHelperTools",@"/Library/LaunchDaemons",@"/Library/Application Support"])
         if(!safeRootPath(directory,YES))return installFailure(@"DIRECTORY",@"系统助手目录权限不安全",@"unchanged");
-    NSString *requirement=[NSString stringWithFormat:@"identifier \"com.lich13.gpt-switch\" and cdhash H\"%@\"",hash];
+    NSString *requirement=[NSString stringWithFormat:@"identifier \"com.lich13.vela\" and cdhash H\"%@\"",hash];
     SecStaticCodeRef code=NULL;SecRequirementRef req=NULL;
     if(SecStaticCodeCreateWithPath((__bridge CFURLRef)[NSURL fileURLWithPath:path],kSecCSDefaultFlags,&code)!=errSecSuccess)
         return installFailure(@"SIGNATURE",@"无法读取应用签名",@"unchanged");
@@ -144,6 +144,24 @@ static NSDictionary *install(uid_t uid, NSString *path, NSString *hash, NSString
         result=binary&&data ? installTransaction(binary,data,@{@"uid":@(uid),@"path":path,@"requirement":requirement,@"version":@1,@"transaction":transaction}) : installFailure(@"READ",@"无法读取安装载荷",@"unchanged");
     }
     writeJSON(InstallReady,nil);
+    if(!result[@"error"]){
+        NSString *legacyRoot=@"/Library/Application Support/gpt-Switch Power";
+        NSString *legacyRestore=[legacyRoot stringByAppendingPathComponent:@"restore.json"];
+        if(lstat(Restore.fileSystemRepresentation,&st)!=0&&safeRootPath(legacyRestore,NO)){
+            NSDictionary *oldRestore=readJSON(legacyRestore);
+            if(oldRestore)writeJSON(Restore,oldRestore);
+        }
+        run(@"/bin/launchctl",@[@"bootout",@"system/com.lich13.gpt-switch.power-helper"],NULL);
+        for(NSString *oldFile in @[@"/Library/LaunchDaemons/com.lich13.gpt-switch.power-helper.plist",
+                                   @"/Library/PrivilegedHelperTools/com.lich13.gpt-switch.power-helper",
+                                   [legacyRoot stringByAppendingPathComponent:@"client.json"],
+                                   legacyRestore,
+                                   [legacyRoot stringByAppendingPathComponent:@"install-ready.json"],
+                                   [legacyRoot stringByAppendingPathComponent:@"install.lock"]]){
+            unlink(oldFile.fileSystemRepresentation);
+        }
+        rmdir(legacyRoot.fileSystemRepresentation);
+    }
     close(lock);
     if(!existed&&result[@"error"]){unlink(lockPath.fileSystemRepresentation);rmdir(Root.fileSystemRepresentation);}
     return result;

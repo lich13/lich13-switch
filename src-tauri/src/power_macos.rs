@@ -9,7 +9,7 @@ use std::{
     process::Command,
 };
 const APP: &str = "/Applications/Vela.app/Contents/MacOS/vela";
-const HELPER: &str = "/Library/PrivilegedHelperTools/com.lich13.gpt-switch.power-helper";
+const HELPER: &str = "/Library/PrivilegedHelperTools/com.lich13.vela.power-helper";
 const IMAGE: &[u8] = include_bytes!(env!("GPT_POWER_HELPER"));
 unsafe extern "C" {
     fn gs_power_request(
@@ -49,7 +49,7 @@ fn request_with_timeout(value: Value, timeout_ms: u64) -> Result<Value> {
     }
     let input = CString::new(value.to_string()).unwrap();
     let requirement = CString::new(format!(
-        "identifier \"com.lich13.gpt-switch.power-helper\" and cdhash H\"{}\"",
+        "identifier \"com.lich13.vela.power-helper\" and cdhash H\"{}\"",
         env!("GPT_POWER_HASH")
     ))
     .unwrap();
@@ -192,7 +192,7 @@ pub fn ensure(force: bool) -> Result<()> {
     let payload = folder.path().join("power-helper");
     storage::atomic_write(&payload, IMAGE, None)?;
     let stage = format!(
-        "/Library/PrivilegedHelperTools/com.lich13.gpt-switch.power-install-{}",
+        "/Library/PrivilegedHelperTools/com.lich13.vela.power-install-{}",
         uuid::Uuid::new_v4()
     );
     let uid = unsafe { libc::geteuid() };

@@ -68,7 +68,7 @@ it("switches to Grok and saves a provider with the selected upstream protocol", 
       clientId: "grok",
     }),
   );
-  expect(localStorage.getItem("lich13-switch.main.client")).toBe("grok");
+  expect(localStorage.getItem("vela.main.client")).toBe("grok");
 
   await user.click(await screen.findByRole("button", { name: "添加" }));
   const dialog = await screen.findByRole("dialog", { name: "添加供应商" });

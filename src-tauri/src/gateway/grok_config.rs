@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 use toml_edit::{value, DocumentMut, Item, Table};
 
-pub const MANAGED: &str = "lich13-switch";
+pub const MANAGED: &str = "vela";
 
 pub use super::provider_protocol::{Connection, Protocol};
 

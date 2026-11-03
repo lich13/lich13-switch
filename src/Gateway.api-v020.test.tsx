@@ -144,7 +144,7 @@ describe("Codex v0.20.0 API login gateway controls", () => {
   );
 
   it("hides Codex connection mode from Claude", async () => {
-    localStorage.setItem("lich13-switch.main.client", "claude");
+    localStorage.setItem("vela.main.client", "claude");
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
     await screen.findByRole("button", { name: "添加" });

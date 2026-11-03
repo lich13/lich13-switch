@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Vela",
-  "version": "0.26.13",
-  "identifier": "com.lich13.gpt-switch",
+  "version": "0.26.14",
+  "identifier": "com.lich13.vela",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",

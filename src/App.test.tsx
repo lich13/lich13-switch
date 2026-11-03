@@ -813,7 +813,7 @@ it("shows association errors recorded before frontend event subscriptions", asyn
 });
 
 it("navigates from an error log to its client's policy and consumes the navigation", async () => {
-  localStorage.setItem("lich13-switch.main.client", "codex");
+  localStorage.setItem("vela.main.client", "codex");
   const original = mocks.command.getMockImplementation()!;
   const event = {
     id: "fixture-log",

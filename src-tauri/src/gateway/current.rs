@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn selected_model_env_and_requirements_are_distinct_from_takeover() {
         let root = tempfile::tempdir().unwrap();
-        let text = "[models]\ndefault='relay'\n[model.relay]\nbase_url='https://Relay.Example.invalid/'\nenv_key='FIXTURE_KEY'\n[model.lich13-switch]\nbase_url='http://127.0.0.1:43721/v1'\napi_key='fixture-local'\n";
+        let text = "[models]\ndefault='relay'\n[model.relay]\nbase_url='https://Relay.Example.invalid/'\nenv_key='FIXTURE_KEY'\n[model.vela]\nbase_url='http://127.0.0.1:43721/v1'\napi_key='fixture-local'\n";
         std::fs::write(root.path().join("config.toml"), text).unwrap();
         let mut store = Store {
             local_token: "fixture-local".into(),
@@ -248,7 +248,7 @@ mod tests {
             Kind::Unmatched { .. }
         ));
         let selected = grok(root.path(), &store, &[43721], &|k| {
-            (k == "GROK_DEFAULT_MODEL").then(|| "lich13-switch".into())
+            (k == "GROK_DEFAULT_MODEL").then(|| "vela".into())
         });
         assert_eq!(selected.state, Kind::Gateway);
         assert_eq!(

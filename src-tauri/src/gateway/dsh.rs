@@ -31,8 +31,8 @@ mod tests_v02518;
 mod tests_v02521;
 pub use batch::Batch;
 
-const ROUTE: &str = "lich13-switch";
-const KEY: &str = "LICH13_SWITCH_GATEWAY_KEY";
+const ROUTE: &str = "vela";
+const KEY: &str = "VELA_GATEWAY_KEY";
 const PI: &str = "llm-pi-ai";
 const DEFAULT: &str = "agent-default-model";
 const PATCH: &str = "cordis.patch.yml";
@@ -574,7 +574,7 @@ fn prepare_shared(
     let providers = mapping(&config, "providers")?;
     if providers.contains_key(ROUTE) && previous.is_none_or(|s| !s.active) {
         return Err(error(
-            "DSH 已有同名 lich13-switch 路由，已保留，请先重命名或撤销原接入",
+            "DSH 已有同名 vela 路由，已保留，请先重命名或撤销原接入",
         ));
     }
     if let Some(previous) = previous.filter(|s| s.active) {
@@ -627,7 +627,7 @@ fn prepare_shared(
         format!("http://127.0.0.1:{port}/v1")
     };
     // JSON is a YAML subset; only the new owned route is serialized.
-    let mut route_value = serde_json::json!({"displayName":"lich13-switch","apiKeyEnv":KEY,"api":api(options.protocol),"baseURL":base,"models":models,
+    let mut route_value = serde_json::json!({"displayName":"vela","apiKeyEnv":KEY,"api":api(options.protocol),"baseURL":base,"models":models,
         "streamIdleTimeoutMs": settings.idle_seconds * 1000,
         "websocketConnectTimeoutMs": settings.connect_seconds * 1000,
         "retryPolicy": {"mode":"normal", "maxRetries":0}});
@@ -1735,7 +1735,7 @@ mod tests {
             let mut current = Input::read(dir.path(), "default").unwrap();
             restore(&snap, &mut current).unwrap();
             assert!(current.patch.after.contains("extra: edited"));
-            assert!(!current.patch.after.contains("lich13-switch"));
+            assert!(!current.patch.after.contains("vela"));
             assert!(!current.environment.after.contains(KEY));
             assert!(!current.credentials.after.contains(KEY));
             assert!(current.credentials.after.contains("OTHER: fixture"));
@@ -1852,7 +1852,7 @@ mod tests {
         assert!(
             !fs::read_to_string(dir.path().join("profiles/default/cordis.patch.yml"))
                 .unwrap()
-                .contains("lich13-switch")
+                .contains("vela")
         );
         assert!(!gateway.0.data.join(JOURNAL).exists());
     }
