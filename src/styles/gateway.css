@@ -1051,6 +1051,11 @@
   --origin-soft: var(--accent-teal-soft);
 }
 
+.policy-tabs button[data-origin="antigravity"] {
+  --origin-tone: var(--accent-violet);
+  --origin-soft: var(--accent-violet-soft);
+}
+
 .policy-tabs button:hover:not([aria-selected="true"]) {
   color: var(--ink);
   background: color-mix(in srgb, var(--origin-soft) 45%, var(--hover));

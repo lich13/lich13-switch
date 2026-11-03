@@ -86,9 +86,11 @@ const categories = {
   status: "状态记录",
 } as const;
 
+export type EventOrigin = FailureOrigin | "antigravity";
+
 export type EventRecord = {
   id: string;
-  origin?: FailureOrigin;
+  origin?: EventOrigin;
   firstAt: number;
   lastAt: number;
   count: number;
@@ -255,8 +257,9 @@ function reasonText(r: EventRecord) {
   }
   return reasons[r.reason];
 }
-export function eventOrigin(r: EventRecord): FailureOrigin {
+export function eventOrigin(r: EventRecord): EventOrigin {
   if (r.origin) return r.origin;
+  if (r.clientId === "antigravity") return "antigravity";
   const response = [
     "model_unavailable",
     "authentication",
@@ -420,7 +423,7 @@ export default function EventLog({
     from: "",
     to: "",
   });
-  const [origin, setOrigin] = useState<FailureOrigin>("upstream");
+  const [origin, setOrigin] = useState<EventOrigin>("upstream");
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -680,7 +683,7 @@ export default function EventLog({
         </div>
       </div>
       <div className="policy-tabs" role="tablist" aria-label="日志来源">
-        {(["upstream", "gateway"] as const).map((value) => (
+        {(["upstream", "gateway", "antigravity"] as const).map((value) => (
           <button
             type="button"
             role="tab"
@@ -692,6 +695,7 @@ export default function EventLog({
               setPage(1);
               setFilters((old) => ({
                 ...old,
+                ...(value === "antigravity" ? { clientId: "", providerId: "" } : {}),
                 reason: "",
                 category: "",
                 level: "",
@@ -701,7 +705,11 @@ export default function EventLog({
               setSelected(null);
             }}
           >
-            {value === "upstream" ? "上游报错" : "网关内部"}
+            {value === "upstream"
+              ? "上游报错"
+              : value === "gateway"
+                ? "网关内部"
+                : "Antigravity app"}
           </button>
         ))}
       </div>
@@ -727,6 +735,7 @@ export default function EventLog({
         <select
           aria-label="客户端"
           value={filters.clientId}
+          disabled={origin === "antigravity"}
           onChange={(e) => change("clientId", e.target.value)}
         >
           <option value="">全部客户端</option>
@@ -734,11 +743,11 @@ export default function EventLog({
           <option value="claude">Claude Code</option>
           <option value="grok">Grok Build</option>
           <option value="dsh">DeepSeek Harness</option>
-          <option value="antigravity">Antigravity app</option>
         </select>
         <select
           aria-label="供应商"
           value={filters.providerId}
+          disabled={origin === "antigravity"}
           onChange={(e) => change("providerId", e.target.value)}
         >
           <option value="">全部供应商</option>

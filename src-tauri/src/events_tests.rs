@@ -282,34 +282,59 @@ fn sync_antigravity_logs_ingests_and_deduplicates_app_errors() {
     fs::create_dir_all(&transcript_dir).unwrap();
     fs::write(
         transcript_dir.join("transcript.jsonl"),
-        r#"{"step_index":3,"type":"PLANNER_RESPONSE","status":"ERROR","model":"claude-opus-4-6","errorMessage":"stream was interrupted after 5m0s"}
-"#,
+        concat!(
+            r#"{"step_index":1,"source":"MODEL","type":"GENERIC","status":"ERROR","content":"Error: edit_file target not found"}"#, "\n",
+            r#"{"type":"ERROR_MESSAGE","status":"DONE","model":"claude-opus-4-6","error":"stream was interrupted after 5m0s"}"#, "\n",
+            r#"{"type":"ERROR_MESSAGE","status":"DONE","model":"claude-opus-4-6","error":"HTTP 401 unauthenticated token"}"#, "\n",
+        ),
     )
     .unwrap();
     let log_dir = home.join("Library/Logs/Antigravity");
     fs::create_dir_all(&log_dir).unwrap();
-    fs::write(
-        log_dir.join("main.log"),
-        "[error] RESOURCE_EXHAUSTED: quota exceeded for project\n",
-    )
-    .unwrap();
+    let mut large_log =
+        "I0414 10:00:00.000000 123 main.go:1] normal info line padding\n".repeat(5200);
+    let now_prefix = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    large_log.push_str(&format!(
+        "[{now_prefix}.401] [error] upstream connection reset by peer\n"
+    ));
+    large_log.push_str("[error] RESOURCE_EXHAUSTED: quota exceeded for project\n");
+    assert!(large_log.len() > 256 * 1024);
+    fs::write(log_dir.join("language_server.log"), large_log).unwrap();
 
     let service = Service::new(&temp.path().join("data"));
     service.sync_antigravity_logs(&home);
     service.sync_antigravity_logs(&home);
 
+    let upstream_page = service.query(Filter {
+        origin: Some(crate::events::Origin::Upstream),
+        ..Filter::default()
+    });
+    assert_eq!(upstream_page.total, 0);
+
     let antigravity_filter = Filter {
         client_id: Some(crate::events::JournalClient::Retired(
             crate::events::RetiredClient::Antigravity,
         )),
-        origin: Some(crate::events::Origin::Upstream),
+        origin: Some(crate::events::Origin::Antigravity),
         ..Filter::default()
     };
     let page = service.query(antigravity_filter);
-    assert_eq!(page.total, 2);
+    assert_eq!(page.total, 4);
     assert!(page
         .items
         .iter()
         .any(|r| r.reason == Reason::RequestInterrupted));
+    assert_eq!(
+        page.items
+            .iter()
+            .filter(|r| r.reason == Reason::Authentication)
+            .count(),
+        1,
+        "timestamp .401 must not be misclassified as 401 Authentication"
+    );
+    assert!(page
+        .items
+        .iter()
+        .any(|r| r.reason == Reason::UpstreamService));
     assert!(page.items.iter().any(|r| r.reason == Reason::RateLimit));
 }

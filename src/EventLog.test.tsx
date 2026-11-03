@@ -473,17 +473,35 @@ it("separates origins, resets pagination, and hides policy actions for internal 
     origin: "gateway",
     details: { upstreamCode: "overloaded_error", errorBasis: "service_error" },
   };
+  const agyError: EventRecord = {
+    ...record,
+    id: "agy-err",
+    clientId: "antigravity",
+    providerId: null,
+    reason: "request_interrupted",
+    origin: "antigravity",
+    details: { upstreamCode: "STREAM_TIMEOUT", message: "stream was interrupted after 5m0s" },
+  };
   const original = mock.command.getMockImplementation()!;
   mock.command.mockImplementation(async (name, args) => {
     if (name === "get_app_events")
       return {
-        items: args.filter.origin === "gateway" ? [internal] : [record],
+        items:
+          args.filter.origin === "gateway"
+            ? [internal]
+            : args.filter.origin === "antigravity"
+              ? [agyError]
+              : [record],
         total: 51,
         page: args.filter.page,
         error: null,
       };
     if (name === "get_app_event")
-      return args.id === "internal" ? internal : record;
+      return args.id === "internal"
+        ? internal
+        : args.id === "agy-err"
+          ? agyError
+          : record;
     return original(name, args);
   });
   const open = vi.fn();
@@ -511,6 +529,18 @@ it("separates origins, resets pagination, and hides policy actions for internal 
   ).not.toBeInTheDocument();
   expect(
     within(dialog).queryByRole("button", { name: "加入故障规则" }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Antigravity app" }));
+  await waitFor(() =>
+    expect(eventCalls().at(-1)?.[1]).toEqual({
+      filter: { origin: "antigravity", page: 1, from: null, to: null },
+    }),
+  );
+  expect(
+    await screen.findByText(/stream was interrupted after 5m0s/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "查看策略" }),
   ).not.toBeInTheDocument();
 });
 

@@ -90,20 +90,22 @@ export type AntigravityAccountItem = {
   updatedAt: number;
   credentialRevision: string;
 };
+export type AntigravityAuthMode =
+  | "oauth"
+  | "adc"
+  | "mixed_adc_file_without_flag"
+  | "mixed_flag_without_adc_file";
 export type AntigravityAuthState = {
   accounts: AntigravityAccountItem[];
-  mode: "oauth" | "adc" | "mixed";
+  mode: AntigravityAuthMode;
   enableAdc: boolean;
   oauthPresent: boolean;
-  oauthSaved: boolean;
   oauthEmail: string | null;
   oauthAuthMethod: string | null;
   adcStatus: "active" | "disabled" | "backup_only" | "missing";
-  adcSaved: boolean;
   adcType: "service_account" | "authorized_user" | null;
   adcEmail: string | null;
   adcProject: string | null;
-  backupCount: number;
   appRestarted?: boolean;
   revision: string;
 };
@@ -517,32 +519,19 @@ export type CommandMap = {
   read_previous_antigravity_config: Call<None, string>;
   validate_antigravity_config: Call<{ text: string }, void>;
   get_antigravity_auth_state: Call<None, AntigravityAuthState>;
-  import_current_antigravity_oauth: Call<
-    { name?: string | null },
-    AntigravityAuthState
-  >;
-  import_current_antigravity_adc: Call<
-    { name?: string | null },
-    AntigravityAuthState
-  >;
   add_antigravity_adc: Call<
     { input: AddAntigravityAdcInput },
     AntigravityAuthState
   >;
   pick_antigravity_credential_file: Call<None, string | null>;
-  switch_antigravity_oauth: Call<
-    { id: string; disableAdc: boolean } & Revision,
-    AntigravityAuthState
-  >;
-  switch_antigravity_adc: Call<
-    { id: string; enableAdc: boolean } & Revision,
+  switch_antigravity_account: Call<
+    { id: string } & Revision,
     AntigravityAuthState
   >;
   set_antigravity_auth_mode: Call<
     { mode: "oauth" | "adc" } & Revision,
     AntigravityAuthState
   >;
-  backup_antigravity_auth: Call<None, AntigravityAuthState>;
   rename_antigravity_account: Call<
     { id: string; name: string } & Revision,
     AntigravityAuthState
@@ -694,7 +683,7 @@ export type CommandMap = {
   get_app_events: Call<
     {
       filter: {
-        origin?: import("./failure-policy-types").FailureOrigin | null;
+        origin?: import("./EventLog").EventOrigin | null;
         from?: number | null;
         to?: number | null;
         clientId?: ClientId | null;
@@ -855,6 +844,7 @@ export type EventMap = {
   "notification-state": NotificationState;
   "claude-profile-state": ClaudeProfileState;
   "claude-login-state": ClaudeLoginState;
+  "antigravity-auth-state": AntigravityAuthState;
   "quick-state": QuickPreferences;
   "app-visibility": boolean;
   "panel-visibility": boolean;

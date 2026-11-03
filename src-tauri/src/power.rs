@@ -89,10 +89,16 @@ impl Service {
             .try_lock()
             .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
         let before = self.state()?;
-        if !before.supported || !before.enabled {
+        if !before.supported || !before.enabled || before.helper != "ready" {
             return Ok(None);
         }
-        self.set_locked(false, &before.revision).map(Some)
+        self.system.apply(&before, false, before.battery_sleep)?;
+        let actual = self.state()?;
+        if actual.enabled {
+            return Err(AppError::new(code::POWER, "电源状态再次变化，请重新操作"));
+        }
+        self.retire_legacy_record()?;
+        Ok(Some(actual))
     }
     fn set_locked(&self, enabled: bool, expected: &str) -> Result<State> {
         let before = self.state()?;

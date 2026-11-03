@@ -397,7 +397,7 @@ fn mismatched_state_after_apply_never_reports_a_successful_toggle() {
 }
 
 #[test]
-fn disable_if_enabled_turns_off_active_clamshell_and_skips_when_already_off() {
+fn disable_if_enabled_turns_off_active_clamshell_and_skips_when_already_off_or_helper_not_ready() {
     let enabled = state("ready", true, 0, "application", "fixture-enabled");
     let disabled = state("ready", false, 5, "none", "fixture-disabled");
     let (_dir, service, helper) = fixture(enabled.clone());
@@ -405,6 +405,15 @@ fn disable_if_enabled_turns_off_active_clamshell_and_skips_when_already_off() {
 
     assert_eq!(service.disable_if_enabled().unwrap(), Some(disabled));
     assert_eq!(*helper.calls.lock().unwrap(), [(enabled, false, 0)]);
+    assert_eq!(helper.repair_count(), 0);
 
     assert_eq!(service.disable_if_enabled().unwrap(), None);
+
+    for not_ready in ["missing", "needsRepair"] {
+        let unready = state(not_ready, true, 0, "application", "fixture-unready");
+        let (_dir, service, helper) = fixture(unready);
+        assert_eq!(service.disable_if_enabled().unwrap(), None);
+        assert_eq!(helper.repair_count(), 0);
+        assert!(helper.calls.lock().unwrap().is_empty());
+    }
 }

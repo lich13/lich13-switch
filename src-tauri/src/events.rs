@@ -145,6 +145,7 @@ pub enum Category {
 pub enum Origin {
     Upstream,
     Gateway,
+    Antigravity,
 }
 // Historical identities must not become executable gateway clients.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -292,7 +293,7 @@ impl Record {
     }
     pub fn origin(&self) -> Origin {
         if self.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity)) {
-            return Origin::Upstream;
+            return Origin::Antigravity;
         }
         let response_error = matches!(
             self.reason,
@@ -335,14 +336,14 @@ impl Record {
             || lower.contains("quota")
             || lower.contains("rate limit")
             || lower.contains("too many requests")
-            || lower.contains("429")
+            || has_status_token(&lower, "429")
         {
             (Reason::RateLimit, Some(429), "RESOURCE_EXHAUSTED")
         } else if lower.contains("unauthenticated")
             || lower.contains("permission_denied")
             || lower.contains("invalid_grant")
-            || lower.contains("401")
-            || lower.contains("403")
+            || has_status_token(&lower, "401")
+            || has_status_token(&lower, "403")
         {
             (Reason::Authentication, Some(401), "UNAUTHENTICATED")
         } else if lower.contains("model")
@@ -571,6 +572,122 @@ impl Record {
 fn safe_id(s: &str) -> Option<String> {
     uuid::Uuid::parse_str(s).ok().map(|v| v.to_string())
 }
+fn has_status_token(lower: &str, code: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let pat = code.as_bytes();
+    for (idx, _) in lower.match_indices(code) {
+        let prev = idx.checked_sub(1).map(|i| bytes[i]);
+        let prev2 = idx.checked_sub(2).map(|i| bytes[i]);
+        let next = bytes.get(idx + pat.len()).copied();
+        let bad_prev = prev.is_some_and(|b| {
+            b.is_ascii_alphanumeric()
+                || b == b'.'
+                || b == b'-'
+                || (b == b':' && prev2.is_some_and(|p| p.is_ascii_digit()))
+        });
+        let bad_next =
+            next.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b':' || b == b'-');
+        if !bad_prev && !bad_next {
+            return true;
+        }
+    }
+    false
+}
+fn is_actionable_antigravity_log_error(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("[error]")
+        || lower.contains("level=error")
+        || lower.contains("unauthenticated")
+        || lower.contains("resource_exhausted")
+        || lower.contains("permission_denied")
+        || lower.contains("deadline_exceeded")
+        || lower.contains("context deadline exceeded")
+        || lower.contains("stream was interrupted")
+        || lower.contains("5m0s")
+        || lower.contains("quota")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("invalid_grant")
+        || has_status_token(&lower, "401")
+        || has_status_token(&lower, "403")
+        || has_status_token(&lower, "429")
+        || has_status_token(&lower, "500")
+        || has_status_token(&lower, "502")
+        || has_status_token(&lower, "503")
+        || has_status_token(&lower, "504")
+}
+fn parse_antigravity_log_line(line: &str, fallback_secs: u64) -> Option<(u64, &str)> {
+    use chrono::{Datelike, TimeZone};
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(after_bracket) = trimmed.strip_prefix('[') {
+        if let Some((ts_part, rest)) = after_bracket.split_once(']') {
+            if let Some(ndt) = ts_part
+                .get(..19)
+                .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())
+            {
+                let ts = chrono::Local
+                    .from_local_datetime(&ndt)
+                    .single()
+                    .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+                    .unwrap_or(fallback_secs);
+                let rest_trimmed = rest.trim();
+                let lower = rest_trimmed.to_ascii_lowercase();
+                if lower.contains("[error]") || lower.contains("level=error") {
+                    let body = rest_trimmed
+                        .strip_prefix("[error]")
+                        .or_else(|| rest_trimmed.strip_prefix("[ERROR]"))
+                        .unwrap_or(rest_trimmed)
+                        .trim();
+                    return (!body.is_empty()).then_some((ts, body));
+                }
+                return None;
+            }
+        }
+    }
+    let glog = trimmed
+        .strip_prefix("ERROR: logging before google.Init: ")
+        .unwrap_or(trimmed);
+    if let Some(epoch_part) = glog.strip_prefix("E0000 00:00:") {
+        let (sec_str, _) = epoch_part.split_once('.')?;
+        let ts = sec_str.parse::<u64>().unwrap_or(fallback_secs);
+        let body = glog.split_once(']').map(|(_, b)| b.trim()).unwrap_or(glog);
+        return is_actionable_antigravity_log_error(body).then_some((ts, body));
+    }
+    if glog.starts_with('E')
+        && glog.len() > 14
+        && glog.as_bytes()[1..5].iter().all(u8::is_ascii_digit)
+        && glog.as_bytes()[5] == b' '
+    {
+        let mm = glog[1..3].parse::<u32>().ok()?;
+        let dd = glog[3..5].parse::<u32>().ok()?;
+        let hms = glog.get(6..14)?;
+        let year = chrono::DateTime::from_timestamp(fallback_secs as i64, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local).year())
+            .unwrap_or(2026);
+        let ts = chrono::NaiveDate::from_ymd_opt(year, mm, dd)
+            .and_then(|d| {
+                let t = chrono::NaiveTime::parse_from_str(hms, "%H:%M:%S").ok()?;
+                chrono::Local.from_local_datetime(&d.and_time(t)).single()
+            })
+            .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+            .unwrap_or(fallback_secs);
+        let body = glog.split_once(']').map(|(_, b)| b.trim()).unwrap_or(glog);
+        return is_actionable_antigravity_log_error(body).then_some((ts, body));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("[error]") || lower.contains("level=error") {
+        let body = trimmed
+            .strip_prefix("[error]")
+            .or_else(|| trimmed.strip_prefix("[ERROR]"))
+            .unwrap_or(trimmed)
+            .trim();
+        return (!body.is_empty()).then_some((fallback_secs, body));
+    }
+    None
+}
 pub fn safe_model(s: &str) -> Option<String> {
     let lower = s.to_ascii_lowercase();
     (!s.is_empty()
@@ -649,12 +766,15 @@ enum Job {
     Prune,
     NotificationAccepted(String),
 }
+type AntigravityCursors = std::collections::HashMap<std::path::PathBuf, (u64, u64, u64)>;
+
 #[derive(Clone)]
 pub struct Service {
     sender: mpsc::SyncSender<Job>,
     journal: Arc<Mutex<Journal>>,
     events: broadcast::Sender<Change>,
     raw_directory: Arc<std::path::PathBuf>,
+    antigravity_cursors: Arc<Mutex<AntigravityCursors>>,
 }
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -747,7 +867,9 @@ fn load(path: &Path) -> Journal {
                         let sanitized = r.details.clone().sanitized();
                         j.dirty |= sanitized != r.details;
                         r.details = sanitized;
-                        if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
+                        if r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity)) {
+                            j.dirty = true;
+                        } else if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
                             j.records.push_back(Arc::new(r))
                         } else {
                             j.dirty = true;
@@ -1165,6 +1287,7 @@ impl Service {
             journal,
             events,
             raw_directory,
+            antigravity_cursors: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
@@ -1239,11 +1362,16 @@ impl Service {
         }
     }
     pub fn sync_antigravity_logs(&self, home: &Path) {
+        use std::io::{Seek, SeekFrom};
         let cutoff = now().saturating_sub(RETENTION);
         let existing: HashSet<String> = {
             let guard = self.journal.lock().unwrap();
             guard.records.iter().map(|r| r.id.clone()).collect()
         };
+        let mut cursors = self
+            .antigravity_cursors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut discovered = Vec::new();
         let brain = home.join(".gemini/antigravity/brain");
         if let Ok(entries) = std::fs::read_dir(&brain) {
@@ -1257,50 +1385,73 @@ impl Service {
                             .unwrap_or_default()
                             .as_secs();
                         if secs >= cutoff && meta.is_file() {
-                            transcripts.push((secs, entry.file_name(), candidate));
+                            transcripts.push((secs, meta.len(), entry.file_name(), candidate));
                         }
                     }
                 }
             }
-            transcripts.sort_by_key(|(secs, _, _)| std::cmp::Reverse(*secs));
-            for (file_secs, conv_name, path) in transcripts.into_iter().take(48) {
+            transcripts.sort_by_key(|(secs, _, _, _)| std::cmp::Reverse(*secs));
+            for (file_secs, file_len, conv_name, path) in transcripts.into_iter().take(48) {
+                let start_offset = match cursors.get(&path) {
+                    Some(&(prev_len, prev_secs, _))
+                        if prev_len == file_len && prev_secs == file_secs =>
+                    {
+                        continue;
+                    }
+                    Some(&(_, _, prev_off)) if file_len >= prev_off => prev_off,
+                    _ => 0,
+                };
                 let conv = conv_name.to_string_lossy();
-                let Ok(file) = std::fs::File::open(&path) else {
+                let Ok(mut file) = std::fs::File::open(&path) else {
                     continue;
                 };
+                if start_offset > 0 && file.seek(SeekFrom::Start(start_offset)).is_err() {
+                    continue;
+                }
                 let mut reader = BufReader::new(file);
+                let mut offset = start_offset;
                 let mut line = Vec::new();
-                while reader.read_until(b'\n', &mut line).unwrap_or(0) > 0 {
+                while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
+                    if read_bytes == 0 {
+                        break;
+                    }
+                    let line_offset = offset;
+                    offset = offset.saturating_add(read_bytes as u64);
                     if line.len() <= 512 * 1024 {
                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&line) {
-                            let is_err = v["status"]
+                            let step_type = v["type"].as_str().unwrap_or("");
+                            let raw_err = v["errorMessage"]
                                 .as_str()
-                                .is_some_and(|s| s.eq_ignore_ascii_case("ERROR"))
-                                || v.get("error").is_some_and(|e| {
-                                    !e.is_null() && e != "" && e != &serde_json::json!({})
-                                })
-                                || v["errorMessage"]
-                                    .as_str()
-                                    .is_some_and(|s| !s.trim().is_empty());
+                                .or_else(|| v["error"]["message"].as_str())
+                                .or_else(|| v["error"].as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty());
+                            let is_err =
+                                !matches!(step_type, "GENERIC" | "TOOL_RESPONSE" | "USER_INPUT")
+                                    && (step_type.eq_ignore_ascii_case("ERROR_MESSAGE")
+                                        || raw_err.is_some());
                             if is_err {
-                                let step_idx = v["step_index"].as_u64().unwrap_or(0);
+                                let step_key = v["step_index"]
+                                    .as_u64()
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_else(|| {
+                                        format!(
+                                            "off:{line_offset}:{}",
+                                            &storage::digest(&line)[..12]
+                                        )
+                                    });
                                 let ts = v["created_at"]
                                     .as_str()
                                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                                     .and_then(|dt| u64::try_from(dt.timestamp()).ok())
                                     .unwrap_or(file_secs);
                                 if ts >= cutoff {
-                                    let raw = v["errorMessage"]
-                                        .as_str()
-                                        .or_else(|| v["error"]["message"].as_str())
-                                        .or_else(|| v["error"].as_str())
-                                        .or_else(|| v["content"].as_str())
-                                        .unwrap_or("Antigravity step error");
+                                    let raw = raw_err.unwrap_or("Antigravity step error");
                                     let model = v["model"]
                                         .as_str()
                                         .or_else(|| v["response_model"].as_str());
                                     let r = Record::antigravity_error(
-                                        &format!("transcript:{conv}:{step_idx}"),
+                                        &format!("transcript:{conv}:{step_key}"),
                                         ts,
                                         model,
                                         raw,
@@ -1314,6 +1465,7 @@ impl Service {
                     }
                     line.clear();
                 }
+                cursors.insert(path, (file_len, file_secs, offset));
             }
         }
         for log_dir in [
@@ -1331,44 +1483,65 @@ impl Service {
                 if !meta.is_file() {
                     continue;
                 }
-                let secs = meta
+                let file_secs = meta
                     .modified()
                     .ok()
                     .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if secs < cutoff {
+                if file_secs < cutoff {
                     continue;
                 }
-                let Ok(Some(bytes)) = storage::read_bounded(&path, 256 * 1024) else {
+                let file_len = meta.len();
+                let start_offset = match cursors.get(&path) {
+                    Some(&(prev_len, prev_secs, _))
+                        if prev_len == file_len && prev_secs == file_secs =>
+                    {
+                        continue;
+                    }
+                    Some(&(_, _, prev_off)) if file_len >= prev_off => prev_off,
+                    _ => 0,
+                };
+                let Ok(mut file) = std::fs::File::open(&path) else {
                     continue;
                 };
-                let text = String::from_utf8_lossy(&bytes);
+                if start_offset > 0 && file.seek(SeekFrom::Start(start_offset)).is_err() {
+                    continue;
+                }
                 let fname = entry.file_name();
                 let fname = fname.to_string_lossy();
-                for (idx, line) in text.lines().enumerate() {
-                    let lower = line.to_ascii_lowercase();
-                    if lower.contains("[error]")
-                        || lower.contains("level=error")
-                        || lower.contains("unauthenticated")
-                        || lower.contains("resource_exhausted")
-                        || lower.contains("permission_denied")
-                        || lower.contains("deadline_exceeded")
-                        || lower.contains("stream was interrupted")
-                    {
-                        let r = Record::antigravity_error(
-                            &format!("logfile:{fname}:{idx}:{line}"),
-                            secs,
-                            None,
-                            line,
-                        );
-                        if !existing.contains(&r.id) {
-                            discovered.push(r);
+                let mut reader = BufReader::new(file);
+                let mut offset = start_offset;
+                let mut line = Vec::new();
+                while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
+                    if read_bytes == 0 {
+                        break;
+                    }
+                    let line_offset = offset;
+                    offset = offset.saturating_add(read_bytes as u64);
+                    if line.len() <= 64 * 1024 {
+                        let line_str = String::from_utf8_lossy(&line);
+                        if let Some((line_ts, body)) =
+                            parse_antigravity_log_line(&line_str, file_secs)
+                        {
+                            if line_ts >= cutoff {
+                                let key = format!(
+                                    "logfile:{fname}:{line_offset}:{}",
+                                    &storage::digest(body.as_bytes())[..16]
+                                );
+                                let r = Record::antigravity_error(&key, line_ts, None, body);
+                                if !existing.contains(&r.id) {
+                                    discovered.push(r);
+                                }
+                            }
                         }
                     }
+                    line.clear();
                 }
+                cursors.insert(path, (file_len, file_secs, offset));
             }
         }
+        drop(cursors);
         if !discovered.is_empty() {
             let mut guard = self.journal.lock().unwrap();
             let mut added = false;

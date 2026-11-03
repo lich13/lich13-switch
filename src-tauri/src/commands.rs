@@ -96,9 +96,15 @@ pub async fn get_app_events(
 ) -> Result<crate::events::Page> {
     let service = r.diagnostics.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if filter.client_id.is_none_or(|c| {
-            c == crate::events::JournalClient::Retired(crate::events::RetiredClient::Antigravity)
-        }) {
+        if filter
+            .origin
+            .is_none_or(|o| o == crate::events::Origin::Antigravity)
+            && filter.client_id.is_none_or(|c| {
+                c == crate::events::JournalClient::Retired(
+                    crate::events::RetiredClient::Antigravity,
+                )
+            })
+        {
             if let Some(home) = dirs::home_dir() {
                 service.sync_antigravity_logs(&home);
             }
