@@ -564,6 +564,17 @@ impl Store {
         if storage_v12::pending(&self.connection) {
             return Ok(false);
         }
+        let v02616_done: bool = db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02616' AND value='done')",
+            [],
+            |r| r.get(0),
+        ))?;
+        if !v02616_done {
+            db(self.connection.execute_batch(
+                "DELETE FROM metadata WHERE key='antigravity_fields_v02614';
+                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02616','done');",
+            ))?;
+        }
         let after: Option<String> = db(self
             .connection
             .query_row(
@@ -575,6 +586,13 @@ impl Store {
         if after.as_deref() == Some("done") {
             return Ok(false);
         }
+        let active_provider = self
+            .connection
+            .path()
+            .and_then(|p| Path::new(p).parent())
+            .filter(|d| d.join("antigravity-accounts.json").exists())
+            .and_then(|d| crate::antigravity::auth::current_state(d).ok())
+            .and_then(|s| crate::antigravity::auth::active_account_id(&s));
         let tx = db(self.connection.transaction())?;
         let rows = {
             let mut stmt = db(tx.prepare("SELECT id,body FROM records WHERE source='antigravity' AND id>?1 ORDER BY id LIMIT 128"))?;
@@ -593,13 +611,22 @@ impl Store {
         for (id, body) in &rows {
             let mut r: Record = bodies::decode(&tx, body)?;
             let normalized = super::antigravity::normalize_record(&mut r);
+            let mut provider_changed = false;
+            if let Some(ref p) = active_provider {
+                for a in &mut r.attempts {
+                    if a.provider.is_none() {
+                        a.provider = Some(p.clone());
+                        provider_changed = true;
+                    }
+                }
+            }
             let generation_changed = r
                 .attempts
                 .iter()
                 .any(|a| a.transport == "local_api" && a.generation_ms.is_none_or(|ms| ms <= 50));
-            if normalized || generation_changed {
+            if normalized || generation_changed || provider_changed {
                 query::project(&tx, 0, id, &r, 1, None)?;
-                if normalized {
+                if normalized || provider_changed {
                     storage_v12::update(&tx, &r)?;
                 }
                 changed = true;
@@ -858,6 +885,7 @@ impl Store {
                     agg.ingest(
                         storage_v12::AntigravityAttemptRow {
                             session_id: r.session_id.clone(),
+                            provider: a.provider.clone(),
                             time,
                             started_at: a.started_at,
                             is_final,
@@ -1412,6 +1440,9 @@ pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Re
                 let Some(b) = previous else {
                     continue;
                 };
+                if r.source == "antigravity" && b.provider.is_some() {
+                    a.provider = b.provider.clone();
+                }
                 a.cost_multiplier = b.cost_multiplier.clone();
                 if let Some(price) = &b.price {
                     a.price = if a.tokens == b.tokens {

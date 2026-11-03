@@ -380,6 +380,15 @@ pub fn disk_stamp() -> Option<String> {
     }
     Some(stamp)
 }
+pub fn active_account_id(state: &AntigravityAuthState) -> Option<String> {
+    let target = if state.enable_adc { AccountKind::Adc } else { AccountKind::Oauth };
+    state.accounts.iter().find(|a| a.current && a.kind == target).or_else(|| state.accounts.iter().find(|a| a.current)).map(|a| a.id.clone())
+}
+pub fn active_provider_for_home(gemini_home: &Path) -> Option<String> {
+    let user_home = gemini_home.parent().unwrap_or(gemini_home);
+    let data_dir = [user_home.join(".vela"), user_home.to_path_buf(), gemini_home.to_path_buf()].into_iter().find(|d| d.join("antigravity-accounts.json").exists())?;
+    with_lock(|| state_at(&Paths { gemini_home: gemini_home.to_path_buf(), ..Paths::from_roots(user_home, &data_dir) })).ok().and_then(|s| active_account_id(&s))
+}
 pub fn poll_state(data_dir: &Path) -> Result<(AntigravityAuthState, bool)> { with_lock(|| state_with_health(&Paths::resolve(data_dir)?)) }
 pub fn current_state(data_dir: &Path) -> Result<AntigravityAuthState> { poll_state(data_dir).map(|(s, _)| s) }
 async fn blocking<T: Send + 'static>(msg: &'static str, f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {

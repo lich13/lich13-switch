@@ -232,6 +232,61 @@ beforeEach(() => {
                   ]
                 : [],
           };
+        case "get_antigravity_auth_state":
+          return {
+            accounts: [
+              {
+                id: "ag-oauth-1",
+                name: "dev@example.invalid",
+                kind: "oauth",
+                email: "dev@example.invalid",
+                projectId: null,
+                current: true,
+                updatedAt: 1,
+                disabled: false,
+                disabledReason: null,
+              },
+              {
+                id: "ag-adc-1",
+                name: "ADC 凭据 · prod-proj",
+                kind: "adc",
+                email: "adc@example.invalid",
+                projectId: "prod-proj",
+                current: false,
+                updatedAt: 1,
+                disabled: false,
+                disabledReason: null,
+              },
+            ],
+            authRevision: "ag-rev-1",
+            currentState: "saved",
+            enableAdc: false,
+            error: null,
+          };
+        case "get_antigravity_usage_stats":
+          return {
+            requests: 1,
+            sessions: 1,
+            costUsd: "0.0045678",
+            unpricedRequests: 0,
+            tokenMix: {
+              input: 0,
+              cacheRead: 20,
+              cacheWrite: 0,
+              output: 400,
+              visibleOutput: 400,
+              reasoning: 0,
+              total: 420,
+              thinkingSharePercent: null,
+              cacheHitPercent: 100,
+              cacheReadEligible: 20,
+              cacheInputEligible: 20,
+              cacheSavingsUsd: "0",
+            },
+            tracks: [],
+            families: [],
+            topSessions: [],
+          };
         case "get_usage_dashboard":
           return structuredClone(dashboard);
         case "get_usage_interruptions":
@@ -452,25 +507,38 @@ describe("usage records", () => {
     expect(calls("set_usage_settings")).toHaveLength(4);
   });
 
-  it("counts interruptions only on request using the current filters", async () => {
+  it("omits the interruption button and filters Antigravity usage by account and credential provider", async () => {
     await renderUsage();
-    await userEvent.selectOptions(
-      screen.getByRole("combobox", { name: "用量客户端" }),
-      "claude",
-    );
-    await chooseRange("all");
+    expect(
+      screen.queryByRole("button", { name: "统计中断" }),
+    ).not.toBeInTheDocument();
     expect(calls("get_usage_interruptions")).toHaveLength(0);
-    await userEvent.click(screen.getByRole("button", { name: "统计中断" }));
-    await screen.findByText("中断统计 · 本网关");
-    expect(calls("get_usage_interruptions")).toHaveLength(1);
-    expect(calls("get_usage_interruptions")[0][1].filter).toMatchObject({
-      client: "claude",
-    });
-    expect(screen.getByText(/读取 3 个逻辑请求/)).toHaveTextContent(
-      "证据不足 1",
+
+    const clientSelect = screen.getByRole("combobox", { name: "用量客户端" });
+    const providerSelect = screen.getByRole("combobox", { name: "用量供应商" });
+    await userEvent.selectOptions(clientSelect, "antigravity");
+    expect(
+      within(providerSelect)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["全部供应商", "dev@example.invalid", "ADC 凭据 · prod-proj"]);
+
+    await userEvent.selectOptions(providerSelect, "ag-adc-1");
+    await waitFor(() =>
+      expect(calls("get_usage_dashboard").at(-1)?.[1].filter).toMatchObject({
+        client: "antigravity",
+        provider: "ag-adc-1",
+      }),
     );
-    await userEvent.click(screen.getByRole("button", { name: "刷新用量" }));
-    expect(calls("get_usage_interruptions")).toHaveLength(1);
+    await userEvent.click(screen.getByRole("tab", { name: "Antigravity" }));
+    await waitFor(() =>
+      expect(
+        calls("get_antigravity_usage_stats").at(-1)?.[1].filter,
+      ).toMatchObject({
+        client: "antigravity",
+        provider: "ag-adc-1",
+      }),
+    );
   });
 
   it("loads the overview while the request log is still pending", async () => {

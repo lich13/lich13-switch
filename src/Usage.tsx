@@ -1,9 +1,7 @@
 import UsageBill from "./UsageBill";
 import Detail from "./UsageDetail";
 import Sources from "./UsageSources";
-import { date } from "./usage-format";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
-import { Drawer as UsageDrawer } from "./UsageDrawer";
 export { Drawer } from "./UsageDrawer";
 import { subscriptions } from "./subscriptions";
 import type {
@@ -30,7 +28,6 @@ import Pricing from "./UsagePricing";
 import UsageAntigravity from "./UsageAntigravity";
 import {
   type AntigravityUsageStats,
-  clientName,
   averageFirstToken,
   firstTokenLabel,
   firstTokenTitle,
@@ -40,7 +37,6 @@ import {
   numeric,
   tokenTotal,
   type Dashboard,
-  type InterruptionSummary,
   type Group,
   type UsageFilter,
   type UsagePage,
@@ -111,13 +107,11 @@ export default function Usage({
   const [tab, setTab] = useState("requests");
   const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
     [agBusy, setAgBusy] = useState(false);
-  const [interruptions, setInterruptions] =
-      useState<InterruptionSummary | null>(null),
-    [countingInterruptions, setCountingInterruptions] = useState(false);
   const [data, setData] = useState<Dashboard | null>(null),
     [logs, setLogs] = useState<UsagePage>(empty),
     [state, setState] = useState<UsageState | null>(null);
   const [providers, setProviders] = useState<Record<string, string>>({}),
+    [agProviders, setAgProviders] = useState<Record<string, string>>({}),
     [selected, setSelected] = useState<UsageRecord | null>(null),
     [sheet, setSheet] = useState(false),
     [error, setError] = useState(""),
@@ -329,19 +323,35 @@ export default function Usage({
       command("get_gateway", { clientId: "claude" }),
       command("get_gateway", { clientId: "grok" }),
       command("get_gateway", { clientId: "dsh" }),
+      command("get_antigravity_auth_state").catch(() => null),
     ])
-      .then((g) => {
-        if (!gone)
-          setProviders(
-            Object.fromEntries(
-              g.flatMap((s) => s.providers.map((p) => [p.id, p.name])),
-            ),
-          );
+      .then(([codex, claude, grok, dsh, ag]) => {
+        if (gone) return;
+        const gw = Object.fromEntries(
+          [codex, claude, grok, dsh].flatMap((s) =>
+            s.providers.map((p) => [p.id, p.name]),
+          ),
+        );
+        const agMap = Object.fromEntries(
+          (ag?.accounts ?? []).map((a) => [a.id, a.name]),
+        );
+        setAgProviders(agMap);
+        setProviders({ ...gw, ...agMap });
       })
       .catch(() => {});
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    events.watch("antigravity-auth-state", (ag) => {
+      if (gone || !ag || typeof ag !== "object" || !("accounts" in ag)) return;
+      const accounts = (ag as { accounts: { id: string; name: string }[] })
+        .accounts;
+      const agMap = Object.fromEntries(accounts.map((a) => [a.id, a.name]));
+      setAgProviders(agMap);
+      setProviders((prev) => ({ ...prev, ...agMap }));
+    });
     return () => {
       gone = true;
       sequence.current++;
+      events.dispose();
     };
   }, [visible, nativeVisible]);
   useEffect(() => {
@@ -470,26 +480,6 @@ export default function Usage({
           title={firstTokenTitle(t)}
         />
       </div>
-      <button
-        disabled={countingInterruptions}
-        onClick={async () => {
-          setCountingInterruptions(true);
-          setError("");
-          try {
-            setInterruptions(
-              await command("get_usage_interruptions", {
-                filter: { ...query(), status: status || undefined },
-              }),
-            );
-          } catch (e) {
-            setError(errorOf(e).message);
-          } finally {
-            setCountingInterruptions(false);
-          }
-        }}
-      >
-        {countingInterruptions ? "正在统计中断…" : "统计中断"}
-      </button>
       <div className="usage-filters">
         <select
           aria-label="用量客户端"
@@ -514,7 +504,9 @@ export default function Usage({
           onChange={(e) => choose(setProvider, e.target.value)}
         >
           <option value="">全部供应商</option>
-          {Object.entries(providers).map(([id, n]) => (
+          {Object.entries(
+            client === "antigravity" ? agProviders : providers,
+          ).map(([id, n]) => (
             <option key={id} value={id}>
               {n}
             </option>
@@ -701,53 +693,6 @@ export default function Usage({
             void load();
           }}
         />
-      )}
-      {interruptions && (
-        <UsageDrawer
-          title="中断统计 · 本网关"
-          onClose={() => setInterruptions(null)}
-        >
-          <p>
-            {interruptions.start ? date(interruptions.start) : "全部历史"} —{" "}
-            {date(interruptions.end)}
-          </p>
-          <p>
-            读取 {interruptions.requests.toLocaleString()} 个逻辑请求 · 已获用量{" "}
-            {interruptions.reported} · 用量不全 {interruptions.partial} ·
-            证据不足 {interruptions.unknown}
-          </p>
-          {interruptions.historyMissing && (
-            <p className="form-error">
-              明细保留起点：{date(interruptions.detailSince)}
-              。更早的历史缺少明细，未计为零。
-            </p>
-          )}
-          <table className="usage-table">
-            <thead>
-              <tr>
-                <th>客户端 · 供应商</th>
-                <th>已获用量</th>
-                <th>用量不全</th>
-                <th>证据不足</th>
-              </tr>
-            </thead>
-            <tbody>
-              {interruptions.groups.map((g) => (
-                <tr key={`${g.client}:${g.provider}`}>
-                  <td>
-                    {clientName(g.client)} · {name(g.provider)}
-                  </td>
-                  <td>{g.reported}</td>
-                  <td>{g.partial}</td>
-                  <td>{g.unknown}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="muted">
-            已获用量不表示与上游账单一致。用量不全时，上游可能在断开后继续生成并计费，本地不估算。
-          </p>
-        </UsageDrawer>
       )}
     </section>
   );

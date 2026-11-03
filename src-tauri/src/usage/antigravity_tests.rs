@@ -1357,6 +1357,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         let a = &r.attempts[0];
         crate::usage::storage_v12::AntigravityAttemptRow {
             session_id: None,
+            provider: None,
             time: at,
             started_at: at,
             is_final: true,
@@ -1763,4 +1764,109 @@ fn extract_settings_model_accepts_unknown_new_models_and_rejects_malformed_block
     assert_eq!((m402.canonical, m402.display_name, m402.effort), ("claude-opus-5-5-high", "Claude Opus 5.5", Some("high")));
     let malformed = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from A to B\n</USER_SETTINGS_CHANGE>";
     assert!(extract_settings_model(malformed).is_none());
+}
+
+#[test]
+fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
+    let dir = tempfile::tempdir().unwrap();
+    let ag_home = dir.path().join(".gemini");
+    let gcloud_dir = dir.path().join(".config/gcloud");
+    let path1 = ag_home.join("antigravity/brain/conv-oauth/.system_generated/logs/transcript.jsonl");
+    let path2 = ag_home.join("antigravity/brain/conv-adc/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(path1.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&gcloud_dir).unwrap();
+    std::fs::create_dir_all(ag_home.join("config")).unwrap();
+    let row = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-20T00:00:01Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":100,\"output_tokens\":25}\n";
+    std::fs::write(&path1, row).unwrap();
+
+    let vault_json = serde_json::json!({
+        "schema": 1,
+        "entries": [
+            {
+                "id": "ag-oauth-1",
+                "name": "oauth@example.invalid",
+                "kind": "oauth",
+                "sourceType": "oauth",
+                "email": "oauth@example.invalid",
+                "projectId": null,
+                "payload": "{\"access_token\":\"tok-1\"}",
+                "updatedAt": 1
+            },
+            {
+                "id": "ag-adc-1",
+                "name": "ADC 凭据 · p1",
+                "kind": "adc",
+                "sourceType": "authorized_user",
+                "email": null,
+                "projectId": "p1",
+                "payload": "{\"type\":\"authorized_user\",\"client_id\":\"c\",\"client_secret\":\"s\",\"refresh_token\":\"r\"}",
+                "updatedAt": 2
+            }
+        ]
+    });
+    std::fs::write(
+        dir.path().join("antigravity-accounts.json"),
+        serde_json::to_vec(&vault_json).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        ag_home.join("jetski-standalone-oauth-token"),
+        "{\"access_token\":\"tok-1\"}",
+    )
+    .unwrap();
+    std::fs::write(
+        gcloud_dir.join("application_default_credentials.json"),
+        "{\"type\":\"authorized_user\",\"client_id\":\"c\",\"client_secret\":\"s\",\"refresh_token\":\"r\"}",
+    )
+    .unwrap();
+
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    scan_home(
+        &mut store,
+        &ag_home,
+        &pricing,
+        &Settings::default(),
+        &mut Report::default(),
+        false,
+    )
+    .unwrap();
+
+    std::fs::write(
+        ag_home.join("config/config.json"),
+        "{\"userSettings\":{\"enableAdc\":true}}\n",
+    )
+    .unwrap();
+    std::fs::write(&path2, row).unwrap();
+    scan_home(
+        &mut store,
+        &ag_home,
+        &pricing,
+        &Settings::default(),
+        &mut Report::default(),
+        true,
+    )
+    .unwrap();
+
+    let all_ag = Filter {
+        client: Some("antigravity".into()),
+        ..Filter::default()
+    };
+    let dash = store.dashboard(&all_ag).unwrap();
+    let mut provider_ids: Vec<String> = dash.providers.iter().map(|g| g.id.clone()).collect();
+    provider_ids.sort();
+    assert_eq!(provider_ids, vec!["ag-adc-1", "ag-oauth-1"]);
+
+    let oauth_only = Filter {
+        client: Some("antigravity".into()),
+        provider: Some("ag-oauth-1".into()),
+        ..Filter::default()
+    };
+    assert_eq!(store.dashboard(&oauth_only).unwrap().totals.requests, 1);
+    let stats_oauth = store
+        .antigravity_stats(&oauth_only, &pricing.frozen(), "1", 1_800_000_000_000)
+        .unwrap();
+    assert_eq!(stats_oauth.requests, 1);
+    assert_eq!(stats_oauth.token_mix.total, 125);
 }

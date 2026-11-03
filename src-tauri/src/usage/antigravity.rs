@@ -1136,11 +1136,23 @@ impl Api {
                 .entry(id.to_owned())
                 .or_insert_with(|| (None, json!({"localModifiedStamp": stamp})));
         }
+        let active_provider = brain
+            .parent()
+            .and_then(Path::parent)
+            .and_then(crate::antigravity::auth::active_provider_for_home);
         report.total_files = summaries.len() as u64;
         for (id, (owner, summary)) in &summaries {
             match self
                 .collect_session(
-                    id, *owner, summary, store, pricing, settings, report, repair,
+                    id,
+                    *owner,
+                    summary,
+                    store,
+                    pricing,
+                    settings,
+                    report,
+                    repair,
+                    active_provider.as_deref(),
                 )
                 .await
             {
@@ -1167,6 +1179,7 @@ impl Api {
         settings: &Settings,
         report: &mut Report,
         repair: bool,
+        active_provider: Option<&str>,
     ) -> Result<()> {
         let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
         let mut cursor: Cursor = if repair {
@@ -1359,6 +1372,13 @@ impl Api {
                             let complete = r.finished_at.is_some()
                                 && r.final_attempt()
                                     .is_some_and(|a| a.outcome != "in_progress");
+                            if let Some(p) = active_provider {
+                                for a in &mut r.attempts {
+                                    if a.provider.is_none() {
+                                        a.provider = Some(p.to_owned());
+                                    }
+                                }
+                            }
                             price(&mut r, pricing, settings);
                             rows.push(r);
                             complete
@@ -1489,8 +1509,21 @@ pub(super) fn scan_file_list(
     report: &mut Report,
     repair: bool,
 ) -> Result<()> {
+    let active_provider = brain
+        .parent()
+        .and_then(Path::parent)
+        .and_then(crate::antigravity::auth::active_provider_for_home);
     for path in files {
-        if let Err(error) = scan_file(store, brain, path, pricing, settings, report, repair) {
+        if let Err(error) = scan_file(
+            store,
+            brain,
+            path,
+            pricing,
+            settings,
+            report,
+            repair,
+            active_provider.as_deref(),
+        ) {
             if store.requires_complete_history() {
                 return Err(error);
             }
@@ -1533,6 +1566,7 @@ fn scan_file(
     settings: &Settings,
     report: &mut Report,
     repair: bool,
+    active_provider: Option<&str>,
 ) -> Result<()> {
     let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
     let saved_raw = if repair { None } else { store.cursor(&key)? };
@@ -1671,6 +1705,7 @@ fn scan_file(
                 let is_failed = failed(&v);
                 let mut attempt = Attempt {
                     id: safe_id(&format!("{id}:final")),
+                    provider: active_provider.map(str::to_owned),
                     response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
                     requested_model: actual_model(model_for_id),
                     response_model: actual_model(model_for_id),
@@ -2008,6 +2043,7 @@ pub(super) struct UsageStatsAggregator {
     anchor: i64,
     start_5h: i64,
     start_7d: i64,
+    provider_filter: Option<String>,
     model_filter: Option<String>,
     session_filter: Option<String>,
     multiplier: String,
@@ -2041,6 +2077,11 @@ impl UsageStatsAggregator {
             anchor,
             start_5h: anchor.saturating_sub(5 * 3_600_000),
             start_7d: anchor.saturating_sub(7 * 86_400_000),
+            provider_filter: filter
+                .provider
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             model_filter: filter
                 .model
                 .as_deref()
@@ -2079,6 +2120,11 @@ impl UsageStatsAggregator {
         row: super::storage_v12::AntigravityAttemptRow,
         pricing: &Pricing,
     ) {
+        if let Some(ref pf) = self.provider_filter {
+            if row.provider.as_deref() != Some(pf.as_str()) {
+                return;
+            }
+        }
         let (resolved_model, family, family_label, track) =
             classify_model_family(row.model.as_deref(), row.display_name.as_deref());
         let attempt_tokens = Tokens {

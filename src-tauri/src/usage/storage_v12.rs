@@ -461,6 +461,7 @@ fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<
 
 pub(super) struct AntigravityAttemptRow {
     pub session_id: Option<String>,
+    pub provider: Option<String>,
     pub time: i64,
     pub started_at: i64,
     pub is_final: bool,
@@ -487,10 +488,11 @@ pub(super) fn scan_antigravity_attempts(
         "SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
          usage_value(m.value),a.shape,shape_value.value,a.body,
          a.inclusive_input,a.input,a.output,a.cache_read,a.cache_write,a.cost,a.unpriced,
-         CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END
+         CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value)
          FROM v12_records r
          JOIN v12_sessions a ON a.owner=r.rid
          LEFT JOIN v12_dictionary m ON m.id=a.model
+         LEFT JOIN v12_dictionary p ON p.id=a.provider
          LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape
          WHERE r.client=usage_label('antigravity') AND r.effective=1 AND r.time>=?1 AND r.time<=?2
          ORDER BY r.rid,a.ordinal",
@@ -526,6 +528,7 @@ pub(super) fn scan_antigravity_attempts(
         };
         visit(AntigravityAttemptRow {
             session_id: identifier(db(row.get(1))?)?,
+            provider: db(row.get(17))?,
             time: db(row.get(2))?,
             started_at: db(row.get(3))?,
             is_final: db(row.get::<_, i64>(4))? != 0,
