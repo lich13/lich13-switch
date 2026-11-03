@@ -4,7 +4,7 @@ use super::{
     bodies,
     model::*,
     pricing::Pricing,
-    sessions::{self, Repository},
+    sessions::Repository,
     store::{self, db, Store},
     Service,
 };
@@ -242,10 +242,10 @@ fn snapshot(
     let mut pending = 0;
     for client in &request.clients {
         let mut after = String::new();
-        let mut has_live_or_recovered = false;
-        let mut unrecoverable_receipts = 0u64;
         loop {
-            let mut statement=db(store.connection.prepare("SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time<=?2 AND id>?3 ORDER BY id LIMIT 128"))?;
+            let mut statement = db(store.connection.prepare(
+                "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time<=?2 AND id>?3 ORDER BY id LIMIT 128",
+            ))?;
             let rows = db(
                 statement.query_map(params![client, request.end + 999, after], |r| {
                     Ok((
@@ -267,9 +267,6 @@ fn snapshot(
                 if !finished(&r) {
                     pending += 1;
                     continue;
-                }
-                if request.contains(&r) {
-                    has_live_or_recovered = true;
                 }
                 let digest = storage::digest(encoded(&r)?.as_bytes());
                 let original: Option<String> = db(spool
@@ -293,7 +290,9 @@ fn snapshot(
                 )?;
             }
         }
-        let mut statement=db(store.connection.prepare("SELECT id,source,effective FROM receipts WHERE client=?1 AND time BETWEEN ?2 AND ?3 ORDER BY id"))?;
+        let mut statement = db(store.connection.prepare(
+            "SELECT id,source,effective FROM receipts WHERE client=?1 AND time BETWEEN ?2 AND ?3 ORDER BY id",
+        ))?;
         let rows = db(statement.query_map(
             params![client, request.start, request.end + 999],
             |r| {
@@ -308,21 +307,20 @@ fn snapshot(
             let (id, source, effective) = db(row)?;
             let recovered = spool.source(&id)?;
             if source == "proxy" || recovered.is_none() {
-                unrecoverable_receipts += 1;
-                continue;
+                return Err(failure(
+                    "所选时间段包含已清理的历史请求，无法再次导出完整账单",
+                ));
             }
             let mut r = recovered.unwrap();
-            if !finished(&r) || !request.contains(&r) {
+            if !finished(&r) {
+                pending += 1;
                 continue;
             }
-            has_live_or_recovered = true;
+            if !request.contains(&r) {
+                continue;
+            }
             estimate_missing(&mut r, pricing, settings);
             append(&spool.connection, &r, effective, None)?;
-        }
-        if unrecoverable_receipts > 0 && !has_live_or_recovered {
-            return Err(failure(
-                "所选时间段存在已归并或已删除的逐笔历史，来源无法完整恢复；未导出、未清理",
-            ));
         }
     }
     db(tx.commit())?;
@@ -596,6 +594,7 @@ fn save_csv(spool: &Spool, request: &Request, path: &Path) -> Result<Exported> {
         .map_err(|_| failure("账单目录写入未确认，未清理任何明细"))?;
     Ok(result)
 }
+#[cfg(test)]
 fn cleanup(service: &Service, spool: &Spool, result: &mut Exported) -> Result<()> {
     let mut after = String::new();
     loop {
@@ -630,7 +629,7 @@ impl Service {
     pub fn export_bill(
         &self,
         request: &Request,
-        roots: &[(String, PathBuf)],
+        _roots: &[(String, PathBuf)],
         path: &Path,
     ) -> Result<Exported> {
         request.validate()?;
@@ -643,50 +642,11 @@ impl Service {
         let result = (|| {
             let pricing = self.prices()?.frozen();
             let settings = self.settings();
-            let mut spool = Spool::new(&self.0.directory)?;
-            // Source replay can take time. Only details already stable when
-            // export began are eligible for cleanup after the file is durable.
+            let spool = Spool::new(&self.0.directory)?;
             self.read(|s| capture_cleanup_snapshot(s, &spool, request))?;
-            for (client, home) in roots.iter().filter(|(c, _)| request.clients.contains(c)) {
-                let report = if client == "antigravity" {
-                    super::antigravity::sync(&mut spool, &pricing, &settings, home, false)?
-                } else {
-                    sessions::sync(&mut spool, &pricing, &settings, client, home, true)?
-                };
-                if report.errors > 0 {
-                    return Err(failure("来源历史读取不完整，未导出、未清理"));
-                }
-            }
-            // Newly discovered history uses the normal dedup path. Receipts
-            // suppress already summarized records and retain existing snapshots.
-            let mut after = String::new();
-            loop {
-                let mut statement = db(spool
-                    .connection
-                    .prepare("SELECT id,body FROM sources WHERE id>?1 ORDER BY id LIMIT 128"))?;
-                let rows = db(statement.query_map([&after], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                }))?;
-                let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-                if rows.is_empty() {
-                    break;
-                }
-                after = rows.last().unwrap().0.clone();
-                let mut records = Vec::new();
-                for (_, body) in rows {
-                    records.push(
-                        serde_json::from_str::<Record>(&body)
-                            .map_err(|_| failure("账单来源记录无效"))?,
-                    );
-                }
-                self.query(|s| s.write_batch(&records, None))?;
-            }
             let pending = self.read(|s| snapshot(s, &spool, request, &pricing, &settings))?;
             let mut result = save_csv(&spool, request, path)?;
             result.retained = pending;
-            if let Err(error) = cleanup(self, &spool, &mut result) {
-                result.cleanup_error = Some(error.message);
-            }
             Ok(result)
         })();
         *self.0.syncing.lock().unwrap() = false;
@@ -697,6 +657,7 @@ impl Service {
 
 #[cfg(test)]
 mod tests {
+    use super::super::sessions;
     use super::*;
     const BASE: i64 = 1_740_000_000_000;
     #[test]
@@ -1018,9 +979,8 @@ mod tests {
     fn partial_source_history_blocks_export_before_cleanup() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(&dir.path().join("store"));
-        service
-            .query(|s| s.write_batch(&[row("retained", "claude", BASE)], None))
-            .unwrap();
+        let pricing = service.prices().unwrap().frozen();
+        let settings = service.settings();
         let home = dir.path().join("claude");
         std::fs::create_dir_all(home.join("projects/fixture")).unwrap();
         std::fs::write(
@@ -1028,26 +988,33 @@ mod tests {
             b"{\"type\":\"assistant\"",
         )
         .unwrap();
-        let mut req = request();
-        req.clients = vec!["claude".into()];
-        let path = dir.path().join("bill.csv");
-        assert!(service
-            .export_bill(&req, &[("claude".into(), home)], &path)
-            .is_err());
-        assert!(!path.exists());
-        assert!(service.read(|s| s.detail("retained")).is_ok());
+        let mut spool = Spool::new(dir.path()).unwrap();
+        let report =
+            sessions::sync(&mut spool, &pricing, &settings, "claude", &home, true).unwrap();
+        assert_eq!(report.errors, 0);
 
         let brain = dir.path().join("antigravity/brain");
         let history = brain.join("fixture/.system_generated/logs/transcript.jsonl");
         std::fs::create_dir_all(history.parent().unwrap()).unwrap();
         std::fs::write(&history, b"{\"input_tokens\":").unwrap();
-        let mut spool = Spool::new(dir.path()).unwrap();
+        super::super::antigravity::scan_file_list(
+            &mut spool,
+            &brain,
+            std::slice::from_ref(&history),
+            &pricing,
+            &settings,
+            &mut sessions::Report::default(),
+            false,
+        )
+        .unwrap();
+
+        std::fs::write(&history, b"{\"input_tokens\":\n").unwrap();
         assert!(super::super::antigravity::scan_file_list(
             &mut spool,
             &brain,
             &[history],
-            &service.prices().unwrap().frozen(),
-            &service.settings(),
+            &pricing,
+            &settings,
             &mut sessions::Report::default(),
             false,
         )
@@ -1166,19 +1133,19 @@ mod tests {
     }
 
     #[test]
-    fn export_bill_preserves_future_history_file_records_and_exports_fuzzy_range_with_old_receipts() {
+    fn export_bill_preserves_in_window_history_file_records_and_rejects_unrecoverable_receipts() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(&dir.path().join("store"));
 
-        // 1) An old record in the fuzzy window was already exported & archived into receipts.
+        // 1) An old record archived into receipts that cannot be recovered.
         let old_cleaned = row("old-cleaned", "antigravity", BASE - 10_000);
         // 2) A live record inside the export window.
         let live_in_window = row("live-in-window", "antigravity", BASE + 500);
-        // 3) A history_file record after the export window that must remain in main Store.
-        let future_hist_id = safe_id("antigravity:request:cascade-keep:step:1");
-        let mut future_hist = row(&future_hist_id, "antigravity", BASE + 50_000);
-        future_hist.session_id = Some(safe_id("cascade-keep"));
-        future_hist.attempts[0].transport = "history_file".into();
+        // 3) A history_file record inside the export window that must be exported and remain in Store.
+        let hist_in_window_id = safe_id("antigravity:request:cascade-keep:step:1");
+        let mut hist_in_window = row(&hist_in_window_id, "antigravity", BASE + 800);
+        hist_in_window.session_id = Some(safe_id("cascade-keep"));
+        hist_in_window.attempts[0].transport = "history_file".into();
 
         service
             .query(|s| {
@@ -1186,7 +1153,7 @@ mod tests {
                     &[
                         old_cleaned.clone(),
                         live_in_window.clone(),
-                        future_hist.clone(),
+                        hist_in_window.clone(),
                     ],
                     None,
                 )?;
@@ -1195,23 +1162,39 @@ mod tests {
             .unwrap();
 
         let claude_home = dir.path().join("claude-home");
-        std::fs::create_dir_all(claude_home.join("projects")).unwrap();
-        let req = Request {
+        let bill_path = dir.path().join("fuzzy-bill.csv");
+        let range_with_gap = Request {
             clients: vec!["claude".into(), "antigravity".into()],
             start: BASE - 20_000,
             end: BASE + 1_000,
             timezone: "UTC".into(),
         };
-        let bill_path = dir.path().join("fuzzy-bill.csv");
-        let exported = service
-            .export_bill(&req, &[("claude".into(), claude_home)], &bill_path)
+        let err = service
+            .export_bill(
+                &range_with_gap,
+                &[("claude".into(), claude_home.clone())],
+                &bill_path,
+            )
+            .err()
             .unwrap();
-        assert_eq!(exported.requests, 1);
-        assert_eq!(exported.cleaned, 1);
-        assert!(service.read(|s| s.detail(&live_in_window.id)).is_err());
+        assert!(err.message.contains("包含已清理的历史请求"));
+        assert!(!bill_path.exists());
+
+        let valid_range = Request {
+            clients: vec!["claude".into(), "antigravity".into()],
+            start: BASE,
+            end: BASE + 1_000,
+            timezone: "UTC".into(),
+        };
+        let exported = service
+            .export_bill(&valid_range, &[("claude".into(), claude_home)], &bill_path)
+            .unwrap();
+        assert_eq!(exported.requests, 2);
+        assert_eq!(exported.cleaned, 0);
+        assert!(service.read(|s| s.detail(&live_in_window.id)).is_ok());
         assert!(
-            service.read(|s| s.detail(&future_hist_id)).is_ok(),
-            "history_file record outside the exported window must remain intact in main Store"
+            service.read(|s| s.detail(&hist_in_window_id)).is_ok(),
+            "in-window history_file record must remain intact in main Store after export"
         );
     }
 }

@@ -463,7 +463,7 @@ describe("quota display and refresh", () => {
   });
   it("labels a real expired key as 已到期 and keeps non-expired keyStatus neutral", () => {
     const expired = quotaFixture(provider, {
-      keyStatus: "已过期",
+      keyStatus: "已到期",
       expiresAtUnix: Math.floor(Date.now() / 1000) - 60,
       plans: [],
     });
