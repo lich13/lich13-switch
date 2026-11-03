@@ -289,26 +289,6 @@ beforeEach(() => {
           };
         case "get_usage_dashboard":
           return structuredClone(dashboard);
-        case "get_usage_interruptions":
-          return {
-            start: timestamp - 1000,
-            end: timestamp + 1000,
-            detailSince: 0,
-            historyMissing: false,
-            requests: 3,
-            reported: 1,
-            partial: 1,
-            unknown: 1,
-            groups: [
-              {
-                client: "claude",
-                provider: "provider-final",
-                reported: 1,
-                partial: 1,
-                unknown: 1,
-              },
-            ],
-          };
         case "get_usage_logs": {
           const filter = args.filter as UsageFilter;
           return {
@@ -512,7 +492,6 @@ describe("usage records", () => {
     expect(
       screen.queryByRole("button", { name: "统计中断" }),
     ).not.toBeInTheDocument();
-    expect(calls("get_usage_interruptions")).toHaveLength(0);
 
     const clientSelect = screen.getByRole("combobox", { name: "用量客户端" });
     const providerSelect = screen.getByRole("combobox", { name: "用量供应商" });

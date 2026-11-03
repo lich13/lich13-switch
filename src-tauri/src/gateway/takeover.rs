@@ -708,11 +708,17 @@ pub fn recover(data: &Path) -> Result<()> {
     let old = parse(applied)?;
     let managed = old
         .get("model_providers")
-        .and_then(|p| p.get("gpt_switch_gateway").or_else(|| p.get("vela_gateway")))
+        .and_then(|p| {
+            p.get("gpt_switch_gateway")
+                .or_else(|| p.get("vela_gateway"))
+        })
         .ok_or_else(|| AppError::new(code::RECOVERY, "无法确认旧恢复记录的来源，已保留现场"))?;
     let still_managed = doc
         .get("model_providers")
-        .and_then(|p| p.get("gpt_switch_gateway").or_else(|| p.get("vela_gateway")))
+        .and_then(|p| {
+            p.get("gpt_switch_gateway")
+                .or_else(|| p.get("vela_gateway"))
+        })
         .is_some()
         || managed.get("base_url").and_then(Item::as_str) == current.base_url.as_deref()
         || managed

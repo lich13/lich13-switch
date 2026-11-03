@@ -2247,6 +2247,7 @@ pub fn run() {
                 let mut agy_config_version: Option<String> = None;
                 let mut agy_config_cache = auth_cache::Cache::default();
                 let mut agy_auth_stamp: Option<String> = None;
+                let mut agy_auth_revision: Option<String> = None;
                 #[cfg(windows)]
                 let mut last_tray_dark: Option<bool> = None;
                 loop {
@@ -2312,8 +2313,13 @@ pub fn run() {
                         }
                         if let Some(stamp) = antigravity::auth::disk_stamp() {
                             if agy_auth_stamp.as_ref() != Some(&stamp) {
-                                if let Ok((auth_state, clean)) = antigravity::auth::poll_state(&runtime.data) {
-                                    let _ = handle.emit("antigravity-auth-state", auth_state);
+                                if let Ok((auth_state, clean)) =
+                                    antigravity::auth::poll_state(&runtime.data)
+                                {
+                                    if agy_auth_revision.as_ref() != Some(&auth_state.revision) {
+                                        agy_auth_revision = Some(auth_state.revision.clone());
+                                        let _ = handle.emit("antigravity-auth-state", auth_state);
+                                    }
                                     if clean {
                                         agy_auth_stamp = Some(stamp);
                                     }
@@ -2409,7 +2415,6 @@ pub fn run() {
             usage::commands::sync_usage,
             usage::commands::get_pricing,
             usage::commands::search_pricing,
-            usage::commands::get_usage_interruptions,
             usage::commands::get_models_dev,
             usage::commands::update_models_dev,
             usage::commands::compare_model_prices,

@@ -505,7 +505,9 @@ export default function Usage({
         >
           <option value="">全部供应商</option>
           {Object.entries(
-            client === "antigravity" ? agProviders : providers,
+            client === "antigravity" || tab === "antigravity"
+              ? agProviders
+              : providers,
           ).map(([id, n]) => (
             <option key={id} value={id}>
               {n}

@@ -1759,27 +1759,48 @@ fn extract_settings_model_accepts_unknown_new_models_and_rejects_malformed_block
         Some("Gemini 4 Argon (High)")
     );
     let m417 = resolve_model_alias(Some("MODEL_PLACEHOLDER_M417")).unwrap();
-    assert_eq!((m417.canonical, m417.display_name, m417.effort), ("gemini-4-argon", "Gemini 4 Argon", Some("high")));
+    assert_eq!(
+        (m417.canonical, m417.display_name, m417.effort),
+        ("gemini-4-argon", "Gemini 4 Argon", Some("high"))
+    );
     let m402 = resolve_model_alias(Some("MODEL_PLACEHOLDER_M402")).unwrap();
-    assert_eq!((m402.canonical, m402.display_name, m402.effort), ("claude-opus-5-5-high", "Claude Opus 5.5", Some("high")));
+    assert_eq!(
+        (m402.canonical, m402.display_name, m402.effort),
+        ("claude-opus-5-5", "Claude Opus 5.5", Some("high"))
+    );
+    assert!(resolve_model_alias(Some("MODEL_GOOGLE_GEMINI_4_ARGON_HIGH")).is_none());
+    assert!(resolve_model_alias(Some("MODEL_CLAUDE_4_OPUS_55_HIGH")).is_none());
     let malformed = "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from A to B\n</USER_SETTINGS_CHANGE>";
     assert!(extract_settings_model(malformed).is_none());
 }
 
 #[test]
-fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
+fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfill() {
     let dir = tempfile::tempdir().unwrap();
     let ag_home = dir.path().join(".gemini");
     let gcloud_dir = dir.path().join(".config/gcloud");
-    let path1 = ag_home.join("antigravity/brain/conv-oauth/.system_generated/logs/transcript.jsonl");
+    let path_pre =
+        ag_home.join("antigravity/brain/conv-pre/.system_generated/logs/transcript.jsonl");
+    let path1 =
+        ag_home.join("antigravity/brain/conv-oauth/.system_generated/logs/transcript.jsonl");
     let path2 = ag_home.join("antigravity/brain/conv-adc/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(path_pre.parent().unwrap()).unwrap();
     std::fs::create_dir_all(path1.parent().unwrap()).unwrap();
     std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
     std::fs::create_dir_all(&gcloud_dir).unwrap();
     std::fs::create_dir_all(ag_home.join("config")).unwrap();
-    let row = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-20T00:00:01Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":100,\"output_tokens\":25}\n";
-    std::fs::write(&path1, row).unwrap();
 
+    // Pre-tracking historical request (2026-10-19), pre-switch request (00:30), post-switch request (01:30)
+    let row_pre = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-19T00:00:01Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":50,\"output_tokens\":10}\n";
+    let row_oauth = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-20T00:30:00Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":100,\"output_tokens\":25}\n";
+    let row_adc = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-20T01:30:00Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":200,\"output_tokens\":50}\n";
+    // Append a half-written trailing line without newline to verify it does not fail sync
+    let row_adc_with_partial = format!("{row_adc}{{\"step_index\":2,\"source\":\"MODEL\"");
+    std::fs::write(&path_pre, row_pre).unwrap();
+    std::fs::write(&path1, row_oauth).unwrap();
+    std::fs::write(&path2, row_adc_with_partial).unwrap();
+
+    // OAuth activated at 2026-10-20T00:00:00Z (1792454400000), switched to ADC at 2026-10-20T01:00:00Z (1792458000000)
     let vault_json = serde_json::json!({
         "schema": 1,
         "entries": [
@@ -1791,7 +1812,7 @@ fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
                 "email": "oauth@example.invalid",
                 "projectId": null,
                 "payload": "{\"access_token\":\"tok-1\"}",
-                "updatedAt": 1
+                "updatedAt": 1792454400
             },
             {
                 "id": "ag-adc-1",
@@ -1801,8 +1822,12 @@ fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
                 "email": null,
                 "projectId": "p1",
                 "payload": "{\"type\":\"authorized_user\",\"client_id\":\"c\",\"client_secret\":\"s\",\"refresh_token\":\"r\"}",
-                "updatedAt": 2
+                "updatedAt": 1792458000
             }
+        ],
+        "activations": [
+            { "accountId": "ag-oauth-1", "sinceMs": 1_792_454_400_000i64 },
+            { "accountId": "ag-adc-1", "sinceMs": 1_792_458_000_000i64 }
         ]
     });
     std::fs::write(
@@ -1811,8 +1836,8 @@ fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
     )
     .unwrap();
     std::fs::write(
-        ag_home.join("jetski-standalone-oauth-token"),
-        "{\"access_token\":\"tok-1\"}",
+        ag_home.join("config/config.json"),
+        "{\"userSettings\":{\"enableAdc\":true}}\n",
     )
     .unwrap();
     std::fs::write(
@@ -1821,6 +1846,8 @@ fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
     )
     .unwrap();
 
+    // Sync happens AFTER switching to ag-adc-1, yet conv-oauth (00:30) is attributed to ag-oauth-1
+    // and conv-pre (2026-10-19) stays unattributed (None).
     let mut store = Store::open(dir.path()).unwrap();
     let pricing = Pricing::new(dir.path()).unwrap();
     scan_home(
@@ -1833,30 +1860,15 @@ fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
     )
     .unwrap();
 
-    std::fs::write(
-        ag_home.join("config/config.json"),
-        "{\"userSettings\":{\"enableAdc\":true}}\n",
-    )
-    .unwrap();
-    std::fs::write(&path2, row).unwrap();
-    scan_home(
-        &mut store,
-        &ag_home,
-        &pricing,
-        &Settings::default(),
-        &mut Report::default(),
-        true,
-    )
-    .unwrap();
-
     let all_ag = Filter {
         client: Some("antigravity".into()),
         ..Filter::default()
     };
     let dash = store.dashboard(&all_ag).unwrap();
+    assert_eq!(dash.totals.requests, 3);
     let mut provider_ids: Vec<String> = dash.providers.iter().map(|g| g.id.clone()).collect();
     provider_ids.sort();
-    assert_eq!(provider_ids, vec!["ag-adc-1", "ag-oauth-1"]);
+    assert_eq!(provider_ids, vec!["ag-adc-1", "ag-oauth-1", "session"]);
 
     let oauth_only = Filter {
         client: Some("antigravity".into()),
@@ -1869,4 +1881,16 @@ fn antigravity_provider_splits_dashboard_and_stats_and_preserves_on_resync() {
         .unwrap();
     assert_eq!(stats_oauth.requests, 1);
     assert_eq!(stats_oauth.token_mix.total, 125);
+
+    let adc_only = Filter {
+        client: Some("antigravity".into()),
+        provider: Some("ag-adc-1".into()),
+        ..Filter::default()
+    };
+    assert_eq!(store.dashboard(&adc_only).unwrap().totals.requests, 1);
+    let stats_adc = store
+        .antigravity_stats(&adc_only, &pricing.frozen(), "1", 1_800_000_000_000)
+        .unwrap();
+    assert_eq!(stats_adc.requests, 1);
+    assert_eq!(stats_adc.token_mix.total, 250);
 }

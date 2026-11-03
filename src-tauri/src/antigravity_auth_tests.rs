@@ -131,22 +131,29 @@ fn oauth_validation_requires_access_or_refresh_token_and_disk_read_tolerates_cor
         serde_json::json!({ "id_token": "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InVAZXhhbXBsZS5pbnZhbGlkIn0." }),
         serde_json::json!({ "oauth_token": "legacy-only" }),
     ] {
-        let err = parse_oauth_metadata(&bad.to_string()).expect_err("must require access_token or refresh_token");
+        let err = parse_oauth_metadata(&bad.to_string())
+            .expect_err("must require access_token or refresh_token");
         assert_eq!(err.code, code::AUTH);
     }
 
-    // Half-written OAuth file and unsupported external_account ADC on disk must not break state_at,
-    // while state_with_health marks clean = false so polling retries on next tick.
+    // Half-written OAuth file marks clean = false so polling retries on next tick.
     write_private_file(&paths.oauth_file(), b"{\"access_token\":\"half").unwrap();
     write_private_file(&paths.adc_file(), br#"{"type":"external_account"}"#).unwrap();
     let (state, clean) = state_with_health(&paths).unwrap();
     assert!(!clean);
     assert!(!state.oauth_present);
     assert!(state.accounts.is_empty());
+
+    // Complete JSON with permanently unsupported schema (external_account ADC) marks clean = true
+    // so disk_stamp advances and background polling does not spin on every tick.
+    fs::remove_file(paths.oauth_file()).unwrap();
+    let (state2, clean2) = state_with_health(&paths).unwrap();
+    assert!(clean2);
+    assert!(state2.accounts.is_empty());
 }
 
 #[test]
-fn no_email_oauth_refresh_updates_in_place_and_observed_revisions_cap_at_64() {
+fn no_email_oauth_refresh_updates_in_place_without_overwriting_other_no_email_accounts() {
     let (_tmp, paths) = setup_paths();
     write_private_file(
         &paths.oauth_file(),
@@ -158,12 +165,39 @@ fn no_email_oauth_refresh_updates_in_place_and_observed_revisions_cap_at_64() {
     let id1 = s1.accounts[0].id.clone();
 
     // Refresh without email (even if refresh_token is omitted on refresh write) updates in place
-    write_private_file(&paths.oauth_file(), br#"{"access_token":"ya29.no-email-2"}"#).unwrap();
+    write_private_file(
+        &paths.oauth_file(),
+        br#"{"access_token":"ya29.no-email-2","refresh_token":"1//rt-1"}"#,
+    )
+    .unwrap();
     let s2 = state_at(&paths).unwrap();
     assert_eq!(s2.accounts.len(), 1);
     assert_eq!(s2.accounts[0].id, id1);
     assert!(s2.accounts[0].current);
+
+    // A second no-email OAuth login with a different refresh_token must NOT overwrite id1
+    write_private_file(
+        &paths.oauth_file(),
+        br#"{"access_token":"ya29.no-email-b","refresh_token":"1//rt-2"}"#,
+    )
+    .unwrap();
+    let s3 = state_at(&paths).unwrap();
+    assert_eq!(s3.accounts.len(), 2);
+    let id2 = s3.accounts.iter().find(|a| a.id != id1).unwrap().id.clone();
+
+    // Refreshing the currently active second no-email account without refresh_token updates id2, not id1
+    write_private_file(
+        &paths.oauth_file(),
+        br#"{"access_token":"ya29.no-email-b-refreshed"}"#,
+    )
+    .unwrap();
+    let s4 = state_at(&paths).unwrap();
+    assert_eq!(s4.accounts.len(), 2);
     let (vault, _) = load_vault(&paths).unwrap();
+    let entry1 = vault.entries.iter().find(|e| e.id == id1).unwrap();
+    let entry2 = vault.entries.iter().find(|e| e.id == id2).unwrap();
+    assert!(entry1.payload.contains("ya29.no-email-2"));
+    assert!(entry2.payload.contains("ya29.no-email-b-refreshed"));
     assert!(vault.observed_revisions.is_empty());
 
     // Cap observed_revisions at 64 when deleting entries

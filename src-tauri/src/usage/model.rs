@@ -1093,38 +1093,6 @@ impl Attempt {
             self.service_tier.as_deref()
         }
     }
-    /// None means no interruption evidence; only actual gateway endings qualify.
-    pub fn interruption(&self) -> Option<&'static str> {
-        let end = self.end.as_ref()?;
-        if !matches!(
-            end.cause,
-            EndCause::ClientCancelled
-                | EndCause::ClientDisconnected
-                | EndCause::DownstreamWriteTimeout
-                | EndCause::DownstreamTransportError
-                | EndCause::GatewayStopped
-                | EndCause::UpstreamDisconnected
-                | EndCause::StreamTimeout
-                | EndCause::FirstByteTimeout
-        ) {
-            return None;
-        }
-        let output = self
-            .output_reported
-            .unwrap_or(end.terminal_received || self.tokens.output.is_some_and(|n| n > 0));
-        Some(
-            if self.tokens.input.is_some()
-                && self.tokens.output.is_some()
-                && output
-                && self.usage_status != "parse_incomplete"
-                && self.parse_reasons.is_empty()
-            {
-                "reported"
-            } else {
-                "partial"
-            },
-        )
-    }
     pub fn grouping_model(&self) -> Option<&str> {
         if self.operation == Operation::WebSearch {
             Some("web_search")

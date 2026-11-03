@@ -322,23 +322,6 @@ export type UsageSettings = {
   multiplier: string;
   pricingModel: "response" | "request";
 };
-export type InterruptionSummary = {
-  start: number;
-  end: number;
-  detailSince: number;
-  historyMissing: boolean;
-  requests: number;
-  reported: number;
-  partial: number;
-  unknown: number;
-  groups: {
-    client: string;
-    provider: string | null;
-    reported: number;
-    partial: number;
-    unknown: number;
-  }[];
-};
 export type UsageState = {
   settings: UsageSettings;
   syncing: boolean;

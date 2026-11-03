@@ -36,16 +36,6 @@ pub async fn get_usage_logs(r: R<'_>, filter: Filter) -> Result<store::Page> {
         .map_err(|_| failure("日志查询中断"))?
 }
 #[tauri::command]
-pub async fn get_usage_interruptions(
-    r: R<'_>,
-    filter: Filter,
-) -> Result<super::interruptions::Summary> {
-    let service = r.usage.clone();
-    tokio::task::spawn_blocking(move || service.read(|store| store.interruptions(&filter)))
-        .await
-        .map_err(|_| failure("中断统计已停止"))?
-}
-#[tauri::command]
 pub async fn get_usage_detail(r: R<'_>, id: String, source: Option<String>) -> Result<Record> {
     let s = r.usage.clone();
     tokio::task::spawn_blocking(move || {

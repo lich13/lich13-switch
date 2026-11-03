@@ -101,24 +101,16 @@ fn speed_confirmation_is_independent_of_tier_and_requires_fast_rates() {
         "20"
     );
     let mut meter = Meter::default();
-    meter.observe(&json!({"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"speed":"standard"}}}),0);
-    a.output_reported = meter.output_reported;
-    a.tokens = meter.tokens.clone();
-    a.end = Some(EndMetadata {
-        cause: EndCause::ClientDisconnected,
-        terminal_received: false,
-        response_started: true,
-    });
-    assert_eq!(a.interruption(), Some("partial"));
+    meter.observe(
+        &json!({"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"speed":"standard"}}}),
+        0,
+    );
+    assert_eq!(meter.output_reported, Some(false));
     meter.observe(
         &json!({"type":"message_delta","usage":{"output_tokens":0}}),
         1,
     );
-    a.output_reported = meter.output_reported;
-    assert_eq!(a.interruption(), Some("reported"));
-    a.usage_status = "session_supplemented".into();
-    a.parse_reasons.push("prompt_cache_total_mismatch".into());
-    assert_eq!(a.interruption(), Some("partial"));
+    assert_eq!(meter.output_reported, Some(true));
     assert_eq!(meter.response_speed.as_deref(), Some("standard"));
 }
 
@@ -188,77 +180,6 @@ fn reasoning_survives_original_multiple_attempts_and_reopen_without_schema_chang
     assert_eq!(raw.response_speed.as_deref(), Some("standard"));
     assert_eq!(raw.parse_reasons, ["fixture_reason"]);
     assert_eq!(schema(), before);
-}
-
-#[test]
-fn interruption_statistics_count_logical_gateway_requests_and_unknowns() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let at = now();
-    let reported = Attempt {
-        id: "reported".into(),
-        provider: Some("fixture-provider".into()),
-        tokens: Tokens {
-            input: Some(10),
-            output: Some(5),
-            ..Tokens::default()
-        },
-        output_reported: Some(true),
-        end: Some(EndMetadata {
-            cause: EndCause::ClientDisconnected,
-            response_started: true,
-            terminal_received: false,
-        }),
-        ..Attempt::default()
-    };
-    let partial = Attempt {
-        output_reported: Some(false),
-        tokens: Tokens {
-            input: Some(10),
-            output: Some(0),
-            ..Tokens::default()
-        },
-        ..reported.clone()
-    };
-    for (i, (source, attempts)) in [
-        ("proxy", vec![reported.clone(), reported]),
-        ("proxy", vec![partial]),
-        ("proxy", vec![Attempt::default()]),
-        ("proxy", vec![]),
-        ("claude", vec![Attempt::default()]),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let row = Record {
-            id: format!("fixture-request-{i}"),
-            client: "claude".into(),
-            source: source.into(),
-            started_at: at,
-            finished_at: Some(at),
-            attempts,
-            ..Record::default()
-        };
-        super::storage_v12::save(&store.connection, &row, 1, i as i64 + 1).unwrap();
-    }
-    let summary = store
-        .interruptions(&Filter {
-            start: Some(at - 1000),
-            end: Some(at + 1000),
-            ..Filter::default()
-        })
-        .unwrap();
-    assert_eq!(
-        (
-            summary.requests,
-            summary.reported,
-            summary.partial,
-            summary.unknown
-        ),
-        (4, 1, 1, 2)
-    );
-    assert_eq!(summary.groups.iter().map(|g| g.reported).sum::<u64>(), 1);
-    assert_eq!(summary.groups.iter().map(|g| g.unknown).sum::<u64>(), 2);
 }
 
 #[test]

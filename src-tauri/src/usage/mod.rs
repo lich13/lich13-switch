@@ -15,7 +15,6 @@ mod event_time_tests;
 mod first_token_tests;
 #[cfg(test)]
 mod grok_usage_tests;
-pub mod interruptions;
 mod maintenance;
 pub mod model;
 mod pending_prices;
@@ -660,6 +659,9 @@ struct SessionStore {
     client: String,
 }
 impl sessions::Repository for SessionStore {
+    fn data_dir(&self) -> Option<&Path> {
+        Some(&self.service.0.directory)
+    }
     fn cursor(&self, id: &str) -> Result<Option<String>> {
         self.reader.cursor(id)
     }

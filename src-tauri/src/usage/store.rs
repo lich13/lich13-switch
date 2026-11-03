@@ -564,15 +564,15 @@ impl Store {
         if storage_v12::pending(&self.connection) {
             return Ok(false);
         }
-        let v02616_done: bool = db(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02616' AND value='done')",
+        let v02617_done: bool = db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02617' AND value='done')",
             [],
             |r| r.get(0),
         ))?;
-        if !v02616_done {
+        if !v02617_done {
             db(self.connection.execute_batch(
                 "DELETE FROM metadata WHERE key='antigravity_fields_v02614';
-                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02616','done');",
+                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02617','done');",
             ))?;
         }
         let after: Option<String> = db(self
@@ -586,13 +586,10 @@ impl Store {
         if after.as_deref() == Some("done") {
             return Ok(false);
         }
-        let active_provider = self
-            .connection
-            .path()
-            .and_then(|p| Path::new(p).parent())
-            .filter(|d| d.join("antigravity-accounts.json").exists())
-            .and_then(|d| crate::antigravity::auth::current_state(d).ok())
-            .and_then(|s| crate::antigravity::auth::active_account_id(&s));
+        let timeline = self
+            .data_dir()
+            .map(|d| crate::antigravity::auth::provider_timeline(d, None))
+            .unwrap_or_default();
         let tx = db(self.connection.transaction())?;
         let rows = {
             let mut stmt = db(tx.prepare("SELECT id,body FROM records WHERE source='antigravity' AND id>?1 ORDER BY id LIMIT 128"))?;
@@ -612,12 +609,11 @@ impl Store {
             let mut r: Record = bodies::decode(&tx, body)?;
             let normalized = super::antigravity::normalize_record(&mut r);
             let mut provider_changed = false;
-            if let Some(ref p) = active_provider {
-                for a in &mut r.attempts {
-                    if a.provider.is_none() {
-                        a.provider = Some(p.clone());
-                        provider_changed = true;
-                    }
+            for a in &mut r.attempts {
+                let expected = timeline.provider_at(a.started_at).map(str::to_owned);
+                if a.provider != expected {
+                    a.provider = expected;
+                    provider_changed = true;
                 }
             }
             let generation_changed = r
@@ -731,6 +727,9 @@ impl Store {
             |r| r.get(0),
         ))?;
         Ok((merged, pending, historical))
+    }
+    pub fn data_dir(&self) -> Option<&Path> {
+        self.connection.path().and_then(|p| Path::new(p).parent())
     }
     pub fn cursor(&self, id: &str) -> Result<Option<String>> {
         db(self
@@ -967,6 +966,7 @@ impl Store {
     }
     /// The exact set is selected while holding the writer lock. Each transaction
     /// accounts and deletes the same bounded set; no global age-based deletion.
+    #[cfg(test)]
     pub(super) fn archive_batch(&mut self, ids: &[String]) -> Result<()> {
         let tx = db(self.connection.transaction())?;
         Self::archive_into(&tx, ids)?;
@@ -1440,7 +1440,7 @@ pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Re
                 let Some(b) = previous else {
                     continue;
                 };
-                if r.source == "antigravity" && b.provider.is_some() {
+                if r.source == "antigravity" && a.provider.is_none() && b.provider.is_some() {
                     a.provider = b.provider.clone();
                 }
                 a.cost_multiplier = b.cost_multiplier.clone();

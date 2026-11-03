@@ -26,7 +26,6 @@ import type {
   AntigravityUsageStats,
   Dashboard,
   ModelsDevState,
-  InterruptionSummary,
   PriceComparison,
   PricingConfig,
   PricingView,
@@ -801,7 +800,6 @@ export type CommandMap = {
     PricingSearchPage
   >;
   get_models_dev: Call<None, ModelsDevState>;
-  get_usage_interruptions: Call<{ filter: UsageFilter }, InterruptionSummary>;
   update_models_dev: Call<None, ModelsDevState>;
   compare_model_prices: Call<
     { model: string; context: number },

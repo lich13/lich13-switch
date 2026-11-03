@@ -239,6 +239,9 @@ pub trait Repository {
     fn requires_complete_history(&self) -> bool {
         false
     }
+    fn data_dir(&self) -> Option<&Path> {
+        None
+    }
     fn cursor(&self, id: &str) -> Result<Option<String>>;
     fn generation(&self, source: &str) -> Result<u64>;
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()>;
@@ -265,6 +268,9 @@ pub trait Repository {
     fn progress(&mut self, _report: &Report) {}
 }
 impl Repository for Store {
+    fn data_dir(&self) -> Option<&Path> {
+        self.data_dir()
+    }
     fn cursor(&self, id: &str) -> Result<Option<String>> {
         Store::cursor(self, id)
     }
@@ -476,9 +482,6 @@ pub fn sync(
                     let current_pos = reader.stream_position().map_err(storage::io_error)?;
                     if current_pos > line_start {
                         partial_tail = true;
-                        if store.requires_complete_history() {
-                            return Err(failure("会话历史仍在写入，未导出、未清理，请稍后重试"));
-                        }
                     }
                     break;
                 };

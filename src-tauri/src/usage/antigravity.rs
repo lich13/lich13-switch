@@ -128,7 +128,7 @@ struct ModelCatalogEntry {
 
 const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ModelCatalogEntry {
-        aliases: &["MODEL_PLACEHOLDER_M417", "MODEL_GOOGLE_GEMINI_4_ARGON_HIGH"],
+        aliases: &["MODEL_PLACEHOLDER_M417"],
         display_names: &["gemini 4 argon (high)", "gemini 4 argon"],
         canonical: "gemini-4-argon",
         display_name: "Gemini 4 Argon",
@@ -136,9 +136,9 @@ const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         thinking_only: false,
     },
     ModelCatalogEntry {
-        aliases: &["MODEL_PLACEHOLDER_M402", "MODEL_CLAUDE_4_OPUS_55_HIGH"],
+        aliases: &["MODEL_PLACEHOLDER_M402"],
         display_names: &["claude opus 5.5 (high)", "claude opus 5.5", "opus 5.5"],
-        canonical: "claude-opus-5-5-high",
+        canonical: "claude-opus-5-5",
         display_name: "Claude Opus 5.5",
         effort: Some("high"),
         thinking_only: false,
@@ -1136,23 +1136,20 @@ impl Api {
                 .entry(id.to_owned())
                 .or_insert_with(|| (None, json!({"localModifiedStamp": stamp})));
         }
-        let active_provider = brain
-            .parent()
-            .and_then(Path::parent)
-            .and_then(crate::antigravity::auth::active_provider_for_home);
+        let timeline = store
+            .data_dir()
+            .map(|d| {
+                crate::antigravity::auth::provider_timeline(
+                    d,
+                    brain.parent().and_then(Path::parent),
+                )
+            })
+            .unwrap_or_default();
         report.total_files = summaries.len() as u64;
         for (id, (owner, summary)) in &summaries {
             match self
                 .collect_session(
-                    id,
-                    *owner,
-                    summary,
-                    store,
-                    pricing,
-                    settings,
-                    report,
-                    repair,
-                    active_provider.as_deref(),
+                    id, *owner, summary, store, pricing, settings, report, repair, &timeline,
                 )
                 .await
             {
@@ -1179,7 +1176,7 @@ impl Api {
         settings: &Settings,
         report: &mut Report,
         repair: bool,
-        active_provider: Option<&str>,
+        timeline: &crate::antigravity::auth::ProviderTimeline,
     ) -> Result<()> {
         let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
         let mut cursor: Cursor = if repair {
@@ -1220,12 +1217,18 @@ impl Api {
                 json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false});
             let page = if resolved_owner || self.endpoints.len() <= 1 {
                 resolved_owner = true;
-                self.call_on(
-                    &self.endpoints[active_endpoint],
-                    "GetCascadeTrajectoryGeneratorMetadata",
-                    &meta_req,
-                )
-                .await?
+                match self
+                    .call_on(
+                        &self.endpoints[active_endpoint],
+                        "GetCascadeTrajectoryGeneratorMetadata",
+                        &meta_req,
+                    )
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(_) if owner.is_none() && offset == 0 => return Ok(()),
+                    Err(err) => return Err(err),
+                }
             } else {
                 let mut selected_page = None;
                 let mut empty_fallback = None;
@@ -1261,6 +1264,8 @@ impl Api {
                     active_endpoint = idx;
                     resolved_owner = true;
                     empty
+                } else if owner.is_none() && offset == 0 {
+                    return Ok(());
                 } else {
                     return Err(
                         last_err.unwrap_or_else(|| failure("Antigravity 历史用量读取不完整"))
@@ -1372,11 +1377,10 @@ impl Api {
                             let complete = r.finished_at.is_some()
                                 && r.final_attempt()
                                     .is_some_and(|a| a.outcome != "in_progress");
-                            if let Some(p) = active_provider {
-                                for a in &mut r.attempts {
-                                    if a.provider.is_none() {
-                                        a.provider = Some(p.to_owned());
-                                    }
+                            for a in &mut r.attempts {
+                                if a.provider.is_none() {
+                                    a.provider =
+                                        timeline.provider_at(a.started_at).map(str::to_owned);
                                 }
                             }
                             price(&mut r, pricing, settings);
@@ -1509,20 +1513,15 @@ pub(super) fn scan_file_list(
     report: &mut Report,
     repair: bool,
 ) -> Result<()> {
-    let active_provider = brain
-        .parent()
-        .and_then(Path::parent)
-        .and_then(crate::antigravity::auth::active_provider_for_home);
+    let timeline = store
+        .data_dir()
+        .map(|d| {
+            crate::antigravity::auth::provider_timeline(d, brain.parent().and_then(Path::parent))
+        })
+        .unwrap_or_default();
     for path in files {
         if let Err(error) = scan_file(
-            store,
-            brain,
-            path,
-            pricing,
-            settings,
-            report,
-            repair,
-            active_provider.as_deref(),
+            store, brain, path, pricing, settings, report, repair, &timeline,
         ) {
             if store.requires_complete_history() {
                 return Err(error);
@@ -1566,7 +1565,7 @@ fn scan_file(
     settings: &Settings,
     report: &mut Report,
     repair: bool,
-    active_provider: Option<&str>,
+    timeline: &crate::antigravity::auth::ProviderTimeline,
 ) -> Result<()> {
     let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
     let saved_raw = if repair { None } else { store.cursor(&key)? };
@@ -1640,11 +1639,6 @@ fn scan_file(
             return Err(failure("Antigravity 历史单行超过读取限制"));
         }
         if bytes.last() != Some(&b'\n') {
-            if store.requires_complete_history() {
-                return Err(failure(
-                    "Antigravity 历史仍在写入，未导出、未清理，请稍后重试",
-                ));
-            }
             partial_tail = true;
             break;
         }
@@ -1705,7 +1699,7 @@ fn scan_file(
                 let is_failed = failed(&v);
                 let mut attempt = Attempt {
                     id: safe_id(&format!("{id}:final")),
-                    provider: active_provider.map(str::to_owned),
+                    provider: timeline.provider_at(at).map(str::to_owned),
                     response_id: text(&v, &["response_id", "message_id"]).map(safe_id),
                     requested_model: actual_model(model_for_id),
                     response_model: actual_model(model_for_id),
