@@ -818,6 +818,7 @@ fn v12_seven_day_cold_archive_preserves_zero_tokens_and_price_snapshot() {
     let cold_before = store.detail(&cold.id).unwrap();
     let hot_before = store.detail(&hot.id).unwrap();
 
+    let before_version = super::query::version(&store.connection).unwrap();
     store.compact(at).unwrap();
 
     let cold_after = store.detail(&cold.id).unwrap();
@@ -845,6 +846,16 @@ fn v12_seven_day_cold_archive_preserves_zero_tokens_and_price_snapshot() {
         serde_json::to_value(&hot_after.attempts[0].price).unwrap(),
         serde_json::to_value(&hot_before.attempts[0].price).unwrap()
     );
+    let changed_version = super::query::version(&store.connection).unwrap();
+    assert!(changed_version > before_version);
+    // Advance/reset the cursor, then scan unchanged records again.
+    for _ in 0..3 {
+        super::storage_v12::cold_batch(&mut store.connection, at).unwrap();
+        assert_eq!(
+            super::query::version(&store.connection).unwrap(),
+            changed_version
+        );
+    }
 }
 
 #[test]

@@ -671,7 +671,16 @@ export default function Usage({
       ) : (
         <Ranking
           groups={
-            tab === "providers" ? (data?.providers ?? []) : (data?.models ?? [])
+            tab === "providers"
+              ? (data?.providers ?? [])
+              : (data?.models ?? []).filter(
+                  ({ totals }) =>
+                    totals.success > 0 ||
+                    Object.values(totals.tokens).some(
+                      (value) => (value ?? 0) > 0,
+                    ) ||
+                    Number(totals.cost) !== 0,
+                )
           }
           name={(id) =>
             tab === "providers"

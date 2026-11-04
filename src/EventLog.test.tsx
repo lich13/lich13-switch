@@ -625,3 +625,124 @@ it("keeps each client's latest gateway event when initial snapshots arrive late"
     screen.getAllByRole("option", { name: "Fixture Provider" }).length,
   ).toBeGreaterThan(0);
 });
+
+it("polls only the visible Antigravity tab and preserves the page and open detail", async () => {
+  vi.useFakeTimers();
+  try {
+    const view = render(<EventLog />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(eventCalls()).toHaveLength(1);
+    fireEvent.click(screen.getByRole("tab", { name: "Antigravity app" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /模型不支持/ }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    const before = eventCalls().length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(eventCalls()).toHaveLength(before + 1);
+    expect(eventCalls().at(-1)?.[1].filter).toMatchObject({
+      origin: "antigravity",
+      page: 2,
+    });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    act(() => mock.listeners.get("app-visibility")!(false));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(eventCalls()).toHaveLength(before + 1);
+    act(() => mock.listeners.get("app-visibility")!(true));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(eventCalls()).toHaveLength(before + 2);
+    fireEvent.click(screen.getByRole("tab", { name: "网关内部" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(eventCalls()).toHaveLength(before + 3);
+    view.unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(eventCalls()).toHaveLength(before + 3);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("coalesces slow log refreshes and ignores a response from the previous tab", async () => {
+  vi.useFakeTimers();
+  try {
+    let resolve!: (value: ReturnType<typeof page>) => void;
+    const slow = new Promise<ReturnType<typeof page>>((done) => {
+      resolve = done;
+    });
+    const original = mock.command.getMockImplementation()!;
+    mock.command.mockImplementation((name, args) =>
+      name === "get_app_events" && args.filter.origin === "antigravity"
+        ? slow
+        : original(name, args),
+    );
+    render(<EventLog />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Antigravity app" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(eventCalls()).toHaveLength(2);
+    fireEvent.click(screen.getByRole("tab", { name: "网关内部" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(eventCalls()).toHaveLength(3);
+    await act(async () => {
+      resolve({
+        ...page(1),
+        items: [{ ...record, id: "stale", errorCode: "STALE_RESPONSE" }],
+      });
+    });
+    expect(screen.queryByText("STALE_RESPONSE")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /模型不支持/ }),
+    ).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("clearing logs starts a fresh query even when the previous query is still pending", async () => {
+  let finish!: (value: ReturnType<typeof page>) => void;
+  const slow = new Promise<ReturnType<typeof page>>((resolve) => { finish = resolve; });
+  const original = mock.command.getMockImplementation()!;
+  let calls = 0;
+  mock.command.mockImplementation((name, args) => {
+    if (name === "get_app_events") return ++calls === 1 ? slow : Promise.resolve({ ...page(1), items: [], total: 0 });
+    return original(name, args);
+  });
+  render(<EventLog />);
+  await waitFor(() => expect(eventCalls()).toHaveLength(1));
+  fireEvent.click(screen.getByRole("button", { name: "清空全部日志" }));
+  await waitFor(() => expect(eventCalls()).toHaveLength(2));
+  await act(async () => { finish(page(1)); });
+  expect(screen.queryByRole("button", { name: /模型不支持/ })).not.toBeInTheDocument();
+});

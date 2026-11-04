@@ -1140,6 +1140,18 @@ impl Store {
                 ))?;
             }
         }
+        if !verified_ids.is_empty() {
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok((verified_ids.len() as u64, retained))
+    }
+    pub(super) fn clean_exported_bill_daily(
+        &mut self,
+        request: &super::billing::Request,
+    ) -> Result<()> {
+        let native = storage_v12::active(&self.connection);
+        let tx = db(self.connection.transaction())?;
         let window_end = request.end.saturating_add(1_000);
         let daily_metrics = if native {
             "usage_daily_metrics"
@@ -1157,11 +1169,11 @@ impl Store {
                 params![request.start, window_end, DAY, client],
             ))?;
         }
-        if !verified_ids.is_empty() || daily_deleted > 0 {
+        if daily_deleted > 0 {
             query::changed(&tx)?;
         }
         db(tx.commit())?;
-        Ok((verified_ids.len() as u64, retained))
+        Ok(())
     }
     #[cfg(test)]
     pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {

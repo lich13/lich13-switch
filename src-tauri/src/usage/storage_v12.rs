@@ -1710,6 +1710,7 @@ pub(super) fn cold_batch(c: &mut Connection, at: i64) -> Result<bool> {
         let it = db(s.query_map(params![after, at - 7 * 86_400_000], |r| r.get::<_, i64>(0)))?;
         db(it.collect::<rusqlite::Result<Vec<_>>>())?
     };
+    let mut updated = false;
     for id in &ids {
         let mut r: Record = serde_json::from_value(load(&tx, *id)?).map_err(json_error)?;
         let clean = |a: &Attempt| {
@@ -1777,6 +1778,7 @@ pub(super) fn cold_batch(c: &mut Connection, at: i64) -> Result<bool> {
         if changed {
             r.detail_archived = true;
             update(&tx, &r)?;
+            updated = true;
         }
     }
     if let Some(last) = ids.last() {
@@ -1787,7 +1789,7 @@ pub(super) fn cold_batch(c: &mut Connection, at: i64) -> Result<bool> {
     } else {
         db(tx.execute("DELETE FROM metadata WHERE key='cold_after'", []))?;
     }
-    if !ids.is_empty() {
+    if updated {
         query::changed(&tx)?;
     }
     db(tx.commit())?;

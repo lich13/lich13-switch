@@ -92,7 +92,7 @@ function modelGroup(
       success: 0,
       statusKnown: 0,
       sessions: 0,
-      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      tokens: { input: 12, output: 0, cacheRead: 0, cacheWrite: 0 },
       cost: "0",
       unpriced: attempts,
       durationMs: 0,
@@ -261,4 +261,69 @@ it("keeps Grok request rankings on deduplicated counts", async () => {
       { model: "fixture-grok-model-two", count: "1" },
     ],
   });
+});
+
+it("filters only models without successes or consumption before sorting and pagination", async () => {
+  const zero = (id: string, requests: number) => {
+    const group = modelGroup(id, requests, requests);
+    group.totals.tokens = {
+      input: null,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: null,
+    };
+    return group;
+  };
+  const hidden = zero("failed-without-usage", 999);
+  const models = Array.from({ length: 21 }, (_, i) => {
+    const group = zero(`used-model-${i.toString().padStart(2, "0")}`, 21 - i);
+    if (i === 0) group.totals.success = 1;
+    else if (i === 1) group.totals.cost = "0.00000001";
+    else {
+      const fields: (keyof Tokens)[] = [
+        "input",
+        "output",
+        "cacheRead",
+        "cacheWrite",
+        "inclusiveInput",
+        "reasoning",
+        "cacheWrite5m",
+        "cacheWrite1h",
+        "imageInput",
+        "imageCacheRead",
+        "imageOutput",
+        "audioInput",
+        "audioOutput",
+      ];
+      group.totals.tokens[fields[(i - 2) % fields.length]] = 1;
+    }
+    return group;
+  });
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(async (name, args) =>
+    name === "get_usage_dashboard"
+      ? {
+          ...structuredClone(dashboard),
+          models: [hidden, ...models],
+          providers: [hidden],
+        }
+      : original(name, args),
+  );
+  const user = userEvent.setup();
+  render(<Usage />);
+  await screen.findByRole("table");
+  await user.click(screen.getByRole("tab", { name: "模型" }));
+  expect(screen.queryByText(hidden.id)).not.toBeInTheDocument();
+  expect(screen.getByText("21 条")).toBeInTheDocument();
+  expect(screen.getByText("used-model-00")).toBeInTheDocument();
+  expect(screen.getByText("used-model-01")).toBeInTheDocument();
+  expect(screen.getAllByRole("row")).toHaveLength(21);
+  await user.click(screen.getByRole("button", { name: "下一页" }));
+  expect(screen.getAllByRole("row")).toHaveLength(2);
+  expect(screen.getByText("used-model-20")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+  await user.click(screen.getByRole("tab", { name: "供应商" }));
+  expect(
+    screen.getByText(`供应商 ${hidden.id.slice(0, 8)}`),
+  ).toBeInTheDocument();
 });

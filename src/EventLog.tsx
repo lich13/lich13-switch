@@ -437,6 +437,9 @@ export default function EventLog({
   const [nativeVisible, setNativeVisible] = useState(true);
   const visible = documentVisible && nativeVisible;
   const sequence = useRef(0);
+  const flight = useRef<{ key: string; promise: Promise<EventPage> } | null>(
+    null,
+  );
   const detailSequence = useRef(0);
   const openPolicy = async (record: EventRecord) => {
     const request = ++detailSequence.current;
@@ -516,7 +519,7 @@ export default function EventLog({
       const filter = Object.fromEntries(
         Object.entries(filters).filter(([, value]) => value),
       );
-      const result = await command("get_app_events", {
+      const args = {
         filter: {
           ...filter,
           origin,
@@ -528,6 +531,15 @@ export default function EventLog({
             ? Math.floor(new Date(filters.to).getTime() / 1000)
             : null,
         },
+      };
+      const key = JSON.stringify(args);
+      const promise =
+        flight.current?.key === key
+          ? flight.current.promise
+          : command("get_app_events", args);
+      flight.current = { key, promise };
+      const result = await promise.finally(() => {
+        if (flight.current?.promise === promise) flight.current = null;
       });
       if (request === sequence.current) {
         setData(result);
@@ -544,6 +556,12 @@ export default function EventLog({
       sequence.current++;
     };
   }, [visible, load]);
+
+  useEffect(() => {
+    if (!visible || origin !== "antigravity") return;
+    const timer = window.setInterval(() => void load(), 5_000);
+    return () => window.clearInterval(timer);
+  }, [visible, origin, load]);
 
   useEffect(() => {
     let disposed = false;
@@ -649,6 +667,7 @@ export default function EventLog({
     setBusy(true);
     try {
       await command("clear_app_events");
+      flight.current = null;
       detailSequence.current++;
       setSelected(null);
       setPage(1);

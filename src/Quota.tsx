@@ -108,6 +108,12 @@ export function useProviderQuota(
     const q = values[p.id];
     return q?.version === p.quotaVersion ? q : (p.quota ?? undefined);
   };
+  const schedule = providers
+    .map((p) => {
+      const q = quotaFor(p);
+      return [q?.state, q?.checkedAt, q?.nextRefreshAt, q?.retryAt].join(":");
+    })
+    .join("|");
   useEffect(() => {
     if (!active || !nativeVisible || !visible || !identity || refreshSeconds === 0) return;
     let cancelled = false;
@@ -150,7 +156,7 @@ export function useProviderQuota(
     };
     void tick();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [active, nativeVisible, visible, identity, refreshSeconds, refresh]);
+  }, [active, nativeVisible, visible, identity, schedule, refreshSeconds, refresh]);
   return { quotaFor, refresh };
 }
 function emptyQuota(p: Provider): ProviderQuota {

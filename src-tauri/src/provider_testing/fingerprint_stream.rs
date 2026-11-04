@@ -630,16 +630,21 @@ impl Target {
             .map_err(|_| Failure::new("network_error", false))
     }
     pub fn lm_payload(&self, prompt: &str) -> TransportResult<Value> {
-        let mut config = lmfpd::DetectConfig::new("https://example.invalid", "unused", &self.model);
-        config.api = match self.protocol.as_str() {
-            "responses" => lmfpd::Api::Responses,
-            "messages" => lmfpd::Api::Messages,
-            "chat_completions" => lmfpd::Api::ChatCompletions,
+        let model = self.model.trim();
+        if model.is_empty() {
+            return Err(Failure::new("invalid_model_or_request", false));
+        }
+        let messages = json!([{"role":"user","content":prompt}]);
+        let mut body = match self.protocol.as_str() {
+            "responses" => json!({"model":model,"input":messages,"stream":true,"store":false}),
+            "messages" => {
+                json!({"model":model,"messages":messages,"max_tokens":8192,"stream":true})
+            }
+            "chat_completions" => {
+                json!({"model":model,"messages":messages,"stream":true,"stream_options":{"include_usage":true}})
+            }
             _ => return Err(Failure::new("protocol_mismatch", false)),
         };
-        let mut body = lmfpd::build_request(&config, prompt)
-            .map_err(|_| Failure::new("invalid_model_or_request", false))?
-            .body;
         if self.protocol == "responses" {
             if let Some(metadata) = &self.client_metadata {
                 body["client_metadata"] = metadata.clone();

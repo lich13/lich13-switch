@@ -457,3 +457,72 @@ fn macos_process_parser_matches_custom_install_paths_and_ignores_helpers() {
         ]
     );
 }
+
+#[test]
+fn initial_activation_uses_current_credentials_and_preserves_existing_zero_history() {
+    let (_tmp, paths) = setup_paths();
+    let set_mtime = |path: &Path, ms: u64| {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_millis(ms)))
+            .unwrap();
+    };
+    write_private_file(&paths.oauth_file(), br#"{"auth_method":"google-oauth","user":{"email":"fixture@example.invalid"},"token":{"access_token":"fixture","refresh_token":"fixture"}}"#).unwrap();
+    write_enable_adc(&paths, false).unwrap();
+    set_mtime(&paths.config_file(), 1_000);
+    set_mtime(&paths.oauth_file(), 2_000);
+    let state = state_at(&paths).unwrap();
+    let id = active_account_id(&state).unwrap();
+    let (mut vault, _) = load_vault(&paths).unwrap();
+    assert_eq!(
+        vault.activations,
+        vec![ActivationSpan {
+            account_id: id.clone(),
+            since_ms: 2_000
+        }]
+    );
+    let timeline = provider_timeline(&paths.data_dir, Some(&paths.gemini_home));
+    assert_eq!(timeline.provider_at(1_999), None);
+    assert_eq!(timeline.provider_at(2_000), Some(id.as_str()));
+    vault.activations[0].since_ms = 0;
+    save_vault(&paths, &vault).unwrap();
+    set_mtime(&paths.config_file(), 3_000);
+    state_at(&paths).unwrap();
+    assert_eq!(load_vault(&paths).unwrap().0.activations[0].since_ms, 0);
+    assert_eq!(
+        provider_timeline(&paths.data_dir, Some(&paths.gemini_home)).provider_at(0),
+        Some(id.as_str())
+    );
+
+    write_private_file(&paths.adc_file(), br#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#).unwrap();
+    write_enable_adc(&paths, true).unwrap();
+    set_mtime(&paths.adc_file(), 2_500);
+    set_mtime(&paths.config_file(), 3_000);
+    vault.activations.clear();
+    save_vault(&paths, &vault).unwrap();
+    let state = state_at(&paths).unwrap();
+    assert!(state.enable_adc);
+    let (mut vault, _) = load_vault(&paths).unwrap();
+    assert_eq!(vault.activations[0].since_ms, 3_000);
+    assert_eq!(
+        vault.activations[0].account_id,
+        active_account_id(&state).unwrap()
+    );
+    let adc_id = vault.activations[0].account_id.clone();
+    vault.activations = vec![ActivationSpan {
+        account_id: id.clone(),
+        since_ms: 0,
+    }];
+    save_vault(&paths, &vault).unwrap();
+    let timeline = provider_timeline(&paths.data_dir, Some(&paths.gemini_home));
+    assert_eq!(timeline.provider_at(2_999), Some(id.as_str()));
+    assert_eq!(timeline.provider_at(3_000), Some(adc_id.as_str()));
+    vault.activations.clear();
+    save_vault(&paths, &vault).unwrap();
+    let observed = now_ms();
+    let timeline = provider_timeline(&paths.data_dir, None);
+    assert!(timeline.spans[0].since_ms >= observed);
+    assert!(timeline.spans[0].since_ms <= now_ms());
+}

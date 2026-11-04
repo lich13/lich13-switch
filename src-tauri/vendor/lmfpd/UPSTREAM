@@ -1,3 +1,4 @@
 Ikaleio/lm-detector
-567e11d65a48d4fbba2713cc4dfbe685cdd05a73
-sdk/rust, unmodified
+fd9b4caf6feafbec64d45a1552432515bf4efa39
+Offline scoring/challenges subset: removed SDK transport and remote loading; added load_bytes.
+Scoring, challenge, codec and tokenizer algorithms checked by resources/lm-detector/manifest.json.

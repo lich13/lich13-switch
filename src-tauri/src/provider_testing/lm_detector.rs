@@ -57,7 +57,13 @@ fn unpack(raw: &[u8]) -> Result<Bundle> {
 }
 fn validate(revision: &str, algorithm: &Value) -> Result<()> {
     let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
-    if algorithm != &manifest["algorithm"]
+    // Older valid caches also include SDK transport hashes; only the offline
+    // algorithms determine compatibility with this loader.
+    if !manifest["algorithm"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .all(|(path, hash)| algorithm.get(path) == Some(hash))
         || revision.len() != 40
         || !revision.bytes().all(|b| b.is_ascii_hexdigit())
     {
@@ -146,27 +152,17 @@ pub(super) fn status(data: &Data) -> Value {
 }
 fn load(raw: &[u8], updated: bool) -> Result<Resource> {
     let bundle = unpack(raw)?;
-    let tokenizer = tokenizer::Bank::from_value(bundle.tokenizer.clone())?;
+    let metadata = metadata(&bundle, updated);
+    let tokenizer = tokenizer::Bank::from_value(bundle.tokenizer)?;
     let detector = STANDARD
         .decode(&bundle.detector)
         .map_err(|_| failure("评分参数格式无效"))?;
-    let dir = tempfile::tempdir().map_err(|_| failure("指纹资源无法读取"))?;
-    std::fs::write(
-        dir.path().join("unified_bank.json"),
-        bundle.bank.to_string(),
-    )
-    .map_err(|_| failure("指纹资源无法读取"))?;
-    std::fs::write(dir.path().join("shared_detector.bin"), detector)
-        .map_err(|_| failure("评分参数无法读取"))?;
-    let detector = lmfpd::Detector::load(&lmfpd::LoadOptions {
-        sources: vec![dir.path().to_string_lossy().into_owned()],
-        ..Default::default()
-    })
-    .map_err(|_| failure("指纹库与评分参数不匹配"))?;
+    let detector = lmfpd::Detector::load_bytes(bundle.bank.to_string().as_bytes(), &detector)
+        .map_err(|_| failure("指纹库与评分参数不匹配"))?;
     Ok(Resource {
         detector,
         tokenizer,
-        metadata: metadata(&bundle, updated),
+        metadata,
     })
 }
 impl Service {
@@ -292,6 +288,24 @@ async fn read(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     }
     Ok(raw)
 }
+async fn tree(client: &reqwest::Client, api: &str, revision: &str) -> Result<Value> {
+    let tree: Value =
+        serde_json::from_slice(&read(client, &format!("{api}/git/trees/{revision}")).await?)
+            .map_err(|_| failure("指纹库目录无效"))?;
+    if tree["truncated"] == true || !tree["tree"].is_array() {
+        return Err(failure("指纹库目录不完整"));
+    }
+    Ok(tree)
+}
+fn tree_entry<'a>(tree: &'a Value, path: &str, kind: &str) -> Result<&'a str> {
+    tree["tree"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["path"] == path && entry["type"] == kind)
+        .and_then(|entry| entry["sha"].as_str())
+        .ok_or_else(|| failure("指纹资源缺失"))
+}
 async fn download(
     current_revision: Option<&str>,
     api: &str,
@@ -315,22 +329,24 @@ async fn download(
     if current_revision == Some(revision) {
         return Ok(None);
     }
-    let tree: Value = serde_json::from_slice(
-        &read(&client, &format!("{api}/git/trees/{revision}?recursive=1")).await?,
-    )
-    .map_err(|_| failure("指纹库目录无效"))?;
-    if tree["truncated"] == true {
-        return Err(failure("指纹库目录不完整"));
-    }
-    let entries = tree["tree"]
-        .as_array()
-        .ok_or_else(|| failure("指纹库目录无效"))?;
+    // Resolve only the data and algorithm directories, never the full repository tree.
+    let root = tree(&client, api, revision).await?;
+    let (data, shared, sdk) = tokio::try_join!(
+        tree(&client, api, tree_entry(&root, "data", "tree")?),
+        tree(&client, api, tree_entry(&root, "shared", "tree")?),
+        tree(&client, api, tree_entry(&root, "sdk", "tree")?),
+    )?;
+    let rust = tree(&client, api, tree_entry(&sdk, "rust", "tree")?).await?;
+    let src = tree(&client, api, tree_entry(&rust, "src", "tree")?).await?;
     let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
     for (path, hash) in manifest["algorithm"].as_object().unwrap() {
-        if !entries
-            .iter()
-            .any(|e| e["path"] == *path && e["sha"] == *hash)
-        {
+        let directory = if path.starts_with("shared/") {
+            &shared
+        } else {
+            &src
+        };
+        let name = path.rsplit('/').next().unwrap();
+        if tree_entry(directory, name, "blob").ok() != hash.as_str() {
             return Err(failure("上游指纹算法已变化，请升级应用"));
         }
     }
@@ -340,12 +356,9 @@ async fn download(
         "data/shared_detector.bin",
         "data/tokenizer_bank.json",
     ] {
-        let expected = entries
-            .iter()
-            .find(|e| e["path"] == path && e["type"] == "blob")
-            .ok_or_else(|| failure("指纹资源缺失"))?;
+        let expected = tree_entry(&data, path.rsplit('/').next().unwrap(), "blob")?;
         let raw = read(&client, &format!("{raw_source}/{revision}/{path}")).await?;
-        if bank::git_blob_digest(&raw) != expected["sha"] {
+        if bank::git_blob_digest(&raw) != expected {
             return Err(failure("指纹资源内容校验失败"));
         }
         files.insert(path, raw);
@@ -412,17 +425,39 @@ mod tests {
                 serde_json::to_vec(&bundle.tokenizer).unwrap(),
             ),
         ]);
-        let mut entries: Vec<_> = bundle
-            .algorithm
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(path, sha)| json!({"path":path,"sha":sha,"type":"blob"}))
-            .collect();
-        entries.extend(files.iter().map(
-            |(path, bytes)| json!({"path":path,"sha":bank::git_blob_digest(bytes),"type":"blob"}),
-        ));
-        let tree = json!({"tree":entries,"truncated":false}).to_string();
+        let branch = |path: &str, sha: char| json!({"path":path,"sha":sha.to_string().repeat(40),"type":"tree"});
+        let algorithms = |prefix: &str| {
+            bundle
+                .algorithm
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter_map(|(path, sha)| {
+                    path.strip_prefix(prefix)
+                        .map(|path| json!({"path":path,"sha":sha,"type":"blob"}))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut src = algorithms("sdk/rust/src/");
+        // Transport and entry point changes are unrelated to offline scoring.
+        src.extend(
+            ["lib.rs", "request.rs", "sample.rs"]
+                .map(|path| json!({"path":path,"sha":"changed-sdk-transport","type":"blob"})),
+        );
+        let trees = HashMap::from([
+            (
+                "root".into(),
+                json!({"tree":[branch("data", 'd'), branch("sdk", 'e'), branch("shared", 'c')]}),
+            ),
+            (
+                "d".repeat(40),
+                json!({"tree":files.iter().map(|(path, bytes)| json!({"path":path.strip_prefix("data/").unwrap(),"sha":bank::git_blob_digest(bytes),"type":"blob"})).collect::<Vec<_>>()}),
+            ),
+            ("e".repeat(40), json!({"tree":[branch("rust", 'f')]})),
+            ("f".repeat(40), json!({"tree":[branch("src", 'a')]})),
+            ("a".repeat(40), json!({"tree":src})),
+            ("c".repeat(40), json!({"tree":algorithms("shared/")})),
+        ]);
         let mode = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let state = mode.clone();
@@ -430,14 +465,19 @@ mod tests {
         let pinned_revision = bundle.revision.clone();
         let port = server(move |request| {
             let path = request.uri().path().to_owned();
-            lock(&hits).push(path.clone());
+            lock(&hits).push(request.uri().to_string());
             let mode = state.load(Ordering::SeqCst);
             let reply = if mode == 2 {
                 response(503, "text/plain", "fixture unavailable")
             } else if path == "/commits/main" {
-                response(200, "application/json", json!({"sha":if mode == 0 { pinned_revision.clone() } else if mode == 3 { "2".repeat(40) } else { "1".repeat(40) }}).to_string())
-            } else if path.starts_with("/git/trees/") {
-                response(200, "application/json", tree.clone())
+                response(200, "application/json", json!({"sha":if mode == 0 { pinned_revision.clone() } else if mode >= 3 { "2".repeat(40) } else { "1".repeat(40) }}).to_string())
+            } else if let Some(sha) = path.strip_prefix("/git/trees/") {
+                let mut tree = trees.get(sha).unwrap_or(&trees["root"]).clone();
+                if mode == 4 && sha == "a".repeat(40) {
+                    tree["tree"][0]["sha"] = json!("incompatible-algorithm");
+                }
+                if mode == 5 { tree["truncated"] = true.into(); }
+                response(200, "application/json", tree.to_string())
             } else if let Some((_, name)) = path.split_once("/data/") {
                 if mode == 3 {
                     response(200, "application/octet-stream", "corrupt fixture")
@@ -465,6 +505,16 @@ mod tests {
         service.0.clock.fetch_add(1000, Ordering::SeqCst);
         let updated = service.update_lm_bank_from(&source, &source).await.unwrap();
         assert_eq!(updated["result"], "updated");
+        assert!(lock(&requests)
+            .iter()
+            .all(|path| !path.contains("recursive")));
+        assert_eq!(
+            lock(&requests)
+                .iter()
+                .filter(|path| path.contains("/data/"))
+                .count(),
+            3
+        );
         assert_eq!(updated["version"]["revision"], "1".repeat(40));
         assert_eq!(updated["updatedAt"], service.now());
         assert_eq!(original.version()["revision"], bundle.revision);
@@ -478,7 +528,7 @@ mod tests {
         assert_eq!(unchanged["result"], "up-to-date");
         assert_eq!(unchanged["updatedAt"], updated["updatedAt"]);
         assert_eq!(*lock(&requests), vec!["/commits/main"]);
-        for failure_mode in [2, 3] {
+        for failure_mode in [2, 3, 4, 5] {
             mode.store(failure_mode, Ordering::SeqCst);
             service.0.clock.fetch_add(1000, Ordering::SeqCst);
             let failed = service.update_lm_bank_from(&source, &source).await.unwrap();
@@ -662,7 +712,26 @@ mod tests {
         assert_eq!(std::fs::read(dir.path().join(CACHE)).unwrap(), original);
         assert_eq!(
             current.version()["revision"],
-            "567e11d65a48d4fbba2713cc4dfbe685cdd05a73"
+            "f920cfe2ff0bab94989ce01ac061e21425b6e321"
         );
+    }
+    #[test]
+    fn older_cache_transport_hashes_do_not_reject_compatible_scoring_data() {
+        let (dir, service) = fixture();
+        let mut legacy = unpack(BUNDLE).unwrap();
+        legacy.revision = "567e11d65a48d4fbba2713cc4dfbe685cdd05a73".into();
+        legacy.algorithm["sdk/rust/src/lib.rs"] = "old-sdk-entry".into();
+        legacy.algorithm["sdk/rust/src/request.rs"] = "old-sdk-transport".into();
+        legacy.algorithm["sdk/rust/src/data.rs"] = "old-loader".into();
+        std::fs::write(dir.path().join(CACHE), pack(&legacy)).unwrap();
+        assert_eq!(
+            service.lm_resource().unwrap().version()["revision"],
+            legacy.revision
+        );
+        let status = initial_status(dir.path());
+        assert_eq!(status["source"], "cache");
+        assert!(status["error"].is_null());
+        legacy.algorithm["sdk/rust/src/analysis.rs"] = "changed-scoring".into();
+        assert!(load(&pack(&legacy), true).is_err());
     }
 }

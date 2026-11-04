@@ -603,7 +603,6 @@ impl Service {
                     }
                 }
             }
-            self.query(|store| store.compact(now()))?;
             first_error.map_or(Ok(()), Err)
         })();
         if result.is_err() {

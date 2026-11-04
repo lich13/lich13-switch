@@ -113,13 +113,17 @@ fn snapshot(
     settings: &Settings,
 ) -> Result<u64> {
     let tx = db(spool.connection.unchecked_transaction())?;
+    let native = super::storage_v12::active(&store.connection);
+    let sql = if native {
+        "SELECT cast(r.rid AS TEXT),r.body,r.effective,r.duplicate_of FROM records r WHERE r.rid IN (SELECT rid FROM v12_rows NOT INDEXED WHERE rid>cast(?4 AS INTEGER) AND client=usage_label(?1) AND time BETWEEN ?2 AND ?3 ORDER BY rid LIMIT 128) ORDER BY r.rid"
+    } else {
+        "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time BETWEEN ?2 AND ?3 AND id>?4 ORDER BY id LIMIT 128"
+    };
     let mut pending = 0;
     for client in &request.clients {
         let mut after = String::new();
         loop {
-            let mut statement = db(store.connection.prepare(
-                "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time BETWEEN ?2 AND ?3 AND id>?4 ORDER BY id LIMIT 128",
-            ))?;
+            let mut statement = db(store.connection.prepare_cached(sql))?;
             let rows = db(statement.query_map(
                 params![client, request.start, request.end + 999, after],
                 |r| {
@@ -427,7 +431,6 @@ fn cleanup(
     result: &mut Exported,
 ) -> Result<()> {
     let mut after = String::new();
-    let mut any_batch = false;
     loop {
         let mut stmt = db(spool.connection.prepare(
             "SELECT id,original_digest FROM bill WHERE original_digest IS NOT NULL AND id>?1 ORDER BY id LIMIT 128",
@@ -437,19 +440,15 @@ fn cleanup(
         }))?;
         let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
         if rows.is_empty() {
-            if !any_batch {
-                service.query(|store| store.clean_exported_bill_batch(&[], request))?;
-            }
             break;
         }
-        any_batch = true;
         after = rows.last().unwrap().0.clone();
         let (cleaned, retained) =
             service.query(|store| store.clean_exported_bill_batch(&rows, request))?;
         result.cleaned += cleaned;
         result.retained += retained;
     }
-    Ok(())
+    service.query(|store| store.clean_exported_bill_daily(request))
 }
 impl Service {
     pub fn export_bill(&self, request: &Request, path: &Path) -> Result<Exported> {
@@ -920,5 +919,45 @@ mod tests {
             })
             .unwrap();
         assert_eq!(in_window_dashboard.totals.requests, 0);
+    }
+
+    #[test]
+    fn numeric_native_and_legacy_pages_export_identical_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut legacy = Store::open_v11_fixture(&dir.path().join("legacy")).unwrap();
+        let mut native = Store::open(&dir.path().join("native")).unwrap();
+        let mut rows: Vec<_> = (0..273)
+            .rev()
+            .map(|i| {
+                row(
+                    &format!("fixture-{i:03}"),
+                    if i % 2 == 0 { "claude" } else { "antigravity" },
+                    BASE + i,
+                )
+            })
+            .collect();
+        rows.push(row("outside", "claude", BASE - 1));
+        rows.push(row("other-client", "codex", BASE));
+        let mut pending = row("pending", "claude", BASE);
+        pending.started_at = BASE;
+        pending.finished_at = None;
+        pending.completed = false;
+        rows.push(pending);
+        let pricing = Pricing::new(dir.path()).unwrap();
+        let prices = pricing.frozen();
+        let mut csv = Vec::new();
+        for store in [&mut legacy, &mut native] {
+            store.write_batch(&rows, None).unwrap();
+            let spool = Spool::new(dir.path()).unwrap();
+            assert_eq!(
+                snapshot(store, &spool, &request(), &prices, &Settings::default()).unwrap(),
+                1
+            );
+            let mut bytes = Vec::new();
+            let result = write_csv(&spool, &request(), &mut bytes).unwrap();
+            assert_eq!((result.requests, result.attempts), (273, 273));
+            csv.push(bytes);
+        }
+        assert_eq!(csv[0], csv[1]);
     }
 }

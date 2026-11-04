@@ -315,6 +315,16 @@ fn now_ms() -> i64 {
 fn file_mtime_ms(path: &Path) -> Option<i64> {
     Some(epoch_dur(fs::metadata(path).ok()?.modified().ok()?).as_millis() as i64)
 }
+fn observed_activation_ms(paths: &Paths, enable_adc: bool) -> i64 {
+    let credential = if enable_adc {
+        paths.adc_file()
+    } else {
+        paths.oauth_file()
+    };
+    file_mtime_ms(&credential)
+        .map(|at| at.max(file_mtime_ms(&paths.config_file()).unwrap_or(at)))
+        .unwrap_or_else(now_ms)
+}
 fn clean_opt(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
@@ -747,15 +757,7 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
     };
     if let Some(id) = active_account_id(&state) {
         let since = if vault.activations.is_empty() {
-            file_mtime_ms(&paths.config_file())
-                .or_else(|| {
-                    file_mtime_ms(&if state.enable_adc {
-                        paths.adc_file()
-                    } else {
-                        paths.oauth_file()
-                    })
-                })
-                .unwrap_or_else(now_ms)
+            observed_activation_ms(paths, state.enable_adc)
         } else {
             now_ms()
         };
@@ -1092,8 +1094,7 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
             if let Some(e) = vault.entries.iter().find(|e| {
                 (e.kind == AccountKind::Adc) == en && entry_matches(e, Some(&d), em.as_deref())
             }) {
-                let mtime = file_mtime_ms(&p.config_file()).or_else(|| file_mtime_ms(&f));
-                push_span(&mut spans, &e.id, mtime.unwrap_or_else(now_ms));
+                push_span(&mut spans, &e.id, observed_activation_ms(&p, en));
             }
         }
     }
@@ -1103,17 +1104,9 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
             .as_deref()
             .and_then(|id| vault.entries.iter().find(|e| e.id == id))
         {
-            push_span(
-                &mut spans,
-                &entry.id,
-                i64::try_from(entry.updated_at.saturating_mul(1000)).unwrap_or(i64::MAX),
-            );
+            push_span(&mut spans, &entry.id, now_ms());
         } else if vault.entries.len() == 1 {
-            push_span(
-                &mut spans,
-                &vault.entries[0].id,
-                i64::try_from(vault.entries[0].updated_at.saturating_mul(1000)).unwrap_or(i64::MAX),
-            );
+            push_span(&mut spans, &vault.entries[0].id, now_ms());
         }
     }
     ProviderTimeline { spans }
@@ -1132,14 +1125,14 @@ async fn run_blocking(
         if sync {
             if let Ok(home) = crate::antigravity::home() {
                 let roots = vec![("antigravity".into(), Ok(home))];
-                let _ = rt.usage.sync_roots(roots, Some("antigravity"));
+                let _ = rt.usage.sync_roots(roots, None);
             }
         }
         let state = f(Paths::resolve(&rt.data)?, SystemAppLifecycle::default())?;
         if sync {
             if let Ok(home) = crate::antigravity::home() {
                 let roots = vec![("antigravity".into(), Ok(home))];
-                let _ = rt.usage.sync_roots(roots, Some("antigravity"));
+                let _ = rt.usage.sync_roots(roots, None);
             }
         }
         Ok(state)

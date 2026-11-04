@@ -2280,7 +2280,7 @@ async fn lm_single_and_three_samples_use_all_four_native_protocols_and_keep_snap
             assert!(!Arc::ptr_eq(&service.lm_resource().unwrap(), &resource));
             assert_eq!(
                 job.resource_version["revision"],
-                "567e11d65a48d4fbba2713cc4dfbe685cdd05a73"
+                "f920cfe2ff0bab94989ce01ac061e21425b6e321"
             );
             service
                 .set_platform(
@@ -3422,4 +3422,35 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
         protected.output.as_ref().map(|o| o.text.as_str()),
         Some("manual-output")
     );
+}
+
+#[test]
+fn offline_lm_payloads_preserve_sdk_protocol_defaults() {
+    for (protocol, expected) in [
+        (
+            "responses",
+            json!({"model":"fixture-model","input":[{"role":"user","content":"fixture prompt"}],"stream":true,"store":false,"client_metadata":{"fixture":"value"}}),
+        ),
+        (
+            "messages",
+            json!({"model":"fixture-model","messages":[{"role":"user","content":"fixture prompt"}],"max_tokens":8192,"stream":true}),
+        ),
+        (
+            "chat_completions",
+            json!({"model":"fixture-model","messages":[{"role":"user","content":"fixture prompt"}],"stream":true,"stream_options":{"include_usage":true}}),
+        ),
+    ] {
+        let mut target = fingerprint_stream::Target {
+            url: "https://example.invalid".into(),
+            headers: Default::default(),
+            proxy: None,
+            model: " fixture-model ".into(),
+            oauth: false,
+            protocol: protocol.into(),
+            client_metadata: Some(json!({"fixture":"value"})),
+        };
+        assert_eq!(target.lm_payload("fixture prompt").unwrap(), expected);
+        target.model = " ".into();
+        assert!(target.lm_payload("fixture prompt").is_err());
+    }
 }

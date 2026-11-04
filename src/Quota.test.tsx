@@ -780,3 +780,72 @@ it("enables manual refresh exactly when backoff expires with automatic refresh o
   await flush();
   expect(mock.command).toHaveBeenCalledTimes(1);
 });
+
+it.each(["manual", "event", "provider"])(
+  "reschedules a daily failure after %s recovery and respects visibility and retryAt",
+  async (source) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-25T00:00:00Z"));
+    provider.quota = {
+      ...result(),
+      state: "error",
+      nextRefreshAt: Date.now() / 1000 + 86_400,
+    };
+    mock.command.mockImplementation(async () => ({
+      ...result(),
+      nextRefreshAt: Date.now() / 1000 + 60,
+    }));
+    const view = render(<Harness />);
+    await flush();
+    expect(mock.command).not.toHaveBeenCalled();
+    if (source === "manual") {
+      fireEvent.click(
+        screen.getByRole("button", { name: `刷新 ${provider.name} 额度` }),
+      );
+    } else if (source === "event") {
+      act(() =>
+        mock.listeners.get("provider-quota")!({
+          clientId: "codex",
+          quota: {
+            ...result(),
+            nextRefreshAt: Date.now() / 1000 + 10,
+            retryAt: Date.now() / 1000 + 60,
+          },
+        }),
+      );
+    } else {
+      view.rerender(
+        <Harness
+          p={{
+            ...provider,
+            quota: { ...result(), nextRefreshAt: Date.now() / 1000 + 60 },
+          }}
+        />,
+      );
+    }
+    await flush();
+    const count = source === "manual" ? 1 : 0;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(59_999);
+    });
+    expect(mock.command).toHaveBeenCalledTimes(count);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mock.command).toHaveBeenCalledTimes(count + 1);
+    act(() => mock.listeners.get("app-visibility")!(false));
+    act(() =>
+      mock.listeners.get("provider-quota")!({
+        clientId: "codex",
+        quota: { ...result(), nextRefreshAt: Date.now() / 1000 + 10 },
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(mock.command).toHaveBeenCalledTimes(count + 1);
+    act(() => mock.listeners.get("app-visibility")!(true));
+    await flush();
+    expect(mock.command).toHaveBeenCalledTimes(count + 2);
+  },
+);

@@ -220,8 +220,6 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                 break;
             };
             if r.smoke.is_none() {
-                let maintenance = r.usage.clone();
-                let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
                 if r.usage.settings().auto_sync {
                     let roots = vec![
                         ("codex".into(), r.home(crate::gateway::ClientId::Codex)),
@@ -232,6 +230,8 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                     let s = r.usage.clone();
                     let _ = tokio::task::spawn_blocking(move || s.sync_roots(roots, None)).await;
                 }
+                let maintenance = r.usage.clone();
+                let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
             }
             drop(r);
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;

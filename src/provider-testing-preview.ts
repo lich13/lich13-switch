@@ -24,7 +24,7 @@ const bank: FingerprintBankState = {
 };
 const lmBank: FingerprintBankState = {
   ...bank,
-  version: { revision: "567e11d65a48d4fbba2713cc4dfbe685cdd05a73" },
+  version: { revision: "f920cfe2ff0bab94989ce01ac061e21425b6e321" },
   updatedAt: null,
   result: null,
 };
