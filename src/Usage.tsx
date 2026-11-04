@@ -332,8 +332,14 @@ export default function Usage({
             s.providers.map((p) => [p.id, p.name]),
           ),
         );
+        const formatAgAccount = (a: { name: string; kind?: string }) =>
+          a.kind === "adc"
+            ? `${a.name} (ADC)`
+            : a.kind === "oauth"
+              ? `${a.name} (OAuth)`
+              : a.name;
         const agMap = Object.fromEntries(
-          (ag?.accounts ?? []).map((a) => [a.id, a.name]),
+          (ag?.accounts ?? []).map((a) => [a.id, formatAgAccount(a)]),
         );
         setAgProviders(agMap);
         setProviders({ ...gw, ...agMap });
@@ -342,9 +348,19 @@ export default function Usage({
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("antigravity-auth-state", (ag) => {
       if (gone || !ag || typeof ag !== "object" || !("accounts" in ag)) return;
-      const accounts = (ag as { accounts: { id: string; name: string }[] })
-        .accounts;
-      const agMap = Object.fromEntries(accounts.map((a) => [a.id, a.name]));
+      const accounts = (
+        ag as { accounts: { id: string; name: string; kind?: string }[] }
+      ).accounts;
+      const agMap = Object.fromEntries(
+        accounts.map((a) => [
+          a.id,
+          a.kind === "adc"
+            ? `${a.name} (ADC)`
+            : a.kind === "oauth"
+              ? `${a.name} (OAuth)`
+              : a.name,
+        ]),
+      );
       setAgProviders(agMap);
       setProviders((prev) => ({ ...prev, ...agMap }));
     });
@@ -513,11 +529,11 @@ export default function Usage({
               {n}
             </option>
           ))}
-          {(client === "antigravity" || tab === "antigravity") &&
-            (provider === "session" ||
-              (agStats?.providers ?? []).some((p) => p.id === "session")) && (
-              <option value="session">本机会话（未归属）</option>
-            )}
+          {(client === "antigravity" ||
+            tab === "antigravity" ||
+            provider === "session") && (
+            <option value="session">本机会话（未归属）</option>
+          )}
         </select>
         <select
           aria-label="请求类型"

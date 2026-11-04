@@ -745,12 +745,21 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
         app_restarted: false,
         revision: String::new(),
     };
-    if vault.activations.len() == 1 && vault.activations[0].since_ms > 0 {
-        vault.activations[0].since_ms = 0;
-        dirty = true;
-    }
     if let Some(id) = active_account_id(&state) {
-        dirty |= push_span(&mut vault.activations, &id, now_ms());
+        let since = if vault.activations.is_empty() {
+            file_mtime_ms(&paths.config_file())
+                .or_else(|| {
+                    file_mtime_ms(&if state.enable_adc {
+                        paths.adc_file()
+                    } else {
+                        paths.oauth_file()
+                    })
+                })
+                .unwrap_or_else(now_ms)
+        } else {
+            now_ms()
+        };
+        dirty |= push_span(&mut vault.activations, &id, since);
     }
     if dirty {
         vault_rev = save_vault(paths, &vault)?;
@@ -1054,11 +1063,7 @@ fn push_span(spans: &mut Vec<ActivationSpan>, id: &str, fb_ms: i64) -> bool {
     if spans.last().map(|s| s.account_id.as_str()) == Some(id) {
         return false;
     }
-    let since_ms = if spans.is_empty() {
-        0
-    } else {
-        fb_ms.max(spans.last().map_or(0, |s| s.since_ms))
-    };
+    let since_ms = fb_ms.max(spans.last().map_or(0, |s| s.since_ms));
     spans.push(ActivationSpan {
         account_id: id.to_owned(),
         since_ms,
@@ -1074,9 +1079,6 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
         return ProviderTimeline::default();
     };
     let mut spans = vault.activations;
-    if spans.len() == 1 && spans[0].since_ms > 0 {
-        spans[0].since_ms = 0;
-    }
     if let Some(g) = gemini_home {
         let p = Paths {
             gemini_home: g.to_path_buf(),
@@ -1096,14 +1098,22 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
         }
     }
     if spans.is_empty() {
-        if let Some(id) = vault
+        if let Some(entry) = vault
             .active_oauth_id
             .as_deref()
-            .filter(|id| vault.entries.iter().any(|e| e.id == *id))
+            .and_then(|id| vault.entries.iter().find(|e| e.id == id))
         {
-            push_span(&mut spans, id, 0);
+            push_span(
+                &mut spans,
+                &entry.id,
+                i64::try_from(entry.updated_at.saturating_mul(1000)).unwrap_or(i64::MAX),
+            );
         } else if vault.entries.len() == 1 {
-            push_span(&mut spans, &vault.entries[0].id, 0);
+            push_span(
+                &mut spans,
+                &vault.entries[0].id,
+                i64::try_from(vault.entries[0].updated_at.saturating_mul(1000)).unwrap_or(i64::MAX),
+            );
         }
     }
     ProviderTimeline { spans }
@@ -1125,7 +1135,14 @@ async fn run_blocking(
                 let _ = rt.usage.sync_roots(roots, Some("antigravity"));
             }
         }
-        f(Paths::resolve(&rt.data)?, SystemAppLifecycle::default())
+        let state = f(Paths::resolve(&rt.data)?, SystemAppLifecycle::default())?;
+        if sync {
+            if let Ok(home) = crate::antigravity::home() {
+                let roots = vec![("antigravity".into(), Ok(home))];
+                let _ = rt.usage.sync_roots(roots, Some("antigravity"));
+            }
+        }
+        Ok(state)
     })
     .await
     .map_err(|_| err(code::PROCESS, msg))?

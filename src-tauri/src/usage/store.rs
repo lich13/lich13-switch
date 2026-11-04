@@ -564,15 +564,15 @@ impl Store {
         if storage_v12::pending(&self.connection) {
             return Ok(false);
         }
-        let v02618_done: bool = db(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02618' AND value='done')",
+        let v02619_done: bool = db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02619' AND value='done')",
             [],
             |r| r.get(0),
         ))?;
-        if !v02618_done {
+        if !v02619_done {
             db(self.connection.execute_batch(
-                "DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617');
-                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02618','done');",
+                "DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617','antigravity_fields_v02618');
+                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02619','done');",
             ))?;
         }
         let after: Option<String> = db(self

@@ -1178,6 +1178,9 @@ impl Api {
         repair: bool,
         timeline: &crate::antigravity::auth::ProviderTimeline,
     ) -> Result<()> {
+        let Some(active_endpoint) = owner else {
+            return Ok(());
+        };
         let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
         let mut cursor: Cursor = if repair {
             Cursor::default()
@@ -1200,9 +1203,6 @@ impl Api {
         if total.is_some_and(|n| n > 100_000) {
             return Err(failure("Antigravity 会话步骤超过读取限制"));
         }
-        let Some(active_endpoint) = owner else {
-            return Ok(());
-        };
         let mut steps = Steps::default();
         let mut failed_steps = BTreeSet::new();
         let mut wrote_any = false;
@@ -2090,16 +2090,11 @@ impl UsageStatsAggregator {
         row: super::storage_v12::AntigravityAttemptRow,
         pricing: &Pricing,
     ) {
-        if let Some(ref pf) = self.provider_filter {
-            let matches = if pf == "session" {
-                row.provider.is_none() || row.provider.as_deref() == Some("session")
-            } else {
-                row.provider.as_deref() == Some(pf.as_str())
-            };
-            if !matches {
-                return;
-            }
-        }
+        let matches_provider = match self.provider_filter.as_deref() {
+            Some("session") => row.provider.is_none() || row.provider.as_deref() == Some("session"),
+            Some(pf) => row.provider.as_deref() == Some(pf),
+            None => true,
+        };
         let (resolved_model, family, family_label, track) =
             classify_model_family(row.model.as_deref(), row.display_name.as_deref());
         let attempt_tokens = Tokens {
@@ -2120,7 +2115,7 @@ impl UsageStatsAggregator {
             .unwrap_or(rust_decimal::Decimal::ZERO);
         let is_unpriced_final = row.is_final && row.cost.is_none() && row.unpriced > 0;
 
-        if row.time >= self.start_7d && row.time <= self.anchor {
+        if matches_provider && row.time >= self.start_7d && row.time <= self.anchor {
             if let Some(track_id) = track {
                 let add_win = |win: &mut WindowAcc| {
                     if row.is_final {
@@ -2161,6 +2156,27 @@ impl UsageStatsAggregator {
             {
                 return;
             }
+        }
+
+        let prov_id = row
+            .provider
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("session")
+            .to_owned();
+        let prov = self.providers.entry(prov_id).or_default();
+        if row.is_final {
+            prov.requests += 1;
+            if is_unpriced_final {
+                prov.unpriced_requests += 1;
+            }
+        }
+        prov.tokens = prov.tokens.saturating_add(tok_total);
+        prov.reasoning_tokens = prov.reasoning_tokens.saturating_add(tok_reasoning);
+        prov.cost += row_cost;
+
+        if !matches_provider {
+            return;
         }
 
         if row.is_final {
@@ -2217,23 +2233,6 @@ impl UsageStatsAggregator {
             }
         }
 
-        let prov_id = row
-            .provider
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("session")
-            .to_owned();
-        let prov = self.providers.entry(prov_id).or_default();
-        if row.is_final {
-            prov.requests += 1;
-            if is_unpriced_final {
-                prov.unpriced_requests += 1;
-            }
-        }
-        prov.tokens = prov.tokens.saturating_add(tok_total);
-        prov.reasoning_tokens = prov.reasoning_tokens.saturating_add(tok_reasoning);
-        prov.cost += row_cost;
-
         let fam = self.families.entry(family).or_insert_with(|| FamilyAcc {
             label: family_label,
             ..FamilyAcc::default()
@@ -2285,6 +2284,7 @@ impl UsageStatsAggregator {
         let thinking_share_percent =
             round_pct(self.mix_reasoning.min(self.mix_output), self.mix_output);
         let cache_hit_percent = round_pct(self.cache_read_eligible, self.cache_input_eligible);
+        let providers_total_tokens: u64 = self.providers.values().map(|acc| acc.tokens).sum();
 
         let mut provider_rows: Vec<AntigravityProviderGroup> = self
             .providers
@@ -2296,7 +2296,7 @@ impl UsageStatsAggregator {
                 reasoning_tokens: acc.reasoning_tokens,
                 cost_usd: fmt_usd(acc.cost),
                 unpriced_requests: acc.unpriced_requests,
-                share_percent: round_pct(acc.tokens, mix_total).unwrap_or(0.0),
+                share_percent: round_pct(acc.tokens, providers_total_tokens).unwrap_or(0.0),
             })
             .collect();
         provider_rows.sort_by(|a, b| {

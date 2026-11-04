@@ -500,7 +500,12 @@ describe("usage records", () => {
       within(providerSelect)
         .getAllByRole("option")
         .map((o) => o.textContent),
-    ).toEqual(["全部供应商", "dev@example.invalid", "ADC 凭据 · prod-proj"]);
+    ).toEqual([
+      "全部供应商",
+      "dev@example.invalid (OAuth)",
+      "ADC 凭据 · prod-proj (ADC)",
+      "本机会话（未归属）",
+    ]);
 
     await userEvent.selectOptions(providerSelect, "ag-adc-1");
     await waitFor(() =>

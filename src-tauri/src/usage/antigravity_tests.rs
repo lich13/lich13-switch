@@ -1920,6 +1920,51 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
         .unwrap();
     assert_eq!(stats_oauth.requests, 1);
     assert_eq!(stats_oauth.token_mix.total, 125);
+    let mut filtered_provider_ids: Vec<String> =
+        stats_oauth.providers.iter().map(|p| p.id.clone()).collect();
+    filtered_provider_ids.sort();
+    assert_eq!(
+        filtered_provider_ids,
+        vec!["ag-adc-1", "ag-oauth-1", "session"]
+    );
+    let oauth_group = stats_oauth
+        .providers
+        .iter()
+        .find(|p| p.id == "ag-oauth-1")
+        .unwrap();
+    assert!(oauth_group.share_percent < 100.0 && oauth_group.share_percent > 0.0);
+
+    // Verify a single activation span with sinceMs > 0 is NOT zeroed out by provider_timeline.
+    let single_span_vault = serde_json::json!({
+        "schema": 1,
+        "entries": [
+            {
+                "id": "ag-oauth-1",
+                "name": "oauth@example.invalid",
+                "kind": "oauth",
+                "sourceType": "oauth",
+                "email": "oauth@example.invalid",
+                "projectId": null,
+                "payload": "{\"access_token\":\"tok-1\"}",
+                "updatedAt": 1792454400
+            }
+        ],
+        "activations": [
+            { "accountId": "ag-oauth-1", "sinceMs": 1_792_454_400_000i64 }
+        ]
+    });
+    std::fs::write(
+        dir.path().join("antigravity-accounts.json"),
+        serde_json::to_vec(&single_span_vault).unwrap(),
+    )
+    .unwrap();
+    let single_tl = crate::antigravity::auth::provider_timeline(dir.path(), Some(&ag_home));
+    assert_eq!(
+        single_tl.provider_at(1_792_368_001_000),
+        None,
+        "requests before a single activation span's sinceMs must remain unattributed"
+    );
+    assert_eq!(single_tl.provider_at(1_792_456_200_000), Some("ag-oauth-1"));
 
     let adc_only = Filter {
         client: Some("antigravity".into()),
