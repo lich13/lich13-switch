@@ -148,16 +148,6 @@ fn snapshot(
                 append(&spool.connection, &r, effective, Some(&digest))?;
             }
         }
-        let has_cleaned: bool = db(store.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM receipts WHERE client=?1 AND time BETWEEN ?2 AND ?3)",
-            params![client, request.start, request.end + 999],
-            |r| r.get(0),
-        ))?;
-        if has_cleaned {
-            return Err(failure(
-                "所选时间段包含已清理的历史请求，无法再次导出完整账单",
-            ));
-        }
     }
     db(tx.commit())?;
     Ok(pending)
@@ -437,6 +427,7 @@ fn cleanup(
     result: &mut Exported,
 ) -> Result<()> {
     let mut after = String::new();
+    let mut any_batch = false;
     loop {
         let mut stmt = db(spool.connection.prepare(
             "SELECT id,original_digest FROM bill WHERE original_digest IS NOT NULL AND id>?1 ORDER BY id LIMIT 128",
@@ -446,8 +437,12 @@ fn cleanup(
         }))?;
         let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
         if rows.is_empty() {
+            if !any_batch {
+                service.query(|store| store.clean_exported_bill_batch(&[], request))?;
+            }
             break;
         }
+        any_batch = true;
         after = rows.last().unwrap().0.clone();
         let (cleaned, retained) =
             service.query(|store| store.clean_exported_bill_batch(&rows, request))?;
@@ -654,9 +649,12 @@ mod tests {
             .query(|s| s.archive_batch(std::slice::from_ref(&r.id)))
             .unwrap();
         let recovered = Spool::new(dir.path()).unwrap();
-        assert!(service
-            .read(|s| snapshot(s, &recovered, &request(), &prices, &service.settings()))
-            .is_err());
+        assert_eq!(
+            service
+                .read(|s| snapshot(s, &recovered, &request(), &prices, &service.settings()))
+                .unwrap(),
+            0
+        );
     }
     #[test]
     fn arrivals_and_updates_during_source_replay_remain_for_next_export() {
@@ -720,6 +718,22 @@ mod tests {
         assert_eq!((cleaned_extra, retained_extra), (0, 2));
         assert!(service.read(|s| s.detail("out-of-range")).is_ok());
         assert!(service.read(|s| s.detail("in-progress")).is_ok());
+
+        in_progress.finished_at = Some(BASE);
+        in_progress.completed = true;
+        in_progress.attempts[0].outcome = "completed".into();
+        service
+            .query(|s| s.write_batch(std::slice::from_ref(&in_progress), None))
+            .unwrap();
+        let second = service
+            .export_bill(&req, &dir.path().join("bill-2.csv"))
+            .unwrap();
+        assert_eq!(second.requests, 3);
+        assert_eq!(second.cleaned, 3);
+        assert_eq!(second.retained, 0);
+        assert!(service.read(|s| s.detail("changed")).is_err());
+        assert!(service.read(|s| s.detail("in-progress")).is_err());
+        assert!(service.read(|s| s.detail("new")).is_err());
     }
     #[test]
     fn compacted_legacy_attempts_are_an_explicit_gap() {
@@ -826,8 +840,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(&dir.path().join("store"));
 
-        // 1) An old record archived into receipts before the export window.
-        let old_cleaned = row("old-cleaned", "antigravity", BASE - 10_000);
+        // 1) An old record archived into daily + receipts on the same UTC day as BASE.
+        let old_cleaned = row("old-cleaned", "antigravity", BASE + 100);
         // 2) A live record inside the export window.
         let live_in_window = row("live-in-window", "antigravity", BASE + 500);
         // 3) A history_file record inside the export window that must be exported and cleaned.
@@ -851,32 +865,50 @@ mod tests {
             .unwrap();
 
         let bill_path = dir.path().join("fuzzy-bill.csv");
-        let range_with_gap = Request {
-            clients: vec!["claude".into(), "antigravity".into()],
-            start: BASE - 20_000,
-            end: BASE + 1_000,
-            timezone: "UTC".into(),
-        };
-        let err = service
-            .export_bill(&range_with_gap, &bill_path)
-            .err()
-            .unwrap();
-        assert!(err.message.contains("包含已清理的历史请求"));
-        assert!(!bill_path.exists());
-
-        let valid_range = Request {
+        let partial_day_range = Request {
             clients: vec!["claude".into(), "antigravity".into()],
             start: BASE,
             end: BASE + 1_000,
             timezone: "UTC".into(),
         };
-        let exported = service.export_bill(&valid_range, &bill_path).unwrap();
+        let exported = service.export_bill(&partial_day_range, &bill_path).unwrap();
         assert_eq!(exported.requests, 2);
         assert_eq!(exported.cleaned, 2);
         assert_eq!(exported.retained, 0);
         assert!(exported.cleanup_error.is_none());
         assert!(service.read(|s| s.detail(&live_in_window.id)).is_err());
         assert!(service.read(|s| s.detail(&hist_in_window_id)).is_err());
+        // Partial-day export must NOT delete the daily aggregate row for the surrounding day.
+        let daily_after_partial: i64 = service
+            .read(|s| {
+                Ok(s.connection
+                    .query_row("SELECT COUNT(*) FROM daily", [], |r| r.get(0))
+                    .unwrap())
+            })
+            .unwrap();
+        assert_eq!(daily_after_partial, 2);
+
+        // Full-day export covering the entire day bucket cleans legacy daily rows even when no live records remain.
+        let full_day_range = Request {
+            clients: vec!["claude".into(), "antigravity".into()],
+            start: BASE - 86_400_000,
+            end: BASE + 172_800_000 - 1_000,
+            timezone: "UTC".into(),
+        };
+        let second = service
+            .export_bill(&full_day_range, &dir.path().join("full-day-bill.csv"))
+            .unwrap();
+        assert_eq!(second.requests, 0);
+        assert_eq!(second.cleaned, 0);
+        assert_eq!(second.retained, 0);
+        let daily_after_full: i64 = service
+            .read(|s| {
+                Ok(s.connection
+                    .query_row("SELECT COUNT(*) FROM daily", [], |r| r.get(0))
+                    .unwrap())
+            })
+            .unwrap();
+        assert_eq!(daily_after_full, 0);
         let in_window_dashboard = service
             .read(|s| {
                 s.dashboard(&Filter {

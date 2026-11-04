@@ -1114,8 +1114,8 @@ impl Store {
             }
             verified_ids.push(id.clone());
         }
+        let native = storage_v12::active(&tx);
         if !verified_ids.is_empty() {
-            let native = storage_v12::active(&tx);
             db(tx.execute_batch(
                 "CREATE TEMP TABLE IF NOT EXISTS archive_ids(id TEXT PRIMARY KEY,rid INTEGER); DELETE FROM archive_ids;",
             ))?;
@@ -1139,23 +1139,25 @@ impl Store {
                     [],
                 ))?;
             }
-            let day_start = query::bucket(request.start, DAY);
-            let day_end = query::bucket(request.end + 999, DAY);
-            let daily_metrics = if native {
-                "usage_daily_metrics"
-            } else {
-                "usage_metrics"
-            };
-            for client in &request.clients {
-                db(tx.execute(
-                    &format!("DELETE FROM {daily_metrics} WHERE kind=1 AND owner IN (SELECT id FROM daily WHERE day BETWEEN ?1 AND ?2 AND json_extract(body,'$.client')=?3)"),
-                    params![day_start, day_end, client],
-                ))?;
-                db(tx.execute(
-                    "DELETE FROM daily WHERE day BETWEEN ?1 AND ?2 AND json_extract(body,'$.client')=?3",
-                    params![day_start, day_end, client],
-                ))?;
-            }
+        }
+        let window_end = request.end.saturating_add(1_000);
+        let daily_metrics = if native {
+            "usage_daily_metrics"
+        } else {
+            "usage_metrics"
+        };
+        let mut daily_deleted = 0usize;
+        for client in &request.clients {
+            db(tx.execute(
+                &format!("DELETE FROM {daily_metrics} WHERE kind=1 AND owner IN (SELECT id FROM daily WHERE day>=?1 AND day+?3<=?2 AND usage_day_end(day)<=?2 AND json_extract(body,'$.client')=?4)"),
+                params![request.start, window_end, DAY, client],
+            ))?;
+            daily_deleted += db(tx.execute(
+                "DELETE FROM daily WHERE day>=?1 AND day+?3<=?2 AND usage_day_end(day)<=?2 AND json_extract(body,'$.client')=?4",
+                params![request.start, window_end, DAY, client],
+            ))?;
+        }
+        if !verified_ids.is_empty() || daily_deleted > 0 {
             query::changed(&tx)?;
         }
         db(tx.commit())?;
