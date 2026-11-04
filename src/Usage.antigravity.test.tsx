@@ -462,10 +462,16 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(tracks).getAllByText("7d 周滚动")).toHaveLength(2);
 
     const creds = screen.getByLabelText("账号与凭据分布");
-    expect(within(creds).getByText("oauth@example.invalid")).toBeInTheDocument();
-    expect(within(creds).getByText("ADC 凭据 · p1")).toBeInTheDocument();
+    expect(
+      within(creds).getByText("oauth@example.invalid (OAuth)"),
+    ).toBeInTheDocument();
+    expect(
+      within(creds).getByText("ADC 凭据 · p1 (ADC)"),
+    ).toBeInTheDocument();
     await user.click(
-      within(creds).getByRole("button", { name: "按 oauth@example.invalid 筛选" }),
+      within(creds).getByRole("button", {
+        name: "按 oauth@example.invalid (OAuth) 筛选",
+      }),
     );
 
     const sessions = screen.getByLabelText("脱敏会话排行");
