@@ -88,7 +88,10 @@ pub(super) fn effective(home: &Path, profile: &str) -> Result<(Input, String, bo
         [PI, DEFAULT]
             .iter()
             .any(|id| match (before.get(*id), input.configs.get(*id)) {
-                (Some(a), Some(b)) => !yaml_edit::yaml_eq(a, b),
+                (Some(a), Some(b)) => !equal(
+                    Some(YamlNode::Mapping(a.clone())),
+                    Some(YamlNode::Mapping(b.clone())),
+                ),
                 (None, None) => false,
                 _ => true,
             });

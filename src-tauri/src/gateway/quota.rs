@@ -140,11 +140,17 @@ impl Service {
         }
     }
     fn schedule(&self, v: &mut QuotaView) {
+        const FAILURE_BACKOFF_SECONDS: u64 = 86_400;
         let seconds = self.0.interval.load(Ordering::Relaxed);
+        let delay = if v.state == "ok" || v.state == "idle" {
+            seconds
+        } else {
+            seconds.max(FAILURE_BACKOFF_SECONDS)
+        };
         v.next_refresh_at = (seconds > 0).then(|| {
             v.checked_at
                 .unwrap_or(0)
-                .saturating_add(seconds)
+                .saturating_add(delay)
                 .max(v.retry_at.unwrap_or(0))
         });
         v.stale = v.success_at.is_some()
@@ -1021,5 +1027,35 @@ mod tests {
         assert!(
             newapi(&json!({"object":"billing_subscription","hard_limit_usd":100000000})).is_none()
         );
+    }
+
+    #[test]
+    fn failed_or_unsupported_quota_backs_off_to_one_day_and_restores_on_recovery() {
+        let service = Service::new();
+        service.set_interval(60);
+        let mut failed = QuotaView {
+            state: "error".into(),
+            checked_at: Some(1_000),
+            ..QuotaView::empty("p1", "v1")
+        };
+        service.schedule(&mut failed);
+        assert_eq!(failed.next_refresh_at, Some(1_000 + 86_400));
+
+        let mut unsupported = QuotaView {
+            state: "unsupported".into(),
+            checked_at: Some(2_000),
+            ..QuotaView::empty("p1", "v1")
+        };
+        service.schedule(&mut unsupported);
+        assert_eq!(unsupported.next_refresh_at, Some(2_000 + 86_400));
+
+        let mut recovered = QuotaView {
+            state: "ok".into(),
+            checked_at: Some(3_000),
+            success_at: Some(3_000),
+            ..QuotaView::empty("p1", "v1")
+        };
+        service.schedule(&mut recovered);
+        assert_eq!(recovered.next_refresh_at, Some(3_000 + 60));
     }
 }

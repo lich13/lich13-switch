@@ -737,19 +737,32 @@ describe("quota display and refresh", () => {
   });
 });
 
-it("waits the configured interval after failed automatic refreshes and preserves cached data", async () => {
+it("backs off failed automatic refreshes to one day, preserves cached data, and restores normal interval on recovery", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-25T00:00:00Z"));
   provider.quota = { ...result(), nextRefreshAt: Date.now() / 1000 - 1, retryAt: Date.now() / 1000 - 2 };
-  mock.command.mockRejectedValue(new Error("fixture quota failure"));
+  mock.command
+    .mockRejectedValueOnce(new Error("fixture quota failure"))
+    .mockImplementation(async () => ({
+      ...result(),
+      checkedAt: Date.now() / 1000,
+      successAt: Date.now() / 1000,
+      nextRefreshAt: Date.now() / 1000 + 60,
+    }));
   render(<Harness />);
   await flush();
   expect(mock.command).toHaveBeenCalledTimes(1);
   expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
-  await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(mock.command).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(86_400_000 - 60_001); });
   expect(mock.command).toHaveBeenCalledTimes(1);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   expect(mock.command).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+  expect(mock.command).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(mock.command).toHaveBeenCalledTimes(3);
 });
 
 it("enables manual refresh exactly when backoff expires with automatic refresh off", async () => {

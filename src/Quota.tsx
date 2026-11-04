@@ -87,13 +87,14 @@ export function useProviderQuota(
             cached?.version === provider.quotaVersion
               ? cached
               : (provider.quota ?? emptyQuota(provider));
+          const failureDelay = Math.max(refreshSeconds, 86_400);
           accept({
             ...previous,
             state: "error",
             stale: Boolean(previous.successAt),
             error: err.message,
             nextRefreshAt:
-              refreshSeconds > 0 ? Date.now() / 1000 + refreshSeconds : null,
+              refreshSeconds > 0 ? Date.now() / 1000 + failureDelay : null,
           });
         }
       } finally {
@@ -111,26 +112,40 @@ export function useProviderQuota(
     if (!active || !nativeVisible || !visible || !identity || refreshSeconds === 0) return;
     let cancelled = false;
     let timer: number;
+    const delayFor = (q: ProviderQuota | null | undefined) =>
+      q && q.state !== "ok" && q.state !== "idle"
+        ? Math.max(refreshSeconds, 86_400)
+        : refreshSeconds;
     const tick = async () => {
       const now = Date.now() / 1000;
-      let next = now + refreshSeconds;
+      let next = Infinity;
       const due: Promise<void>[] = [];
       for (const p of latest.current) {
         const cached = snapshots.current[p.id];
         const q = cached?.version === p.quotaVersion ? cached : p.quota;
-        const at = Math.max(q?.nextRefreshAt ?? (q?.checkedAt ? q.checkedAt + refreshSeconds : 0), q?.retryAt ?? 0);
+        const at = Math.max(
+          q?.nextRefreshAt ?? (q?.checkedAt ? q.checkedAt + delayFor(q) : 0),
+          q?.retryAt ?? 0,
+        );
         if (at <= now) due.push(refresh(p.id, false));
         else next = Math.min(next, at);
       }
       await Promise.all(due);
       if (!cancelled) {
-        next = Date.now()/1000 + refreshSeconds;
+        const afterNow = Date.now() / 1000;
+        next = Infinity;
         for (const p of latest.current) {
-          const cached=snapshots.current[p.id];
-          const q=cached?.version===p.quotaVersion ? cached : p.quota;
-          if(q?.nextRefreshAt) next=Math.min(next, Math.max(q.nextRefreshAt,q.retryAt??0));
+          const cached = snapshots.current[p.id];
+          const q = cached?.version === p.quotaVersion ? cached : p.quota;
+          const fallback = afterNow + delayFor(q);
+          const at = Math.max(q?.nextRefreshAt ?? fallback, q?.retryAt ?? 0);
+          next = Math.min(next, at);
         }
-        timer=window.setTimeout(tick,Math.max(1000,(next-Date.now()/1000)*1000));
+        if (!Number.isFinite(next)) next = afterNow + refreshSeconds;
+        timer = window.setTimeout(
+          tick,
+          Math.min(2_147_483_647, Math.max(1000, (next - afterNow) * 1000)),
+        );
       }
     };
     void tick();

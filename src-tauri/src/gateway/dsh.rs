@@ -732,18 +732,51 @@ fn owned_route(seq: &Sequence) -> Result<Option<YamlNode>> {
         .and_then(|c| c.get_mapping("providers"))
         .and_then(|p| p.get(ROUTE)))
 }
+fn scalar_equal(a: &yaml_edit::Scalar, b: &yaml_edit::Scalar) -> bool {
+    if a.is_quoted() != b.is_quoted() {
+        return false;
+    }
+    if a.is_quoted() {
+        return a.as_string() == b.as_string();
+    }
+    if a.is_null() || b.is_null() {
+        return a.is_null() && b.is_null();
+    }
+    if let (Some(x), Some(y)) = (a.as_bool(), b.as_bool()) {
+        return x == y;
+    }
+    if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
+        return x == y;
+    }
+    if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
+        return x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
+    }
+    a.as_string() == b.as_string()
+}
 fn equal(a: Option<YamlNode>, b: Option<YamlNode>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => {
             // Projection stores maps as JSON; key order must not change ownership.
             if let (Some(a), Some(b)) = (a.as_mapping(), b.as_mapping()) {
                 a.iter().count() == b.iter().count()
-                    && a.iter().all(|(key, value)| equal(Some(value), b.get(key)))
+                    && a.iter().all(|(key, value)| {
+                        let matched = b.get(&key).or_else(|| {
+                            b.entries()
+                                .find(|e| {
+                                    e.key_node()
+                                        .is_some_and(|bk| equal(Some(key.clone()), Some(bk)))
+                                })
+                                .and_then(|e| e.value_node())
+                        });
+                        equal(Some(value), matched)
+                    })
             } else if let (Some(a), Some(b)) = (a.as_sequence(), b.as_sequence()) {
                 a.values().count() == b.values().count()
                     && a.values()
                         .zip(b.values())
                         .all(|(a, b)| equal(Some(a), Some(b)))
+            } else if let (Some(a), Some(b)) = (a.as_scalar(), b.as_scalar()) {
+                scalar_equal(a, b)
             } else {
                 a.yaml_eq(&b)
             }
@@ -1917,6 +1950,29 @@ mod tests {
             .unwrap()
             .unwrap()
             .contains("fixture-local"));
+    }
+    #[test]
+    fn multiline_flow_mapping_trailing_integer_matches_single_line_route_snapshot() {
+        let dir = fixture();
+        let mut input = Input::read(dir.path(), "default").unwrap();
+        let snapshot = prepare(
+            &mut input,
+            options(Protocol::ChatCompletions),
+            "fixture-local",
+            43721,
+            &[],
+            None,
+        )
+        .unwrap();
+        let pretty_patch = input.patch.after.replace(
+            "\"streamIdleTimeoutMs\":300000,\"websocketConnectTimeoutMs\":300000}",
+            "\"streamIdleTimeoutMs\": 300000,\n              \"websocketConnectTimeoutMs\": 300000\n            }",
+        );
+        assert_ne!(pretty_patch, input.patch.after);
+        input.patch.before = Some(pretty_patch);
+        input.environment.before = Some(input.environment.after.clone());
+        input.credentials.before = Some(input.credentials.after.clone());
+        restore(&snapshot, &mut input).unwrap();
     }
 }
 
