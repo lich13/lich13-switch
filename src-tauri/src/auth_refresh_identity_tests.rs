@@ -813,10 +813,7 @@ fn deleting_the_selected_id_prevents_login_from_resurrecting_or_replacing_it() {
         let view = reopened.state().unwrap();
         assert_eq!(view.accounts.len(), usize::from(readd_identity));
         assert!(view.accounts.iter().all(|a| a.id != id));
-        assert_eq!(
-            std::fs::read(core.home().join("auth.json")).unwrap(),
-            original.as_bytes()
-        );
+        assert!(!core.home().join("auth.json").exists());
     }
 }
 

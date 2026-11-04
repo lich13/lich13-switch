@@ -354,7 +354,47 @@ fn rename_and_delete_account_prevent_active_deletion_and_suppress_reimport() {
 
     let s4 = delete_account_at(&paths, &adc_id, &s3.revision).unwrap();
     assert!(s4.accounts.is_empty());
-    let _ = lifecycle;
+    assert!(!paths.agswitch_adc_file().exists());
+
+    // When ADC 1 is active and ADC 2 is stored in agswitch_adc_file (inactive backup),
+    // deleting ADC 2 also removes the matching agswitch_adc_file without touching active ADC 1.
+    let au2 = serde_json::json!({
+        "type": "authorized_user",
+        "client_id": "cid2",
+        "client_secret": "sec2",
+        "refresh_token": "ref2"
+    });
+    let s5 = add_adc_at(
+        &paths,
+        &lifecycle,
+        AddAntigravityAdcInput {
+            name: Some("ADC Active".to_string()),
+            json_text: au.to_string(),
+            quota_project_id: None,
+            activate: true,
+        },
+    )
+    .unwrap();
+    assert!(!paths.agswitch_adc_file().exists());
+    let s6 = add_adc_at(
+        &paths,
+        &lifecycle,
+        AddAntigravityAdcInput {
+            name: Some("ADC Backup".to_string()),
+            json_text: au2.to_string(),
+            quota_project_id: None,
+            activate: false,
+        },
+    )
+    .unwrap();
+    let adc2_id = s6.accounts.iter().find(|a| !a.current).unwrap().id.clone();
+    write_private_file(&paths.agswitch_adc_file(), au2.to_string().as_bytes()).unwrap();
+    let s7 = state_at(&paths).unwrap();
+    let s8 = delete_account_at(&paths, &adc2_id, &s7.revision).unwrap();
+    assert_eq!(s8.accounts.len(), 1);
+    assert!(!paths.agswitch_adc_file().exists());
+    assert!(paths.adc_file().exists());
+    let _ = s5;
 }
 
 #[test]

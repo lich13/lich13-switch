@@ -37,7 +37,14 @@ fn owned(path: &Path, directory: bool) -> bool {
     }
 }
 
-fn clean_directory(path: &Path) -> bool {
+fn bill_entry_name(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("spool.sqlite3" | "spool.sqlite3-journal" | "spool.sqlite3-wal" | "spool.sqlite3-shm")
+    ) || allocated_name(name, ".tmp")
+}
+
+fn clean_directory_with(path: &Path, allowed_file: fn(&std::ffi::OsStr) -> bool) -> bool {
     if !owned(path, true) {
         return false;
     }
@@ -49,7 +56,7 @@ fn clean_directory(path: &Path) -> bool {
         let Ok(entry) = entry else {
             return false;
         };
-        if !allocated_name(&entry.file_name(), ".tmp") || !owned(&entry.path(), false) {
+        if !allowed_file(&entry.file_name()) || !owned(&entry.path(), false) {
             return false;
         }
         files.push(entry.path());
@@ -76,7 +83,6 @@ pub fn clean(data: &Path) -> usize {
         data.join("claude"),
         data.join("grok"),
         data.join("dsh"),
-        data.join("agy"),
     ] {
         if !owned(&root, true) {
             continue;
@@ -86,9 +92,21 @@ pub fn clean(data: &Path) -> usize {
         };
         for entry in entries.flatten() {
             if allocated_name(&entry.file_name(), "gateway-spool-")
-                && clean_directory(&entry.path())
+                && clean_directory_with(&entry.path(), |name| allocated_name(name, ".tmp"))
             {
                 removed += 1;
+            }
+        }
+    }
+    let usage = data.join("usage");
+    if owned(&usage, true) {
+        if let Ok(entries) = fs::read_dir(usage) {
+            for entry in entries.flatten() {
+                if allocated_name(&entry.file_name(), "bill-")
+                    && clean_directory_with(&entry.path(), bill_entry_name)
+                {
+                    removed += 1;
+                }
             }
         }
     }

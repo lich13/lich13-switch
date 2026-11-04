@@ -114,10 +114,7 @@ fn completed_same_identity_login_updates_current_file_and_clears_older_in_place(
         std::fs::read(core.home().join("config.toml")).unwrap(),
         CONFIG
     );
-    assert_eq!(
-        std::fs::read(core.data_dir.join("previous-auth.json")).unwrap(),
-        old.as_bytes()
-    );
+    assert!(!core.data_dir.join("previous-auth.json").exists());
     let saved_store: Store =
         serde_json::from_slice(&std::fs::read(core.data_dir.join("accounts.json")).unwrap())
             .unwrap();
@@ -223,13 +220,10 @@ fn observed_revision_with_newer_token_is_reprocessed_without_readding_deleted_id
     core.delete(&id).unwrap();
     let deleted = core.state().unwrap();
     assert!(deleted.accounts.is_empty());
-    assert_eq!(deleted.current_state, "unsaved");
+    assert_eq!(deleted.current_state, "missing");
     let mut reopened = Core::new(core.data_dir.clone(), core.home()).unwrap();
     assert!(reopened.state().unwrap().accounts.is_empty());
-    assert_eq!(
-        std::fs::read(core.home().join("auth.json")).unwrap(),
-        refreshed.as_bytes()
-    );
+    assert!(!core.home().join("auth.json").exists());
 }
 
 #[test]

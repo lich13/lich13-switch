@@ -791,6 +791,16 @@ fn delete_account(
     r: tauri::State<'_, Arc<Runtime>>,
     id: String,
 ) -> Result<ViewState> {
+    if let Ok(session) = r.login.lock() {
+        if login_active(&session.state)
+            && session.state.target_account_id.as_deref() == Some(id.as_str())
+        {
+            return Err(AppError::new(
+                code::LOGIN_BUSY,
+                "该账号正在刷新登录，请先取消或等待完成",
+            ));
+        }
+    }
     let mut core = lock(&r.core)?;
     if core.official_view().account_id.as_deref() == Some(id.as_str()) {
         return Err(AppError::new(
@@ -1895,18 +1905,19 @@ pub fn run() {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| user_home.join(".codex"))
                 });
+            let mut migration_error = None;
             if smoke.is_none() {
                 if let Some(dir) = dirs::data_dir() {
                     let legacy_dirs = [
                         dir.join("com.lich13.gpt-switch"),
                         dir.join("com.lich13.lich13-switch"),
                     ];
-                    migrations::migrate_to_vela_home(&data, &legacy_dirs)?;
+                    migration_error = migrations::migrate_to_vela_home(&data, &legacy_dirs).err();
                 }
             }
             // Single-instance registration has completed; no current spool exists yet.
             cleanup_spool::clean(&data);
-            let cleanup_error = migrations::before_services(&data).err();
+            let cleanup_error = migration_error.or_else(|| migrations::before_services(&data).err());
             let mut core = Core::new(data.clone(), home)?;
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
@@ -1926,6 +1937,9 @@ pub fn run() {
                 preferences.grok_home = fixture.path().join("grok").to_string_lossy().into_owned();
                 preferences.dsh_home = fixture.path().join("dsh").to_string_lossy().into_owned();
                 core.set_preferences(preferences)?;
+            }
+            if smoke.is_none() {
+                let _ = antigravity::auth::poll_state(&data);
             }
             let usage = usage::Service::new(&data);
             gateway.set_usage(usage.clone());

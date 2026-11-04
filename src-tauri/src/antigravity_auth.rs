@@ -745,13 +745,12 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
         app_restarted: false,
         revision: String::new(),
     };
+    if vault.activations.len() == 1 && vault.activations[0].since_ms > 0 {
+        vault.activations[0].since_ms = 0;
+        dirty = true;
+    }
     if let Some(id) = active_account_id(&state) {
-        let up = state
-            .accounts
-            .iter()
-            .find(|a| a.id == id)
-            .map_or(0, |a| a.updated_at);
-        dirty |= push_span(&mut vault.activations, &id, up, now_ms());
+        dirty |= push_span(&mut vault.activations, &id, now_ms());
     }
     if dirty {
         vault_rev = save_vault(paths, &vault)?;
@@ -832,7 +831,6 @@ fn with_lifecycle(
 }
 fn write_active_adc(paths: &Paths, bytes: &[u8]) -> Result<()> {
     write_private_file(&paths.adc_file(), bytes)?;
-    write_private_file(&paths.agswitch_adc_file(), bytes)?;
     restore_file(&paths.adc_disabled_file(), None)?;
     write_enable_adc(paths, true)
 }
@@ -988,7 +986,37 @@ pub fn delete_account_at(paths: &Paths, id: &str, rev: &str) -> Result<Antigravi
             ));
         }
         let (mut vault, _) = load_vault(paths)?;
-        let removed = vault.entries.remove(vault.index_of(id)?);
+        let idx = vault.index_of(id)?;
+        let target = vault.entries[idx].clone();
+        let candidates: Vec<PathBuf> = match target.kind {
+            AccountKind::Oauth => vec![paths.oauth_file()],
+            AccountKind::Adc => vec![
+                paths.adc_file(),
+                paths.adc_disabled_file(),
+                paths.agswitch_adc_file(),
+            ],
+        };
+        for f in candidates {
+            if let Some(raw) = read_text_optional(&f)? {
+                let d = payload_digest(&raw);
+                let em = (target.kind == AccountKind::Oauth)
+                    .then(|| parse_oauth_metadata(&raw).ok()?.1)
+                    .flatten();
+                let adc_value_matches = target.kind == AccountKind::Adc
+                    && serde_json::from_str::<Value>(&raw)
+                        .ok()
+                        .zip(serde_json::from_str::<Value>(&target.payload).ok())
+                        .is_some_and(|(a, b)| a == b);
+                if entry_matches(&target, Some(&d), em.as_deref()) || adc_value_matches {
+                    let meta = fs::symlink_metadata(&f).map_err(storage::io_error)?;
+                    if meta.file_type().is_symlink() || !meta.is_file() {
+                        return Err(err(code::SYMLINK, "拒绝删除非普通文件或符号链接的凭据文件"));
+                    }
+                    fs::remove_file(&f).map_err(storage::io_error)?;
+                }
+            }
+        }
+        let removed = vault.entries.remove(idx);
         remember_observed(&mut vault, &payload_digest(&removed.payload));
         if vault.active_oauth_id.as_deref() == Some(id) {
             vault.active_oauth_id = None;
@@ -1022,12 +1050,12 @@ pub fn active_account_id(state: &AntigravityAuthState) -> Option<String> {
         .or_else(|| state.accounts.iter().find(|a| a.current))
         .map(|a| a.id.clone())
 }
-fn push_span(spans: &mut Vec<ActivationSpan>, id: &str, updated_at: u64, fb_ms: i64) -> bool {
+fn push_span(spans: &mut Vec<ActivationSpan>, id: &str, fb_ms: i64) -> bool {
     if spans.last().map(|s| s.account_id.as_str()) == Some(id) {
         return false;
     }
     let since_ms = if spans.is_empty() {
-        (updated_at as i64).saturating_mul(1000)
+        0
     } else {
         fb_ms.max(spans.last().map_or(0, |s| s.since_ms))
     };
@@ -1046,6 +1074,9 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
         return ProviderTimeline::default();
     };
     let mut spans = vault.activations;
+    if spans.len() == 1 && spans[0].since_ms > 0 {
+        spans[0].since_ms = 0;
+    }
     if let Some(g) = gemini_home {
         let p = Paths {
             gemini_home: g.to_path_buf(),
@@ -1060,13 +1091,19 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
                 (e.kind == AccountKind::Adc) == en && entry_matches(e, Some(&d), em.as_deref())
             }) {
                 let mtime = file_mtime_ms(&p.config_file()).or_else(|| file_mtime_ms(&f));
-                push_span(
-                    &mut spans,
-                    &e.id,
-                    e.updated_at,
-                    mtime.unwrap_or_else(now_ms),
-                );
+                push_span(&mut spans, &e.id, mtime.unwrap_or_else(now_ms));
             }
+        }
+    }
+    if spans.is_empty() {
+        if let Some(id) = vault
+            .active_oauth_id
+            .as_deref()
+            .filter(|id| vault.entries.iter().any(|e| e.id == *id))
+        {
+            push_span(&mut spans, id, 0);
+        } else if vault.entries.len() == 1 {
+            push_span(&mut spans, &vault.entries[0].id, 0);
         }
     }
     ProviderTimeline { spans }

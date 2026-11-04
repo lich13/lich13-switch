@@ -64,6 +64,7 @@ struct Inner {
     pub prices: Option<Pricing>,
     settings: RwLock<Settings>,
     path: PathBuf,
+    data_dir: PathBuf,
     directory: PathBuf,
     writer: mpsc::SyncSender<Option<Record>>,
     overflow: mpsc::SyncSender<Record>,
@@ -189,6 +190,7 @@ impl Inner {
         if records.is_empty() && self.pending_error.lock().unwrap().is_none() {
             self.has_pending
                 .store(false, std::sync::atomic::Ordering::Release);
+            let _ = std::fs::remove_dir(self.directory.join("pending"));
         }
         records
     }
@@ -231,6 +233,7 @@ impl Service {
         let (writer, receiver) = mpsc::sync_channel::<Option<Record>>(256);
         let (overflow, pending) = mpsc::sync_channel::<Record>(64);
         let (events, _) = broadcast::channel(32);
+        let _ = std::fs::remove_dir(dir.join("pending"));
         let initial_pending = dir.join("pending").exists();
         let inner = Arc::new(Inner {
             store: Mutex::new(opened.ok()),
@@ -238,6 +241,7 @@ impl Service {
             prices: prices.ok(),
             settings: RwLock::new(settings),
             path,
+            data_dir: data.to_path_buf(),
             directory: dir,
             writer,
             overflow,
@@ -396,6 +400,7 @@ impl Service {
                                 });
                             if !any_left && inner.pending_error.lock().unwrap().is_none() {
                                 inner.has_pending.store(false, Ordering::Release);
+                                let _ = std::fs::remove_dir(inner.directory.join("pending"));
                             }
                         }
                     }
@@ -660,7 +665,7 @@ struct SessionStore {
 }
 impl sessions::Repository for SessionStore {
     fn data_dir(&self) -> Option<&Path> {
-        Some(&self.service.0.directory)
+        Some(&self.service.0.data_dir)
     }
     fn cursor(&self, id: &str) -> Result<Option<String>> {
         self.reader.cursor(id)

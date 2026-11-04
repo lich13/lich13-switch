@@ -2,6 +2,25 @@
 
 最新版本置顶。每个版本只记录用户可感知的变化、迁移影响和验证范围；下载文件请以对应 GitHub Release 为准。
 
+## v0.26.18 · 2026-11-04
+
+### 修复与调整
+
+- 修复 Antigravity 用量按凭据／账号归属、统计分栏拆解与无所属会话同步：修正 `usage::Service` 与 `Store::data_dir` 的 `~/.vela` 根目录解析，使同步与历史回填正确读取 `~/.vela/antigravity-accounts.json`；首次初始化 `activations` 时间轴时将首条当前凭据基线起点设为 `0`（并修正 `v0.26.17` 单段 `updated_at * 1000` 偏移），且在打开用量库前先完成一次凭据状态识别；Antigravity 统计面板新增“账号／凭据归属”卡片，支持按 `"session"`（未归属本机会话）筛选并在点选会话时保留当前凭据筛选；本地 `transcript.jsonl` 在当前运行实例中无匹配 `owner` 时跳过本地 RPC 请求，避免已删除线程触发同步失败。
+- 保留流超时事件日志、移除错误消息 `[已隐去]` 脱敏并修正表格与供应商展示：`events.jsonl` 重载白名单纳入 `STREAM_TIMEOUT`，避免重启丢失 Antigravity 流超时日志；`event_details::safe_message` 与事件日志保留完整报错文本（网关自动切换规则关键字校验内聚至 `failure_rules`）；修正价格映射前后端客户端枚举（移除 `"agy"`）与日志页供应商名称域名正则误判，移除请求明细表格左列多余的 `: 本机会话` 拼接。
+- 账单导出真正清理明细与统计并调整默认文件名：导出 CSV 保存成功后同步删除所选客户端截至结束时间的已完成明细与聚合统计（不再保留 `cleaned_receipts` 残影，进行中请求保留至下次导出），默认导出文件名改为 `<主机名>+<系统平台>.csv`。
+- 删除账号同步清理匹配的本机登录文件与精简 `~/.vela` 冗余文件：删除非当前激活的 Codex 账号或 Antigravity 凭据时，在校验目标状态后一并清理与之匹配的本机登录文件（如 `~/.codex/auth.json` 或对应的非激活 OAuth／ADC 文件）；停止写入并自动清理退役的 `~/.vela/previous-auth.json`、`~/.vela/agy/`、`accounts.json` 中的 `seenRoots`、残留 `usage/bill-*` 临时目录及空的 `usage/pending` 目录，停止向 `~/.config/agswitch/adc.json` 重复写入 ADC 凭据；启动迁移遇到旧目录摘要冲突时记录至启动提示横幅而不再阻断应用启动。
+
+### 兼容性与迁移
+
+- 升级启动自动执行 `antigravity_fields_v02618` 重算历史 Antigravity 记录的凭据归属，并自动清理 `~/.vela/previous-auth.json`、`~/.vela/agy/` 等退役文件与冗余字段。
+
+### 验证与下载
+
+- 已完成受影响模块测试、前端类型检查、构建、Clippy 与格式检查。macOS Apple Silicon 与 Windows x64 的完整回归、构建及安装冒烟由本版本标签 CI 执行。
+- Antigravity 凭据归属统计、账单导出后明细与统计同步清理、删除账号联动清理本机登录文件及完整报错日志展示待用户验收。
+- 下载对应 GitHub Release 的 `.dmg` 或 `.exe` 安装包，使用同页 `SHA256SUMS` 核对。
+
 ## v0.26.17 · 2026-11-04
 
 ### 修复与调整

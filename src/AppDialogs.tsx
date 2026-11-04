@@ -555,7 +555,7 @@ export function AccountEdit({
         </label>
       ) : (
         <p className="delete-copy">
-          从列表删除「{dialog.account.name}」？当前 Codex 登录文件会保留。
+          从列表删除「{dialog.account.name}」？若当前 Codex 登录文件属于该账号，将一并删除。
         </p>
       )}
       {error && (

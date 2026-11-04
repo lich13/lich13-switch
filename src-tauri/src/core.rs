@@ -62,7 +62,6 @@ struct Store {
     schema: u32,
     profiles: Vec<Profile>,
     preferences: Preferences,
-    seen_roots: Vec<String>,
     #[serde(default)]
     observed_auth_revisions: BTreeMap<String, String>,
     #[serde(default)]
@@ -577,7 +576,6 @@ impl Core {
                     quota_refresh_seconds: default_quota_refresh(),
                     system_notifications: true,
                 },
-                seen_roots: vec![],
                 observed_auth_revisions: BTreeMap::new(),
                 auth_sync_version: 1,
                 extensions: BTreeMap::new(),
@@ -600,7 +598,8 @@ impl Core {
             exchange: exchange::Service::default(),
             normalization_revision: std::cell::RefCell::new(Some(normalization_revision)),
         };
-        let removed_receiver = core.store.extensions.remove("linkReceiver").is_some();
+        let removed_receiver = core.store.extensions.remove("linkReceiver").is_some()
+            | core.store.extensions.remove("seenRoots").is_some();
         if core.store.auth_sync_version == 0 || removed_receiver {
             if core.store.auth_sync_version == 0 {
                 core.store.observed_auth_revisions.clear();
@@ -715,9 +714,6 @@ impl Core {
             .is_some_and(|current| current.matches(&info));
         let id = self.import_raw(raw, None)?;
         if active {
-            if let Some(previous) = &previous {
-                storage::atomic_write(&self.data_dir.join("previous-auth.json"), previous, None)?;
-            }
             storage::atomic_write(&path, raw.as_bytes(), Some(&expected)).map_err(|error| {
                 AppError::new(
                     &error.code,
@@ -881,23 +877,58 @@ impl Core {
         Ok(())
     }
     pub fn delete(&mut self, id: &str) -> Result<()> {
+        let target = self
+            .store
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::new(code::ACCOUNT, "账号不存在"))?;
+        if self.official_view().account_id.as_deref() == Some(id) {
+            return Err(AppError::new(
+                code::OFFICIAL_MODE,
+                "请先关闭官方账号连接，再删除该账号",
+            ));
+        }
+        let home = self.home();
+        if crate::gateway::manages_auth(&self.data_dir, &home) {
+            return Err(AppError::new(
+                code::GATEWAY_ACTIVE,
+                "请先关闭普通 API 网关并处理恢复事务，再删除账号",
+            ));
+        }
+        let auth_path = home.join("auth.json");
         let old = self.store.clone();
-        if let Ok(Some(bytes)) = storage::read_optional(&self.home().join("auth.json")) {
-            if let Some(info) = std::str::from_utf8(&bytes)
-                .ok()
-                .and_then(|raw| auth_info(raw).ok())
-            {
-                if self
-                    .store
-                    .profiles
-                    .iter()
-                    .any(|p| p.id == id && auth_info(&p.auth).is_ok_and(|p| p.matches(&info)))
-                {
-                    self.store.observed_auth_revisions.insert(
-                        self.store.preferences.codex_home.clone(),
-                        storage::digest(&bytes),
-                    );
+        if let Some(bytes) = storage::read_optional(&auth_path)? {
+            let matches_disk = bytes == target.auth.as_bytes()
+                || std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|raw| auth_info(raw).ok())
+                    .is_some_and(|disk| auth_info(&target.auth).is_ok_and(|p| p.matches(&disk)));
+            if matches_disk {
+                let meta = std::fs::symlink_metadata(&auth_path).map_err(storage::io_error)?;
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    return Err(AppError::new(
+                        code::SYMLINK,
+                        "拒绝删除非普通文件或符号链接的 auth.json",
+                    ));
                 }
+                std::fs::remove_file(&auth_path).map_err(|e| {
+                    AppError::new(
+                        code::IO,
+                        &format!("无法删除登录凭据文件 auth.json ({e})，账号库未修改"),
+                    )
+                })?;
+                #[cfg(unix)]
+                if let Some(parent) = auth_path.parent() {
+                    let _ = std::fs::File::open(parent).and_then(|f| f.sync_all());
+                }
+                self.auth_cache.clear();
+                self.checked_auth = None;
+                self.store.observed_auth_revisions.insert(
+                    self.store.preferences.codex_home.clone(),
+                    storage::revision(None),
+                );
             }
         }
         self.store.profiles.retain(|p| p.id != id);
@@ -1168,9 +1199,6 @@ impl Core {
         if storage::revision(previous.as_deref()) != expected {
             return Err(AppError::new(code::CONFLICT, "账号文件已变化，请重新选择"));
         }
-        if let Some(bytes) = previous {
-            storage::atomic_write(&self.data_dir.join("previous-auth.json"), &bytes, None)?;
-        }
         storage::atomic_write(&path, raw.as_bytes(), Some(expected))?;
         self.state()
     }
@@ -1288,6 +1316,9 @@ mod tests {
             .insert("linkReceiver".into(), json!("fixture-retired-app"));
         core.store
             .extensions
+            .insert("seenRoots".into(), json!(["/tmp/codex"]));
+        core.store
+            .extensions
             .insert("fixtureExtension".into(), json!({"keep": true}));
         core.persist().unwrap();
         let mut loaded = Core::new(dir.path().join("app"), core.home()).unwrap();
@@ -1296,6 +1327,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(dir.path().join("app/accounts.json")).unwrap())
                 .unwrap();
         assert!(value.get("linkReceiver").is_none());
+        assert!(value.get("seenRoots").is_none());
         assert_eq!(value["fixtureExtension"]["keep"], true);
     }
     fn jwt(subject: &str) -> String {
@@ -1412,10 +1444,21 @@ mod tests {
         let (t, mut c) = setup();
         let a = c.add_api_key("A", "test").unwrap();
         c.switch_account(&a, "missing").unwrap();
+        assert!(!c.data_dir.join("previous-auth.json").exists());
+        assert_eq!(c.delete("nonexistent").unwrap_err().code, code::ACCOUNT);
         c.delete(&a).unwrap();
+        assert!(!c.home().join("auth.json").exists());
         let mut reopened = Core::new(t.path().join("app"), c.home()).unwrap();
         assert!(reopened.state().unwrap().accounts.is_empty());
-        assert_eq!(reopened.state().unwrap().current_state, "unsaved");
+        assert_eq!(reopened.state().unwrap().current_state, "missing");
+
+        // Deleting a non-current account preserves the active auth.json of another account.
+        let b = reopened.add_api_key("B", "key-b").unwrap();
+        let c_id = reopened.add_api_key("C", "key-c").unwrap();
+        reopened.switch_account(&b, "missing").unwrap();
+        reopened.delete(&c_id).unwrap();
+        assert!(reopened.home().join("auth.json").exists());
+        assert_eq!(reopened.state().unwrap().accounts.len(), 1);
     }
     #[test]
     fn bearer_provider_without_account_does_not_report_missing_auth() {
