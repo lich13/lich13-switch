@@ -79,6 +79,60 @@ async function flush() {
     await Promise.resolve();
   });
 }
+
+it("waits for a slow provider when another provider reschedules polling", async () => {
+  vi.useFakeTimers();
+  const second = { ...provider, id: "fixture-second" };
+  const finish = new Map<string, (q: ProviderQuota) => void>();
+  mock.command.mockImplementation(
+    (_name, args) =>
+      new Promise((resolve) => finish.set(args.providerId, resolve)),
+  );
+  let waiting: Promise<void> | undefined;
+  function Pair() {
+    const q = useProviderQuota([provider, second], true);
+    return (
+      <button
+        onClick={() => {
+          waiting = q.refresh(second.id);
+        }}
+      >
+        wait
+      </button>
+    );
+  }
+  render(<Pair />);
+  await flush();
+  expect(mock.command).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    finish.get(provider.id)!({
+      ...result(),
+      nextRefreshAt: Date.now() / 1000 + 60,
+    });
+  });
+  fireEvent.click(screen.getByText("wait"));
+  let settled = false;
+  void waiting!.then(() => {
+    settled = true;
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(settled).toBe(false);
+  expect(mock.command).toHaveBeenCalledTimes(2);
+  expect(vi.getTimerCount()).toBe(0);
+  await act(async () => {
+    finish.get(second.id)!({
+      ...result(),
+      providerId: second.id,
+      version: second.quotaVersion,
+      nextRefreshAt: Date.now() / 1000 + 60,
+    });
+    await waiting;
+  });
+  expect(settled).toBe(true);
+  expect(vi.getTimerCount()).toBe(1);
+});
 beforeEach(() => {
   localStorage.clear();
   provider = structuredClone(gatewayDemo.providers[0]);

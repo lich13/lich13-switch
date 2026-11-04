@@ -98,7 +98,6 @@ export default function AccountExchange({ mode, close, update, notify }: {
       await command("select_account_template", { token: template.token, id });
       templateToken.current = null; setTemplate(null);
     })} /> : <>
-      {mode === "import" && preview?.rows.some(r => r.duplicate) && <p className="muted">重复账号默认跳过，勾选后更新其凭据。</p>}
       <label className="exchange-select-all"><input type="checkbox" disabled={busy || !available.length}
         checked={available.length > 0 && available.every(id => selected.includes(id))}
         onChange={e => setSelected(e.target.checked ? available : [])} />

@@ -24,7 +24,9 @@ it("exports the selected clients at second boundaries and distinguishes cleanup 
   );
   expect(screen.getByLabelText("开始")).toHaveAttribute("step", "1");
   expect(screen.getByText(/已导出明细与统计汇总/)).toBeVisible();
-  expect(screen.getByText(/同步清理该范围的明细与统计汇总/)).toBeVisible();
+  expect(
+    screen.queryByText(/同步清理该范围的明细与统计汇总/),
+  ).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "导出并清理" }));
   await waitFor(() => expect(saved).toHaveBeenCalled());
   expect(mock.command).toHaveBeenCalledWith("export_usage_bill", {

@@ -1989,3 +1989,107 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
         .unwrap();
     assert_eq!(stats_session.requests, 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credential_switch_reuses_incremental_cursors_before_and_after() {
+    use crate::antigravity::auth::{self, AppLifecycle};
+    struct Lifecycle;
+    impl AppLifecycle for Lifecycle {
+        fn is_running(&self) -> Result<bool> {
+            Ok(false)
+        }
+        fn quit(&self) -> Result<()> {
+            Ok(())
+        }
+        fn launch(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    let fixture = fixture(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = auth::Paths::from_roots(&dir.path().join("home"), &dir.path().join("auth"));
+    std::fs::create_dir_all(paths.oauth_file().parent().unwrap()).unwrap();
+    std::fs::write(
+        paths.oauth_file(),
+        br#"{"email":"fixture@example.invalid","access_token":"fixture-oauth"}"#,
+    )
+    .unwrap();
+    let initial = auth::state_at(&paths).unwrap();
+    let oauth = initial.accounts[0].id.clone();
+    let added = auth::add_adc_at(&paths, &Lifecycle, auth::AddAntigravityAdcInput {
+        name: Some("Fixture ADC".into()), json_text: r#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#.into(), quota_project_id: None, activate: false,
+    }).unwrap();
+    let adc = added
+        .accounts
+        .iter()
+        .find(|a| a.id != oauth)
+        .unwrap()
+        .id
+        .clone();
+    let mut store = Store::open(&dir.path().join("usage")).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let settings = Settings::default();
+    collect_home(
+        &fixture.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut Report::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    let key = safe_id("antigravity:rpc:z-good");
+    let before: Cursor = serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
+    fixture.calls.lock().unwrap().clear();
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let mut syncs = 0;
+        let state = auth::with_usage_sync(
+            true,
+            |rebuild| {
+                assert!(rebuild.is_none());
+                assert!(store.cursor(&key).unwrap().is_some());
+                handle
+                    .block_on(collect_home(
+                        &fixture.api,
+                        &mut store,
+                        dir.path(),
+                        &pricing,
+                        &settings,
+                        &mut Report::default(),
+                        rebuild.is_some(),
+                    ))
+                    .unwrap();
+                let cursor: Cursor =
+                    serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
+                assert!(cursor.count >= before.count);
+                assert!(cursor.covered.is_superset(&before.covered));
+                syncs += 1;
+            },
+            || {
+                let switched = auth::switch_account_at(&paths, &Lifecycle, &adc, &added.revision)?;
+                *fixture.changed.lock().unwrap() = "after-switch".into();
+                Ok(switched)
+            },
+        )
+        .unwrap();
+        assert_eq!(state.mode, auth::AuthMode::Adc);
+        assert_eq!(syncs, 2);
+        assert_eq!(
+            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            2
+        );
+        let calls = fixture.calls.lock().unwrap();
+        assert!(!calls.iter().any(|(m, _)| m == "GetCascadeTrajectory"));
+        assert!(calls
+            .iter()
+            .any(|(m, b)| m == "GetCascadeTrajectorySteps" && b["stepOffset"] == 1));
+        assert!(!calls
+            .iter()
+            .any(|(m, b)| m == "GetCascadeTrajectorySteps" && b["stepOffset"] == 0));
+    })
+    .await
+    .unwrap();
+}

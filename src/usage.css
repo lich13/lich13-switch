@@ -1290,11 +1290,6 @@
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
-.usage-bill-rule {
-  margin: 0;
-  line-height: 1.6;
-  font-size: inherit;
-}
 .usage-bill-form .modal-actions {
   margin: 0;
 }

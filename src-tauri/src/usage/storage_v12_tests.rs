@@ -1978,3 +1978,78 @@ fn v12_final_cutover_rejects_corrupt_detail_before_switch_and_keeps_legacy_autho
         );
     }
 }
+
+#[test]
+fn native_reads_backfill_counts_and_archive_match_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let pricing = Pricing::new(&dir.path().join("prices")).unwrap();
+    let rows: Vec<_> = (0..137)
+        .map(|i| {
+            let mut r = record(
+                &format!("fixture-native-read-{i}"),
+                "codex",
+                BASE + i,
+                None,
+                100 + i as u64,
+                20,
+            );
+            r.attempts[0].requested_model = Some("gpt-4o".into());
+            r.attempts[0].response_model = Some("gpt-4o".into());
+            r.attempts[0].pricing_model = Some("gpt-4o".into());
+            r
+        })
+        .collect();
+    let mut results = Vec::new();
+    for native in [false, true] {
+        let mut store = if native {
+            Store::open(&dir.path().join("native"))
+        } else {
+            Store::open_v11_fixture(&dir.path().join("legacy"))
+        }
+        .unwrap();
+        store.write_batch(&rows, None).unwrap();
+        let table = if native { "v12_rows" } else { "records" };
+        store
+            .connection
+            .execute(
+                &format!("UPDATE {table} SET effective=2 WHERE time%3=0"),
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                &format!("UPDATE {table} SET effective=0 WHERE time%3=1"),
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.source_counts("codex").unwrap(), (46, 46, 0));
+        assert_eq!(store.source_counts("missing").unwrap(), (0, 0, 0));
+        store.backfill(&pricing).unwrap();
+        assert!(store.detail(&rows[0].id).unwrap().attempts[0]
+            .price
+            .is_some());
+        let page = store
+            .logs(&Filter {
+                page: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        let before = store.dashboard(&Filter::default()).unwrap().totals;
+        for chunk in rows.chunks(50) {
+            store
+                .archive_batch(&chunk.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
+                .unwrap();
+        }
+        let after = store.dashboard(&Filter::default()).unwrap().totals;
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+        results.push((
+            serde_json::to_value(page.rows).unwrap(),
+            serde_json::to_value(after).unwrap(),
+        ));
+    }
+    assert_eq!(results[0], results[1]);
+}

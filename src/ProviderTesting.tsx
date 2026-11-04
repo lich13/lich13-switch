@@ -1,5 +1,4 @@
 import { flushTestPrompt, useTestPrompt } from "./provider-test-prompt";
-import { clientName } from "./ClientSelection";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Copy, RefreshCw } from "lucide-react";
 import { command } from "./bridge";
@@ -527,16 +526,10 @@ export default function ProviderTesting({
     });
   const catalogStatus = (
     <>
-      {catalogLoading ? (
+      {catalogLoading && (
         <p className="provider-test-hint" role="status">
           正在读取模型目录…
         </p>
-      ) : (
-        !models?.fetchedAt && (
-          <p className="provider-test-hint">
-            尚未缓存该端点模型，点击重新拉取。
-          </p>
-        )
       )}
       {models?.fetchedAt && (
         <p className="provider-test-hint">上次拉取 {date(models.fetchedAt)}</p>
@@ -621,9 +614,7 @@ export default function ProviderTesting({
                     disabled={busy || !!running.length}
                     onChange={(e) => setTokenizer(e.target.checked)}
                   />
-                  <span>
-                    附加分词器探测 <small>最多 22 次短请求，仅供参考</small>
-                  </span>
+                  <span>附加分词器探测</span>
                 </label>
               )}
             </div>
@@ -758,10 +749,6 @@ export default function ProviderTesting({
                 }
               />
             </label>
-            <p className="provider-test-hint">
-              {clientName(gateway.clientId)}{" "}
-              的所有供应商共用检测源和组数，改选后自动保存，新任务生效。模型、端点和周期仅用于本供应商。
-            </p>
             {platformControls(false)}
             <div className="provider-test-detection-config">
               {endpointSelect(detection.endpoint ?? provider.baseUrl, (value) =>
@@ -1383,9 +1370,6 @@ function TestResult({
                 : ` · ${job.tokenizerResult.verdict.kind === "exact" ? "匹配" : "相近"} ${job.tokenizerResult.verdict.top.id}`
               : ""}
           </summary>
-          <p className="provider-test-hint">
-            分词器结果独立展示，不参与降智判定或退队。
-          </p>
           {job.tokenizerResult.baselineDrift && (
             <p className="provider-test-hint">
               两次对照用量不一致，上游可能添加了变化的隐藏输入。

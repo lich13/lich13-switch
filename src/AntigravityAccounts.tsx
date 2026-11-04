@@ -448,15 +448,6 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                 );
               }}
             >
-              <div className="ag-adc-guide">
-                <p>
-                  支持导入 <code>gcloud auth application-default login</code> 生成的{" "}
-                  <code>authorized_user</code> JSON，或包含完整{" "}
-                  <code>private_key / client_email / project_id</code> 的{" "}
-                  <code>service_account</code> 密钥文件。
-                </p>
-              </div>
-
               <label>
                 备注名称（可选）
                 <input

@@ -315,14 +315,20 @@ fn now_ms() -> i64 {
 fn file_mtime_ms(path: &Path) -> Option<i64> {
     Some(epoch_dur(fs::metadata(path).ok()?.modified().ok()?).as_millis() as i64)
 }
-fn observed_activation_ms(paths: &Paths, enable_adc: bool) -> i64 {
+fn observed_activation_ms(paths: &Paths, enable_adc: bool, initial: bool) -> i64 {
     let credential = if enable_adc {
         paths.adc_file()
     } else {
         paths.oauth_file()
     };
     file_mtime_ms(&credential)
-        .map(|at| at.max(file_mtime_ms(&paths.config_file()).unwrap_or(at)))
+        .map(|at| {
+            if enable_adc || !initial {
+                at.max(file_mtime_ms(&paths.config_file()).unwrap_or(at))
+            } else {
+                at
+            }
+        })
         .unwrap_or_else(now_ms)
 }
 fn clean_opt(raw: Option<&str>) -> Option<String> {
@@ -757,7 +763,7 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
     };
     if let Some(id) = active_account_id(&state) {
         let since = if vault.activations.is_empty() {
-            observed_activation_ms(paths, state.enable_adc)
+            observed_activation_ms(paths, state.enable_adc, true)
         } else {
             now_ms()
         };
@@ -1094,7 +1100,8 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
             if let Some(e) = vault.entries.iter().find(|e| {
                 (e.kind == AccountKind::Adc) == en && entry_matches(e, Some(&d), em.as_deref())
             }) {
-                push_span(&mut spans, &e.id, observed_activation_ms(&p, en));
+                let since = observed_activation_ms(&p, en, spans.is_empty());
+                push_span(&mut spans, &e.id, since);
             }
         }
     }
@@ -1114,6 +1121,20 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
 pub fn poll_state(data_dir: &Path) -> Result<(AntigravityAuthState, bool)> {
     with_lock(|| state_with_health(&Paths::resolve(data_dir)?))
 }
+pub(crate) fn with_usage_sync<T>(
+    sync: bool,
+    mut synchronize: impl FnMut(Option<&str>),
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if sync {
+        synchronize(None);
+    }
+    let state = action()?;
+    if sync {
+        synchronize(None);
+    }
+    Ok(state)
+}
 async fn run_blocking(
     r: R<'_>,
     sync: bool,
@@ -1122,20 +1143,16 @@ async fn run_blocking(
 ) -> Result<AntigravityAuthState> {
     let rt = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if sync {
-            if let Ok(home) = crate::antigravity::home() {
-                let roots = vec![("antigravity".into(), Ok(home))];
-                let _ = rt.usage.sync_roots(roots, None);
-            }
-        }
-        let state = f(Paths::resolve(&rt.data)?, SystemAppLifecycle::default())?;
-        if sync {
-            if let Ok(home) = crate::antigravity::home() {
-                let roots = vec![("antigravity".into(), Ok(home))];
-                let _ = rt.usage.sync_roots(roots, None);
-            }
-        }
-        Ok(state)
+        with_usage_sync(
+            sync,
+            |rebuild| {
+                if let Ok(home) = crate::antigravity::home() {
+                    let roots = vec![("antigravity".into(), Ok(home))];
+                    let _ = rt.usage.sync_roots(roots, rebuild);
+                }
+            },
+            || f(Paths::resolve(&rt.data)?, SystemAppLifecycle::default()),
+        )
     })
     .await
     .map_err(|_| err(code::PROCESS, msg))?

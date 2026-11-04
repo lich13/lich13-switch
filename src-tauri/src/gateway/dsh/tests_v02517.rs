@@ -618,3 +618,230 @@ async fn identical_model_mapping_preserves_body_bytes_and_content_encoding() {
     }
     fixture.gateway.stop().await.unwrap();
 }
+
+fn retry_settings(fixture: &Fixture, limit: usize) {
+    let mut settings = fixture.gateway.view().settings;
+    settings.max_retries = limit;
+    settings.failure_threshold = 4;
+    settings.transient_failure_threshold = 6;
+    settings.retry_budget_seconds = 30;
+    fixture
+        .gateway
+        .edit(
+            Edit::Settings { settings },
+            &fixture.gateway.view().revision,
+            fixture.home.path(),
+        )
+        .unwrap();
+    fixture
+        .gateway
+        .edit(
+            Edit::RpmProvider {
+                id: fixture.gateway.view().providers[0].id.clone(),
+                max_rpm: 100,
+            },
+            &fixture.gateway.view().revision,
+            fixture.home.path(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn fixed_provider_retries_service_errors_before_delivery() {
+    for manual in [false, true] {
+        for framed in [false, true] {
+            let calls = Arc::new(Mutex::new(0));
+            let seen = calls.clone();
+            let upstream = server(move |request| {
+                let seen = seen.clone();
+                async move {
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    let value: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(value["model"], "vendor-0-flash");
+                    let count = { let mut count = seen.lock().unwrap(); *count += 1; *count };
+                    if count == 1 {
+                        if framed {
+                            Response::builder().header("content-type", "text/event-stream")
+                                .body(replay::full("data: {\"error\":{\"type\":\"server_error\",\"message\":\"fixture service failure\"}}\n\n")).unwrap()
+                        } else {
+                            Response::builder().status(502).body(replay::full("fixture bad gateway")).unwrap()
+                        }
+                    } else { success() }
+                }
+            }).await;
+            let fixture = Fixture::new(&[upstream.url("/v1")], manual).await;
+            retry_settings(&fixture, 3);
+            let events = crate::events::Service::new(&fixture.home.path().join("events"));
+            fixture.gateway.set_diagnostics(events.clone());
+            let request = fixture.request(models::FLASH, framed);
+            let waiting = async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while fixture.gateway.view().transient_retries.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(fixture.gateway.view().providers[0].active_requests, 0);
+            };
+            let (response, ()) = tokio::join!(request, waiting);
+            assert_eq!(response.status(), 200, "manual={manual}, framed={framed}");
+            assert!(response.text().await.unwrap().contains("fixture"));
+            assert_eq!(*calls.lock().unwrap(), 2);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(event) = events
+                        .query(crate::events::Filter::default())
+                        .items
+                        .iter()
+                        .find(|event| event.action == crate::events::Action::RetryingSame)
+                    {
+                        assert_eq!(event.attempt, Some(1));
+                        assert_eq!(event.details.wait_seconds, Some(1));
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            fixture.gateway.stop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn fixed_provider_short_retries_obey_attempt_limit_and_two_retry_cap() {
+    for (limit, expected) in [(0, 1), (1, 2), (5, 3)] {
+        let calls = Arc::new(Mutex::new(0));
+        let seen = calls.clone();
+        let upstream = server(move |_| {
+            let seen = seen.clone();
+            async move {
+                *seen.lock().unwrap() += 1;
+                Response::builder()
+                    .status(502)
+                    .body(replay::full("fixture bad gateway"))
+                    .unwrap()
+            }
+        })
+        .await;
+        let fixture = Fixture::new(&[upstream.url("/v1")], false).await;
+        retry_settings(&fixture, limit);
+        let response = fixture.request(models::FLASH, false).await;
+        assert_eq!(response.status(), 502);
+        response.bytes().await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), expected);
+        assert_eq!(fixture.gateway.view().providers[0].rpm_used, expected);
+        assert_eq!(fixture.gateway.view().providers[0].active_requests, 0);
+        fixture.gateway.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fixed_provider_connection_retry_recovers_and_can_be_stopped() {
+    for stop in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let fixture = Fixture::new(&[format!("http://127.0.0.1:{port}/v1")], false).await;
+        retry_settings(&fixture, 3);
+        let request = fixture.request(models::FLASH, false);
+        let recovery = async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while fixture.gateway.view().transient_retries.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(fixture.gateway.view().providers[0].active_requests, 0);
+            if stop {
+                fixture.gateway.stop().await.unwrap();
+            } else {
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                    .await
+                    .unwrap();
+                let (socket, _) = listener.accept().await.unwrap();
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        hyper_util::rt::TokioIo::new(socket),
+                        hyper::service::service_fn(
+                            |request: hyper::Request<hyper::body::Incoming>| async move {
+                                request.into_body().collect().await.unwrap();
+                                let mut response = success();
+                                response
+                                    .headers_mut()
+                                    .insert("connection", "close".parse().unwrap());
+                                Ok::<_, std::convert::Infallible>(response)
+                            },
+                        ),
+                    )
+                    .await;
+            }
+        };
+        let (response, ()) = tokio::join!(request, recovery);
+        assert_eq!(response.status(), if stop { 503 } else { 200 });
+        response.bytes().await.unwrap();
+        fixture.gateway.stop().await.unwrap();
+        assert!(fixture.gateway.view().transient_retries.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt() {
+    use tokio::io::AsyncWriteExt;
+    let calls = Arc::new(Mutex::new(0));
+    let seen = calls.clone();
+    let upstream = server(move |_| {
+        let seen = seen.clone();
+        async move {
+            *seen.lock().unwrap() += 1;
+            Response::builder()
+                .status(502)
+                .body(replay::full("fixture bad gateway"))
+                .unwrap()
+        }
+    })
+    .await;
+    let fixture = Fixture::new(&[upstream.url("/v1")], false).await;
+    retry_settings(&fixture, 3);
+    let token = fixture
+        .gateway
+        .0
+        .inner
+        .lock()
+        .unwrap()
+        .store
+        .local_token
+        .clone();
+    let mut client =
+        tokio::net::TcpStream::connect(("127.0.0.1", fixture.gateway.listener_view().port))
+            .await
+            .unwrap();
+    let body =
+        json!({"model": models::FLASH, "messages": [{"role": "user", "content": "fixture"}]})
+            .to_string();
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while fixture.gateway.view().transient_retries.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    #[allow(deprecated)]
+    client.set_linger(Some(Duration::ZERO)).unwrap();
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !fixture.gateway.view().transient_retries.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.gateway.view().providers[0].active_requests, 0);
+    assert_eq!(fixture.gateway.view().providers[0].rpm_used, 1);
+    assert_eq!(*calls.lock().unwrap(), 1);
+    fixture.gateway.stop().await.unwrap();
+}

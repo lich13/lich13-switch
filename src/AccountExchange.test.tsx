@@ -163,8 +163,8 @@ it("disables missing credentials, skips duplicates by default, and explicitly up
   expect(missing).toBeDisabled();
   expect(missing).not.toBeChecked();
   expect(
-    within(dialog).getByText("重复账号默认跳过，勾选后更新其凭据。"),
-  ).toBeInTheDocument();
+    within(dialog).queryByText("重复账号默认跳过，勾选后更新其凭据。"),
+  ).not.toBeInTheDocument();
 
   await user.click(missing);
   await user.click(second);

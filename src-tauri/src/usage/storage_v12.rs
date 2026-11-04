@@ -1129,6 +1129,9 @@ pub(super) fn load(c: &Connection, owner: i64) -> Result<Value> {
     r.as_object_mut().unwrap().remove("responseId");
     Ok(r)
 }
+pub(super) fn load_record(c: &Connection, owner: i64) -> Result<Record> {
+    serde_json::from_value(load(c, owner)?).map_err(json_error)
+}
 pub(super) fn owner(c: &Connection, id: &str) -> Result<Option<i64>> {
     db(c.query_row(
         "SELECT rid FROM v12_records WHERE usage_hint(key)=usage_hint(?1) AND key=?1",
@@ -1405,9 +1408,7 @@ fn verify_record(c: &Connection, r: &Record) -> Result<()> {
 }
 pub(super) fn record(c: &Connection, id: &str) -> Result<Option<Record>> {
     if active(c) {
-        owner(c, id)?
-            .map(|id| serde_json::from_value(load(c, id)?).map_err(json_error))
-            .transpose()
+        owner(c, id)?.map(|id| load_record(c, id)).transpose()
     } else {
         let row: Option<(String, Option<String>)> = db(c
             .query_row(

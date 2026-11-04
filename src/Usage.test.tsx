@@ -1678,3 +1678,80 @@ it("requests fresh state after showing and ignores an older hidden response", as
   await act(async () => reads[0](structuredClone(state)));
   expect(screen.getByText("同步失败")).toBeInTheDocument();
 });
+
+it("refreshes state events without reusing an older state query", async () => {
+  const original = mock.command.getMockImplementation()!;
+  let finish!: (value: UsageState) => void;
+  let count = 0;
+  mock.command.mockImplementation((name, args) =>
+    name === "get_usage_state" && ++count === 1
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : original(name, args),
+  );
+  render(<Usage />);
+  await flush();
+  act(() => {
+    mock.listeners.get("usage-state")?.({});
+  });
+  await waitFor(() => expect(calls("get_usage_state")).toHaveLength(2));
+  await act(async () => {
+    finish({ ...state, error: "STALE_STATE" });
+  });
+  expect(screen.queryByText("STALE_STATE")).not.toBeInTheDocument();
+});
+
+it.each(["sync", "export"])(
+  "%s completion replaces an in-flight query for a fixed range",
+  async (action) => {
+    await renderUsage();
+    await chooseRange("custom");
+    await flush();
+    const original = mock.command.getMockImplementation()!;
+    let finish!: (value: Dashboard) => void;
+    let count = 0;
+    mock.command.mockImplementation((name, args) => {
+      if (name === "get_usage_dashboard" && ++count === 1)
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      if (name === "export_usage_bill")
+        return Promise.resolve({
+          requests: 1,
+          attempts: 1,
+          cleaned: 1,
+          retained: 0,
+          cleanupError: null,
+        });
+      return original(name, args);
+    });
+    if (action === "export") {
+      fireEvent.click(screen.getByRole("button", { name: "导出账单" }));
+      await act(async () => mock.listeners.get("app-visibility")!(false));
+      await act(async () => mock.listeners.get("app-visibility")!(true));
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "刷新用量" }));
+    }
+    await flush();
+    const before = calls("get_usage_dashboard").length;
+    if (action === "sync") {
+      fireEvent.click(screen.getByRole("button", { name: "数据来源" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "补全 Antigravity 历史" }),
+      );
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "导出并清理" }));
+    }
+    await waitFor(() =>
+      expect(calls("get_usage_dashboard")).toHaveLength(before + 1),
+    );
+    await act(async () => {
+      finish({
+        ...dashboard,
+        totals: { ...dashboard.totals, requests: 999999 },
+      });
+    });
+    expect(screen.queryByText("999,999")).not.toBeInTheDocument();
+  },
+);

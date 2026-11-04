@@ -114,35 +114,57 @@ fn snapshot(
 ) -> Result<u64> {
     let tx = db(spool.connection.unchecked_transaction())?;
     let native = super::storage_v12::active(&store.connection);
-    let sql = if native {
-        "SELECT cast(r.rid AS TEXT),r.body,r.effective,r.duplicate_of FROM records r WHERE r.rid IN (SELECT rid FROM v12_rows NOT INDEXED WHERE rid>cast(?4 AS INTEGER) AND client=usage_label(?1) AND time BETWEEN ?2 AND ?3 ORDER BY rid LIMIT 128) ORDER BY r.rid"
-    } else {
-        "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time BETWEEN ?2 AND ?3 AND id>?4 ORDER BY id LIMIT 128"
-    };
     let mut pending = 0;
     for client in &request.clients {
         let mut after = String::new();
         loop {
-            let mut statement = db(store.connection.prepare_cached(sql))?;
-            let rows = db(statement.query_map(
-                params![client, request.start, request.end + 999, after],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            ))?;
-            let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
+            let rows = if native {
+                let mut statement = db(store.connection.prepare_cached(
+                    "SELECT rid,effective FROM v12_rows NOT INDEXED WHERE rid>cast(?4 AS INTEGER) AND client=usage_label(?1) AND time BETWEEN ?2 AND ?3 ORDER BY rid LIMIT 128",
+                ))?;
+                let selected = db(statement.query_map(
+                    params![client, request.start, request.end + 999, after],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                ))?;
+                db(selected.collect::<rusqlite::Result<Vec<_>>>())?
+                    .into_iter()
+                    .map(|(rid, effective)| {
+                        Ok((
+                            rid.to_string(),
+                            super::storage_v12::load_record(&store.connection, rid)?,
+                            effective,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                let mut statement = db(store.connection.prepare_cached(
+                    "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time BETWEEN ?2 AND ?3 AND id>?4 ORDER BY id LIMIT 128",
+                ))?;
+                let selected = db(statement.query_map(
+                    params![client, request.start, request.end + 999, after],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                ))?;
+                db(selected.collect::<rusqlite::Result<Vec<_>>>())?
+                    .into_iter()
+                    .map(|(id, body, effective, duplicate)| {
+                        let mut r: Record = bodies::decode(&store.connection, &body)?;
+                        r.duplicate_of = duplicate;
+                        Ok((id, r, effective))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            };
             if rows.is_empty() {
                 break;
             }
-            for (id, body, effective, duplicate) in rows {
+            for (id, mut r, effective) in rows {
                 after = id;
-                let mut r: Record = bodies::decode(&store.connection, &body)?;
-                r.duplicate_of = duplicate;
                 if !finished(&r) {
                     pending += 1;
                     continue;
@@ -481,6 +503,31 @@ impl Service {
 mod tests {
     use super::*;
     const BASE: i64 = 1_740_000_000_000;
+    #[test]
+    fn native_link_digest_matches_cleanup_and_list_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let linked = row("fixture-linked", "claude", BASE);
+        service.query(|store| {
+            store.write_batch(std::slice::from_ref(&linked), None)?;
+            db(store.connection.execute("INSERT INTO v12_links(owner,target) SELECT rid,usage_key('fixture-target') FROM v12_rows WHERE key=usage_key(?1)", [&linked.id]))?;
+            let detail = store.detail(&linked.id)?;
+            assert_eq!(detail.duplicate_of.as_deref(), Some("fixture-target"));
+            assert_eq!(store.logs(&Filter::default())?.rows[0].duplicate_of, detail.duplicate_of);
+            Ok(())
+        }).unwrap();
+        let exported = service
+            .export_bill(&request(), &dir.path().join("bill.csv"))
+            .unwrap();
+        assert_eq!(
+            (exported.requests, exported.cleaned, exported.retained),
+            (1, 1, 0)
+        );
+        assert!(exported.cleanup_error.is_none());
+        assert!(std::fs::read_to_string(dir.path().join("bill.csv"))
+            .unwrap()
+            .contains("fixture-target"));
+    }
     #[test]
     fn temporary_bill_sources_are_removed_when_export_ends() {
         let dir = tempfile::tempdir().unwrap();

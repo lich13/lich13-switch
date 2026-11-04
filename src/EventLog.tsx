@@ -513,7 +513,8 @@ export default function EventLog({
       });
   }, [focus?.sequence]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (fresh = false) => {
+    if (fresh) flight.current = null;
     const request = ++sequence.current;
     try {
       const filter = Object.fromEntries(
@@ -612,7 +613,7 @@ export default function EventLog({
       if (visible && timer == null) {
         timer = window.setTimeout(() => {
           timer = undefined;
-          void load();
+          void load(true);
         }, 250);
       }
     });
@@ -668,10 +669,11 @@ export default function EventLog({
     try {
       await command("clear_app_events");
       flight.current = null;
+      sequence.current++;
       detailSequence.current++;
       setSelected(null);
-      setPage(1);
-      await load();
+      if (page !== 1) setPage(1);
+      else await load(true);
     } catch (e) {
       setError(errorOf(e).message);
     } finally {
@@ -687,7 +689,7 @@ export default function EventLog({
           <button
             className="icon-button"
             aria-label="刷新日志"
-            onClick={() => void load()}
+            onClick={() => void load(true)}
           >
             <RefreshCw size={16} />
           </button>

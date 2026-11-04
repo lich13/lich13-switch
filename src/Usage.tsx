@@ -266,23 +266,29 @@ export default function Usage({
       if (id === agSequence.current) setAgBusy(false);
     }
   }, [query, request]);
-  const loadState = useCallback(async () => {
-    const id = ++stateSequence.current;
-    try {
-      const value = await request("get_usage_state");
-      if (id === stateSequence.current) setState(value);
-    } catch (e) {
-      if (id === stateSequence.current) setError(errorOf(e).message);
-    }
-  }, [request]);
+  const loadState = useCallback(
+    async (fresh = false) => {
+      if (fresh) pending.current.delete("get_usage_state{}");
+      const id = ++stateSequence.current;
+      try {
+        const value = await request("get_usage_state");
+        if (id === stateSequence.current) setState(value);
+      } catch (e) {
+        if (id === stateSequence.current) setError(errorOf(e).message);
+      }
+    },
+    [request],
+  );
   const load = useCallback(
-    () =>
-      Promise.all([
+    (fresh = false) => {
+      if (fresh) pending.current.clear();
+      return Promise.all([
         loadOverview(),
         ...(tab === "requests" ? [loadRows()] : []),
         ...(tab === "antigravity" ? [loadAntigravity()] : []),
         loadState(),
-      ]),
+      ]);
+    },
     [loadOverview, loadRows, loadAntigravity, loadState, tab],
   );
   useEffect(() => {
@@ -309,7 +315,7 @@ export default function Usage({
     if (!visible || !nativeVisible) return;
     void loadState();
     const events = subscriptions((e) => setError(errorOf(e).message));
-    events.watch("usage-state", loadState);
+    events.watch("usage-state", () => void loadState(true));
     return () => {
       stateSequence.current++;
       events.dispose();
@@ -463,7 +469,7 @@ export default function Usage({
             className="icon-button"
             aria-label="刷新用量"
             disabled={busy}
-            onClick={() => void load()}
+            onClick={() => void load(true)}
           >
             <RefreshCw size={17} />
           </button>
@@ -716,7 +722,7 @@ export default function Usage({
             setBillResult(
               `已导出 ${numeric(result.requests)} 个请求、${numeric(result.attempts)} 次尝试，清理 ${numeric(result.cleaned)} 条已导出记录与对应统计${result.retained ? `，保留 ${numeric(result.retained)} 条更新记录` : ""}。${result.cleanupError ?? ""}`,
             );
-            void load();
+            void load(true);
           }}
         />
       )}
@@ -728,7 +734,7 @@ export default function Usage({
           onClose={() => setSheet(false)}
           onChange={(s) => {
             setState(s);
-            void load();
+            void load(true);
           }}
         />
       )}

@@ -717,16 +717,14 @@ impl Store {
         ))
     }
     pub fn source_counts(&self, source: &str) -> Result<(u64, u64, i64)> {
-        let merged = db(self.connection.query_row(
-            "SELECT count(*) FROM records WHERE source=?1 AND effective=0",
-            [source],
-            |r| r.get(0),
-        ))?;
-        let pending = db(self.connection.query_row(
-            "SELECT count(*) FROM records WHERE source=?1 AND effective=2",
-            [source],
-            |r| r.get(0),
-        ))?;
+        let sql = if storage_v12::active(&self.connection) {
+            "SELECT count(*) FILTER (WHERE effective=0),count(*) FILTER (WHERE effective=2) FROM v12_rows WHERE source=usage_label(?1)"
+        } else {
+            "SELECT count(*) FILTER (WHERE effective=0),count(*) FILTER (WHERE effective=2) FROM records WHERE source=?1"
+        };
+        let (merged, pending) = db(self
+            .connection
+            .query_row(sql, [source], |r| Ok((r.get(0)?, r.get(1)?))))?;
         let historical = db(self.connection.query_row(
             "SELECT coalesce((SELECT cast(value as integer) FROM metadata WHERE key=?1),0)",
             [format!("historical_{source}")],
@@ -813,17 +811,20 @@ impl Store {
             |r| r.get(0),
         ))?;
         let page = f.page.max(1).min((total.div_ceil(20) as u32).max(1));
-        let mut stmt=db(self.connection.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE {where_sql} ORDER BY time DESC,local_sequence DESC,id DESC LIMIT 20 OFFSET {}",(page-1)*20)))?;
-        let rows = db(
-            stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-            }),
-        )?;
+        let native = storage_v12::active(&self.connection);
+        let projection = if native { "rid" } else { "body,duplicate_of" };
+        let mut stmt=db(self.connection.prepare(&format!("SELECT {projection} FROM records r WHERE {where_sql} ORDER BY time DESC,local_sequence DESC,id DESC LIMIT 20 OFFSET {}",(page-1)*20)))?;
+        let mut rows = db(stmt.query(rusqlite::params_from_iter(args.iter())))?;
         let mut records = Vec::new();
-        for row in rows {
-            let (body, duplicate) = db(row)?;
-            let mut r: Record = bodies::decode(&self.connection, &body)?;
-            r.duplicate_of = duplicate;
+        while let Some(row) = db(rows.next())? {
+            let mut r: Record = if native {
+                storage_v12::load_record(&self.connection, db(row.get(0))?)?
+            } else {
+                let mut r: Record =
+                    bodies::decode(&self.connection, &db(row.get::<_, String>(0))?)?;
+                r.duplicate_of = db(row.get(1))?;
+                r
+            };
             if f.source.as_deref() == Some("proxy") {
                 r.gateway_only();
             }
@@ -1005,20 +1006,24 @@ impl Store {
             };
             let eligible = query::eligible(tx, &filter, "r", false);
             let key = if native { "rid" } else { "id" };
-            let mut statement = db(tx.prepare(&format!("SELECT body,duplicate_of FROM records r WHERE r.{key} IN (SELECT {key} FROM archive_ids) AND {eligible}")))?;
-            let rows = db(statement.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-            }))?;
+            let projection = if native { "rid" } else { "body,duplicate_of" };
+            let mut statement = db(tx.prepare(&format!("SELECT {projection} FROM records r WHERE r.{key} IN (SELECT {key} FROM archive_ids) AND {eligible}")))?;
+            let mut rows = db(statement.query([]))?;
             let mut records = Vec::new();
-            for row in rows {
-                let (body, duplicate) = db(row)?;
-                let mut r: Record = bodies::decode(tx, &body)?;
-                r.duplicate_of = duplicate;
+            while let Some(row) = db(rows.next())? {
+                let mut r: Record = if native {
+                    storage_v12::load_record(tx, db(row.get(0))?)?
+                } else {
+                    let mut r: Record = bodies::decode(tx, &db(row.get::<_, String>(0))?)?;
+                    r.duplicate_of = db(row.get(1))?;
+                    r
+                };
                 if scope == Some("proxy") {
                     r.gateway_only();
                 }
                 records.push((scope.map(str::to_owned), r));
             }
+            drop(rows);
             drop(statement);
             for (scope, mut r) in records {
                 let day = query::bucket(r.event_time(), DAY);
@@ -1199,21 +1204,37 @@ impl Store {
         let sql = if cursor.daily {
             "SELECT id,body FROM daily WHERE id>?1 AND json_extract(body,'$.totals.unpriced')>0 ORDER BY id LIMIT 128"
         } else if native {
-            "SELECT cast(r.rid as text),r.body FROM records r WHERE r.rid>cast(?1 as integer) AND EXISTS(SELECT 1 FROM usage_metrics m WHERE m.kind=0 AND m.owner=r.rid AND m.unpriced>0) ORDER BY r.rid LIMIT 128"
+            "SELECT cast(r.rid as text),r.rid FROM v12_rows r WHERE r.rid>cast(?1 as integer) AND (EXISTS(SELECT 1 FROM v12_attempts a WHERE a.owner=r.rid AND a.unpriced>0) OR EXISTS(SELECT 1 FROM v12_sessions a WHERE a.owner=r.rid AND a.unpriced>0)) ORDER BY r.rid LIMIT 128"
         } else {
             super::pending_prices::SELECT
         };
         let rows = {
             let mut stmt = db(tx.prepare_cached(sql))?;
             let rows = db(stmt.query_map([&cursor.after], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    if native && !cursor.daily {
+                        None
+                    } else {
+                        Some(r.get::<_, String>(1)?)
+                    },
+                    if native && !cursor.daily {
+                        Some(r.get::<_, i64>(1)?)
+                    } else {
+                        None
+                    },
+                ))
             }))?;
             db(rows.collect::<rusqlite::Result<Vec<_>>>())?
         };
         let mut changed = false;
-        for (id, body) in &rows {
+        for (id, body, rid) in &rows {
             if !cursor.daily {
-                let mut r: Record = bodies::decode(&tx, body)?;
+                let mut r: Record = if let Some(rid) = rid {
+                    storage_v12::load_record(&tx, *rid)?
+                } else {
+                    bodies::decode(&tx, body.as_deref().unwrap())?
+                };
                 let mut updated = false;
                 for a in &mut r.attempts {
                     if a.price.is_none() && a.compacted_unpriced.is_none() {
@@ -1227,7 +1248,7 @@ impl Store {
                     changed = true;
                 }
             } else {
-                let mut d: Daily = bodies::decode(&tx, body)?;
+                let mut d: Daily = bodies::decode(&tx, body.as_deref().unwrap())?;
                 let mut updated = false;
                 for a in &mut d.example.attempts {
                     if a.price.is_none() && a.compacted_unpriced.is_none() {
@@ -1267,7 +1288,7 @@ impl Store {
             ))?;
         }
         db(tx.commit())?;
-        if let Some((last, _)) = rows.last() {
+        if let Some((last, _, _)) = rows.last() {
             cursor.after = last.clone();
         } else {
             cursor.after.clear();

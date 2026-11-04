@@ -517,7 +517,6 @@ function PriceReference({
           ))}
         </tbody>
       </table>
-      <p className="muted">仅比较当前可比价格，不修改生效价格或历史快照。</p>
     </Drawer>
   );
 }

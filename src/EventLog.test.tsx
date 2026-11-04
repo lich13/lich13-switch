@@ -746,3 +746,62 @@ it("clearing logs starts a fresh query even when the previous query is still pen
   await act(async () => { finish(page(1)); });
   expect(screen.queryByRole("button", { name: /模型不支持/ })).not.toBeInTheDocument();
 });
+
+it.each(["上游报错", "网关内部"])(
+  "refreshes %s events received during a slow query",
+  async (tab) => {
+    vi.useFakeTimers();
+    try {
+      const original = mock.command.getMockImplementation()!;
+      const finish: ((value: ReturnType<typeof page>) => void)[] = [];
+      mock.command.mockImplementation((name, args) =>
+        name === "get_app_events"
+          ? new Promise((resolve) => finish.push(resolve))
+          : original(name, args),
+      );
+      render(<EventLog />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      if (tab === "网关内部")
+        fireEvent.click(screen.getByRole("tab", { name: tab }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const before = eventCalls().length;
+      act(() => {
+        mock.listeners.get("app-event")?.({});
+        mock.listeners.get("app-event")?.({});
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(eventCalls()).toHaveLength(before + 1);
+      fireEvent.click(screen.getByRole("button", { name: "刷新日志" }));
+      expect(eventCalls()).toHaveLength(before + 2);
+      await act(async () => {
+        finish.pop()!({
+          ...page(1),
+          items: [{ ...record, errorCode: "NEW_EVENT" }],
+        });
+      });
+      await act(async () => {
+        for (const resolve of finish) resolve({ ...page(1), items: [] });
+      });
+      expect(screen.getByText("NEW_EVENT")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it("clearing the second page queries only the first page", async () => {
+  render(<EventLog />);
+  await screen.findByRole("button", { name: /模型不支持/ });
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(eventCalls().at(-1)?.[1].filter.page).toBe(2));
+  const before = eventCalls().length;
+  fireEvent.click(screen.getByRole("button", { name: "清空全部日志" }));
+  await waitFor(() => expect(eventCalls()).toHaveLength(before + 1));
+  expect(eventCalls().at(-1)?.[1].filter.page).toBe(1);
+});

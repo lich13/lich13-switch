@@ -471,7 +471,7 @@ fn initial_activation_uses_current_credentials_and_preserves_existing_zero_histo
     };
     write_private_file(&paths.oauth_file(), br#"{"auth_method":"google-oauth","user":{"email":"fixture@example.invalid"},"token":{"access_token":"fixture","refresh_token":"fixture"}}"#).unwrap();
     write_enable_adc(&paths, false).unwrap();
-    set_mtime(&paths.config_file(), 1_000);
+    set_mtime(&paths.config_file(), 3_000);
     set_mtime(&paths.oauth_file(), 2_000);
     let state = state_at(&paths).unwrap();
     let id = active_account_id(&state).unwrap();

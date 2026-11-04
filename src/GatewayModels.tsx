@@ -131,7 +131,6 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
           )}
         </div>
       </div>
-      {view && <p className="model-hint">{view.hint}</p>}
       {(error || view?.error) && (
         <p className="banner error" role="alert">
           {error || view?.error}
@@ -352,9 +351,6 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
               placeholder="搜索模型 ID 或名称"
             />
           </label>
-          <p className="muted">
-            来源分别列出，最多 50 条。指定来源仅影响元数据和参考价格。
-          </p>
           {hits?.error && (
             <p role="alert" className="form-error">
               {hits.error}

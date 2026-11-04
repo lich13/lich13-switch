@@ -27,7 +27,7 @@ export function useProviderQuota(
   const [values, setValues] = useState<Record<string, ProviderQuota>>({});
   const [nativeVisible, setNativeVisible] = useState(true);
   const [visible, setVisible] = useState(document.visibilityState !== "hidden");
-  const flights = useRef(new Set<string>());
+  const flights = useRef(new Map<string, Promise<void>>());
   const snapshots = useRef<Record<string, ProviderQuota>>({});
   const mounted = useRef(true);
   const accept = useCallback((q: ProviderQuota) => {
@@ -59,47 +59,53 @@ export function useProviderQuota(
     };
   }, [accept, visibilityEvent, clientId]);
   const refresh = useCallback(
-    async (id: string, force = true) => {
+    (id: string, force = true): Promise<void> => {
       const provider = latest.current.find((p) => p.id === id);
-      if (!provider) return;
-      const flight = id + provider.quotaVersion;
-      if (flights.current.has(flight)) return;
-      flights.current.add(flight);
-      try {
-        accept(
-          await command("query_provider_quota", {
-            clientId,
-            providerId: id,
-            force,
-          }),
-        );
-      } catch (e) {
-        const err = errorOf(e);
-        if (
-          err.code !== "STALE" &&
-          mounted.current &&
-          latest.current.some(
-            (p) => p.id === id && p.quotaVersion === provider.quotaVersion,
-          )
-        ) {
-          const cached = snapshots.current[id];
-          const previous =
-            cached?.version === provider.quotaVersion
-              ? cached
-              : (provider.quota ?? emptyQuota(provider));
-          const failureDelay = Math.max(refreshSeconds, 86_400);
-          accept({
-            ...previous,
-            state: "error",
-            stale: Boolean(previous.successAt),
-            error: err.message,
-            nextRefreshAt:
-              refreshSeconds > 0 ? Date.now() / 1000 + failureDelay : null,
-          });
-        }
-      } finally {
-        flights.current.delete(flight);
-      }
+      if (!provider) return Promise.resolve();
+      const flight = `${clientId}:${id}:${provider.quotaVersion}`;
+      const existing = flights.current.get(flight);
+      if (existing) return existing;
+      const promise = Promise.resolve()
+        .then(async () => {
+          try {
+            accept(
+              await command("query_provider_quota", {
+                clientId,
+                providerId: id,
+                force,
+              }),
+            );
+          } catch (e) {
+            const err = errorOf(e);
+            if (
+              err.code !== "STALE" &&
+              mounted.current &&
+              latest.current.some(
+                (p) => p.id === id && p.quotaVersion === provider.quotaVersion,
+              )
+            ) {
+              const cached = snapshots.current[id];
+              const previous =
+                cached?.version === provider.quotaVersion
+                  ? cached
+                  : (provider.quota ?? emptyQuota(provider));
+              const failureDelay = Math.max(refreshSeconds, 86_400);
+              accept({
+                ...previous,
+                state: "error",
+                stale: Boolean(previous.successAt),
+                error: err.message,
+                nextRefreshAt:
+                  refreshSeconds > 0 ? Date.now() / 1000 + failureDelay : null,
+              });
+            }
+          }
+        })
+        .finally(() => {
+          flights.current.delete(flight);
+        });
+      flights.current.set(flight, promise);
+      return promise;
     },
     [accept, clientId, refreshSeconds],
   );

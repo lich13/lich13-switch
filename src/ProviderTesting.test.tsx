@@ -513,7 +513,12 @@ it("shows mixed-family evidence separately from a normal aggregate prediction", 
 
 it("opens only the selected provider and reads cache without fetching upstream", async () => {
   open();
-  await screen.findByText("尚未缓存该端点模型，点击重新拉取。");
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith(
+      "provider_test_models",
+      expect.any(Object),
+    ),
+  );
   expect(mock.command).toHaveBeenCalledWith("provider_test_state", {
     clientId: "codex",
     providerId: gateway.providers[0].id,
@@ -600,7 +605,12 @@ it("starts ordinary chat at the chosen auxiliary endpoint without changing the g
 it("allows default chat without a directory but requires a cached fingerprint model", async () => {
   const user = userEvent.setup();
   open();
-  await screen.findByText("尚未缓存该端点模型，点击重新拉取。");
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith(
+      "provider_test_models",
+      expect.any(Object),
+    ),
+  );
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "开始测试" })).toBeEnabled(),
   );

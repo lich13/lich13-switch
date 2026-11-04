@@ -294,6 +294,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             s.running,
         )
     };
+    let fixed_dsh =
+        (gateway.client_id() == super::ClientId::Dsh && ids.len() == 1).then(|| ids[0].clone());
     if !running {
         return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
     }
@@ -1301,8 +1303,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     // Use the same owner and budget as 5xx for connection failures,
                     // including a peer closing before response headers arrive.
                     // Header timeouts still use the separate no-replay boundary.
-                    let retry_delay = if route.client_id == super::ClientId::Codex
-                        && !dedicated_search
+                    let retry_delay = if !dedicated_search
                         && matches!(
                             category,
                             None | Some(
@@ -1312,10 +1313,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         )
                         && !unknown_affinity
                         && ordinary_attempts <= settings.max_retries
-                        && (pinned.as_deref() == Some(&route.provider.id)
-                            || ownership
-                                .as_ref()
-                                .is_some_and(|lease| lease.owns(&route.provider.id)))
+                        && ((route.client_id == super::ClientId::Codex
+                            && (pinned.as_deref() == Some(&route.provider.id)
+                                || ownership
+                                    .as_ref()
+                                    .is_some_and(|lease| lease.owns(&route.provider.id))))
+                            || fixed_dsh.as_deref() == Some(&route.provider.id))
                     {
                         routing::transient_delay(&mut transient_retries, None)
                     } else {
@@ -1617,18 +1620,19 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     wait_budget.protect_capacity();
                 }
                 let retryable = compact_error || model_error || hard_rejection || policy.retryable;
-                let retry_delay = if route.client_id == super::ClientId::Codex
-                    && circuit::is_server_error(status.as_u16())
+                let retry_delay = if circuit::is_server_error(status.as_u16())
                     && !compact_error
                     && !model_error
                     && !capacity
                     && !hard_rejection
                     && !unknown_affinity
                     && ordinary_attempts <= settings.max_retries
-                    && (pinned.as_deref() == Some(&route.provider.id)
-                        || ownership
-                            .as_ref()
-                            .is_some_and(|lease| lease.owns(&route.provider.id)))
+                    && ((route.client_id == super::ClientId::Codex
+                        && (pinned.as_deref() == Some(&route.provider.id)
+                            || ownership
+                                .as_ref()
+                                .is_some_and(|lease| lease.owns(&route.provider.id))))
+                        || fixed_dsh.as_deref() == Some(&route.provider.id))
                 {
                     routing::transient_delay(&mut transient_retries, cooldown)
                 } else {
@@ -2107,7 +2111,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     && (pinned.as_deref() == Some(&route.provider.id)
                         || ownership
                             .as_ref()
-                            .is_some_and(|lease| lease.owns(&route.provider.id)))
+                            .is_some_and(|lease| lease.owns(&route.provider.id))
+                        || fixed_dsh.as_deref() == Some(&route.provider.id))
                 {
                     routing::transient_delay(&mut transient_retries, cooldown)
                 } else {
@@ -2137,8 +2142,9 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 let mut details = protocol.observation.error.clone();
                 details.phase = Some(crate::events::Phase::Response);
                 details.counted_failure = Some(!initial_compact_error && policy.counted_failure);
-                details.wait_seconds =
-                    cooldown.map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
+                details.wait_seconds = cooldown
+                    .or(retry_delay)
+                    .map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
                 last_error = Some(failover.report_failure(Some(&protocol), || {
                     admission.permits.report(
                         &gateway,

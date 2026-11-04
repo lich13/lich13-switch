@@ -116,9 +116,7 @@ function PluginsOverview({ text }: { text: string }) {
     <section className="settings-list-group" aria-label="已配置插件">
       <h3>已配置插件</h3>
       {entries.length === 0 ? (
-        <p className="muted">
-          当前未检测到插件配置项。插件与未知字段在可视化编辑时会自动无损保留，也可在「高级」或「JSON」视图中直接维护。
-        </p>
+        <p className="muted">暂无插件</p>
       ) : (
         <div className="ag-plugin-list">
           {entries.map(([id, item]) => {

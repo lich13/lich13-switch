@@ -266,9 +266,6 @@ export default function DshConfigEditor({
           {dirty && "；草稿已保留"}
         </p>
       )}
-      {doc?.readOnly && (
-        <p className="muted">仅显示名称与遮蔽值，请在 DSH 中管理凭据。</p>
-      )}
       <div className="dsh-source-editor">
         {Surface ? (
           <Surface
