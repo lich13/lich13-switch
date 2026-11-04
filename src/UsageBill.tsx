@@ -130,11 +130,11 @@ export default function UsageBill({
           </dd>
           <dt>清理范围</dt>
           <dd>
-            所选客户端截至 {display(to)} 的全部明细，包含开始时间以前的记录。
+            所选客户端 {display(from)} 至 {display(to)} 的已导出明细与统计汇总。
           </dd>
         </dl>
         <p className="usage-bill-rule">
-          文件保存成功后清理明细，统计汇总保留。仍在变化的请求留待下次处理。
+          文件保存成功后同步清理该范围的明细与统计汇总，仍在变化的请求留待下次处理。
         </p>
         {error && (
           <p role="alert" className="form-error">

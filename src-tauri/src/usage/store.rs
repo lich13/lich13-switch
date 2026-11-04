@@ -564,15 +564,15 @@ impl Store {
         if storage_v12::pending(&self.connection) {
             return Ok(false);
         }
-        let v02617_done: bool = db(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02617' AND value='done')",
+        let v02618_done: bool = db(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02618' AND value='done')",
             [],
             |r| r.get(0),
         ))?;
-        if !v02617_done {
+        if !v02618_done {
             db(self.connection.execute_batch(
-                "DELETE FROM metadata WHERE key='antigravity_fields_v02614';
-                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02617','done');",
+                "DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617');
+                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02618','done');",
             ))?;
         }
         let after: Option<String> = db(self
@@ -586,9 +586,13 @@ impl Store {
         if after.as_deref() == Some("done") {
             return Ok(false);
         }
+        let ag_home = crate::antigravity::home().ok();
+        let has_vault = self
+            .data_dir()
+            .is_some_and(|d| d.join("antigravity-accounts.json").exists());
         let timeline = self
             .data_dir()
-            .map(|d| crate::antigravity::auth::provider_timeline(d, None))
+            .map(|d| crate::antigravity::auth::provider_timeline(d, ag_home.as_deref()))
             .unwrap_or_default();
         let tx = db(self.connection.transaction())?;
         let rows = {
@@ -611,7 +615,9 @@ impl Store {
             let mut provider_changed = false;
             for a in &mut r.attempts {
                 let expected = timeline.provider_at(a.started_at).map(str::to_owned);
-                if a.provider != expected {
+                let legacy_placeholder = a.provider.as_deref() == Some("antigravity");
+                if (has_vault || legacy_placeholder || expected.is_some()) && a.provider != expected
+                {
                     a.provider = expected;
                     provider_changed = true;
                 }
@@ -729,7 +735,14 @@ impl Store {
         Ok((merged, pending, historical))
     }
     pub fn data_dir(&self) -> Option<&Path> {
-        self.connection.path().and_then(|p| Path::new(p).parent())
+        let dir = self.connection.path().and_then(|p| Path::new(p).parent())?;
+        if dir.file_name().and_then(|n| n.to_str()) == Some("usage")
+            && !dir.join("antigravity-accounts.json").exists()
+        {
+            dir.parent().or(Some(dir))
+        } else {
+            Some(dir)
+        }
     }
     pub fn cursor(&self, id: &str) -> Result<Option<String>> {
         db(self
@@ -1078,6 +1091,75 @@ impl Store {
             ))?;
         }
         query::changed(tx)
+    }
+    pub(super) fn clean_exported_bill_batch(
+        &mut self,
+        rows: &[(String, String)],
+        request: &super::billing::Request,
+    ) -> Result<(u64, u64)> {
+        let tx = db(self.connection.transaction())?;
+        let mut verified_ids = Vec::with_capacity(rows.len());
+        let mut retained = 0u64;
+        for (id, expected_digest) in rows {
+            let Some(r) = storage_v12::record(&tx, id)? else {
+                retained += 1;
+                continue;
+            };
+            if !request.contains(&r)
+                || !super::billing::finished(&r)
+                || storage::digest(super::billing::encoded(&r)?.as_bytes()) != *expected_digest
+            {
+                retained += 1;
+                continue;
+            }
+            verified_ids.push(id.clone());
+        }
+        if !verified_ids.is_empty() {
+            let native = storage_v12::active(&tx);
+            db(tx.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS archive_ids(id TEXT PRIMARY KEY,rid INTEGER); DELETE FROM archive_ids;",
+            ))?;
+            let sql = if native {
+                "INSERT OR IGNORE INTO archive_ids SELECT usage_text(key),rid FROM v12_rows WHERE usage_hint(key)=usage_hint(usage_key(?1)) AND key=usage_key(?1)"
+            } else {
+                "INSERT OR IGNORE INTO archive_ids SELECT id,NULL FROM records WHERE id=?1"
+            };
+            let mut selected = db(tx.prepare_cached(sql))?;
+            for id in &verified_ids {
+                db(selected.execute([id]))?;
+            }
+            drop(selected);
+            if native {
+                storage_v12::archive_selected(&tx)?;
+            } else {
+                db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE id IN (SELECT id FROM archive_ids)", []))?;
+                db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM archive_ids)", []))?;
+                db(tx.execute(
+                    "DELETE FROM records WHERE id IN (SELECT id FROM archive_ids)",
+                    [],
+                ))?;
+            }
+            let day_start = query::bucket(request.start, DAY);
+            let day_end = query::bucket(request.end + 999, DAY);
+            let daily_metrics = if native {
+                "usage_daily_metrics"
+            } else {
+                "usage_metrics"
+            };
+            for client in &request.clients {
+                db(tx.execute(
+                    &format!("DELETE FROM {daily_metrics} WHERE kind=1 AND owner IN (SELECT id FROM daily WHERE day BETWEEN ?1 AND ?2 AND json_extract(body,'$.client')=?3)"),
+                    params![day_start, day_end, client],
+                ))?;
+                db(tx.execute(
+                    "DELETE FROM daily WHERE day BETWEEN ?1 AND ?2 AND json_extract(body,'$.client')=?3",
+                    params![day_start, day_end, client],
+                ))?;
+            }
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok((verified_ids.len() as u64, retained))
     }
     #[cfg(test)]
     pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {

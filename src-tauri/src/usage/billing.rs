@@ -4,17 +4,16 @@ use super::{
     bodies,
     model::*,
     pricing::Pricing,
-    sessions::Repository,
-    store::{self, db, Store},
+    store::{db, Store},
     Service,
 };
 use crate::storage::{self, Result};
 use chrono::{Local, TimeZone};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufWriter, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 #[derive(Clone, Deserialize)]
@@ -56,7 +55,7 @@ impl Request {
         }
         Ok(())
     }
-    fn contains(&self, r: &Record) -> bool {
+    pub(super) fn contains(&self, r: &Record) -> bool {
         self.clients.contains(&r.client)
             && r.event_time() >= self.start
             && r.event_time() <= self.end + 999
@@ -83,153 +82,28 @@ impl Spool {
         let path = directory.path().join("spool.sqlite3");
         let connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
-        db(connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; CREATE TABLE sources(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE cleanup_snapshot(id TEXT PRIMARY KEY,digest TEXT NOT NULL); CREATE TABLE bill(id TEXT PRIMARY KEY,body TEXT NOT NULL,effective INTEGER NOT NULL,original_digest TEXT);"))?;
+        db(connection.execute_batch(
+            "PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; CREATE TABLE bill(id TEXT PRIMARY KEY,body TEXT NOT NULL,effective INTEGER NOT NULL,original_digest TEXT);",
+        ))?;
         Ok(Self {
             connection,
             _directory: directory,
         })
     }
-    fn source(&self, id: &str) -> Result<Option<Record>> {
-        let body: Option<String> = db(self
-            .connection
-            .query_row("SELECT body FROM sources WHERE id=?1", [id], |r| r.get(0))
-            .optional())?;
-        body.map(|s| serde_json::from_str(&s).map_err(|_| failure("账单暂存记录无效")))
-            .transpose()
-    }
-    fn capture(&mut self, records: &[Record]) -> Result<()> {
-        let tx = db(self.connection.transaction())?;
-        for r in records {
-            let old: Option<String> = db(tx
-                .query_row("SELECT body FROM sources WHERE id=?1", [&r.id], |row| {
-                    row.get(0)
-                })
-                .optional())?;
-            let old = old
-                .map(|s| serde_json::from_str(&s).map_err(|_| failure("账单来源记录无效")))
-                .transpose()?;
-            let record = store::preserve_record(r, old)?;
-            let body = serde_json::to_string(&record).map_err(|_| failure("账单来源记录无效"))?;
-            db(tx.execute("INSERT INTO sources VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![record.id,body]))?;
-        }
-        db(tx.commit())
-    }
 }
-impl Repository for Spool {
-    fn requires_complete_history(&self) -> bool {
-        true
-    }
-    fn cursor(&self, id: &str) -> Result<Option<String>> {
-        db(self
-            .connection
-            .query_row("SELECT body FROM cursors WHERE id=?1", [id], |r| r.get(0))
-            .optional())
-    }
-    fn generation(&self, _: &str) -> Result<u64> {
-        Ok(0)
-    }
-    fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
-        self.capture(rows)?;
-        if let Some((id, body)) = cursor {
-            db(self.connection.execute("INSERT INTO cursors VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![id,body]))?;
-        }
-        Ok(())
-    }
-    fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let tx = db(self.connection.transaction())?;
-        for id in ids {
-            db(tx.execute("DELETE FROM sources WHERE id=?1", [id]))?;
-        }
-        db(tx.commit())
-    }
-    fn write_batch_with_superseded(
-        &mut self,
-        rows: &[Record],
-        superseded_ids: &[String],
-        cursor: Option<(&str, &str)>,
-    ) -> Result<()> {
-        self.remove_superseded(superseded_ids)?;
-        self.write_batch(rows, cursor)
-    }
-    fn begin_rebuild(&mut self, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn stage_rebuild(
-        &mut self,
-        _: &str,
-        rows: &[Record],
-        cursor: Option<(&str, &str)>,
-    ) -> Result<()> {
-        self.write_batch(rows, cursor)
-    }
-    fn finish_rebuild(&mut self, _: &str) -> Result<()> {
-        Ok(())
-    }
-}
-fn finished(r: &Record) -> bool {
+pub(super) fn finished(r: &Record) -> bool {
     r.finished_at.is_some()
         && (r.source != "claude" || r.completed)
         && !r.attempts.is_empty()
         && r.final_attempt()
             .is_some_and(|a| !matches!(a.outcome.as_str(), "in_progress" | "pending"))
 }
-fn encoded(r: &Record) -> Result<String> {
+pub(super) fn encoded(r: &Record) -> Result<String> {
     serde_json::to_string(r).map_err(|_| failure("账单记录无法序列化"))
 }
 fn append(spool: &Connection, r: &Record, effective: i64, digest: Option<&str>) -> Result<()> {
     db(spool.execute("INSERT INTO bill VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET body=excluded.body,effective=excluded.effective,original_digest=excluded.original_digest",params![r.id,encoded(r)?,effective,digest]))?;
     Ok(())
-}
-fn capture_cleanup_snapshot(store: &Store, spool: &Spool, request: &Request) -> Result<()> {
-    let tx = db(spool.connection.unchecked_transaction())?;
-    if request.clients.iter().any(|c| c == "antigravity") {
-        let mut cursors = db(store.connection.prepare(
-            "SELECT id,body FROM cursors WHERE CASE WHEN json_valid(body) THEN json_type(body,'$.covered') END='array'",
-        ))?;
-        let rows =
-            db(cursors.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-        for row in rows {
-            let (id, body) = db(row)?;
-            db(tx.execute(
-                "INSERT INTO cursors VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
-                params![id, body],
-            ))?;
-        }
-    }
-    for client in &request.clients {
-        let mut after = String::new();
-        loop {
-            let mut statement = db(store.connection.prepare("SELECT id,body,duplicate_of FROM records WHERE client=?1 AND time<=?2 AND id>?3 ORDER BY id LIMIT 128"))?;
-            let rows = db(
-                statement.query_map(params![client, request.end + 999, after], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                }),
-            )?;
-            let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-            if rows.is_empty() {
-                break;
-            }
-            for (id, body, duplicate) in rows {
-                after = id;
-                let mut r: Record = bodies::decode(&store.connection, &body)?;
-                r.duplicate_of = duplicate;
-                if finished(&r) {
-                    db(tx.execute(
-                        "INSERT INTO cleanup_snapshot VALUES(?1,?2)",
-                        params![r.id, storage::digest(encoded(&r)?.as_bytes())],
-                    ))?;
-                }
-            }
-        }
-    }
-    db(tx.commit())
 }
 fn snapshot(
     store: &Store,
@@ -244,18 +118,19 @@ fn snapshot(
         let mut after = String::new();
         loop {
             let mut statement = db(store.connection.prepare(
-                "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time<=?2 AND id>?3 ORDER BY id LIMIT 128",
+                "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time BETWEEN ?2 AND ?3 AND id>?4 ORDER BY id LIMIT 128",
             ))?;
-            let rows = db(
-                statement.query_map(params![client, request.end + 999, after], |r| {
+            let rows = db(statement.query_map(
+                params![client, request.start, request.end + 999, after],
+                |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, i64>(2)?,
                         r.get::<_, Option<String>>(3)?,
                     ))
-                }),
-            )?;
+                },
+            ))?;
             let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
             if rows.is_empty() {
                 break;
@@ -269,58 +144,19 @@ fn snapshot(
                     continue;
                 }
                 let digest = storage::digest(encoded(&r)?.as_bytes());
-                let original: Option<String> = db(spool
-                    .connection
-                    .query_row(
-                        "SELECT digest FROM cleanup_snapshot WHERE id=?1",
-                        [&r.id],
-                        |row| row.get(0),
-                    )
-                    .optional())?;
-                let unchanged = original.as_deref() == Some(digest.as_str());
-                if !unchanged {
-                    pending += 1;
-                }
                 estimate_missing(&mut r, pricing, settings);
-                append(
-                    &spool.connection,
-                    &r,
-                    effective,
-                    unchanged.then_some(digest.as_str()),
-                )?;
+                append(&spool.connection, &r, effective, Some(&digest))?;
             }
         }
-        let mut statement = db(store.connection.prepare(
-            "SELECT id,source,effective FROM receipts WHERE client=?1 AND time BETWEEN ?2 AND ?3 ORDER BY id",
-        ))?;
-        let rows = db(statement.query_map(
+        let has_cleaned: bool = db(store.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipts WHERE client=?1 AND time BETWEEN ?2 AND ?3)",
             params![client, request.start, request.end + 999],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            },
+            |r| r.get(0),
         ))?;
-        for row in rows {
-            let (id, source, effective) = db(row)?;
-            let recovered = spool.source(&id)?;
-            if source == "proxy" || recovered.is_none() {
-                return Err(failure(
-                    "所选时间段包含已清理的历史请求，无法再次导出完整账单",
-                ));
-            }
-            let mut r = recovered.unwrap();
-            if !finished(&r) {
-                pending += 1;
-                continue;
-            }
-            if !request.contains(&r) {
-                continue;
-            }
-            estimate_missing(&mut r, pricing, settings);
-            append(&spool.connection, &r, effective, None)?;
+        if has_cleaned {
+            return Err(failure(
+                "所选时间段包含已清理的历史请求，无法再次导出完整账单",
+            ));
         }
     }
     db(tx.commit())?;
@@ -594,11 +430,17 @@ fn save_csv(spool: &Spool, request: &Request, path: &Path) -> Result<Exported> {
         .map_err(|_| failure("账单目录写入未确认，未清理任何明细"))?;
     Ok(result)
 }
-#[cfg(test)]
-fn cleanup(service: &Service, spool: &Spool, result: &mut Exported) -> Result<()> {
+fn cleanup(
+    service: &Service,
+    spool: &Spool,
+    request: &Request,
+    result: &mut Exported,
+) -> Result<()> {
     let mut after = String::new();
     loop {
-        let mut stmt=db(spool.connection.prepare("SELECT id,original_digest FROM bill WHERE original_digest IS NOT NULL AND id>?1 ORDER BY id LIMIT 128"))?;
+        let mut stmt = db(spool.connection.prepare(
+            "SELECT id,original_digest FROM bill WHERE original_digest IS NOT NULL AND id>?1 ORDER BY id LIMIT 128",
+        ))?;
         let rows = db(stmt.query_map([&after], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         }))?;
@@ -607,31 +449,15 @@ fn cleanup(service: &Service, spool: &Spool, result: &mut Exported) -> Result<()
             break;
         }
         after = rows.last().unwrap().0.clone();
-        let cleaned = service.query(|store| {
-            let mut ids = Vec::new();
-            for (id, digest) in &rows {
-                if let Some(r) = super::storage_v12::record(&store.connection, id)? {
-                    // Updates and arrivals after the export snapshot remain live.
-                    if storage::digest(encoded(&r)?.as_bytes()) == *digest {
-                        ids.push(id.clone());
-                    }
-                }
-            }
-            store.archive_batch(&ids)?;
-            Ok(ids.len() as u64)
-        })?;
+        let (cleaned, retained) =
+            service.query(|store| store.clean_exported_bill_batch(&rows, request))?;
         result.cleaned += cleaned;
-        result.retained += rows.len() as u64 - cleaned;
+        result.retained += retained;
     }
     Ok(())
 }
 impl Service {
-    pub fn export_bill(
-        &self,
-        request: &Request,
-        _roots: &[(String, PathBuf)],
-        path: &Path,
-    ) -> Result<Exported> {
+    pub fn export_bill(&self, request: &Request, path: &Path) -> Result<Exported> {
         request.validate()?;
         let mut syncing = self.0.syncing.lock().unwrap();
         if *syncing {
@@ -643,10 +469,12 @@ impl Service {
             let pricing = self.prices()?.frozen();
             let settings = self.settings();
             let spool = Spool::new(&self.0.directory)?;
-            self.read(|s| capture_cleanup_snapshot(s, &spool, request))?;
             let pending = self.read(|s| snapshot(s, &spool, request, &pricing, &settings))?;
             let mut result = save_csv(&spool, request, path)?;
             result.retained = pending;
+            if let Err(err) = cleanup(self, &spool, request, &mut result) {
+                result.cleanup_error = Some(err.message);
+            }
             Ok(result)
         })();
         *self.0.syncing.lock().unwrap() = false;
@@ -657,14 +485,19 @@ impl Service {
 
 #[cfg(test)]
 mod tests {
-    use super::super::sessions;
     use super::*;
     const BASE: i64 = 1_740_000_000_000;
     #[test]
     fn temporary_bill_sources_are_removed_when_export_ends() {
         let dir = tempfile::tempdir().unwrap();
-        let mut spool = Spool::new(dir.path()).unwrap();
-        spool.capture(&[row("temporary", "claude", BASE)]).unwrap();
+        let spool = Spool::new(dir.path()).unwrap();
+        append(
+            &spool.connection,
+            &row("temporary", "claude", BASE),
+            1,
+            None,
+        )
+        .unwrap();
         let path = spool._directory.path().to_path_buf();
         assert!(path.join("spool.sqlite3").is_file());
         drop(spool);
@@ -765,10 +598,8 @@ mod tests {
             .read(|s| s.dashboard(&Filter::default()))
             .unwrap()
             .totals;
+        assert_eq!(before.requests, 48);
         let pricing = service.prices().unwrap().frozen();
-        service
-            .read(|s| capture_cleanup_snapshot(s, &spool, &request))
-            .unwrap();
         service
             .read(|s| snapshot(s, &spool, &request, &pricing, &service.settings()))
             .unwrap();
@@ -787,10 +618,10 @@ mod tests {
         assert!(csv.contains("last-ms"));
         assert!(!csv.contains("before-attempt"));
         assert!(!csv.contains("after-attempt"));
-        cleanup(&service, &spool, &mut exported).unwrap();
-        assert_eq!(exported.cleaned, 46);
+        cleanup(&service, &spool, &request, &mut exported).unwrap();
+        assert_eq!(exported.cleaned, 45);
         assert_eq!(exported.retained, 1);
-        assert!(service.read(|s| s.detail("before")).is_err());
+        assert!(service.read(|s| s.detail("before")).is_ok());
         assert!(service.read(|s| s.detail("last-ms")).is_err());
         assert!(service.read(|s| s.detail("after")).is_ok());
         assert!(service.read(|s| s.detail(&changed.id)).is_ok());
@@ -800,9 +631,9 @@ mod tests {
             .read(|s| s.dashboard(&Filter::default()))
             .unwrap()
             .totals;
-        assert_eq!(after.requests, before.requests + 1);
-        assert_eq!(after.attempts, before.attempts + 1);
-        assert!(service.read(|s| s.detail("before")).is_err());
+        assert_eq!(after.requests, 4);
+        assert_eq!(after.attempts, 4);
+        assert!(service.read(|s| s.detail("before")).is_ok());
     }
     #[test]
     fn failed_save_and_history_gap_never_clear_details() {
@@ -822,26 +653,10 @@ mod tests {
         service
             .query(|s| s.archive_batch(std::slice::from_ref(&r.id)))
             .unwrap();
-        let mut recovered = Spool::new(dir.path()).unwrap();
+        let recovered = Spool::new(dir.path()).unwrap();
         assert!(service
             .read(|s| snapshot(s, &recovered, &request(), &prices, &service.settings()))
             .is_err());
-        recovered.capture(std::slice::from_ref(&r)).unwrap();
-        service
-            .read(|s| snapshot(s, &recovered, &request(), &prices, &service.settings()))
-            .unwrap();
-        let mut csv = Vec::new();
-        let result = write_csv(&recovered, &request(), &mut csv).unwrap();
-        assert_eq!(result.requests, 1);
-        assert!(service.read(|s| s.detail("preserved")).is_err());
-        assert_eq!(
-            service
-                .read(|s| s.dashboard(&Filter::default()))
-                .unwrap()
-                .totals
-                .requests,
-            1
-        );
     }
     #[test]
     fn arrivals_and_updates_during_source_replay_remain_for_next_export() {
@@ -851,29 +666,60 @@ mod tests {
         let req = request();
         let stable = row("stable", "claude", BASE);
         let mut changed = row("changed", "claude", BASE);
+        let mut in_progress = row("in-progress", "claude", BASE);
+        in_progress.started_at = BASE;
+        in_progress.finished_at = None;
+        in_progress.completed = false;
+        in_progress.attempts[0].outcome = "in_progress".into();
+        let out_of_range = row("out-of-range", "claude", BASE - 5_000);
         service
-            .query(|s| s.write_batch(&[stable, changed.clone()], None))
-            .unwrap();
-        service
-            .read(|s| capture_cleanup_snapshot(s, &spool, &req))
-            .unwrap();
-        changed.attempts[0].tokens.output = Some(30);
-        service
-            .query(|s| s.write_batch(&[changed, row("new", "claude", BASE)], None))
+            .query(|s| {
+                s.write_batch(
+                    &[
+                        stable,
+                        changed.clone(),
+                        in_progress.clone(),
+                        out_of_range.clone(),
+                    ],
+                    None,
+                )
+            })
             .unwrap();
         let pricing = service.prices().unwrap().frozen();
         let pending = service
             .read(|s| snapshot(s, &spool, &req, &pricing, &service.settings()))
             .unwrap();
+        assert_eq!(pending, 1);
+        changed.attempts[0].tokens.output = Some(30);
+        service
+            .query(|s| s.write_batch(&[changed, row("new", "claude", BASE)], None))
+            .unwrap();
         let mut result = save_csv(&spool, &req, &dir.path().join("bill.csv")).unwrap();
         result.retained = pending;
-        cleanup(&service, &spool, &mut result).unwrap();
-        assert_eq!(result.requests, 3);
+        cleanup(&service, &spool, &req, &mut result).unwrap();
+        assert_eq!(result.requests, 2);
         assert_eq!(result.cleaned, 1);
         assert_eq!(result.retained, 2);
         assert!(service.read(|s| s.detail("stable")).is_err());
         assert!(service.read(|s| s.detail("changed")).is_ok());
+        assert!(service.read(|s| s.detail("in-progress")).is_ok());
         assert!(service.read(|s| s.detail("new")).is_ok());
+        let out_digest = storage::digest(encoded(&out_of_range).unwrap().as_bytes());
+        let in_prog_digest = storage::digest(encoded(&in_progress).unwrap().as_bytes());
+        let (cleaned_extra, retained_extra) = service
+            .query(|s| {
+                s.clean_exported_bill_batch(
+                    &[
+                        (out_of_range.id.clone(), out_digest),
+                        (in_progress.id.clone(), in_prog_digest),
+                    ],
+                    &req,
+                )
+            })
+            .unwrap();
+        assert_eq!((cleaned_extra, retained_extra), (0, 2));
+        assert!(service.read(|s| s.detail("out-of-range")).is_ok());
+        assert!(service.read(|s| s.detail("in-progress")).is_ok());
     }
     #[test]
     fn compacted_legacy_attempts_are_an_explicit_gap() {
@@ -976,172 +822,15 @@ mod tests {
         }
     }
     #[test]
-    fn partial_source_history_blocks_export_before_cleanup() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = Service::new(&dir.path().join("store"));
-        let pricing = service.prices().unwrap().frozen();
-        let settings = service.settings();
-        let home = dir.path().join("claude");
-        std::fs::create_dir_all(home.join("projects/fixture")).unwrap();
-        std::fs::write(
-            home.join("projects/fixture/session.jsonl"),
-            b"{\"type\":\"assistant\"",
-        )
-        .unwrap();
-        let mut spool = Spool::new(dir.path()).unwrap();
-        let report =
-            sessions::sync(&mut spool, &pricing, &settings, "claude", &home, true).unwrap();
-        assert_eq!(report.errors, 0);
-
-        let brain = dir.path().join("antigravity/brain");
-        let history = brain.join("fixture/.system_generated/logs/transcript.jsonl");
-        std::fs::create_dir_all(history.parent().unwrap()).unwrap();
-        std::fs::write(&history, b"{\"input_tokens\":").unwrap();
-        super::super::antigravity::scan_file_list(
-            &mut spool,
-            &brain,
-            std::slice::from_ref(&history),
-            &pricing,
-            &settings,
-            &mut sessions::Report::default(),
-            false,
-        )
-        .unwrap();
-
-        std::fs::write(&history, b"{\"input_tokens\":\n").unwrap();
-        assert!(super::super::antigravity::scan_file_list(
-            &mut spool,
-            &brain,
-            &[history],
-            &pricing,
-            &settings,
-            &mut sessions::Report::default(),
-            false,
-        )
-        .is_err());
-    }
-    #[test]
-    fn app_transcript_cannot_replace_api_attempts_or_their_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut spool = Spool::new(dir.path()).unwrap();
-        let mut api = row("request", "antigravity", BASE);
-        api.attempts[0].transport = "local_api".into();
-        api.attempts[0].cost_multiplier = "1.25".into();
-        let mut retry = api.attempts[0].clone();
-        retry.id = "retry".into();
-        retry.outcome = "failed".into();
-        api.attempts.insert(0, retry);
-        spool.capture(&[api]).unwrap();
-        let mut transcript = row("request", "antigravity", BASE);
-        transcript.attempts[0].transport = "history_file".into();
-        transcript.attempts[0].tokens.output = Some(99);
-        spool.capture(&[transcript]).unwrap();
-        let saved = spool.source("request").unwrap().unwrap();
-        assert_eq!(saved.attempts.len(), 2);
-        assert_eq!(saved.attempts[0].outcome, "failed");
-        assert_eq!(saved.attempts[1].tokens.output, Some(20));
-        assert_eq!(saved.attempts[1].cost_multiplier, "1.25");
-    }
-    #[test]
-    fn antigravity_export_copies_rpc_cursors_and_suppresses_covered_transcript_steps() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = Service::new(&dir.path().join("store"));
-        let rpc_record = Record {
-            id: safe_id("antigravity:cascade-b1:exec-1:0"),
-            client: "antigravity".into(),
-            source: "antigravity".into(),
-            session_id: Some(safe_id("cascade-b1")),
-            started_at: BASE - 1000,
-            finished_at: Some(BASE + 200),
-            completed: true,
-            attempts: vec![Attempt {
-                id: safe_id("antigravity:cascade-b1:exec-1:0:final"),
-                requested_model: Some("claude-opus-4-6".into()),
-                response_model: Some("claude-opus-4-6".into()),
-                model_display_name: Some("Claude Opus 4.6".into()),
-                started_at: BASE - 1000,
-                duration_ms: 1200,
-                outcome: "success".into(),
-                transport: "local_api".into(),
-                usage_status: "reported".into(),
-                tokens: Tokens {
-                    input: Some(500),
-                    output: Some(80),
-                    ..Tokens::default()
-                },
-                ..Attempt::default()
-            }],
-            ..Record::default()
-        };
-        let cursor_key = safe_id("antigravity:rpc:cascade-b1");
-        let cursor_body = r#"{"modified":"2026-01-01T00:00:05Z","count":1,"covered":[1]}"#;
-        service
-            .query(|s| s.write_batch(&[rpc_record], Some((&cursor_key, cursor_body))))
-            .unwrap();
-
-        let ag_home = dir.path().join("ag-home");
-        let transcript =
-            ag_home.join("antigravity/brain/cascade-b1/.system_generated/logs/transcript.jsonl");
-        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        // Step 1 is already covered by RPC cursor; step 2 is new in the transcript.
-        let end_iso = chrono::DateTime::from_timestamp_millis(BASE + 500)
-            .unwrap()
-            .to_rfc3339();
-        let rows = format!(
-            "{{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"{end_iso}\",\"content\":\"<USER_REQUEST>\\nhi\\n</USER_REQUEST>\\n<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Claude Opus 4.6 (Thinking). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}}\n\
-             {{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"{end_iso}\",\"input_tokens\":500,\"output_tokens\":80}}\n\
-             {{\"step_index\":2,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"{end_iso}\",\"input_tokens\":300,\"output_tokens\":40}}\n"
-        );
-        std::fs::write(&transcript, rows).unwrap();
-
-        let mut req = request();
-        req.clients = vec!["antigravity".into()];
-        let mut spool = Spool::new(dir.path()).unwrap();
-        service
-            .read(|s| capture_cleanup_snapshot(s, &spool, &req))
-            .unwrap();
-        assert_eq!(
-            spool.cursor(&cursor_key).unwrap().as_deref(),
-            Some(cursor_body)
-        );
-        let pricing = service.prices().unwrap().frozen();
-        let settings = service.settings();
-        let mut report = sessions::Report::default();
-        super::super::antigravity::scan_file_list(
-            &mut spool,
-            &ag_home.join("antigravity/brain"),
-            &[transcript],
-            &pricing,
-            &settings,
-            &mut report,
-            false,
-        )
-        .unwrap();
-        assert_eq!(report.errors, 0);
-        assert_eq!(report.imported, 1);
-        let step2_id = safe_id("antigravity:request:cascade-b1:step:2");
-        let step2 = spool.source(&step2_id).unwrap().unwrap();
-        service.query(|s| s.write_batch(&[step2], None)).unwrap();
-        service
-            .read(|s| snapshot(s, &spool, &req, &pricing, &settings))
-            .unwrap();
-        let mut csv = Vec::new();
-        let exported = write_csv(&spool, &req, &mut csv).unwrap();
-        // Exactly 2 requests exported: the RPC record for step 1 and the transcript record for step 2 (step 1 is not double-imported).
-        assert_eq!(exported.requests, 2);
-        assert_eq!(exported.attempts, 2);
-    }
-
-    #[test]
-    fn export_bill_preserves_in_window_history_file_records_and_rejects_unrecoverable_receipts() {
+    fn export_bill_cleans_in_window_records_and_statistics_while_rejecting_cleaned_gaps() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(&dir.path().join("store"));
 
-        // 1) An old record archived into receipts that cannot be recovered.
+        // 1) An old record archived into receipts before the export window.
         let old_cleaned = row("old-cleaned", "antigravity", BASE - 10_000);
         // 2) A live record inside the export window.
         let live_in_window = row("live-in-window", "antigravity", BASE + 500);
-        // 3) A history_file record inside the export window that must be exported and remain in Store.
+        // 3) A history_file record inside the export window that must be exported and cleaned.
         let hist_in_window_id = safe_id("antigravity:request:cascade-keep:step:1");
         let mut hist_in_window = row(&hist_in_window_id, "antigravity", BASE + 800);
         hist_in_window.session_id = Some(safe_id("cascade-keep"));
@@ -1161,7 +850,6 @@ mod tests {
             })
             .unwrap();
 
-        let claude_home = dir.path().join("claude-home");
         let bill_path = dir.path().join("fuzzy-bill.csv");
         let range_with_gap = Request {
             clients: vec!["claude".into(), "antigravity".into()],
@@ -1170,11 +858,7 @@ mod tests {
             timezone: "UTC".into(),
         };
         let err = service
-            .export_bill(
-                &range_with_gap,
-                &[("claude".into(), claude_home.clone())],
-                &bill_path,
-            )
+            .export_bill(&range_with_gap, &bill_path)
             .err()
             .unwrap();
         assert!(err.message.contains("包含已清理的历史请求"));
@@ -1186,15 +870,23 @@ mod tests {
             end: BASE + 1_000,
             timezone: "UTC".into(),
         };
-        let exported = service
-            .export_bill(&valid_range, &[("claude".into(), claude_home)], &bill_path)
-            .unwrap();
+        let exported = service.export_bill(&valid_range, &bill_path).unwrap();
         assert_eq!(exported.requests, 2);
-        assert_eq!(exported.cleaned, 0);
-        assert!(service.read(|s| s.detail(&live_in_window.id)).is_ok());
-        assert!(
-            service.read(|s| s.detail(&hist_in_window_id)).is_ok(),
-            "in-window history_file record must remain intact in main Store after export"
-        );
+        assert_eq!(exported.cleaned, 2);
+        assert_eq!(exported.retained, 0);
+        assert!(exported.cleanup_error.is_none());
+        assert!(service.read(|s| s.detail(&live_in_window.id)).is_err());
+        assert!(service.read(|s| s.detail(&hist_in_window_id)).is_err());
+        let in_window_dashboard = service
+            .read(|s| {
+                s.dashboard(&Filter {
+                    client: Some("antigravity".into()),
+                    start: Some(BASE),
+                    end: Some(BASE + 1_999),
+                    ..Filter::default()
+                })
+            })
+            .unwrap();
+        assert_eq!(in_window_dashboard.totals.requests, 0);
     }
 }

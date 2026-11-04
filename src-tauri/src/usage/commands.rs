@@ -239,6 +239,35 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
     });
 }
 
+fn format_bill_file_name(host: Option<&str>, platform: &str) -> String {
+    let cleaned = host
+        .map(str::trim)
+        .map(|h| h.strip_suffix(".local").unwrap_or(h))
+        .map(|h| {
+            h.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+                .trim_matches(['-', '.'])
+                .to_string()
+        })
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "localhost".into());
+    format!("{cleaned}+{platform}.csv")
+}
+
+fn default_bill_file_name() -> String {
+    format_bill_file_name(
+        sysinfo::System::host_name().as_deref(),
+        std::env::consts::OS,
+    )
+}
+
 #[tauri::command]
 pub async fn export_usage_bill(
     r: R<'_>,
@@ -248,23 +277,13 @@ pub async fn export_usage_bill(
     use tauri_plugin_dialog::DialogExt;
     request.validate()?;
     let service = r.usage.clone();
-    let mut roots = Vec::new();
-    for client in &request.clients {
-        roots.push((
-            client.clone(),
-            if client == "claude" {
-                r.home(crate::gateway::ClientId::Claude)?
-            } else {
-                crate::antigravity::home()?
-            },
-        ));
-    }
+    let default_name = default_bill_file_name();
     tauri::async_runtime::spawn_blocking(move || {
         let Some(file) = app
             .dialog()
             .file()
             .set_title("导出账单并清理明细")
-            .set_file_name("usage-bill.csv")
+            .set_file_name(&default_name)
             .add_filter("CSV", &["csv"])
             .blocking_save_file()
         else {
@@ -273,8 +292,26 @@ pub async fn export_usage_bill(
         let path = file
             .into_path()
             .map_err(|_| failure("请选择本地账单保存路径"))?;
-        service.export_bill(&request, &roots, &path).map(Some)
+        service.export_bill(&request, &path).map(Some)
     })
     .await
     .map_err(|_| failure("账单导出中断，明细清理结果请检查用量页"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_bill_file_name;
+
+    #[test]
+    fn formats_default_bill_file_name_with_hostname_and_platform() {
+        assert_eq!(
+            format_bill_file_name(Some("MacBook-Pro.local"), "macos"),
+            "MacBook-Pro+macos.csv"
+        );
+        assert_eq!(
+            format_bill_file_name(Some("  my host/1  "), "windows"),
+            "my-host-1+windows.csv"
+        );
+        assert_eq!(format_bill_file_name(None, "linux"), "localhost+linux.csv");
+    }
 }

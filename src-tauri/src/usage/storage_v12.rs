@@ -1409,10 +1409,19 @@ pub(super) fn record(c: &Connection, id: &str) -> Result<Option<Record>> {
             .map(|id| serde_json::from_value(load(c, id)?).map_err(json_error))
             .transpose()
     } else {
-        let body: Option<String> = db(c
-            .query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0))
+        let row: Option<(String, Option<String>)> = db(c
+            .query_row(
+                "SELECT body,duplicate_of FROM records WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional())?;
-        body.map(|v| bodies::decode(c, &v)).transpose()
+        row.map(|(v, duplicate)| {
+            let mut r: Record = bodies::decode(c, &v)?;
+            r.duplicate_of = duplicate;
+            Ok(r)
+        })
+        .transpose()
     }
 }
 pub(super) fn update(c: &Connection, r: &Record) -> Result<()> {
@@ -1425,13 +1434,14 @@ pub(super) fn update(c: &Connection, r: &Record) -> Result<()> {
         save(c, r, effective, seq)
     } else {
         db(c.execute(
-            "UPDATE records SET body=?2,signature=?3,model=?4,time=?5 WHERE id=?1",
+            "UPDATE records SET body=?2,signature=?3,model=?4,time=?5,provider=?6 WHERE id=?1",
             params![
                 r.id,
                 bodies::encode(c, r)?,
                 r.signature(),
                 r.final_attempt().and_then(|a| a.grouping_model()),
-                r.event_time()
+                r.event_time(),
+                r.final_attempt().and_then(|a| a.provider.as_deref())
             ],
         ))?;
         Ok(())
