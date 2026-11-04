@@ -83,6 +83,7 @@ pub fn clean(data: &Path) -> usize {
         data.join("claude"),
         data.join("grok"),
         data.join("dsh"),
+        data.join("agy"),
     ] {
         if !owned(&root, true) {
             continue;

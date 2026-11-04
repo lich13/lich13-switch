@@ -390,6 +390,21 @@ fn rename_and_delete_account_prevent_active_deletion_and_suppress_reimport() {
     let adc2_id = s6.accounts.iter().find(|a| !a.current).unwrap().id.clone();
     write_private_file(&paths.agswitch_adc_file(), au2.to_string().as_bytes()).unwrap();
     let s7 = state_at(&paths).unwrap();
+    #[cfg(unix)]
+    {
+        let target = paths.agswitch_adc_file().with_extension("target");
+        fs::rename(paths.agswitch_adc_file(), &target).unwrap();
+        std::os::unix::fs::symlink(&target, paths.agswitch_adc_file()).unwrap();
+        assert_eq!(
+            delete_account_at(&paths, &adc2_id, &s7.revision)
+                .unwrap_err()
+                .code,
+            code::SYMLINK
+        );
+        fs::remove_file(paths.agswitch_adc_file()).unwrap();
+        fs::rename(&target, paths.agswitch_adc_file()).unwrap();
+        assert_eq!(state_at(&paths).unwrap().accounts.len(), 2);
+    }
     let s8 = delete_account_at(&paths, &adc2_id, &s7.revision).unwrap();
     assert_eq!(s8.accounts.len(), 1);
     assert!(!paths.agswitch_adc_file().exists());

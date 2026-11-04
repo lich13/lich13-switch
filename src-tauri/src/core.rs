@@ -1459,6 +1459,48 @@ mod tests {
         reopened.delete(&c_id).unwrap();
         assert!(reopened.home().join("auth.json").exists());
         assert_eq!(reopened.state().unwrap().accounts.len(), 1);
+
+        // Gateway-active and official-mode busy states reject deletion and preserve accounts.json.
+        let gw_marker = reopened.data_dir.join("gateway-api-write.json");
+        std::fs::write(&gw_marker, b"{}").unwrap();
+        assert_eq!(reopened.delete(&b).unwrap_err().code, code::GATEWAY_ACTIVE);
+        std::fs::remove_file(&gw_marker).unwrap();
+
+        let official_marker = reopened.data_dir.join("official-mode.json");
+        std::fs::write(
+            &official_marker,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "enabled": true,
+                "path": reopened.home().join("config.toml"),
+                "beforeRevision": "missing",
+                "managedRevision": null,
+                "fields": [
+                    { "key": "base_url", "original": null, "managed": null },
+                    { "key": "experimental_bearer_token", "original": null, "managed": null },
+                    { "key": "supports_websockets", "original": null, "managed": null }
+                ],
+                "accountId": b
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reopened.delete(&b).unwrap_err().code, code::OFFICIAL_MODE);
+        std::fs::remove_file(&official_marker).unwrap();
+
+        // Symlink / file removal failure aborts deletion and preserves accounts.json.
+        #[cfg(unix)]
+        {
+            let auth_file = reopened.home().join("auth.json");
+            let target_file = reopened.home().join("auth-target.json");
+            std::fs::rename(&auth_file, &target_file).unwrap();
+            std::os::unix::fs::symlink(&target_file, &auth_file).unwrap();
+            assert_eq!(reopened.delete(&b).unwrap_err().code, code::SYMLINK);
+            std::fs::remove_file(&auth_file).unwrap();
+            std::fs::rename(&target_file, &auth_file).unwrap();
+            let verify_reopened = Core::new(t.path().join("app"), reopened.home()).unwrap();
+            assert_eq!(verify_reopened.store.profiles.len(), 1);
+        }
     }
     #[test]
     fn bearer_provider_without_account_does_not_report_missing_auth() {

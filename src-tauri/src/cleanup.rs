@@ -18,6 +18,12 @@ const RETIRED_AGY_FILES: &[&str] = &[
     "gateway-api-write.json",
     "previous-config.json",
     "previous-settings.json",
+    "rpm-window.json",
+    "conversation-owners.json",
+    "endpoint-owners.json",
+    "provider-models.json",
+    "model-list.json",
+    "previous-config.toml",
 ];
 
 /// Exact retired-module files only. Never follow links or remove a non-empty directory.
@@ -83,12 +89,17 @@ mod tests {
         for name in RETIRED_FILES {
             std::fs::write(dir.path().join(name), b"retired").unwrap();
         }
+        crate::storage::private_dir(dir.path()).unwrap();
         let agy = dir.path().join("agy");
-        std::fs::create_dir(&agy).unwrap();
+        crate::storage::private_dir(&agy).unwrap();
         for name in RETIRED_AGY_FILES {
             std::fs::write(agy.join(name), b"retired").unwrap();
         }
+        let spool = agy.join("gateway-spool-abc123");
+        crate::storage::private_dir(&spool).unwrap();
+        crate::storage::atomic_write(&spool.join(".tmpabc123"), b"tmp", None).unwrap();
         std::fs::write(dir.path().join("gateway.json"), b"preserve").unwrap();
+        assert_eq!(crate::cleanup_spool::clean(dir.path()), 1);
         retired_statistics(dir.path()).unwrap();
         retired_statistics(dir.path()).unwrap();
         assert!(!agy.exists());
