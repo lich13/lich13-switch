@@ -234,6 +234,26 @@ function buildStats(
         },
       },
     ],
+    providers: [
+      {
+        id: "ag-oauth-1",
+        requests: 10,
+        tokens: 175_000,
+        reasoningTokens: 10_400,
+        costUsd: "0.6850",
+        unpricedRequests: 0,
+        sharePercent: 67.3,
+      },
+      {
+        id: "ag-adc-1",
+        requests: 5,
+        tokens: 85_000,
+        reasoningTokens: 5_800,
+        costUsd: "0.5600",
+        unpricedRequests: 0,
+        sharePercent: 32.7,
+      },
+    ],
     families: [
       {
         family: "gemini",
@@ -380,6 +400,13 @@ describe("Usage Antigravity statistics tab", () => {
         if (name === "get_usage_dashboard") return dashboard;
         if (name === "get_usage_state") return usageState;
         if (name === "get_gateway") return { providers: [] };
+        if (name === "get_antigravity_auth_state")
+          return {
+            accounts: [
+              { id: "ag-oauth-1", name: "oauth@example.invalid", kind: "oauth" },
+              { id: "ag-adc-1", name: "ADC 凭据 · p1", kind: "adc" },
+            ],
+          };
         if (name === "get_antigravity_usage_stats") return statsPayload;
         if (name === "get_usage_logs") {
           const filter = (args?.filter ?? {}) as UsageFilter;
@@ -434,6 +461,13 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(tracks).getAllByText("5h 突发窗口")).toHaveLength(2);
     expect(within(tracks).getAllByText("7d 周滚动")).toHaveLength(2);
 
+    const creds = screen.getByLabelText("账号与凭据分布");
+    expect(within(creds).getByText("oauth@example.invalid")).toBeInTheDocument();
+    expect(within(creds).getByText("ADC 凭据 · p1")).toBeInTheDocument();
+    await user.click(
+      within(creds).getByRole("button", { name: "按 oauth@example.invalid 筛选" }),
+    );
+
     const sessions = screen.getByLabelText("脱敏会话排行");
     expect(within(sessions).getByText("#a1b2c3d4")).toBeInTheDocument();
     expect(within(sessions).getByText("gemini-3.1-pro")).toBeInTheDocument();
@@ -448,6 +482,7 @@ describe("Usage Antigravity statistics tab", () => {
       ).toBeInTheDocument();
       expect(lastLogFilters.at(-1)).toMatchObject({
         client: "antigravity",
+        provider: "ag-oauth-1",
         sessionId: SESSION_ALPHA,
       });
     });

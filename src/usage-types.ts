@@ -259,6 +259,16 @@ export type AntigravityQuotaTrack = {
   weekly7d: AntigravityTrackWindow;
 };
 
+export type AntigravityProviderGroup = {
+  id: string;
+  requests: number;
+  tokens: number;
+  reasoningTokens: number;
+  costUsd: string;
+  unpricedRequests: number;
+  sharePercent: number;
+};
+
 export type AntigravityFamilyGroup = {
   family: string;
   label: string;
@@ -292,6 +302,7 @@ export type AntigravityUsageStats = {
   unpricedRequests: number;
   tokenMix: AntigravityTokenMix;
   tracks: AntigravityQuotaTrack[];
+  providers?: AntigravityProviderGroup[];
   families: AntigravityFamilyGroup[];
   topSessions: AntigravitySessionRow[];
 };

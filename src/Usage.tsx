@@ -513,6 +513,11 @@ export default function Usage({
               {n}
             </option>
           ))}
+          {(client === "antigravity" || tab === "antigravity") &&
+            (provider === "session" ||
+              (agStats?.providers ?? []).some((p) => p.id === "session")) && (
+              <option value="session">本机会话（未归属）</option>
+            )}
         </select>
         <select
           aria-label="请求类型"
@@ -631,9 +636,15 @@ export default function Usage({
         <UsageAntigravity
           stats={agStats}
           busy={agBusy}
+          selectedProvider={provider}
+          providerName={name}
+          onSelectProvider={(nextProvider) => {
+            if (nextProvider) setClient("antigravity");
+            setProvider(nextProvider);
+            resetPages();
+          }}
           onSelectSession={(nextSessionId) => {
             setClient("antigravity");
-            setProvider("");
             setSessionId(nextSessionId);
             resetPages();
             setTab("requests");
@@ -678,7 +689,7 @@ export default function Usage({
           saved={(result) => {
             setBillOpen(false);
             setBillResult(
-              `已导出 ${numeric(result.requests)} 个请求、${numeric(result.attempts)} 次尝试，清理 ${numeric(result.cleaned)} 条明细${result.retained ? `，保留 ${numeric(result.retained)} 条更新记录` : ""}。${result.cleanupError ?? ""}`,
+              `已导出 ${numeric(result.requests)} 个请求、${numeric(result.attempts)} 次尝试，清理 ${numeric(result.cleaned)} 条已导出记录与对应统计${result.retained ? `，保留 ${numeric(result.retained)} 条更新记录` : ""}。${result.cleanupError ?? ""}`,
             );
             void load();
           }}

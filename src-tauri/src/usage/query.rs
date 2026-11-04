@@ -343,14 +343,20 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
         ("model", &f.model),
     ] {
         if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
-            if column == "model" && f.source.as_deref() == Some("proxy") {
+            if column == "provider" && value == "session" {
+                terms.push(format!(
+                    "({alias}.provider IS NULL OR {alias}.provider='session')"
+                ));
+            } else if column == "model" && f.source.as_deref() == Some("proxy") {
                 terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics original WHERE original.kind=({}) AND original.owner={alias}.id AND original.requests>0 AND original.model=?)", gateway_kind(alias)));
+                args.push(Value::Text(value.clone()));
             } else if column == "model" && grok_model_filter(f).is_some() {
                 terms.push(format!("EXISTS(SELECT 1 FROM usage_metrics native WHERE native.kind=0 AND native.owner={alias}.id AND native.model=?)"));
+                args.push(Value::Text(value.clone()));
             } else {
                 terms.push(format!("{alias}.{column}=?"));
+                args.push(Value::Text(value.clone()));
             }
-            args.push(Value::Text(value.clone()));
         }
     }
     if let Some(session_id) = f.session_id.as_deref().filter(|v| !v.is_empty()) {
@@ -427,12 +433,16 @@ fn selection(c: &Connection, f: &Filter) -> (String, Vec<Value>) {
         ("model", &f.model),
     ] {
         if let Some(v) = value.as_ref().filter(|v| !v.is_empty()) {
-            if key == "model" && grok_model_filter(f).is_some() {
+            if key == "provider" && v == "session" {
+                daily
+                    .push("coalesce(json_extract(d.body,'$.provider'),'session')='session'".into());
+            } else if key == "model" && grok_model_filter(f).is_some() {
                 daily.push("EXISTS(SELECT 1 FROM usage_metrics native WHERE native.kind=1 AND native.owner=d.id AND native.model=?)".into());
+                args.push(Value::Text(v.clone()));
             } else {
                 daily.push(format!("json_extract(d.body,'$.{key}')=?"));
+                args.push(Value::Text(v.clone()));
             }
-            args.push(Value::Text(v.clone()));
         }
     }
     if f.session_id.as_deref().is_some_and(|v| !v.is_empty()) {

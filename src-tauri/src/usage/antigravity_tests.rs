@@ -684,11 +684,12 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
             "antigravity/brain/{id}/.system_generated/logs/transcript.jsonl"
         ));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            path,
-            "{\"step_index\":0,\"input_tokens\":100}\n{\"step_index\":1,\"input_tokens\":100}\n",
-        )
-        .unwrap();
+        let body = if id == "z-good" {
+            "{\"step_index\":0,\"input_tokens\":100}\n{\"step_index\":1,\"input_tokens\":100}\n"
+        } else {
+            "{\"type\":\"PLANNER_RESPONSE\",\"step_index\":0,\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":100}\n{\"type\":\"PLANNER_RESPONSE\",\"step_index\":1,\"created_at\":\"2026-01-01T00:00:01Z\",\"input_tokens\":100}\n"
+        };
+        std::fs::write(path, body).unwrap();
     }
     let mut store = Store::open(&dir.path().join("db")).unwrap();
     let pricing = Pricing::new(&dir.path().join("db")).unwrap();
@@ -719,16 +720,18 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
             store.dashboard(&Filter::default()).unwrap().totals.requests,
             4
         );
-        for id in ["z-good", "local-only"] {
-            let cursor: Cursor = serde_json::from_str(
-                &store
-                    .cursor(&safe_id(&format!("antigravity:rpc:{id}")))
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap();
-            assert_eq!(cursor.covered, BTreeSet::from([0, 1]));
-        }
+        let cursor: Cursor = serde_json::from_str(
+            &store
+                .cursor(&safe_id("antigravity:rpc:z-good"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cursor.covered, BTreeSet::from([0, 1]));
+        assert!(store
+            .cursor(&safe_id("antigravity:rpc:local-only"))
+            .unwrap()
+            .is_none());
     }
     assert!(f
         .calls
@@ -746,8 +749,19 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
                 m == "GetCascadeTrajectoryGeneratorMetadata" && b["cascadeId"] == "local-only"
             })
             .count(),
-        3
+        0
     );
+    // Simulate a previously synced RPC cursor (count >= 2 => offset > 0) for a deleted thread
+    // whose transcript.jsonl still exists on disk and changes (H3.4).
+    store
+        .write_batch(
+            &[],
+            Some((
+                &safe_id("antigravity:rpc:local-only"),
+                r#"{"modified":"old","count":3,"covered":[0,1]}"#,
+            )),
+        )
+        .unwrap();
     let local_transcript = dir
         .path()
         .join("antigravity/brain/local-only/.system_generated/logs/transcript.jsonl");
@@ -766,6 +780,7 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
     )
     .await
     .unwrap();
+    assert_eq!(report.errors, 0);
     assert_eq!(
         f.calls
             .lock()
@@ -775,7 +790,7 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
                 m == "GetCascadeTrajectoryGeneratorMetadata" && b["cascadeId"] == "local-only"
             })
             .count(),
-        5
+        0
     );
 }
 
@@ -1123,7 +1138,11 @@ async fn multi_window_endpoints_merge_fresher_trajectories_and_fallback_for_brai
         .path()
         .join("antigravity/brain/brain-b/transcript.jsonl");
     std::fs::create_dir_all(brain_file.parent().unwrap()).unwrap();
-    std::fs::write(&brain_file, "{}\n").unwrap();
+    std::fs::write(
+        &brain_file,
+        "{\"type\":\"PLANNER_RESPONSE\",\"step_index\":0,\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":50}\n",
+    )
+    .unwrap();
 
     let api = Api::from_endpoints(
         reqwest::Client::builder().no_proxy().build().unwrap(),
@@ -1143,11 +1162,20 @@ async fn multi_window_endpoints_merge_fresher_trajectories_and_fallback_for_brai
     )
     .await
     .unwrap();
+    scan_home(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .unwrap();
     server_a.abort();
     server_b.abort();
 
     assert_eq!(report.errors, 0);
-    // 2 from fresher window_b "shared" + 1 from window_a "only-a" + 1 from fallback window_b "brain-b"
+    // 2 from fresher window_b "shared" + 1 from window_a "only-a" + 1 from local transcript "brain-b"
     assert_eq!(
         store.dashboard(&Filter::default()).unwrap().totals.requests,
         4
@@ -1159,7 +1187,7 @@ async fn multi_window_endpoints_merge_fresher_trajectories_and_fallback_for_brai
         .detail(&safe_id("antigravity:request:shared-stale"))
         .is_err());
     assert!(store
-        .detail(&safe_id("antigravity:request:brain-b-req"))
+        .detail(&safe_id("antigravity:request:brain-b:step:0"))
         .is_ok());
 }
 
@@ -1848,8 +1876,11 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
 
     // Sync happens AFTER switching to ag-adc-1, yet conv-oauth (00:30) is attributed to ag-oauth-1
     // and conv-pre (2026-10-19) stays unattributed (None).
-    let mut store = Store::open(dir.path()).unwrap();
-    let pricing = Pricing::new(dir.path()).unwrap();
+    // Open Store inside the `usage` subdirectory while `antigravity-accounts.json` is in `dir.path()`
+    // to verify the production directory layout (`~/.vela` vs `~/.vela/usage`).
+    let usage_dir = dir.path().join("usage");
+    let mut store = Store::open(&usage_dir).unwrap();
+    let pricing = Pricing::new(&usage_dir).unwrap();
     scan_home(
         &mut store,
         &ag_home,
@@ -1869,6 +1900,14 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     let mut provider_ids: Vec<String> = dash.providers.iter().map(|g| g.id.clone()).collect();
     provider_ids.sort();
     assert_eq!(provider_ids, vec!["ag-adc-1", "ag-oauth-1", "session"]);
+
+    let stats_all = store
+        .antigravity_stats(&all_ag, &pricing.frozen(), "1", 1_800_000_000_000)
+        .unwrap();
+    let mut stat_provider_ids: Vec<String> =
+        stats_all.providers.iter().map(|p| p.id.clone()).collect();
+    stat_provider_ids.sort();
+    assert_eq!(stat_provider_ids, vec!["ag-adc-1", "ag-oauth-1", "session"]);
 
     let oauth_only = Filter {
         client: Some("antigravity".into()),
@@ -1893,4 +1932,15 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
         .unwrap();
     assert_eq!(stats_adc.requests, 1);
     assert_eq!(stats_adc.token_mix.total, 250);
+
+    let session_only = Filter {
+        client: Some("antigravity".into()),
+        provider: Some("session".into()),
+        ..Filter::default()
+    };
+    assert_eq!(store.dashboard(&session_only).unwrap().totals.requests, 1);
+    let stats_session = store
+        .antigravity_stats(&session_only, &pricing.frozen(), "1", 1_800_000_000_000)
+        .unwrap();
+    assert_eq!(stats_session.requests, 1);
 }

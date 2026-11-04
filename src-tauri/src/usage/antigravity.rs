@@ -1200,8 +1200,9 @@ impl Api {
         if total.is_some_and(|n| n > 100_000) {
             return Err(failure("Antigravity 会话步骤超过读取限制"));
         }
-        let mut active_endpoint = owner.unwrap_or(0);
-        let mut resolved_owner = owner.is_some();
+        let Some(active_endpoint) = owner else {
+            return Ok(());
+        };
         let mut steps = Steps::default();
         let mut failed_steps = BTreeSet::new();
         let mut wrote_any = false;
@@ -1215,63 +1216,13 @@ impl Api {
         loop {
             let meta_req =
                 json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false});
-            let page = if resolved_owner || self.endpoints.len() <= 1 {
-                resolved_owner = true;
-                match self
-                    .call_on(
-                        &self.endpoints[active_endpoint],
-                        "GetCascadeTrajectoryGeneratorMetadata",
-                        &meta_req,
-                    )
-                    .await
-                {
-                    Ok(page) => page,
-                    Err(_) if owner.is_none() && offset == 0 => return Ok(()),
-                    Err(err) => return Err(err),
-                }
-            } else {
-                let mut selected_page = None;
-                let mut empty_fallback = None;
-                let mut last_err = None;
-                for (idx, endpoint) in self.endpoints.iter().enumerate() {
-                    match self
-                        .call_on(endpoint, "GetCascadeTrajectoryGeneratorMetadata", &meta_req)
-                        .await
-                    {
-                        Ok(candidate) => {
-                            let non_empty = candidate["generatorMetadata"]
-                                .as_array()
-                                .is_some_and(|a| !a.is_empty());
-                            if non_empty {
-                                active_endpoint = idx;
-                                resolved_owner = true;
-                                selected_page = Some(candidate);
-                                break;
-                            }
-                            if empty_fallback.is_none()
-                                && (candidate["generatorMetadata"].is_array()
-                                    || candidate.as_object().is_some_and(|o| o.is_empty()))
-                            {
-                                empty_fallback = Some((idx, candidate));
-                            }
-                        }
-                        Err(err) => last_err = Some(err),
-                    }
-                }
-                if let Some(found) = selected_page {
-                    found
-                } else if let Some((idx, empty)) = empty_fallback {
-                    active_endpoint = idx;
-                    resolved_owner = true;
-                    empty
-                } else if owner.is_none() && offset == 0 {
-                    return Ok(());
-                } else {
-                    return Err(
-                        last_err.unwrap_or_else(|| failure("Antigravity 历史用量读取不完整"))
-                    );
-                }
-            };
+            let page = self
+                .call_on(
+                    &self.endpoints[active_endpoint],
+                    "GetCascadeTrajectoryGeneratorMetadata",
+                    &meta_req,
+                )
+                .await?;
             let entries = match page["generatorMetadata"].as_array() {
                 Some(entries) => entries,
                 None if page.as_object().is_some_and(|o| o.is_empty()) => break,
@@ -1878,6 +1829,18 @@ pub struct AntigravityQuotaTrack {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct AntigravityProviderGroup {
+    pub id: String,
+    pub requests: u64,
+    pub tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cost_usd: String,
+    pub unpriced_requests: u64,
+    pub share_percent: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AntigravityFamilyGroup {
     pub family: String,
     pub label: String,
@@ -1915,6 +1878,8 @@ pub struct AntigravityUsageStats {
     pub unpriced_requests: u64,
     pub token_mix: AntigravityTokenMix,
     pub tracks: Vec<AntigravityQuotaTrack>,
+    #[serde(default)]
+    pub providers: Vec<AntigravityProviderGroup>,
     pub families: Vec<AntigravityFamilyGroup>,
     pub top_sessions: Vec<AntigravitySessionRow>,
 }
@@ -2007,6 +1972,15 @@ impl WindowAcc {
 }
 
 #[derive(Default)]
+struct ProviderAcc {
+    requests: u64,
+    tokens: u64,
+    reasoning_tokens: u64,
+    cost: rust_decimal::Decimal,
+    unpriced_requests: u64,
+}
+
+#[derive(Default)]
 struct FamilyAcc {
     label: &'static str,
     requests: u64,
@@ -2057,6 +2031,7 @@ pub(super) struct UsageStatsAggregator {
     gemini_7d: WindowAcc,
     claude_5h: WindowAcc,
     claude_7d: WindowAcc,
+    providers: BTreeMap<String, ProviderAcc>,
     families: BTreeMap<&'static str, FamilyAcc>,
     sessions: BTreeMap<String, SessionAcc>,
     quote_cache: BTreeMap<(String, i64), super::pricing::Quote>,
@@ -2103,6 +2078,7 @@ impl UsageStatsAggregator {
             gemini_7d: WindowAcc::default(),
             claude_5h: WindowAcc::default(),
             claude_7d: WindowAcc::default(),
+            providers: BTreeMap::new(),
             families: BTreeMap::new(),
             sessions: BTreeMap::new(),
             quote_cache: BTreeMap::new(),
@@ -2115,7 +2091,12 @@ impl UsageStatsAggregator {
         pricing: &Pricing,
     ) {
         if let Some(ref pf) = self.provider_filter {
-            if row.provider.as_deref() != Some(pf.as_str()) {
+            let matches = if pf == "session" {
+                row.provider.is_none() || row.provider.as_deref() == Some("session")
+            } else {
+                row.provider.as_deref() == Some(pf.as_str())
+            };
+            if !matches {
                 return;
             }
         }
@@ -2236,6 +2217,23 @@ impl UsageStatsAggregator {
             }
         }
 
+        let prov_id = row
+            .provider
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("session")
+            .to_owned();
+        let prov = self.providers.entry(prov_id).or_default();
+        if row.is_final {
+            prov.requests += 1;
+            if is_unpriced_final {
+                prov.unpriced_requests += 1;
+            }
+        }
+        prov.tokens = prov.tokens.saturating_add(tok_total);
+        prov.reasoning_tokens = prov.reasoning_tokens.saturating_add(tok_reasoning);
+        prov.cost += row_cost;
+
         let fam = self.families.entry(family).or_insert_with(|| FamilyAcc {
             label: family_label,
             ..FamilyAcc::default()
@@ -2287,6 +2285,26 @@ impl UsageStatsAggregator {
         let thinking_share_percent =
             round_pct(self.mix_reasoning.min(self.mix_output), self.mix_output);
         let cache_hit_percent = round_pct(self.cache_read_eligible, self.cache_input_eligible);
+
+        let mut provider_rows: Vec<AntigravityProviderGroup> = self
+            .providers
+            .into_iter()
+            .map(|(id, acc)| AntigravityProviderGroup {
+                id,
+                requests: acc.requests,
+                tokens: acc.tokens,
+                reasoning_tokens: acc.reasoning_tokens,
+                cost_usd: fmt_usd(acc.cost),
+                unpriced_requests: acc.unpriced_requests,
+                share_percent: round_pct(acc.tokens, mix_total).unwrap_or(0.0),
+            })
+            .collect();
+        provider_rows.sort_by(|a, b| {
+            b.tokens
+                .cmp(&a.tokens)
+                .then_with(|| b.requests.cmp(&a.requests))
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         let mut family_rows: Vec<AntigravityFamilyGroup> = self
             .families
@@ -2388,6 +2406,7 @@ impl UsageStatsAggregator {
                 cache_savings_usd: fmt_usd(self.cache_savings),
             },
             tracks,
+            providers: provider_rows,
             families: family_rows,
             top_sessions,
         }

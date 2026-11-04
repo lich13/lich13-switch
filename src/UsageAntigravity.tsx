@@ -74,10 +74,16 @@ function TrackWindowBlock({
 export default function UsageAntigravity({
   stats,
   busy,
+  selectedProvider,
+  providerName,
+  onSelectProvider,
   onSelectSession,
 }: {
   stats: AntigravityUsageStats | null;
   busy: boolean;
+  selectedProvider?: string;
+  providerName?: (id: string | null) => string;
+  onSelectProvider?: (providerId: string) => void;
   onSelectSession: (sessionId: string, shortHash: string) => void;
 }) {
   if (!stats) {
@@ -209,6 +215,76 @@ export default function UsageAntigravity({
           </article>
         ))}
       </section>
+
+      {(stats.providers ?? []).length > 0 && (
+        <section className="usage-ag-card" aria-label="账号与凭据分布">
+          <h2 className="usage-ag-section-title">账号与凭据分布</h2>
+          <div className="usage-ag-families">
+            {(stats.providers ?? []).map((prov) => {
+              const label = providerName
+                ? providerName(prov.id === "session" ? null : prov.id)
+                : prov.id === "session"
+                  ? "本机会话"
+                  : prov.id;
+              const active = selectedProvider === prov.id;
+              return (
+                <div
+                  key={prov.id}
+                  className="usage-ag-family-item"
+                  data-provider={prov.id}
+                >
+                  <div className="usage-ag-family-top">
+                    <strong>{label}</strong>
+                    <span>{prov.sharePercent.toFixed(1)}%</span>
+                  </div>
+                  <div className="usage-ag-family-bar" aria-hidden="true">
+                    <span
+                      style={{
+                        width: `${Math.min(100, Math.max(0, prov.sharePercent))}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="usage-ag-family-meta">
+                    <span title={`${numeric(prov.requests)} 次请求`}>
+                      {compact(prov.requests)} 请求
+                    </span>
+                    <span title={`${numeric(prov.tokens)} Token`}>
+                      {compact(prov.tokens)} Token
+                    </span>
+                    <span title={`思考 ${numeric(prov.reasoningTokens)}`}>
+                      思考 {compact(prov.reasoningTokens)}
+                    </span>
+                    <b title={prov.costUsd}>
+                      {formatCostOrUnpriced(
+                        prov.costUsd,
+                        prov.unpricedRequests,
+                        prov.requests,
+                      )}
+                    </b>
+                    {onSelectProvider && (
+                      <button
+                        type="button"
+                        className="usage-ag-session-btn"
+                        aria-pressed={active}
+                        aria-label={
+                          active
+                            ? `取消按 ${label} 筛选`
+                            : `按 ${label} 筛选`
+                        }
+                        onClick={() =>
+                          onSelectProvider(active ? "" : prov.id)
+                        }
+                      >
+                        {active ? "已筛选" : "筛选"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {stats.families.length > 0 && (
         <section className="usage-ag-card" aria-label="模型家族分布">
