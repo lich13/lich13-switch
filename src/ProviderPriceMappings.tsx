@@ -145,13 +145,13 @@ export default function ProviderPriceMappings({
                     }
                   >
                     <option value="">选择供应商</option>
-                    {!providers[rule.client].some(
+                    {!(providers[rule.client] ?? []).some(
                       (p) => p.id === rule.provider,
                     ) &&
                       rule.provider && (
                         <option value={rule.provider}>已删除供应商</option>
                       )}
-                    {providers[rule.client].map((p) => (
+                    {(providers[rule.client] ?? []).map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name}
                       </option>

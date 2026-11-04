@@ -431,7 +431,7 @@ fn metadata_text(v: &Value, key: &str) -> Option<String> {
     if text.chars().count() > 80 || text.chars().any(char::is_control) {
         return None;
     }
-    crate::events::safe_message(text).filter(|s| !s.contains("[已隐去]"))
+    crate::events::safe_message(text)
 }
 fn subscription_expiry(value: &Value) -> Option<String> {
     if let Some(seconds) = value.as_i64().filter(|s| *s > 0) {

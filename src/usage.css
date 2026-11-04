@@ -480,7 +480,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 2px 4px;
   min-width: 0;
 }
@@ -491,6 +491,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  max-width: 100%;
   font-weight: 500;
 }
 .usage-provider-inline small {

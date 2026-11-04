@@ -26,7 +26,7 @@ impl Rule {
             || self.value.trim().is_empty()
             || self.value.len() > 256
             || self.value != self.value.trim()
-            || crate::events::safe_message(&self.value).as_deref() != Some(self.value.as_str())
+            || !valid_rule_keyword(&self.value)
             || matches!(self.category, Unknown)
         {
             return Err(AppError::new(
@@ -36,6 +36,76 @@ impl Rule {
         }
         Ok(())
     }
+}
+fn valid_rule_keyword(value: &str) -> bool {
+    if value.chars().any(|c| {
+        c.is_control() || matches!(c, '\"' | '\'' | '`' | '“' | '”' | '‘' | '’' | '「' | '」')
+    }) {
+        return false;
+    }
+    let lower = value.to_lowercase();
+    if [
+        "prompt",
+        "request body",
+        "request_body",
+        "messages:",
+        "messages=",
+        "content:",
+        "content=",
+        "input:",
+        "input=",
+        "request payload",
+        "query=",
+        "<script",
+        "<!doctype",
+        "<html",
+        "-----begin",
+        "bearer",
+        "authorization",
+        "api_key",
+        "apikey",
+        "api-key",
+        "password",
+        "cookie",
+        "id_token",
+        "access_token",
+        "refresh_token",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
+    {
+        return false;
+    }
+    for token in value.split_whitespace() {
+        let s = token.trim_matches(|c: char| "()[]{}<>,;".contains(c));
+        let lower = s.to_lowercase();
+        if s.contains('@')
+            || s.contains("://")
+            || s.contains('/')
+            || s.contains('\\')
+            || s.contains("sk-")
+            || s.starts_with("eyJ")
+            || s.len() > 100
+            || s.parse::<std::net::IpAddr>().is_ok()
+            || s.split(':')
+                .next()
+                .is_some_and(|v| v.parse::<std::net::IpAddr>().is_ok())
+            || s.rsplit_once('.').is_some_and(|(host, tld)| {
+                !host.is_empty()
+                    && (2..=24).contains(&tld.len())
+                    && tld.chars().all(|c| c.is_ascii_alphabetic())
+            })
+            || [".com", ".net", ".org", ".xyz", ".invalid", ".cn", ".io"]
+                .iter()
+                .any(|v| lower.contains(v))
+            || s.as_bytes()
+                .windows(24)
+                .any(|w| w.iter().all(u8::is_ascii_hexdigit))
+        {
+            return false;
+        }
+    }
+    true
 }
 pub fn validate(rules: &[Rule]) -> Result<()> {
     for (i, rule) in rules.iter().enumerate() {

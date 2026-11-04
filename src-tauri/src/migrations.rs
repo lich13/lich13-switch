@@ -81,7 +81,9 @@ fn migrate_tree(src: &Path, dst: &Path, rel_prefix: &Path) -> Result<()> {
             std::fs::remove_file(&src_path).map_err(crate::storage::io_error)?;
             continue;
         }
-        if name_str.starts_with("gateway-spool-") && meta.is_dir() {
+        if (name_str.starts_with("gateway-spool-") || name_str.starts_with("bill-"))
+            && meta.is_dir()
+        {
             std::fs::remove_dir_all(&src_path).map_err(crate::storage::io_error)?;
             continue;
         }

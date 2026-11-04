@@ -458,7 +458,6 @@ impl Record {
                 .as_deref()
                 .filter(|s| s.chars().count() <= 120)
                 .and_then(safe_message)
-                .filter(|s| !s.contains("[已隐去]"))
                 .unwrap_or_else(|| {
                     format!(
                         "供应商 {}",
@@ -583,7 +582,9 @@ fn is_antigravity_log_record(r: &Record) -> bool {
         && matches!(
             r.details.upstream_code.as_deref(),
             Some(
-                "STREAM_INTERRUPTED"
+                "STREAM_TIMEOUT"
+                    | "STREAM_INTERRUPTED"
+                    | "INTERNAL"
                     | "RESOURCE_EXHAUSTED"
                     | "UNAUTHENTICATED"
                     | "MODEL_UNAVAILABLE"
@@ -1693,15 +1694,16 @@ mod v016_tests {
         ] {
             let error = AppError::new(
                 code,
-                "受管字段被外部修改 https://example.invalid/private Bearer fixture-secret",
+                "受管字段被外部修改 settings.json https://example.invalid/v1 \"model\"",
             );
             let record = Record::configuration_failure(ClientId::Dsh, &error, true).unwrap();
             assert_eq!(record.reason, Reason::ConfigConflict);
             assert_eq!(record.details.local_code.as_deref(), Some(code));
             let message = record.details.message.unwrap();
-            assert!(message.contains("受管字段被外部修改"));
-            assert!(!message.contains("example.invalid"));
-            assert!(!message.contains("fixture-secret"));
+            assert_eq!(
+                message,
+                "受管字段被外部修改 settings.json https://example.invalid/v1 \"model\""
+            );
         }
         for code in [code::RECOVERY, "GUARDED", "GATEWAY_ACTIVE", "IO"] {
             let error = AppError::new(code, "恢复未完成");
@@ -2105,6 +2107,16 @@ mod routing_visibility_tests {
                 "429 Too Many Requests for \"gemini-2.5-pro\" at https://example.invalid/v1/models"
             )
         );
+        let timeout_record = Record::antigravity_error(
+            "transcript:conv-1:3",
+            now(),
+            Some("gemini-2.5-pro"),
+            "Error: stream was interrupted after 5m0s",
+        );
+        assert_eq!(
+            timeout_record.details.upstream_code.as_deref(),
+            Some("STREAM_TIMEOUT")
+        );
         let mut old_redacted = Record::antigravity_error(
             "transcript:conv-1:2",
             now(),
@@ -2114,17 +2126,19 @@ mod routing_visibility_tests {
         old_redacted.details.upstream_type = Some("antigravity_log".into());
         old_redacted.details.message = Some("429 Too Many Requests [已隐去]".into());
         let content = format!(
-            "{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n",
             serde_json::to_string(&legacy).unwrap(),
             serde_json::to_string(&old_redacted).unwrap(),
-            serde_json::to_string(&log_record).unwrap()
+            serde_json::to_string(&log_record).unwrap(),
+            serde_json::to_string(&timeout_record).unwrap()
         );
         std::fs::write(&path, content).unwrap();
 
         let loaded = load(&path);
         assert!(loaded.dirty);
-        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.records.len(), 2);
         assert_eq!(loaded.records[0].id, log_record.id);
+        assert_eq!(loaded.records[1].id, timeout_record.id);
         assert!(loaded.records[0].details.upstream_type.is_none());
     }
 }

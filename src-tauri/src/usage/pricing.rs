@@ -234,10 +234,8 @@ fn valid_config(c: &Config) -> Result<()> {
     let mut keys = BTreeSet::new();
     if c.provider_mappings.len() > 4096
         || c.provider_mappings.iter().any(|rule| {
-            !matches!(
-                rule.client.as_str(),
-                "codex" | "claude" | "grok" | "dsh" | "agy"
-            ) || rule.provider.is_empty()
+            !matches!(rule.client.as_str(), "codex" | "claude" | "grok" | "dsh")
+                || rule.provider.is_empty()
                 || rule.provider.len() > 128
                 || !rule
                     .provider
@@ -281,7 +279,17 @@ impl Pricing {
             .map(serde_json::from_slice::<Config>)
             .transpose();
         let (config, config_error) = match decoded {
-            Ok(Some(c)) if valid_config(&c).is_ok() => (c, None),
+            Ok(Some(mut c)) => {
+                c.provider_mappings.retain(|r| r.client != "agy");
+                if valid_config(&c).is_ok() {
+                    (c, None)
+                } else {
+                    (
+                        Config::default(),
+                        Some("定价文件无效，正在使用有效价格源".into()),
+                    )
+                }
+            }
             Ok(None) => (Config::default(), None),
             _ => (
                 Config::default(),

@@ -288,7 +288,7 @@ export default function UsageLogTable({
                     aria-label={`${name(a.provider)} · ${clientName(r.client)}`}
                     title={`${name(a.provider)} · ${clientName(r.client)}`}
                   >
-                    <strong>{name(a.provider)}</strong>
+                    {a.provider && <strong>{name(a.provider)}</strong>}
                     <small data-client={r.client}>{clientName(r.client)}</small>
                   </span>
                 ),

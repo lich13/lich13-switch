@@ -260,118 +260,17 @@ pub(crate) fn safe_upstream_reason(value: &str) -> Option<String> {
     .map(str::to_owned)
 }
 
-/// Error-only text: discard content-bearing errors, then mask identifiers.
+/// Normalize error/log text without redacting content.
 pub fn safe_message(value: &str) -> Option<String> {
     if value.len() > 128 * 1024 {
         return None;
     }
-    let lower = value.to_lowercase();
-    if [
-        "prompt",
-        "request body",
-        "request_body",
-        "messages:",
-        "messages=",
-        "content:",
-        "content=",
-        "input:",
-        "input=",
-        "\"messages\"",
-        "\"content\"",
-        "\"input\"",
-        "request payload",
-        "query=",
-        "<script",
-        "<!doctype",
-        "<html",
-        "-----begin",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-    {
-        return None;
-    }
-    // Quoted/backticked fragments commonly echo a prompt, argument, or identifier.
-    let mut scrubbed = String::new();
-    let mut quote = None;
-    let mut previous = None;
-    for c in value.chars() {
-        if let Some(end) = quote {
-            if c == end {
-                quote = None;
-            }
-            previous = Some(c);
-            continue;
-        }
-        if matches!(c, '\"' | '`' | '“' | '「' | '‘')
-            || (c == '\'' && previous.is_none_or(|p: char| !p.is_alphanumeric()))
-        {
-            quote = Some(match c {
-                '“' => '”',
-                '「' => '」',
-                '‘' => '’',
-                _ => c,
-            });
-            scrubbed.push_str("[已隐去]");
-        } else {
-            scrubbed.push(c);
-        }
-        previous = Some(c);
-    }
-    let mut result = Vec::new();
-    let mut redact_next = false;
-    for token in scrubbed.split_whitespace().take(160) {
-        let s = token.trim_matches(|c: char| "\"'()[]{}<>,;".contains(c));
-        let lower = s.to_lowercase();
-        let credential = [
-            "bearer",
-            "authorization",
-            "api_key",
-            "apikey",
-            "api-key",
-            "password",
-            "cookie",
-            "id_token",
-            "access_token",
-            "refresh_token",
-        ]
-        .iter()
-        .any(|v| lower.contains(v));
-        let hidden = redact_next
-            || credential
-            || s.contains('@')
-            || s.contains("://")
-            || s.contains('/')
-            || s.contains('\\')
-            || s.contains("sk-")
-            || s.starts_with("eyJ")
-            || s.len() > 100
-            || s.parse::<std::net::IpAddr>().is_ok()
-            || s.split(':')
-                .next()
-                .is_some_and(|v| v.parse::<std::net::IpAddr>().is_ok())
-            || s.rsplit_once('.').is_some_and(|(host, tld)| {
-                !host.is_empty()
-                    && (2..=24).contains(&tld.len())
-                    && tld.chars().all(|c| c.is_ascii_alphabetic())
-            })
-            || [".com", ".net", ".org", ".xyz", ".invalid", ".cn", ".io"]
-                .iter()
-                .any(|v| lower.contains(v))
-            || s.as_bytes()
-                .windows(24)
-                .any(|w| w.iter().all(u8::is_ascii_hexdigit));
-        result.push(if hidden {
-            "[已隐去]".into()
-        } else {
-            token
-                .chars()
-                .filter(|c| !c.is_control())
-                .collect::<String>()
-        });
-        redact_next = credential;
-    }
-    let result: String = result.join(" ").chars().take(512).collect();
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect();
+    let result = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let result: String = result.chars().take(4096).collect();
     (!result.is_empty()).then_some(result)
 }
 impl Details {
@@ -439,32 +338,24 @@ impl Details {
 mod v016_tests {
     use super::*;
     #[test]
-    fn error_details_are_bounded_and_do_not_keep_credentials_or_echoed_content() {
-        let clean = safe_message("model not found; host https://example.invalid key Bearer fixture-secret quoted \"private fixture text\"").unwrap();
-        assert!(!clean.contains("example.invalid"));
-        assert!(!clean.contains("fixture-secret"));
-        assert!(!clean.contains("private fixture text"));
-        assert!(clean.contains("model not found"));
-        assert!(safe_message("error request body: fixture").is_none());
-        assert!(safe_message("bad input=fixture").is_none());
-        assert!(!safe_message("invalid argument 'private fixture text'")
-            .unwrap()
-            .contains("private fixture text"));
-        assert!(!safe_message("无效参数‘private fixture text’")
-            .unwrap()
-            .contains("private fixture text"));
-        assert!(safe_message("model isn't available")
-            .unwrap()
-            .contains("isn't available"));
-        assert!(!safe_message("failed at 192.0.2.1:443")
-            .unwrap()
-            .contains("192.0.2.1"));
+    fn error_details_are_bounded_and_preserve_raw_error_text_without_redaction() {
+        let raw = "model not found in settings.json; host https://example.invalid/v1/models quoted \"gemini-2.5-pro\" at 192.0.2.1:443";
+        let clean = safe_message(raw).unwrap();
+        assert_eq!(clean, raw);
+        assert_eq!(
+            safe_message("error request body: invalid field 'temperature'").as_deref(),
+            Some("error request body: invalid field 'temperature'")
+        );
+        assert_eq!(
+            safe_message("bad input=fixture\x00with\nnewlines").as_deref(),
+            Some("bad input=fixturewith newlines")
+        );
         assert!(
-            safe_message(&"模型不存在 ".repeat(200))
+            safe_message(&"模型不存在 ".repeat(1000))
                 .unwrap()
                 .chars()
                 .count()
-                <= 512
+                <= 4096
         );
     }
     #[test]

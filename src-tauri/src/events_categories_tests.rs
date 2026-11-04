@@ -342,14 +342,14 @@ fn only_circuit_open_and_thread_handoff_are_notifiable() {
 }
 
 #[test]
-fn circuit_notification_uses_remaining_deadline_and_hides_untrusted_provider_text() {
+fn circuit_notification_uses_remaining_deadline_and_preserves_provider_and_message() {
     let mut record = event(
         "fixture-notification-model",
         Reason::CircuitOpen,
         Action::Stopped,
     );
-    record.notification_provider =
-        Some("Bearer fixture-secret /Users/fixture/private user@example.invalid".into());
+    record.notification_provider = Some("Models.dev (https://example.invalid)".into());
+    record.details.message = Some("upstream failed in settings.json \"model\"".into());
     record.details.health_scope = Some(HealthScope::Provider);
     record.details.circuit = Some(CircuitEvidence {
         cause_reason: Some(Reason::UpstreamService),
@@ -369,15 +369,9 @@ fn circuit_notification_uses_remaining_deadline_and_hides_untrusted_provider_tex
     assert!(twenty_seconds.contains("等待 20 秒后可探测"));
     let due = record.notification_at(2_000);
     assert!(due.contains("待请求探测"));
-    for sensitive in [
-        "Bearer",
-        "fixture-secret",
-        "/Users/fixture",
-        "private",
-        "example.invalid",
-    ] {
-        assert!(!thirty_seconds.contains(sensitive));
-    }
+    assert!(thirty_seconds.contains("Models.dev (https://example.invalid)"));
+    assert!(thirty_seconds.contains("upstream failed in settings.json \"model\""));
+    assert!(!thirty_seconds.contains("[已隐去]"));
 
     let serialized = serde_json::to_value(&record).unwrap();
     assert!(serialized.get("notificationProvider").is_none());

@@ -195,7 +195,7 @@ const time = (seconds: number) =>
 
 function displayName(name: string, id: string) {
   return name.length <= 120 &&
-    !/(@|:\/\/|sk-|eyJ|Bearer|[\\/]|[\u0000-\u001f]|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[a-z0-9-]+\.(com|net|org|xyz|cn|io|dev)\b)/i.test(
+    !/(@|:\/\/|sk-|eyJ|Bearer|[\\/]|[\u0000-\u001f]|\b(?:\d{1,3}\.){3}\d{1,3}\b)/i.test(
       name,
     )
     ? name
