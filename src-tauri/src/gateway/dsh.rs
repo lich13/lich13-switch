@@ -733,25 +733,17 @@ fn owned_route(seq: &Sequence) -> Result<Option<YamlNode>> {
         .and_then(|p| p.get(ROUTE)))
 }
 fn scalar_equal(a: &yaml_edit::Scalar, b: &yaml_edit::Scalar) -> bool {
-    if a.is_quoted() != b.is_quoted() {
-        return false;
+    if !a.is_quoted() && !b.is_quoted() {
+        let sa = a.as_string();
+        let sb = b.as_string();
+        if let (Ok(x), Ok(y)) = (sa.trim().parse::<i64>(), sb.trim().parse::<i64>()) {
+            return x == y;
+        }
+        if let (Ok(x), Ok(y)) = (sa.trim().parse::<f64>(), sb.trim().parse::<f64>()) {
+            return x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
+        }
     }
-    if a.is_quoted() {
-        return a.as_string() == b.as_string();
-    }
-    if a.is_null() || b.is_null() {
-        return a.is_null() && b.is_null();
-    }
-    if let (Some(x), Some(y)) = (a.as_bool(), b.as_bool()) {
-        return x == y;
-    }
-    if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
-        return x == y;
-    }
-    if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
-        return x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
-    }
-    a.as_string() == b.as_string()
+    false
 }
 fn equal(a: Option<YamlNode>, b: Option<YamlNode>) -> bool {
     match (a, b) {
@@ -775,10 +767,12 @@ fn equal(a: Option<YamlNode>, b: Option<YamlNode>) -> bool {
                     && a.values()
                         .zip(b.values())
                         .all(|(a, b)| equal(Some(a), Some(b)))
-            } else if let (Some(a), Some(b)) = (a.as_scalar(), b.as_scalar()) {
-                scalar_equal(a, b)
+            } else if a.yaml_eq(&b) {
+                true
+            } else if let (Some(sa), Some(sb)) = (a.as_scalar(), b.as_scalar()) {
+                scalar_equal(sa, sb)
             } else {
-                a.yaml_eq(&b)
+                false
             }
         }
         (None, None) => true,
