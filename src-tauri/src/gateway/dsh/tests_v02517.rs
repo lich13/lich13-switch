@@ -621,6 +621,9 @@ async fn identical_model_mapping_preserves_body_bytes_and_content_encoding() {
 
 fn retry_settings(fixture: &Fixture, limit: usize) {
     let mut settings = fixture.gateway.view().settings;
+    // Let connection failures settle before the separate response-header deadline.
+    settings.connect_seconds = 1;
+    settings.first_byte_seconds = 3;
     settings.max_retries = limit;
     settings.failure_threshold = 4;
     settings.transient_failure_threshold = 6;
