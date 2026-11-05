@@ -994,7 +994,7 @@ pub fn add_adc_at(
     let payload = format!("{pretty}\n");
     let digest = payload_digest(&payload);
     let label = adc_label(input.name.as_deref(), &email, &project_id)?;
-    let (id, state) = with_lock(|| {
+    let (entry, state) = with_lock(|| {
         let (mut vault, _) = load_vault(paths)?;
         let id = if let Some(ex) = vault
             .entries
@@ -1020,34 +1020,43 @@ pub fn add_adc_at(
         };
         vault.observed_revisions.retain(|r| r != &digest);
         save_vault(paths, &vault)?;
-        Ok((id, state_at(paths)?))
+        Ok((
+            vault.entries[vault.index_of(&id)?].clone(),
+            state_at(paths)?,
+        ))
     })?;
     if input.activate {
-        switch_account_at(paths, lc, &id, &state.revision)
+        switch_account_at(paths, lc, entry, &state.revision)
     } else {
         Ok(state)
     }
 }
-pub fn switch_account_at(
+#[cfg(test)]
+pub(crate) fn switch_fixture_account(
     paths: &Paths,
     lc: &dyn AppLifecycle,
     id: &str,
+    revision: &str,
+) -> Result<AntigravityAuthState> {
+    let entry = with_lock(|| {
+        let (vault, _) = load_vault(paths)?;
+        Ok(vault.entries[vault.index_of(id)?].clone())
+    })?;
+    switch_account_at(paths, lc, entry, revision)
+}
+fn switch_account_at(
+    paths: &Paths,
+    lc: &dyn AppLifecycle,
+    entry: StoredEntry,
     rev: &str,
 ) -> Result<AntigravityAuthState> {
-    let (vault, entry) = with_lock(|| {
-        let (v, _) = load_vault(paths)?;
-        let e = v.entries[v.index_of(id)?].clone();
-        match e.kind {
-            AccountKind::Oauth => parse_oauth_metadata(&e.payload).map(|_| ())?,
-            AccountKind::Adc => parse_adc_metadata(&e.payload).map(|_| ())?,
-            AccountKind::VertexKey => {
-                return Err(err(code::AUTH, "请通过共享监听切换 Vertex API Key"))
-            }
-        }
-        Ok((v, e))
-    })?;
+    match entry.kind {
+        AccountKind::Oauth => parse_oauth_metadata(&entry.payload).map(|_| ())?,
+        AccountKind::Adc => parse_adc_metadata(&entry.payload).map(|_| ())?,
+        AccountKind::VertexKey => unreachable!("Vertex uses the shared listener"),
+    }
     with_lifecycle(paths, rev, lc, || {
-        restore_gateway_settings(paths)?;
+        let vault = restore_gateway_settings(paths)?;
         match entry.kind {
             AccountKind::Oauth => {
                 write_private_file(&paths.oauth_file(), entry.payload.as_bytes())?;
@@ -1160,6 +1169,53 @@ pub fn disk_stamp() -> Option<String> {
     }
     Some(stamp)
 }
+pub(crate) fn current_oauth_identity(data: &Path, home: &Path) -> Result<Option<(String, String)>> {
+    with_lock(|| {
+        let paths = Paths {
+            gemini_home: home.to_path_buf(),
+            ..Paths::from_roots(home.parent().unwrap_or(home), data)
+        };
+        let (vault, _) = load_vault(&paths)?;
+        if read_enable_adc(&paths)?.0 || paths.adc_file().exists() {
+            return Ok(None);
+        }
+        if vault
+            .gateway
+            .as_ref()
+            .is_some_and(|g| read_app_settings(&paths).is_ok_and(|s| g.matches(&s)))
+        {
+            return Ok(None);
+        }
+        let Some(raw) = read_text_optional(&paths.oauth_file())? else {
+            return Ok(None);
+        };
+        let Some(email) = parse_oauth_metadata(&raw)?.1 else {
+            return Ok(None);
+        };
+        let digest = payload_digest(&raw);
+        Ok(vault
+            .entries
+            .iter()
+            .find(|e| e.kind == AccountKind::Oauth && entry_matches(e, Some(&digest), Some(&email)))
+            .map(|e| (e.id.clone(), email)))
+    })
+}
+pub(crate) fn usage_accounts(
+    data: &Path,
+) -> Result<Vec<crate::usage::antigravity::quota::Account>> {
+    with_lock(|| {
+        let (vault, _) = load_vault(&Paths::resolve(data)?)?;
+        Ok(vault
+            .entries
+            .into_iter()
+            .map(|e| crate::usage::antigravity::quota::Account {
+                id: e.id,
+                name: e.name,
+                kind: e.kind,
+            })
+            .collect())
+    })
+}
 pub fn active_account_id(state: &AntigravityAuthState) -> Option<String> {
     let target = if state.mode == AuthMode::VertexKey {
         AccountKind::VertexKey
@@ -1172,7 +1228,6 @@ pub fn active_account_id(state: &AntigravityAuthState) -> Option<String> {
         .accounts
         .iter()
         .find(|a| a.current && a.kind == target)
-        .or_else(|| state.accounts.iter().find(|a| a.current))
         .map(|a| a.id.clone())
 }
 fn push_span(spans: &mut Vec<ActivationSpan>, id: &str, fb_ms: i64) -> bool {
@@ -1194,19 +1249,6 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
     let Ok(vault) = serde_json::from_slice::<Vault>(&b) else {
         return ProviderTimeline::default();
     };
-    if let Some(selection) = &vault.gateway {
-        if let Some(home) = gemini_home {
-            let paths = Paths {
-                gemini_home: home.to_path_buf(),
-                ..Paths::from_roots(home.parent().unwrap_or(home), data_dir)
-            };
-            if read_app_settings(&paths).is_ok_and(|s| selection.matches(&s)) {
-                return ProviderTimeline {
-                    spans: vault.activations,
-                };
-            }
-        }
-    }
     let mut spans = vault.activations;
     if let Some(g) = gemini_home {
         let p = Paths {
@@ -1214,6 +1256,13 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
             ..Paths::from_roots(g.parent().unwrap_or(g), data_dir)
         };
         let en = read_enable_adc(&p).is_ok_and(|(en, _, _)| en);
+        if !en
+            && vault.gateway.as_ref().is_some_and(|selection| {
+                read_app_settings(&p).is_ok_and(|settings| selection.matches(&settings))
+            })
+        {
+            return ProviderTimeline { spans };
+        }
         let f = if en { p.adc_file() } else { p.oauth_file() };
         if let Some(raw) = read_text_optional(&f).ok().flatten() {
             let d = payload_digest(&raw);
@@ -1273,10 +1322,10 @@ fn decode_vertex(entry: &StoredEntry) -> Result<VertexKey> {
     key.validate()?;
     Ok(key)
 }
-fn restore_gateway_settings(paths: &Paths) -> Result<()> {
+fn restore_gateway_settings(paths: &Paths) -> Result<Vault> {
     let (mut vault, _) = load_vault(paths)?;
     let Some(selection) = vault.gateway.take() else {
-        return Ok(());
+        return Ok(vault);
     };
     let mut settings = read_app_settings(paths)?;
     for (key, previous) in [
@@ -1295,9 +1344,9 @@ fn restore_gateway_settings(paths: &Paths) -> Result<()> {
         write_app_settings(paths, &settings)?;
     }
     save_vault(paths, &vault)?;
-    Ok(())
+    Ok(vault)
 }
-fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<StoredEntry> {
+fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<(StoredEntry, VertexKey)> {
     with_lock(|| {
         verify_revision(paths, &input.expected_revision)?;
         let (vault, _) = load_vault(paths)?;
@@ -1325,19 +1374,22 @@ fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<StoredEntry
             models: input.models.clone(),
         };
         key.validate()?;
-        Ok(StoredEntry {
-            id: existing
-                .map(|e| e.id.clone())
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            name: clean_label(Some(&input.name), "Vertex API Key")?,
-            kind: AccountKind::VertexKey,
-            source_type: "vertex_key".into(),
-            email: None,
-            project_id: key.project_id.clone(),
-            payload: serde_json::to_string(&key)
-                .map_err(|_| err(code::JSON, "Vertex API Key 无法保存"))?,
-            updated_at: now_secs(),
-        })
+        Ok((
+            StoredEntry {
+                id: existing
+                    .map(|e| e.id.clone())
+                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                name: clean_label(Some(&input.name), "Vertex API Key")?,
+                kind: AccountKind::VertexKey,
+                source_type: "vertex_key".into(),
+                email: None,
+                project_id: key.project_id.clone(),
+                payload: serde_json::to_string(&key)
+                    .map_err(|_| err(code::JSON, "Vertex API Key 无法保存"))?,
+                updated_at: now_secs(),
+            },
+            key,
+        ))
     })
 }
 fn upsert_vertex(vault: &mut Vault, entry: StoredEntry) {
@@ -1347,16 +1399,17 @@ fn upsert_vertex(vault: &mut Vault, entry: StoredEntry) {
         vault.entries.push(entry);
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn activate_vertex_at(
     paths: &Paths,
     lc: &dyn AppLifecycle,
     entry: StoredEntry,
+    key: &VertexKey,
     rev: &str,
     port: u16,
     token: String,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<AntigravityAuthState> {
-    let key = decode_vertex(&entry)?;
     with_lifecycle(paths, rev, lc, || {
         let (mut vault, _) = load_vault(paths)?;
         let mut settings = read_app_settings(paths)?;
@@ -1389,10 +1442,10 @@ fn activate_vertex_at(
 async fn run_vertex(
     rt: Arc<Runtime>,
     entry: StoredEntry,
+    key: VertexKey,
     revision: String,
 ) -> Result<AntigravityAuthState> {
     let paths = Paths::resolve(&rt.data)?;
-    let key = decode_vertex(&entry)?;
     let token = with_lock(|| {
         Ok(load_vault(&paths)?
             .0
@@ -1423,6 +1476,7 @@ async fn run_vertex(
                     &paths,
                     &SystemAppLifecycle::default(),
                     entry,
+                    &active.key,
                     &revision,
                     prepared.port,
                     token,
@@ -1431,7 +1485,8 @@ async fn run_vertex(
                             prepared.socket,
                             activate_registry.clone(),
                             || {
-                                *activate_registry.antigravity.lock().unwrap() = Some(active);
+                                *activate_registry.antigravity.lock().unwrap() =
+                                    Some(active.clone());
                                 Ok(())
                             },
                         )
@@ -1484,13 +1539,13 @@ async fn restore_vertex_listener_at(
     };
     let registry = gateway.registry();
     let _lifecycle = registry.lifecycle.lock().await;
-    if registry.listener.view()?.port != selection.port {
+    let prepared = registry.listener.prepare().await?;
+    if prepared.port != selection.port {
         return Err(err(
             code::CONFLICT,
             "Antigravity 共享端口已变化，请重新切换此账号",
         ));
     }
-    let prepared = registry.listener.prepare().await?;
     registry.update_ports()?;
     let session = Arc::new(vertex::Session::new(key, selection.token, &registry));
     registry
@@ -1508,7 +1563,7 @@ pub async fn save_antigravity_vertex_key(
     input: SaveVertexKeyInput,
 ) -> Result<AntigravityAuthState> {
     let paths = Paths::resolve(&r.data)?;
-    let entry = vertex_entry(&paths, &input)?;
+    let (entry, key) = vertex_entry(&paths, &input)?;
     let active = with_lock(|| {
         Ok(load_vault(&paths)?
             .0
@@ -1516,7 +1571,7 @@ pub async fn save_antigravity_vertex_key(
             .is_some_and(|g| g.account_id == entry.id))
     })?;
     if input.activate || active {
-        run_vertex(r.inner().clone(), entry, input.expected_revision).await
+        run_vertex(r.inner().clone(), entry, key, input.expected_revision).await
     } else {
         with_lock(|| {
             verify_revision(&paths, &input.expected_revision)?;
@@ -1614,11 +1669,12 @@ pub async fn switch_antigravity_account(
         Ok(vault.entries[vault.index_of(&id)?].clone())
     })?;
     if entry.kind == AccountKind::VertexKey {
-        return run_vertex(r.inner().clone(), entry, expected_revision).await;
+        let key = decode_vertex(&entry)?;
+        return run_vertex(r.inner().clone(), entry, key, expected_revision).await;
     }
     let msg = "切换凭据任务异常中断";
     run_blocking(r, true, msg, move |p, l| {
-        switch_account_at(&p, &l, &id, &expected_revision)
+        switch_account_at(&p, &l, entry, &expected_revision)
     })
     .await
 }

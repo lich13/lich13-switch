@@ -283,7 +283,8 @@ beforeEach(() => {
               cacheInputEligible: 20,
               cacheSavingsUsd: "0",
             },
-            tracks: [],
+            accounts: [],
+            quotaError: null,
             families: [],
             topSessions: [],
           };

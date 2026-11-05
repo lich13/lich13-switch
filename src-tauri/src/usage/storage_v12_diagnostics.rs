@@ -96,9 +96,6 @@ fn write(c: &Connection, entries: &[Pending]) -> Result<()> {
     }
     let values = Value::Array(entries.iter().map(|p| p.value.clone()).collect());
     let bytes = pack(&values)?;
-    if unpack(&bytes)? != values {
-        return Err(failure("用量诊断块核对失败，原数据已保留"));
-    }
     db(c.execute(
         "INSERT INTO v12_diagnostics(body,templates) VALUES(?1,?2)",
         params![bytes, templates(&values)?],

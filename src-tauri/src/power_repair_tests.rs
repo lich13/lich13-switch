@@ -397,25 +397,96 @@ fn mismatched_state_after_apply_never_reports_a_successful_toggle() {
 }
 
 #[test]
-fn disable_if_enabled_turns_off_active_clamshell_and_skips_when_already_off_or_helper_not_ready() {
+fn disable_if_enabled_turns_off_active_clamshell_and_repairs_when_needed() {
     let enabled = state("ready", true, 0, "application", "fixture-enabled");
     let disabled = state("ready", false, 5, "none", "fixture-disabled");
     let (_dir, service, helper) = fixture(enabled.clone());
     helper.reply(disabled.clone(), None);
 
-    assert_eq!(service.disable_if_enabled().unwrap(), Some(disabled));
+    assert_eq!(service.disable_if_enabled(|| true).unwrap(), Some(disabled));
     assert_eq!(*helper.calls.lock().unwrap(), [(enabled, false, 0)]);
     assert_eq!(helper.repair_count(), 0);
 
-    assert_eq!(service.disable_if_enabled().unwrap(), None);
+    assert_eq!(service.disable_if_enabled(|| true).unwrap(), None);
 
     for not_ready in ["missing", "needsRepair"] {
         let unready = state(not_ready, true, 0, "application", "fixture-unready");
         let (_dir, service, helper) = fixture(unready);
-        let err = service.disable_if_enabled().unwrap_err();
-        assert_eq!(err.code, "POWER_HELPER");
-        assert!(err.message.contains("电源助手未就绪"));
-        assert_eq!(helper.repair_count(), 0);
-        assert!(helper.calls.lock().unwrap().is_empty());
+        helper.repair_to(state("ready", true, 0, "application", "fixture-repaired"));
+        helper.reply(state("ready", false, 5, "none", "fixture-disabled"), None);
+        assert!(
+            !service
+                .disable_if_enabled(|| true)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(helper.repair_count(), 1);
+        assert_eq!(helper.calls.lock().unwrap().len(), 1);
     }
+}
+
+#[test]
+fn automatic_close_waits_for_drain_and_attempts_once_until_thawed() {
+    let mut attempted = false;
+    for (frozen, draining, expected) in [
+        (false, 0, false),
+        (true, 1, false),
+        (true, 0, true),
+        (true, 0, false),
+        (false, 0, false),
+        (true, 0, true),
+    ] {
+        assert_eq!(
+            super::close_after_freeze(&mut attempted, frozen, draining),
+            expected
+        );
+    }
+}
+
+#[test]
+fn automatic_close_keeps_cancelled_and_failed_authorization_available_for_manual_retry() {
+    for code in ["POWER_AUTH", "POWER_HELPER"] {
+        let initial = state("missing", true, 0, "external", "fixture-initial");
+        let (_dir, service, helper) = fixture(initial.clone());
+        *helper.repair_error.lock().unwrap() = Some(code);
+        assert_eq!(service.disable_if_enabled(|| true).unwrap_err().code, code);
+        assert_eq!(service.state().unwrap(), initial);
+        assert_eq!(helper.repair_count(), 1);
+        assert!(helper.calls.lock().unwrap().is_empty());
+        *helper.repair_error.lock().unwrap() = None;
+        helper.repair_to(state("ready", true, 0, "external", "fixture-repaired"));
+        helper.reply(state("ready", false, 5, "none", "fixture-disabled"), None);
+        assert!(!service.set(false, &initial.revision).unwrap().enabled);
+        assert_eq!(helper.repair_count(), 2);
+    }
+}
+
+#[test]
+fn thawing_during_authorization_prevents_automatic_close() {
+    let initial = state("missing", true, 0, "application", "fixture-initial");
+    let (_dir, service, helper) = fixture(initial);
+    let prepared = state("ready", true, 0, "application", "fixture-repaired");
+    helper.repair_to(prepared.clone());
+    assert!(service
+        .disable_if_enabled(|| helper.repair_count() == 0)
+        .unwrap()
+        .is_none());
+    assert_eq!(service.state().unwrap(), prepared);
+    assert_eq!(helper.repair_count(), 1);
+    assert!(helper.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn authenticated_helper_state_preserves_its_physical_and_ownership_fields() {
+    let value = serde_json::json!({"supported":true,"enabled":true,"batterySleep":17,"ownership":"external","externalChanged":true});
+    let state = super::helper_state(&value).unwrap();
+    assert!(state.supported && state.enabled && state.external_changed);
+    assert_eq!(state.battery_sleep, 17);
+    assert_eq!(state.ownership, "external");
+    assert_eq!(state.helper, "ready");
+    assert_eq!(
+        state.revision,
+        crate::storage::digest(value.to_string().as_bytes())
+    );
 }

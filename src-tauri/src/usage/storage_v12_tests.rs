@@ -234,7 +234,7 @@ fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
         20,
     );
     old.write_batch(
-        &[proxy, session],
+        &[session, proxy],
         Some(("fixture-v12-cursor", "cursor-before")),
     )
     .unwrap();
@@ -2150,4 +2150,46 @@ fn native_archive_preserves_all_scopes_operations_and_receipts() {
         }
     }
     assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn migration_preserves_links_to_already_archived_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
+    let proxy = record(
+        "fixture-archived-proxy",
+        "proxy",
+        BASE,
+        Some("fixture-archived-response"),
+        100,
+        20,
+    );
+    let session = record(
+        "fixture-archived-session",
+        "codex",
+        BASE + 1,
+        Some("fixture-archived-response"),
+        100,
+        20,
+    );
+    old.write_batch(&[proxy.clone(), session.clone()], None)
+        .unwrap();
+    old.archive_batch(std::slice::from_ref(&proxy.id)).unwrap();
+    assert_eq!(
+        old.detail(&session.id).unwrap().duplicate_of.as_deref(),
+        Some(proxy.id.as_str())
+    );
+    let snapshot = |store: &Store| json!({"page":page_value(store,&all_time()),"dashboard":dashboard_value(store,&all_time()),"detail":store.detail(&session.id).unwrap()});
+    let before = snapshot(&old);
+    drop(old);
+    let mut migrating = Store::open(dir.path()).unwrap();
+    assert!(migrating.compact_storage_batch().unwrap());
+    drop(migrating);
+    let mut resumed = Store::open(dir.path()).unwrap();
+    while resumed.compact_storage_batch().unwrap() {}
+    assert_eq!(
+        resumed.detail(&session.id).unwrap().duplicate_of.as_deref(),
+        Some(proxy.id.as_str())
+    );
+    assert_eq!(snapshot(&resumed), before);
 }

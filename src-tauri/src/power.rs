@@ -52,6 +52,17 @@ pub struct Service {
     system: Arc<dyn System>,
     lock: Mutex<()>,
 }
+pub fn close_after_freeze(attempted: &mut bool, frozen: bool, draining: usize) -> bool {
+    if !frozen {
+        *attempted = false;
+    }
+    if frozen && draining == 0 && !*attempted {
+        *attempted = true;
+        true
+    } else {
+        false
+    }
+}
 impl Service {
     pub fn new(data: &std::path::Path) -> Self {
         Self {
@@ -83,7 +94,7 @@ impl Service {
             .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
         self.set_locked(enabled, expected)
     }
-    pub fn disable_if_enabled(&self) -> Result<Option<State>> {
+    pub fn disable_if_enabled(&self, still_frozen: impl Fn() -> bool) -> Result<Option<State>> {
         let _lock = self
             .lock
             .try_lock()
@@ -92,19 +103,8 @@ impl Service {
         if !before.supported || !before.enabled {
             return Ok(None);
         }
-        if before.helper != "ready" {
-            return Err(AppError::new(
-                code::POWER_HELPER,
-                "电源助手未就绪，未能自动关闭合盖不休眠，请在设置中处理",
-            ));
-        }
-        self.system.apply(&before, false, before.battery_sleep)?;
-        let actual = self.state()?;
-        if actual.enabled {
-            return Err(AppError::new(code::POWER, "电源状态再次变化，请重新操作"));
-        }
-        self.retire_legacy_record()?;
-        Ok(Some(actual))
+        let actual = self.apply_locked(before, false, &still_frozen)?;
+        Ok((!actual.enabled).then_some(actual))
     }
     fn set_locked(&self, enabled: bool, expected: &str) -> Result<State> {
         let before = self.state()?;
@@ -114,12 +114,26 @@ impl Service {
         if before.revision != expected {
             return Err(AppError::new(code::CONFLICT, "电源状态已变化，请重新操作"));
         }
+        self.apply_locked(before, enabled, &|| true)
+    }
+    fn apply_locked(
+        &self,
+        before: State,
+        enabled: bool,
+        allowed: &dyn Fn() -> bool,
+    ) -> Result<State> {
+        if !allowed() {
+            return Ok(before);
+        }
         let repaired = before.helper != "ready";
         let before = if repaired {
             self.repair_for_toggle(&before)?
         } else {
             before
         };
+        if !allowed() {
+            return Ok(before);
+        }
         // Restoration belongs exclusively to the privileged helper. An unverified
         // legacy user/script record must never supply a battery sleep value.
         if let Err(error) = self.system.apply(&before, enabled, before.battery_sleep) {
@@ -129,6 +143,9 @@ impl Service {
             // An authorization can expire between read and set. At most one repair,
             // then a fresh physical-state check before retrying the intended operation.
             let repaired = self.repair_for_toggle(&before)?;
+            if !allowed() {
+                return Ok(repaired);
+            }
             self.system
                 .apply(&repaired, enabled, repaired.battery_sleep)?;
         }
@@ -213,6 +230,24 @@ fn parse(general: &str, custom: &str) -> Result<State> {
         _ => Err(AppError::new(code::POWER, "无法读取合盖休眠状态")),
     }
 }
+#[cfg(any(target_os = "macos", test))]
+fn helper_state(actual: &serde_json::Value) -> Result<State> {
+    let supported = actual["supported"]
+        .as_bool()
+        .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))?;
+    let enabled = actual["enabled"]
+        .as_bool()
+        .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))?;
+    let minutes = actual["batterySleep"]
+        .as_u64()
+        .filter(|n| *n <= 1440)
+        .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))? as u16;
+    let mut state = State::new(supported, enabled, minutes);
+    state.ownership = actual["ownership"].as_str().unwrap_or("external").into();
+    state.external_changed = actual["externalChanged"].as_bool().unwrap_or(false);
+    state.revision = storage::digest(actual.to_string().as_bytes());
+    Ok(state)
+}
 impl System for Native {
     fn prepare(&self, force: bool) -> Result<()> {
         #[cfg(target_os = "macos")]
@@ -238,27 +273,17 @@ impl System for Native {
     fn read(&self) -> Result<State> {
         #[cfg(target_os = "macos")]
         {
-            let mut state = parse(&output(&["-g"])?, &output(&["-g", "custom"])?)?;
-            let (helper, response) = if state.supported {
-                crate::power_macos::probe()
-            } else {
-                ("unsupported", None)
-            };
-            state.helper = helper.into();
+            let (helper, response) = crate::power_macos::probe();
             if let Some(response) = response {
-                let actual = &response["state"];
-                state.enabled = actual["enabled"]
-                    .as_bool()
-                    .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))?;
-                state.battery_sleep = actual["batterySleep"]
-                    .as_u64()
-                    .filter(|n| *n <= 1440)
-                    .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))?
-                    as u16;
-                state.ownership = actual["ownership"].as_str().unwrap_or("external").into();
-                state.external_changed = actual["externalChanged"].as_bool().unwrap_or(false);
-                state.revision = storage::digest(actual.to_string().as_bytes());
+                return helper_state(&response["state"]);
             }
+            let mut state = parse(&output(&["-g"])?, &output(&["-g", "custom"])?)?;
+            state.helper = if state.supported {
+                helper
+            } else {
+                "unsupported"
+            }
+            .into();
             Ok(state)
         }
         #[cfg(not(target_os = "macos"))]

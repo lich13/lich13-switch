@@ -215,6 +215,13 @@ describe("AntigravityAccounts", () => {
 
   it("imports a masked Vertex key with editable models and keeps errors in the form", async () => {
     mockCommand.mockImplementation(async (name: string) => {
+      if (name === "get_antigravity_vertex_models")
+        return {
+          models: [
+            { id: "gemini-fixture-new", name: "Fixture new", preview: false },
+          ],
+          error: null,
+        };
       if (name === "save_antigravity_vertex_key")
         throw new Error("地区格式无效");
       return initialState;
@@ -228,15 +235,19 @@ describe("AntigravityAccounts", () => {
       "password",
     );
     expect(screen.getByLabelText("地区")).toHaveValue("global");
-    expect(screen.getByLabelText("模型")).toHaveValue(
-      "gemini-3-flash-preview\ngemini-3.1-pro-preview\ngemini-2.5-flash",
-    );
+    expect(screen.getByLabelText("模型")).toHaveValue("");
     fireEvent.change(screen.getByLabelText("名称"), {
       target: { value: "Fixture Vertex" },
     });
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "fixture-key" },
     });
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    await screen.findByRole("option", { name: /gemini-fixture-new/ });
+    fireEvent.change(screen.getByLabelText("添加目录模型"), {
+      target: { value: "gemini-fixture-new" },
+    });
+    expect(screen.getByLabelText("模型")).toHaveValue("gemini-fixture-new");
     fireEvent.change(screen.getByLabelText("模型"), {
       target: { value: "gemini-2.5-flash" },
     });
@@ -268,16 +279,34 @@ describe("AntigravityAccounts", () => {
       current: true,
       vertex: { location: "global", models: ["gemini-2.5-flash"] },
     };
-    mockCommand.mockResolvedValue({
+    const vertexState = {
       ...initialState,
       mode: "vertex_key",
       accounts: [vertex],
+    };
+    mockCommand.mockImplementation(async (name: string) => {
+      if (name === "get_antigravity_vertex_models")
+        return {
+          models: [{ id: "gemini-fixture-new", name: null, preview: false }],
+          error: "目录刷新失败",
+        };
+      return vertexState;
     });
     render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
     await screen.findByText("Fixture Vertex");
     fireEvent.click(screen.getByLabelText("管理 Fixture Vertex"));
     fireEvent.click(screen.getByRole("button", { name: "编辑凭据" }));
     expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(await screen.findByText("目录刷新失败")).toBeInTheDocument();
+    expect(screen.getByLabelText("模型")).toHaveValue("gemini-2.5-flash");
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    await waitFor(() =>
+      expect(mockCommand).toHaveBeenCalledWith(
+        "get_antigravity_vertex_models",
+        { refresh: true },
+      ),
+    );
+    expect(screen.getByLabelText("模型")).toHaveValue("gemini-2.5-flash");
     expect(screen.getByLabelText("立即启用")).toBeDisabled();
     fireEvent.change(screen.getByLabelText("地区"), {
       target: { value: "us-central1" },

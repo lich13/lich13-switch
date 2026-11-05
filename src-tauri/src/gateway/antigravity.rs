@@ -162,10 +162,8 @@ pub(super) async fn forward(
         .uri()
         .path()
         .strip_prefix("/antigravity")
-        .unwrap_or("");
-    if request.method() == Method::GET
-        && matches!(path, "/v1beta/models" | "/v1/models" | "/models")
-    {
+        .expect("Antigravity route prefix");
+    if request.method() == Method::GET && path == "/v1beta/models" {
         return json_response(
             json!({"models": session.key.models.iter().map(|model| json!({
             "name": format!("models/{model}"), "displayName": model,

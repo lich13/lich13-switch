@@ -1485,7 +1485,7 @@
   gap: 8px;
   margin-bottom: 10px;
 }
-.usage-ag-track-head h2 {
+.usage-ag-track-head h3 {
   margin: 0;
   font-size: 14px;
   font-weight: 620;
@@ -1656,4 +1656,18 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+}
+
+.usage-ag-accounts {
+  display: grid;
+  gap: 16px;
+}
+.usage-ag-account > h2 {
+  margin: 0 0 10px;
+}
+.usage-ag-period {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
 }

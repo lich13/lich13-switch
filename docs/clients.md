@@ -52,7 +52,7 @@ ChatGPT 登录需要本机已安装 [官方 Codex CLI](https://developers.openai
 
 在“账号 → Antigravity → 导入账号”选择“ADC JSON”或“Vertex API Key”。Key 表单填写名称、密钥、可选 Project ID、地区与模型；勾选“立即启用”后保存并切换。密钥默认遮蔽，编辑已有条目时留空保留原值，列表支持切换、编辑凭据、重命名和删除。
 
-Project ID 留空使用 Express 全局端点；填写后使用项目端点，地区默认为 `global`。预置 `gemini-3-flash-preview`、`gemini-3.1-pro-preview`、`gemini-2.5-flash`，首个为默认，可编辑列表及顺序。Vela 提供该模型目录，不自动探测权限；实际生成、流式生成和 Token 计数返回 Google 的真实状态及错误。
+Project ID 留空使用 Express 全局端点；填写后使用项目端点，地区默认为 `global`。模型候选复用 models.dev 的 `google-vertex` 目录，仅展示未弃用、支持工具调用和文本输入输出的 Gemini 型号；正式型号优先，同类按发布日期排序。新建时需从候选添加或手填至少一个模型，首个为默认；编辑保留已有列表，刷新只更新候选。旧缓存缺少筛选信息时，打开模型选择会更新一次，失败保留已选模型并显示错误。目录不代表当前 Key 已验证可用；实际生成、流式生成和 Token 计数返回 Google 的真实状态及错误。
 
 Vertex Key 使用 App 的企业网关入口和 Vela 共享回环监听，独立于四客户端的供应商调度。启用后 Vela 必须保持运行；重启 Vela 会恢复所选账号的监听，退出只停止转发。该流量参与全局冻结，用量仍从 App 采集并按账号切换时间归属。
 

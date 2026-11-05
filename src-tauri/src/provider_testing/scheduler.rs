@@ -57,6 +57,17 @@ impl Service {
             ClientId::Grok,
             ClientId::Dsh,
         ] {
+            let prefix = format!("{}:", client_key(client));
+            let enabled = lock(&self.0.data)
+                .saved
+                .detection
+                .iter()
+                .any(|(key, config)| {
+                    key.starts_with(&prefix) && config.enabled && config.mode == "smart"
+                });
+            if !enabled {
+                continue;
+            }
             let counts = self.gateway(client).detection_request_counts(at);
             let mut data = lock(&self.0.data);
             data.frequency_sampled_at = Some(at);

@@ -1150,13 +1150,6 @@ pub(super) fn flush(c: &Connection) -> Result<()> {
     while flush_batch(c)? {}
     Ok(())
 }
-fn save_migrating(c: &Connection, r: &Record, effective: i64, sequence: i64) -> Result<()> {
-    save(c, r, effective, sequence)?;
-    let owner = owner(c, &r.id)?.ok_or_else(|| failure("用量迁移记录缺失"))?;
-    db(c.execute("DELETE FROM v12_links WHERE owner=?1", [owner]))?;
-    db(c.execute("INSERT INTO v12_links SELECT rid,usage_key(archived_duplicate) FROM v12_records WHERE rid=?1 AND archived_duplicate IS NOT NULL", [owner]))?;
-    Ok(())
-}
 fn flush_batch(c: &Connection) -> Result<bool> {
     let ids = {
         let mut stmt = db(c.prepare("SELECT id FROM v12_dirty ORDER BY id LIMIT 2000"))?;
@@ -1173,10 +1166,9 @@ fn flush_batch(c: &Connection) -> Result<bool> {
             .optional())?;
         if let Some((body, effective, sequence)) = old {
             let r = bodies::decode(c, &body)?;
-            save_migrating(c, &r, effective, sequence)?;
+            save(c, &r, effective, sequence)?;
             verify_record(c, &r)?;
         } else {
-            db(c.execute("DELETE FROM v12_links WHERE owner IN (SELECT rid FROM v12_records WHERE key=usage_key(?1))", [&id]))?;
             delete(c, &id)?;
         }
         db(c.execute("DELETE FROM v12_dirty WHERE id=?1", [&id]))?;
@@ -1269,7 +1261,7 @@ fn validate(c: &Connection) -> Result<()> {
     }
     let metadata_differs: bool = db(c.query_row("WITH old AS (
       SELECT id,client,source,time,response,usage_hint(usage_key(signature)),effective,duplicate_of,local_sequence FROM records), new AS (
-      SELECT usage_text(r.key),usage_label(r.client),usage_label(r.source),r.time,usage_text(r.response),r.signature,r.effective,coalesce(usage_text(d.key),usage_text(l.target),r.archived_duplicate),r.sequence FROM v12_records r LEFT JOIN v12_rows d ON d.rid=r.duplicate LEFT JOIN v12_links l ON l.owner=r.rid)
+      SELECT usage_text(r.key),usage_label(r.client),usage_label(r.source),r.time,usage_text(r.response),r.signature,r.effective,coalesce(usage_text(d.key),r.archived_duplicate),r.sequence FROM v12_records r LEFT JOIN v12_rows d ON d.rid=r.duplicate)
       SELECT EXISTS(SELECT * FROM old EXCEPT SELECT * FROM new) OR EXISTS(SELECT * FROM new EXCEPT SELECT * FROM old)",[],|r|r.get(0)))?;
     if metadata_differs {
         return Err(failure("用量迁移来源、顺序或关联核对失败，旧数据已保留"));
@@ -1283,7 +1275,7 @@ fn validate(c: &Connection) -> Result<()> {
     while let Some(row) = db(rows.next())? {
         let _: Record = serde_json::from_value(load(c, db(row.get(0))?)?).map_err(json_error)?;
     }
-    let bad:bool=db(c.query_row("SELECT EXISTS(SELECT 1 FROM v12_links l WHERE NOT EXISTS(SELECT 1 FROM v12_records r WHERE usage_hint(r.key)=usage_hint(l.target) AND r.key=l.target) AND NOT EXISTS(SELECT 1 FROM receipts r WHERE r.id=usage_text(l.target)))",[],|r|r.get(0)))?;
+    let bad:bool=db(c.query_row("SELECT EXISTS(SELECT 1 FROM v12_rows unresolved WHERE unresolved.archived_duplicate IS NOT NULL AND NOT EXISTS(SELECT 1 FROM v12_rows r WHERE usage_hint(r.key)=usage_hint(usage_key(unresolved.archived_duplicate)) AND r.key=usage_key(unresolved.archived_duplicate)) AND NOT EXISTS(SELECT 1 FROM receipts r WHERE r.id=unresolved.archived_duplicate))",[],|r|r.get(0)))?;
     if bad {
         return Err(failure("用量迁移关联核对失败，旧数据已保留"));
     }
@@ -1356,7 +1348,7 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
     };
     for (_, body, effective, sequence) in &rows {
         let r: Record = bodies::decode(&tx, body)?;
-        save_migrating(&tx, &r, *effective, *sequence)?;
+        save(&tx, &r, *effective, *sequence)?;
         verify_record(&tx, &r)?;
     }
     if let Some(last) = rows.last() {
@@ -1370,7 +1362,7 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
             return Ok(true);
         }
         validate(&tx)?;
-        db(tx.execute_batch("UPDATE v12_records SET duplicate=(SELECT target.rid FROM v12_links l JOIN v12_records target ON usage_hint(target.key)=usage_hint(l.target) AND target.key=l.target WHERE l.owner=v12_records.rid),archived_duplicate=(SELECT usage_text(l.target) FROM v12_links l WHERE l.owner=v12_records.rid AND NOT EXISTS(SELECT 1 FROM v12_records target WHERE usage_hint(target.key)=usage_hint(l.target) AND target.key=l.target)) WHERE rid IN (SELECT owner FROM v12_links); DELETE FROM v12_links;
+        db(tx.execute_batch("UPDATE v12_rows AS r SET duplicate=(SELECT target.rid FROM v12_rows target WHERE usage_hint(target.key)=usage_hint(usage_key(r.archived_duplicate)) AND target.key=usage_key(r.archived_duplicate)),archived_duplicate=NULL WHERE archived_duplicate IS NOT NULL AND EXISTS(SELECT 1 FROM v12_rows target WHERE usage_hint(target.key)=usage_hint(usage_key(r.archived_duplicate)) AND target.key=usage_key(r.archived_duplicate)); DELETE FROM v12_links;
           DROP TRIGGER v12_track_insert; DROP TRIGGER v12_track_update; DROP TRIGGER v12_track_delete;
           DROP TRIGGER IF EXISTS pending_prices_insert; DROP TRIGGER IF EXISTS pending_prices_update; DROP TRIGGER IF EXISTS pending_prices_delete;
           DROP TABLE pending_prices;

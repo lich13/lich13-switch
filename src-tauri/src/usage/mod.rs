@@ -1,4 +1,4 @@
-mod antigravity;
+pub(crate) mod antigravity;
 mod billing;
 mod bodies;
 mod body_wire;
@@ -515,6 +515,12 @@ impl Service {
             store::Store::reader_with_cache(&self.0.directory, self.0.overview_cache.clone())?;
         reader.snapshot(|db| f(db))
     }
+    pub(crate) async fn refresh_antigravity_quota(&self, data: &Path) -> Result<()> {
+        if let Some((id, periods)) = antigravity::quota::observe(data).await? {
+            self.query(|db| db.save_antigravity_quota(&id, &periods))?;
+        }
+        Ok(())
+    }
     pub(crate) fn recent_gateway_requests(
         &self,
         client: &str,
@@ -663,6 +669,14 @@ struct SessionStore {
     client: String,
 }
 impl sessions::Repository for SessionStore {
+    fn save_antigravity_quota(
+        &mut self,
+        id: &str,
+        periods: &antigravity::quota::Periods,
+    ) -> Result<()> {
+        self.service
+            .query(|db| db.save_antigravity_quota(id, periods))
+    }
     fn data_dir(&self) -> Option<&Path> {
         Some(&self.service.0.data_dir)
     }

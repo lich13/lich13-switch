@@ -322,7 +322,20 @@ fn switch_account_switches_between_oauth_and_adc_and_restarts_running_app() {
     assert!(s1.app_restarted);
     assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
 
-    let s2 = switch_account_at(&paths, &lifecycle, &oauth1_id, &s1.revision).unwrap();
+    let s2 = switch_account_at(
+        &paths,
+        &lifecycle,
+        load_vault(&paths)
+            .unwrap()
+            .0
+            .entries
+            .iter()
+            .find(|e| e.id == oauth1_id)
+            .unwrap()
+            .clone(),
+        &s1.revision,
+    )
+    .unwrap();
     assert_eq!(s2.mode, AuthMode::Oauth);
     assert!(!paths.adc_file().exists());
     assert!(paths.adc_disabled_file().exists());
@@ -551,12 +564,13 @@ fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_setti
     let original = json!({"gateway":{"enabled":false,"customHeaders":{"fixture":"kept"}},"models":{"defaultModelId":"fixture-original"},"theme":"fixture-theme"});
     write_app_settings(&paths, &original).unwrap();
     let before = state_at(&paths).unwrap();
-    let entry = vertex_entry(&paths, &vertex_input(before.revision.clone())).unwrap();
+    let (entry, key) = vertex_entry(&paths, &vertex_input(before.revision.clone())).unwrap();
     let id = entry.id.clone();
     let selected = activate_vertex_at(
         &paths,
         &lifecycle,
         entry,
+        &key,
         &before.revision,
         43721,
         "fixture-local-token".into(),
@@ -583,7 +597,7 @@ fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_setti
     edit.id = Some(id.clone());
     edit.api_key.clear();
     edit.models = vec!["gemini-2.5-flash".into()];
-    let updated = vertex_entry(&paths, &edit).unwrap();
+    let (updated, updated_key) = vertex_entry(&paths, &edit).unwrap();
     assert_eq!(
         decode_vertex(&updated).unwrap().api_key,
         "fixture-vertex-key"
@@ -592,6 +606,7 @@ fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_setti
         &paths,
         &lifecycle,
         updated,
+        &updated_key,
         &selected.revision,
         43721,
         "fixture-local-token".into(),
@@ -624,7 +639,7 @@ fn vertex_conflicts_listener_failure_and_restart_failure_restore_files_and_vault
         let mut lifecycle = MockLifecycle::new(true);
         lifecycle.fail_launch = fail_launch;
         let state = state_at(&paths).unwrap();
-        let entry = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
+        let (entry, key) = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
         let before: Vec<_> = paths
             .watched_files()
             .into_iter()
@@ -638,6 +653,7 @@ fn vertex_conflicts_listener_failure_and_restart_failure_restore_files_and_vault
             &paths,
             &lifecycle,
             entry,
+            &key,
             &state.revision,
             43721,
             "fixture-local-token".into(),
@@ -681,11 +697,12 @@ async fn selected_vertex_listener_restores_after_restart_without_rewriting_app_s
         .set_listener_port(port, &gateway.listener_view().revision)
         .unwrap();
     let state = state_at(&paths).unwrap();
-    let entry = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
+    let (entry, key) = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
     activate_vertex_at(
         &paths,
         &lifecycle,
         entry,
+        &key,
         &state.revision,
         port,
         "fixture-local-token".into(),
@@ -711,4 +728,46 @@ async fn selected_vertex_listener_restores_after_restart_without_rewriting_app_s
     vertex::stop(&gateway.registry()).await.unwrap();
     assert_eq!(fs::read(paths.app_settings_file()).unwrap(), before);
     assert_eq!(state_at(&paths).unwrap().mode, AuthMode::VertexKey);
+}
+
+#[test]
+fn current_account_and_timeline_do_not_fall_back_across_credential_kinds() {
+    let (_tmp, paths) = setup_paths();
+    let lifecycle = MockLifecycle::new(false);
+    let added = add_adc_at(&paths,&lifecycle,AddAntigravityAdcInput {name:Some("Fixture ADC".into()),json_text:r#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#.into(),quota_project_id:None,activate:true}).unwrap();
+    let adc = added
+        .accounts
+        .iter()
+        .find(|a| a.kind == AccountKind::Adc)
+        .unwrap()
+        .id
+        .clone();
+    let (entry, key) = vertex_entry(&paths, &vertex_input(added.revision.clone())).unwrap();
+    let mut selected = activate_vertex_at(
+        &paths,
+        &lifecycle,
+        entry,
+        &key,
+        &added.revision,
+        43721,
+        "fixture-local".into(),
+        || Ok(()),
+    )
+    .unwrap();
+    selected.mode = AuthMode::Oauth;
+    selected.enable_adc = false;
+    selected.accounts.retain(|a| a.kind != AccountKind::Oauth);
+    assert_eq!(active_account_id(&selected), None);
+    let bytes = fs::read(paths.adc_disabled_file()).unwrap();
+    write_active_adc(&paths, &bytes).unwrap();
+    let state = state_at(&paths).unwrap();
+    assert_eq!(state.mode, AuthMode::Adc);
+    assert_eq!(active_account_id(&state), Some(adc.clone()));
+    assert_eq!(
+        provider_timeline(&paths.data_dir, Some(&paths.gemini_home)).provider_at(now_ms()),
+        Some(adc.as_str())
+    );
+    assert!(current_oauth_identity(&paths.data_dir, &paths.gemini_home)
+        .unwrap()
+        .is_none());
 }

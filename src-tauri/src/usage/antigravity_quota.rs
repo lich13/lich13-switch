@@ -1,0 +1,193 @@
+//! Observed account quota boundaries. Never extrapolate a new window.
+use super::{time, AntigravityQuotaTrack, AntigravityTrackWindow, Api, WindowAcc};
+use crate::{
+    antigravity::auth::{self, AccountKind},
+    storage::Result,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{collections::BTreeMap, path::Path};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Period {
+    pub start: i64,
+    pub end: i64,
+}
+impl Period {
+    fn current(&self, now: i64) -> bool {
+        self.start <= now && now < self.end
+    }
+    fn contains(&self, at: i64) -> bool {
+        self.start <= at && at < self.end
+    }
+}
+pub type Periods = BTreeMap<String, Period>;
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Account {
+    pub id: String,
+    pub name: String,
+    pub kind: AccountKind,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsage {
+    pub id: String,
+    pub name: String,
+    pub kind: AccountKind,
+    pub tracks: Vec<AntigravityQuotaTrack>,
+    pub total: AntigravityTrackWindow,
+}
+pub fn parse(value: &Value) -> Periods {
+    let response = &value["response"];
+    response["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|g| g["buckets"].as_array().into_iter().flatten())
+        .chain(response["buckets"].as_array().into_iter().flatten())
+        .filter_map(|b| {
+            if b["disabled"] == true {
+                return None;
+            }
+            let id = b["bucketId"].as_str()?;
+            let duration = match (id, b["window"].as_str()?) {
+                ("gemini-5h" | "3p-5h", "5h") => 5 * 3_600_000,
+                ("gemini-weekly" | "3p-weekly", "weekly") => 7 * 86_400_000,
+                _ => return None,
+            };
+            let end = time(&b["resetTime"])?;
+            Some((
+                id.to_owned(),
+                Period {
+                    start: end.saturating_sub(duration),
+                    end,
+                },
+            ))
+        })
+        .collect()
+}
+impl Api {
+    pub(super) async fn quota(
+        &self,
+        data: &Path,
+        home: &Path,
+    ) -> Result<Option<(String, Periods)>> {
+        let Some((id, email)) = auth::current_oauth_identity(data, home)? else {
+            return Ok(None);
+        };
+        Ok(self.quota_for(&email).await?.map(|periods| (id, periods)))
+    }
+    async fn quota_for(&self, email: &str) -> Result<Option<Periods>> {
+        for endpoint in &self.endpoints {
+            let user = self.call_on(endpoint, "GetUserStatus", &json!({})).await?;
+            if !user["userStatus"]["email"]
+                .as_str()
+                .is_some_and(|e| e.eq_ignore_ascii_case(email))
+            {
+                continue;
+            }
+            let value = self
+                .call_on(endpoint, "RetrieveUserQuotaSummary", &json!({}))
+                .await?;
+            return Ok(Some(parse(&value)));
+        }
+        Ok(None)
+    }
+}
+pub async fn observe(data: &Path) -> Result<Option<(String, Periods)>> {
+    match Api::connect().await? {
+        Some(api) => api.quota(data, &crate::antigravity::home()?).await,
+        None => Ok(None),
+    }
+}
+pub(in crate::usage) struct AccountAccumulator {
+    account: Account,
+    periods: Periods,
+    windows: BTreeMap<String, WindowAcc>,
+    total: WindowAcc,
+}
+impl AccountAccumulator {
+    pub(in crate::usage) fn new(account: Account, mut periods: Periods, now: i64) -> Self {
+        periods.retain(|_, p| account.kind == AccountKind::Oauth && p.current(now));
+        Self {
+            account,
+            periods,
+            windows: BTreeMap::new(),
+            total: WindowAcc::default(),
+        }
+    }
+    pub(in crate::usage) fn earliest(&self) -> Option<i64> {
+        self.periods.values().map(|p| p.start).min()
+    }
+    pub(super) fn ingest(
+        &mut self,
+        at: i64,
+        track: Option<&str>,
+        amounts: &WindowAcc,
+        historical: bool,
+        now: i64,
+    ) {
+        let add = |w: &mut WindowAcc| {
+            w.requests += amounts.requests;
+            w.unpriced_requests += amounts.unpriced_requests;
+            w.tokens = w.tokens.saturating_add(amounts.tokens);
+            w.reasoning_tokens = w.reasoning_tokens.saturating_add(amounts.reasoning_tokens);
+            w.cost += amounts.cost;
+        };
+        if historical {
+            add(&mut self.total);
+        }
+        if at > now || self.account.kind != AccountKind::Oauth {
+            return;
+        }
+        let group = match track {
+            Some("gemini") => "gemini",
+            Some("claude_gpt") => "3p",
+            _ => return,
+        };
+        for suffix in ["5h", "weekly"] {
+            let key = format!("{group}-{suffix}");
+            if self.periods.get(&key).is_some_and(|p| p.contains(at)) {
+                add(self.windows.entry(key).or_default());
+            }
+        }
+    }
+    pub(super) fn finish(mut self) -> AccountUsage {
+        let mut tracks = Vec::new();
+        if self.account.kind == AccountKind::Oauth {
+            for (id, label, group) in [
+                ("gemini", "Gemini", "gemini"),
+                ("claude_gpt", "Claude / GPT", "3p"),
+            ] {
+                let mut window = |suffix: &str, hours: f64| {
+                    let key = format!("{group}-{suffix}");
+                    let mut w = self
+                        .windows
+                        .remove(&key)
+                        .unwrap_or_default()
+                        .into_view(hours);
+                    w.period = self.periods.remove(&key);
+                    w
+                };
+                tracks.push(AntigravityQuotaTrack {
+                    id: id.into(),
+                    label: label.into(),
+                    burst_5h: window("5h", 5.0),
+                    weekly_7d: window("weekly", 168.0),
+                });
+            }
+        }
+        AccountUsage {
+            id: self.account.id,
+            name: self.account.name,
+            kind: self.account.kind,
+            tracks,
+            total: self.total.into_view(0.0),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "antigravity_quota_tests.rs"]
+mod tests;

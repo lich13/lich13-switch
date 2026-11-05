@@ -817,6 +817,13 @@ export type CommandMap = {
     PricingSearchPage
   >;
   get_models_dev: Call<None, ModelsDevState>;
+  get_antigravity_vertex_models: Call<
+    { refresh: boolean },
+    {
+      models: { id: string; name: string | null; preview: boolean }[];
+      error: string | null;
+    }
+  >;
   update_models_dev: Call<None, ModelsDevState>;
   compare_model_prices: Call<
     { model: string; context: number },
@@ -856,6 +863,7 @@ export type EventMap = {
     guarded: boolean;
   };
   "clamshell-state": PowerState;
+  "clamshell-error": AppError | null;
   "notification-state": NotificationState;
   "claude-profile-state": ClaudeProfileState;
   "claude-login-state": ClaudeLoginState;

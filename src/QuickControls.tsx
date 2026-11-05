@@ -1,6 +1,6 @@
 import { subscriptions } from "./subscriptions";
 import { useEffect, useRef, useState } from "react";
-import { Moon, SquarePower } from "lucide-react";
+import { Moon, SquarePower, X } from "lucide-react";
 import { command } from "./bridge";
 import { errorOf } from "./types";
 type State = {
@@ -22,12 +22,20 @@ export default function QuickControls({
   const [state, setState] = useState<State | null>(null),
     [powerBusy, setPowerBusy] = useState(false),
     [quitBusy, setQuitBusy] = useState<"codex" | "claude" | null>(null),
-    [readError, setReadError] = useState("");
+    [readError, setReadError] = useState(""),
+    [powerError, setPowerError] = useState("");
   const lock = useRef(false),
     quitting = useRef(false);
   useEffect(() => {
     const events = subscriptions((e) => setReadError(errorOf(e).message));
-    events.watch("clamshell-state", setState);
+    events.watch("clamshell-state", (next) => {
+      setState(next);
+      setReadError("");
+      if (!next.enabled) setPowerError("");
+    });
+    events.watch("clamshell-error", (next) =>
+      setPowerError(next?.message ?? ""),
+    );
     return events.dispose;
   }, []);
   useEffect(() => {
@@ -40,6 +48,7 @@ export default function QuickControls({
         if (!disposed) {
           setState(s);
           setReadError("");
+          if (!s.enabled) setPowerError("");
         }
       } catch (e) {
         if (!disposed) setReadError(errorOf(e).message);
@@ -56,6 +65,7 @@ export default function QuickControls({
     if (!state || lock.current) return;
     lock.current = true;
     setPowerBusy(true);
+    setPowerError("");
     try {
       const next = await command("set_clamshell_awake", {
         enabled: !state.enabled,
@@ -64,7 +74,7 @@ export default function QuickControls({
       setState(next);
       notify(next.enabled ? "已开启合盖不休眠" : "已恢复电池休眠设置");
     } catch (e) {
-      error(errorOf(e).message);
+      setPowerError(errorOf(e).message);
       try {
         setState(await command("get_clamshell_state"));
       } catch {
@@ -93,6 +103,18 @@ export default function QuickControls({
   };
   return (
     <div className="quick-controls">
+      {powerError && (
+        <div className="quick-feedback error quick-power-error" role="alert">
+          <span>{powerError}</span>
+          <button
+            type="button"
+            aria-label="关闭电源告警"
+            onClick={() => setPowerError("")}
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
       {(state?.supported || readError) && (
         <div className="quick-power">
           <label>

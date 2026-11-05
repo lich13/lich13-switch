@@ -156,6 +156,18 @@ async fn forwards_paths_auth_bytes_catalog_telemetry_and_real_errors() {
                 .status(),
             401
         );
+        for alias in ["/v1/models", "/models"] {
+            assert_eq!(
+                client
+                    .get(fixture.url(alias))
+                    .bearer_auth("fixture-local-token")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                404
+            );
+        }
         assert_eq!(seen.lock().unwrap().len(), 3);
         fixture.stop().await;
     }

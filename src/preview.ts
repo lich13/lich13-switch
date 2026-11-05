@@ -713,6 +713,8 @@ export async function run(
       return;
     case "pick_path":
     case "import_auth_file":
+    case "get_antigravity_vertex_models":
+      return { models: [], error: null };
     case "pick_antigravity_credential_file":
       return null;
     case "get_antigravity_auth_state":

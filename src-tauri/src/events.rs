@@ -1448,10 +1448,6 @@ impl Service {
     }
     pub fn sync_antigravity_logs(&self, home: &Path) {
         let cutoff = now().saturating_sub(RETENTION);
-        let existing: HashSet<String> = {
-            let guard = self.journal.lock().unwrap();
-            guard.records.iter().map(|r| r.id.clone()).collect()
-        };
         let mut cursors = self
             .antigravity_cursors
             .lock()
@@ -1523,9 +1519,7 @@ impl Service {
                                             model,
                                             raw,
                                         );
-                                        if !existing.contains(&r.id) {
-                                            discovered.push(r);
-                                        }
+                                        discovered.push(r);
                                     }
                                 }
                             }
@@ -1578,9 +1572,7 @@ impl Service {
                                         &storage::digest(body.as_bytes())[..16]
                                     );
                                     let r = Record::antigravity_error(&key, line_ts, None, body);
-                                    if !existing.contains(&r.id) {
-                                        discovered.push(r);
-                                    }
+                                    discovered.push(r);
                                 }
                             }
                         }

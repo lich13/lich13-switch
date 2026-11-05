@@ -43,22 +43,21 @@ pub async fn serve(
                     let connection_activity = activity.clone();
                     let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
                         let antigravity = request.uri().path().starts_with("/antigravity/");
-                        let vertex = if antigravity { super::locks::published(&registry.antigravity).clone() } else { None };
-                        let freeze = registry.freeze.clone();
-                        let routed = super::listener::route(request.uri(), request.headers(), &registry).and_then(|(client, uri)| {
+                        let vertex = antigravity.then(|| (super::locks::published(&registry.antigravity).clone(), registry.freeze.clone()));
+                        let routed = (!antigravity).then(|| super::listener::route(request.uri(), request.headers(), &registry).and_then(|(client, uri)| {
                             *request.uri_mut() = uri;
                             registry.gateway(client).ok_or(super::listener::RouteError::NotFound)
-                        });
+                        }));
                         let delivery = std::sync::Arc::new(super::protocol::Delivery::default());
                         delivery.track(activity.clone());
                         request.extensions_mut().insert(delivery);
                         request.extensions_mut().insert(ReceivedAt(crate::usage::model::now()));
                         request.extensions_mut().insert(activity.clone());
                         async move{
-                            if antigravity {
+                            if let Some((vertex, freeze)) = vertex {
                                 return Ok::<_,Infallible>(super::antigravity::forward(vertex, freeze, request).await);
                             }
-                            Ok::<_,Infallible>(match routed {
+                            Ok::<_,Infallible>(match routed.expect("ordinary gateway route") {
                             Ok(g) => {
                                 let mut client_stop = match g.request_state() {
                                     Ok(state) => state.shutdown.as_ref().map(watch::Sender::subscribe),

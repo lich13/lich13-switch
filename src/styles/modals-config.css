@@ -766,3 +766,18 @@
 .antigravity-accounts > .list-tools .exchange-button {
   white-space: nowrap;
 }
+
+.ag-model-catalog {
+  display: grid;
+  gap: 8px;
+}
+.ag-model-catalog select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}

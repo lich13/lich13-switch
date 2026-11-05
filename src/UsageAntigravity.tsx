@@ -33,10 +33,19 @@ function formatCostOrUnpriced(
 function TrackWindowBlock({
   title,
   window: w,
+  current = true,
 }: {
   title: string;
   window: AntigravityTrackWindow;
+  current?: boolean;
 }) {
+  if (current && !w.period)
+    return (
+      <div className="usage-ag-window">
+        <div className="usage-ag-window-head">{title}</div>
+        <p className="usage-empty">未获取当前周期</p>
+      </div>
+    );
   return (
     <div className="usage-ag-window">
       <div className="usage-ag-window-head">
@@ -45,6 +54,11 @@ function TrackWindowBlock({
           {formatCostOrUnpriced(w.costUsd, w.unpricedRequests, w.requests)}
         </strong>
       </div>
+      {w.period && (
+        <p className="usage-ag-period">
+          {date(w.period.start)} — {date(w.period.end)}
+        </p>
+      )}
       <dl className="usage-ag-window-stats">
         <div>
           <dt>请求</dt>
@@ -60,12 +74,14 @@ function TrackWindowBlock({
             {compact(w.reasoningTokens)}
           </dd>
         </div>
-        <div>
-          <dt>速率</dt>
-          <dd title={`${numeric(Math.round(w.tokensPerHour))} Token/h`}>
-            {compact(Math.round(w.tokensPerHour))}/h
-          </dd>
-        </div>
+        {current && (
+          <div>
+            <dt>速率</dt>
+            <dd title={`${numeric(Math.round(w.tokensPerHour))} Token/h`}>
+              {compact(Math.round(w.tokensPerHour))}/h
+            </dd>
+          </div>
+        )}
       </dl>
     </div>
   );
@@ -192,21 +208,53 @@ export default function UsageAntigravity({
         </div>
       </section>
 
-      <section className="usage-ag-tracks" aria-label="近期用量">
-        {stats.tracks.map((track) => (
-          <article
-            key={track.id}
-            className="usage-ag-card usage-ag-track-card"
-            data-track={track.id}
+      <section className="usage-ag-accounts" aria-label="账号周期用量">
+        {stats.quotaError && (
+          <p className="form-error" role="alert">
+            {stats.quotaError}
+          </p>
+        )}
+        {stats.accounts.map((account) => (
+          <section
+            key={account.id}
+            aria-label={account.name}
+            className="usage-ag-account"
           >
-            <header className="usage-ag-track-head">
-              <h2>{track.label}</h2>
-            </header>
-            <div className="usage-ag-windows">
-              <TrackWindowBlock title="近 5 小时" window={track.burst5h} />
-              <TrackWindowBlock title="近 7 天" window={track.weekly7d} />
-            </div>
-          </article>
+            <h2 className="usage-ag-section-title">{account.name}</h2>
+            {account.kind === "oauth" ? (
+              <div className="usage-ag-tracks">
+                {account.tracks.map((track) => (
+                  <article
+                    key={track.id}
+                    className="usage-ag-card usage-ag-track-card"
+                    data-track={track.id}
+                  >
+                    <header className="usage-ag-track-head">
+                      <h3>{track.label}</h3>
+                    </header>
+                    <div className="usage-ag-windows">
+                      <TrackWindowBlock
+                        title="当前 5h"
+                        window={track.burst5h}
+                      />
+                      <TrackWindowBlock
+                        title="当前 7d"
+                        window={track.weekly7d}
+                      />
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <article className="usage-ag-card">
+                <TrackWindowBlock
+                  title={`${account.kind === "vertex_key" ? "Vertex Key" : "ADC"} · 所选日期`}
+                  window={account.total}
+                  current={false}
+                />
+              </article>
+            )}
+          </section>
         ))}
       </section>
 

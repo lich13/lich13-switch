@@ -1,3 +1,4 @@
+import UsageAntigravity from "./UsageAntigravity";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -192,46 +193,79 @@ function buildStats(
       cacheInputEligible: 230_000,
       cacheSavingsUsd: "0.4860",
     },
-    tracks: [
+    quotaError: null,
+    accounts: [
       {
-        id: "gemini",
-        label: "Gemini",
-        burst5h: {
-          requests: 6,
-          tokens: 110_000,
-          reasoningTokens: 7_200,
-          costUsd: "0.4200",
+        id: "ag-oauth-1",
+        name: "Fixture OAuth",
+        kind: "oauth",
+        total: {
+          period: null,
+          requests: 15,
+          tokens: 260000,
+          reasoningTokens: 16200,
+          costUsd: "1.2450",
           unpricedRequests: 0,
-          tokensPerHour: 22_000,
+          tokensPerHour: 0,
         },
-        weekly7d: {
-          requests: 10,
-          tokens: 175_000,
-          reasoningTokens: 10_400,
-          costUsd: "0.6850",
-          unpricedRequests: 0,
-          tokensPerHour: 1_041.7,
-        },
-      },
-      {
-        id: "claude_gpt",
-        label: "Claude / GPT",
-        burst5h: {
-          requests: 3,
-          tokens: 52_000,
-          reasoningTokens: 3_600,
-          costUsd: "0.3500",
-          unpricedRequests: 0,
-          tokensPerHour: 10_400,
-        },
-        weekly7d: {
-          requests: 5,
-          tokens: 85_000,
-          reasoningTokens: 5_800,
-          costUsd: "0.5600",
-          unpricedRequests: 0,
-          tokensPerHour: 506.0,
-        },
+        tracks: [
+          {
+            id: "gemini",
+            label: "Gemini",
+            burst5h: {
+              period: {
+                start: 1_760_000_000_000 - 5 * 3_600_000,
+                end: 1_760_000_000_000,
+              },
+              requests: 6,
+              tokens: 110_000,
+              reasoningTokens: 7_200,
+              costUsd: "0.4200",
+              unpricedRequests: 0,
+              tokensPerHour: 22_000,
+            },
+            weekly7d: {
+              period: {
+                start: 1_760_000_000_000 - 168 * 3_600_000,
+                end: 1_760_000_000_000,
+              },
+              requests: 10,
+              tokens: 175_000,
+              reasoningTokens: 10_400,
+              costUsd: "0.6850",
+              unpricedRequests: 0,
+              tokensPerHour: 1_041.7,
+            },
+          },
+          {
+            id: "claude_gpt",
+            label: "Claude / GPT",
+            burst5h: {
+              period: {
+                start: 1_760_000_000_000 - 5 * 3_600_000,
+                end: 1_760_000_000_000,
+              },
+              requests: 3,
+              tokens: 52_000,
+              reasoningTokens: 3_600,
+              costUsd: "0.3500",
+              unpricedRequests: 0,
+              tokensPerHour: 10_400,
+            },
+            weekly7d: {
+              period: {
+                start: 1_760_000_000_000 - 168 * 3_600_000,
+                end: 1_760_000_000_000,
+              },
+              requests: 5,
+              tokens: 85_000,
+              reasoningTokens: 5_800,
+              costUsd: "0.5600",
+              unpricedRequests: 0,
+              tokensPerHour: 506.0,
+            },
+          },
+        ],
       },
     ],
     providers: [
@@ -403,7 +437,11 @@ describe("Usage Antigravity statistics tab", () => {
         if (name === "get_antigravity_auth_state")
           return {
             accounts: [
-              { id: "ag-oauth-1", name: "oauth@example.invalid", kind: "oauth" },
+              {
+                id: "ag-oauth-1",
+                name: "oauth@example.invalid",
+                kind: "oauth",
+              },
               { id: "ag-adc-1", name: "ADC 凭据 · p1", kind: "adc" },
             ],
           };
@@ -457,17 +495,15 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(summary).getByText("78.3%")).toBeInTheDocument();
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();
 
-    const tracks = screen.getByLabelText("近期用量");
-    expect(within(tracks).getAllByText("近 5 小时")).toHaveLength(2);
-    expect(within(tracks).getAllByText("近 7 天")).toHaveLength(2);
+    const tracks = screen.getByLabelText("账号周期用量");
+    expect(within(tracks).getAllByText("当前 5h")).toHaveLength(2);
+    expect(within(tracks).getAllByText("当前 7d")).toHaveLength(2);
 
     const creds = screen.getByLabelText("账号与凭据分布");
     expect(
       within(creds).getByText("oauth@example.invalid (OAuth)"),
     ).toBeInTheDocument();
-    expect(
-      within(creds).getByText("ADC 凭据 · p1 (ADC)"),
-    ).toBeInTheDocument();
+    expect(within(creds).getByText("ADC 凭据 · p1 (ADC)")).toBeInTheDocument();
     await user.click(
       within(creds).getByRole("button", {
         name: "按 oauth@example.invalid (OAuth) 筛选",
@@ -511,10 +547,21 @@ describe("Usage Antigravity statistics tab", () => {
     statsPayload = buildStats({
       costUsd: "0",
       unpricedRequests: 15,
-      tracks: buildStats().tracks.map((t) => ({
-        ...t,
-        burst5h: { ...t.burst5h, costUsd: "0", unpricedRequests: t.burst5h.requests },
-        weekly7d: { ...t.weekly7d, costUsd: "0", unpricedRequests: t.weekly7d.requests },
+      accounts: buildStats().accounts.map((a) => ({
+        ...a,
+        tracks: a.tracks.map((t) => ({
+          ...t,
+          burst5h: {
+            ...t.burst5h,
+            costUsd: "0",
+            unpricedRequests: t.burst5h.requests,
+          },
+          weekly7d: {
+            ...t.weekly7d,
+            costUsd: "0",
+            unpricedRequests: t.weekly7d.requests,
+          },
+        })),
       })),
       topSessions: buildStats().topSessions.map((s) => ({
         ...s,
@@ -529,9 +576,54 @@ describe("Usage Antigravity statistics tab", () => {
 
     const summary = await screen.findByLabelText("Token 构成与缓存节省");
     expect(within(summary).getByText("未定价")).toBeInTheDocument();
-    const tracks = screen.getByLabelText("近期用量");
+    const tracks = screen.getByLabelText("账号周期用量");
     expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
     const sessions = screen.getByLabelText("会话排行");
     expect(within(sessions).getByText("未定价")).toBeInTheDocument();
   });
+});
+
+it("shows two current-window cards per OAuth account and dated totals for Key and ADC", () => {
+  const base = buildStats();
+  const unavailable = {
+    ...base.accounts[0],
+    id: "b",
+    name: "Fixture B",
+    tracks: base.accounts[0].tracks.map((t) => ({
+      ...t,
+      burst5h: { ...t.burst5h, period: null },
+      weekly7d: { ...t.weekly7d, period: null },
+    })),
+  };
+  const accounts = [
+    ...base.accounts,
+    unavailable,
+    ...(["vertex_key", "adc"] as const).map((kind) => ({
+      ...base.accounts[0],
+      id: kind,
+      name: kind,
+      kind,
+      tracks: [],
+    })),
+  ];
+  render(
+    <UsageAntigravity
+      stats={{ ...base, accounts }}
+      busy={false}
+      onSelectSession={vi.fn()}
+    />,
+  );
+  const known = screen.getByLabelText("Fixture OAuth");
+  expect(within(known).getAllByText("当前 5h")).toHaveLength(2);
+  expect(within(known).getAllByText("当前 7d")).toHaveLength(2);
+  expect(known.querySelectorAll(".usage-ag-period")).toHaveLength(4);
+  expect(
+    within(screen.getByLabelText("Fixture B")).getAllByText("未获取当前周期"),
+  ).toHaveLength(4);
+  for (const kind of ["vertex_key", "adc"]) {
+    const section = screen.getByLabelText(kind);
+    expect(within(section).getByText(/所选日期/)).toBeInTheDocument();
+    expect(within(section).queryByText("当前 5h")).not.toBeInTheDocument();
+    expect(within(section).getByText("请求")).toBeInTheDocument();
+  }
 });

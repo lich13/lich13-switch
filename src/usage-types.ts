@@ -244,6 +244,7 @@ export type AntigravityTokenMix = {
 };
 
 export type AntigravityTrackWindow = {
+  period: { start: number; end: number } | null;
   requests: number;
   tokens: number;
   reasoningTokens: number;
@@ -301,7 +302,14 @@ export type AntigravityUsageStats = {
   costUsd: string;
   unpricedRequests: number;
   tokenMix: AntigravityTokenMix;
-  tracks: AntigravityQuotaTrack[];
+  accounts: {
+    id: string;
+    name: string;
+    kind: "oauth" | "adc" | "vertex_key";
+    tracks: AntigravityQuotaTrack[];
+    total: AntigravityTrackWindow;
+  }[];
+  quotaError: string | null;
   providers?: AntigravityProviderGroup[];
   families: AntigravityFamilyGroup[];
   topSessions: AntigravitySessionRow[];

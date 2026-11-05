@@ -19,11 +19,18 @@ pub async fn get_antigravity_usage_stats(
     filter: Filter,
 ) -> Result<super::antigravity::AntigravityUsageStats> {
     let s = r.usage.clone();
+    let quota_error = s
+        .refresh_antigravity_quota(&r.data)
+        .await
+        .err()
+        .map(|e| e.message);
     let prices = s.prices()?.frozen();
     let multiplier = s.settings().multiplier;
     let now_ms = now();
     tokio::task::spawn_blocking(move || {
-        s.read(|db| db.antigravity_stats(&filter, &prices, &multiplier, now_ms))
+        let mut stats = s.read(|db| db.antigravity_stats(&filter, &prices, &multiplier, now_ms))?;
+        stats.quota_error = quota_error;
+        Ok(stats)
     })
     .await
     .map_err(|_| failure("Antigravity 统计查询中断"))?
@@ -108,6 +115,24 @@ pub async fn update_models_dev(r: R<'_>, app: tauri::AppHandle) -> Result<crate:
     }
     crate::emit_if_main_visible(&app, crate::MainSignal::PricingState, ());
     Ok(view)
+}
+#[tauri::command]
+pub async fn get_antigravity_vertex_models(
+    r: R<'_>,
+    app: tauri::AppHandle,
+    refresh: bool,
+) -> Result<crate::models_dev::VertexModels> {
+    let catalog = &r.usage.prices()?.models_dev;
+    let before = catalog.view().version;
+    let result = catalog.vertex_models(refresh).await?;
+    if result.error.is_none() && catalog.view().version != before {
+        let service = r.usage.clone();
+        tokio::task::spawn_blocking(move || service.backfill_prices())
+            .await
+            .map_err(|_| failure("价格补算中断"))??;
+        crate::emit_if_main_visible(&app, crate::MainSignal::PricingState, ());
+    }
+    Ok(result)
 }
 #[tauri::command]
 pub fn compare_model_prices(

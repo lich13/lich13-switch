@@ -32,7 +32,11 @@ export default function PowerSettings() {
       .catch((e) => {
         if (!disposed) setError(errorOf(e).message);
       });
-    events.watch("clamshell-state", setState);
+    events.watch("clamshell-state", (next) => {
+      setState(next);
+      if (!next.enabled) setError("");
+    });
+    events.watch("clamshell-error", (next) => setError(next?.message ?? ""));
     return () => {
       disposed = true;
       events.dispose();

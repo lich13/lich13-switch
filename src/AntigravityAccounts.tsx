@@ -149,6 +149,37 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
     }
   };
 
+  const [candidates, setCandidates] = useState<
+    { id: string; name: string | null; preview: boolean }[]
+  >([]);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const catalogRequest = useRef(0);
+  const loadModels = useCallback(async (refresh: boolean) => {
+    const request = ++catalogRequest.current;
+    setCatalogBusy(true);
+    setCatalogError("");
+    try {
+      const next = await command("get_antigravity_vertex_models", { refresh });
+      if (request === catalogRequest.current) {
+        setCandidates(next.models ?? []);
+        setCatalogError(next.error ?? "");
+      }
+    } catch (e) {
+      if (request === catalogRequest.current)
+        setCatalogError(errorOf(e).message);
+    } finally {
+      if (request === catalogRequest.current) setCatalogBusy(false);
+    }
+  }, []);
+  const vertexOpen = dialog?.type === "import" && importType === "vertex_key";
+  useEffect(() => {
+    if (vertexOpen) void loadModels(false);
+    return () => {
+      catalogRequest.current++;
+    };
+  }, [vertexOpen, loadModels]);
+
   const openImport = (item?: AntigravityAccountItem) => {
     setName(item?.name ?? "");
     setJsonText("");
@@ -156,15 +187,7 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
     setApiKey("");
     setProjectId(item?.projectId ?? "");
     setLocation(item?.vertex?.location ?? "global");
-    setModels(
-      (
-        item?.vertex?.models ?? [
-          "gemini-3-flash-preview",
-          "gemini-3.1-pro-preview",
-          "gemini-2.5-flash",
-        ]
-      ).join("\n"),
-    );
+    setModels((item?.vertex?.models ?? []).join("\n"));
     setImportType(item ? "vertex_key" : "adc");
     setActivate(item ? item.current : true);
     setDialogError("");
@@ -633,6 +656,48 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                       />
                     </label>
                   </div>
+                  <div className="ag-model-catalog">
+                    <div className="ag-json-header">
+                      <span>模型目录</span>
+                      <button
+                        type="button"
+                        disabled={catalogBusy}
+                        onClick={() => void loadModels(true)}
+                      >
+                        <RefreshCw size={14} />
+                        {catalogBusy ? "正在加载…" : "刷新模型"}
+                      </button>
+                    </div>
+                    <select
+                      aria-label="添加目录模型"
+                      value=""
+                      disabled={catalogBusy || !candidates.length}
+                      onChange={(e) => {
+                        const selected = models
+                          .split(/[,\n]/)
+                          .map((m) => m.trim())
+                          .filter(Boolean);
+                        if (
+                          e.target.value &&
+                          !selected.includes(e.target.value)
+                        )
+                          setModels([...selected, e.target.value].join("\n"));
+                      }}
+                    >
+                      <option value="">选择模型</option>
+                      {candidates.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.id}
+                          {m.preview ? " · 预览" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {catalogError && (
+                      <div className="form-error" role="alert">
+                        {catalogError}
+                      </div>
+                    )}
+                  </div>
                   <label className="field">
                     模型
                     <textarea
@@ -701,7 +766,12 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                 <button
                   type="submit"
                   className="primary"
-                  disabled={busy || (importType === "adc" && !adcPreview.valid)}
+                  disabled={
+                    busy ||
+                    (importType === "adc"
+                      ? !adcPreview.valid
+                      : !models.split(/[,\n]/).some((m) => m.trim()))
+                  }
                 >
                   {busy ? "保存中…" : "保存"}
                 </button>

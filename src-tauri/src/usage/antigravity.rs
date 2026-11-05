@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "antigravity_quota.rs"]
+pub(crate) mod quota;
 const LIMIT: usize = 32 * 1024 * 1024;
 #[cfg(test)]
 #[path = "antigravity_tests.rs"]
@@ -1207,7 +1209,7 @@ impl Api {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
-        let metadata_changed = cursor.session_id != session_id
+        let metadata_changed = (cursor.title.is_some() && cursor.session_id != session_id)
             || (summary.get("summary").is_some() && cursor.title != title);
         cursor.session_id = session_id;
         if summary.get("summary").is_some() {
@@ -1780,6 +1782,13 @@ pub fn sync(
     let connected = runtime.block_on(async {
         match Api::connect().await? {
             Some(api) => {
+                if let Some(data) = store.data_dir() {
+                    match api.quota(data, home).await {
+                        Ok(Some((id, periods))) => store.save_antigravity_quota(&id, &periods)?,
+                        Ok(None) => {}
+                        Err(_) => report.errors += 1,
+                    }
+                }
                 api.collect_with_files(
                     store,
                     &brain,
@@ -1838,6 +1847,7 @@ pub struct AntigravityTokenMix {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AntigravityTrackWindow {
+    pub period: Option<quota::Period>,
     pub requests: u64,
     pub tokens: u64,
     pub reasoning_tokens: u64,
@@ -1905,7 +1915,8 @@ pub struct AntigravityUsageStats {
     pub cost_usd: String,
     pub unpriced_requests: u64,
     pub token_mix: AntigravityTokenMix,
-    pub tracks: Vec<AntigravityQuotaTrack>,
+    pub accounts: Vec<quota::AccountUsage>,
+    pub quota_error: Option<String>,
     #[serde(default)]
     pub providers: Vec<AntigravityProviderGroup>,
     pub families: Vec<AntigravityFamilyGroup>,
@@ -1985,6 +1996,7 @@ struct WindowAcc {
 impl WindowAcc {
     fn into_view(self, hours: f64) -> AntigravityTrackWindow {
         AntigravityTrackWindow {
+            period: None,
             requests: self.requests,
             tokens: self.tokens,
             reasoning_tokens: self.reasoning_tokens,
@@ -2036,9 +2048,8 @@ struct SessionAcc {
 pub(super) struct UsageStatsAggregator {
     filter_start: i64,
     filter_end: i64,
-    anchor: i64,
-    start_5h: i64,
-    start_7d: i64,
+    now: i64,
+    pub(super) accounts: BTreeMap<String, quota::AccountAccumulator>,
     provider_filter: Option<String>,
     model_filter: Option<String>,
     session_filter: Option<String>,
@@ -2055,10 +2066,6 @@ pub(super) struct UsageStatsAggregator {
     cache_read_eligible: u64,
     cache_input_eligible: u64,
     cache_savings: rust_decimal::Decimal,
-    gemini_5h: WindowAcc,
-    gemini_7d: WindowAcc,
-    claude_5h: WindowAcc,
-    claude_7d: WindowAcc,
     providers: BTreeMap<String, ProviderAcc>,
     families: BTreeMap<&'static str, FamilyAcc>,
     sessions: BTreeMap<String, SessionAcc>,
@@ -2071,9 +2078,8 @@ impl UsageStatsAggregator {
         Self {
             filter_start: filter.start.unwrap_or(0),
             filter_end: anchor,
-            anchor,
-            start_5h: anchor.saturating_sub(5 * 3_600_000),
-            start_7d: anchor.saturating_sub(7 * 86_400_000),
+            now: now_ms,
+            accounts: BTreeMap::new(),
             provider_filter: filter
                 .provider
                 .as_deref()
@@ -2102,10 +2108,6 @@ impl UsageStatsAggregator {
             cache_read_eligible: 0,
             cache_input_eligible: 0,
             cache_savings: rust_decimal::Decimal::ZERO,
-            gemini_5h: WindowAcc::default(),
-            gemini_7d: WindowAcc::default(),
-            claude_5h: WindowAcc::default(),
-            claude_7d: WindowAcc::default(),
             providers: BTreeMap::new(),
             families: BTreeMap::new(),
             sessions: BTreeMap::new(),
@@ -2143,31 +2145,24 @@ impl UsageStatsAggregator {
             .unwrap_or(rust_decimal::Decimal::ZERO);
         let is_unpriced_final = row.is_final && row.cost.is_none() && row.unpriced > 0;
 
-        if matches_provider && row.time >= self.start_7d && row.time <= self.anchor {
-            if let Some(track_id) = track {
-                let add_win = |win: &mut WindowAcc| {
-                    if row.is_final {
-                        win.requests += 1;
-                        if is_unpriced_final {
-                            win.unpriced_requests += 1;
-                        }
-                    }
-                    win.tokens = win.tokens.saturating_add(tok_total);
-                    win.reasoning_tokens = win.reasoning_tokens.saturating_add(tok_reasoning);
-                    win.cost += row_cost;
-                };
-                if track_id == "gemini" {
-                    add_win(&mut self.gemini_7d);
-                    if row.time >= self.start_5h {
-                        add_win(&mut self.gemini_5h);
-                    }
-                } else {
-                    add_win(&mut self.claude_7d);
-                    if row.time >= self.start_5h {
-                        add_win(&mut self.claude_5h);
-                    }
-                }
-            }
+        if let Some(account) = row
+            .provider
+            .as_ref()
+            .and_then(|id| self.accounts.get_mut(id))
+        {
+            account.ingest(
+                row.time,
+                track,
+                &WindowAcc {
+                    requests: u64::from(row.is_final),
+                    tokens: tok_total,
+                    reasoning_tokens: tok_reasoning,
+                    cost: row_cost,
+                    unpriced_requests: u64::from(is_unpriced_final),
+                },
+                row.time >= self.filter_start && row.time <= self.filter_end,
+                self.now,
+            );
         }
 
         if row.time < self.filter_start || row.time > self.filter_end {
@@ -2398,21 +2393,6 @@ impl UsageStatsAggregator {
         });
         top_sessions.truncate(20);
 
-        let tracks = vec![
-            AntigravityQuotaTrack {
-                id: "gemini".into(),
-                label: "Gemini".into(),
-                burst_5h: self.gemini_5h.into_view(5.0),
-                weekly_7d: self.gemini_7d.into_view(168.0),
-            },
-            AntigravityQuotaTrack {
-                id: "claude_gpt".into(),
-                label: "Claude / GPT".into(),
-                burst_5h: self.claude_5h.into_view(5.0),
-                weekly_7d: self.claude_7d.into_view(168.0),
-            },
-        ];
-
         AntigravityUsageStats {
             requests: self.requests,
             sessions: total_sessions,
@@ -2432,7 +2412,12 @@ impl UsageStatsAggregator {
                 cache_input_eligible: self.cache_input_eligible,
                 cache_savings_usd: fmt_usd(self.cache_savings),
             },
-            tracks,
+            accounts: self
+                .accounts
+                .into_values()
+                .map(quota::AccountAccumulator::finish)
+                .collect(),
+            quota_error: None,
             providers: provider_rows,
             families: family_rows,
             top_sessions,

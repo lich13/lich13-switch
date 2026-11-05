@@ -12,8 +12,8 @@ const mock = vi.hoisted(() => ({
 }));
 vi.mock("./bridge", () => ({
   command: mock.command,
-  subscribe: vi.fn(async (_name: string, listener: (s: unknown) => void) => {
-    mock.listener = listener;
+  subscribe: vi.fn(async (name: string, listener: (s: unknown) => void) => {
+    if (name === "clamshell-state") mock.listener = listener;
     return () => {};
   }),
 }));
@@ -93,12 +93,14 @@ it("shows and clears external changes from the actual helper state without issui
   expect(mock.command).toHaveBeenCalledTimes(1);
   expect(mock.command).toHaveBeenCalledWith("get_clamshell_state");
 
-  act(() => mock.listener({
-    ...initial,
-    helper: "ready",
-    ownership: "application",
-    externalChanged: false,
-  }));
+  act(() =>
+    mock.listener({
+      ...initial,
+      helper: "ready",
+      ownership: "application",
+      externalChanged: false,
+    }),
+  );
   expect(screen.queryByText("外部已修改")).not.toBeInTheDocument();
   expect(screen.getByText("已就绪")).toBeInTheDocument();
   expect(mock.command).toHaveBeenCalledTimes(1);

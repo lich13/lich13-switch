@@ -581,6 +581,7 @@ impl Store {
         if progress.as_deref() == Some("complete") {
             return Ok(false);
         }
+        let mut initialize = None;
         let after = if let Some(after) = progress.as_deref().and_then(|p| p.strip_prefix("after:"))
         {
             Some(after.to_owned())
@@ -603,16 +604,7 @@ impl Store {
                 Some(after) => format!("after:{after}"),
                 None => "after:".to_owned(),
             };
-            let tx = db(self.connection.transaction())?;
-            db(tx.execute(
-                "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02619',?1)",
-                [&next],
-            ))?;
-            db(tx.execute("DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617','antigravity_fields_v02618')", []))?;
-            db(tx.commit())?;
-            if next == "complete" {
-                return Ok(false);
-            }
+            initialize = Some(next);
             legacy
         };
         let ag_home = crate::antigravity::home().ok();
@@ -624,6 +616,17 @@ impl Store {
             .map(|d| crate::antigravity::auth::provider_timeline(d, ag_home.as_deref()))
             .unwrap_or_default();
         let tx = db(self.connection.transaction())?;
+        if let Some(next) = initialize {
+            db(tx.execute(
+                "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02619',?1)",
+                [&next],
+            ))?;
+            db(tx.execute("DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617','antigravity_fields_v02618')", []))?;
+            if next == "complete" {
+                db(tx.commit())?;
+                return Ok(false);
+            }
+        }
         let rows = if storage_v12::active(&tx) {
             let mut stmt = db(tx.prepare("SELECT usage_text(key),rid FROM v12_rows WHERE source=usage_label('antigravity') AND usage_text(key)>?1 ORDER BY usage_text(key) LIMIT 128"))?;
             let rows = db(stmt.query_map([after.as_deref().unwrap_or("")], |r| {
@@ -908,6 +911,24 @@ impl Store {
         *self.overview_cache.lock().unwrap() = Some((key, view.clone()));
         Ok(view)
     }
+    pub(super) fn save_antigravity_quota(
+        &mut self,
+        id: &str,
+        periods: &super::antigravity::quota::Periods,
+    ) -> Result<()> {
+        let key = format!("antigravity_quota:{id}");
+        let body = serde_json::to_string(periods).map_err(|_| failure("当前周期无法保存"))?;
+        let current: Option<String> = db(self
+            .connection
+            .query_row("SELECT value FROM metadata WHERE key=?1", [&key], |r| {
+                r.get(0)
+            })
+            .optional())?;
+        if current.as_deref() != Some(&body) {
+            db(self.connection.execute("INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, body]))?;
+        }
+        Ok(())
+    }
     pub fn antigravity_stats(
         &self,
         f: &Filter,
@@ -916,11 +937,35 @@ impl Store {
         now_ms: i64,
     ) -> Result<super::antigravity::AntigravityUsageStats> {
         let _snapshot = self.read_snapshot()?;
-        let anchor = f.end.unwrap_or(now_ms);
-        let start_7d = anchor.saturating_sub(7 * DAY);
-        let min_time = f.start.unwrap_or(0).min(start_7d);
-        let max_time = anchor;
         let mut agg = super::antigravity::UsageStatsAggregator::new(f, multiplier, now_ms);
+        let accounts = self
+            .data_dir()
+            .map(crate::antigravity::auth::usage_accounts)
+            .transpose()?
+            .unwrap_or_default();
+        let mut min_time = f.start.unwrap_or(0);
+        let mut max_time = f.end.unwrap_or(now_ms);
+        for account in accounts {
+            let raw: Option<String> = db(self
+                .connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key=?1",
+                    [format!("antigravity_quota:{}", account.id)],
+                    |r| r.get(0),
+                )
+                .optional())?;
+            let periods = raw
+                .map(|s| serde_json::from_str(&s).map_err(|_| failure("已保存的账号周期无法读取")))
+                .transpose()?
+                .unwrap_or_default();
+            let id = account.id.clone();
+            let acc = super::antigravity::quota::AccountAccumulator::new(account, periods, now_ms);
+            if let Some(start) = acc.earliest() {
+                min_time = min_time.min(start);
+                max_time = max_time.max(now_ms);
+            }
+            agg.accounts.insert(id, acc);
+        }
         if storage_v12::active(&self.connection) {
             storage_v12::scan_antigravity_attempts(&self.connection, min_time, max_time, |row| {
                 agg.ingest(row, pricing);

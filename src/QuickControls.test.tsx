@@ -111,7 +111,10 @@ it.each([
     render(<QuickControls visible notify={notify} error={error} />);
     const toggle = await screen.findByRole("switch", { name: "合盖不休眠" });
     fireEvent.click(toggle);
-    await waitFor(() => expect(error).toHaveBeenCalledExactlyOnceWith(message));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(error).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭电源告警" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     await waitFor(() => expect(toggle).toBeEnabled());
     expect(toggle).not.toBeChecked();
     expect(notify).not.toHaveBeenCalled();
@@ -154,9 +157,10 @@ it("refreshes external changes after a repair conflict without replaying the tog
   });
   expect(toggle).toBeChecked();
   expect(toggle).toBeEnabled();
-  expect(error).toHaveBeenCalledExactlyOnceWith(
+  expect(screen.getByRole("alert")).toHaveTextContent(
     "修复期间电源状态已变化，请重新操作",
   );
+  expect(error).not.toHaveBeenCalled();
   expect(notify).not.toHaveBeenCalled();
   expect(
     mock.command.mock.calls.filter(([name]) => name === "set_clamshell_awake"),
@@ -208,4 +212,34 @@ it("quits only the chosen platform and blocks duplicate operations", async () =>
   expect(mock.command).toHaveBeenCalledWith("force_quit_agent_clients", {
     target: "codex",
   });
+});
+
+it("keeps power alerts separate, dismisses them, and clears them when power closes", async () => {
+  const error = vi.fn();
+  mock.command.mockImplementation(async (name: string) => {
+    if (name === "get_clamshell_state") return enabled;
+    throw { message: "Fixture quit error" };
+  });
+  render(<QuickControls visible notify={vi.fn()} error={error} />);
+  await screen.findByRole("switch");
+  fireEvent.click(screen.getByRole("button", { name: "退出 Claude Code" }));
+  await waitFor(() => expect(error).toHaveBeenCalledWith("Fixture quit error"));
+  act(() =>
+    mock.listeners.get("clamshell-error")?.({
+      code: "POWER_AUTH",
+      message: "已取消系统授权",
+    }),
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent("已取消系统授权");
+  fireEvent.click(screen.getByRole("button", { name: "关闭电源告警" }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  act(() =>
+    mock.listeners.get("clamshell-error")?.({
+      code: "POWER_HELPER",
+      message: "助手修复失败",
+    }),
+  );
+  act(() => mock.listeners.get("clamshell-state")?.(original));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(error).toHaveBeenCalledTimes(1);
 });

@@ -39,6 +39,13 @@ function commandTypeExamples() {
     path: "fixture.yaml",
   });
   expectTypeOf<CommandResult<"search_models_dev">>().toHaveProperty("error");
+  expectTypeOf<CommandResult<"get_antigravity_vertex_models">>().toHaveProperty(
+    "models",
+  );
+  expectTypeOf<CommandResult<"get_antigravity_usage_stats">>().toHaveProperty(
+    "accounts",
+  );
+  expectTypeOf<EventMap["clamshell-error"]>().toEqualTypeOf<AppError | null>();
 
   // @ts-expect-error Unknown commands must not be callable.
   void command("unknown_fixture_command");

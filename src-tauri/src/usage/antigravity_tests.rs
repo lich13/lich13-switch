@@ -407,6 +407,12 @@ async fn fixture(broken: bool) -> Fixture {
                             json!({"unexpected":"fixture"})
                         } else {
                             match method.as_str() {
+                                "GetUserStatus" => {
+                                    json!({"userStatus":{"email":"fixture@example.invalid"}})
+                                }
+                                "RetrieveUserQuotaSummary" => {
+                                    json!({"response":{"groups":[{"buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2026-11-05T18:00:00Z"}]}]}})
+                                }
                                 "GetAllCascadeTrajectories" => {
                                     let mut summaries = json!({"z-good":{"lastModifiedTime":*version.lock().unwrap(),"stepCount":2}});
                                     if broken {
@@ -1205,6 +1211,27 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
+        std::fs::write(dir.path().join("antigravity-accounts.json"), serde_json::to_vec(&json!({"schema":1,"entries":[{"id":"fixture-oauth","name":"Fixture OAuth","kind":"oauth","sourceType":"oauth","payload":"{}","updatedAt":0}]})).unwrap()).unwrap();
+        let periods = ["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"]
+            .into_iter()
+            .map(|id| {
+                let duration = if id.ends_with("5h") {
+                    5 * 3_600_000
+                } else {
+                    7 * 86_400_000
+                };
+                (
+                    id.to_owned(),
+                    quota::Period {
+                        start: now_ms + 1 - duration,
+                        end: now_ms + 1,
+                    },
+                )
+            })
+            .collect();
+        store
+            .save_antigravity_quota("fixture-oauth", &periods)
+            .unwrap();
         let pricing = Pricing::new(dir.path()).unwrap();
         let settings = Settings::default();
 
@@ -1226,6 +1253,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
                 completed: true,
                 attempts: vec![Attempt {
                     id: safe_id(&format!("antigravity:request:{req_id}:final")),
+                    provider: Some("fixture-oauth".into()),
                     requested_model: actual_model(Some(model)),
                     response_model: actual_model(Some(model)),
                     started_at: at - 2_000,
@@ -1322,12 +1350,20 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         assert_eq!(stats.token_mix.cache_hit_percent, Some(77.0));
         assert!(decimal(&stats.token_mix.cache_savings_usd).unwrap() > rust_decimal::Decimal::ZERO);
 
-        assert_eq!(stats.tracks[0].id, "gemini");
-        assert_eq!(stats.tracks[0].burst_5h.requests, 1);
-        assert_eq!(stats.tracks[0].weekly_7d.requests, 2);
-        assert_eq!(stats.tracks[1].id, "claude_gpt");
-        assert_eq!(stats.tracks[1].burst_5h.requests, 1);
-        assert_eq!(stats.tracks[1].weekly_7d.requests, 1);
+        assert_eq!(stats.accounts[0].tracks[0].id, "gemini");
+        assert_eq!(stats.accounts[0].tracks[0].burst_5h.requests, 1);
+        assert_eq!(
+            stats.accounts[0].tracks[0].burst_5h.cost_usd,
+            fmt_usd(r1.cost().unwrap())
+        );
+        assert_eq!(stats.accounts[0].tracks[0].weekly_7d.requests, 2);
+        assert_eq!(stats.accounts[0].tracks[1].id, "claude_gpt");
+        assert_eq!(stats.accounts[0].tracks[1].burst_5h.requests, 1);
+        assert_eq!(
+            stats.accounts[0].tracks[1].burst_5h.cost_usd,
+            fmt_usd(r3.cost().unwrap())
+        );
+        assert_eq!(stats.accounts[0].tracks[1].weekly_7d.requests, 1);
 
         assert_eq!(stats.families.len(), 2);
         assert_eq!(stats.top_sessions.len(), 2);
@@ -2026,7 +2062,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
         .unwrap()
         .id
         .clone();
-    let service = crate::usage::Service::new(dir.path());
+    let service = crate::usage::Service::new(&paths.data_dir);
     let pricing = Pricing::new(dir.path()).unwrap();
     let settings = Settings::default();
     let handle = tokio::runtime::Handle::current();
@@ -2070,7 +2106,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
             || {
                 service
                     .sync_roots(
-                        vec![("antigravity".into(), Ok(dir.path().to_path_buf()))],
+                        vec![("antigravity".into(), Ok(paths.gemini_home.clone()))],
                         None,
                     )
                     .unwrap();
@@ -2088,12 +2124,28 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
                     .unwrap();
             },
             || {
-                let switched = auth::switch_account_at(&paths, &Lifecycle, &adc, &added.revision)?;
+                let switched =
+                    auth::switch_fixture_account(&paths, &Lifecycle, &adc, &added.revision)?;
                 *fixture.changed.lock().unwrap() = "after-switch".into();
                 Ok(switched)
             },
         )
         .unwrap();
+        service
+            .read(|store| {
+                let saved: String = store
+                    .connection
+                    .query_row(
+                        "SELECT value FROM metadata WHERE key=?1",
+                        [format!("antigravity_quota:{oauth}")],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                let periods: quota::Periods = serde_json::from_str(&saved).unwrap();
+                assert!(periods.contains_key("gemini-5h"));
+                Ok(())
+            })
+            .unwrap();
         TEST_ENDPOINT.with(|endpoint| *endpoint.borrow_mut() = None);
         assert_eq!(state.mode, auth::AuthMode::Adc);
         assert_eq!(
@@ -2140,6 +2192,36 @@ async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
         )
         .await
         .unwrap();
+    let cursor_id = safe_id("antigravity:rpc:z-good");
+    let mut legacy: Value =
+        serde_json::from_str(&store.cursor(&cursor_id).unwrap().unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("session_id");
+    legacy.as_object_mut().unwrap().remove("title");
+    store
+        .write_batch(&[], Some((&cursor_id, &legacy.to_string())))
+        .unwrap();
+    let changes = store.connection.total_changes();
+    let no_title = json!({"lastModifiedTime":"fixture-stable","stepCount":2});
+    fixture
+        .api
+        .collect_session(
+            "z-good",
+            Some(0),
+            &no_title,
+            &mut store,
+            &pricing,
+            &settings,
+            &mut Report::default(),
+            false,
+            &timeline,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.connection.total_changes(),
+        changes,
+        "an unchanged untitled legacy cursor needs no write"
+    );
     let before = store.logs(&Filter::default()).unwrap();
     fixture.calls.lock().unwrap().clear();
     summary["summary"] = json!("修改后的会话");

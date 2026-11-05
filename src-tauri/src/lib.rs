@@ -2048,22 +2048,25 @@ pub fn run() {
             let freeze_app = app.handle().clone();
             let freeze_runtime = runtime.clone();
             tauri::async_runtime::spawn(async move {
+                let mut power_attempted = false;
                 while freeze_events.changed().await.is_ok() {
                     let view = freeze.view();
                     for window in visible_windows(&freeze_app) {
                         let _ = window.emit("gateway-freeze", &view);
                     }
-                    if view.frozen && view.draining == 0 {
+                    if power::close_after_freeze(&mut power_attempted, view.frozen, view.draining) {
+                        let gate = freeze.clone();
                         let r = freeze_runtime.clone();
                         let app_handle = freeze_app.clone();
                         tauri::async_runtime::spawn_blocking(move || {
-                            match r.power.disable_if_enabled() {
+                            match r.power.disable_if_enabled(|| { let v = gate.view(); v.frozen && v.draining == 0 }) {
                                 Ok(Some(state)) => {
                                     let _ = app_handle.emit("clamshell-state", state);
+                                    let _ = app_handle.emit("clamshell-error", Option::<AppError>::None);
                                 }
                                 Ok(None) => {}
                                 Err(err) => {
-                                    let _ = app_handle.emit("switch-error", err);
+                                    let _ = app_handle.emit("clamshell-error", Some(err));
                                 }
                             }
                         });
@@ -2437,6 +2440,7 @@ pub fn run() {
             usage::commands::get_pricing,
             usage::commands::search_pricing,
             usage::commands::get_models_dev,
+            usage::commands::get_antigravity_vertex_models,
             usage::commands::update_models_dev,
             usage::commands::compare_model_prices,
             usage::commands::configure_pricing,

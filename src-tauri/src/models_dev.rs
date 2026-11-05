@@ -20,6 +20,14 @@ const CACHE_LIMIT: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Model {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -42,6 +50,8 @@ struct Provider {
 #[derive(Clone, Serialize, Deserialize)]
 struct Index {
     schema: u8,
+    #[serde(default)]
+    vertex_filters: bool,
     updated_at: i64,
     providers: BTreeMap<String, Provider>,
 }
@@ -81,6 +91,17 @@ pub struct SearchHit {
 #[derive(Serialize)]
 pub struct Search {
     pub hits: Vec<SearchHit>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Serialize)]
+pub struct VertexModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub preview: bool,
+}
+#[derive(Serialize)]
+pub struct VertexModels {
+    pub models: Vec<VertexModel>,
     pub error: Option<String>,
 }
 #[derive(Clone, Default)]
@@ -166,6 +187,7 @@ fn crop(value: Value) -> Result<Index> {
     }
     let index = Index {
         schema: 1,
+        vertex_filters: true,
         updated_at: now(),
         providers,
     };
@@ -261,11 +283,9 @@ impl Catalog {
         }
         let result = download(source).await.and_then(|index| {
             let state = self.state.read().unwrap();
-            if state
-                .index
-                .as_ref()
-                .is_some_and(|old| old.providers == index.providers)
-            {
+            if state.index.as_ref().is_some_and(|old| {
+                old.providers == index.providers && old.vertex_filters == index.vertex_filters
+            }) {
                 return Ok((index, state.version.clone().unwrap_or_default()));
             }
             drop(state);
@@ -362,6 +382,71 @@ impl Catalog {
             }}),
             state.version.clone()?,
         ))
+    }
+    pub async fn vertex_models(&self, force: bool) -> Result<VertexModels> {
+        self.vertex_models_from(force, SOURCE).await
+    }
+    async fn vertex_models_from(&self, force: bool, source: &str) -> Result<VertexModels> {
+        self.ensure_loaded();
+        let upgrade = {
+            let state = self.state.read().unwrap();
+            state.attempted.is_none() && state.index.as_ref().is_some_and(|i| !i.vertex_filters)
+        };
+        self.refresh_from(force || upgrade, source).await?;
+        Ok(self.vertex_choices())
+    }
+    fn vertex_choices(&self) -> VertexModels {
+        let state = self.state.read().unwrap();
+        let Some(index) = state.index.as_ref().filter(|i| i.vertex_filters) else {
+            return VertexModels {
+                models: vec![],
+                error: Some(
+                    state
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "模型目录需要刷新".into()),
+                ),
+            };
+        };
+        let mut models: Vec<_> = index
+            .providers
+            .get("google-vertex")
+            .into_iter()
+            .flat_map(|p| p.models.iter())
+            .filter(|(id, m)| {
+                id.starts_with("gemini-")
+                    && m.tool_call == Some(true)
+                    && m.status.as_deref() != Some("deprecated")
+                    && m.modalities.as_ref().is_some_and(|v| {
+                        v["output"] == json!(["text"])
+                            && v["input"]
+                                .as_array()
+                                .is_some_and(|items| items.iter().any(|x| x == "text"))
+                    })
+            })
+            .collect();
+        let preview = |id: &str, m: &Model| {
+            matches!(m.status.as_deref(), Some("alpha" | "beta" | "preview"))
+                || id.contains("-preview")
+                || id.contains("-exp")
+        };
+        models.sort_by(|(a_id, a), (b_id, b)| {
+            preview(a_id, a)
+                .cmp(&preview(b_id, b))
+                .then_with(|| b.release_date.cmp(&a.release_date))
+                .then_with(|| a_id.cmp(b_id))
+        });
+        VertexModels {
+            models: models
+                .into_iter()
+                .map(|(id, m)| VertexModel {
+                    id: id.clone(),
+                    name: m.name.clone(),
+                    preview: preview(id, m),
+                })
+                .collect(),
+            error: state.error.clone(),
+        }
     }
     pub fn has_source(&self, source: &str) -> bool {
         self.ensure_loaded();
@@ -780,6 +865,77 @@ mod tests {
         )
         .unwrap();
         Catalog::new(dir)
+    }
+    #[tokio::test]
+    async fn vertex_catalog_upgrades_legacy_cache_once_and_retains_candidates_on_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let model = |status: &str, date: &str, tool: bool, output: Value| json!({"status":status,"release_date":date,"tool_call":tool,"modalities":{"input":["text","image"],"output":output}});
+        let source = json!({"google-vertex":{"models":{
+            "gemini-old":model("deprecated","2026-11-01",true,json!(["text"])),
+            "gemini-new":model("stable","2026-10-01",true,json!(["text"])),
+            "gemini-stable":model("stable","2026-09-01",true,json!(["text"])),
+            "gemini-preview":model("preview","2026-11-01",true,json!(["text"])),
+            "gemini-image":model("stable","2026-11-01",true,json!(["text","image"])),
+            "gemini-no-tools":model("stable","2026-11-01",false,json!(["text"])),
+            "other-model":model("stable","2026-11-01",true,json!(["text"]))
+        }},"google":{"models":{"gemini-other":model("stable","2026-11-01",true,json!(["text"]))}}});
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = json!({"schema":1,"updated_at":0,"providers":{"google-vertex":{"name":"Vertex","models":{"gemini-old":{"name":"Old"}}}}});
+        std::fs::write(dir.path().join("models-dev-index.json"), legacy.to_string()).unwrap();
+        let cat = Catalog::new(dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (status, body) in [(200, source.to_string()), (500, "failed".into())] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let upgraded = cat.vertex_models_from(false, &url).await.unwrap();
+        let ids = |v: &VertexModels| v.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(&upgraded),
+            ["gemini-new", "gemini-stable", "gemini-preview"]
+        );
+        assert!(!upgraded.models[0].preview && upgraded.models[2].preview);
+        let bytes = std::fs::read(&cat.path).unwrap();
+        let cached: Index = serde_json::from_slice(&bytes).unwrap();
+        assert!(cached.vertex_filters);
+        assert_eq!(
+            cached.providers["google-vertex"].models["gemini-new"]
+                .modalities
+                .as_ref()
+                .unwrap()["input"],
+            json!(["text", "image"])
+        );
+        assert_eq!(
+            ids(&cat.vertex_models_from(false, &url).await.unwrap()),
+            ids(&upgraded)
+        );
+        let failed = cat.vertex_models_from(true, &url).await.unwrap();
+        assert!(failed.error.is_some());
+        assert_eq!(ids(&failed), ids(&upgraded));
+        assert_eq!(std::fs::read(&cat.path).unwrap(), bytes);
+        server.await.unwrap();
+        // A failed legacy upgrade is not retried on every form open.
+        std::fs::write(&cat.path, legacy.to_string()).unwrap();
+        let legacy_cat = Catalog::new(dir.path());
+        assert!(legacy_cat
+            .vertex_models_from(false, &url)
+            .await
+            .unwrap()
+            .error
+            .is_some());
+        let attempt = legacy_cat.state.read().unwrap().attempted;
+        assert!(legacy_cat
+            .vertex_models_from(false, &url)
+            .await
+            .unwrap()
+            .models
+            .is_empty());
+        assert_eq!(legacy_cat.state.read().unwrap().attempted, attempt);
     }
     #[test]
     fn frozen_prices_share_the_index_and_survive_catalog_replacement() {

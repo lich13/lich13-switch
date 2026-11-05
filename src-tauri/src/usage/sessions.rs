@@ -236,6 +236,13 @@ fn parent_prefix(path: &Path, cutoff: i64) -> Result<Vec<String>> {
     Ok(signatures)
 }
 pub trait Repository {
+    fn save_antigravity_quota(
+        &mut self,
+        _id: &str,
+        _periods: &super::antigravity::quota::Periods,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn requires_complete_history(&self) -> bool {
         false
     }
@@ -268,6 +275,13 @@ pub trait Repository {
     fn progress(&mut self, _report: &Report) {}
 }
 impl Repository for Store {
+    fn save_antigravity_quota(
+        &mut self,
+        id: &str,
+        periods: &super::antigravity::quota::Periods,
+    ) -> Result<()> {
+        Store::save_antigravity_quota(self, id, periods)
+    }
     fn data_dir(&self) -> Option<&Path> {
         self.data_dir()
     }
