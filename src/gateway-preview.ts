@@ -362,6 +362,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     s.pendingRequests = s.pendingRequests?.filter(
       (r) => r.requestId !== args.requestId,
     );
+    s.waitingRequests = s.pendingRequests?.length ?? 0;
     s.activeRequests = s.activeRequests?.filter(
       (r) => r.waitId !== args.requestId,
     );
@@ -738,9 +739,9 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         : [
             {
               name: "API Key 配额",
-              remaining: 42.35,
-              used: 7.65,
-              total: 50,
+              remaining: densePreview ? 86900 : 42.35,
+              used: densePreview ? 13100 : 7.65,
+              total: densePreview ? 100000 : 50,
               unit: "USD",
               unlimited: false,
               resetAt: null,
@@ -1373,8 +1374,8 @@ if (densePreview) {
     model: "fixture-model-long-context-preview",
     startedAt: Math.floor(Date.now() / 1000) - 90 - i * 12,
     elapsedSeconds: 90 + i * 12,
-    remainingSeconds: 210 - i * 12,
-    phase: ["headers", "capacity", "retry", "ws_wait"][i],
+    remainingSeconds: i === 0 ? null : 210 - i * 12,
+    phase: ["compaction", "capacity", "retry", "ws_wait"][i],
   }));
   gatewayDemo.waitingRequests = 4;
   gatewayDemo.activeRequests = gatewayDemo.pendingRequests.map((r, i) => ({

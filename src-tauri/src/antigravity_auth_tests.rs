@@ -633,7 +633,6 @@ fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_setti
     );
     let mut edit = vertex_input(selected.revision.clone());
     edit.id = Some(id.clone());
-    edit.activate = false;
     edit.api_key.clear();
     edit.models = vec!["gemini-2.5-flash".into()];
     let (updated, updated_key) = vertex_entry(&paths, &edit).unwrap();

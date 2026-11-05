@@ -520,7 +520,7 @@
 
 .quick-provider-main .quota-compact {
   flex: 0 1 auto;
-  min-width: 0;
+  min-width: 112px;
   padding: 0;
   gap: 4px;
   font-size: 13px;
@@ -528,7 +528,8 @@
 }
 
 .quick-provider-main .quota-compact .quota-value {
-  min-width: 0;
+  min-width: calc(5ch + 10px);
+  padding-inline: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -544,6 +545,7 @@
 .quick-provider-main .quota-subscription {
   min-width: 0;
   max-width: 64px;
+  padding-inline: 4px;
   font-size: inherit;
   white-space: nowrap;
   flex-shrink: 1;
