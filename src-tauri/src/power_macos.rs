@@ -82,9 +82,6 @@ fn request_with_timeout(value: Value, timeout_ms: u64) -> Result<Value> {
     }
     Ok(response)
 }
-pub fn status() -> &'static str {
-    probe().0
-}
 /// Reuse the authenticated state reply; a second XPC probe can fail after the first succeeds.
 pub fn probe() -> (&'static str, Option<crate::power::State>) {
     if !installed_app() {
@@ -168,15 +165,12 @@ fn installation_result(output: &std::process::Output) -> Result<()> {
     }
     Ok(())
 }
-pub fn ensure(force: bool) -> Result<()> {
+pub fn ensure() -> Result<()> {
     if !installed_app() {
         return Err(AppError::new(
             code::POWER_ISOLATED,
             "隔离程序不注册系统电源助手",
         ));
-    }
-    if !force && status() == "ready" {
-        return Ok(());
     }
     let hash = take(unsafe { gs_power_identity() })
         .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -221,13 +215,7 @@ pub fn ensure(force: bool) -> Result<()> {
                 json!({"op":"verifyInstall", "transaction":transaction}),
                 2_000,
             )
-            .is_ok_and(|reply| {
-                reply["state"]["supported"].is_boolean()
-                    && reply["state"]["enabled"].is_boolean()
-                    && reply["state"]["batterySleep"]
-                        .as_u64()
-                        .is_some_and(|n| n <= 1440)
-            });
+            .is_ok_and(|reply| crate::power::helper_state(&reply["state"]).is_ok());
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
@@ -238,7 +226,6 @@ pub fn ensure(force: bool) -> Result<()> {
             "助手未通过应用连接校验，请重新修复",
         ));
     }
-    request(json!({"op":"state"}))?;
     Ok(())
 }
 pub fn remove() -> Result<()> {
@@ -318,8 +305,8 @@ mod tests {
     #[test]
     fn isolated_binary_never_installs_or_calls_production_service() {
         assert!(!super::installed_app());
-        assert_eq!(super::status(), "isolated");
-        assert_eq!(super::ensure(false).unwrap_err().code, code::POWER_ISOLATED);
+        assert_eq!(super::probe().0, "isolated");
+        assert_eq!(super::ensure().unwrap_err().code, code::POWER_ISOLATED);
         assert!(super::request(serde_json::json!({"op":"set"})).is_err());
     }
     #[test]

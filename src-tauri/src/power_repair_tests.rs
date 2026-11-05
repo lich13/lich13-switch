@@ -50,11 +50,7 @@ impl System for MockHelper {
     fn read(&self) -> Result<State> {
         Ok(self.current.lock().unwrap().clone())
     }
-    fn prepare(&self, force: bool) -> Result<()> {
-        assert!(
-            force,
-            "a toggle repairs only through explicit authorization"
-        );
+    fn prepare(&self) -> Result<()> {
         self.repairs.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = self.repair_gate.lock().unwrap().take() {
             gate.entered.send(()).unwrap();

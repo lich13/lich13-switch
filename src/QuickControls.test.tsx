@@ -121,7 +121,6 @@ it.each([
     expect(mock.command.mock.calls.map(([name]) => name)).toEqual([
       "get_clamshell_state",
       "set_clamshell_awake",
-      "get_clamshell_state",
     ]);
   },
 );

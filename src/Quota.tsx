@@ -288,12 +288,14 @@ export function QuotaInfo({
   quota,
   refresh,
   compact = false,
+  terse = false,
   details,
 }: {
   provider: Provider;
   quota?: ProviderQuota;
   refresh: () => void;
   compact?: boolean;
+  terse?: boolean;
   details?: () => void;
 }) {
   const [showDetails, setShowDetails] = useState(false);
@@ -326,7 +328,13 @@ export function QuotaInfo({
               ? "查询中…"
               : "未查询"));
   const headline = formatHeadline(amount);
-  const compactHeadline = formatHeadline(compactAmount);
+  const compactHeadline = terse && quota?.plans[0]
+    ? quota.plans[0].unlimited
+      ? "无限制"
+      : quota.plans[0].remaining == null
+        ? "未返回额度"
+        : compactNumberValue(quota.plans[0].remaining)
+    : formatHeadline(compactAmount);
   const source =
     quota?.source === "sub2api"
       ? "Sub2API"

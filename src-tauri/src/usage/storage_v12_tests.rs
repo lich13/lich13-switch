@@ -214,7 +214,7 @@ fn compact_diagnostics_until_done(store: &mut Store) {
 }
 
 #[test]
-fn v12_ready_database_removes_legacy_links_during_reclaim() {
+fn v12_ready_database_removes_legacy_links_on_open() {
     let (dir, store) = migrated_empty();
     let has_links = |store: &Store| {
         store
@@ -230,7 +230,6 @@ fn v12_ready_database_removes_legacy_links_during_reclaim() {
     store.connection.execute_batch("CREATE TABLE v12_links(owner INTEGER PRIMARY KEY,target BLOB NOT NULL); INSERT INTO v12_links VALUES(1,x'00'); INSERT OR REPLACE INTO metadata VALUES('storage_repack','1');").unwrap();
     drop(store);
     let reopened = Store::open(dir.path()).unwrap();
-    reopened.reclaim_space().unwrap();
     assert!(!has_links(&reopened));
 }
 

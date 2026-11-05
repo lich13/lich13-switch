@@ -108,15 +108,17 @@ export default function UsageAntigravity({
   const [accountId, setAccountId] = useState(currentAccountId ?? "");
   useEffect(() => setAccountId(currentAccountId ?? ""), [currentAccountId]);
   useEffect(() => {
-    if (stats && !stats.accounts.some((a) => a.id === accountId)) {
-      setAccountId(
-        currentAccountId &&
-          stats.accounts.some((a) => a.id === currentAccountId)
-          ? currentAccountId
-          : "",
+    if (stats) {
+      setAccountId((selected) =>
+        stats.accounts.some((a) => a.id === selected)
+          ? selected
+          : currentAccountId &&
+              stats.accounts.some((a) => a.id === currentAccountId)
+            ? currentAccountId
+            : "",
       );
     }
-  }, [stats, accountId, currentAccountId]);
+  }, [stats, currentAccountId]);
   if (!stats) {
     return (
       <p className="usage-empty">

@@ -3,7 +3,62 @@
 //! retires its old slot transactionally, without changing any surviving slot.
 use super::*;
 use rusqlite::types::Value as Sql;
-use std::{borrow::Cow, cell::RefCell, collections::VecDeque};
+use std::{cell::RefCell, collections::VecDeque};
+
+// IDs are valid only for the single SELECT snapshot that owns this cache.
+#[derive(Default)]
+pub(super) struct ScanCache(VecDeque<(i64, Value)>);
+impl ScanCache {
+    pub(super) fn inspect<T>(
+        &mut self,
+        c: &Connection,
+        body: Sql,
+        read: impl FnOnce(u8, &Value) -> Result<T>,
+    ) -> Result<T> {
+        let Sql::Integer(reference) = body else {
+            return inspect(c, body, read);
+        };
+        if reference < 2048 {
+            return inspect(c, body, read);
+        }
+        let id = reference / 2048;
+        let index = if let Some(index) = self.0.iter().position(|(saved, _)| *saved == id) {
+            index
+        } else {
+            let bytes: Vec<u8> = db(db(
+                c.prepare_cached("SELECT body FROM v12_diagnostics WHERE id=?1")
+            )?
+            .query_row([id], |r| r.get(0)))?;
+            let value = unpack(&bytes)?;
+            if self.0.len() == 4 {
+                self.0.pop_front();
+            }
+            self.0.push_back((id, value));
+            self.0.len() - 1
+        };
+        read_entry(&self.0[index].1, reference, read)
+    }
+}
+
+fn read_entry<T>(
+    block: &Value,
+    reference: i64,
+    read: impl FnOnce(u8, &Value) -> Result<T>,
+) -> Result<T> {
+    let entry = block
+        .as_array()
+        .and_then(|a| a.get((reference % 2048) as usize))
+        .ok_or_else(|| failure("用量诊断块缺失，原数据已保留"))?;
+    let a = entry
+        .as_array()
+        .filter(|a| a.len() == 2)
+        .ok_or_else(|| failure("用量诊断块字段损坏，原数据已保留"))?;
+    let tag = a[0]
+        .as_u64()
+        .filter(|tag| matches!(tag, 0..=4))
+        .ok_or_else(|| failure("用量诊断块版本无效，原数据已保留"))? as u8;
+    read(tag, &a[1])
+}
 
 type CachedBlock = (Vec<u8>, Value);
 thread_local! {
@@ -13,54 +68,35 @@ thread_local! {
 }
 
 pub(super) fn read(c: &Connection, body: Sql) -> Result<(u8, Value)> {
-    inspect(c, body, None, |tag, value| Ok((tag, value.clone())))
+    inspect(c, body, |tag, value| Ok((tag, value.clone())))
 }
 
 pub(super) fn inspect<T>(
     c: &Connection,
     body: Sql,
-    block: Option<&[u8]>,
     read: impl FnOnce(u8, &Value) -> Result<T>,
 ) -> Result<T> {
     match body {
         Sql::Integer(0) => read(0, &json!({})),
         Sql::Blob(bytes) => read(bytes.first().copied().unwrap_or(255), &unpack(&bytes)?),
         Sql::Integer(reference) if reference >= 2048 => {
-            let bytes: Cow<'_, [u8]> = match block {
-                Some(bytes) => Cow::Borrowed(bytes),
-                None => Cow::Owned(db(db(
-                    c.prepare_cached("SELECT body FROM v12_diagnostics WHERE id=?1")
-                )?
-                .query_row([reference / 2048], |r| r.get(0)))?),
-            };
+            let bytes: Vec<u8> = db(db(
+                c.prepare_cached("SELECT body FROM v12_diagnostics WHERE id=?1")
+            )?
+            .query_row([reference / 2048], |r| r.get(0)))?;
             CACHE.with(|cache| -> Result<T> {
                 let mut cache = cache.borrow_mut();
-                let index = if let Some(index) = cache.iter().position(|(b, _)| b == bytes.as_ref())
-                {
+                let index = if let Some(index) = cache.iter().position(|(b, _)| *b == bytes) {
                     index
                 } else {
                     let value = unpack(&bytes)?;
                     if cache.len() == 4 {
                         cache.pop_front();
                     }
-                    cache.push_back((bytes.into_owned(), value));
+                    cache.push_back((bytes, value));
                     cache.len() - 1
                 };
-                let entry = cache[index]
-                    .1
-                    .as_array()
-                    .and_then(|a| a.get((reference % 2048) as usize))
-                    .ok_or_else(|| failure("用量诊断块缺失，原数据已保留"))?;
-                let a = entry
-                    .as_array()
-                    .filter(|a| a.len() == 2)
-                    .ok_or_else(|| failure("用量诊断块字段损坏，原数据已保留"))?;
-                let tag = a[0]
-                    .as_u64()
-                    .filter(|tag| matches!(tag, 0..=4))
-                    .ok_or_else(|| failure("用量诊断块版本无效，原数据已保留"))?
-                    as u8;
-                read(tag, &a[1])
+                read_entry(&cache[index].1, reference, read)
             })
         }
         _ => Err(failure("用量诊断引用无效，原数据已保留")),

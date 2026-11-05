@@ -57,16 +57,21 @@ it("keeps state and controls after authorization is cancelled, then accepts help
   await screen.findByText("电源状态已被外部修改");
   expect(screen.getByText("需要修复")).toBeInTheDocument();
 });
-it("refreshes actual helper status after a failed installation", async () => {
+it("receives actual helper status after a failed installation without a duplicate query", async () => {
   render(<PowerSettings />);
   await screen.findByText("未安装");
   mock.command.mockRejectedValueOnce({
     code: "POWER_INSTALL_REGISTER",
     message: "服务注册失败；原注册状态恢复失败，请重新修复助手",
   });
-  mock.command.mockResolvedValueOnce({ ...initial, helper: "needsRepair" });
   fireEvent.click(screen.getByRole("button", { name: "安装" }));
-  await screen.findByText("需要修复");
+  await screen.findByRole("alert");
+  act(() => mock.listener({ ...initial, helper: "needsRepair" }));
+  expect(screen.getByText("需要修复")).toBeInTheDocument();
+  expect(mock.command.mock.calls.map(([name]) => name)).toEqual([
+    "get_clamshell_state",
+    "install_power_helper",
+  ]);
   expect(screen.getByRole("alert")).toHaveTextContent("服务注册失败");
   act(() => mock.listener({ ...initial, helper: "needsRepair" }));
   expect(screen.getByRole("alert")).toHaveTextContent("服务注册失败");

@@ -161,25 +161,24 @@ impl AccountAccumulator {
     pub(super) fn finish(mut self) -> AccountUsage {
         let mut tracks = Vec::new();
         if self.account.kind == AccountKind::Oauth {
-            for (id, label, group) in [
-                ("gemini", "Gemini", "gemini"),
-                ("claude_gpt", "Claude / GPT", "3p"),
+            for (id, label, burst, weekly) in [
+                ("gemini", "Gemini", "gemini-5h", "gemini-weekly"),
+                ("claude_gpt", "Claude / GPT", "3p-5h", "3p-weekly"),
             ] {
-                let mut window = |suffix: &str, hours: f64| {
-                    let key = format!("{group}-{suffix}");
+                let mut window = |key: &str, hours: f64| {
                     let mut w = self
                         .windows
-                        .remove(key.as_str())
+                        .remove(key)
                         .unwrap_or_default()
                         .into_view(hours);
-                    w.period = self.periods.remove(&key);
+                    w.period = self.periods.remove(key);
                     w
                 };
                 tracks.push(AntigravityQuotaTrack {
                     id: id.into(),
                     label: label.into(),
-                    burst_5h: window("5h", 5.0),
-                    weekly_7d: window("weekly", 168.0),
+                    burst_5h: window(burst, 5.0),
+                    weekly_7d: window(weekly, 168.0),
                 });
             }
         }

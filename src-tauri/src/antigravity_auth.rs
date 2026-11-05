@@ -888,9 +888,9 @@ fn with_lifecycle(
     lc: &dyn AppLifecycle,
     mutate: impl FnOnce() -> Result<()>,
 ) -> Result<AntigravityAuthState> {
-    with_lock(|| verify_revision(paths, rev).map(|_| ()))?;
     let was_running = lc.is_running()?;
     if was_running {
+        with_lock(|| verify_revision(paths, rev).map(|_| ()))?;
         lc.quit()?;
     }
     let mut snapshots = Vec::new();
@@ -1074,15 +1074,12 @@ pub fn set_mode_at(
     rev: &str,
 ) -> Result<AntigravityAuthState> {
     let use_adc = matches!(mode, TargetMode::Adc);
-    with_lock(|| {
-        if !use_adc && !paths.oauth_file().exists() {
-            return Err(err(
-                code::AUTH,
-                "未检测到 Antigravity OAuth 登录令牌，请先在 Antigravity 内登录账号",
-            ));
-        }
-        Ok(())
-    })?;
+    if !use_adc && !paths.oauth_file().exists() {
+        return Err(err(
+            code::AUTH,
+            "未检测到 Antigravity OAuth 登录令牌，请先在 Antigravity 内登录账号",
+        ));
+    }
     with_lifecycle(paths, rev, lc, || {
         let vault = restore_gateway_settings(paths)?;
         if use_adc {
@@ -1351,7 +1348,7 @@ fn restore_gateway_settings(paths: &Paths) -> Result<Vault> {
     Ok(vault)
 }
 enum VertexSave {
-    Activate(StoredEntry, VertexKey),
+    Activate(StoredEntry, VertexKey, Option<String>),
     Saved(AntigravityAuthState),
 }
 fn prepare_vertex_save(paths: &Paths, input: &SaveVertexKeyInput) -> Result<VertexSave> {
@@ -1395,13 +1392,12 @@ fn prepare_vertex_save(paths: &Paths, input: &SaveVertexKeyInput) -> Result<Vert
                 .map_err(|_| err(code::JSON, "Vertex API Key 无法保存"))?,
             updated_at: now_secs(),
         };
-        if input.activate
-            || vault
-                .gateway
-                .as_ref()
-                .is_some_and(|g| g.account_id == entry.id)
-        {
-            Ok(VertexSave::Activate(entry, key))
+        if input.activate {
+            Ok(VertexSave::Activate(
+                entry,
+                key,
+                vault.gateway.map(|g| g.token),
+            ))
         } else {
             upsert_vertex(&mut vault, entry);
             save_vault(paths, &vault)?;
@@ -1461,15 +1457,10 @@ async fn run_vertex(
     entry: StoredEntry,
     key: VertexKey,
     revision: String,
+    token: Option<String>,
 ) -> Result<AntigravityAuthState> {
     let paths = Paths::resolve(&rt.data)?;
-    let token = with_lock(|| {
-        Ok(load_vault(&paths)?
-            .0
-            .gateway
-            .map(|g| g.token)
-            .unwrap_or_else(|| format!("vela_ag_{}", Uuid::new_v4().simple())))
-    })?;
+    let token = token.unwrap_or_else(|| format!("vela_ag_{}", Uuid::new_v4().simple()));
     let registry = rt.gateway.registry();
     let _lifecycle = registry.lifecycle.lock().await;
     let prepared = registry.listener.prepare().await?;
@@ -1581,8 +1572,15 @@ pub async fn save_antigravity_vertex_key(
 ) -> Result<AntigravityAuthState> {
     let paths = Paths::resolve(&r.data)?;
     match prepare_vertex_save(&paths, &input)? {
-        VertexSave::Activate(entry, key) => {
-            run_vertex(r.inner().clone(), entry, key, input.expected_revision).await
+        VertexSave::Activate(entry, key, token) => {
+            run_vertex(
+                r.inner().clone(),
+                entry,
+                key,
+                input.expected_revision,
+                token,
+            )
+            .await
         }
         VertexSave::Saved(state) => Ok(state),
     }
@@ -1669,13 +1667,16 @@ pub async fn switch_antigravity_account(
     id: String,
     expected_revision: String,
 ) -> Result<AntigravityAuthState> {
-    let entry = with_lock(|| {
+    let (entry, token) = with_lock(|| {
         let (vault, _) = load_vault(&Paths::resolve(&r.data)?)?;
-        Ok(vault.entries[vault.index_of(&id)?].clone())
+        Ok((
+            vault.entries[vault.index_of(&id)?].clone(),
+            vault.gateway.map(|g| g.token),
+        ))
     })?;
     if entry.kind == AccountKind::VertexKey {
         let key = decode_vertex(&entry)?;
-        return run_vertex(r.inner().clone(), entry, key, expected_revision).await;
+        return run_vertex(r.inner().clone(), entry, key, expected_revision, token).await;
     }
     let msg = "切换凭据任务异常中断";
     run_blocking(r, true, msg, move |p, l| {

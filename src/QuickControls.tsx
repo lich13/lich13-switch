@@ -73,11 +73,6 @@ export default function QuickControls({
       notify(next.enabled ? "已开启合盖不休眠" : "已恢复电池休眠设置");
     } catch (e) {
       setPowerError(errorOf(e).message);
-      try {
-        setState(await command("get_clamshell_state"));
-      } catch {
-        setReadError("电源状态读取失败");
-      }
     } finally {
       lock.current = false;
       setPowerBusy(false);

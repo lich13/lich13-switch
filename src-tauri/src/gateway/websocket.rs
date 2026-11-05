@@ -1080,7 +1080,7 @@ async fn session_once(
             break frame;
         }
     };
-    let mut traffic = g.0.registry.freeze.request();
+    let mut traffic = g.0.registry.freeze.request_for(g.client_id());
     traffic.waiting();
     if request_budget.deadline().is_none() {
         request_budget.begin();
@@ -3267,7 +3267,7 @@ async fn session_once(
                     pending_received_at = crate::usage::model::now();
                     pending_started = tokio::time::Instant::now();
                     pending = Some(frame);
-                    let ticket = g.0.registry.freeze.request();
+                    let ticket = g.0.registry.freeze.request_for(g.client_id());
                     ticket.waiting();
                     pending_traffic = Some(ticket);
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {

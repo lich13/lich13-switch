@@ -34,7 +34,7 @@ impl State {
     }
 }
 trait System: Send + Sync {
-    fn prepare(&self, _force: bool) -> Result<()> {
+    fn prepare(&self) -> Result<()> {
         Ok(())
     }
     fn remove(&self) -> Result<()> {
@@ -76,7 +76,7 @@ impl Service {
     }
     pub fn install(&self) -> Result<State> {
         let _lock = self.lock.lock().unwrap();
-        self.system.prepare(true)?;
+        self.system.prepare()?;
         self.state()
     }
     pub fn remove(&self) -> Result<State> {
@@ -158,7 +158,7 @@ impl Service {
         Ok(actual)
     }
     fn repair_for_toggle(&self, before: &State) -> Result<State> {
-        self.system.prepare(true)?;
+        self.system.prepare()?;
         let prepared = self.state()?;
         if before.supported != prepared.supported
             || before.enabled != prepared.enabled
@@ -250,14 +250,13 @@ pub(crate) fn helper_state(actual: &serde_json::Value) -> Result<State> {
     Ok(state)
 }
 impl System for Native {
-    fn prepare(&self, force: bool) -> Result<()> {
+    fn prepare(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            crate::power_macos::ensure(force)
+            crate::power_macos::ensure()
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = force;
             Err(AppError::new(code::UNSUPPORTED, "此设备不支持电源助手"))
         }
     }
@@ -348,15 +347,13 @@ mod tests {
             }
             Ok(state)
         }
-        fn prepare(&self, force: bool) -> Result<()> {
+        fn prepare(&self) -> Result<()> {
             self.prepares.fetch_add(1, Ordering::SeqCst);
-            if force || !self.ready.load(Ordering::SeqCst) {
-                self.approvals.fetch_add(1, Ordering::SeqCst);
-                if self.cancelled.load(Ordering::SeqCst) {
-                    return Err(AppError::new(code::POWER_AUTH, "已取消系统授权"));
-                }
-                self.ready.store(true, Ordering::SeqCst);
+            self.approvals.fetch_add(1, Ordering::SeqCst);
+            if self.cancelled.load(Ordering::SeqCst) {
+                return Err(AppError::new(code::POWER_AUTH, "已取消系统授权"));
             }
+            self.ready.store(true, Ordering::SeqCst);
             if let Some(state) = self.after_prepare.lock().unwrap().take() {
                 *self.current.lock().unwrap() = state;
             }

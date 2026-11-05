@@ -10,7 +10,13 @@ import type {
   CommandParams,
   CommandResult,
 } from "./bridge-contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from "react";
 import {
   Download,
   ArrowDown,
@@ -312,16 +318,14 @@ export default function Usage({
   useEffect(() => {
     if (!visible || !nativeVisible || tab !== "antigravity") return;
     void loadAntigravity();
-    const events = subscriptions((e) => setError(errorOf(e).message));
-    events.watch("antigravity-auth-state", () => {
-      pending.current.clear();
-      void loadAntigravity();
-    });
     return () => {
       agSequence.current++;
-      events.dispose();
     };
   }, [loadAntigravity, visible, nativeVisible, tab]);
+  const reloadAccountStats = useEffectEvent(() => {
+    pending.current.clear();
+    if (tab === "antigravity") void loadAntigravity();
+  });
   useEffect(() => {
     if (!visible || !nativeVisible) return;
     void loadState();
@@ -343,7 +347,6 @@ export default function Usage({
     let gone = false;
     let latestAccounts: AntigravityAuthState | null = null;
     const updateAccounts = (ag: AntigravityAuthState | null) => {
-      if (gone) return;
       const kind =
         ag?.mode === "vertex_key"
           ? "vertex_key"
@@ -386,6 +389,7 @@ export default function Usage({
       latestAccounts = ag;
       const agMap = updateAccounts(ag);
       setProviders((prev) => ({ ...prev, ...agMap }));
+      reloadAccountStats();
     });
     return () => {
       gone = true;

@@ -28,6 +28,13 @@ struct Pending {
     traffic: Option<super::freeze::Ticket>,
     paused_before: Duration,
 }
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if let Some(traffic) = &self.traffic {
+            traffic.clear_wait(&self.view.request_id);
+        }
+    }
+}
 impl Pending {
     fn paused_for(&self) -> Duration {
         self.traffic.as_ref().map_or(Duration::ZERO, |t| {
@@ -212,6 +219,7 @@ impl WaitBudget {
         if let Some(active) = &mut self.shared.state.lock().unwrap().active {
             active.paused_before = traffic.paused_for();
             active.traffic = Some(traffic.clone());
+            traffic.describe(&active.view);
         }
         self.shared.changes.send_replace(());
     }
@@ -240,6 +248,9 @@ impl WaitBudget {
             }
             active.view.phase = phase.into();
             active.compaction_execution = false;
+            if let Some(traffic) = &active.traffic {
+                traffic.describe(&active.view);
+            }
         }
         drop(state);
         self.shared.changes.send_replace(());
@@ -266,6 +277,9 @@ impl WaitBudget {
             active.compaction_execution = executing;
             if executing {
                 active.view.phase = "compaction".into();
+            }
+            if let Some(traffic) = &active.traffic {
+                traffic.describe(&active.view);
             }
         }
         drop(state);

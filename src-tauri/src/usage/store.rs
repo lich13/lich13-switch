@@ -95,6 +95,7 @@ impl Store {
         query::register(&connection)?;
         if storage_v12::active(&connection) {
             storage_v12::protect_encoding(&connection)?;
+            db(connection.execute_batch("DROP TABLE IF EXISTS v12_links;"))?;
             storage_v12::refresh_metrics(&connection)?;
             return Ok(Self {
                 connection,

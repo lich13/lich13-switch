@@ -554,7 +554,7 @@ fn vertex_input(revision: String) -> SaveVertexKeyInput {
 }
 fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<(StoredEntry, VertexKey)> {
     match prepare_vertex_save(paths, input)? {
-        VertexSave::Activate(entry, key) => Ok((entry, key)),
+        VertexSave::Activate(entry, key, _) => Ok((entry, key)),
         VertexSave::Saved(_) => panic!("fixture expected activation"),
     }
 }

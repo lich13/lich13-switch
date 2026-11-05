@@ -402,7 +402,7 @@ fn unpack_diagnostic(c: &Connection, body: rusqlite::types::Value, anchor: i64) 
 fn diagnostic_u64(
     c: &Connection,
     body: rusqlite::types::Value,
-    block: Option<&[u8]>,
+    cache: Option<&mut diagnostics::ScanCache>,
     field: &'static str,
 ) -> Result<Option<u64>> {
     // Resolve only this scalar; no absolute clock restoration or full diagnostic
@@ -412,7 +412,7 @@ fn diagnostic_u64(
     thread_local! {
         static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<CachedTemplate>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     }
-    diagnostics::inspect(c, body, block, |tag, value| {
+    let read = |tag, value: &Value| {
         let num = if tag == 4 {
             let values = value
                 .as_array()
@@ -453,7 +453,11 @@ fn diagnostic_u64(
             value[field].as_u64()
         };
         Ok(num)
-    })
+    };
+    match cache {
+        Some(cache) => cache.inspect(c, body, read),
+        None => diagnostics::inspect(c, body, read),
+    }
 }
 
 fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<u64>> {
@@ -485,11 +489,8 @@ pub(super) fn scan_antigravity_attempts(
     max_time: i64,
     mut visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
 ) -> Result<()> {
-    // Sort the small attempt rows before joining compressed blocks; otherwise
-    // the sorter copies the same block once for every attempt that references it.
     let mut stmt = db(c.prepare_cached(
-        "WITH ordered AS MATERIALIZED (
-         SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
+        "SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
          usage_value(m.value),a.shape,shape_value.value,a.body,
          a.inclusive_input,a.input,a.output,a.cache_read,a.cache_write,a.cost,a.unpriced,
          CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value)
@@ -499,10 +500,9 @@ pub(super) fn scan_antigravity_attempts(
          LEFT JOIN v12_dictionary p ON p.id=a.provider
          LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape
          WHERE r.client=usage_label('antigravity') AND r.effective=1 AND r.time>=?1 AND r.time<=?2
-         ORDER BY r.rid,a.ordinal)
-         SELECT ordered.*,diagnostic.body FROM ordered
-         LEFT JOIN v12_diagnostics diagnostic ON typeof(ordered.body)='integer' AND ordered.body>=2048 AND diagnostic.id=ordered.body/2048 AND ordered.output>0",
+         ORDER BY r.rid,a.ordinal",
     ))?;
+    let mut diagnostics = diagnostics::ScanCache::default();
     let mut shape_display_cache: std::collections::BTreeMap<i64, Option<String>> =
         std::collections::BTreeMap::new();
     let mut rows = db(stmt.query(params![min_time, max_time]))?;
@@ -528,10 +528,7 @@ pub(super) fn scan_antigravity_attempts(
         let output = opt_u64(11)?;
         let reasoning = if output.is_some_and(|n| n > 0) {
             let body = db(row.get::<_, rusqlite::types::Value>(8))?;
-            let block = db(row.get_ref(18))?
-                .as_blob_or_null()
-                .map_err(|_| failure("用量诊断块字段损坏，原数据已保留"))?;
-            diagnostic_u64(c, body, block, "reasoningTokens")?
+            diagnostic_u64(c, body, Some(&mut diagnostics), "reasoningTokens")?
         } else {
             None
         };
@@ -1551,7 +1548,6 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
     db(c.execute_batch(&format!("DROP VIEW usage_metrics; CREATE VIEW usage_metrics AS {} UNION ALL {} UNION ALL {original} UNION ALL SELECT * FROM usage_daily_metrics;",metric_select("v12_attempts",0),metric_select("v12_sessions",0))))
 }
 pub(super) fn prune(c: &Connection) -> Result<()> {
-    db(c.execute_batch("DROP TABLE IF EXISTS v12_links;"))?;
     db(c.execute("DELETE FROM v12_archives WHERE rid NOT IN (SELECT json_extract(body,'$._usageArchive') FROM daily WHERE json_extract(body,'$._usageArchive') IS NOT NULL)",[]))?;
     diagnostics::prune(c)?;
     db(c.execute_batch("DELETE FROM v12_measures WHERE id NOT IN (SELECT measure FROM v12_attempt_rows UNION SELECT measure FROM v12_session_rows); DELETE FROM v12_dimensions WHERE shape NOT IN (SELECT shape FROM v12_attempt_rows UNION SELECT shape FROM v12_session_rows);"))?;

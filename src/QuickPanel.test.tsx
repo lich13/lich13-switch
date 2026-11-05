@@ -44,6 +44,58 @@ beforeEach(() => {
   );
 });
 afterEach(() => localStorage.clear());
+it("isolates activity by platform and refreshes the snapshot after being hidden", async () => {
+  const original = mock.command.getMockImplementation()!;
+  let finish!: (value: GatewayState) => void;
+  const initial = new Promise<GatewayState>((resolve) => {
+    finish = resolve;
+  });
+  mock.command.mockImplementation((name, args) =>
+    name === "get_gateway" ? initial : original(name, args),
+  );
+  render(<QuickPanel />);
+  const request = {
+    requestId: "fixture-active",
+    providerId: "primary",
+    model: "fixture-live-model",
+    startedAt: 1000,
+    elapsedSeconds: 2,
+    phase: "streaming",
+    tokensPerSecond: 12,
+    waitId: null,
+  };
+  await waitFor(() =>
+    expect(mock.listeners.has("gateway-activity")).toBe(true),
+  );
+  act(() =>
+    mock.listeners.get("gateway-activity")!({
+      clientId: "codex",
+      activeRequests: [request],
+    }),
+  );
+  await act(async () => {
+    finish({ ...gatewayDemo, activeRequests: [] });
+    await initial;
+  });
+  expect(screen.getByText("≈12 tok/s")).toBeInTheDocument();
+  act(() =>
+    mock.listeners.get("gateway-activity")!({
+      clientId: "claude",
+      activeRequests: [],
+    }),
+  );
+  expect(screen.getByText("≈12 tok/s")).toBeInTheDocument();
+  act(() => mock.listeners.get("panel-visibility")!(false));
+  mock.command.mockImplementation(async (name, args) =>
+    name === "get_gateway"
+      ? { ...gatewayDemo, activeRequests: [] }
+      : original(name, args),
+  );
+  act(() => mock.listeners.get("panel-visibility")!(true));
+  await waitFor(() =>
+    expect(screen.queryByText("≈12 tok/s")).not.toBeInTheDocument(),
+  );
+});
 it("keeps a newer hide event when the initial visibility read resolves late", async () => {
   let finish!: (value: {
     pinned: boolean;
@@ -162,10 +214,12 @@ it("omits the provider/account tab row, hides wallet placeholder badges, and com
   expect(
     screen.queryByRole("navigation", { name: "快捷面板" }),
   ).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "账号" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "账号" }),
+  ).not.toBeInTheDocument();
   expect(within(quota).queryByText("钱包余额")).not.toBeInTheDocument();
   const valueButton = within(quota).getByRole("button", {
-    name: "剩余 87.5K USD",
+    name: "87.5K",
   });
   expect(valueButton).toHaveAttribute("title", "剩余 87,495.917 USD");
 });

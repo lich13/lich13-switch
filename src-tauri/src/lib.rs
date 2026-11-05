@@ -181,6 +181,7 @@ impl Runtime {
         let was_visible = slot.swap(visible, Ordering::Relaxed);
         if visible && !was_visible {
             self.window_wake.notify_one();
+            self.gateway.freeze_gate().refresh();
         }
         was_visible
     }
@@ -2049,10 +2050,34 @@ pub fn run() {
             let freeze_runtime = runtime.clone();
             tauri::async_runtime::spawn(async move {
                 let mut power_attempted = false;
-                while freeze_events.changed().await.is_ok() {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    let sampling = freeze_runtime
+                        .window_visible
+                        .iter()
+                        .any(|v| v.load(Ordering::Relaxed))
+                        && freeze.has_activity();
+                    let phase_changed = tokio::select! {
+                        changed = freeze_events.changed() => {
+                            if changed.is_err() { break; }
+                            true
+                        }
+                        _ = tick.tick(), if sampling => false,
+                    };
                     let view = freeze.view();
-                    for window in visible_windows(&freeze_app) {
-                        let _ = window.emit("gateway-freeze", &view);
+                    let windows = visible_windows(&freeze_app);
+                    if !windows.is_empty() {
+                        for activity in freeze.activities() {
+                            for window in &windows {
+                                let _ = window.emit("gateway-activity", &activity);
+                            }
+                        }
+                        if phase_changed {
+                            for window in &windows {
+                                let _ = window.emit("gateway-freeze", &view);
+                            }
+                        }
                     }
                     if power::close_after_freeze(&mut power_attempted, view.frozen, view.draining) {
                         let gate = freeze.clone();

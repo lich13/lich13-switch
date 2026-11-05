@@ -7,6 +7,24 @@ use crate::{
 use std::sync::{atomic::Ordering, Arc};
 use tauri::Emitter;
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
+fn publish_power_result(
+    app: &tauri::AppHandle,
+    power: &power::Service,
+    result: Result<power::State>,
+) -> Result<power::State> {
+    match &result {
+        Ok(state) => {
+            let _ = app.emit("clamshell-state", state);
+            let _ = app.emit("clamshell-error", Option::<AppError>::None);
+        }
+        Err(_) => {
+            if let Ok(state) = power.state() {
+                let _ = app.emit("clamshell-state", state);
+            }
+        }
+    }
+    result
+}
 #[tauri::command]
 pub async fn get_clamshell_state(r: R<'_>) -> Result<power::State> {
     let r = r.inner().clone();
@@ -24,18 +42,7 @@ pub async fn set_clamshell_awake(
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = r.power.set(enabled, &expected_revision);
-        match &result {
-            Ok(state) => {
-                let _ = app.emit("clamshell-state", state);
-                let _ = app.emit("clamshell-error", Option::<AppError>::None);
-            }
-            Err(_) => {
-                if let Ok(state) = r.power.state() {
-                    let _ = app.emit("clamshell-state", state);
-                }
-            }
-        }
-        result
+        publish_power_result(&app, &r.power, result)
     })
     .await
     .map_err(|_| AppError::new(code::POWER, "电源设置失败"))?
@@ -45,18 +52,7 @@ pub async fn install_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<pow
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = r.power.install();
-        match &result {
-            Ok(state) => {
-                let _ = app.emit("clamshell-state", state);
-                let _ = app.emit("clamshell-error", Option::<AppError>::None);
-            }
-            Err(_) => {
-                if let Ok(state) = r.power.state() {
-                    let _ = app.emit("clamshell-state", state);
-                }
-            }
-        }
-        result
+        publish_power_result(&app, &r.power, result)
     })
     .await
     .map_err(|_| AppError::new(code::POWER, "助手安装失败"))?
@@ -66,18 +62,7 @@ pub async fn remove_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<powe
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = r.power.remove();
-        match &result {
-            Ok(state) => {
-                let _ = app.emit("clamshell-state", state);
-                let _ = app.emit("clamshell-error", Option::<AppError>::None);
-            }
-            Err(_) => {
-                if let Ok(state) = r.power.state() {
-                    let _ = app.emit("clamshell-state", state);
-                }
-            }
-        }
-        result
+        publish_power_result(&app, &r.power, result)
     })
     .await
     .map_err(|_| AppError::new(code::POWER, "助手移除失败"))?

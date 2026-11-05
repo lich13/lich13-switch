@@ -210,6 +210,16 @@ export type CurrentConnection = {
   protocol?: GrokProtocol | null;
 };
 export type DshProfileCurrent = { profile: string; current: CurrentConnection };
+export type ActiveRequest = {
+  requestId: string;
+  providerId: string | null;
+  model: string | null;
+  startedAt: number;
+  elapsedSeconds: number;
+  phase: string;
+  tokensPerSecond: number | null;
+  waitId: string | null;
+};
 export type GatewayState = {
   listener?: GatewayListener;
   grokModels?: GrokModel[];
@@ -239,6 +249,7 @@ export type GatewayState = {
   settings: GatewaySettings;
   activeConnections: number;
   waitingRequests: number;
+  activeRequests?: ActiveRequest[];
   pendingRequests?: {
     requestId: string;
     providerId: string | null;

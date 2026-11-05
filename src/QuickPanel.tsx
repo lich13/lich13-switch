@@ -89,6 +89,7 @@ function QuickContent({
     let receivedVisibility = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
     const watch = events.watch;
+    let latestActivity: GatewayState["activeRequests"];
     watch("switch-state", (next) => {
       receivedAccountState = true;
       setAccounts(next);
@@ -96,8 +97,17 @@ function QuickContent({
     watch("gateway-state", (s) => {
       if ((s.clientId ?? "codex") === clientId) {
         gatewaySequence++;
+        latestActivity = s.activeRequests;
         setGateway(s);
       }
+    });
+    watch("gateway-activity", (activity) => {
+      if (activity.clientId !== clientId) return;
+      latestActivity = activity.activeRequests;
+      setGateway(
+        (previous) =>
+          previous && { ...previous, activeRequests: activity.activeRequests },
+      );
     });
     watch("quick-state", (p) => {
       receivedQuickState = true;
@@ -107,10 +117,18 @@ function QuickContent({
       receivedVisibility = true;
       setVisible(value);
       const request = ++gatewaySequence;
+      const beforeActivity = latestActivity;
       if (value)
         void command("get_gateway", { clientId })
           .then((next) => {
-            if (!disposed && request === gatewaySequence) setGateway(next);
+            if (!disposed && request === gatewaySequence)
+              setGateway({
+                ...next,
+                activeRequests:
+                  latestActivity === beforeActivity
+                    ? next.activeRequests
+                    : latestActivity,
+              });
           })
           .catch((e) => {
             if (!disposed && request === gatewaySequence)
@@ -127,7 +145,11 @@ function QuickContent({
       .then(([a, g, p]) => {
         if (!disposed) {
           if (!receivedAccountState) setAccounts(a);
-          if (gatewaySequence === 0) setGateway(g);
+          if (gatewaySequence === 0)
+            setGateway({
+              ...g,
+              activeRequests: latestActivity ?? g.activeRequests,
+            });
           if (!receivedQuickState) setPrefs(p);
           if (!receivedVisibility && !receivedQuickState)
             setVisible(p.visible ?? preview);
@@ -334,7 +356,6 @@ function QuickContent({
                   <QuickWaits
                     gateway={gateway}
                     clientId={clientId}
-                    visible={visible}
                     notify={setNotice}
                     error={setError}
                   />
@@ -382,6 +403,7 @@ function QuickContent({
                           />
                           <QuotaInfo
                             compact
+                            terse
                             provider={p}
                             quota={quota.quotaFor(p)}
                             refresh={() => void quota.refresh(p.id)}

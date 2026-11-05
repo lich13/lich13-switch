@@ -855,6 +855,10 @@ export type EventMap = {
   "switch-error": AppError;
   "switch-notice": string;
   "gateway-state": GatewayState;
+  "gateway-activity": {
+    clientId: ClientId;
+    activeRequests: NonNullable<GatewayState["activeRequests"]>;
+  };
   "gateway-freeze": GatewayFreeze;
   "provider-quota": { clientId: ClientId; quota: ProviderQuota };
   "config-state": {
