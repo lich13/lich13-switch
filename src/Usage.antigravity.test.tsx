@@ -277,7 +277,7 @@ function buildStats(
     topSessions: [
       {
         sessionId: SESSION_ALPHA,
-        shortHash: "a1b2c3d4",
+        title: "示例会话",
         requests: 9,
         primaryModel: "gemini-3.1-pro",
         family: "gemini",
@@ -427,7 +427,7 @@ describe("Usage Antigravity statistics tab", () => {
     );
   });
 
-  it("lazily fetches Antigravity stats on tab selection, displays dual-track windows & token mix, and filters logs by redacted session", async () => {
+  it("lazily fetches Antigravity stats on tab selection, displays dual-track windows & token mix, and filters logs by session title", async () => {
     const user = userEvent.setup();
     render(<Usage />);
 
@@ -457,9 +457,9 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(summary).getByText("78.3%")).toBeInTheDocument();
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();
 
-    const tracks = screen.getByLabelText("双轨 5 小时与 7 天滚动窗口");
-    expect(within(tracks).getAllByText("5h 突发窗口")).toHaveLength(2);
-    expect(within(tracks).getAllByText("7d 周滚动")).toHaveLength(2);
+    const tracks = screen.getByLabelText("近期用量");
+    expect(within(tracks).getAllByText("近 5 小时")).toHaveLength(2);
+    expect(within(tracks).getAllByText("近 7 天")).toHaveLength(2);
 
     const creds = screen.getByLabelText("账号与凭据分布");
     expect(
@@ -474,12 +474,12 @@ describe("Usage Antigravity statistics tab", () => {
       }),
     );
 
-    const sessions = screen.getByLabelText("脱敏会话排行");
-    expect(within(sessions).getByText("#a1b2c3d4")).toBeInTheDocument();
+    const sessions = screen.getByLabelText("会话排行");
+    expect(within(sessions).getByText("示例会话")).toBeInTheDocument();
     expect(within(sessions).getByText("gemini-3.1-pro")).toBeInTheDocument();
 
     await user.click(
-      screen.getByRole("button", { name: "查看会话 #a1b2c3d4 请求" }),
+      screen.getByRole("button", { name: "查看会话 示例会话 请求" }),
     );
 
     await waitFor(() => {
@@ -494,14 +494,14 @@ describe("Usage Antigravity statistics tab", () => {
     });
 
     const chip = screen.getByRole("button", {
-      name: "清除会话筛选 #a1b2c3d4",
+      name: "清除会话筛选 示例会话",
     });
     expect(chip).toBeInTheDocument();
     await user.click(chip);
 
     await waitFor(() => {
       expect(
-        screen.queryByRole("button", { name: "清除会话筛选 #a1b2c3d4" }),
+        screen.queryByRole("button", { name: "清除会话筛选 示例会话" }),
       ).not.toBeInTheDocument();
       expect(lastLogFilters.at(-1)?.sessionId).toBeUndefined();
     });
@@ -529,9 +529,9 @@ describe("Usage Antigravity statistics tab", () => {
 
     const summary = await screen.findByLabelText("Token 构成与缓存节省");
     expect(within(summary).getByText("未定价")).toBeInTheDocument();
-    const tracks = screen.getByLabelText("双轨 5 小时与 7 天滚动窗口");
+    const tracks = screen.getByLabelText("近期用量");
     expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
-    const sessions = screen.getByLabelText("脱敏会话排行");
+    const sessions = screen.getByLabelText("会话排行");
     expect(within(sessions).getByText("未定价")).toBeInTheDocument();
   });
 });

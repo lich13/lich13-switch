@@ -1,6 +1,14 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AntigravityAccounts from "./AntigravityAccounts";
+import { subscribe } from "./bridge";
 import type { AntigravityAuthState } from "./bridge-contracts";
 
 const mockCommand = vi.fn();
@@ -162,11 +170,15 @@ describe("AntigravityAccounts", () => {
         ],
       });
     });
-    expect((await screen.findAllByText("user3@example.invalid")).length).toBeGreaterThan(0);
-    expect(screen.getByText(/不一致（存在 ADC 文件但未启用设置）/)).toBeTruthy();
+    expect(
+      (await screen.findAllByText("user3@example.invalid")).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/不一致（存在 ADC 文件但未启用设置）/),
+    ).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "导入 ADC" }));
-    const submitBtn = screen.getByRole("button", { name: "导入保存" });
+    fireEvent.click(screen.getByRole("button", { name: "导入账号" }));
+    const submitBtn = screen.getByRole("button", { name: "保存" });
     expect(submitBtn).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText("凭据 JSON 内容"), {
@@ -199,5 +211,132 @@ describe("AntigravityAccounts", () => {
         },
       });
     });
+  });
+
+  it("imports a masked Vertex key with editable models and keeps errors in the form", async () => {
+    mockCommand.mockImplementation(async (name: string) => {
+      if (name === "save_antigravity_vertex_key")
+        throw new Error("地区格式无效");
+      return initialState;
+    });
+    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
+    await screen.findByText("OAuth 主号");
+    fireEvent.click(screen.getByRole("button", { name: "导入账号" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Vertex API Key" }));
+    expect(screen.getByLabelText("API Key")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    expect(screen.getByLabelText("地区")).toHaveValue("global");
+    expect(screen.getByLabelText("模型")).toHaveValue(
+      "gemini-3-flash-preview\ngemini-3.1-pro-preview\ngemini-2.5-flash",
+    );
+    fireEvent.change(screen.getByLabelText("名称"), {
+      target: { value: "Fixture Vertex" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "fixture-key" },
+    });
+    fireEvent.change(screen.getByLabelText("模型"), {
+      target: { value: "gemini-2.5-flash" },
+    });
+    fireEvent.click(screen.getByLabelText("立即启用"));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("地区格式无效");
+    expect(screen.getByLabelText("API Key")).toHaveValue("fixture-key");
+    expect(mockCommand).toHaveBeenCalledWith("save_antigravity_vertex_key", {
+      input: {
+        id: null,
+        name: "Fixture Vertex",
+        apiKey: "fixture-key",
+        projectId: null,
+        location: "global",
+        models: ["gemini-2.5-flash"],
+        activate: false,
+        expectedRevision: "rev-1",
+      },
+    });
+  });
+
+  it("edits Vertex metadata without reading or resubmitting the stored key", async () => {
+    const vertex = {
+      ...initialState.accounts[2],
+      id: "vertex-1",
+      name: "Fixture Vertex",
+      kind: "vertex_key" as const,
+      sourceType: "vertex_key",
+      current: true,
+      vertex: { location: "global", models: ["gemini-2.5-flash"] },
+    };
+    mockCommand.mockResolvedValue({
+      ...initialState,
+      mode: "vertex_key",
+      accounts: [vertex],
+    });
+    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
+    await screen.findByText("Fixture Vertex");
+    fireEvent.click(screen.getByLabelText("管理 Fixture Vertex"));
+    fireEvent.click(screen.getByRole("button", { name: "编辑凭据" }));
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(screen.getByLabelText("立即启用")).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("地区"), {
+      target: { value: "us-central1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(mockCommand).toHaveBeenCalledWith("save_antigravity_vertex_key", {
+        input: expect.objectContaining({
+          id: "vertex-1",
+          apiKey: "",
+          location: "us-central1",
+          activate: true,
+        }),
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps newer events when the initial state read finishes late", async () => {
+    let finish!: (state: AntigravityAuthState) => void;
+    mockCommand.mockReturnValue(
+      new Promise<AntigravityAuthState>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
+    act(() =>
+      listeners.get("antigravity-auth-state")?.({
+        ...initialState,
+        accounts: [{ ...initialState.accounts[0], name: "最新账号" }],
+      }),
+    );
+    await act(async () => {
+      finish(initialState);
+    });
+    expect(screen.getByText("最新账号")).toBeInTheDocument();
+    expect(screen.queryByText("OAuth 主号")).not.toBeInTheDocument();
+  });
+
+  it("disposes event registration that finishes after unmount", async () => {
+    let registered!: (clean: () => void) => void;
+    vi.mocked(subscribe).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          registered = resolve;
+        }),
+    );
+    mockCommand.mockResolvedValue(initialState);
+    const view = render(
+      <AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />,
+    );
+    await screen.findByText("OAuth 主号");
+    view.unmount();
+    const clean = vi.fn();
+    await act(async () => {
+      registered(clean);
+    });
+    expect(clean).toHaveBeenCalledTimes(1);
   });
 });

@@ -231,7 +231,10 @@ impl Runtime {
         let b = self.claude.stop_for_exit().await;
         let c = self.grok.stop_for_exit().await;
         let d = self.dsh.stop_for_exit().await;
-        a.and(b).and(c).and(d).map(|_| ())
+        let registry = self.gateway.registry();
+        let _listener = registry.lifecycle.lock().await;
+        let e = gateway::antigravity::stop(&registry).await;
+        a.and(b).and(c).and(d).and(e).map(|_| ())
     }
 }
 struct SmokeSnapshot {
@@ -1971,6 +1974,9 @@ pub fn run() {
             grok.set_diagnostics(diagnostics.clone());
             dsh.set_diagnostics(diagnostics.clone());
             let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), grok.clone(), dsh.clone()])?;
+            let vertex_error = if smoke.is_none() {
+                tauri::async_runtime::block_on(antigravity::auth::restore_vertex_listener(&data, &gateway)).err()
+            } else { None };
             let runtime = Arc::new(Runtime {
                 usage,
                 diagnostics,
@@ -1994,7 +2000,7 @@ pub fn run() {
                 power,
                 frontend_started: AtomicBool::new(false),
                 force_quitting: AtomicBool::new(false),
-                startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error)),
+                startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error).or(vertex_error)),
                 cleanup_error: Mutex::new(cleanup_error),
                 official_tx: tokio::sync::Mutex::new(()),
                 window_wake: tokio::sync::Notify::new(),
@@ -2414,6 +2420,7 @@ pub fn run() {
             antigravity::validate_antigravity_config,
             antigravity::auth::get_antigravity_auth_state,
             antigravity::auth::add_antigravity_adc,
+            antigravity::auth::save_antigravity_vertex_key,
             antigravity::auth::pick_antigravity_credential_file,
             antigravity::auth::switch_antigravity_account,
             antigravity::auth::set_antigravity_auth_mode,

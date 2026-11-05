@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -14,7 +14,8 @@ import {
   Trash2,
   UserRound,
 } from "lucide-react";
-import { command, subscribe } from "./bridge";
+import { command } from "./bridge";
+import { subscriptions } from "./subscriptions";
 import type {
   AntigravityAccountItem,
   AntigravityAuthState,
@@ -29,130 +30,146 @@ type Props = {
 
 type DialogState =
   | null
-  | { type: "add-adc" }
+  | { type: "import"; item?: AntigravityAccountItem }
   | { type: "rename"; item: AntigravityAccountItem }
   | { type: "delete"; item: AntigravityAccountItem };
 
 function parseAdcPreview(raw: string): {
   valid: boolean;
-  type: string | null;
-  identity: string | null;
   project: string | null;
   hint: string | null;
 } {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return { valid: false, type: null, identity: null, project: null, hint: null };
-  }
+  if (!raw.trim()) return { valid: false, project: null, hint: null };
   try {
-    const obj = JSON.parse(trimmed) as Record<string, unknown>;
+    const obj = JSON.parse(raw) as Record<string, unknown>;
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
-      return { valid: false, type: null, identity: null, project: null, hint: "顶层必须是 JSON 对象" };
+      return { valid: false, project: null, hint: "顶层必须是 JSON 对象" };
     }
-    const type = typeof obj.type === "string" ? obj.type.trim() : "";
-    const project =
-      (typeof obj.quota_project_id === "string" && obj.quota_project_id.trim()) ||
-      (typeof obj.project_id === "string" && obj.project_id.trim()) ||
-      null;
-    if (type === "service_account") {
-      const email = typeof obj.client_email === "string" ? obj.client_email.trim() : "";
-      const pk = typeof obj.private_key === "string" ? obj.private_key.trim() : "";
-      if (!pk.includes("PRIVATE KEY") || !email || !project) {
-        return {
-          valid: false,
-          type,
-          identity: email || null,
-          project,
-          hint: "service_account 需包含 private_key、client_email 与 project_id",
-        };
+    const field = (key: string) =>
+      typeof obj[key] === "string" ? obj[key].trim() : "";
+    const project = field("quota_project_id") || field("project_id") || null;
+    let hint: string | null = null;
+    if (field("type") === "service_account") {
+      if (
+        !field("private_key").includes("PRIVATE KEY") ||
+        !field("client_email") ||
+        !project
+      ) {
+        hint = "service_account 需包含 private_key、client_email 与 project_id";
       }
-      return { valid: true, type, identity: email, project, hint: null };
-    }
-    if (type === "authorized_user") {
-      const cid = typeof obj.client_id === "string" ? obj.client_id.trim() : "";
-      const csec = typeof obj.client_secret === "string" ? obj.client_secret.trim() : "";
-      const rt = typeof obj.refresh_token === "string" ? obj.refresh_token.trim() : "";
-      if (!cid || !csec || !rt) {
-        return {
-          valid: false,
-          type,
-          identity: cid || null,
-          project,
-          hint: "authorized_user 需包含 client_id、client_secret 与 refresh_token",
-        };
+    } else if (field("type") === "authorized_user") {
+      if (
+        !field("client_id") ||
+        !field("client_secret") ||
+        !field("refresh_token")
+      ) {
+        hint =
+          "authorized_user 需包含 client_id、client_secret 与 refresh_token";
       }
-      return { valid: true, type, identity: cid, project, hint: null };
+    } else {
+      hint = "仅支持 service_account 或 authorized_user 类型";
     }
-    return {
-      valid: false,
-      type: type || null,
-      identity: null,
-      project,
-      hint: "仅支持 service_account 或 authorized_user 类型",
-    };
+    return { valid: hint === null, project, hint };
   } catch {
-    return { valid: false, type: null, identity: null, project: null, hint: "JSON 语法无效" };
+    return { valid: false, project: null, hint: "JSON 语法无效" };
   }
 }
 
 export default function AntigravityAccounts({ notify, setError }: Props) {
   const [state, setState] = useState<AntigravityAuthState | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<"all" | "oauth" | "adc">("all");
+  const [tab, setTab] = useState<"all" | "oauth" | "adc" | "vertex_key">("all");
   const [dialog, setDialog] = useState<DialogState>(null);
 
   const [name, setName] = useState("");
   const [jsonText, setJsonText] = useState("");
   const [quotaProjectId, setQuotaProjectId] = useState("");
   const [activate, setActivate] = useState(true);
+  const sequence = useRef(0);
+
+  const [importType, setImportType] = useState<"adc" | "vertex_key">("adc");
+  const [apiKey, setApiKey] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [location, setLocation] = useState("global");
+  const [models, setModels] = useState("");
+  const [dialogError, setDialogError] = useState("");
+  const [dialogRevision, setDialogRevision] = useState("");
+  const closeDialog = () => {
+    setDialog(null);
+    setApiKey("");
+    setJsonText("");
+    setDialogError("");
+  };
 
   const adcPreview = useMemo(() => parseAdcPreview(jsonText), [jsonText]);
 
   const load = useCallback(async () => {
+    const id = ++sequence.current;
     try {
-      setState(await command("get_antigravity_auth_state"));
+      const next = await command("get_antigravity_auth_state");
+      if (id === sequence.current) setState(next);
     } catch (e) {
-      setError(errorOf(e).message);
+      if (id === sequence.current) setError(errorOf(e).message);
     }
   }, [setError]);
 
   useEffect(() => {
     void load();
-    let off: (() => void) | undefined;
-    void subscribe("antigravity-auth-state", (next) => {
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    events.watch("antigravity-auth-state", (next) => {
+      sequence.current++;
       setState(next);
-    }).then((fn) => {
-      off = fn;
     });
-    return () => off?.();
-  }, [load]);
+    return () => {
+      sequence.current++;
+      events.dispose();
+    };
+  }, [load, setError]);
 
   const runAction = async (
     fn: () => Promise<AntigravityAuthState>,
     formatNotice: (next: AntigravityAuthState) => string,
   ) => {
     setBusy(true);
+    const id = ++sequence.current;
     setError("");
+    setDialogError("");
     try {
       const next = await fn();
-      setState(next);
+      if (id === sequence.current) setState(next);
       const msg = formatNotice(next);
       if (msg) notify(msg);
-      setDialog(null);
+      closeDialog();
     } catch (e) {
-      setError(errorOf(e).message);
+      if (dialog) setDialogError(errorOf(e).message);
+      else setError(errorOf(e).message);
       void load();
     } finally {
       setBusy(false);
     }
   };
 
-  const openAddAdc = () => {
-    setName("");
+  const openImport = (item?: AntigravityAccountItem) => {
+    setName(item?.name ?? "");
     setJsonText("");
     setQuotaProjectId("");
-    setActivate(true);
-    setDialog({ type: "add-adc" });
+    setApiKey("");
+    setProjectId(item?.projectId ?? "");
+    setLocation(item?.vertex?.location ?? "global");
+    setModels(
+      (
+        item?.vertex?.models ?? [
+          "gemini-3-flash-preview",
+          "gemini-3.1-pro-preview",
+          "gemini-2.5-flash",
+        ]
+      ).join("\n"),
+    );
+    setImportType(item ? "vertex_key" : "adc");
+    setActivate(item ? item.current : true);
+    setDialogError("");
+    setDialogRevision(state?.revision ?? "");
+    setDialog({ type: "import", item });
   };
 
   const pickFile = async () => {
@@ -167,8 +184,15 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
   const items = (state?.accounts ?? []).filter((a) =>
     tab === "all" ? true : a.kind === tab,
   );
-  const oauthCount = (state?.accounts ?? []).filter((a) => a.kind === "oauth").length;
-  const adcCount = (state?.accounts ?? []).filter((a) => a.kind === "adc").length;
+  const oauthCount = (state?.accounts ?? []).filter(
+    (a) => a.kind === "oauth",
+  ).length;
+  const adcCount = (state?.accounts ?? []).filter(
+    (a) => a.kind === "adc",
+  ).length;
+  const vertexCount = (state?.accounts ?? []).filter(
+    (a) => a.kind === "vertex_key",
+  ).length;
   const isMixed =
     state?.mode === "mixed_adc_file_without_flag" ||
     state?.mode === "mixed_flag_without_adc_file";
@@ -184,13 +208,15 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
             {isMixed ? <AlertTriangle size={16} /> : <Shield size={16} />}
             <strong>
               当前模式：
-              {state?.mode === "adc"
-                ? "ADC 模式（已启用 ADC）"
-                : state?.mode === "mixed_adc_file_without_flag"
-                  ? "不一致（存在 ADC 文件但未启用设置）"
-                  : state?.mode === "mixed_flag_without_adc_file"
-                    ? "不一致（已启用设置但缺少 ADC 文件）"
-                    : "OAuth 模式（已禁用 ADC）"}
+              {state?.mode === "vertex_key"
+                ? "Vertex API Key"
+                : state?.mode === "adc"
+                  ? "ADC 模式（已启用 ADC）"
+                  : state?.mode === "mixed_adc_file_without_flag"
+                    ? "不一致（存在 ADC 文件但未启用设置）"
+                    : state?.mode === "mixed_flag_without_adc_file"
+                      ? "不一致（已启用设置但缺少 ADC 文件）"
+                      : "OAuth 模式（已禁用 ADC）"}
             </strong>
           </div>
           <div className="ag-status-pills">
@@ -215,10 +241,16 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           </div>
         </div>
         <div className="ag-status-actions">
-          <div className="exchange-button-group" role="group" aria-label="切换认证模式">
+          <div
+            className="exchange-button-group"
+            role="group"
+            aria-label="切换认证模式"
+          >
             <button
               type="button"
-              className={"exchange-button" + (state?.mode === "oauth" ? " active" : "")}
+              className={
+                "exchange-button" + (state?.mode === "oauth" ? " active" : "")
+              }
               disabled={!state || busy || state.mode === "oauth"}
               onClick={() =>
                 state &&
@@ -239,7 +271,9 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
             </button>
             <button
               type="button"
-              className={"exchange-button" + (state?.mode === "adc" ? " active" : "")}
+              className={
+                "exchange-button" + (state?.mode === "adc" ? " active" : "")
+              }
               disabled={!state || busy || state.mode === "adc"}
               onClick={() =>
                 state &&
@@ -272,7 +306,11 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
       </div>
 
       <div className="list-tools">
-        <div className="exchange-button-group" role="tablist" aria-label="凭据类型筛选">
+        <div
+          className="exchange-button-group"
+          role="tablist"
+          aria-label="凭据类型筛选"
+        >
           <button
             role="tab"
             aria-selected={tab === "all"}
@@ -297,11 +335,26 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           >
             ADC 凭据 ({adcCount})
           </button>
+          <button
+            role="tab"
+            aria-selected={tab === "vertex_key"}
+            className={
+              "exchange-button" + (tab === "vertex_key" ? " active" : "")
+            }
+            onClick={() => setTab("vertex_key")}
+          >
+            Vertex Key ({vertexCount})
+          </button>
         </div>
         <div className="account-actions">
-          <button type="button" className="primary" disabled={busy} onClick={openAddAdc}>
+          <button
+            type="button"
+            className="primary"
+            disabled={busy}
+            onClick={() => openImport()}
+          >
             <Plus size={15} />
-            导入 ADC
+            导入账号
           </button>
         </div>
       </div>
@@ -316,21 +369,33 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
           <div className="empty">
             <KeyRound size={30} />
             <h3>尚无已保存的 Antigravity 凭据</h3>
-            <p>在 Antigravity 登录 OAuth 账号后会自动识别并保存在此处，也可点击「导入 ADC」添加 Google Cloud ADC JSON。</p>
           </div>
         ) : (
           items.map((item) => {
             const isEffective =
               item.current &&
-              ((item.kind === "oauth" && state.mode === "oauth" && state.oauthPresent) ||
-                (item.kind === "adc" && state.mode === "adc" && state.adcStatus === "active"));
+              ((item.kind === "oauth" &&
+                state.mode === "oauth" &&
+                state.oauthPresent) ||
+                (item.kind === "adc" &&
+                  state.mode === "adc" &&
+                  state.adcStatus === "active") ||
+                (item.kind === "vertex_key" && state.mode === "vertex_key"));
             return (
               <div
                 key={item.id}
                 className={"account-row" + (isEffective ? " selected" : "")}
               >
-                <div className={"avatar " + (item.kind === "oauth" ? "chatgpt" : "apikey")}>
-                  {item.kind === "oauth" ? <UserRound size={20} /> : <KeyRound size={20} />}
+                <div
+                  className={
+                    "avatar " + (item.kind === "oauth" ? "chatgpt" : "apikey")
+                  }
+                >
+                  {item.kind === "oauth" ? (
+                    <UserRound size={20} />
+                  ) : (
+                    <KeyRound size={20} />
+                  )}
                 </div>
                 <div className="account-copy">
                   <div className="account-title">
@@ -338,13 +403,22 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                     <span className="plan-badge">
                       {item.kind === "oauth"
                         ? `OAuth · ${item.sourceType}`
-                        : `ADC · ${item.sourceType}`}
+                        : item.kind === "vertex_key"
+                          ? "Vertex API Key"
+                          : `ADC · ${item.sourceType}`}
                     </span>
                   </div>
                   <div className="ag-account-meta">
                     {item.email && <span title={item.email}>{item.email}</span>}
-                    {item.projectId && <span title={item.projectId}>项目: {item.projectId}</span>}
-                    {!item.email && !item.projectId && <span>{item.sourceType}</span>}
+                    {item.projectId && (
+                      <span title={item.projectId}>项目: {item.projectId}</span>
+                    )}
+                    {item.kind === "vertex_key" ? (
+                      <span>{item.vertex?.location ?? "global"}</span>
+                    ) : (
+                      !item.email &&
+                      !item.projectId && <span>{item.sourceType}</span>
+                    )}
                   </div>
                 </div>
                 <div className="account-actions">
@@ -382,10 +456,26 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                       <MoreHorizontal size={18} />
                     </summary>
                     <div className="menu-popover">
+                      {item.kind === "vertex_key" && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.currentTarget
+                              .closest("details")
+                              ?.removeAttribute("open");
+                            openImport(item);
+                          }}
+                        >
+                          <KeyRound size={14} />
+                          编辑凭据
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {
-                          e.currentTarget.closest("details")?.removeAttribute("open");
+                          e.currentTarget
+                            .closest("details")
+                            ?.removeAttribute("open");
                           setName(item.name);
                           setDialog({ type: "rename", item });
                         }}
@@ -397,7 +487,9 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                         type="button"
                         className="danger"
                         onClick={(e) => {
-                          e.currentTarget.closest("details")?.removeAttribute("open");
+                          e.currentTarget
+                            .closest("details")
+                            ?.removeAttribute("open");
                           setDialog({ type: "delete", item });
                         }}
                       >
@@ -416,107 +508,208 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
       {dialog && state && (
         <AppModal
           title={
-            dialog.type === "add-adc"
-              ? "导入 Google Cloud ADC 凭据"
+            dialog.type === "import"
+              ? dialog.item
+                ? "编辑 Vertex API Key"
+                : "导入账号"
               : dialog.type === "rename"
                 ? "重命名凭据"
                 : "删除凭据"
           }
-          onClose={() => setDialog(null)}
+          onClose={closeDialog}
         >
-          {dialog.type === "add-adc" ? (
+          {dialog.type === "import" ? (
             <form
-              className="modal-form ag-adc-form"
+              className="modal-content ag-account-form ag-adc-form"
               onSubmit={(e) => {
                 e.preventDefault();
                 void runAction(
                   () =>
-                    command("add_antigravity_adc", {
-                      input: {
-                        name: name.trim() || null,
-                        jsonText,
-                        quotaProjectId: quotaProjectId.trim() || null,
-                        activate,
-                      },
-                    }),
+                    importType === "vertex_key"
+                      ? command("save_antigravity_vertex_key", {
+                          input: {
+                            id: dialog.item?.id ?? null,
+                            name,
+                            apiKey,
+                            projectId: projectId.trim() || null,
+                            location,
+                            models: models
+                              .split(/[,\n]/)
+                              .map((m) => m.trim())
+                              .filter(Boolean),
+                            activate,
+                            expectedRevision: dialogRevision,
+                          },
+                        })
+                      : command("add_antigravity_adc", {
+                          input: {
+                            name: name.trim() || null,
+                            jsonText,
+                            quotaProjectId: quotaProjectId.trim() || null,
+                            activate,
+                          },
+                        }),
                   (next) =>
-                    activate
-                      ? next.appRestarted
-                        ? "已导入并启用 ADC 凭据，Antigravity 已自动重启"
-                        : "已导入并启用 ADC 凭据"
-                      : "已导入 ADC 凭据",
+                    next.appRestarted
+                      ? "账号已保存，Antigravity 已重启"
+                      : "账号已保存",
                 );
               }}
             >
-              <label>
-                备注名称（可选）
-                <input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="例如：Vertex AI 生产项目 ADC"
-                />
-              </label>
-
-              <div className="ag-json-header">
-                <span>ADC JSON 内容</span>
-                <button type="button" className="text-button" onClick={() => void pickFile()}>
-                  <FolderOpen size={14} />
-                  选择 JSON 文件…
-                </button>
-              </div>
-              <textarea
-                rows={6}
-                required
-                aria-label="凭据 JSON 内容"
-                value={jsonText}
-                onChange={(e) => setJsonText(e.target.value)}
-                placeholder='{"type":"authorized_user","client_id":"...","client_secret":"...","refresh_token":"...","quota_project_id":"..."}'
-              />
-
-              {jsonText.trim() !== "" && (
-                <div className={"ag-json-preview" + (adcPreview.valid ? " ok" : " invalid")}>
-                  {adcPreview.valid ? (
-                    <>
-                      <span>类型: {adcPreview.type}</span>
-                      {adcPreview.identity && <span>标识: {adcPreview.identity}</span>}
-                      <span>项目: {quotaProjectId.trim() || adcPreview.project || "未指定"}</span>
-                    </>
-                  ) : (
-                    <span>{adcPreview.hint}</span>
-                  )}
+              {!dialog.item && (
+                <div
+                  className="exchange-button-group ag-import-tabs"
+                  role="tablist"
+                  aria-label="导入类型"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={importType === "adc"}
+                    className={
+                      "exchange-button" +
+                      (importType === "adc" ? " active" : "")
+                    }
+                    onClick={() => {
+                      setImportType("adc");
+                      setApiKey("");
+                      setDialogError("");
+                    }}
+                  >
+                    ADC JSON
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={importType === "vertex_key"}
+                    className={
+                      "exchange-button" +
+                      (importType === "vertex_key" ? " active" : "")
+                    }
+                    onClick={() => {
+                      setImportType("vertex_key");
+                      setJsonText("");
+                      setDialogError("");
+                    }}
+                  >
+                    Vertex API Key
+                  </button>
                 </div>
               )}
-
-              <label>
-                配额项目 ID 覆盖（quota_project_id，可选）
-                <input
-                  value={quotaProjectId}
-                  onChange={(e) => setQuotaProjectId(e.target.value)}
-                  placeholder={adcPreview.project ?? "例如：my-gcp-project"}
-                />
+              <label className="field">
+                名称
+                <input value={name} onChange={(e) => setName(e.target.value)} />
               </label>
-
+              {importType === "vertex_key" ? (
+                <>
+                  <label className="field">
+                    API Key
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      spellCheck={false}
+                      required={!dialog.item}
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder={dialog.item ? "留空保留现有密钥" : ""}
+                    />
+                  </label>
+                  <div className="ag-key-location">
+                    <label className="field">
+                      Project ID（可选）
+                      <input
+                        value={projectId}
+                        onChange={(e) => setProjectId(e.target.value)}
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label className="field">
+                      地区
+                      <input
+                        required
+                        value={location}
+                        onChange={(e) => setLocation(e.target.value)}
+                        spellCheck={false}
+                      />
+                    </label>
+                  </div>
+                  <label className="field">
+                    模型
+                    <textarea
+                      required
+                      rows={3}
+                      value={models}
+                      onChange={(e) => setModels(e.target.value)}
+                      spellCheck={false}
+                    />
+                  </label>
+                </>
+              ) : (
+                <>
+                  <div className="ag-json-header">
+                    <span>ADC JSON</span>
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => void pickFile()}
+                    >
+                      <FolderOpen size={14} />
+                      选择文件
+                    </button>
+                  </div>
+                  <textarea
+                    rows={6}
+                    required
+                    aria-label="凭据 JSON 内容"
+                    value={jsonText}
+                    onChange={(e) => setJsonText(e.target.value)}
+                    spellCheck={false}
+                  />
+                  {jsonText.trim() !== "" && !adcPreview.valid && (
+                    <p className="ag-form-error" role="alert">
+                      {adcPreview.hint}
+                    </p>
+                  )}
+                  <label className="field">
+                    配额项目 ID（可选）
+                    <input
+                      value={quotaProjectId}
+                      onChange={(e) => setQuotaProjectId(e.target.value)}
+                      placeholder={adcPreview.project ?? ""}
+                    />
+                  </label>
+                </>
+              )}
               <label className="ag-checkbox-row">
                 <input
                   type="checkbox"
                   checked={activate}
+                  disabled={dialog.item?.current}
                   onChange={(e) => setActivate(e.target.checked)}
                 />
-                导入后立即切换为当前生效 ADC（若 Antigravity 正在运行将自动重启）
+                立即启用
               </label>
-
+              {dialogError && (
+                <p className="ag-form-error" role="alert">
+                  {dialogError}
+                </p>
+              )}
               <div className="modal-actions">
-                <button type="button" onClick={() => setDialog(null)}>
+                <button type="button" onClick={closeDialog}>
                   取消
                 </button>
-                <button type="submit" className="primary" disabled={busy || !adcPreview.valid}>
-                  导入保存
+                <button
+                  type="submit"
+                  className="primary"
+                  disabled={busy || (importType === "adc" && !adcPreview.valid)}
+                >
+                  {busy ? "保存中…" : "保存"}
                 </button>
               </div>
             </form>
           ) : dialog.type === "rename" ? (
             <form
-              className="modal-form"
+              className="modal-content ag-account-form"
               onSubmit={(e) => {
                 e.preventDefault();
                 void runAction(
@@ -530,12 +723,21 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
                 );
               }}
             >
-              <label>
+              <label className="field">
                 新名称
-                <input required value={name} onChange={(e) => setName(e.target.value)} />
+                <input
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
               </label>
+              {dialogError && (
+                <p className="ag-form-error" role="alert">
+                  {dialogError}
+                </p>
+              )}
               <div className="modal-actions">
-                <button type="button" onClick={() => setDialog(null)}>
+                <button type="button" onClick={closeDialog}>
                   取消
                 </button>
                 <button type="submit" className="primary" disabled={busy}>
@@ -544,12 +746,18 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
               </div>
             </form>
           ) : (
-            <div className="modal-form">
+            <div className="modal-content ag-account-form">
               <p>
-                确定要从多账号库中删除「{dialog.item.name}」吗？正在使用中的凭据无法直接删除。
+                确定要从多账号库中删除「{dialog.item.name}
+                」吗？正在使用中的凭据无法直接删除。
               </p>
+              {dialogError && (
+                <p className="ag-form-error" role="alert">
+                  {dialogError}
+                </p>
+              )}
               <div className="modal-actions">
-                <button type="button" onClick={() => setDialog(null)}>
+                <button type="button" onClick={closeDialog}>
                   取消
                 </button>
                 <button

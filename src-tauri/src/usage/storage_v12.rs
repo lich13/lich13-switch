@@ -919,12 +919,7 @@ pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) ->
     )?;
     db(c.execute("INSERT INTO v12_rows(key,client,source,time,response,signature,effective,sequence,shape,body,rid,session,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(rid) DO UPDATE SET client=excluded.client,source=excluded.source,time=excluded.time,response=excluded.response,signature=excluded.signature,effective=excluded.effective,shape=excluded.shape,body=excluded.body,session=excluded.session,state=excluded.state",params![key(&r.id),db(label(r.client.clone().into()))?,db(label(r.source.clone().into()))?,time,response,sig,effective,sequence,shape,pack_diagnostic(c,Value::Object(diagnostic),r.started_at)?,previous,session,state]))?;
     let owner = previous.unwrap_or_else(|| c.last_insert_rowid());
-    for table in [
-        "v12_attempt_rows",
-        "v12_session_rows",
-        "v12_original",
-        "v12_links",
-    ] {
+    for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
         db(c.execute(&format!("DELETE FROM {table} WHERE owner=?1"), [owner]))?;
     }
     db(c.execute(
@@ -933,12 +928,6 @@ pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) ->
     ))?;
     if let Some(target) = &r.duplicate_of {
         let target_owner = self::owner(c, target)?;
-        if target_owner.is_none() {
-            db(c.execute(
-                "INSERT INTO v12_links VALUES(?1,?2)",
-                params![owner, key(target)],
-            ))?;
-        }
         db(c.execute(
             "UPDATE v12_records SET duplicate=?2,archived_duplicate=?3 WHERE rid=?1",
             params![
@@ -1100,7 +1089,7 @@ pub(super) fn load(c: &Connection, owner: i64) -> Result<Value> {
     obj.insert("sessionId".into(), json!(identifier(db(row.get(21))?)?));
     let target: Option<Vec<u8>> = db(c
         .query_row(
-            "SELECT coalesce(d.key,l.target,usage_key(r.archived_duplicate)) FROM v12_records r LEFT JOIN v12_rows d ON d.rid=r.duplicate LEFT JOIN v12_links l ON l.owner=r.rid WHERE r.rid=?1",
+            "SELECT coalesce(d.key,usage_key(r.archived_duplicate)) FROM v12_records r LEFT JOIN v12_rows d ON d.rid=r.duplicate WHERE r.rid=?1",
             [owner],
             |r| r.get(0),
         )
@@ -1142,12 +1131,7 @@ pub(super) fn owner(c: &Connection, id: &str) -> Result<Option<i64>> {
 }
 pub(super) fn delete(c: &Connection, id: &str) -> Result<()> {
     if let Some(owner) = owner(c, id)? {
-        for table in [
-            "v12_attempt_rows",
-            "v12_session_rows",
-            "v12_original",
-            "v12_links",
-        ] {
+        for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
             db(c.execute(&format!("DELETE FROM {table} WHERE owner=?1"), [owner]))?;
         }
         db(c.execute("DELETE FROM v12_records WHERE rid=?1", [owner]))?;
@@ -1166,6 +1150,13 @@ pub(super) fn flush(c: &Connection) -> Result<()> {
     while flush_batch(c)? {}
     Ok(())
 }
+fn save_migrating(c: &Connection, r: &Record, effective: i64, sequence: i64) -> Result<()> {
+    save(c, r, effective, sequence)?;
+    let owner = owner(c, &r.id)?.ok_or_else(|| failure("用量迁移记录缺失"))?;
+    db(c.execute("DELETE FROM v12_links WHERE owner=?1", [owner]))?;
+    db(c.execute("INSERT INTO v12_links SELECT rid,usage_key(archived_duplicate) FROM v12_records WHERE rid=?1 AND archived_duplicate IS NOT NULL", [owner]))?;
+    Ok(())
+}
 fn flush_batch(c: &Connection) -> Result<bool> {
     let ids = {
         let mut stmt = db(c.prepare("SELECT id FROM v12_dirty ORDER BY id LIMIT 2000"))?;
@@ -1182,9 +1173,10 @@ fn flush_batch(c: &Connection) -> Result<bool> {
             .optional())?;
         if let Some((body, effective, sequence)) = old {
             let r = bodies::decode(c, &body)?;
-            save(c, &r, effective, sequence)?;
+            save_migrating(c, &r, effective, sequence)?;
             verify_record(c, &r)?;
         } else {
+            db(c.execute("DELETE FROM v12_links WHERE owner IN (SELECT rid FROM v12_records WHERE key=usage_key(?1))", [&id]))?;
             delete(c, &id)?;
         }
         db(c.execute("DELETE FROM v12_dirty WHERE id=?1", [&id]))?;
@@ -1364,7 +1356,7 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
     };
     for (_, body, effective, sequence) in &rows {
         let r: Record = bodies::decode(&tx, body)?;
-        save(&tx, &r, *effective, *sequence)?;
+        save_migrating(&tx, &r, *effective, *sequence)?;
         verify_record(&tx, &r)?;
     }
     if let Some(last) = rows.last() {
@@ -1378,7 +1370,7 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
             return Ok(true);
         }
         validate(&tx)?;
-        db(tx.execute_batch("UPDATE v12_records SET duplicate=(SELECT target.rid FROM v12_links l JOIN v12_records target ON usage_hint(target.key)=usage_hint(l.target) AND target.key=l.target WHERE l.owner=v12_records.rid),archived_duplicate=(SELECT usage_text(l.target) FROM v12_links l WHERE l.owner=v12_records.rid AND NOT EXISTS(SELECT 1 FROM v12_records target WHERE usage_hint(target.key)=usage_hint(l.target) AND target.key=l.target)) WHERE rid IN (SELECT owner FROM v12_links); DELETE FROM v12_links WHERE owner IN (SELECT rid FROM v12_records WHERE duplicate IS NOT NULL);
+        db(tx.execute_batch("UPDATE v12_records SET duplicate=(SELECT target.rid FROM v12_links l JOIN v12_records target ON usage_hint(target.key)=usage_hint(l.target) AND target.key=l.target WHERE l.owner=v12_records.rid),archived_duplicate=(SELECT usage_text(l.target) FROM v12_links l WHERE l.owner=v12_records.rid AND NOT EXISTS(SELECT 1 FROM v12_records target WHERE usage_hint(target.key)=usage_hint(l.target) AND target.key=l.target)) WHERE rid IN (SELECT owner FROM v12_links); DELETE FROM v12_links;
           DROP TRIGGER v12_track_insert; DROP TRIGGER v12_track_update; DROP TRIGGER v12_track_delete;
           DROP TRIGGER IF EXISTS pending_prices_insert; DROP TRIGGER IF EXISTS pending_prices_update; DROP TRIGGER IF EXISTS pending_prices_delete;
           DROP TABLE pending_prices;
@@ -1520,13 +1512,17 @@ pub(super) fn set_state(c: &Connection, r: &Record, effective: i64) -> Result<()
 }
 // archive_ids is a bounded, connection-local selection owned by Store::archive_batch.
 pub(super) fn archive_selected(c: &Connection) -> Result<()> {
-    db(c.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,ended,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE rid IN (SELECT rid FROM archive_ids)",[]))?;
-    for table in [
-        "v12_attempt_rows",
-        "v12_session_rows",
-        "v12_original",
-        "v12_links",
-    ] {
+    db(c.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation)
+      SELECT usage_text(r.key),usage_label(r.client),usage_label(r.source),r.time,usage_value(p.value),usage_text(r.response),
+        usage_signature(r.client,s.value,coalesce(a.input,b.input),coalesce(a.output,b.output),coalesce(a.cache_read,b.cache_read),coalesce(a.cache_write,b.cache_write),coalesce(a.operation,b.operation)),
+        r.time+r.ended,r.effective,CASE coalesce(a.operation,b.operation) WHEN 1 THEN 'compaction' WHEN 2 THEN 'web_search' ELSE 'model' END
+      FROM v12_records r
+      LEFT JOIN v12_attempts a ON a.owner=r.rid AND a.ordinal=r.last
+      LEFT JOIN v12_sessions b ON b.owner=r.rid AND b.ordinal=r.last
+      LEFT JOIN v12_dictionary p ON p.id=coalesce(a.provider,b.provider)
+      LEFT JOIN v12_dictionary s ON s.id=coalesce(a.shape,b.shape)
+      WHERE r.rid IN (SELECT rid FROM archive_ids)",[]))?;
+    for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
         db(c.execute(
             &format!("DELETE FROM {table} WHERE owner IN (SELECT rid FROM archive_ids)"),
             [],
@@ -1609,10 +1605,6 @@ fn compact_archives(c: &Connection) -> Result<bool> {
             return Err(failure("用量历史归档缺少依据，原数据已保留"));
         }
         let packed = bodies::encode(&tx, &value)?;
-        let restored: Value = bodies::decode(&tx, &packed)?;
-        if restored != value {
-            return Err(failure("用量历史归档核对失败，原数据已保留"));
-        }
         db(tx.execute("UPDATE daily SET body=?2 WHERE id=?1", params![id, packed]))?;
     }
     db(tx.commit())?;
@@ -1659,12 +1651,7 @@ pub(super) fn remove_record(c: &Connection, id: &str) -> Result<()> {
     let Some(rid) = owner(c, id)? else {
         return Ok(());
     };
-    for table in [
-        "v12_attempt_rows",
-        "v12_session_rows",
-        "v12_original",
-        "v12_links",
-    ] {
+    for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
         db(c.execute(&format!("DELETE FROM {table} WHERE owner=?1"), [rid]))?;
     }
     db(c.execute(
@@ -1675,12 +1662,7 @@ pub(super) fn remove_record(c: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 pub(super) fn remove_source(c: &Connection, source: &str) -> Result<()> {
-    for table in [
-        "v12_attempt_rows",
-        "v12_session_rows",
-        "v12_original",
-        "v12_links",
-    ] {
+    for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
         db(c.execute(
             &format!(
                 "DELETE FROM {table} WHERE owner IN (SELECT rid FROM v12_records WHERE source=usage_label(?1))"
@@ -1693,7 +1675,6 @@ pub(super) fn remove_source(c: &Connection, source: &str) -> Result<()> {
         [source],
     ))?;
     db(c.execute("UPDATE v12_records SET effective=1,duplicate=NULL,archived_duplicate=NULL WHERE duplicate IS NOT NULL AND duplicate NOT IN (SELECT rid FROM v12_records)",[]))?;
-    db(c.execute("DELETE FROM v12_links WHERE NOT EXISTS(SELECT 1 FROM v12_records r WHERE usage_hint(r.key)=usage_hint(v12_links.target) AND r.key=v12_links.target) AND NOT EXISTS(SELECT 1 FROM receipts r WHERE r.id=usage_text(v12_links.target))",[]))?;
     Ok(())
 }
 pub(super) fn cold_batch(c: &mut Connection, at: i64) -> Result<bool> {

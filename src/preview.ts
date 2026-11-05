@@ -717,6 +717,7 @@ export async function run(
       return null;
     case "get_antigravity_auth_state":
     case "add_antigravity_adc":
+    case "save_antigravity_vertex_key":
     case "switch_antigravity_account":
     case "set_antigravity_auth_mode":
     case "rename_antigravity_account":
@@ -744,6 +745,25 @@ export async function run(
             current: true,
             updatedAt: Math.floor(Date.now() / 1000) - 300,
             credentialRevision: "rev-adc-1",
+          },
+          {
+            id: "ag-vertex-1",
+            name: "Vertex Preview",
+            kind: "vertex_key",
+            sourceType: "vertex_key",
+            email: null,
+            projectId: null,
+            current: false,
+            updatedAt: Math.floor(Date.now() / 1000) - 60,
+            credentialRevision: "rev-vertex-1",
+            vertex: {
+              location: "global",
+              models: [
+                "gemini-3-flash-preview",
+                "gemini-3.1-pro-preview",
+                "gemini-2.5-flash",
+              ],
+            },
           },
         ],
         mode: "oauth",

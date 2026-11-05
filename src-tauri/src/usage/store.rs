@@ -450,6 +450,9 @@ impl Store {
         storage_v12::copy_batch(&mut self.connection)
     }
     pub fn repair_finish_times(&mut self) -> Result<bool> {
+        if storage_v12::active(&self.connection) {
+            return Ok(false);
+        }
         let after: Option<String> = db(self
             .connection
             .query_row(
@@ -508,6 +511,9 @@ impl Store {
         if self.repair_antigravity_batch()? {
             return Ok(true);
         }
+        if storage_v12::active(&self.connection) {
+            return Ok(false);
+        }
         let after: Option<String> = db(self
             .connection
             .query_row(
@@ -564,28 +570,51 @@ impl Store {
         if storage_v12::pending(&self.connection) {
             return Ok(false);
         }
-        let v02619_done: bool = db(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='antigravity_fields_v02619' AND value='done')",
-            [],
-            |r| r.get(0),
-        ))?;
-        if !v02619_done {
-            db(self.connection.execute_batch(
-                "DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617','antigravity_fields_v02618');
-                 INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02619','done');",
-            ))?;
-        }
-        let after: Option<String> = db(self
+        let progress: Option<String> = db(self
             .connection
             .query_row(
-                "SELECT value FROM metadata WHERE key='antigravity_fields_v02614'",
+                "SELECT value FROM metadata WHERE key='antigravity_fields_v02619'",
                 [],
                 |r| r.get(0),
             )
             .optional())?;
-        if after.as_deref() == Some("done") {
+        if progress.as_deref() == Some("complete") {
             return Ok(false);
         }
+        let after = if let Some(after) = progress.as_deref().and_then(|p| p.strip_prefix("after:"))
+        {
+            Some(after.to_owned())
+        } else {
+            // v0.26.19's "done" meant the old repair was reset, not completed.
+            let legacy: Option<String> = if progress.as_deref() == Some("done") {
+                db(self
+                    .connection
+                    .query_row(
+                        "SELECT value FROM metadata WHERE key='antigravity_fields_v02614'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .optional())?
+            } else {
+                None
+            };
+            let next = match legacy.as_deref() {
+                Some("done") => "complete".to_owned(),
+                Some(after) => format!("after:{after}"),
+                None => "after:".to_owned(),
+            };
+            let tx = db(self.connection.transaction())?;
+            db(tx.execute(
+                "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02619',?1)",
+                [&next],
+            ))?;
+            db(tx.execute("DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617','antigravity_fields_v02618')", []))?;
+            db(tx.commit())?;
+            if next == "complete" {
+                return Ok(false);
+            }
+            legacy
+        };
         let ag_home = crate::antigravity::home().ok();
         let has_vault = self
             .data_dir()
@@ -595,22 +624,34 @@ impl Store {
             .map(|d| crate::antigravity::auth::provider_timeline(d, ag_home.as_deref()))
             .unwrap_or_default();
         let tx = db(self.connection.transaction())?;
-        let rows = {
+        let rows = if storage_v12::active(&tx) {
+            let mut stmt = db(tx.prepare("SELECT usage_text(key),rid FROM v12_rows WHERE source=usage_label('antigravity') AND usage_text(key)>?1 ORDER BY usage_text(key) LIMIT 128"))?;
+            let rows = db(stmt.query_map([after.as_deref().unwrap_or("")], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+                .into_iter()
+                .map(|(id, rid)| Ok((id, storage_v12::load_record(&tx, rid)?)))
+                .collect::<Result<Vec<_>>>()?
+        } else {
             let mut stmt = db(tx.prepare("SELECT id,body FROM records WHERE source='antigravity' AND id>?1 ORDER BY id LIMIT 128"))?;
             let rows = db(stmt.query_map([after.as_deref().unwrap_or("")], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             }))?;
             db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+                .into_iter()
+                .map(|(id, body)| Ok((id, bodies::decode::<Record>(&tx, &body)?)))
+                .collect::<Result<Vec<_>>>()?
         };
-        if after.is_none() && !rows.is_empty() {
+        if after.as_deref().unwrap_or("").is_empty() && !rows.is_empty() {
             db(tx.execute(
                 "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
                 [],
             ))?;
         }
         let mut changed = false;
-        for (id, body) in &rows {
-            let mut r: Record = bodies::decode(&tx, body)?;
+        for (id, record) in &rows {
+            let mut r = record.clone();
             let normalized = super::antigravity::normalize_record(&mut r);
             let mut provider_changed = false;
             for a in &mut r.attempts {
@@ -635,8 +676,10 @@ impl Store {
             }
         }
         db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02614',?1)",
-            [rows.last().map_or("done", |(id, _)| id.as_str())],
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02619',?1)",
+            [rows
+                .last()
+                .map_or_else(|| "complete".to_owned(), |(id, _)| format!("after:{id}"))],
         ))?;
         if changed {
             query::changed(&tx)?;
@@ -927,7 +970,19 @@ impl Store {
                 }
             }
         }
-        Ok(agg.finish())
+        let mut stats = agg.finish();
+        if !stats.top_sessions.is_empty() {
+            let mut stmt = db(self.connection.prepare("SELECT json_extract(body,'$.session_id'),json_extract(body,'$.title') FROM cursors WHERE json_extract(body,'$.title') IS NOT NULL"))?;
+            let titles =
+                db(stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+            for title in titles {
+                let (id, title) = db(title)?;
+                if let Some(row) = stats.top_sessions.iter_mut().find(|r| r.session_id == id) {
+                    row.title = Some(title);
+                }
+            }
+        }
+        Ok(stats)
     }
     pub fn detail_since(&self) -> Result<i64> {
         let value: Option<String> = db(self
@@ -999,33 +1054,58 @@ impl Store {
             db(selected.execute([id]))?;
         }
         drop(selected);
-        for scope in [None, Some("proxy"), Some("sessions"), Some("grok_sessions")] {
-            let filter = Filter {
-                source: scope.map(str::to_owned),
-                ..Filter::default()
+        let scopes = [None, Some("proxy"), Some("sessions"), Some("grok_sessions")];
+        let eligible: Vec<_> = scopes
+            .iter()
+            .map(|scope| {
+                let eligible = query::eligible(
+                    tx,
+                    &Filter {
+                        source: scope.map(str::to_owned),
+                        ..Filter::default()
+                    },
+                    "r",
+                    false,
+                );
+                // CASE keeps eligibility's correlated checks short-circuited,
+                // as they were when each scope had its own WHERE clause.
+                format!("CASE WHEN {eligible} THEN 1 ELSE 0 END")
+            })
+            .collect();
+        let (table, key, projection) = if native {
+            ("(SELECT rid,usage_text(key) id,source source_code,time,effective,duplicate,archived_duplicate FROM v12_rows)", "rid", "rid")
+        } else {
+            ("records", "id", "body,duplicate_of")
+        };
+        let mut statement = db(tx.prepare(&format!(
+            "SELECT {projection},{} FROM {table} r WHERE r.{key} IN (SELECT {key} FROM archive_ids)",
+            eligible.join(",")
+        )))?;
+        let mut rows = db(statement.query([]))?;
+        while let Some(row) = db(rows.next())? {
+            let offset = if native { 1 } else { 2 };
+            let selected = (0..scopes.len())
+                .map(|i| db(row.get::<_, bool>(offset + i)))
+                .collect::<Result<Vec<_>>>()?;
+            if !selected.iter().any(|selected| *selected) {
+                continue;
+            }
+            let record: Record = if native {
+                storage_v12::load_record(tx, db(row.get(0))?)?
+            } else {
+                let mut r: Record = bodies::decode(tx, &db(row.get::<_, String>(0))?)?;
+                r.duplicate_of = db(row.get(1))?;
+                r
             };
-            let eligible = query::eligible(tx, &filter, "r", false);
-            let key = if native { "rid" } else { "id" };
-            let projection = if native { "rid" } else { "body,duplicate_of" };
-            let mut statement = db(tx.prepare(&format!("SELECT {projection} FROM records r WHERE r.{key} IN (SELECT {key} FROM archive_ids) AND {eligible}")))?;
-            let mut rows = db(statement.query([]))?;
-            let mut records = Vec::new();
-            while let Some(row) = db(rows.next())? {
-                let mut r: Record = if native {
-                    storage_v12::load_record(tx, db(row.get(0))?)?
-                } else {
-                    let mut r: Record = bodies::decode(tx, &db(row.get::<_, String>(0))?)?;
-                    r.duplicate_of = db(row.get(1))?;
-                    r
-                };
+            for (scope, selected) in scopes.into_iter().zip(selected) {
+                if !selected {
+                    continue;
+                }
+                let mut r = record.clone();
                 if scope == Some("proxy") {
                     r.gateway_only();
                 }
-                records.push((scope.map(str::to_owned), r));
-            }
-            drop(rows);
-            drop(statement);
-            for (scope, mut r) in records {
+                let scope = scope.map(str::to_owned);
                 let day = query::bucket(r.event_time(), DAY);
                 let Some(a) = r.final_attempt() else {
                     continue;
@@ -1085,6 +1165,8 @@ impl Store {
                 query::project(tx, 1, &key, &d.example, d.totals.requests, Some(&d.totals))?;
             }
         }
+        drop(rows);
+        drop(statement);
         if native {
             storage_v12::archive_selected(tx)?;
         } else {

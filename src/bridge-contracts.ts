@@ -81,15 +81,17 @@ export type ClaudeLoginState = {
 export type AntigravityAccountItem = {
   id: string;
   name: string;
-  kind: "oauth" | "adc";
+  kind: "oauth" | "adc" | "vertex_key";
   sourceType: string;
   email: string | null;
   projectId: string | null;
   current: boolean;
   updatedAt: number;
   credentialRevision: string;
+  vertex?: { location: string; models: string[] };
 };
 export type AntigravityAuthMode =
+  | "vertex_key"
   | "oauth"
   | "adc"
   | "mixed_adc_file_without_flag"
@@ -520,6 +522,21 @@ export type CommandMap = {
   get_antigravity_auth_state: Call<None, AntigravityAuthState>;
   add_antigravity_adc: Call<
     { input: AddAntigravityAdcInput },
+    AntigravityAuthState
+  >;
+  save_antigravity_vertex_key: Call<
+    {
+      input: {
+        id: string | null;
+        name: string;
+        apiKey: string;
+        projectId: string | null;
+        location: string;
+        models: string[];
+        activate: boolean;
+        expectedRevision: string;
+      };
+    },
     AntigravityAuthState
   >;
   pick_antigravity_credential_file: Call<None, string | null>;

@@ -181,6 +181,7 @@ export type GatewayListener = {
   port: number;
   revision: string;
   runningClients: ClientId[];
+  antigravityActive: boolean;
 };
 export type GrokModel = {
   key: string;

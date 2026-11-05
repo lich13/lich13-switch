@@ -2053,3 +2053,101 @@ fn native_reads_backfill_counts_and_archive_match_legacy() {
     }
     assert_eq!(results[0], results[1]);
 }
+
+#[test]
+fn native_archive_preserves_all_scopes_operations_and_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rows = Vec::new();
+    for (i, source) in ["proxy", "codex", "grok"].into_iter().enumerate() {
+        for (j, operation) in [
+            Operation::Model,
+            Operation::Compaction,
+            Operation::WebSearch,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let n = i * 3 + j;
+            let mut row = priced_record(
+                &format!("fixture-archive-op-{n}"),
+                BASE + (n % 2) as i64 * DAY,
+                100 + n as u64,
+                20,
+                "0.012",
+            );
+            row.source = source.into();
+            if source == "grok" {
+                row.client = "grok".into();
+            }
+            row.attempts[0].operation = operation;
+            rows.push(row);
+        }
+    }
+    let mut duplicate = rows[0].clone();
+    duplicate.id = "fixture-archive-duplicate".into();
+    duplicate.source = "codex".into();
+    duplicate.attempts[0].id = "fixture-duplicate-attempt".into();
+    rows.push(duplicate);
+    let mut results = Vec::new();
+    for native in [false, true] {
+        let root = dir.path().join(if native { "native" } else { "legacy" });
+        let mut store = if native {
+            Store::open(&root)
+        } else {
+            Store::open_v11_fixture(&root)
+        }
+        .unwrap();
+        store.write_batch(&rows, None).unwrap();
+        assert!(store
+            .detail("fixture-archive-duplicate")
+            .unwrap()
+            .duplicate_of
+            .is_some());
+        let filters: Vec<_> = [None, Some("proxy"), Some("sessions"), Some("grok_sessions")]
+            .into_iter()
+            .flat_map(|scope| {
+                [None, Some("model"), Some("compaction"), Some("web_search")]
+                    .into_iter()
+                    .map(move |op| Filter {
+                        source: scope.map(str::to_owned),
+                        operation: op.map(str::to_owned),
+                        ..Filter::default()
+                    })
+            })
+            .collect();
+        let totals = |s: &Store| {
+            filters
+                .iter()
+                .map(|f| serde_json::to_value(s.dashboard(f).unwrap().totals).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let before = totals(&store);
+        store
+            .archive_batch(&rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(totals(&store), before);
+        let receipts: Vec<(String, String, Option<String>, String)> = store
+            .connection
+            .prepare("SELECT id,operation,signature,source FROM receipts ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for row in &rows {
+            assert_eq!(
+                receipts.iter().find(|r| r.0 == row.id).unwrap().1,
+                row.final_attempt().unwrap().operation.as_str()
+            );
+        }
+        results.push((before, receipts));
+        if native {
+            drop(store);
+            assert_eq!(
+                totals(&Store::open(&root).unwrap()),
+                results.last().unwrap().0
+            );
+        }
+    }
+    assert_eq!(results[0], results[1]);
+}

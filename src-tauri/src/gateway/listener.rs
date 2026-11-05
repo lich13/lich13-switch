@@ -24,6 +24,7 @@ pub struct View {
     pub port: u16,
     pub revision: String,
     pub running_clients: Vec<ClientId>,
+    pub antigravity_active: bool,
 }
 
 struct State {
@@ -31,6 +32,7 @@ struct State {
     port: u16,
     revision: String,
     clients: Vec<ClientId>,
+    antigravity_active: bool,
     shutdown: Option<watch::Sender<bool>>,
     task: Option<JoinHandle<()>>,
 }
@@ -74,6 +76,7 @@ impl Listener {
                 port: config.port,
                 revision,
                 clients: Vec::new(),
+                antigravity_active: false,
                 shutdown: None,
                 task: None,
             }),
@@ -96,6 +99,7 @@ impl Listener {
             port: s.port,
             revision: s.revision.clone(),
             running_clients: s.clients.clone(),
+            antigravity_active: s.antigravity_active,
         })
     }
     pub fn check_revision(&self) -> Result<()> {
@@ -117,7 +121,7 @@ impl Listener {
                 "共享端口已变化，请刷新后重试",
             ));
         }
-        if !s.clients.is_empty() {
+        if !s.clients.is_empty() || s.antigravity_active {
             return Err(AppError::new(
                 code::GATEWAY_ACTIVE,
                 "请先停用全部客户端网关，再修改共享端口",
@@ -146,7 +150,7 @@ impl Listener {
         self.check_revision()?;
         let view = self.view()?;
         let version = self.lock_state()?.version;
-        if !view.running_clients.is_empty() {
+        if !view.running_clients.is_empty() || view.antigravity_active {
             return Ok(Prepared {
                 socket: None,
                 port: view.port,
@@ -212,10 +216,31 @@ impl Listener {
         registry: Arc<Registry>,
         commit: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        self.activate_resource(Some(client), listener, registry, commit)
+    }
+    pub(crate) fn activate_antigravity(
+        &self,
+        listener: Option<TcpListener>,
+        registry: Arc<Registry>,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.activate_resource(None, listener, registry, commit)
+    }
+    fn activate_resource(
+        &self,
+        client: Option<ClientId>,
+        listener: Option<TcpListener>,
+        registry: Arc<Registry>,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let mut s = self.lock_state()?;
         commit()?;
-        if !s.clients.contains(&client) {
-            s.clients.push(client);
+        if let Some(client) = client {
+            if !s.clients.contains(&client) {
+                s.clients.push(client);
+            }
+        } else {
+            s.antigravity_active = true;
         }
         if let Some(listener) = listener {
             let (shutdown, rx) = watch::channel(false);
@@ -234,6 +259,12 @@ impl Listener {
         self.activate_with(client, listener, registry, || Ok(()))
     }
     pub async fn deactivate(&self, client: ClientId) -> Result<()> {
+        self.deactivate_resource(Some(client)).await
+    }
+    pub(crate) async fn deactivate_antigravity(&self) -> Result<()> {
+        self.deactivate_resource(None).await
+    }
+    async fn deactivate_resource(&self, client: Option<ClientId>) -> Result<()> {
         let (task, poisoned) = {
             let (mut s, poisoned) = match self.state.lock() {
                 Ok(state) => (state, false),
@@ -242,9 +273,13 @@ impl Listener {
                 Err(error) => (error.into_inner(), true),
             };
             if !poisoned {
-                s.clients.retain(|id| *id != client);
+                if let Some(client) = client {
+                    s.clients.retain(|id| *id != client);
+                } else {
+                    s.antigravity_active = false;
+                }
             }
-            let task = if poisoned || s.clients.is_empty() {
+            let task = if poisoned || (s.clients.is_empty() && !s.antigravity_active) {
                 if let Some(shutdown) = s.shutdown.take() {
                     let _ = shutdown.send(true);
                 }

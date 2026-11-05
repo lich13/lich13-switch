@@ -1,3 +1,4 @@
+use crate::gateway::antigravity::{self as vertex, VertexKey};
 use crate::{
     errors::code,
     storage::{self, AppError, Result},
@@ -26,12 +27,14 @@ fn err(c: &str, msg: &str) -> AppError {
 pub enum AccountKind {
     Oauth,
     Adc,
+    VertexKey,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     Oauth,
     Adc,
+    VertexKey,
     MixedAdcFileWithoutFlag,
     MixedFlagWithoutAdcFile,
 }
@@ -75,6 +78,8 @@ pub struct AntigravityAccountItem {
     pub current: bool,
     pub updated_at: u64,
     pub credential_revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertex: Option<VertexMetadata>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +106,53 @@ pub struct AddAntigravityAdcInput {
     pub quota_project_id: Option<String>,
     #[serde(default)]
     pub activate: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VertexMetadata {
+    pub location: String,
+    pub models: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveVertexKeyInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub api_key: String,
+    pub project_id: Option<String>,
+    pub location: String,
+    pub models: Vec<String>,
+    pub activate: bool,
+    pub expected_revision: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewaySnapshot {
+    gateway: Option<Value>,
+    models: Option<Value>,
+    file_existed: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewaySelection {
+    account_id: String,
+    token: String,
+    port: u16,
+    previous: GatewaySnapshot,
+}
+impl GatewaySelection {
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/antigravity", self.port)
+    }
+    fn matches(&self, settings: &Value) -> bool {
+        settings
+            .pointer("/gateway/enabled")
+            .and_then(Value::as_bool)
+            == Some(true)
+            && settings.pointer("/gateway/url").and_then(Value::as_str) == Some(self.url().as_str())
+            && settings.pointer("/gateway/apiKey").and_then(Value::as_str)
+                == Some(self.token.as_str())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -143,6 +195,8 @@ struct Vault {
     active_oauth_id: Option<String>,
     #[serde(default)]
     activations: Vec<ActivationSpan>,
+    #[serde(default)]
+    gateway: Option<GatewaySelection>,
 }
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -185,13 +239,19 @@ impl Paths {
     pub fn vault_file(&self) -> PathBuf {
         self.data_dir.join("antigravity-accounts.json")
     }
-    pub fn watched_files(&self) -> [PathBuf; 5] {
+    pub fn app_settings_file(&self) -> PathBuf {
+        self.gemini_home
+            .with_file_name(".antigravity")
+            .join("settings.json")
+    }
+    pub fn watched_files(&self) -> [PathBuf; 6] {
         [
             self.oauth_file(),
             self.config_file(),
             self.adc_file(),
             self.adc_disabled_file(),
             self.agswitch_adc_file(),
+            self.app_settings_file(),
         ]
     }
 }
@@ -718,11 +778,21 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
         (false, _, true) => AdcStatus::BackupOnly,
         (false, _, false) => AdcStatus::Missing,
     };
-    let mode = match (enable_adc, adc_on) {
-        (true, true) => AuthMode::Adc,
-        (false, false) => AuthMode::Oauth,
-        (false, true) => AuthMode::MixedAdcFileWithoutFlag,
-        (true, false) => AuthMode::MixedFlagWithoutAdcFile,
+    let app_raw = storage::read_optional(&paths.app_settings_file())?;
+    let app_settings = parse_app_settings(app_raw.as_deref())?;
+    let vertex_active = vault
+        .gateway
+        .as_ref()
+        .filter(|g| !enable_adc && g.matches(&app_settings));
+    let mode = if vertex_active.is_some() {
+        AuthMode::VertexKey
+    } else {
+        match (enable_adc, adc_on) {
+            (true, true) => AuthMode::Adc,
+            (false, false) => AuthMode::Oauth,
+            (false, true) => AuthMode::MixedAdcFileWithoutFlag,
+            (true, false) => AuthMode::MixedFlagWithoutAdcFile,
+        }
     };
     let accounts: Vec<AntigravityAccountItem> = vault
         .entries
@@ -733,8 +803,9 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
                     entry_matches(e, oauth_digest.as_deref(), oauth_email.as_deref())
                 }
                 AccountKind::Adc => entry_matches(e, adc_digest.as_deref(), None),
+                AccountKind::VertexKey => vertex_active.is_some_and(|g| g.account_id == e.id),
             };
-            AntigravityAccountItem {
+            Ok(AntigravityAccountItem {
                 id: e.id.clone(),
                 name: e.name.clone(),
                 kind: e.kind,
@@ -744,9 +815,18 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
                 current,
                 updated_at: e.updated_at,
                 credential_revision: payload_digest(&e.payload),
-            }
+                vertex: if e.kind == AccountKind::VertexKey {
+                    let key = decode_vertex(e)?;
+                    Some(VertexMetadata {
+                        location: key.location,
+                        models: key.models,
+                    })
+                } else {
+                    None
+                },
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let mut state = AntigravityAuthState {
         accounts,
         mode,
@@ -775,7 +855,11 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
     let cfg_rev = storage::revision(cfg_raw.as_deref());
     let oauth_rev = oauth_digest.as_deref().unwrap_or("none");
     state.revision = storage::digest(
-        format!("{vault_rev}:{cfg_rev}:{oauth_rev}:{adc_status:?}:{adc_digest:?}").as_bytes(),
+        format!(
+            "{vault_rev}:{cfg_rev}:{oauth_rev}:{adc_status:?}:{adc_digest:?}:{}",
+            storage::revision(app_raw.as_deref())
+        )
+        .as_bytes(),
     );
     Ok((state, clean))
 }
@@ -809,15 +893,19 @@ fn with_lifecycle(
     if was_running {
         lc.quit()?;
     }
+    let mut snapshots = Vec::new();
     let next = with_lock(|| {
         verify_revision(paths, rev)?;
         let snaps: Vec<_> = paths
             .watched_files()
             .into_iter()
+            .chain(std::iter::once(paths.vault_file()))
             .map(|f| storage::read_optional(&f).map(|b| (f, b)))
             .collect::<Result<_>>()?;
-        if let Err(e) = mutate() {
-            let res: Vec<_> = snaps
+        snapshots = snaps;
+        let next = mutate().and_then(|_| state_at(paths));
+        if let Err(e) = next {
+            let res: Vec<_> = snapshots
                 .iter()
                 .filter_map(|(f, p)| {
                     restore_file(f, p.as_deref())
@@ -832,11 +920,20 @@ fn with_lifecycle(
                 err(&e.code, &msg)
             });
         }
-        state_at(paths)
+        next
     });
     if was_running {
         if next.is_ok() {
-            lc.launch()?;
+            if let Err(error) = lc.launch() {
+                with_lock(|| {
+                    for (file, before) in &snapshots {
+                        restore_file(file, before.as_deref())?;
+                    }
+                    Ok(())
+                })?;
+                let _ = lc.launch();
+                return Err(error);
+            }
         } else {
             let _ = lc.launch();
         }
@@ -943,15 +1040,22 @@ pub fn switch_account_at(
         match e.kind {
             AccountKind::Oauth => parse_oauth_metadata(&e.payload).map(|_| ())?,
             AccountKind::Adc => parse_adc_metadata(&e.payload).map(|_| ())?,
+            AccountKind::VertexKey => {
+                return Err(err(code::AUTH, "请通过共享监听切换 Vertex API Key"))
+            }
         }
         Ok((v, e))
     })?;
-    with_lifecycle(paths, rev, lc, || match entry.kind {
-        AccountKind::Oauth => {
-            write_private_file(&paths.oauth_file(), entry.payload.as_bytes())?;
-            apply_mode_files(paths, false, &vault)
+    with_lifecycle(paths, rev, lc, || {
+        restore_gateway_settings(paths)?;
+        match entry.kind {
+            AccountKind::Oauth => {
+                write_private_file(&paths.oauth_file(), entry.payload.as_bytes())?;
+                apply_mode_files(paths, false, &vault)
+            }
+            AccountKind::Adc => write_active_adc(paths, entry.payload.as_bytes()),
+            AccountKind::VertexKey => unreachable!(),
         }
-        AccountKind::Adc => write_active_adc(paths, entry.payload.as_bytes()),
     })
 }
 pub fn set_mode_at(
@@ -971,6 +1075,7 @@ pub fn set_mode_at(
         Ok(load_vault(paths)?.0)
     })?;
     with_lifecycle(paths, rev, lc, || {
+        restore_gateway_settings(paths)?;
         apply_mode_files(paths, enable_adc, &vault)
     })
 }
@@ -1007,6 +1112,7 @@ pub fn delete_account_at(paths: &Paths, id: &str, rev: &str) -> Result<Antigravi
         let target = vault.entries[idx].clone();
         let candidates: Vec<PathBuf> = match target.kind {
             AccountKind::Oauth => vec![paths.oauth_file()],
+            AccountKind::VertexKey => vec![],
             AccountKind::Adc => vec![
                 paths.adc_file(),
                 paths.adc_disabled_file(),
@@ -1055,7 +1161,9 @@ pub fn disk_stamp() -> Option<String> {
     Some(stamp)
 }
 pub fn active_account_id(state: &AntigravityAuthState) -> Option<String> {
-    let target = if state.enable_adc {
+    let target = if state.mode == AuthMode::VertexKey {
+        AccountKind::VertexKey
+    } else if state.enable_adc {
         AccountKind::Adc
     } else {
         AccountKind::Oauth
@@ -1086,6 +1194,19 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
     let Ok(vault) = serde_json::from_slice::<Vault>(&b) else {
         return ProviderTimeline::default();
     };
+    if let Some(selection) = &vault.gateway {
+        if let Some(home) = gemini_home {
+            let paths = Paths {
+                gemini_home: home.to_path_buf(),
+                ..Paths::from_roots(home.parent().unwrap_or(home), data_dir)
+            };
+            if read_app_settings(&paths).is_ok_and(|s| selection.matches(&s)) {
+                return ProviderTimeline {
+                    spans: vault.activations,
+                };
+            }
+        }
+    }
     let mut spans = vault.activations;
     if let Some(g) = gemini_home {
         let p = Paths {
@@ -1098,7 +1219,13 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
             let d = payload_digest(&raw);
             let em = (!en).then(|| parse_oauth_metadata(&raw).ok()?.1).flatten();
             if let Some(e) = vault.entries.iter().find(|e| {
-                (e.kind == AccountKind::Adc) == en && entry_matches(e, Some(&d), em.as_deref())
+                e.kind
+                    == if en {
+                        AccountKind::Adc
+                    } else {
+                        AccountKind::Oauth
+                    }
+                    && entry_matches(e, Some(&d), em.as_deref())
             }) {
                 let since = observed_activation_ms(&p, en, spans.is_empty());
                 push_span(&mut spans, &e.id, since);
@@ -1121,17 +1248,296 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
 pub fn poll_state(data_dir: &Path) -> Result<(AntigravityAuthState, bool)> {
     with_lock(|| state_with_health(&Paths::resolve(data_dir)?))
 }
+fn parse_app_settings(raw: Option<&[u8]>) -> Result<Value> {
+    let value: Value = raw
+        .map(serde_json::from_slice)
+        .transpose()
+        .map_err(|_| err(code::JSON, "Antigravity App 设置不是有效的 JSON"))?
+        .unwrap_or_else(|| json!({}));
+    if !value.is_object() {
+        return Err(err(code::JSON, "Antigravity App 设置必须是 JSON 对象"));
+    }
+    Ok(value)
+}
+fn read_app_settings(paths: &Paths) -> Result<Value> {
+    parse_app_settings(storage::read_optional(&paths.app_settings_file())?.as_deref())
+}
+fn write_app_settings(paths: &Paths, value: &Value) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|_| err(code::JSON, "Antigravity App 设置无法保存"))?;
+    write_private_file(&paths.app_settings_file(), &bytes)
+}
+fn decode_vertex(entry: &StoredEntry) -> Result<VertexKey> {
+    let mut key: VertexKey = serde_json::from_str(&entry.payload)
+        .map_err(|_| err(code::AUTH, "Vertex API Key 凭据无法读取"))?;
+    key.validate()?;
+    Ok(key)
+}
+fn restore_gateway_settings(paths: &Paths) -> Result<()> {
+    let (mut vault, _) = load_vault(paths)?;
+    let Some(selection) = vault.gateway.take() else {
+        return Ok(());
+    };
+    let mut settings = read_app_settings(paths)?;
+    for (key, previous) in [
+        ("gateway", selection.previous.gateway),
+        ("models", selection.previous.models),
+    ] {
+        if let Some(value) = previous {
+            settings[key] = value;
+        } else {
+            settings.as_object_mut().unwrap().remove(key);
+        }
+    }
+    if !selection.previous.file_existed && settings.as_object().unwrap().is_empty() {
+        restore_file(&paths.app_settings_file(), None)?;
+    } else {
+        write_app_settings(paths, &settings)?;
+    }
+    save_vault(paths, &vault)?;
+    Ok(())
+}
+fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<StoredEntry> {
+    with_lock(|| {
+        verify_revision(paths, &input.expected_revision)?;
+        let (vault, _) = load_vault(paths)?;
+        let existing = input
+            .id
+            .as_deref()
+            .map(|id| vault.index_of(id).map(|i| &vault.entries[i]))
+            .transpose()?;
+        if existing.is_some_and(|e| e.kind != AccountKind::VertexKey) {
+            return Err(err(code::ACCOUNT, "此条目不是 Vertex API Key"));
+        }
+        let api_key = if input.api_key.trim().is_empty() {
+            existing
+                .map(decode_vertex)
+                .transpose()?
+                .map(|k| k.api_key)
+                .unwrap_or_default()
+        } else {
+            input.api_key.clone()
+        };
+        let mut key = VertexKey {
+            api_key,
+            project_id: input.project_id.clone(),
+            location: input.location.clone(),
+            models: input.models.clone(),
+        };
+        key.validate()?;
+        Ok(StoredEntry {
+            id: existing
+                .map(|e| e.id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            name: clean_label(Some(&input.name), "Vertex API Key")?,
+            kind: AccountKind::VertexKey,
+            source_type: "vertex_key".into(),
+            email: None,
+            project_id: key.project_id.clone(),
+            payload: serde_json::to_string(&key)
+                .map_err(|_| err(code::JSON, "Vertex API Key 无法保存"))?,
+            updated_at: now_secs(),
+        })
+    })
+}
+fn upsert_vertex(vault: &mut Vault, entry: StoredEntry) {
+    if let Some(old) = vault.entries.iter_mut().find(|e| e.id == entry.id) {
+        *old = entry;
+    } else {
+        vault.entries.push(entry);
+    }
+}
+fn activate_vertex_at(
+    paths: &Paths,
+    lc: &dyn AppLifecycle,
+    entry: StoredEntry,
+    rev: &str,
+    port: u16,
+    token: String,
+    ready: impl FnOnce() -> Result<()>,
+) -> Result<AntigravityAuthState> {
+    let key = decode_vertex(&entry)?;
+    with_lifecycle(paths, rev, lc, || {
+        let (mut vault, _) = load_vault(paths)?;
+        let mut settings = read_app_settings(paths)?;
+        let previous = vault
+            .gateway
+            .as_ref()
+            .map(|g| g.previous.clone())
+            .unwrap_or_else(|| GatewaySnapshot {
+                gateway: settings.get("gateway").cloned(),
+                models: settings.get("models").cloned(),
+                file_existed: paths.app_settings_file().exists(),
+            });
+        let selection = GatewaySelection {
+            account_id: entry.id.clone(),
+            token,
+            port,
+            previous,
+        };
+        settings["gateway"] = json!({"enabled": true, "url": selection.url(), "apiKey": selection.token, "wireProtocol": "genai", "customHeaders": {}});
+        settings["models"] = json!({"defaultModelId": key.models[0], "list": key.models.iter().map(|m| json!({"modelId":m})).collect::<Vec<_>>()});
+        write_app_settings(paths, &settings)?;
+        apply_mode_files(paths, false, &vault)?;
+        push_span(&mut vault.activations, &entry.id, now_ms());
+        upsert_vertex(&mut vault, entry);
+        vault.gateway = Some(selection);
+        save_vault(paths, &vault)?;
+        ready()
+    })
+}
+async fn run_vertex(
+    rt: Arc<Runtime>,
+    entry: StoredEntry,
+    revision: String,
+) -> Result<AntigravityAuthState> {
+    let paths = Paths::resolve(&rt.data)?;
+    let key = decode_vertex(&entry)?;
+    let token = with_lock(|| {
+        Ok(load_vault(&paths)?
+            .0
+            .gateway
+            .map(|g| g.token)
+            .unwrap_or_else(|| format!("vela_ag_{}", Uuid::new_v4().simple())))
+    })?;
+    let registry = rt.gateway.registry();
+    let _lifecycle = registry.lifecycle.lock().await;
+    let prepared = registry.listener.prepare().await?;
+    registry.update_ports()?;
+    let session = Arc::new(vertex::Session::new(key, token.clone(), &registry));
+    let previous = registry.antigravity.lock().unwrap().clone();
+    let activate_registry = registry.clone();
+    let active = session.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        with_usage_sync(
+            true,
+            || {
+                if let Ok(home) = crate::antigravity::home() {
+                    let _ = rt
+                        .usage
+                        .sync_roots(vec![("antigravity".into(), Ok(home))], None);
+                }
+            },
+            || {
+                activate_vertex_at(
+                    &paths,
+                    &SystemAppLifecycle::default(),
+                    entry,
+                    &revision,
+                    prepared.port,
+                    token,
+                    || {
+                        activate_registry.listener.activate_antigravity(
+                            prepared.socket,
+                            activate_registry.clone(),
+                            || {
+                                *activate_registry.antigravity.lock().unwrap() = Some(active);
+                                Ok(())
+                            },
+                        )
+                    },
+                )
+            },
+        )
+    })
+    .await
+    .map_err(|_| err(code::PROCESS, "Vertex API Key 切换任务异常中断"))?;
+    if result.is_err() {
+        session.stop();
+        *registry.antigravity.lock().unwrap() = previous.clone();
+        if previous.is_none() {
+            registry.listener.deactivate_antigravity().await?;
+        }
+    } else if let Some(previous) = previous {
+        previous.stop();
+    }
+    registry.changed();
+    result
+}
+pub(crate) async fn restore_vertex_listener(
+    data: &Path,
+    gateway: &crate::gateway::Gateway,
+) -> Result<()> {
+    restore_vertex_listener_at(&Paths::resolve(data)?, gateway).await
+}
+async fn restore_vertex_listener_at(
+    paths: &Paths,
+    gateway: &crate::gateway::Gateway,
+) -> Result<()> {
+    let selected = with_lock(|| {
+        let (vault, _) = load_vault(paths)?;
+        let Some(selection) = vault.gateway else {
+            return Ok(None);
+        };
+        if !selection.matches(&read_app_settings(paths)?) {
+            return Ok(None);
+        }
+        let entry = vault
+            .entries
+            .iter()
+            .find(|e| e.id == selection.account_id && e.kind == AccountKind::VertexKey)
+            .ok_or_else(|| err(code::AUTH, "当前 Vertex API Key 条目不存在"))?;
+        Ok(Some((selection, decode_vertex(entry)?)))
+    })?;
+    let Some((selection, key)) = selected else {
+        return Ok(());
+    };
+    let registry = gateway.registry();
+    let _lifecycle = registry.lifecycle.lock().await;
+    if registry.listener.view()?.port != selection.port {
+        return Err(err(
+            code::CONFLICT,
+            "Antigravity 共享端口已变化，请重新切换此账号",
+        ));
+    }
+    let prepared = registry.listener.prepare().await?;
+    registry.update_ports()?;
+    let session = Arc::new(vertex::Session::new(key, selection.token, &registry));
+    registry
+        .listener
+        .activate_antigravity(prepared.socket, registry.clone(), || {
+            *registry.antigravity.lock().unwrap() = Some(session);
+            Ok(())
+        })?;
+    registry.changed();
+    Ok(())
+}
+#[tauri::command]
+pub async fn save_antigravity_vertex_key(
+    r: R<'_>,
+    input: SaveVertexKeyInput,
+) -> Result<AntigravityAuthState> {
+    let paths = Paths::resolve(&r.data)?;
+    let entry = vertex_entry(&paths, &input)?;
+    let active = with_lock(|| {
+        Ok(load_vault(&paths)?
+            .0
+            .gateway
+            .is_some_and(|g| g.account_id == entry.id))
+    })?;
+    if input.activate || active {
+        run_vertex(r.inner().clone(), entry, input.expected_revision).await
+    } else {
+        with_lock(|| {
+            verify_revision(&paths, &input.expected_revision)?;
+            let (mut vault, _) = load_vault(&paths)?;
+            upsert_vertex(&mut vault, entry);
+            save_vault(&paths, &vault)?;
+            state_at(&paths)
+        })
+    }
+}
 pub(crate) fn with_usage_sync<T>(
     sync: bool,
-    mut synchronize: impl FnMut(Option<&str>),
+    mut synchronize: impl FnMut(),
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if sync {
-        synchronize(None);
+        synchronize();
     }
     let state = action()?;
     if sync {
-        synchronize(None);
+        synchronize();
     }
     Ok(state)
 }
@@ -1142,20 +1548,26 @@ async fn run_blocking(
     f: impl FnOnce(Paths, SystemAppLifecycle) -> Result<AntigravityAuthState> + Send + 'static,
 ) -> Result<AntigravityAuthState> {
     let rt = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let registry = rt.gateway.registry();
+    let _lifecycle = registry.lifecycle.lock().await;
+    let result = tauri::async_runtime::spawn_blocking(move || {
         with_usage_sync(
             sync,
-            |rebuild| {
+            || {
                 if let Ok(home) = crate::antigravity::home() {
                     let roots = vec![("antigravity".into(), Ok(home))];
-                    let _ = rt.usage.sync_roots(roots, rebuild);
+                    let _ = rt.usage.sync_roots(roots, None);
                 }
             },
             || f(Paths::resolve(&rt.data)?, SystemAppLifecycle::default()),
         )
     })
     .await
-    .map_err(|_| err(code::PROCESS, msg))?
+    .map_err(|_| err(code::PROCESS, msg))?;
+    if result.as_ref().is_ok_and(|s| s.mode != AuthMode::VertexKey) {
+        vertex::stop(&registry).await?;
+    }
+    result
 }
 #[tauri::command]
 pub fn get_antigravity_auth_state(r: R<'_>) -> Result<AntigravityAuthState> {
@@ -1197,6 +1609,13 @@ pub async fn switch_antigravity_account(
     id: String,
     expected_revision: String,
 ) -> Result<AntigravityAuthState> {
+    let entry = with_lock(|| {
+        let (vault, _) = load_vault(&Paths::resolve(&r.data)?)?;
+        Ok(vault.entries[vault.index_of(&id)?].clone())
+    })?;
+    if entry.kind == AccountKind::VertexKey {
+        return run_vertex(r.inner().clone(), entry, expected_revision).await;
+    }
     let msg = "切换凭据任务异常中断";
     run_blocking(r, true, msg, move |p, l| {
         switch_account_at(&p, &l, &id, &expected_revision)

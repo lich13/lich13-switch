@@ -18,6 +18,7 @@ pub struct Registry {
     pub lifecycle: tokio::sync::Mutex<()>,
     pub listener: Listener,
     pub freeze: super::freeze::Gate,
+    pub antigravity: Mutex<Option<Arc<super::antigravity::Session>>>,
 }
 impl Registry {
     pub fn new(data: PathBuf, port: Option<u16>) -> Result<Self> {
@@ -30,6 +31,7 @@ impl Registry {
             lifecycle: tokio::sync::Mutex::new(()),
             listener,
             freeze: super::freeze::Gate::default(),
+            antigravity: Mutex::new(None),
         })
     }
     pub fn gateway(&self, client: ClientId) -> Option<Gateway> {
@@ -86,7 +88,7 @@ impl Registry {
             let _ = gateway.events.send(());
         }
     }
-    pub fn register(&self, shared: &Arc<Shared>, token: &str) -> Result<()> {
+    pub(super) fn register(&self, shared: &Arc<Shared>, token: &str) -> Result<()> {
         self.update_ports()?;
         self.update_tokens(|entries| {
             entries.retain(|entry| entry.client != shared.client);

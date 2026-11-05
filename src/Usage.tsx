@@ -102,6 +102,7 @@ export default function Usage({
     [provider, setProvider] = useState(""),
     [operation, setOperation] = useState(""),
     [sessionId, setSessionId] = useState(""),
+    [sessionTitle, setSessionTitle] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
@@ -279,17 +280,20 @@ export default function Usage({
     },
     [request],
   );
-  const load = useCallback(
+  const loadData = useCallback(
     (fresh = false) => {
       if (fresh) pending.current.clear();
       return Promise.all([
         loadOverview(),
         ...(tab === "requests" ? [loadRows()] : []),
         ...(tab === "antigravity" ? [loadAntigravity()] : []),
-        loadState(),
       ]);
     },
-    [loadOverview, loadRows, loadAntigravity, loadState, tab],
+    [loadOverview, loadRows, loadAntigravity, tab],
+  );
+  const load = useCallback(
+    (fresh = false) => Promise.all([loadData(fresh), loadState()]),
+    [loadData, loadState],
   );
   useEffect(() => {
     if (visible && nativeVisible) void loadOverview();
@@ -321,6 +325,12 @@ export default function Usage({
       events.dispose();
     };
   }, [loadState, visible, nativeVisible]);
+  useEffect(() => {
+    if (!visible || !nativeVisible) return;
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    events.watch("pricing-state", () => void loadData(true));
+    return () => events.dispose();
+  }, [loadData, visible, nativeVisible]);
   useEffect(() => {
     if (!visible || !nativeVisible) return;
     let gone = false;
@@ -567,13 +577,13 @@ export default function Usage({
           <button
             type="button"
             className="usage-session-chip"
-            aria-label={`清除会话筛选 #${sessionId.slice(0, 8)}`}
+            aria-label={`清除会话筛选 ${sessionTitle}`}
             onClick={() => {
               setSessionId("");
               resetPages();
             }}
           >
-            <span>会话 #{sessionId.slice(0, 8)}</span>
+            <span>{sessionTitle || "未命名会话"}</span>
             <span aria-hidden="true">×</span>
           </button>
         )}
@@ -665,7 +675,8 @@ export default function Usage({
             setProvider(nextProvider);
             resetPages();
           }}
-          onSelectSession={(nextSessionId) => {
+          onSelectSession={(nextSessionId, title) => {
+            setSessionTitle(title);
             setClient("antigravity");
             setSessionId(nextSessionId);
             resetPages();
@@ -733,8 +744,9 @@ export default function Usage({
           historyIncomplete={data?.sourceHistoryIncomplete ?? false}
           onClose={() => setSheet(false)}
           onChange={(s) => {
+            stateSequence.current++;
             setState(s);
-            void load(true);
+            void loadData(true);
           }}
         />
       )}

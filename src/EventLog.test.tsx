@@ -88,6 +88,35 @@ function eventCalls() {
   return mock.command.mock.calls.filter(([name]) => name === "get_app_events");
 }
 
+it("starts a fresh visible request and ignores an older hidden-window response", async () => {
+  const original = mock.command.getMockImplementation()!;
+  let finish!: (value: ReturnType<typeof page>) => void;
+  let reads = 0;
+  mock.command.mockImplementation((name, args) =>
+    name === "get_app_events" && ++reads === 1
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : original(name, args),
+  );
+  render(<EventLog />);
+  await waitFor(() => expect(eventCalls()).toHaveLength(1));
+  act(() => mock.listeners.get("app-visibility")?.(false));
+  act(() => mock.listeners.get("app-event")?.(record));
+  expect(eventCalls()).toHaveLength(1);
+  act(() => mock.listeners.get("app-visibility")?.(true));
+  await waitFor(() => expect(eventCalls()).toHaveLength(2));
+  expect(
+    await screen.findByRole("button", { name: /模型不支持/ }),
+  ).toBeInTheDocument();
+  await act(async () => {
+    finish({ ...page(1), items: [], total: 0 });
+  });
+  expect(
+    screen.getByRole("button", { name: /模型不支持/ }),
+  ).toBeInTheDocument();
+});
+
 it("opens a policy from either the row or drawer with the original error fields", async () => {
   const user = userEvent.setup();
   const open = vi.fn();
@@ -480,7 +509,10 @@ it("separates origins, resets pagination, and hides policy actions for internal 
     providerId: null,
     reason: "request_interrupted",
     origin: "antigravity",
-    details: { upstreamCode: "STREAM_TIMEOUT", message: "stream was interrupted after 5m0s" },
+    details: {
+      upstreamCode: "STREAM_TIMEOUT",
+      message: "stream was interrupted after 5m0s",
+    },
   };
   const original = mock.command.getMockImplementation()!;
   mock.command.mockImplementation(async (name, args) => {
@@ -732,19 +764,28 @@ it("coalesces slow log refreshes and ignores a response from the previous tab", 
 
 it("clearing logs starts a fresh query even when the previous query is still pending", async () => {
   let finish!: (value: ReturnType<typeof page>) => void;
-  const slow = new Promise<ReturnType<typeof page>>((resolve) => { finish = resolve; });
+  const slow = new Promise<ReturnType<typeof page>>((resolve) => {
+    finish = resolve;
+  });
   const original = mock.command.getMockImplementation()!;
   let calls = 0;
   mock.command.mockImplementation((name, args) => {
-    if (name === "get_app_events") return ++calls === 1 ? slow : Promise.resolve({ ...page(1), items: [], total: 0 });
+    if (name === "get_app_events")
+      return ++calls === 1
+        ? slow
+        : Promise.resolve({ ...page(1), items: [], total: 0 });
     return original(name, args);
   });
   render(<EventLog />);
   await waitFor(() => expect(eventCalls()).toHaveLength(1));
   fireEvent.click(screen.getByRole("button", { name: "清空全部日志" }));
   await waitFor(() => expect(eventCalls()).toHaveLength(2));
-  await act(async () => { finish(page(1)); });
-  expect(screen.queryByRole("button", { name: /模型不支持/ })).not.toBeInTheDocument();
+  await act(async () => {
+    finish(page(1));
+  });
+  expect(
+    screen.queryByRole("button", { name: /模型不支持/ }),
+  ).not.toBeInTheDocument();
 });
 
 it.each(["上游报错", "网关内部"])(

@@ -281,7 +281,7 @@ export type AntigravityFamilyGroup = {
 
 export type AntigravitySessionRow = {
   sessionId: string;
-  shortHash: string;
+  title: string | null;
   requests: number;
   primaryModel: string;
   family: string;

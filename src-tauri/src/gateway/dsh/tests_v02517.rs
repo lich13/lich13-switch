@@ -848,3 +848,177 @@ async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt()
     assert_eq!(*calls.lock().unwrap(), 1);
     fixture.gateway.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn exhausted_dsh_timeouts_preserve_504_without_replaying_same_provider() {
+    for (manual, count) in [(false, 1), (true, 2), (false, 2)] {
+        for phase in ["headers", "first_byte", "idle"] {
+            let calls = Arc::new(Mutex::new(0));
+            let seen = calls.clone();
+            let upstream = server(move |_| {
+                let seen = seen.clone();
+                async move {
+                    *seen.lock().unwrap() += 1;
+                    if phase == "headers" {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        return success();
+                    }
+                    let frames = async_stream::try_stream! {
+                        if phase == "idle" {
+                            yield hyper::body::Frame::data(bytes::Bytes::from_static(b": waiting\n\n"));
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        yield hyper::body::Frame::data(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+                    };
+                    Response::builder().header("content-type", "text/event-stream")
+                        .body(http_body_util::StreamBody::new(frames).boxed_unsync()).unwrap()
+                }
+            }).await;
+            // Distinct paths retain separate providers pointing at the same fixture.
+            let bases: Vec<_> = (0..count)
+                .map(|i| upstream.url(&format!("/provider-{i}/v1")))
+                .collect();
+            let fixture = Fixture::new(&bases, manual).await;
+            let events = crate::events::Service::new(&fixture.home.path().join("events"));
+            fixture.gateway.set_diagnostics(events.clone());
+            let response = fixture.request(models::FLASH, true).await;
+            assert_eq!(response.status(), 504, "{manual}/{count}/{phase}");
+            assert!(response.text().await.unwrap().contains(if phase == "idle" {
+                "STREAM_TIMEOUT"
+            } else {
+                "FIRST_BYTE_TIMEOUT"
+            }));
+            let expected = if manual { 1 } else { count };
+            assert_eq!(*calls.lock().unwrap(), expected);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let page = events.query(crate::events::Filter::default());
+                    if page.items.iter().any(|e| {
+                        e.attempt == Some(expected) && e.action == crate::events::Action::Returned
+                    }) {
+                        assert!(!page
+                            .items
+                            .iter()
+                            .any(|e| e.action == crate::events::Action::RetryingSame));
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            fixture.gateway.stop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn filtered_dsh_provider_retries_interrupted_prebuffer_and_honors_retry_after() {
+    for interrupted in [true, false] {
+        let calls = Arc::new(Mutex::new(0));
+        let seen = calls.clone();
+        let upstream = server(move |_| {
+            let seen = seen.clone();
+            async move {
+                let attempt = { let mut n = seen.lock().unwrap(); *n += 1; *n };
+                if attempt > 1 { return success(); }
+                if !interrupted {
+                    return Response::builder().status(503).header("retry-after", "2")
+                        .body(replay::full("fixture service failure")).unwrap();
+                }
+                let frames = async_stream::try_stream! {
+                    yield hyper::body::Frame::data(bytes::Bytes::from_static(b": waiting\n\n"));
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err::<(), crate::gateway::connector::BoxError>(std::io::Error::other("fixture stream interrupted").into())?;
+                };
+                Response::builder().header("content-type", "text/event-stream")
+                    .body(http_body_util::StreamBody::new(frames).boxed_unsync()).unwrap()
+            }
+        }).await;
+        let skipped = server(|_| async { panic!("excluded model must not be dispatched") }).await;
+        let fixture = Fixture::new(&[upstream.url("/v1"), skipped.url("/v1")], false).await;
+        retry_settings(&fixture, 2);
+        fixture
+            .gateway
+            .edit(
+                Edit::DshModelsProvider {
+                    id: fixture.gateway.view().providers[1].id.clone(),
+                    mapping: ModelMapping(BTreeMap::from([
+                        (models::FLASH.into(), None),
+                        (models::PRO.into(), Some("fixture-pro".into())),
+                    ])),
+                },
+                &fixture.gateway.view().revision,
+                fixture.home.path(),
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        let response = fixture.request(models::FLASH, interrupted).await;
+        assert_eq!(response.status(), 200);
+        assert!(response.text().await.unwrap().contains("fixture"));
+        assert_eq!(*calls.lock().unwrap(), 2);
+        if !interrupted {
+            assert!(started.elapsed() >= Duration::from_secs(2));
+        }
+        fixture.gateway.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn dsh_failure_reaching_breaker_threshold_does_not_schedule_short_wait() {
+    for framed in [false, true] {
+        let calls = Arc::new(Mutex::new(0));
+        let seen = calls.clone();
+        let upstream = server(move |_| {
+            let seen = seen.clone();
+            async move {
+                *seen.lock().unwrap() += 1;
+                if framed {
+                    Response::builder().header("content-type", "text/event-stream")
+                        .body(replay::full("data: {\"error\":{\"type\":\"server_error\",\"message\":\"fixture failure\"}}\n\n")).unwrap()
+                } else {
+                    Response::builder().status(503).body(replay::full("fixture service failure")).unwrap()
+                }
+            }
+        }).await;
+        let fixture = Fixture::new(&[upstream.url("/v1")], false).await;
+        retry_settings(&fixture, 3);
+        let mut settings = fixture.gateway.view().settings;
+        settings.transient_failure_threshold = 1;
+        fixture
+            .gateway
+            .edit(
+                Edit::Settings { settings },
+                &fixture.gateway.view().revision,
+                fixture.home.path(),
+            )
+            .unwrap();
+        let events = crate::events::Service::new(&fixture.home.path().join("events"));
+        fixture.gateway.set_diagnostics(events.clone());
+        let response = fixture.request(models::FLASH, framed).await;
+        assert_eq!(response.status().as_u16(), if framed { 502 } else { 503 });
+        response.bytes().await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert!(fixture.gateway.view().transient_retries.is_empty());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let page = events.query(crate::events::Filter::default());
+                if page
+                    .items
+                    .iter()
+                    .any(|e| e.reason == crate::events::Reason::UpstreamService)
+                {
+                    assert!(!page
+                        .items
+                        .iter()
+                        .any(|e| e.action == crate::events::Action::RetryingSame));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        fixture.gateway.stop().await.unwrap();
+    }
+}

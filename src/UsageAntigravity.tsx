@@ -84,7 +84,7 @@ export default function UsageAntigravity({
   selectedProvider?: string;
   providerName?: (id: string | null) => string;
   onSelectProvider?: (providerId: string) => void;
-  onSelectSession: (sessionId: string, shortHash: string) => void;
+  onSelectSession: (sessionId: string, title: string) => void;
 }) {
   if (!stats) {
     return (
@@ -121,7 +121,7 @@ export default function UsageAntigravity({
             </strong>
           </div>
           <div>
-            <span>脱敏会话</span>
+            <span>会话</span>
             <strong title={numeric(stats.sessions)}>
               {compact(stats.sessions)}
             </strong>
@@ -154,10 +154,7 @@ export default function UsageAntigravity({
           </div>
           <div>
             <span>缓存估算节省</span>
-            <strong
-              className="usage-ag-savings"
-              title={mix.cacheSavingsUsd}
-            >
+            <strong className="usage-ag-savings" title={mix.cacheSavingsUsd}>
               {money(mix.cacheSavingsUsd)}
             </strong>
           </div>
@@ -195,10 +192,7 @@ export default function UsageAntigravity({
         </div>
       </section>
 
-      <section
-        className="usage-ag-tracks"
-        aria-label="双轨 5 小时与 7 天滚动窗口"
-      >
+      <section className="usage-ag-tracks" aria-label="近期用量">
         {stats.tracks.map((track) => (
           <article
             key={track.id}
@@ -209,8 +203,8 @@ export default function UsageAntigravity({
               <h2>{track.label}</h2>
             </header>
             <div className="usage-ag-windows">
-              <TrackWindowBlock title="5h 突发窗口" window={track.burst5h} />
-              <TrackWindowBlock title="7d 周滚动" window={track.weekly7d} />
+              <TrackWindowBlock title="近 5 小时" window={track.burst5h} />
+              <TrackWindowBlock title="近 7 天" window={track.weekly7d} />
             </div>
           </article>
         ))}
@@ -267,13 +261,9 @@ export default function UsageAntigravity({
                         className="usage-ag-session-btn"
                         aria-pressed={active}
                         aria-label={
-                          active
-                            ? `取消按 ${label} 筛选`
-                            : `按 ${label} 筛选`
+                          active ? `取消按 ${label} 筛选` : `按 ${label} 筛选`
                         }
-                        onClick={() =>
-                          onSelectProvider(active ? "" : prov.id)
-                        }
+                        onClick={() => onSelectProvider(active ? "" : prov.id)}
                       >
                         {active ? "已筛选" : "筛选"}
                       </button>
@@ -325,8 +315,8 @@ export default function UsageAntigravity({
         </section>
       )}
 
-      <section className="usage-ag-card" aria-label="脱敏会话排行">
-        <h2 className="usage-ag-section-title">脱敏会话排行</h2>
+      <section className="usage-ag-card" aria-label="会话排行">
+        <h2 className="usage-ag-section-title">会话排行</h2>
         {stats.topSessions.length === 0 ? (
           <p className="usage-empty">当前时间范围暂无 Antigravity 会话记录</p>
         ) : (
@@ -334,7 +324,7 @@ export default function UsageAntigravity({
             <table className="usage-table usage-ag-session-table">
               <thead>
                 <tr>
-                  <th>脱敏会话</th>
+                  <th>会话</th>
                   <th>主要模型</th>
                   <th>轮次</th>
                   <th>Token / 思考</th>
@@ -349,7 +339,9 @@ export default function UsageAntigravity({
                 {stats.topSessions.map((row) => (
                   <tr key={row.sessionId}>
                     <td>
-                      <code className="usage-ag-hash">#{row.shortHash}</code>
+                      <span className="usage-ag-session-title">
+                        {row.title || "未命名会话"}
+                      </span>
                     </td>
                     <td className="usage-model" title={row.primaryModel}>
                       {row.primaryModel}
@@ -379,9 +371,12 @@ export default function UsageAntigravity({
                       <button
                         type="button"
                         className="usage-ag-session-btn"
-                        aria-label={`查看会话 #${row.shortHash} 请求`}
+                        aria-label={`查看会话 ${row.title || "未命名会话"} 请求`}
                         onClick={() =>
-                          onSelectSession(row.sessionId, row.shortHash)
+                          onSelectSession(
+                            row.sessionId,
+                            row.title || "未命名会话",
+                          )
                         }
                       >
                         查看请求

@@ -1,4 +1,4 @@
-//! Read-only Antigravity app accounting. No conversation text or API headers persist.
+//! Read-only Antigravity app accounting. Only session titles persist in private cursors; no messages or API headers.
 use super::{
     model::*,
     pricing::Pricing,
@@ -21,6 +21,8 @@ mod regression_tests;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Cursor {
+    session_id: String,
+    title: Option<String>,
     modified: String,
     count: usize,
     covered: BTreeSet<u64>,
@@ -994,6 +996,10 @@ struct Api {
     http: reqwest::Client,
     endpoints: Vec<Endpoint>,
 }
+#[cfg(test)]
+thread_local! {
+    static TEST_ENDPOINT: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
 impl Api {
     #[cfg(test)]
     fn from_single(http: reqwest::Client, origin: String, token: String) -> Self {
@@ -1034,6 +1040,10 @@ impl Api {
         Ok(bytes)
     }
     async fn connect() -> Result<Option<Self>> {
+        #[cfg(test)]
+        if let Some((origin, token)) = TEST_ENDPOINT.with(|endpoint| endpoint.borrow().clone()) {
+            return Ok(Some(Self::from_single(loopback_client()?, origin, token)));
+        }
         let port_path = dirs::config_dir()
             .ok_or_else(|| failure("无法定位 Antigravity app"))?
             .join("Antigravity/DevToolsActivePort");
@@ -1190,6 +1200,19 @@ impl Api {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default()
         };
+        let session_id = safe_id(id);
+        let title = summary
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let metadata_changed = cursor.session_id != session_id
+            || (summary.get("summary").is_some() && cursor.title != title);
+        cursor.session_id = session_id;
+        if summary.get("summary").is_some() {
+            cursor.title = title;
+        }
         let modified = summary["lastModifiedTime"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -1197,6 +1220,11 @@ impl Api {
             .unwrap_or("");
         if !store.requires_complete_history() && !modified.is_empty() && cursor.modified == modified
         {
+            if metadata_changed {
+                let saved = serde_json::to_string(&cursor)
+                    .map_err(|_| failure("Antigravity 同步位置无效"))?;
+                store.write_batch(&[], Some((&cursor_id, &saved)))?;
+            }
             return Ok(());
         }
         let total = number(&summary["stepCount"]);
@@ -1855,7 +1883,7 @@ pub struct AntigravityFamilyGroup {
 #[serde(rename_all = "camelCase")]
 pub struct AntigravitySessionRow {
     pub session_id: String,
-    pub short_hash: String,
+    pub title: Option<String>,
     pub requests: u64,
     pub primary_model: String,
     pub family: String,
@@ -2331,7 +2359,6 @@ impl UsageStatsAggregator {
             .sessions
             .into_iter()
             .map(|(session_id, acc)| {
-                let short_hash: String = session_id.chars().take(8).collect();
                 let primary_model = acc
                     .models
                     .into_iter()
@@ -2347,7 +2374,7 @@ impl UsageStatsAggregator {
                     .to_owned();
                 AntigravitySessionRow {
                     session_id,
-                    short_hash,
+                    title: None,
                     requests: acc.requests,
                     primary_model,
                     family,

@@ -2,7 +2,7 @@
 
 <img src="assets/icon.svg" alt="Vela icon" width="96" />
 
-面向 **macOS** 与 **Windows** 的本地多客户端 AI 账号、配置与 API 网关工作台（基于 **Tauri 2 + Rust + React** 构建）。统一管理 **Codex**、**Claude Code**、**Grok Build**、**DSH** 的独立供应商队列与本地流量调度，并原生支持 **Antigravity app** 的双模配置编辑、增量会话用量核算与账单导出。
+面向 **macOS** 与 **Windows** 的本地多客户端 AI 账号、配置与 API 网关工作台（基于 **Tauri 2 + Rust + React** 构建）。统一管理 **Codex**、**Claude Code**、**Grok Build**、**DSH** 的独立供应商队列与本地流量调度，并原生支持 **Antigravity app** 的账号管理、Vertex API Key 接入、双模配置编辑、增量会话用量核算与账单导出。
 
 > **安全提示**：所有账号凭据、供应商密钥与配置文件均保存在本机当前系统账户目录下（默认未加密），不会上传至任何第三方或项目服务。请按原客户端凭据的安全级别妥善保管本机文件；官方与第三方 API 配置隔离不承诺规避上游平台风控。
 
@@ -51,7 +51,7 @@
 | **Claude Code** | `127.0.0.1:43721` | `settings.json` 环境变量接入；官方／API 配置档隔离切换 | `settings.json` **可视化（5 分组）+ JSON** 双模编辑 | 网关实时计量 + 主／子代理会话去重 + **账单导出** |
 | **Grok Build** | `127.0.0.1:43721/v1` | 独立受管 API 模型接入，保留原生官方 OAuth 模型自由切换 | `config.toml` 原文校验与 `endpoint.env` 导入预览 | 网关实时计量 + 原生多模型轮次独立统计 |
 | **DSH** | `127.0.0.1:43721/v1` | Chat Completions 协议；全 profile 事务同步与官方模型目录映射 | `desktop` / 各 profile YAML patch 编辑与恢复 | 网关实时请求与模型调用计量 |
-| **Antigravity app** | —（不经过本地网关） | 本机应用直连上游；`Vela` 本地只读协同 | `config.json` **可视化（4 分组）+ JSON** 双模编辑与备份恢复 | 本机 RPC／`brain` 会话增量采集 + **账单导出与清理** |
+| **Antigravity app** | Vertex Key：`127.0.0.1:43721/antigravity` | OAuth／ADC 由 App 直连；Vertex API Key 通过 Vela 转发至 Google，使用时需保持 Vela 运行 | `config.json` **可视化（4 分组）+ JSON** 双模编辑；账号切换事务管理认证及企业网关设置 | 本机 RPC／`brain` 会话增量采集、原名展示 + **账单导出与清理** |
 
 ---
 
@@ -80,9 +80,12 @@ flowchart LR
   end
 
   Upstreams["已配置的各家上游供应商端点"]
+  Vertex["Google Vertex AI"]
 
   Codex & Claude & Grok & DSH -->|"独立本地令牌 (HTTP / SSE / WS)"| GW
   GW -->|"故障策略 / 线程亲和 / 多端点优选"| Upstreams
+  AG -->|"Vertex Key 专用路由与本地令牌"| GW
+  GW -->|"Vertex 请求直接转发"| Vertex
   Codex & Claude & Grok & DSH & AG <-->|"受管事务写入 / 变更通知 / 只读采集"| Watch & Sync
   GW & Sync --> DB
   Main & Quick <-->|"可见窗口按需 IPC"| Core
@@ -134,7 +137,7 @@ Get-FileHash .\Vela_*.exe -Algorithm SHA256
 ## 隐私、网络与存储边界
 
 - **零遥测与本地自治**：应用不含广告、统计埋点或云端账号同步。内部应用标识为 `com.lich13.vela`，本地私有数据目录统一位于 `~/.vela`（升级自动迁移旧目录数据）。
-- **明确的网络边界**：业务转发、额度刷新、模型目录拉取、无凭据多端点测速与模型指纹挑战仅发往用户显式配置的供应商地址；其余应用直接请求仅限用户检查更新（GitHub Releases API）、自动／手动同步公开模型价格（`Wei-Shaw/model-price-repo` / `models.dev`）以及用户手动更新公开指纹库资源。源码硬编码域名由 `scripts/check-network-hosts.py` 与 `scripts/network-hosts.json` 离线静态门禁严格校验。
+- **明确的网络边界**：业务转发、额度刷新、模型目录拉取、无凭据多端点测速与模型指纹挑战发往用户显式配置的供应商地址；启用 Antigravity Vertex Key 后，请求转发至 Google Vertex AI 的全局或所选地区端点。其余应用直接请求仅限用户检查更新（GitHub Releases API）、自动／手动同步公开模型价格（`Wei-Shaw/model-price-repo` / `models.dev`）以及用户手动更新公开指纹库资源。源码硬编码域名由 `scripts/check-network-hosts.py` 与 `scripts/network-hosts.json` 离线静态门禁严格校验。
 - **脱敏诊断与仓库规范**：诊断日志自动过滤敏感头与路径，不保存请求／响应正文或账号邮箱；仓库源码与测试统一使用 `example.invalid`、回环地址与 `fixture` 脱敏夹具。
 - 完整数据清单与网络矩阵请参阅 **[隐私与安全 (PRIVACY.md)](PRIVACY.md)**。发现安全隐患请通过 [GitHub Security Advisories](https://github.com/lich13/vela/security/advisories/new) 私下报告。
 

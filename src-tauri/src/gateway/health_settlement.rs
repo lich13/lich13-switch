@@ -114,6 +114,16 @@ pub(super) fn settle_protocol(
         None => (),
     }
 }
+pub(super) fn publish(g: &Gateway, event: crate::events::Record) -> Reported {
+    let queued = super::locks::published(&g.0.diagnostics)
+        .as_ref()
+        .is_some_and(|service| service.emit_checked(event.clone()));
+    Reported {
+        record: event,
+        queued,
+    }
+}
+
 pub(super) struct Permits {
     provider: Option<Permit>,
     model: Option<Permit>,
@@ -127,12 +137,28 @@ impl Permits {
         g: &Gateway,
         route: &Route,
         model: Option<&str>,
+        reason: Reason,
+        action: Action,
+        status: Option<u16>,
+        attempt: usize,
+        details: crate::events::Details,
+    ) -> Reported {
+        let event = self.prepare_report(g, route, model, reason, action, status, attempt, details);
+        publish(g, event)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_report(
+        &mut self,
+        g: &Gateway,
+        route: &Route,
+        model: Option<&str>,
         mut reason: Reason,
         action: Action,
         status: Option<u16>,
         attempt: usize,
         mut details: crate::events::Details,
-    ) -> Reported {
+    ) -> crate::events::Record {
         use crate::events::{HealthScope, Phase};
         if details.error_basis.is_some() {
             let policy = super::failure_policy::decision(status, &details);
@@ -206,13 +232,7 @@ impl Permits {
         if let Some(p) = target {
             p.set_failure_event(event.clone());
         }
-        let queued = super::locks::published(&g.0.diagnostics)
-            .as_ref()
-            .is_some_and(|service| service.emit_checked(event.clone()));
-        Reported {
-            record: event,
-            queued,
-        }
+        event
     }
 
     fn settle(&mut self, cfg: &Settings, outcome: Outcome) {

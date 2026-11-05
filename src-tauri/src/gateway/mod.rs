@@ -20,13 +20,14 @@ mod shared_listener_tests;
 #[cfg(test)]
 mod shared_transport_tests;
 pub(crate) use takeover::manages_auth;
+pub(crate) mod antigravity;
 mod client;
 #[cfg(test)]
 mod client_cancel_tests;
 pub mod freeze;
 mod listener;
 mod locks;
-mod registry;
+pub(crate) mod registry;
 pub use listener::View as ListenerView;
 mod retired;
 pub use client::{claude_home, dsh_home, grok_home, ClientId};
@@ -419,6 +420,9 @@ fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
 impl Gateway {
+    pub(crate) fn registry(&self) -> Arc<registry::Registry> {
+        self.0.registry.clone()
+    }
     pub fn freeze_gate(&self) -> freeze::Gate {
         self.0.registry.freeze.clone()
     }

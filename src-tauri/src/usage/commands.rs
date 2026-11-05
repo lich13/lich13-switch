@@ -190,11 +190,8 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
             if runtime.smoke.is_none() {
                 if let Ok(prices) = usage.prices() {
                     let before = prices.sync_stamp();
-                    let _ = prices.update(false).await;
+                    let _ = usage.update_prices(false).await;
                     let after = prices.sync_stamp();
-                    if before.0 != after.0 {
-                        usage.schedule_price_backfill();
-                    }
                     if before.1 != after.1 {
                         crate::emit_if_main_visible(
                             &price_handle,

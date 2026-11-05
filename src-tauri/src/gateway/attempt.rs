@@ -9,8 +9,7 @@ use crate::errors::code;
 use std::sync::Arc;
 
 pub(super) fn transport_retry(received: bool, eligible: bool, failure: &str) -> bool {
-    replay_policy::transport_retry(received, eligible)
-        && (failure != code::FIRST_BYTE_TIMEOUT || replay_policy::first_byte_timeout_retry(true))
+    replay_policy::transport_retry(received, eligible) && failure != code::FIRST_BYTE_TIMEOUT
 }
 
 pub(super) struct DeliveryGuard {

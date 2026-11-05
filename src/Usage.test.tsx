@@ -1735,6 +1735,7 @@ it.each(["sync", "export"])(
     }
     await flush();
     const before = calls("get_usage_dashboard").length;
+    const stateReads = calls("get_usage_state").length;
     if (action === "sync") {
       fireEvent.click(screen.getByRole("button", { name: "数据来源" }));
       fireEvent.click(
@@ -1746,6 +1747,8 @@ it.each(["sync", "export"])(
     await waitFor(() =>
       expect(calls("get_usage_dashboard")).toHaveLength(before + 1),
     );
+    if (action === "sync")
+      expect(calls("get_usage_state")).toHaveLength(stateReads);
     await act(async () => {
       finish({
         ...dashboard,
@@ -1755,3 +1758,19 @@ it.each(["sync", "export"])(
     expect(screen.queryByText("999,999")).not.toBeInTheDocument();
   },
 );
+
+it("refreshes dashboard and visible request costs after pricing changes", async () => {
+  await renderUsage();
+  fireEvent.click(screen.getByRole("tab", { name: "请求日志" }));
+  await flush();
+  const overviewReads = calls("get_usage_dashboard").length;
+  const rowReads = calls("get_usage_logs").length;
+  dashboard.totals.cost = "12.345";
+  records[0].attempts[0].price!.cost = "12.345";
+  act(() => mock.listeners.get("pricing-state")?.(pricing));
+  await waitFor(() => {
+    expect(calls("get_usage_dashboard")).toHaveLength(overviewReads + 1);
+    expect(calls("get_usage_logs")).toHaveLength(rowReads + 1);
+    expect(screen.getAllByText(/12\.345/).length).toBeGreaterThan(0);
+  });
+});

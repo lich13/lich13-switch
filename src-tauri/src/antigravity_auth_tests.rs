@@ -526,3 +526,189 @@ fn initial_activation_uses_current_credentials_and_preserves_existing_zero_histo
     assert!(timeline.spans[0].since_ms >= observed);
     assert!(timeline.spans[0].since_ms <= now_ms());
 }
+
+fn vertex_input(revision: String) -> SaveVertexKeyInput {
+    SaveVertexKeyInput {
+        id: None,
+        name: "Fixture Vertex".into(),
+        api_key: "fixture-vertex-key".into(),
+        project_id: None,
+        location: "global".into(),
+        models: vec!["gemini-3-flash-preview".into(), "gemini-2.5-flash".into()],
+        activate: true,
+        expected_revision: revision,
+    }
+}
+#[test]
+fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_settings() {
+    let (_tmp, paths) = setup_paths();
+    let lifecycle = MockLifecycle::new(true);
+    let initial = state_at(&paths).unwrap();
+    let adc = add_adc_at(&paths,&lifecycle,AddAntigravityAdcInput {
+        name: Some("Fixture ADC".into()), json_text: r#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#.into(), quota_project_id: None, activate: true,
+    }).unwrap();
+    assert_ne!(initial.revision, adc.revision);
+    let original = json!({"gateway":{"enabled":false,"customHeaders":{"fixture":"kept"}},"models":{"defaultModelId":"fixture-original"},"theme":"fixture-theme"});
+    write_app_settings(&paths, &original).unwrap();
+    let before = state_at(&paths).unwrap();
+    let entry = vertex_entry(&paths, &vertex_input(before.revision.clone())).unwrap();
+    let id = entry.id.clone();
+    let selected = activate_vertex_at(
+        &paths,
+        &lifecycle,
+        entry,
+        &before.revision,
+        43721,
+        "fixture-local-token".into(),
+        || {
+            assert!(!paths.adc_file().exists());
+            assert!(paths.adc_disabled_file().exists());
+            assert_eq!(
+                read_app_settings(&paths)?["gateway"]["url"],
+                "http://127.0.0.1:43721/antigravity"
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(selected.mode, AuthMode::VertexKey);
+    assert_eq!(active_account_id(&selected).as_deref(), Some(id.as_str()));
+    let visible = serde_json::to_string(&selected).unwrap();
+    assert!(!visible.contains("fixture-vertex-key") && !visible.contains("fixture-local-token"));
+    assert_eq!(
+        provider_timeline(&paths.data_dir, Some(&paths.gemini_home)).provider_at(now_ms()),
+        Some(id.as_str())
+    );
+    let mut edit = vertex_input(selected.revision.clone());
+    edit.id = Some(id.clone());
+    edit.api_key.clear();
+    edit.models = vec!["gemini-2.5-flash".into()];
+    let updated = vertex_entry(&paths, &edit).unwrap();
+    assert_eq!(
+        decode_vertex(&updated).unwrap().api_key,
+        "fixture-vertex-key"
+    );
+    let state = activate_vertex_at(
+        &paths,
+        &lifecycle,
+        updated,
+        &selected.revision,
+        43721,
+        "fixture-local-token".into(),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        read_app_settings(&paths).unwrap()["models"]["defaultModelId"],
+        "gemini-2.5-flash"
+    );
+    let state = set_mode_at(&paths, &lifecycle, TargetMode::Adc, &state.revision).unwrap();
+    assert_eq!(state.mode, AuthMode::Adc);
+    assert_eq!(read_app_settings(&paths).unwrap(), original);
+    assert!(load_vault(&paths).unwrap().0.gateway.is_none());
+    let renamed = rename_account_at(&paths, &id, "Renamed Vertex", &state.revision).unwrap();
+    assert!(renamed
+        .accounts
+        .iter()
+        .any(|a| a.id == id && a.name == "Renamed Vertex"));
+    assert!(!delete_account_at(&paths, &id, &renamed.revision)
+        .unwrap()
+        .accounts
+        .iter()
+        .any(|a| a.id == id));
+}
+#[test]
+fn vertex_conflicts_listener_failure_and_restart_failure_restore_files_and_vault() {
+    for fail_launch in [false, true] {
+        let (_tmp, paths) = setup_paths();
+        let mut lifecycle = MockLifecycle::new(true);
+        lifecycle.fail_launch = fail_launch;
+        let state = state_at(&paths).unwrap();
+        let entry = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
+        let before: Vec<_> = paths
+            .watched_files()
+            .into_iter()
+            .chain(std::iter::once(paths.vault_file()))
+            .map(|p| {
+                let bytes = storage::read_optional(&p).unwrap();
+                (p, bytes)
+            })
+            .collect();
+        let error = activate_vertex_at(
+            &paths,
+            &lifecycle,
+            entry,
+            &state.revision,
+            43721,
+            "fixture-local-token".into(),
+            || {
+                if fail_launch {
+                    Ok(())
+                } else {
+                    Err(err(code::CONFLICT, "fixture listener conflict"))
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            if fail_launch {
+                code::PROCESS
+            } else {
+                code::CONFLICT
+            }
+        );
+        for (path, bytes) in before {
+            assert_eq!(storage::read_optional(&path).unwrap(), bytes);
+        }
+        let current = state_at(&paths).unwrap();
+        let mut input = vertex_input(current.revision);
+        write_app_settings(&paths, &json!({"theme":"external-change"})).unwrap();
+        assert!(vertex_entry(&paths, &input).is_err());
+        input.expected_revision = state_at(&paths).unwrap().revision;
+        assert!(vertex_entry(&paths, &input).is_ok());
+    }
+}
+#[tokio::test]
+async fn selected_vertex_listener_restores_after_restart_without_rewriting_app_settings() {
+    let (_tmp, paths) = setup_paths();
+    let lifecycle = MockLifecycle::new(false);
+    let gateway = crate::gateway::Gateway::new(paths.data_dir.clone()).unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    gateway
+        .set_listener_port(port, &gateway.listener_view().revision)
+        .unwrap();
+    let state = state_at(&paths).unwrap();
+    let entry = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
+    activate_vertex_at(
+        &paths,
+        &lifecycle,
+        entry,
+        &state.revision,
+        port,
+        "fixture-local-token".into(),
+        || Ok(()),
+    )
+    .unwrap();
+    let before = fs::read(paths.app_settings_file()).unwrap();
+    restore_vertex_listener_at(&paths, &gateway).await.unwrap();
+    assert!(gateway.listener_view().antigravity_active);
+    let catalog: Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("http://127.0.0.1:{port}/antigravity/v1beta/models"))
+        .bearer_auth("fixture-local-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
+    vertex::stop(&gateway.registry()).await.unwrap();
+    assert_eq!(fs::read(paths.app_settings_file()).unwrap(), before);
+    assert_eq!(state_at(&paths).unwrap().mode, AuthMode::VertexKey);
+}

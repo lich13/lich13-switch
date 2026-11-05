@@ -547,7 +547,7 @@ export function usagePreview(
         {
           sessionId:
             "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-          shortHash: "a1b2c3d4",
+          title: "界面布局调整",
           requests: 10,
           primaryModel: "gemini-3.1-pro",
           family: "gemini",

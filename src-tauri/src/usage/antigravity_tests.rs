@@ -1331,7 +1331,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
 
         assert_eq!(stats.families.len(), 2);
         assert_eq!(stats.top_sessions.len(), 2);
-        assert_eq!(stats.top_sessions[0].short_hash.len(), 8);
+        assert!(stats.top_sessions[0].title.is_none());
         assert!(!stats.top_sessions[0].session_id.contains("session-"));
 
         // Verify session_id filter isolates logs cleanly in both v11 and v12.
@@ -2026,47 +2026,66 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
         .unwrap()
         .id
         .clone();
-    let mut store = Store::open(&dir.path().join("usage")).unwrap();
+    let service = crate::usage::Service::new(dir.path());
     let pricing = Pricing::new(dir.path()).unwrap();
     let settings = Settings::default();
-    collect_home(
-        &fixture.api,
-        &mut store,
-        dir.path(),
-        &pricing,
-        &settings,
-        &mut Report::default(),
-        false,
-    )
-    .await
-    .unwrap();
-    let key = safe_id("antigravity:rpc:z-good");
-    let before: Cursor = serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
-    fixture.calls.lock().unwrap().clear();
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        let mut syncs = 0;
+        TEST_ENDPOINT.with(|endpoint| {
+            *endpoint.borrow_mut() = Some((
+                fixture.api.endpoints[0].origin.clone(),
+                fixture.api.endpoints[0].token.clone(),
+            ))
+        });
+        service
+            .query(|store| {
+                handle.block_on(collect_home(
+                    &fixture.api,
+                    store,
+                    dir.path(),
+                    &pricing,
+                    &settings,
+                    &mut Report::default(),
+                    false,
+                ))
+            })
+            .unwrap();
+        let key = safe_id("antigravity:rpc:z-good");
+        let before: Cursor = service
+            .read(|store| Ok(serde_json::from_str(&store.cursor(&key)?.unwrap()).unwrap()))
+            .unwrap();
+        let ids = service
+            .read(|store| {
+                Ok(store
+                    .logs(&Filter::default())?
+                    .rows
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>())
+            })
+            .unwrap();
+        fixture.calls.lock().unwrap().clear();
         let state = auth::with_usage_sync(
             true,
-            |rebuild| {
-                assert!(rebuild.is_none());
-                assert!(store.cursor(&key).unwrap().is_some());
-                handle
-                    .block_on(collect_home(
-                        &fixture.api,
-                        &mut store,
-                        dir.path(),
-                        &pricing,
-                        &settings,
-                        &mut Report::default(),
-                        rebuild.is_some(),
-                    ))
+            || {
+                service
+                    .sync_roots(
+                        vec![("antigravity".into(), Ok(dir.path().to_path_buf()))],
+                        None,
+                    )
                     .unwrap();
-                let cursor: Cursor =
-                    serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
-                assert!(cursor.count >= before.count);
-                assert!(cursor.covered.is_superset(&before.covered));
-                syncs += 1;
+                service
+                    .read(|store| {
+                        let cursor: Cursor =
+                            serde_json::from_str(&store.cursor(&key)?.unwrap()).unwrap();
+                        assert!(cursor.count >= before.count);
+                        assert!(cursor.covered.is_superset(&before.covered));
+                        for id in &ids {
+                            assert_eq!(&store.detail(id)?.id, id);
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
             },
             || {
                 let switched = auth::switch_account_at(&paths, &Lifecycle, &adc, &added.revision)?;
@@ -2075,10 +2094,12 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
             },
         )
         .unwrap();
+        TEST_ENDPOINT.with(|endpoint| *endpoint.borrow_mut() = None);
         assert_eq!(state.mode, auth::AuthMode::Adc);
-        assert_eq!(syncs, 2);
         assert_eq!(
-            store.dashboard(&Filter::default()).unwrap().totals.requests,
+            service
+                .read(|store| Ok(store.dashboard(&Filter::default())?.totals.requests))
+                .unwrap(),
             2
         );
         let calls = fixture.calls.lock().unwrap();
@@ -2092,4 +2113,133 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
+    let fixture = fixture(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let settings = Settings::default();
+    let timeline = crate::antigravity::auth::ProviderTimeline::default();
+    let mut summary =
+        json!({"summary":"初始会话","lastModifiedTime":"fixture-stable","stepCount":2});
+    fixture
+        .api
+        .collect_session(
+            "z-good",
+            Some(0),
+            &summary,
+            &mut store,
+            &pricing,
+            &settings,
+            &mut Report::default(),
+            false,
+            &timeline,
+        )
+        .await
+        .unwrap();
+    let before = store.logs(&Filter::default()).unwrap();
+    fixture.calls.lock().unwrap().clear();
+    summary["summary"] = json!("修改后的会话");
+    fixture
+        .api
+        .collect_session(
+            "z-good",
+            Some(0),
+            &summary,
+            &mut store,
+            &pricing,
+            &settings,
+            &mut Report::default(),
+            false,
+            &timeline,
+        )
+        .await
+        .unwrap();
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    let after = store.logs(&Filter::default()).unwrap();
+    assert_eq!(before.data_version, after.data_version);
+    assert_eq!(
+        serde_json::to_value(before.rows).unwrap(),
+        serde_json::to_value(after.rows).unwrap()
+    );
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    let stats = store
+        .antigravity_stats(&Filter::default(), &pricing, "1", now())
+        .unwrap();
+    assert_eq!(stats.top_sessions[0].title.as_deref(), Some("修改后的会话"));
+    assert_eq!(stats.top_sessions[0].session_id, safe_id("z-good"));
+}
+
+#[test]
+fn antigravity_repair_resumes_legacy_cursor_and_skips_completed_v12_maintenance() {
+    for completed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let records: Vec<_> = ["fixture-a", "fixture-z"]
+            .into_iter()
+            .map(|id| {
+                let mut r = parsed(&entry(id, 0));
+                r.id = id.into();
+                r
+            })
+            .collect();
+        store.write_batch(&records, None).unwrap();
+        for mut r in records {
+            r.attempts[0].requested_model = Some("claude-opus-4-6".into());
+            r.attempts[0].model_display_name = Some("Claude Opus 4.6".into());
+            r.attempts[0].reasoning_effort = Some("high".into());
+            crate::usage::storage_v12::update(&store.connection, &r).unwrap();
+        }
+        store.connection.execute_batch("INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02619','done'); INSERT OR REPLACE INTO metadata VALUES('finish_time_after',''); INSERT OR REPLACE INTO metadata VALUES('repair_v020_after','');").unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02614',?1)",
+                [if completed { "done" } else { "fixture-a" }],
+            )
+            .unwrap();
+        assert!(!store.repair_finish_times().unwrap());
+        assert_eq!(store.repair_metadata_batch().unwrap(), !completed);
+        drop(store);
+        let mut store = Store::open(dir.path()).unwrap();
+        while store.repair_metadata_batch().unwrap() {}
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='antigravity_fields_v02619'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "complete"
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM metadata WHERE key='antigravity_fields_v02614'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store.detail("fixture-a").unwrap().attempts[0]
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            store.detail("fixture-z").unwrap().attempts[0]
+                .reasoning_effort
+                .as_deref(),
+            if completed { Some("high") } else { None }
+        );
+    }
 }

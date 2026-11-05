@@ -172,7 +172,10 @@ export default function Advanced({
             form={formId}
             type="number"
             disabled={
-              busy || (key === "port" && !!listener?.runningClients.length)
+              busy ||
+              (key === "port" &&
+                (!!listener?.runningClients.length ||
+                  !!listener?.antigravityActive))
             }
             required
             min={

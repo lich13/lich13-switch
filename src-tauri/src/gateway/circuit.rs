@@ -449,10 +449,17 @@ impl Permit {
                 let transient = self.failure_event.as_ref().is_some_and(|event| {
                     use crate::errors::code;
                     use crate::events::{Phase, Reason};
-                    (event.reason == Reason::UpstreamService
-                        && (event.status.is_some_and(is_server_error)
-                            || event.details.error_basis
-                                == Some(crate::events::ErrorBasis::ServiceError)))
+                    (event.reason == Reason::Network
+                        && event
+                            .client_id
+                            .and_then(crate::events::JournalClient::active)
+                            == Some(super::ClientId::Dsh)
+                        && event.details.phase == Some(Phase::Response)
+                        && event.details.local_code.as_deref() == Some(code::STREAM_INTERRUPTED))
+                        || (event.reason == Reason::UpstreamService
+                            && (event.status.is_some_and(is_server_error)
+                                || event.details.error_basis
+                                    == Some(crate::events::ErrorBasis::ServiceError)))
                         || (event.reason == Reason::Network
                             && event.status.is_none()
                             && matches!(

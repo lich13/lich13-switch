@@ -48,6 +48,16 @@ ChatGPT 登录需要本机已安装 [官方 Codex CLI](https://developers.openai
 
 每个 ChatGPT 账号行提供“设备码刷新”，用于更新指定账号的凭据。完成同一用户的官方 CLI 隔离登录后，整组替换 Token 及配套账号字段，工作区变化不再拦截，也无需额外选择工作区。保留账号名称、顺序和扩展字段；登录到其他用户时拒绝覆盖。当前磁盘账号同步更新 `auth.json`，其他账号仅更新账号库。登录期间账号或磁盘凭据变化时停止覆盖；刚完成的有效官方登录不会因旧刷新时间被拒绝。
 
+## Antigravity app 账号
+
+在“账号 → Antigravity → 导入账号”选择“ADC JSON”或“Vertex API Key”。Key 表单填写名称、密钥、可选 Project ID、地区与模型；勾选“立即启用”后保存并切换。密钥默认遮蔽，编辑已有条目时留空保留原值，列表支持切换、编辑凭据、重命名和删除。
+
+Project ID 留空使用 Express 全局端点；填写后使用项目端点，地区默认为 `global`。预置 `gemini-3-flash-preview`、`gemini-3.1-pro-preview`、`gemini-2.5-flash`，首个为默认，可编辑列表及顺序。Vela 提供该模型目录，不自动探测权限；实际生成、流式生成和 Token 计数返回 Google 的真实状态及错误。
+
+Vertex Key 使用 App 的企业网关入口和 Vela 共享回环监听，独立于四客户端的供应商调度。启用后 Vela 必须保持运行；重启 Vela 会恢复所选账号的监听，退出只停止转发。该流量参与全局冻结，用量仍从 App 采集并按账号切换时间归属。
+
+切换先准备监听，再关闭 ADC 并写入 App 网关与模型设置；沿用配置冲突检查、失败恢复及必要的 App 重启。切回 OAuth／ADC 会恢复接管前的相关设置。Key 账号使用期间共享端口不可修改；先切回 OAuth／ADC，再按其他网关的运行状态修改端口。
+
 ## Claude 可视化配置
 
 配置页选择 Claude Code，仅编辑当前 `CLAUDE_CONFIG_DIR` 或 `~/.claude` 中的全局 `settings.json`。默认以模型、权限、偏好、环境变量和高级分组编辑；JSON 模式提供原文、高亮、查找、折叠及显式格式化。两种方式共用内存草稿，切换不会自动保存。项目、组织配置和 `~/.claude.json` 不在编辑范围。

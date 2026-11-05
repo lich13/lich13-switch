@@ -552,7 +552,8 @@ export default function EventLog({
   }, [filters, page, origin]);
 
   useEffect(() => {
-    if (visible) void load();
+    if (visible) void load(true);
+    else flight.current = null;
     return () => {
       sequence.current++;
     };

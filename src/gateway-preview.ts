@@ -22,7 +22,12 @@ export const gatewayDemo: GatewayState = {
   revision: "preview-gateway",
   running: false,
   address: "http://127.0.0.1:43721/v1",
-  listener: { port: 43721, revision: "preview-listener", runningClients: [] },
+  listener: {
+    port: 43721,
+    revision: "preview-listener",
+    runningClients: [],
+    antigravityActive: false,
+  },
   mode: "manual",
   selected: "primary",
   lastSuccessful: null,
@@ -202,7 +207,12 @@ function syncListener(port = gatewayDemo.settings.port, changed = false) {
     .map((state) => state.clientId);
   for (const state of states) {
     state.settings.port = port;
-    state.listener = { port, revision, runningClients };
+    state.listener = {
+      port,
+      revision,
+      runningClients,
+      antigravityActive: false,
+    };
     state.address = `http://127.0.0.1:${port}${state.clientId === "claude" ? "" : "/v1"}`;
   }
 }
