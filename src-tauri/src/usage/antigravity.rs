@@ -2049,7 +2049,7 @@ pub(super) struct UsageStatsAggregator {
     filter_start: i64,
     filter_end: i64,
     now: i64,
-    pub(super) accounts: BTreeMap<String, quota::AccountAccumulator>,
+    pub(super) accounts: BTreeMap<String, (usize, quota::AccountAccumulator)>,
     provider_filter: Option<String>,
     model_filter: Option<String>,
     session_filter: Option<String>,
@@ -2145,7 +2145,7 @@ impl UsageStatsAggregator {
             .unwrap_or(rust_decimal::Decimal::ZERO);
         let is_unpriced_final = row.is_final && row.cost.is_none() && row.unpriced > 0;
 
-        if let Some(account) = row
+        if let Some((_, account)) = row
             .provider
             .as_ref()
             .and_then(|id| self.accounts.get_mut(id))
@@ -2412,11 +2412,11 @@ impl UsageStatsAggregator {
                 cache_input_eligible: self.cache_input_eligible,
                 cache_savings_usd: fmt_usd(self.cache_savings),
             },
-            accounts: self
-                .accounts
-                .into_values()
-                .map(quota::AccountAccumulator::finish)
-                .collect(),
+            accounts: {
+                let mut accounts: Vec<_> = self.accounts.into_values().collect();
+                accounts.sort_by_key(|(order, _)| *order);
+                accounts.into_iter().map(|(_, a)| a.finish()).collect()
+            },
             quota_error: None,
             providers: provider_rows,
             families: family_rows,

@@ -9,11 +9,13 @@ import { beforeEach, expect, it, vi } from "vitest";
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
   listener: (_s: unknown) => {},
+  errorListener: (_s: unknown) => {},
 }));
 vi.mock("./bridge", () => ({
   command: mock.command,
   subscribe: vi.fn(async (name: string, listener: (s: unknown) => void) => {
     if (name === "clamshell-state") mock.listener = listener;
+    if (name === "clamshell-error") mock.errorListener = listener;
     return () => {};
   }),
 }));
@@ -66,6 +68,10 @@ it("refreshes actual helper status after a failed installation", async () => {
   fireEvent.click(screen.getByRole("button", { name: "安装" }));
   await screen.findByText("需要修复");
   expect(screen.getByRole("alert")).toHaveTextContent("服务注册失败");
+  act(() => mock.listener({ ...initial, helper: "needsRepair" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("服务注册失败");
+  act(() => mock.errorListener(null));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "修复" })).toBeEnabled();
 });
 it("disables management for an isolated native app and hides unsupported devices", async () => {

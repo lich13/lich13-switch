@@ -25,6 +25,13 @@ fn each_group_uses_its_observed_reset_and_half_open_window() {
     assert!(!gemini.contains(gemini.start - 1));
     assert!(!gemini.contains(gemini.end));
     assert!(!gemini.current(gemini.end));
+    let mut mismatched = summary();
+    mismatched["response"]["groups"][0]["buckets"][0]["window"] = json!("weekly");
+    assert!(!parse(&mismatched).contains_key("gemini-5h"));
+    assert!(
+        parse(&json!({"response":{"buckets":summary()["response"]["groups"][0]["buckets"]}}))
+            .is_empty()
+    );
 }
 
 #[test]
@@ -43,8 +50,8 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
             while store.compact_storage_batch().unwrap() {}
         }
         let profiles = [
-            ("a", "oauth"),
             ("b", "oauth"),
+            ("a", "oauth"),
             ("key", "vertex_key"),
             ("adc", "adc"),
         ];
@@ -98,6 +105,7 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
                     make("before", "a", "gemini-3-flash", start - 1),
                     make("included", "a", "gemini-3-flash", start),
                     make("current", "a", "gemini-3-flash", now),
+                    make("future", "a", "gemini-3-flash", now + 500),
                     make("reset", "a", "gemini-3-flash", periods["gemini-5h"].end),
                     make("claude-before", "a", "claude-opus-4-6", start),
                     make(
@@ -117,11 +125,20 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
         let prices = Pricing::new(dir.path()).unwrap();
         let filter = Filter {
             start: Some(now),
-            end: Some(now),
+            end: Some(now + 1000),
             ..Filter::default()
         };
         let stats = store.antigravity_stats(&filter, &prices, "1", now).unwrap();
+        assert_eq!(
+            stats
+                .accounts
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "a", "key", "adc"]
+        );
         let a = stats.accounts.iter().find(|a| a.id == "a").unwrap();
+        assert_eq!(a.total.requests, 0);
         assert_eq!(a.tracks[0].burst_5h.requests, 2);
         assert_eq!(a.tracks[0].burst_5h.tokens, 240);
         assert_eq!(a.tracks[0].weekly_7d.requests, 3);

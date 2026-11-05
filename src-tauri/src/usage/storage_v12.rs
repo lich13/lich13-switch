@@ -402,6 +402,7 @@ fn unpack_diagnostic(c: &Connection, body: rusqlite::types::Value, anchor: i64) 
 fn diagnostic_u64(
     c: &Connection,
     body: rusqlite::types::Value,
+    block: Option<&[u8]>,
     field: &'static str,
 ) -> Result<Option<u64>> {
     // Resolve only this scalar; no absolute clock restoration or full diagnostic
@@ -411,7 +412,7 @@ fn diagnostic_u64(
     thread_local! {
         static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<CachedTemplate>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     }
-    diagnostics::inspect(c, body, |tag, value| {
+    diagnostics::inspect(c, body, block, |tag, value| {
         let num = if tag == 4 {
             let values = value
                 .as_array()
@@ -456,7 +457,7 @@ fn diagnostic_u64(
 }
 
 fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<u64>> {
-    Ok(diagnostic_u64(c, body, "generationMs")?.filter(|ms| *ms > 50))
+    Ok(diagnostic_u64(c, body, None, "generationMs")?.filter(|ms| *ms > 50))
 }
 
 pub(super) struct AntigravityAttemptRow {
@@ -484,8 +485,11 @@ pub(super) fn scan_antigravity_attempts(
     max_time: i64,
     mut visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
 ) -> Result<()> {
+    // Sort the small attempt rows before joining compressed blocks; otherwise
+    // the sorter copies the same block once for every attempt that references it.
     let mut stmt = db(c.prepare_cached(
-        "SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
+        "WITH ordered AS MATERIALIZED (
+         SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
          usage_value(m.value),a.shape,shape_value.value,a.body,
          a.inclusive_input,a.input,a.output,a.cache_read,a.cache_write,a.cost,a.unpriced,
          CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value)
@@ -495,7 +499,9 @@ pub(super) fn scan_antigravity_attempts(
          LEFT JOIN v12_dictionary p ON p.id=a.provider
          LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape
          WHERE r.client=usage_label('antigravity') AND r.effective=1 AND r.time>=?1 AND r.time<=?2
-         ORDER BY r.rid,a.ordinal",
+         ORDER BY r.rid,a.ordinal)
+         SELECT ordered.*,diagnostic.body FROM ordered
+         LEFT JOIN v12_diagnostics diagnostic ON typeof(ordered.body)='integer' AND ordered.body>=2048 AND diagnostic.id=ordered.body/2048 AND ordered.output>0",
     ))?;
     let mut shape_display_cache: std::collections::BTreeMap<i64, Option<String>> =
         std::collections::BTreeMap::new();
@@ -522,7 +528,10 @@ pub(super) fn scan_antigravity_attempts(
         let output = opt_u64(11)?;
         let reasoning = if output.is_some_and(|n| n > 0) {
             let body = db(row.get::<_, rusqlite::types::Value>(8))?;
-            diagnostic_u64(c, body, "reasoningTokens")?
+            let block = db(row.get_ref(18))?
+                .as_blob_or_null()
+                .map_err(|_| failure("用量诊断块字段损坏，原数据已保留"))?;
+            diagnostic_u64(c, body, block, "reasoningTokens")?
         } else {
             None
         };
@@ -633,7 +642,6 @@ pub(super) fn install(c: &Connection) -> Result<()> {
       CREATE INDEX v12_archived_duplicate ON v12_rows(archived_duplicate,time) WHERE archived_duplicate IS NOT NULL;
       CREATE TRIGGER v12_record_update INSTEAD OF UPDATE OF body,effective,duplicate,archived_duplicate ON v12_records BEGIN UPDATE v12_rows SET body=NEW.body,effective=NEW.effective,duplicate=NEW.duplicate,archived_duplicate=NEW.archived_duplicate WHERE rid=OLD.rid; END;
       CREATE TRIGGER v12_record_delete INSTEAD OF DELETE ON v12_records BEGIN DELETE FROM v12_rows WHERE rid=OLD.rid; END;
-      CREATE TABLE v12_links(owner INTEGER PRIMARY KEY,target BLOB NOT NULL);
       CREATE TABLE v12_dirty(id TEXT PRIMARY KEY) WITHOUT ROWID;
       INSERT OR REPLACE INTO metadata VALUES('storage_v12','copy'),('storage_v12_after','');
       PRAGMA user_version=13;"))?;
@@ -852,7 +860,7 @@ fn save_attempt(
     }
     Ok(())
 }
-pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) -> Result<()> {
+pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) -> Result<i64> {
     let mut v = serde_json::to_value(r).map_err(json_error)?;
     let obj = v.as_object_mut().ok_or_else(|| failure("用量记录无效"))?;
     for k in [
@@ -957,7 +965,7 @@ pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) ->
         )?;
         sparse_original(c, table, owner, r.attempts.len().saturating_sub(1) as i64)?;
     }
-    Ok(())
+    Ok(owner)
 }
 fn sparse_original(c: &Connection, table: &str, owner: i64, ordinal: i64) -> Result<()> {
     let values = |table: &str| -> Result<Vec<rusqlite::types::Value>> {
@@ -1166,8 +1174,8 @@ fn flush_batch(c: &Connection) -> Result<bool> {
             .optional())?;
         if let Some((body, effective, sequence)) = old {
             let r = bodies::decode(c, &body)?;
-            save(c, &r, effective, sequence)?;
-            verify_record(c, &r)?;
+            let owner = save(c, &r, effective, sequence)?;
+            verify_record(c, &r, owner)?;
         } else {
             delete(c, &id)?;
         }
@@ -1348,8 +1356,8 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
     };
     for (_, body, effective, sequence) in &rows {
         let r: Record = bodies::decode(&tx, body)?;
-        save(&tx, &r, *effective, *sequence)?;
-        verify_record(&tx, &r)?;
+        let owner = save(&tx, &r, *effective, *sequence)?;
+        verify_record(&tx, &r, owner)?;
     }
     if let Some(last) = rows.last() {
         db(tx.execute(
@@ -1362,7 +1370,7 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
             return Ok(true);
         }
         validate(&tx)?;
-        db(tx.execute_batch("UPDATE v12_rows AS r SET duplicate=(SELECT target.rid FROM v12_rows target WHERE usage_hint(target.key)=usage_hint(usage_key(r.archived_duplicate)) AND target.key=usage_key(r.archived_duplicate)),archived_duplicate=NULL WHERE archived_duplicate IS NOT NULL AND EXISTS(SELECT 1 FROM v12_rows target WHERE usage_hint(target.key)=usage_hint(usage_key(r.archived_duplicate)) AND target.key=usage_key(r.archived_duplicate)); DELETE FROM v12_links;
+        db(tx.execute_batch("UPDATE v12_rows AS r SET duplicate=target.rid,archived_duplicate=NULL FROM v12_rows AS target WHERE r.archived_duplicate IS NOT NULL AND usage_hint(target.key)=usage_hint(usage_key(r.archived_duplicate)) AND target.key=usage_key(r.archived_duplicate); DROP TABLE IF EXISTS v12_links;
           DROP TRIGGER v12_track_insert; DROP TRIGGER v12_track_update; DROP TRIGGER v12_track_delete;
           DROP TRIGGER IF EXISTS pending_prices_insert; DROP TRIGGER IF EXISTS pending_prices_update; DROP TRIGGER IF EXISTS pending_prices_delete;
           DROP TABLE pending_prices;
@@ -1380,8 +1388,7 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
     db(tx.commit())?;
     Ok(true)
 }
-fn verify_record(c: &Connection, r: &Record) -> Result<()> {
-    let id = owner(c, &r.id)?.ok_or_else(|| failure("用量迁移记录缺失"))?;
+fn verify_record(c: &Connection, r: &Record, id: i64) -> Result<()> {
     let decoded: Record = serde_json::from_value(load(c, id)?).map_err(json_error)?;
     if serde_json::to_value(&decoded).map_err(json_error)?
         != serde_json::to_value(r).map_err(json_error)?
@@ -1416,7 +1423,7 @@ pub(super) fn update(c: &Connection, r: &Record) -> Result<()> {
             [key(&r.id)],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ))?;
-        save(c, r, effective, seq)
+        save(c, r, effective, seq).map(|_| ())
     } else {
         db(c.execute(
             "UPDATE records SET body=?2,signature=?3,model=?4,time=?5,provider=?6 WHERE id=?1",
@@ -1500,7 +1507,7 @@ pub(super) fn set_state(c: &Connection, r: &Record, effective: i64) -> Result<()
         [key(&r.id)],
         |r| r.get(0),
     ))?;
-    save(c, r, effective, sequence)
+    save(c, r, effective, sequence).map(|_| ())
 }
 // archive_ids is a bounded, connection-local selection owned by Store::archive_batch.
 pub(super) fn archive_selected(c: &Connection) -> Result<()> {
@@ -1544,6 +1551,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
     db(c.execute_batch(&format!("DROP VIEW usage_metrics; CREATE VIEW usage_metrics AS {} UNION ALL {} UNION ALL {original} UNION ALL SELECT * FROM usage_daily_metrics;",metric_select("v12_attempts",0),metric_select("v12_sessions",0))))
 }
 pub(super) fn prune(c: &Connection) -> Result<()> {
+    db(c.execute_batch("DROP TABLE IF EXISTS v12_links;"))?;
     db(c.execute("DELETE FROM v12_archives WHERE rid NOT IN (SELECT json_extract(body,'$._usageArchive') FROM daily WHERE json_extract(body,'$._usageArchive') IS NOT NULL)",[]))?;
     diagnostics::prune(c)?;
     db(c.execute_batch("DELETE FROM v12_measures WHERE id NOT IN (SELECT measure FROM v12_attempt_rows UNION SELECT measure FROM v12_session_rows); DELETE FROM v12_dimensions WHERE shape NOT IN (SELECT shape FROM v12_attempt_rows UNION SELECT shape FROM v12_session_rows);"))?;

@@ -127,13 +127,14 @@ impl Service {
         }
         let repaired = before.helper != "ready";
         let before = if repaired {
-            self.repair_for_toggle(&before)?
+            let before = self.repair_for_toggle(&before)?;
+            if !allowed() {
+                return Ok(before);
+            }
+            before
         } else {
             before
         };
-        if !allowed() {
-            return Ok(before);
-        }
         // Restoration belongs exclusively to the privileged helper. An unverified
         // legacy user/script record must never supply a battery sleep value.
         if let Err(error) = self.system.apply(&before, enabled, before.battery_sleep) {
@@ -231,7 +232,7 @@ fn parse(general: &str, custom: &str) -> Result<State> {
     }
 }
 #[cfg(any(target_os = "macos", test))]
-fn helper_state(actual: &serde_json::Value) -> Result<State> {
+pub(crate) fn helper_state(actual: &serde_json::Value) -> Result<State> {
     let supported = actual["supported"]
         .as_bool()
         .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))?;
@@ -273,9 +274,9 @@ impl System for Native {
     fn read(&self) -> Result<State> {
         #[cfg(target_os = "macos")]
         {
-            let (helper, response) = crate::power_macos::probe();
-            if let Some(response) = response {
-                return helper_state(&response["state"]);
+            let (helper, state) = crate::power_macos::probe();
+            if let Some(state) = state {
+                return Ok(state);
             }
             let mut state = parse(&output(&["-g"])?, &output(&["-g", "custom"])?)?;
             state.helper = if state.supported {

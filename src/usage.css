@@ -1662,8 +1662,26 @@
   display: grid;
   gap: 16px;
 }
-.usage-ag-account > h2 {
-  margin: 0 0 10px;
+.usage-ag-account-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.usage-ag-account-picker select {
+  height: 36px;
+  width: min(100%, 360px);
+  min-width: 0;
+  padding: 0 12px;
+  font: inherit;
+  font-weight: 400;
+  border-radius: var(--radius-sm);
+  text-overflow: ellipsis;
+}
+.usage-ag-account-picker select:disabled {
+  opacity: 0.6;
 }
 .usage-ag-period {
   color: var(--muted);

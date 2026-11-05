@@ -1,5 +1,5 @@
 import UsageAntigravity from "./UsageAntigravity";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -13,15 +13,17 @@ import type {
 
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
+  listeners: new Map<string, Set<(value: unknown) => void>>(),
 }));
 
 vi.mock("./bridge", () => ({
   preview: false,
   command: mock.command,
   subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
+    const listeners = mock.listeners.get(name) ?? new Set();
+    listeners.add(listener);
+    mock.listeners.set(name, listeners);
+    return () => listeners.delete(listener);
   }),
 }));
 
@@ -436,11 +438,14 @@ describe("Usage Antigravity statistics tab", () => {
         if (name === "get_gateway") return { providers: [] };
         if (name === "get_antigravity_auth_state")
           return {
+            mode: "oauth",
+            enableAdc: false,
             accounts: [
               {
                 id: "ag-oauth-1",
                 name: "oauth@example.invalid",
                 kind: "oauth",
+                current: true,
               },
               { id: "ag-adc-1", name: "ADC 凭据 · p1", kind: "adc" },
             ],
@@ -581,9 +586,105 @@ describe("Usage Antigravity statistics tab", () => {
     const sessions = screen.getByLabelText("会话排行");
     expect(within(sessions).getByText("未定价")).toBeInTheDocument();
   });
+  it("keeps a current-account event when the initial query returns late", async () => {
+    const implementation = mock.command.getMockImplementation()!;
+    const initial = await implementation("get_antigravity_auth_state");
+    let finish!: () => void;
+    const pending = new Promise((resolve) => {
+      finish = () => resolve(initial);
+    });
+    mock.command.mockImplementation((name, args) =>
+      name === "get_antigravity_auth_state"
+        ? pending
+        : implementation(name, args),
+    );
+    statsPayload.accounts.push({
+      ...statsPayload.accounts[0],
+      id: "active-adc",
+      name: "Current ADC",
+      kind: "adc",
+      tracks: [],
+    });
+    const user = userEvent.setup();
+    render(<Usage />);
+    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
+    const select = await screen.findByRole("combobox", {
+      name: "Antigravity 用量账号",
+    });
+    act(() =>
+      mock.listeners.get("antigravity-auth-state")?.forEach((listener) =>
+        listener({
+          mode: "adc",
+          enableAdc: true,
+          accounts: statsPayload.accounts.map((account) => ({
+            ...account,
+            current: true,
+          })),
+        }),
+      ),
+    );
+    await waitFor(() => expect(select).toHaveValue("active-adc"));
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(select).toHaveValue("active-adc");
+  });
+
+  it("follows the active authentication mode without changing the global usage filter", async () => {
+    const extra = (["vertex_key", "adc"] as const).map((kind) => ({
+      ...statsPayload.accounts[0],
+      id: kind,
+      name: kind,
+      kind,
+      tracks: [],
+    }));
+    statsPayload = {
+      ...statsPayload,
+      accounts: [...statsPayload.accounts, ...extra],
+    };
+    const user = userEvent.setup();
+    render(<Usage />);
+    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
+    const select = await screen.findByRole("combobox", {
+      name: "Antigravity 用量账号",
+    });
+    await waitFor(() => expect(select).toHaveValue("ag-oauth-1"));
+    const accounts = statsPayload.accounts.map((a) => ({
+      ...a,
+      current: true,
+    }));
+    for (const mode of ["vertex_key", "adc"] as const) {
+      const count = mock.command.mock.calls.filter(
+        ([name]) => name === "get_antigravity_usage_stats",
+      ).length;
+      act(() =>
+        mock.listeners
+          .get("antigravity-auth-state")
+          ?.forEach((listener) =>
+            listener({ accounts, mode, enableAdc: mode === "adc" }),
+          ),
+      );
+      await waitFor(() => expect(select).toHaveValue(mode));
+      await waitFor(() =>
+        expect(
+          mock.command.mock.calls.filter(
+            ([name]) => name === "get_antigravity_usage_stats",
+          ).length,
+        ).toBeGreaterThan(count),
+      );
+    }
+    const count = mock.command.mock.calls.length;
+    await user.selectOptions(select, "ag-oauth-1");
+    expect(mock.command.mock.calls).toHaveLength(count);
+    expect(screen.getByRole("combobox", { name: "用量供应商" })).toHaveValue(
+      "",
+    );
+  });
 });
 
-it("shows two current-window cards per OAuth account and dated totals for Key and ADC", () => {
+it("selects one account, retains manual selection on refresh, follows the current account and handles deletion", async () => {
+  const user = userEvent.setup();
   const base = buildStats();
   const unavailable = {
     ...base.accounts[0],
@@ -606,24 +707,58 @@ it("shows two current-window cards per OAuth account and dated totals for Key an
       tracks: [],
     })),
   ];
-  render(
-    <UsageAntigravity
-      stats={{ ...base, accounts }}
-      busy={false}
-      onSelectSession={vi.fn()}
-    />,
-  );
+  const props = {
+    stats: { ...base, accounts },
+    busy: false,
+    currentAccountId: "ag-oauth-1",
+    onSelectSession: vi.fn(),
+  };
+  const view = render(<UsageAntigravity {...props} />);
+  const select = screen.getByRole("combobox", { name: "Antigravity 用量账号" });
+  expect(select).toHaveValue("ag-oauth-1");
+  expect(screen.queryByLabelText("Fixture B")).not.toBeInTheDocument();
   const known = screen.getByLabelText("Fixture OAuth");
   expect(within(known).getAllByText("当前 5h")).toHaveLength(2);
   expect(within(known).getAllByText("当前 7d")).toHaveLength(2);
   expect(known.querySelectorAll(".usage-ag-period")).toHaveLength(4);
+  await user.selectOptions(select, "b");
+  expect(screen.queryByLabelText("Fixture OAuth")).not.toBeInTheDocument();
+  view.rerender(<UsageAntigravity {...props} stats={{ ...props.stats }} />);
+  expect(select).toHaveValue("b");
   expect(
     within(screen.getByLabelText("Fixture B")).getAllByText("未获取当前周期"),
   ).toHaveLength(4);
   for (const kind of ["vertex_key", "adc"]) {
+    await user.selectOptions(select, kind);
     const section = screen.getByLabelText(kind);
     expect(within(section).getByText(/所选日期/)).toBeInTheDocument();
     expect(within(section).queryByText("当前 5h")).not.toBeInTheDocument();
     expect(within(section).getByText("请求")).toBeInTheDocument();
   }
+  expect(screen.getByLabelText("Token 构成与缓存节省")).toHaveTextContent(
+    "$1.2450",
+  );
+  view.rerender(<UsageAntigravity {...props} currentAccountId="b" />);
+  expect(select).toHaveValue("b");
+  await user.selectOptions(select, "adc");
+  view.rerender(
+    <UsageAntigravity
+      {...props}
+      currentAccountId="b"
+      stats={{ ...base, accounts: accounts.filter((a) => a.id !== "adc") }}
+    />,
+  );
+  expect(select).toHaveValue("b");
+  view.rerender(<UsageAntigravity {...props} currentAccountId={null} />);
+  expect(select).toHaveValue("");
+  expect(screen.queryByLabelText("Fixture B")).not.toBeInTheDocument();
+  view.rerender(
+    <UsageAntigravity
+      {...props}
+      currentAccountId={null}
+      stats={{ ...base, accounts: [] }}
+    />,
+  );
+  expect(select).toBeDisabled();
+  expect(screen.getByRole("option", { name: "暂无账号" })).toBeInTheDocument();
 });

@@ -747,7 +747,6 @@ fn storage_size(dir: &Path) -> StorageSize {
         "v12_dead_diagnostics",
         "v12_record_states",
         "v12_rows",
-        "v12_links",
         "v12_dirty",
         "v12_measures",
         "v12_dimensions",
@@ -797,13 +796,6 @@ fn storage_size(dir: &Path) -> StorageSize {
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .unwrap(),
-            "v12_links" => connection
-                .query_row(
-                    "SELECT count(*), 0, coalesce(sum(length(target)),0) FROM v12_links",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .unwrap(),
             "v12_dirty" => connection
                 .query_row(
                     "SELECT count(*), 0, coalesce(sum(length(id)),0) FROM v12_dirty",

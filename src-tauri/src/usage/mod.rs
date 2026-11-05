@@ -515,8 +515,8 @@ impl Service {
             store::Store::reader_with_cache(&self.0.directory, self.0.overview_cache.clone())?;
         reader.snapshot(|db| f(db))
     }
-    pub(crate) async fn refresh_antigravity_quota(&self, data: &Path) -> Result<()> {
-        if let Some((id, periods)) = antigravity::quota::observe(data).await? {
+    pub(crate) async fn refresh_antigravity_quota(&self) -> Result<()> {
+        if let Some((id, periods)) = antigravity::quota::observe(&self.0.data_dir).await? {
             self.query(|db| db.save_antigravity_quota(&id, &periods))?;
         }
         Ok(())

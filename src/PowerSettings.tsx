@@ -34,7 +34,6 @@ export default function PowerSettings() {
       });
     events.watch("clamshell-state", (next) => {
       setState(next);
-      if (!next.enabled) setError("");
     });
     events.watch("clamshell-error", (next) => setError(next?.message ?? ""));
     return () => {

@@ -31,7 +31,6 @@ export default function QuickControls({
     events.watch("clamshell-state", (next) => {
       setState(next);
       setReadError("");
-      if (!next.enabled) setPowerError("");
     });
     events.watch("clamshell-error", (next) =>
       setPowerError(next?.message ?? ""),
@@ -48,7 +47,6 @@ export default function QuickControls({
         if (!disposed) {
           setState(s);
           setReadError("");
-          if (!s.enabled) setPowerError("");
         }
       } catch (e) {
         if (!disposed) setReadError(errorOf(e).message);

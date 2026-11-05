@@ -86,22 +86,15 @@ pub fn status() -> &'static str {
     probe().0
 }
 /// Reuse the authenticated state reply; a second XPC probe can fail after the first succeeds.
-pub fn probe() -> (&'static str, Option<Value>) {
+pub fn probe() -> (&'static str, Option<crate::power::State>) {
     if !installed_app() {
         return ("isolated", None);
     }
     if !Path::new(HELPER).exists() {
         return ("notInstalled", None);
     }
-    match request(json!({"op":"state"})) {
-        Ok(response)
-            if response["state"]["enabled"].is_boolean()
-                && response["state"]["batterySleep"]
-                    .as_u64()
-                    .is_some_and(|v| v <= 1440) =>
-        {
-            ("ready", Some(response))
-        }
+    match request(json!({"op":"state"})).and_then(|r| crate::power::helper_state(&r["state"])) {
+        Ok(state) => ("ready", Some(state)),
         _ => ("needsRepair", None),
     }
 }

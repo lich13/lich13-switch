@@ -214,6 +214,27 @@ fn compact_diagnostics_until_done(store: &mut Store) {
 }
 
 #[test]
+fn v12_ready_database_removes_legacy_links_during_reclaim() {
+    let (dir, store) = migrated_empty();
+    let has_links = |store: &Store| {
+        store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='v12_links')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    };
+    assert!(!has_links(&store));
+    store.connection.execute_batch("CREATE TABLE v12_links(owner INTEGER PRIMARY KEY,target BLOB NOT NULL); INSERT INTO v12_links VALUES(1,x'00'); INSERT OR REPLACE INTO metadata VALUES('storage_repack','1');").unwrap();
+    drop(store);
+    let reopened = Store::open(dir.path()).unwrap();
+    reopened.reclaim_space().unwrap();
+    assert!(!has_links(&reopened));
+}
+
+#[test]
 fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let mut old = Store::open_v11_fixture(dir.path()).unwrap();
@@ -243,6 +264,8 @@ fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
 
     let mut migrated = Store::open(dir.path()).unwrap();
     assert!(migrated.compact_storage_batch().unwrap());
+    // A previous version may have left this redundant table in a pending copy.
+    migrated.connection.execute_batch("CREATE TABLE v12_links(owner INTEGER PRIMARY KEY,target BLOB NOT NULL); INSERT INTO v12_links VALUES(1,x'00');").unwrap();
     assert_eq!(views(&migrated), before);
     drop(migrated);
 
@@ -250,6 +273,15 @@ fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
     while resumed.compact_storage_batch().unwrap() {}
     resumed.reclaim_space().unwrap();
     assert_eq!(views(&resumed), before);
+    let links: bool = resumed
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='v12_links')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!links);
     assert_eq!(
         resumed.cursor("fixture-v12-cursor").unwrap().as_deref(),
         Some("cursor-before")
@@ -1580,6 +1612,48 @@ fn v12_diagnostic_block_compaction_preserves_detail_fields() {
         .unwrap();
     assert!(blocks > 0);
     assert!(packed_rows > 0);
+}
+
+#[test]
+fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
+    let (dir, mut writer) = migrated_empty();
+    let mut row = record("fixture-ag-reasoning", "antigravity", BASE, None, 100, 20);
+    row.client = "antigravity".into();
+    row.attempts[0].tokens.reasoning = Some(9);
+    super::antigravity::normalize_record(&mut row);
+    writer
+        .write_batch(std::slice::from_ref(&row), None)
+        .unwrap();
+    let reasoning = |store: &Store| {
+        let mut values = Vec::new();
+        super::storage_v12::scan_antigravity_attempts(
+            &store.connection,
+            BASE,
+            BASE + 1000,
+            |attempt| {
+                values.push(attempt.reasoning);
+                Ok(())
+            },
+        )
+        .unwrap();
+        values
+    };
+    assert_eq!(reasoning(&writer), vec![Some(9)]);
+    compact_diagnostics_until_done(&mut writer);
+    assert_eq!(reasoning(&writer), vec![Some(9)]);
+    let reader = Store::reader(dir.path()).unwrap();
+    reader
+        .snapshot(|snapshot| {
+            assert_eq!(reasoning(snapshot), vec![Some(9)]);
+            row.attempts[0].tokens.reasoning = Some(7);
+            writer.write_batch(std::slice::from_ref(&row), None)?;
+            compact_diagnostics_until_done(&mut writer);
+            assert_eq!(reasoning(&writer), vec![Some(7)]);
+            assert_eq!(reasoning(snapshot), vec![Some(9)]);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(reasoning(&reader), vec![Some(7)]);
 }
 
 #[test]

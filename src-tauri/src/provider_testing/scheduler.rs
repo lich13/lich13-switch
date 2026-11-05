@@ -36,43 +36,38 @@ fn due(timing: &DetectionTiming, minutes: u32, at: i64) -> i64 {
 }
 impl Service {
     fn refresh_frequencies(&self, at: i64, force: bool) {
-        {
+        let clients = {
             let data = lock(&self.0.data);
-            if !data
-                .saved
-                .detection
-                .values()
-                .any(|c| c.enabled && c.mode == "smart")
-                || (!force
-                    && data
-                        .frequency_sampled_at
-                        .is_some_and(|sample| at >= sample && at - sample < 60_000))
+            if !force
+                && data
+                    .frequency_sampled_at
+                    .is_some_and(|sample| at >= sample && at - sample < 60_000)
             {
                 return;
             }
-        }
-        for client in [
-            ClientId::Codex,
-            ClientId::Claude,
-            ClientId::Grok,
-            ClientId::Dsh,
-        ] {
-            let prefix = format!("{}:", client_key(client));
-            let enabled = lock(&self.0.data)
+            let enabled: std::collections::BTreeSet<_> = data
                 .saved
                 .detection
                 .iter()
-                .any(|(key, config)| {
-                    key.starts_with(&prefix) && config.enabled && config.mode == "smart"
-                });
-            if !enabled {
-                continue;
-            }
+                .filter(|(_, config)| config.enabled && config.mode == "smart")
+                .filter_map(|(key, _)| key.split_once(':').map(|(client, _)| client))
+                .collect();
+            [
+                ClientId::Codex,
+                ClientId::Claude,
+                ClientId::Grok,
+                ClientId::Dsh,
+            ]
+            .into_iter()
+            .filter(|client| enabled.contains(client_key(*client)))
+            .map(|client| (client, format!("{}:", client_key(client))))
+            .collect::<Vec<_>>()
+        };
+        for (client, prefix) in clients {
             let counts = self.gateway(client).detection_request_counts(at);
             let mut data = lock(&self.0.data);
             data.frequency_sampled_at = Some(at);
-            data.frequencies
-                .retain(|k, _| !k.starts_with(&format!("{}:", client_key(client))));
+            data.frequencies.retain(|k, _| !k.starts_with(&prefix));
             match counts {
                 Ok(counts) => {
                     data.frequencies.extend(

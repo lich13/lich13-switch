@@ -214,7 +214,7 @@ it("quits only the chosen platform and blocks duplicate operations", async () =>
   });
 });
 
-it("keeps power alerts separate, dismisses them, and clears them when power closes", async () => {
+it("keeps power alerts separate, dismisses them, and clears them after explicit success", async () => {
   const error = vi.fn();
   mock.command.mockImplementation(async (name: string) => {
     if (name === "get_clamshell_state") return enabled;
@@ -240,6 +240,36 @@ it("keeps power alerts separate, dismisses them, and clears them when power clos
     }),
   );
   act(() => mock.listeners.get("clamshell-state")?.(original));
+  expect(screen.getByRole("alert")).toHaveTextContent("助手修复失败");
+  act(() => mock.listeners.get("clamshell-error")?.(null));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(error).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a failed enable visible across polling and reopening", async () => {
+  vi.useFakeTimers();
+  try {
+    mock.command.mockImplementation(async (name: string) => {
+      if (name === "get_clamshell_state") return original;
+      throw { code: "POWER_AUTH", message: "已取消系统授权" };
+    });
+    const props = { notify: vi.fn(), error: vi.fn() };
+    const view = render(<QuickControls {...props} visible />);
+    await act(async () => {});
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "合盖不休眠" }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("已取消系统授权");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("已取消系统授权");
+    view.rerender(<QuickControls {...props} visible={false} />);
+    view.rerender(<QuickControls {...props} visible />);
+    await act(async () => {});
+    expect(screen.getByRole("alert")).toHaveTextContent("已取消系统授权");
+    view.unmount();
+  } finally {
+    vi.useRealTimers();
+  }
 });

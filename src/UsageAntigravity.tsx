@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { date } from "./usage-format";
 import {
   compact,
@@ -90,6 +91,7 @@ function TrackWindowBlock({
 export default function UsageAntigravity({
   stats,
   busy,
+  currentAccountId,
   selectedProvider,
   providerName,
   onSelectProvider,
@@ -97,11 +99,24 @@ export default function UsageAntigravity({
 }: {
   stats: AntigravityUsageStats | null;
   busy: boolean;
+  currentAccountId: string | null;
   selectedProvider?: string;
   providerName?: (id: string | null) => string;
   onSelectProvider?: (providerId: string) => void;
   onSelectSession: (sessionId: string, title: string) => void;
 }) {
+  const [accountId, setAccountId] = useState(currentAccountId ?? "");
+  useEffect(() => setAccountId(currentAccountId ?? ""), [currentAccountId]);
+  useEffect(() => {
+    if (stats && !stats.accounts.some((a) => a.id === accountId)) {
+      setAccountId(
+        currentAccountId &&
+          stats.accounts.some((a) => a.id === currentAccountId)
+          ? currentAccountId
+          : "",
+      );
+    }
+  }, [stats, accountId, currentAccountId]);
   if (!stats) {
     return (
       <p className="usage-empty">
@@ -111,6 +126,7 @@ export default function UsageAntigravity({
   }
 
   const mix = stats.tokenMix;
+  const account = stats.accounts.find((a) => a.id === accountId);
   const segments = [
     { key: "input", label: "新输入", value: mix.input },
     { key: "cacheRead", label: "缓存读取", value: mix.cacheRead },
@@ -209,18 +225,41 @@ export default function UsageAntigravity({
       </section>
 
       <section className="usage-ag-accounts" aria-label="账号周期用量">
+        <label className="usage-ag-account-picker">
+          <span>账号用量</span>
+          <select
+            aria-label="Antigravity 用量账号"
+            value={accountId}
+            disabled={!stats.accounts.length}
+            onChange={(e) => setAccountId(e.target.value)}
+          >
+            <option value="" disabled>
+              {stats.accounts.length ? "选择账号" : "暂无账号"}
+            </option>
+            {stats.accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name} ·{" "}
+                {a.kind === "oauth"
+                  ? "OAuth"
+                  : a.kind === "adc"
+                    ? "ADC"
+                    : "Vertex Key"}
+                {a.id === currentAccountId ? "（当前）" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
         {stats.quotaError && (
           <p className="form-error" role="alert">
             {stats.quotaError}
           </p>
         )}
-        {stats.accounts.map((account) => (
+        {account && (
           <section
             key={account.id}
             aria-label={account.name}
             className="usage-ag-account"
           >
-            <h2 className="usage-ag-section-title">{account.name}</h2>
             {account.kind === "oauth" ? (
               <div className="usage-ag-tracks">
                 {account.tracks.map((track) => (
@@ -255,7 +294,7 @@ export default function UsageAntigravity({
               </article>
             )}
           </section>
-        ))}
+        )}
       </section>
 
       {(stats.providers ?? []).length > 0 && (

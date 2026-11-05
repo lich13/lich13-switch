@@ -24,8 +24,16 @@ pub async fn set_clamshell_awake(
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = r.power.set(enabled, &expected_revision);
-        if let Ok(state) = r.power.state() {
-            let _ = app.emit("clamshell-state", state);
+        match &result {
+            Ok(state) => {
+                let _ = app.emit("clamshell-state", state);
+                let _ = app.emit("clamshell-error", Option::<AppError>::None);
+            }
+            Err(_) => {
+                if let Ok(state) = r.power.state() {
+                    let _ = app.emit("clamshell-state", state);
+                }
+            }
         }
         result
     })
@@ -37,8 +45,16 @@ pub async fn install_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<pow
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = r.power.install();
-        if let Ok(state) = r.power.state() {
-            let _ = app.emit("clamshell-state", state);
+        match &result {
+            Ok(state) => {
+                let _ = app.emit("clamshell-state", state);
+                let _ = app.emit("clamshell-error", Option::<AppError>::None);
+            }
+            Err(_) => {
+                if let Ok(state) = r.power.state() {
+                    let _ = app.emit("clamshell-state", state);
+                }
+            }
         }
         result
     })
@@ -50,8 +66,16 @@ pub async fn remove_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<powe
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = r.power.remove();
-        if let Ok(state) = r.power.state() {
-            let _ = app.emit("clamshell-state", state);
+        match &result {
+            Ok(state) => {
+                let _ = app.emit("clamshell-state", state);
+                let _ = app.emit("clamshell-error", Option::<AppError>::None);
+            }
+            Err(_) => {
+                if let Ok(state) = r.power.state() {
+                    let _ = app.emit("clamshell-state", state);
+                }
+            }
         }
         result
     })

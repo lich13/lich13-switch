@@ -19,11 +19,7 @@ pub async fn get_antigravity_usage_stats(
     filter: Filter,
 ) -> Result<super::antigravity::AntigravityUsageStats> {
     let s = r.usage.clone();
-    let quota_error = s
-        .refresh_antigravity_quota(&r.data)
-        .await
-        .err()
-        .map(|e| e.message);
+    let quota_error = s.refresh_antigravity_quota().await.err().map(|e| e.message);
     let prices = s.prices()?.frozen();
     let multiplier = s.settings().multiplier;
     let now_ms = now();

@@ -96,7 +96,6 @@ pub struct Search {
 #[derive(Clone, Serialize)]
 pub struct VertexModel {
     pub id: String,
-    pub name: Option<String>,
     pub preview: bool,
 }
 #[derive(Serialize)]
@@ -194,13 +193,6 @@ fn crop(value: Value) -> Result<Index> {
     if !validate(&index) {
         return Err(failure("models.dev 目录为空或超过限制"));
     }
-    if serde_json::to_vec(&index)
-        .map_err(|_| failure("models.dev 缓存无效"))?
-        .len() as u64
-        > CACHE_LIMIT
-    {
-        return Err(failure("models.dev 裁剪目录超过 4 MiB"));
-    }
     Ok(index)
 }
 impl Catalog {
@@ -283,13 +275,18 @@ impl Catalog {
         }
         let result = download(source).await.and_then(|index| {
             let state = self.state.read().unwrap();
-            if state.index.as_ref().is_some_and(|old| {
-                old.providers == index.providers && old.vertex_filters == index.vertex_filters
-            }) {
+            if state
+                .index
+                .as_ref()
+                .is_some_and(|old| old.providers == index.providers && old.vertex_filters)
+            {
                 return Ok((index, state.version.clone().unwrap_or_default()));
             }
             drop(state);
             let bytes = serde_json::to_vec(&index).map_err(|_| failure("models.dev 缓存无效"))?;
+            if bytes.len() as u64 > CACHE_LIMIT {
+                return Err(failure("models.dev 裁剪目录超过 4 MiB"));
+            }
             storage::replace_cache_bounded(&self.path, &bytes, CACHE_LIMIT)?;
             Ok((index, storage::digest(&bytes)))
         });
@@ -400,12 +397,7 @@ impl Catalog {
         let Some(index) = state.index.as_ref().filter(|i| i.vertex_filters) else {
             return VertexModels {
                 models: vec![],
-                error: Some(
-                    state
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "模型目录需要刷新".into()),
-                ),
+                error: state.error.clone(),
             };
         };
         let mut models: Vec<_> = index
@@ -441,7 +433,6 @@ impl Catalog {
                 .into_iter()
                 .map(|(id, m)| VertexModel {
                     id: id.clone(),
-                    name: m.name.clone(),
                     preview: preview(id, m),
                 })
                 .collect(),

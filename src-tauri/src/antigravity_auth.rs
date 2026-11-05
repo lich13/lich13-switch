@@ -948,14 +948,14 @@ fn write_active_adc(paths: &Paths, bytes: &[u8]) -> Result<()> {
     restore_file(&paths.adc_disabled_file(), None)?;
     write_enable_adc(paths, true)
 }
-fn apply_mode_files(p: &Paths, enable_adc: bool, vault: &Vault) -> Result<()> {
-    if !enable_adc {
-        if let Some(adc_bytes) = storage::read_optional(&p.adc_file())? {
-            write_private_file(&p.adc_disabled_file(), &adc_bytes)?;
-            fs::remove_file(p.adc_file()).map_err(storage::io_error)?;
-        }
-        return write_enable_adc(p, false);
+fn disable_adc(p: &Paths) -> Result<()> {
+    if let Some(adc_bytes) = storage::read_optional(&p.adc_file())? {
+        write_private_file(&p.adc_disabled_file(), &adc_bytes)?;
+        fs::remove_file(p.adc_file()).map_err(storage::io_error)?;
     }
+    write_enable_adc(p, false)
+}
+fn enable_adc(p: &Paths, vault: &Vault) -> Result<()> {
     if !p.adc_file().exists() {
         let v_adc = || {
             vault
@@ -1056,11 +1056,11 @@ fn switch_account_at(
         AccountKind::VertexKey => unreachable!("Vertex uses the shared listener"),
     }
     with_lifecycle(paths, rev, lc, || {
-        let vault = restore_gateway_settings(paths)?;
+        restore_gateway_settings(paths)?;
         match entry.kind {
             AccountKind::Oauth => {
                 write_private_file(&paths.oauth_file(), entry.payload.as_bytes())?;
-                apply_mode_files(paths, false, &vault)
+                disable_adc(paths)
             }
             AccountKind::Adc => write_active_adc(paths, entry.payload.as_bytes()),
             AccountKind::VertexKey => unreachable!(),
@@ -1073,19 +1073,23 @@ pub fn set_mode_at(
     mode: TargetMode,
     rev: &str,
 ) -> Result<AntigravityAuthState> {
-    let enable_adc = matches!(mode, TargetMode::Adc);
-    let vault = with_lock(|| {
-        if !enable_adc && !paths.oauth_file().exists() {
+    let use_adc = matches!(mode, TargetMode::Adc);
+    with_lock(|| {
+        if !use_adc && !paths.oauth_file().exists() {
             return Err(err(
                 code::AUTH,
                 "未检测到 Antigravity OAuth 登录令牌，请先在 Antigravity 内登录账号",
             ));
         }
-        Ok(load_vault(paths)?.0)
+        Ok(())
     })?;
     with_lifecycle(paths, rev, lc, || {
-        restore_gateway_settings(paths)?;
-        apply_mode_files(paths, enable_adc, &vault)
+        let vault = restore_gateway_settings(paths)?;
+        if use_adc {
+            enable_adc(paths, &vault)
+        } else {
+            disable_adc(paths)
+        }
     })
 }
 pub fn rename_account_at(
@@ -1346,10 +1350,14 @@ fn restore_gateway_settings(paths: &Paths) -> Result<Vault> {
     save_vault(paths, &vault)?;
     Ok(vault)
 }
-fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<(StoredEntry, VertexKey)> {
+enum VertexSave {
+    Activate(StoredEntry, VertexKey),
+    Saved(AntigravityAuthState),
+}
+fn prepare_vertex_save(paths: &Paths, input: &SaveVertexKeyInput) -> Result<VertexSave> {
     with_lock(|| {
         verify_revision(paths, &input.expected_revision)?;
-        let (vault, _) = load_vault(paths)?;
+        let (mut vault, _) = load_vault(paths)?;
         let existing = input
             .id
             .as_deref()
@@ -1374,22 +1382,31 @@ fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<(StoredEntr
             models: input.models.clone(),
         };
         key.validate()?;
-        Ok((
-            StoredEntry {
-                id: existing
-                    .map(|e| e.id.clone())
-                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                name: clean_label(Some(&input.name), "Vertex API Key")?,
-                kind: AccountKind::VertexKey,
-                source_type: "vertex_key".into(),
-                email: None,
-                project_id: key.project_id.clone(),
-                payload: serde_json::to_string(&key)
-                    .map_err(|_| err(code::JSON, "Vertex API Key 无法保存"))?,
-                updated_at: now_secs(),
-            },
-            key,
-        ))
+        let entry = StoredEntry {
+            id: existing
+                .map(|e| e.id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            name: clean_label(Some(&input.name), "Vertex API Key")?,
+            kind: AccountKind::VertexKey,
+            source_type: "vertex_key".into(),
+            email: None,
+            project_id: key.project_id.clone(),
+            payload: serde_json::to_string(&key)
+                .map_err(|_| err(code::JSON, "Vertex API Key 无法保存"))?,
+            updated_at: now_secs(),
+        };
+        if input.activate
+            || vault
+                .gateway
+                .as_ref()
+                .is_some_and(|g| g.account_id == entry.id)
+        {
+            Ok(VertexSave::Activate(entry, key))
+        } else {
+            upsert_vertex(&mut vault, entry);
+            save_vault(paths, &vault)?;
+            state_at(paths).map(VertexSave::Saved)
+        }
     })
 }
 fn upsert_vertex(vault: &mut Vault, entry: StoredEntry) {
@@ -1431,7 +1448,7 @@ fn activate_vertex_at(
         settings["gateway"] = json!({"enabled": true, "url": selection.url(), "apiKey": selection.token, "wireProtocol": "genai", "customHeaders": {}});
         settings["models"] = json!({"defaultModelId": key.models[0], "list": key.models.iter().map(|m| json!({"modelId":m})).collect::<Vec<_>>()});
         write_app_settings(paths, &settings)?;
-        apply_mode_files(paths, false, &vault)?;
+        disable_adc(paths)?;
         push_span(&mut vault.activations, &entry.id, now_ms());
         upsert_vertex(&mut vault, entry);
         vault.gateway = Some(selection);
@@ -1563,23 +1580,11 @@ pub async fn save_antigravity_vertex_key(
     input: SaveVertexKeyInput,
 ) -> Result<AntigravityAuthState> {
     let paths = Paths::resolve(&r.data)?;
-    let (entry, key) = vertex_entry(&paths, &input)?;
-    let active = with_lock(|| {
-        Ok(load_vault(&paths)?
-            .0
-            .gateway
-            .is_some_and(|g| g.account_id == entry.id))
-    })?;
-    if input.activate || active {
-        run_vertex(r.inner().clone(), entry, key, input.expected_revision).await
-    } else {
-        with_lock(|| {
-            verify_revision(&paths, &input.expected_revision)?;
-            let (mut vault, _) = load_vault(&paths)?;
-            upsert_vertex(&mut vault, entry);
-            save_vault(&paths, &vault)?;
-            state_at(&paths)
-        })
+    match prepare_vertex_save(&paths, &input)? {
+        VertexSave::Activate(entry, key) => {
+            run_vertex(r.inner().clone(), entry, key, input.expected_revision).await
+        }
+        VertexSave::Saved(state) => Ok(state),
     }
 }
 pub(crate) fn with_usage_sync<T>(

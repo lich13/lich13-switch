@@ -45,7 +45,6 @@ pub fn parse(value: &Value) -> Periods {
         .into_iter()
         .flatten()
         .flat_map(|g| g["buckets"].as_array().into_iter().flatten())
-        .chain(response["buckets"].as_array().into_iter().flatten())
         .filter_map(|b| {
             if b["disabled"] == true {
                 return None;
@@ -96,20 +95,24 @@ impl Api {
     }
 }
 pub async fn observe(data: &Path) -> Result<Option<(String, Periods)>> {
+    let Some((id, email)) = auth::current_oauth_identity(data, &crate::antigravity::home()?)?
+    else {
+        return Ok(None);
+    };
     match Api::connect().await? {
-        Some(api) => api.quota(data, &crate::antigravity::home()?).await,
+        Some(api) => Ok(api.quota_for(&email).await?.map(|periods| (id, periods))),
         None => Ok(None),
     }
 }
 pub(in crate::usage) struct AccountAccumulator {
     account: Account,
     periods: Periods,
-    windows: BTreeMap<String, WindowAcc>,
+    windows: BTreeMap<&'static str, WindowAcc>,
     total: WindowAcc,
 }
 impl AccountAccumulator {
     pub(in crate::usage) fn new(account: Account, mut periods: Periods, now: i64) -> Self {
-        periods.retain(|_, p| account.kind == AccountKind::Oauth && p.current(now));
+        periods.retain(|_, p| p.current(now));
         Self {
             account,
             periods,
@@ -135,20 +138,22 @@ impl AccountAccumulator {
             w.reasoning_tokens = w.reasoning_tokens.saturating_add(amounts.reasoning_tokens);
             w.cost += amounts.cost;
         };
-        if historical {
-            add(&mut self.total);
-        }
-        if at > now || self.account.kind != AccountKind::Oauth {
+        if self.account.kind != AccountKind::Oauth {
+            if historical {
+                add(&mut self.total);
+            }
             return;
         }
-        let group = match track {
-            Some("gemini") => "gemini",
-            Some("claude_gpt") => "3p",
+        if at > now || self.periods.is_empty() {
+            return;
+        }
+        let keys = match track {
+            Some("gemini") => ["gemini-5h", "gemini-weekly"],
+            Some("claude_gpt") => ["3p-5h", "3p-weekly"],
             _ => return,
         };
-        for suffix in ["5h", "weekly"] {
-            let key = format!("{group}-{suffix}");
-            if self.periods.get(&key).is_some_and(|p| p.contains(at)) {
+        for key in keys {
+            if self.periods.get(key).is_some_and(|p| p.contains(at)) {
                 add(self.windows.entry(key).or_default());
             }
         }
@@ -164,7 +169,7 @@ impl AccountAccumulator {
                     let key = format!("{group}-{suffix}");
                     let mut w = self
                         .windows
-                        .remove(&key)
+                        .remove(key.as_str())
                         .unwrap_or_default()
                         .into_view(hours);
                     w.period = self.periods.remove(&key);

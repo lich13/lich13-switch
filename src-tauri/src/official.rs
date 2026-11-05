@@ -114,10 +114,7 @@ fn lines(text: &str) -> Vec<Line> {
     out
 }
 
-fn active_custom(text: &str) -> Result<()> {
-    let doc = text
-        .parse::<Document<String>>()
-        .map_err(|_| AppError::new(code::TOML, "配置不是有效的 TOML，请先修复配置"))?;
+fn active_custom(doc: &Document<String>) -> Result<()> {
     let profile = doc.get("profile").and_then(|v| v.as_str());
     let selector = profile
         .and_then(|p| doc.get("profiles")?.get(p)?.get("model_provider"))
@@ -155,10 +152,10 @@ fn assignment(body: &str, key: &str) -> bool {
 }
 
 fn scan(text: &str) -> Result<Scan> {
-    active_custom(text)?;
     let doc = text
         .parse::<Document<String>>()
         .map_err(|_| AppError::new(code::TOML, "配置不是有效的 TOML，请先修复配置"))?;
+    active_custom(&doc)?;
     let custom = doc
         .get("model_providers")
         .and_then(|v| v.get("custom"))

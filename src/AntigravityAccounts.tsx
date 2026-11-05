@@ -150,7 +150,7 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
   };
 
   const [candidates, setCandidates] = useState<
-    { id: string; name: string | null; preview: boolean }[]
+    { id: string; preview: boolean }[]
   >([]);
   const [catalogError, setCatalogError] = useState("");
   const [catalogBusy, setCatalogBusy] = useState(false);
@@ -162,7 +162,7 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
     try {
       const next = await command("get_antigravity_vertex_models", { refresh });
       if (request === catalogRequest.current) {
-        setCandidates(next.models ?? []);
+        setCandidates(next.models);
         setCatalogError(next.error ?? "");
       }
     } catch (e) {

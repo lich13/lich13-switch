@@ -552,6 +552,44 @@ fn vertex_input(revision: String) -> SaveVertexKeyInput {
         expected_revision: revision,
     }
 }
+fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<(StoredEntry, VertexKey)> {
+    match prepare_vertex_save(paths, input)? {
+        VertexSave::Activate(entry, key) => Ok((entry, key)),
+        VertexSave::Saved(_) => panic!("fixture expected activation"),
+    }
+}
+#[test]
+fn inactive_vertex_save_updates_in_place_without_changing_app_files() {
+    let (_tmp, paths) = setup_paths();
+    let mut input = vertex_input(state_at(&paths).unwrap().revision);
+    input.activate = false;
+    let VertexSave::Saved(saved) = prepare_vertex_save(&paths, &input).unwrap() else {
+        panic!("inactive entry must save without activation");
+    };
+    assert!(!paths.app_settings_file().exists());
+    assert!(!paths.config_file().exists());
+    let account = saved
+        .accounts
+        .iter()
+        .find(|a| a.kind == AccountKind::VertexKey)
+        .unwrap();
+    input.id = Some(account.id.clone());
+    input.api_key.clear();
+    input.name = "Fixture renamed key".into();
+    input.expected_revision = saved.revision;
+    let VertexSave::Saved(updated) = prepare_vertex_save(&paths, &input).unwrap() else {
+        panic!("inactive edit must save without activation");
+    };
+    assert_eq!(updated.accounts.len(), 1);
+    assert_eq!(updated.accounts[0].name, "Fixture renamed key");
+    assert!(!updated.accounts[0].current);
+    assert!(prepare_vertex_save(&paths, &input).is_err());
+    let (vault, _) = load_vault(&paths).unwrap();
+    assert_eq!(
+        decode_vertex(&vault.entries[0]).unwrap().api_key,
+        "fixture-vertex-key"
+    );
+}
 #[test]
 fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_settings() {
     let (_tmp, paths) = setup_paths();
@@ -595,6 +633,7 @@ fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_setti
     );
     let mut edit = vertex_input(selected.revision.clone());
     edit.id = Some(id.clone());
+    edit.activate = false;
     edit.api_key.clear();
     edit.models = vec!["gemini-2.5-flash".into()];
     let (updated, updated_key) = vertex_entry(&paths, &edit).unwrap();

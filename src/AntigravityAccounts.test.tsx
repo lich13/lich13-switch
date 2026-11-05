@@ -217,9 +217,7 @@ describe("AntigravityAccounts", () => {
     mockCommand.mockImplementation(async (name: string) => {
       if (name === "get_antigravity_vertex_models")
         return {
-          models: [
-            { id: "gemini-fixture-new", name: "Fixture new", preview: false },
-          ],
+          models: [{ id: "gemini-fixture-new", preview: false }],
           error: null,
         };
       if (name === "save_antigravity_vertex_key")
@@ -287,7 +285,7 @@ describe("AntigravityAccounts", () => {
     mockCommand.mockImplementation(async (name: string) => {
       if (name === "get_antigravity_vertex_models")
         return {
-          models: [{ id: "gemini-fixture-new", name: null, preview: false }],
+          models: [{ id: "gemini-fixture-new", preview: false }],
           error: "目录刷新失败",
         };
       return vertexState;

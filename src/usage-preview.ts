@@ -485,14 +485,14 @@ export function usagePreview(
       accounts: [
         {
           id: "ag-oauth-1",
-          name: "Fixture OAuth",
+          name: "Antigravity OAuth",
           kind: "oauth",
           total: {
             period: null,
-            requests: 15,
-            tokens: 260000,
-            reasoningTokens: 16200,
-            costUsd: "1.2450",
+            requests: 0,
+            tokens: 0,
+            reasoningTokens: 0,
+            costUsd: "0",
             unpricedRequests: 0,
             tokensPerHour: 0,
           },
@@ -502,8 +502,8 @@ export function usagePreview(
               label: "Gemini",
               burst5h: {
                 period: {
-                  start: 1_760_000_000_000 - 5 * 3_600_000,
-                  end: 1_760_000_000_000,
+                  start: now - 4 * 3_600_000,
+                  end: now + 3_600_000,
                 },
                 requests: 7,
                 tokens: 182400,
@@ -514,8 +514,8 @@ export function usagePreview(
               },
               weekly7d: {
                 period: {
-                  start: 1_760_000_000_000 - 168 * 3_600_000,
-                  end: 1_760_000_000_000,
+                  start: now - 144 * 3_600_000,
+                  end: now + 24 * 3_600_000,
                 },
                 requests: 12,
                 tokens: 286000,
@@ -530,8 +530,8 @@ export function usagePreview(
               label: "Claude / GPT",
               burst5h: {
                 period: {
-                  start: 1_760_000_000_000 - 5 * 3_600_000,
-                  end: 1_760_000_000_000,
+                  start: now - 3 * 3_600_000,
+                  end: now + 2 * 3_600_000,
                 },
                 requests: 4,
                 tokens: 94200,
@@ -542,8 +542,8 @@ export function usagePreview(
               },
               weekly7d: {
                 period: {
-                  start: 1_760_000_000_000 - 168 * 3_600_000,
-                  end: 1_760_000_000_000,
+                  start: now - 120 * 3_600_000,
+                  end: now + 48 * 3_600_000,
                 },
                 requests: 6,
                 tokens: 131400,
@@ -555,6 +555,24 @@ export function usagePreview(
             },
           ],
         },
+        ...([
+          ["ag-adc-1", "GCP Project Alpha", "adc"],
+          ["ag-vertex-1", "Vertex Preview", "vertex_key"],
+        ] as const).map(([id, name, kind]) => ({
+          id,
+          name,
+          kind,
+          total: {
+            period: null,
+            requests: 0,
+            tokens: 0,
+            reasoningTokens: 0,
+            costUsd: "0",
+            unpricedRequests: 0,
+            tokensPerHour: 0,
+          },
+          tracks: [],
+        })),
       ],
       families: [
         {

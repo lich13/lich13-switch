@@ -945,15 +945,20 @@ impl Store {
             .unwrap_or_default();
         let mut min_time = f.start.unwrap_or(0);
         let mut max_time = f.end.unwrap_or(now_ms);
-        for account in accounts {
-            let raw: Option<String> = db(self
-                .connection
-                .query_row(
-                    "SELECT value FROM metadata WHERE key=?1",
-                    [format!("antigravity_quota:{}", account.id)],
-                    |r| r.get(0),
-                )
-                .optional())?;
+        for (order, account) in accounts.into_iter().enumerate() {
+            let raw: Option<String> =
+                if account.kind == crate::antigravity::auth::AccountKind::Oauth {
+                    db(self
+                        .connection
+                        .query_row(
+                            "SELECT value FROM metadata WHERE key=?1",
+                            [format!("antigravity_quota:{}", account.id)],
+                            |r| r.get(0),
+                        )
+                        .optional())?
+                } else {
+                    None
+                };
             let periods = raw
                 .map(|s| serde_json::from_str(&s).map_err(|_| failure("已保存的账号周期无法读取")))
                 .transpose()?
@@ -964,7 +969,7 @@ impl Store {
                 min_time = min_time.min(start);
                 max_time = max_time.max(now_ms);
             }
-            agg.accounts.insert(id, acc);
+            agg.accounts.insert(id, (order, acc));
         }
         if storage_v12::active(&self.connection) {
             storage_v12::scan_antigravity_attempts(&self.connection, min_time, max_time, |row| {

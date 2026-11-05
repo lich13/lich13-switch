@@ -5,6 +5,7 @@ import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
 export { Drawer } from "./UsageDrawer";
 import { subscriptions } from "./subscriptions";
 import type {
+  AntigravityAuthState,
   CommandName,
   CommandParams,
   CommandResult,
@@ -107,7 +108,8 @@ export default function Usage({
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
   const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
-    [agBusy, setAgBusy] = useState(false);
+    [agBusy, setAgBusy] = useState(false),
+    [agCurrentAccount, setAgCurrentAccount] = useState<string | null>(null);
   const [data, setData] = useState<Dashboard | null>(null),
     [logs, setLogs] = useState<UsagePage>(empty),
     [state, setState] = useState<UsageState | null>(null);
@@ -308,11 +310,16 @@ export default function Usage({
     };
   }, [loadRows, visible, nativeVisible, tab]);
   useEffect(() => {
-    if (visible && nativeVisible && tab === "antigravity") {
+    if (!visible || !nativeVisible || tab !== "antigravity") return;
+    void loadAntigravity();
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    events.watch("antigravity-auth-state", () => {
+      pending.current.clear();
       void loadAntigravity();
-    }
+    });
     return () => {
       agSequence.current++;
+      events.dispose();
     };
   }, [loadAntigravity, visible, nativeVisible, tab]);
   useEffect(() => {
@@ -334,6 +341,27 @@ export default function Usage({
   useEffect(() => {
     if (!visible || !nativeVisible) return;
     let gone = false;
+    let latestAccounts: AntigravityAuthState | null = null;
+    const updateAccounts = (ag: AntigravityAuthState | null) => {
+      if (gone) return;
+      const kind =
+        ag?.mode === "vertex_key"
+          ? "vertex_key"
+          : ag?.enableAdc
+            ? "adc"
+            : "oauth";
+      setAgCurrentAccount(
+        ag?.accounts.find((a) => a.current && a.kind === kind)?.id ?? null,
+      );
+      const names = Object.fromEntries(
+        (ag?.accounts ?? []).map((a) => [
+          a.id,
+          `${a.name} (${a.kind === "oauth" ? "OAuth" : a.kind === "adc" ? "ADC" : "Vertex Key"})`,
+        ]),
+      );
+      setAgProviders(names);
+      return names;
+    };
     void Promise.all([
       command("get_gateway", { clientId: "codex" }),
       command("get_gateway", { clientId: "claude" }),
@@ -348,36 +376,15 @@ export default function Usage({
             s.providers.map((p) => [p.id, p.name]),
           ),
         );
-        const formatAgAccount = (a: { name: string; kind?: string }) =>
-          a.kind === "adc"
-            ? `${a.name} (ADC)`
-            : a.kind === "oauth"
-              ? `${a.name} (OAuth)`
-              : a.name;
-        const agMap = Object.fromEntries(
-          (ag?.accounts ?? []).map((a) => [a.id, formatAgAccount(a)]),
-        );
-        setAgProviders(agMap);
+        const agMap = updateAccounts(latestAccounts ?? ag);
         setProviders({ ...gw, ...agMap });
       })
       .catch(() => {});
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("antigravity-auth-state", (ag) => {
-      if (gone || !ag || typeof ag !== "object" || !("accounts" in ag)) return;
-      const accounts = (
-        ag as { accounts: { id: string; name: string; kind?: string }[] }
-      ).accounts;
-      const agMap = Object.fromEntries(
-        accounts.map((a) => [
-          a.id,
-          a.kind === "adc"
-            ? `${a.name} (ADC)`
-            : a.kind === "oauth"
-              ? `${a.name} (OAuth)`
-              : a.name,
-        ]),
-      );
-      setAgProviders(agMap);
+      if (gone) return;
+      latestAccounts = ag;
+      const agMap = updateAccounts(ag);
       setProviders((prev) => ({ ...prev, ...agMap }));
     });
     return () => {
@@ -668,6 +675,7 @@ export default function Usage({
         <UsageAntigravity
           stats={agStats}
           busy={agBusy}
+          currentAccountId={agCurrentAccount}
           selectedProvider={provider}
           providerName={name}
           onSelectProvider={(nextProvider) => {

@@ -489,4 +489,13 @@ fn authenticated_helper_state_preserves_its_physical_and_ownership_fields() {
         state.revision,
         crate::storage::digest(value.to_string().as_bytes())
     );
+    for (key, invalid) in [
+        ("supported", serde_json::Value::Null),
+        ("enabled", serde_json::json!("false")),
+        ("batterySleep", serde_json::json!(1441)),
+    ] {
+        let mut bad = value.clone();
+        bad[key] = invalid;
+        assert!(super::helper_state(&bad).is_err());
+    }
 }

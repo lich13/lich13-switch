@@ -820,7 +820,7 @@ export type CommandMap = {
   get_antigravity_vertex_models: Call<
     { refresh: boolean },
     {
-      models: { id: string; name: string | null; preview: boolean }[];
+      models: { id: string; preview: boolean }[];
       error: string | null;
     }
   >;

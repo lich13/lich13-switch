@@ -3,7 +3,7 @@
 //! retires its old slot transactionally, without changing any surviving slot.
 use super::*;
 use rusqlite::types::Value as Sql;
-use std::{cell::RefCell, collections::VecDeque};
+use std::{borrow::Cow, cell::RefCell, collections::VecDeque};
 
 type CachedBlock = (Vec<u8>, Value);
 thread_local! {
@@ -13,32 +13,37 @@ thread_local! {
 }
 
 pub(super) fn read(c: &Connection, body: Sql) -> Result<(u8, Value)> {
-    inspect(c, body, |tag, value| Ok((tag, value.clone())))
+    inspect(c, body, None, |tag, value| Ok((tag, value.clone())))
 }
 
 pub(super) fn inspect<T>(
     c: &Connection,
     body: Sql,
+    block: Option<&[u8]>,
     read: impl FnOnce(u8, &Value) -> Result<T>,
 ) -> Result<T> {
     match body {
         Sql::Integer(0) => read(0, &json!({})),
         Sql::Blob(bytes) => read(bytes.first().copied().unwrap_or(255), &unpack(&bytes)?),
         Sql::Integer(reference) if reference >= 2048 => {
-            let bytes: Vec<u8> = db(db(
-                c.prepare_cached("SELECT body FROM v12_diagnostics WHERE id=?1")
-            )?
-            .query_row([reference / 2048], |r| r.get(0)))?;
+            let bytes: Cow<'_, [u8]> = match block {
+                Some(bytes) => Cow::Borrowed(bytes),
+                None => Cow::Owned(db(db(
+                    c.prepare_cached("SELECT body FROM v12_diagnostics WHERE id=?1")
+                )?
+                .query_row([reference / 2048], |r| r.get(0)))?),
+            };
             CACHE.with(|cache| -> Result<T> {
                 let mut cache = cache.borrow_mut();
-                let index = if let Some(index) = cache.iter().position(|(b, _)| *b == bytes) {
+                let index = if let Some(index) = cache.iter().position(|(b, _)| b == bytes.as_ref())
+                {
                     index
                 } else {
                     let value = unpack(&bytes)?;
                     if cache.len() == 4 {
                         cache.pop_front();
                     }
-                    cache.push_back((bytes, value));
+                    cache.push_back((bytes.into_owned(), value));
                     cache.len() - 1
                 };
                 let entry = cache[index]
