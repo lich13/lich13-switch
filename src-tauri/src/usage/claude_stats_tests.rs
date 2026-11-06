@@ -197,8 +197,9 @@ fn saved_tariff_controls_savings_and_missing_basis_stays_unknown() {
         .calculate(&attempt.tokens, Some("fast"));
     attempt.service_tier = Some("fast".into());
     let price = attempt.price.as_ref().unwrap();
-    let expected =
-        super::pricing::cache_savings(price, attempt.tokens.cache_read.unwrap()).unwrap();
+    let expected = super::pricing::cache_savings_rates(&price.rates, &price.multiplier)
+        .and_then(|rates| super::pricing::cache_savings(rates, attempt.tokens.cache_read.unwrap()))
+        .unwrap();
     let cost = price.cost.clone();
     store.write_batch(std::slice::from_ref(&row), None).unwrap();
     let selected = Filter {
@@ -228,7 +229,7 @@ fn saved_tariff_controls_savings_and_missing_basis_stays_unknown() {
 
 #[test]
 fn cache_savings_uses_applied_rates_for_compacted_retries() {
-    use super::pricing::{cache_savings, Quote};
+    use super::pricing::{cache_savings, cache_savings_rates, Quote};
     let quote = Quote {
         model: "fixture-model".into(),
         data: Some(serde_json::json!({
@@ -250,7 +251,8 @@ fn cache_savings_uses_applied_rates_for_compacted_retries() {
     let mut aggregate = tokens.clone();
     aggregate.add(&tokens);
     assert_eq!(
-        cache_savings(&price, aggregate.cache_read.unwrap()),
+        cache_savings_rates(&price.rates, &price.multiplier)
+            .and_then(|rates| cache_savings(rates, aggregate.cache_read.unwrap())),
         decimal("1800")
     );
     let zero_fresh = Tokens {
@@ -258,7 +260,11 @@ fn cache_savings_uses_applied_rates_for_compacted_retries() {
         ..tokens
     };
     let saved = quote.calculate(&zero_fresh, None).unwrap();
-    assert_eq!(cache_savings(&saved, zero_fresh.cache_read.unwrap()), None);
+    assert_eq!(
+        cache_savings_rates(&saved.rates, &saved.multiplier)
+            .and_then(|rates| cache_savings(rates, zero_fresh.cache_read.unwrap())),
+        None
+    );
 }
 
 #[test]
@@ -277,6 +283,7 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
             "claude-sonnet-4-6",
             Operation::Model,
         );
+        row.attempts[0].tokens.reasoning = Some(8);
         let prices = Pricing::new(dir.path()).unwrap();
         row.attempts[0].price = prices
             .quote(Some("claude-sonnet-4-6"), "2")
@@ -298,6 +305,29 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
         assert_eq!(stats.token_mix.input, 100);
         assert_eq!(stats.token_mix.cache_write, 0);
         assert!(stats.token_mix.unreported.is_empty());
+        assert!(stats.token_mix.reasoning_reported);
+        assert_eq!(stats.token_mix.reasoning, 8);
+        assert_eq!(stats.token_mix.thinking_share_percent, Some(40.0));
+        assert!(stats.token_mix.cache_savings_usd.is_some());
+        assert!(stats.families[0].reasoning_reported);
+        assert!(stats.top_sessions[0].reasoning_reported);
+        assert_eq!(stats.top_sessions[0].reasoning_tokens, 8);
+        assert!(
+            !stats
+                .providers
+                .iter()
+                .find(|p| p.id == "first")
+                .unwrap()
+                .reasoning_reported
+        );
+        assert!(
+            stats
+                .providers
+                .iter()
+                .find(|p| p.id == "last")
+                .unwrap()
+                .reasoning_reported
+        );
         assert_eq!(stats.unpriced_requests, 1);
         assert_eq!(stats.top_sessions[0].unpriced_requests, 1);
         assert_eq!(
@@ -332,5 +362,52 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
             )
             .unwrap();
         assert_eq!(stats.token_mix.unreported.len(), 4);
+        assert!(!stats.token_mix.reasoning_reported);
+        let empty = store
+            .claude_stats(
+                &Filter {
+                    start: Some(AT + 3000),
+                    ..Default::default()
+                },
+                AT + 4000,
+            )
+            .unwrap();
+        assert_eq!(empty.requests, 0);
+        assert!(!empty.token_mix.reasoning_reported);
+    }
+}
+
+#[test]
+fn zero_output_preserves_reported_reasoning_zero_in_both_storage_layouts() {
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        for reasoning in [Some(0), None] {
+            let mut row = request("zero-output", "proxy", "fixture-model", Operation::Model);
+            row.attempts[0].tokens.output = Some(0);
+            row.attempts[0].tokens.reasoning = reasoning;
+            store.write_batch(&[row], None).unwrap();
+            for compacted in [false, true] {
+                if native && compacted {
+                    while store.compact_storage_batch().unwrap() {}
+                }
+                let stats = store.claude_stats(&Filter::default(), AT + 2000).unwrap();
+                assert_eq!(stats.token_mix.output, 0);
+                assert_eq!(stats.token_mix.reasoning, 0);
+                assert_eq!(stats.token_mix.reasoning_reported, reasoning.is_some());
+                assert_eq!(stats.providers[0].reasoning_reported, reasoning.is_some());
+                assert_eq!(stats.families[0].reasoning_reported, reasoning.is_some());
+                assert_eq!(
+                    stats.top_sessions[0].reasoning_reported,
+                    reasoning.is_some()
+                );
+                assert_eq!(stats.token_mix.thinking_share_percent, None);
+            }
+        }
     }
 }

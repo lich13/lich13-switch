@@ -1430,9 +1430,11 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
             model: a.response_model.clone(),
             display_name: None,
             tokens: a.tokens.clone(),
-            price: a.price.clone().map(std::sync::Arc::new),
+            cache_savings_rates: a
+                .price
+                .as_ref()
+                .and_then(|p| crate::usage::pricing::cache_savings_rates(&p.rates, &p.multiplier)),
             cost: a.price.as_ref().map(|p| p.cost.clone()),
-            unpriced: 0,
             request_unpriced: false,
             provider_unpriced: false,
             duration_ms: 1000,

@@ -969,11 +969,8 @@ fn load(path: &Path) -> Journal {
     }
     j
 }
-fn append_lines(path: &Path, rows: &[Record]) -> Result<()> {
+fn append_lines<'a>(path: &Path, rows: impl Iterator<Item = &'a Record>) -> Result<()> {
     use std::io::Write;
-    if rows.is_empty() {
-        return Ok(());
-    }
     let metadata = std::fs::symlink_metadata(path).map_err(storage::io_error)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(storage::io_error(std::io::Error::other(
@@ -985,6 +982,9 @@ fn append_lines(path: &Path, rows: &[Record]) -> Result<()> {
         serde_json::to_writer(&mut buf, record)
             .map_err(|_| AppError::new(code::LOG_WRITE, "日志写入失败，请检查文件权限与空间"))?;
         buf.push(b'\n');
+    }
+    if buf.is_empty() {
+        return Ok(());
     }
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -1155,75 +1155,8 @@ impl Service {
                             Err(_) => break,
                         }
                     }
-                    let fast_batch = {
-                        let guard = j.lock().unwrap();
-                        if !guard.needs_write(&path)
-                            && !jobs
-                                .iter()
-                                .any(|job| matches!(job, Job::Append(r) if r.details.raw.is_some()))
-                        {
-                            let mut staged: Vec<(Record, bool)> = Vec::with_capacity(jobs.len());
-                            let mut pure_append = true;
-                            for job in &jobs {
-                                let Job::Append(boxed) = job else {
-                                    pure_append = false;
-                                    break;
-                                };
-                                let mut r = (**boxed).clone();
-                                resolve_cause_id(
-                                    &mut r,
-                                    &guard.aliases,
-                                    guard
-                                        .records
-                                        .iter()
-                                        .map(Arc::as_ref)
-                                        .chain(staged.iter().map(|(rec, _)| rec)),
-                                );
-                                if guard
-                                    .records
-                                    .iter()
-                                    .map(Arc::as_ref)
-                                    .chain(staged.iter().map(|(rec, _)| rec))
-                                    .rev()
-                                    .any(|old| {
-                                        old.same(&r)
-                                            && r.last_at.saturating_sub(old.first_at)
-                                                < r.merge_seconds()
-                                    })
-                                {
-                                    pure_append = false;
-                                    break;
-                                }
-                                let notify = r.reason.notifiable(r.action);
-                                staged.push((r, notify));
-                            }
-                            pure_append.then_some(staged)
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(staged) = fast_batch {
-                        let rows: Vec<Record> = staged.iter().map(|(r, _)| r.clone()).collect();
-                        let result = append_lines(&path, &rows);
-                        let error = {
-                            let mut guard = j.lock().unwrap();
-                            guard.records.extend(rows.into_iter().map(Arc::new));
-                            if result.is_err() {
-                                guard.dirty = true;
-                                guard.error = Some("日志写入失败，请检查文件权限与空间".into());
-                            }
-                            guard.error.clone()
-                        };
-                        for (record, notify) in staged {
-                            let _ = events_copy.send(Change {
-                                record: Some(record),
-                                error: error.clone(),
-                                notify,
-                            });
-                        }
-                        continue;
-                    }
                 }
+                let mut append_only = append;
                 let mut changes = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let mut changed = None;
@@ -1263,6 +1196,7 @@ impl Service {
                                                 < r.merge_seconds()
                                     })
                                 {
+                                    append_only = false;
                                     let old = Arc::make_mut(old_arc);
                                     old.last_at = r.last_at;
                                     old.count = old.count.saturating_add(1);
@@ -1326,14 +1260,26 @@ impl Service {
                 let (snapshot, retained_raw_ids) = {
                     let mut journal = j.lock().unwrap();
                     let before_retention = journal.records.len();
-                    let snapshot = journal.prepare_rewrite(&path, !prune_only);
+                    append_only &= !journal.needs_write(&path);
+                    let snapshot = if append_only {
+                        None
+                    } else {
+                        journal.prepare_rewrite(&path, !prune_only)
+                    };
                     let retained_raw = (cleanup || journal.records.len() != before_retention)
                         .then(|| journal.retained_raw_ids());
                     (snapshot, retained_raw)
                 };
-                let result = match &snapshot {
-                    Some(records) => write_records_stream(&path, records),
-                    None => Ok(()),
+                let result = if append_only {
+                    append_lines(
+                        &path,
+                        changes.iter().filter_map(|(record, _)| record.as_ref()),
+                    )
+                } else {
+                    match &snapshot {
+                        Some(records) => write_records_stream(&path, records),
+                        None => Ok(()),
+                    }
                 };
                 let raw_pruned = if result.is_ok() {
                     if let Some(retained) = &retained_raw_ids {
@@ -1354,6 +1300,7 @@ impl Service {
                             journal.error = Some("日志原文清理失败，请重试".into());
                         }
                     } else {
+                        journal.dirty = true;
                         journal.error = Some("日志写入失败，请检查文件权限与空间".into());
                     }
                     journal.error.clone()

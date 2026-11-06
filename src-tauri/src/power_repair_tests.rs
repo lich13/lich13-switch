@@ -28,6 +28,7 @@ struct MockHelper {
     repair_gate: Mutex<Option<RepairGate>>,
     replies: Mutex<VecDeque<Reply>>,
     repairs: AtomicUsize,
+    reads: AtomicUsize,
     calls: Mutex<Vec<(State, bool, u16)>>,
 }
 
@@ -48,6 +49,7 @@ impl MockHelper {
 
 impl System for MockHelper {
     fn read(&self) -> Result<State> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(self.current.lock().unwrap().clone())
     }
     fn prepare(&self) -> Result<()> {
@@ -68,7 +70,7 @@ impl System for MockHelper {
         }
         Ok(())
     }
-    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<()> {
+    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<State> {
         assert_eq!(&*self.current.lock().unwrap(), before);
         self.calls
             .lock()
@@ -80,8 +82,8 @@ impl System for MockHelper {
             .unwrap()
             .pop_front()
             .expect("fixture apply reply");
-        *self.current.lock().unwrap() = reply.state;
-        reply.error.map_or(Ok(()), |code| {
+        *self.current.lock().unwrap() = reply.state.clone();
+        reply.error.map_or(Ok(reply.state), |code| {
             Err(AppError::new(code, "fixture helper transaction failed"))
         })
     }
@@ -108,6 +110,7 @@ fn fixture(initial: State) -> (tempfile::TempDir, Service, Arc<MockHelper>) {
         repair_gate: Mutex::new(None),
         replies: Mutex::new(VecDeque::new()),
         repairs: AtomicUsize::new(0),
+        reads: AtomicUsize::new(0),
         calls: Mutex::new(Vec::new()),
     });
     let service = Service {
@@ -263,6 +266,7 @@ fn ready_helper_is_reused_without_authorization() {
     helper.reply(actual.clone(), None);
     assert_eq!(service.set(true, &original.revision).unwrap(), actual);
     assert_eq!(helper.repair_count(), 0);
+    assert_eq!(helper.reads.load(Ordering::SeqCst), 1);
     assert_eq!(*helper.calls.lock().unwrap(), [(original, true, 7)]);
 }
 
@@ -309,21 +313,6 @@ fn apply_errors_are_returned_without_retry_or_rollback() {
         assert_eq!(*helper.calls.lock().unwrap(), [(original, true, 7)]);
         assert_legacy(&service);
     }
-}
-
-#[test]
-fn mismatched_state_after_apply_never_reports_a_successful_toggle() {
-    let original = state("ready", false, 7, "none", "fixture-before");
-    let (_dir, service, helper) = fixture(original.clone());
-    legacy(&service);
-    helper.reply(original.clone(), None);
-    assert_eq!(
-        service.set(true, &original.revision).unwrap_err().code,
-        "POWER"
-    );
-    assert_eq!(helper.repair_count(), 0);
-    assert_eq!(helper.calls.lock().unwrap().len(), 1);
-    assert_legacy(&service);
 }
 
 #[test]

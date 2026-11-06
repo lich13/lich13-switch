@@ -1032,7 +1032,7 @@ impl Store {
                 for (idx, a) in r.attempts.iter().enumerate() {
                     let is_final = idx == last_idx;
                     attempts.push(storage_v12::AntigravityAttemptRow {
-                        final_provider: r.final_attempt().and_then(|a| a.provider.clone()),
+                        final_provider: None,
                         session_id: r.session_id.clone(),
                         provider: a.provider.clone(),
                         time,
@@ -1045,10 +1045,11 @@ impl Store {
                             .or_else(|| a.requested_model.clone()),
                         display_name: a.model_display_name.clone(),
                         tokens: a.tokens.clone(),
-                        price: a.price.clone().map(std::sync::Arc::new),
+                        cache_savings_rates: a.price.as_ref().and_then(|p| {
+                            super::pricing::cache_savings_rates(&p.rates, &p.multiplier)
+                        }),
                         cost: a.price.as_ref().map(|p| p.cost.clone()),
-                        unpriced: a.unpriced_count(),
-                        request_unpriced: false,
+                        request_unpriced: a.unpriced_count() > 0,
                         provider_unpriced: false,
                         duration_ms: if is_final {
                             a.measured_duration_ms().unwrap_or(0)

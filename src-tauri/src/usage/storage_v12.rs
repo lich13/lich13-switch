@@ -438,9 +438,8 @@ pub(super) struct AntigravityAttemptRow {
     pub model: Option<String>,
     pub display_name: Option<String>,
     pub tokens: Tokens,
-    pub price: Option<std::sync::Arc<PriceSnapshot>>,
+    pub cache_savings_rates: Option<(rust_decimal::Decimal, rust_decimal::Decimal)>,
     pub cost: Option<String>,
-    pub unpriced: u64,
     pub request_unpriced: bool,
     pub provider_unpriced: bool,
     pub duration_ms: u64,
@@ -458,7 +457,12 @@ pub(super) fn scan_antigravity_attempts(
 
 struct StatsShape {
     display_name: Option<String>,
-    price: Option<std::sync::Arc<PriceSnapshot>>,
+    cache_savings_rates: Option<(rust_decimal::Decimal, rust_decimal::Decimal)>,
+}
+#[derive(serde::Deserialize)]
+struct StatsPrice {
+    rates: std::collections::BTreeMap<String, String>,
+    multiplier: String,
 }
 
 // A request is the filtering/counting unit, while costs and missing prices belong
@@ -468,12 +472,12 @@ pub(super) fn visit_request_attempts(
     mut visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
 ) -> Result<()> {
     let provider = rows.last().and_then(|row| row.provider.clone());
-    let unpriced = rows.iter().any(|row| row.unpriced > 0);
+    let unpriced = rows.iter().any(|row| row.request_unpriced);
     let mut providers = std::collections::BTreeSet::new();
     for mut row in rows.drain(..) {
         row.final_provider = provider.clone();
+        row.provider_unpriced = row.request_unpriced && providers.insert(row.provider.clone());
         row.request_unpriced = unpriced;
-        row.provider_unpriced = row.unpriced > 0 && providers.insert(row.provider.clone());
         visit(row)?;
     }
     Ok(())
@@ -532,26 +536,20 @@ pub(super) fn scan_client_attempts(
             if let Some(cached) = shapes.get(&sid) {
                 Some(cached.clone())
             } else {
-                let mut value = db(row.get::<_, Option<Vec<u8>>>(7))?
+                let value = db(row.get::<_, Option<Vec<u8>>>(7))?
                     .as_deref()
                     .and_then(shared_value)
                     .unwrap_or_else(|| json!({}));
-                if let Some(price) = value["price"].as_object_mut() {
-                    price.insert("cost".into(), json!("0"));
-                    price.remove("basis");
-                }
                 let price = value
                     .get("price")
                     .filter(|p| !p.is_null())
-                    .map(|p| {
-                        serde_json::from_value(p.clone())
-                            .map(std::sync::Arc::new)
-                            .map_err(json_error)
-                    })
+                    .map(|p| serde_json::from_value::<StatsPrice>(p.clone()).map_err(json_error))
                     .transpose()?;
                 let decoded = std::sync::Arc::new(StatsShape {
                     display_name: value["modelDisplayName"].as_str().map(str::to_owned),
-                    price,
+                    cache_savings_rates: price
+                        .as_ref()
+                        .and_then(|p| super::pricing::cache_savings_rates(&p.rates, &p.multiplier)),
                 });
                 shapes.insert(sid, decoded.clone());
                 Some(decoded)
@@ -560,11 +558,7 @@ pub(super) fn scan_client_attempts(
             None
         };
         let output = opt_u64(11)?;
-        let reasoning = if output.is_some_and(|n| n > 0) {
-            diagnostic_u64(c, db(row.get(8))?, &mut diagnostics, "reasoningTokens")?
-        } else {
-            None
-        };
+        let reasoning = diagnostic_u64(c, db(row.get(8))?, &mut diagnostics, "reasoningTokens")?;
         let is_final = db(row.get::<_, i64>(4))? != 0;
         if is_final {
             request_operation = match db(row.get::<_, i64>(18))? {
@@ -592,10 +586,9 @@ pub(super) fn scan_client_attempts(
                 cache_write: opt_u64(13)?,
                 ..Default::default()
             },
-            price: shape.as_ref().and_then(|s| s.price.clone()),
+            cache_savings_rates: shape.as_ref().and_then(|s| s.cache_savings_rates),
             cost: db(row.get(14))?,
-            unpriced: opt_u64(15)?.unwrap_or(0),
-            request_unpriced: false,
+            request_unpriced: opt_u64(15)?.unwrap_or(0) > 0,
             provider_unpriced: false,
             duration_ms: opt_u64(16)?.unwrap_or(0),
         });
@@ -1242,7 +1235,7 @@ fn metric_select(table: &str, kind: i64) -> String {
       coalesce(cost,'0') cost,unpriced,
       CASE WHEN ordinal=r.last THEN duration ELSE 0 END duration_ms,
       CASE WHEN ordinal=r.last AND {generation}>0 THEN coalesce(output,0) ELSE 0 END measured_outputs,
-      CASE WHEN ordinal=r.last AND {generation}>0 THEN {generation} ELSE 0 END generation_ms,
+      CASE WHEN ordinal=r.last THEN max(coalesce({generation},0),0) ELSE 0 END generation_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 THEN coalesce(first_token,0) ELSE 0 END first_token_sum_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 AND first_token IS NOT NULL THEN 1 ELSE 0 END first_token_samples,
       CASE WHEN cache_read IS NOT NULL AND cache_read<=coalesce(inclusive_input,input+cache_read+cache_write) THEN cache_read ELSE 0 END cache_read_eligible,
@@ -1589,7 +1582,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     ))?;
-    if sql.contains("THEN usage_generation_ms(a.body,0)") {
+    if sql.contains("THEN max(coalesce(CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,0)") {
         return Ok(());
     }
     let original = metric_select("v12_raw_attempts", 2)

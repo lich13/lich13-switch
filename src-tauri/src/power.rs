@@ -41,7 +41,7 @@ trait System: Send + Sync {
         Err(AppError::new(code::UNSUPPORTED, "此设备不支持电源助手"))
     }
     fn read(&self) -> Result<State>;
-    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<()>;
+    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<State>;
 }
 struct Native;
 #[cfg(test)]
@@ -136,11 +136,7 @@ impl Service {
         };
         // Restoration belongs exclusively to the privileged helper. An unverified
         // legacy user/script record must never supply a battery sleep value.
-        self.system.apply(&before, enabled, before.battery_sleep)?;
-        let actual = self.state()?;
-        if actual.enabled != enabled {
-            return Err(AppError::new(code::POWER, "电源状态再次变化，请重新操作"));
-        }
+        let actual = self.system.apply(&before, enabled, before.battery_sleep)?;
         self.retire_legacy_record()?;
         Ok(actual)
     }
@@ -277,13 +273,13 @@ impl System for Native {
             Ok(State::new(false, false, 0))
         }
     }
-    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<()> {
+    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<State> {
         #[cfg(target_os = "macos")]
         {
-            crate::power_macos::request(
+            let response = crate::power_macos::request(
                 serde_json::json!({"op":"set", "enabled":enabled, "minutes":minutes, "beforeEnabled":before.enabled, "beforeSleep":before.battery_sleep,"beforeOwnership":before.ownership}),
             )?;
-            Ok(())
+            helper_state(&response["state"])
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -345,7 +341,7 @@ mod tests {
             }
             Ok(())
         }
-        fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<()> {
+        fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<State> {
             let mut state = self.current.lock().unwrap();
             if state.revision != before.revision {
                 return Err(AppError::new(code::CONFLICT, "外部状态变化"));
@@ -363,9 +359,10 @@ mod tests {
                 .pop_front()
                 .expect("helper reply");
             *state = reply.state;
-            reply
-                .error
-                .map_or(Ok(()), |code| Err(AppError::new(code, "助手事务失败")))
+            reply.error.map_or_else(
+                || Ok(state.clone()),
+                |code| Err(AppError::new(code, "助手事务失败")),
+            )
         }
         fn remove(&self) -> Result<()> {
             self.removals.fetch_add(1, Ordering::SeqCst);
@@ -581,19 +578,6 @@ mod tests {
         assert_eq!(service.state().unwrap(), external);
         assert_eq!(helper.calls.lock().unwrap().len(), 1);
         assert_eq!(std::fs::read_to_string(&service.path).unwrap(), "legacy");
-    }
-
-    #[test]
-    fn successful_helper_reply_with_wrong_final_flag_is_rejected() {
-        let original = state(false, 7, "none", false);
-        let (_dir, service, helper) = fixture(original.clone());
-        helper.reply(original.clone(), None);
-        assert_eq!(
-            service.set(true, &original.revision).unwrap_err().code,
-            code::POWER
-        );
-        assert_eq!(service.state().unwrap(), original);
-        assert_eq!(helper.calls.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -915,18 +915,29 @@ async fn fetch(
 }
 /// Calculate cache-read savings from the unit rates saved with each bill.
 /// Never mix the current catalog or multiplier with a historical bill.
-pub(super) fn cache_savings(snapshot: &PriceSnapshot, cached: u64) -> Option<Decimal> {
+pub(super) fn cache_savings_rates(
+    rates: &BTreeMap<String, String>,
+    multiplier: &str,
+) -> Option<(Decimal, Decimal)> {
     let rate = |name: &str| {
-        snapshot
-            .rates
+        rates
             .iter()
             .find(|(key, _)| key.starts_with(name))
             .and_then(|(_, value)| decimal(value))
     };
-    rate("input_cost_per_token")?
-        .checked_sub(rate("cache_read_input_token_cost")?)?
+    Some((
+        rate("input_cost_per_token")?.checked_sub(rate("cache_read_input_token_cost")?)?,
+        decimal(multiplier)?,
+    ))
+}
+
+pub(super) fn cache_savings(
+    (difference, multiplier): (Decimal, Decimal),
+    cached: u64,
+) -> Option<Decimal> {
+    difference
         .checked_mul(Decimal::from(cached))?
-        .checked_mul(decimal(&snapshot.multiplier)?)
+        .checked_mul(multiplier)
         .map(|value| value.max(Decimal::ZERO))
 }
 

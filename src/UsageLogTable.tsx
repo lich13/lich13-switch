@@ -58,15 +58,22 @@ export function UsageLogControls({
         menu.current.querySelector("summary")?.focus();
       }
     };
+    const watchPosition = () => {
+      window.removeEventListener("resize", fit);
+      document.removeEventListener("scroll", fit, true);
+      if (details?.open) {
+        fit();
+        window.addEventListener("resize", fit);
+        document.addEventListener("scroll", fit, true);
+      }
+    };
     document.addEventListener("pointerdown", outside);
     document.addEventListener("keydown", escape);
-    details?.addEventListener("toggle", fit);
-    window.addEventListener("resize", fit);
-    document.addEventListener("scroll", fit, true);
+    details?.addEventListener("toggle", watchPosition);
     return () => {
       document.removeEventListener("pointerdown", outside);
       document.removeEventListener("keydown", escape);
-      details?.removeEventListener("toggle", fit);
+      details?.removeEventListener("toggle", watchPosition);
       window.removeEventListener("resize", fit);
       document.removeEventListener("scroll", fit, true);
     };

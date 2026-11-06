@@ -8,6 +8,50 @@ const MODEL: &str = "fixture-model";
 const QUEUE_FULL: &str = "日志队列已满，部分事件未记录";
 
 #[tokio::test]
+async fn raw_appends_and_merges_preserve_index_and_full_attachments_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    let body = "fixture error ".repeat(100);
+    let mut records = Vec::new();
+    for n in 0..3 {
+        let mut record = Record::new(
+            Some(ClientId::Codex),
+            Some(PROVIDER),
+            Some(&format!("fixture-{n}")),
+            Reason::ProtocolError,
+            Action::Returned,
+            Some(502),
+            None,
+        );
+        record.details.message = Some(body.clone());
+        record.details.raw = Some(Arc::new(crate::event_raw::Raw::bytes(
+            body.as_bytes(),
+            vec![],
+            None,
+        )));
+        service.emit(record.clone());
+        assert!(changes.recv().await.unwrap().error.is_none());
+        records.push(record);
+    }
+    let mut repeated = records[1].clone();
+    repeated.id = uuid::Uuid::new_v4().to_string();
+    service.emit(repeated);
+    let merged = changes.recv().await.unwrap();
+    assert!(merged.error.is_none());
+    assert_eq!(merged.record.unwrap().count, 2);
+    drop(service);
+    let reopened = Service::new(dir.path());
+    assert_eq!(reopened.query(Filter::default()).total, 3);
+    for (n, record) in records.iter().enumerate() {
+        let saved = reopened.detail(&record.id).unwrap();
+        assert_eq!(saved.count, if n == 1 { 2 } else { 1 });
+        assert_eq!(saved.details.message.as_ref().unwrap().chars().count(), 512);
+        assert_eq!(reopened.raw(&record.id).unwrap().unwrap().body, body);
+    }
+}
+
+#[tokio::test]
 async fn clear_write_failure_restores_rows_aliases_and_stable_page_order() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
