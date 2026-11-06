@@ -89,14 +89,13 @@ export function useProviderQuota(
                 cached?.version === provider.quotaVersion
                   ? cached
                   : (provider.quota ?? emptyQuota(provider));
-              const failureDelay = Math.max(refreshSeconds, 86_400);
               accept({
                 ...previous,
                 state: "error",
                 stale: Boolean(previous.successAt),
                 error: err.message,
                 nextRefreshAt:
-                  refreshSeconds > 0 ? Date.now() / 1000 + failureDelay : null,
+                  refreshSeconds > 0 ? Date.now() / 1000 + refreshSeconds : null,
               });
             }
           }
@@ -125,7 +124,7 @@ export function useProviderQuota(
     let cancelled = false;
     let timer: number;
     const delayFor = (q: ProviderQuota | null | undefined) =>
-      q && q.state !== "ok" && q.state !== "idle"
+      q?.state === "unsupported"
         ? Math.max(refreshSeconds, 86_400)
         : refreshSeconds;
     const tick = async () => {
@@ -374,17 +373,11 @@ export function QuotaInfo({
       >
         {subscriptionLabel && <span className="quota-subscription" title={subscriptionLabel}>{subscriptionLabel}</span>}
           <button className="quota-value" title={headline} onClick={details ?? (() => setShowDetails(true))}>
-            {compactHeadline}
+            {quota?.plans.length ? compactHeadline : (keyStatus ?? "—")}
           </button>
-        {quota?.error &&
-          quota.state !== "unsupported" &&
-          quota.plans.length > 0 && (
-            <button className="quota-warning text-button" onClick={details ?? (() => setShowDetails(true))}>
-              查询失败
-            </button>
-          )}
         <button
-          className="icon-button"
+          className={`icon-button${quota?.error ? " quota-query-error" : ""}`}
+          title={quota?.error ?? "刷新额度"}
           disabled={
             loading ||
             Boolean(quota?.retryAt && quota.retryAt > Date.now() / 1000)

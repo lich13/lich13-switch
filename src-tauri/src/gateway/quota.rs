@@ -140,12 +140,12 @@ impl Service {
         }
     }
     fn schedule(&self, v: &mut QuotaView) {
-        const FAILURE_BACKOFF_SECONDS: u64 = 86_400;
+        const UNSUPPORTED_INTERVAL_SECONDS: u64 = 86_400;
         let seconds = self.0.interval.load(Ordering::Relaxed);
-        let delay = if v.state == "ok" || v.state == "idle" {
-            seconds
+        let delay = if v.state == "unsupported" {
+            seconds.max(UNSUPPORTED_INTERVAL_SECONDS)
         } else {
-            seconds.max(FAILURE_BACKOFF_SECONDS)
+            seconds
         };
         v.next_refresh_at = (seconds > 0).then(|| {
             v.checked_at
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_or_unsupported_quota_backs_off_to_one_day_and_restores_on_recovery() {
+    fn failed_quota_retries_normally_while_unsupported_probes_daily() {
         let service = Service::new();
         service.set_interval(60);
         let mut failed = QuotaView {
@@ -1039,7 +1039,7 @@ mod tests {
             ..QuotaView::empty("p1", "v1")
         };
         service.schedule(&mut failed);
-        assert_eq!(failed.next_refresh_at, Some(1_000 + 86_400));
+        assert_eq!(failed.next_refresh_at, Some(1_000 + 60));
 
         let mut unsupported = QuotaView {
             state: "unsupported".into(),

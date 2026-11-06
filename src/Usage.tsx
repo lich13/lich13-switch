@@ -307,8 +307,6 @@ export default function Usage({
           account: null,
           plan: null,
           windows: [],
-          fetchedAt: null,
-          retryAt: null,
           error: errorOf(error).message,
         });
       }
@@ -688,47 +686,38 @@ export default function Usage({
           {error || state?.error}
         </p>
       )}
-      <div className="usage-tabs" role="tablist" aria-label="用量明细">
-        {[
-          ["requests", "请求日志"],
-          ["providers", "供应商"],
-          ["models", "模型"],
-          ["antigravity", "Antigravity"],
-          ["claude", "Claude Code"],
-          ["pricing", "定价"],
-        ].map(([id, n]) => (
-          <button
-            role="tab"
-            data-tab={id}
-            aria-selected={tab === id}
-            key={id}
-            onClick={() => void selectTab(id)}
-          >
-            {n}
-          </button>
-        ))}
-        {tab === "requests" && (
-          <div className="usage-toolbar" role="group" aria-label="请求日志工具">
-            <select
-              aria-label="请求状态"
-              value={status}
-              onChange={(e) => choose(setStatus, e.target.value)}
+      <div className="usage-navigation">
+        <div className="usage-tabs" role="tablist" aria-label="用量明细">
+          {[
+            ["requests", "请求日志"],
+            ["providers", "供应商"],
+            ["models", "模型"],
+            ["antigravity", "Antigravity"],
+            ["claude", "Claude Code"],
+            ["pricing", "定价"],
+          ].map(([id, n]) => (
+            <button
+              role="tab"
+              data-tab={id}
+              aria-selected={tab === id}
+              key={id}
+              onClick={() => void selectTab(id)}
             >
-              <option value="">全部状态</option>
-              {["2xx", "4xx", "5xx"].map((v) => (
-                <option key={v}>{v}</option>
-              ))}
-              <option value="none">会话 / 无状态码</option>
-            </select>
-            <UsageLogControls
-              settings={state?.settings}
-              save={(settings) => {
-                void command("set_usage_settings", { settings })
-                  .then(setState)
-                  .catch((e) => setError(errorOf(e).message));
-              }}
-            />
-          </div>
+              {n}
+            </button>
+          ))}
+        </div>
+        {tab === "requests" && (
+          <UsageLogControls
+            status={status}
+            onStatusChange={(value) => choose(setStatus, value)}
+            settings={state?.settings}
+            save={(settings) => {
+              void command("set_usage_settings", { settings })
+                .then(setState)
+                .catch((e) => setError(errorOf(e).message));
+            }}
+          />
         )}
       </div>
       {tab === "requests" ? (

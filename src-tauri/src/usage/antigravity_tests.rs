@@ -1422,7 +1422,6 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         let a = &r.attempts[0];
         crate::usage::storage_v12::AntigravityAttemptRow {
             final_provider: None,
-            repeat_count: 1,
             session_id: None,
             provider: None,
             time: at,
@@ -1432,9 +1431,10 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
             display_name: None,
             tokens: a.tokens.clone(),
             price: a.price.clone().map(std::sync::Arc::new),
-            price_tier: a.price_tier().map(str::to_owned),
             cost: a.price.as_ref().map(|p| p.cost.clone()),
             unpriced: 0,
+            request_unpriced: false,
+            provider_unpriced: false,
             duration_ms: 1000,
         }
     };

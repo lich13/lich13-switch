@@ -267,43 +267,6 @@ fn ready_helper_is_reused_without_authorization() {
 }
 
 #[test]
-fn helper_failure_at_apply_repairs_only_once_even_if_retry_fails() {
-    for expired_code in ["POWER_HELPER"] {
-        for retry_error in [None, Some(expired_code)] {
-            let original = state("ready", false, 7, "none", "fixture-before");
-            let unavailable = state("needsRepair", false, 7, "none", "fixture-expired");
-            let prepared = state("ready", false, 7, "none", "fixture-prepared");
-            let actual = state("ready", true, 0, "application", "fixture-after");
-            let (_dir, service, helper) = fixture(original.clone());
-            legacy(&service);
-            helper.reply(unavailable, Some(expired_code));
-            helper.repair_to(prepared.clone());
-            helper.reply(
-                if retry_error.is_some() {
-                    prepared.clone()
-                } else {
-                    actual.clone()
-                },
-                retry_error,
-            );
-            let result = service.set(true, &original.revision);
-            if let Some(code) = retry_error {
-                assert_eq!(result.unwrap_err().code, code);
-                assert_legacy(&service);
-            } else {
-                assert_eq!(result.unwrap(), actual);
-                assert!(!service.path.exists());
-            }
-            assert_eq!(helper.repair_count(), 1);
-            assert_eq!(
-                *helper.calls.lock().unwrap(),
-                [(original, true, 7), (prepared, true, 7)]
-            );
-        }
-    }
-}
-
-#[test]
 fn already_repaired_toggle_does_not_repair_again_when_apply_loses_authorization() {
     for code in ["POWER_AUTH", "POWER_HELPER"] {
         let original = state("missing", false, 7, "none", "fixture-before");
@@ -323,26 +286,14 @@ fn already_repaired_toggle_does_not_repair_again_when_apply_loses_authorization(
 }
 
 #[test]
-fn ready_ownership_change_during_authorization_repair_stops_the_retry() {
-    let original = state("ready", true, 0, "application", "fixture-before");
-    let external = state("ready", true, 0, "external", "fixture-external");
-    let (_dir, service, helper) = fixture(original.clone());
-    legacy(&service);
-    helper.reply(original.clone(), Some("POWER_HELPER"));
-    helper.repair_to(external.clone());
-    assert_eq!(
-        service.set(false, &original.revision).unwrap_err().code,
-        "CONFLICT"
-    );
-    assert_eq!(service.state().unwrap(), external);
-    assert_eq!(helper.repair_count(), 1);
-    assert_eq!(*helper.calls.lock().unwrap(), [(original, false, 0)]);
-    assert_legacy(&service);
-}
-
-#[test]
-fn non_authorization_apply_errors_are_returned_without_retry_or_rollback() {
-    for code in ["POWER", "POWER_AUTH", "CONFLICT", "FIXTURE_UNKNOWN"] {
+fn apply_errors_are_returned_without_retry_or_rollback() {
+    for code in [
+        "POWER",
+        "POWER_AUTH",
+        "POWER_HELPER",
+        "CONFLICT",
+        "FIXTURE_UNKNOWN",
+    ] {
         let original = state("ready", false, 7, "none", "fixture-before");
         let mut external = state("ready", false, 19, "external", "fixture-external");
         external.external_changed = true;
@@ -358,23 +309,6 @@ fn non_authorization_apply_errors_are_returned_without_retry_or_rollback() {
         assert_eq!(*helper.calls.lock().unwrap(), [(original, true, 7)]);
         assert_legacy(&service);
     }
-}
-
-#[test]
-fn cancelled_reauthorization_after_expired_apply_does_not_retry_the_toggle() {
-    let original = state("ready", false, 7, "none", "fixture-before");
-    let (_dir, service, helper) = fixture(original.clone());
-    legacy(&service);
-    helper.reply(original.clone(), Some("POWER_HELPER"));
-    *helper.repair_error.lock().unwrap() = Some("POWER_AUTH");
-    assert_eq!(
-        service.set(true, &original.revision).unwrap_err().code,
-        "POWER_AUTH"
-    );
-    assert_eq!(service.state().unwrap(), original);
-    assert_eq!(helper.repair_count(), 1);
-    assert_eq!(helper.calls.lock().unwrap().len(), 1);
-    assert_legacy(&service);
 }
 
 #[test]

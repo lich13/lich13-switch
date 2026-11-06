@@ -180,6 +180,12 @@ it("refreshes the waiting budget once on freeze and thaw", async () => {
     mock.command.mock.calls.filter(([name]) => name === "get_gateway").length;
   const before = reads();
   await act(async () =>
+    mock.listeners.get("gateway-freeze")?.({ frozen: false }),
+  );
+  expect(reads()).toBe(before);
+  await act(async () => mock.listeners.get("panel-visibility")?.(false));
+  expect(reads()).toBe(before);
+  await act(async () =>
     mock.listeners.get("gateway-freeze")?.({ frozen: true }),
   );
   expect(reads()).toBe(before + 1);

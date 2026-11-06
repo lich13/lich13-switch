@@ -125,8 +125,7 @@ impl Service {
         if !allowed() {
             return Ok(before);
         }
-        let repaired = before.helper != "ready";
-        let before = if repaired {
+        let before = if before.helper != "ready" {
             let before = self.repair_for_toggle(&before)?;
             if !allowed() {
                 return Ok(before);
@@ -137,19 +136,7 @@ impl Service {
         };
         // Restoration belongs exclusively to the privileged helper. An unverified
         // legacy user/script record must never supply a battery sleep value.
-        if let Err(error) = self.system.apply(&before, enabled, before.battery_sleep) {
-            if repaired || error.code != code::POWER_HELPER {
-                return Err(error);
-            }
-            // A helper connection can fail between read and set. At most one repair,
-            // then a fresh physical-state check before retrying the intended operation.
-            let repaired = self.repair_for_toggle(&before)?;
-            if !allowed() {
-                return Ok(repaired);
-            }
-            self.system
-                .apply(&repaired, enabled, repaired.battery_sleep)?;
-        }
+        self.system.apply(&before, enabled, before.battery_sleep)?;
         let actual = self.state()?;
         if actual.enabled != enabled {
             return Err(AppError::new(code::POWER, "电源状态再次变化，请重新操作"));
@@ -164,7 +151,6 @@ impl Service {
             || before.enabled != prepared.enabled
             || before.battery_sleep != prepared.battery_sleep
             || prepared.external_changed
-            || (before.helper == "ready" && before.ownership != prepared.ownership)
         {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -579,26 +565,6 @@ mod tests {
         assert_eq!(service.set(true, "stale").unwrap_err().code, code::CONFLICT);
         assert_eq!(helper.prepares.load(Ordering::SeqCst), 0);
         assert!(helper.calls.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn ownership_changes_during_helper_repair_require_a_new_revision() {
-        let original = state(true, 0, "application", false);
-        let external = state(true, 0, "external", true);
-        let (_dir, service, helper) = fixture(original.clone());
-        helper.reply(original.clone(), Some(code::POWER_HELPER));
-        *helper.after_prepare.lock().unwrap() = Some(external.clone());
-        assert_eq!(
-            service.set(false, &original.revision).unwrap_err().code,
-            code::CONFLICT
-        );
-        assert_eq!(service.state().unwrap(), external);
-        assert_eq!(
-            helper.calls.lock().unwrap().as_slice(),
-            &[(original, false, 0)]
-        );
-        assert_eq!(helper.prepares.load(Ordering::SeqCst), 1);
-        assert_eq!(helper.approvals.load(Ordering::SeqCst), 1);
     }
 
     #[test]

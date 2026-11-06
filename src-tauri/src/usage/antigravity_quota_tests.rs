@@ -155,6 +155,29 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
                 .requests,
             1
         );
+        let mut retry = make("retry", "b", "gemini-3-flash", now);
+        let mut first = retry.attempts[0].clone();
+        first.id = "retry-first".into();
+        first.provider = Some("a".into());
+        let mut second = first.clone();
+        second.id = "retry-second".into();
+        retry.attempts.splice(0..0, [first, second]);
+        super::super::normalize_record(&mut retry);
+        store.write_batch(&[retry], None).unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let retried = store.antigravity_stats(&filter, now).unwrap();
+        assert_eq!(retried.unpriced_requests, other.unpriced_requests + 1);
+        for id in ["a", "b"] {
+            let before = other.accounts.iter().find(|a| a.id == id).unwrap();
+            let after = retried.accounts.iter().find(|a| a.id == id).unwrap();
+            assert_eq!(
+                after.tracks[0].burst_5h.unpriced_requests,
+                before.tracks[0].burst_5h.unpriced_requests + 1,
+                "each account owns its unpriced attempts, once per request"
+            );
+        }
         let expired_at = periods["3p-weekly"].end;
         let expired = store.antigravity_stats(&filter, expired_at).unwrap();
         assert!(expired.accounts.iter().flat_map(|a| &a.tracks).all(|t| t

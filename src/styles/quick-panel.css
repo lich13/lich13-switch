@@ -539,13 +539,6 @@
   flex-shrink: 1;
 }
 
-.quick-provider-main .quota-warning {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .quick-select {
   display: inline-flex;
   align-items: center;

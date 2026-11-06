@@ -1027,13 +1027,12 @@ impl Store {
                     continue;
                 }
                 let last_idx = r.attempts.len().saturating_sub(1);
-                let request_unpriced = r.attempts.iter().any(|a| a.unpriced_count() > 0);
+                let mut attempts = Vec::with_capacity(r.attempts.len());
                 let time = r.event_time();
                 for (idx, a) in r.attempts.iter().enumerate() {
                     let is_final = idx == last_idx;
-                    agg.ingest(storage_v12::AntigravityAttemptRow {
+                    attempts.push(storage_v12::AntigravityAttemptRow {
                         final_provider: r.final_attempt().and_then(|a| a.provider.clone()),
-                        repeat_count: a.repeat_count,
                         session_id: r.session_id.clone(),
                         provider: a.provider.clone(),
                         time,
@@ -1047,9 +1046,10 @@ impl Store {
                         display_name: a.model_display_name.clone(),
                         tokens: a.tokens.clone(),
                         price: a.price.clone().map(std::sync::Arc::new),
-                        price_tier: a.price_tier().map(str::to_owned),
                         cost: a.price.as_ref().map(|p| p.cost.clone()),
-                        unpriced: u64::from(request_unpriced),
+                        unpriced: a.unpriced_count(),
+                        request_unpriced: false,
+                        provider_unpriced: false,
                         duration_ms: if is_final {
                             a.measured_duration_ms().unwrap_or(0)
                         } else {
@@ -1057,6 +1057,10 @@ impl Store {
                         },
                     });
                 }
+                storage_v12::visit_request_attempts(&mut attempts, |row| {
+                    agg.ingest(row);
+                    Ok(())
+                })?;
             }
         }
         let mut stats = agg.finish();

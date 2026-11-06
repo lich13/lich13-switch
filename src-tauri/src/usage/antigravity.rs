@@ -2063,7 +2063,7 @@ pub(super) struct UsageStatsAggregator {
     full_models: bool,
     reasoning_missing: bool,
     savings_missing: bool,
-    unreported: BTreeSet<String>,
+    reported: BTreeSet<String>,
     requests: u64,
     unpriced_requests: u64,
     total_cost: rust_decimal::Decimal,
@@ -2106,7 +2106,7 @@ impl UsageStatsAggregator {
             full_models: filter.client.as_deref() == Some("claude"),
             reasoning_missing: false,
             savings_missing: false,
-            unreported: BTreeSet::new(),
+            reported: BTreeSet::new(),
             requests: 0,
             unpriced_requests: 0,
             total_cost: rust_decimal::Decimal::ZERO,
@@ -2158,7 +2158,7 @@ impl UsageStatsAggregator {
             .as_deref()
             .and_then(decimal)
             .unwrap_or(rust_decimal::Decimal::ZERO);
-        let is_unpriced_final = row.is_final && row.unpriced > 0;
+        let is_unpriced_final = row.is_final && row.request_unpriced;
 
         if let Some((_, account)) = row
             .provider
@@ -2173,7 +2173,7 @@ impl UsageStatsAggregator {
                     tokens: tok_total,
                     reasoning_tokens: tok_reasoning,
                     cost: row_cost,
-                    unpriced_requests: u64::from(is_unpriced_final),
+                    unpriced_requests: u64::from(row.provider_unpriced),
                 },
                 row.time >= self.filter_start && row.time <= self.filter_end,
             );
@@ -2204,9 +2204,9 @@ impl UsageStatsAggregator {
         let prov = self.providers.entry(prov_id).or_default();
         if row.is_final {
             prov.requests += 1;
-            if is_unpriced_final {
-                prov.unpriced_requests += 1;
-            }
+        }
+        if row.provider_unpriced {
+            prov.unpriced_requests += 1;
         }
         prov.tokens = prov.tokens.saturating_add(tok_total);
         prov.reasoning_tokens = prov.reasoning_tokens.saturating_add(tok_reasoning);
@@ -2231,8 +2231,8 @@ impl UsageStatsAggregator {
             ("cacheRead", row.tokens.cache_read),
             ("cacheWrite", row.tokens.cache_write),
         ] {
-            if value.is_none() {
-                self.unreported.insert(key.into());
+            if value.is_some() {
+                self.reported.insert(key.into());
             }
         }
         let inp = row.tokens.input.unwrap_or(0);
@@ -2255,14 +2255,11 @@ impl UsageStatsAggregator {
         }
 
         if cr > 0 {
-            match row.price.as_ref().and_then(|price| {
-                super::pricing::cache_savings(
-                    price,
-                    attempt_tokens,
-                    row.price_tier.as_deref(),
-                    row.repeat_count,
-                )
-            }) {
+            match row
+                .price
+                .as_ref()
+                .and_then(|price| super::pricing::cache_savings(price, cr))
+            {
                 Some(savings) => self.cache_savings += savings,
                 None => self.savings_missing = true,
             }
@@ -2434,7 +2431,11 @@ impl UsageStatsAggregator {
                 cache_input_eligible: self.cache_input_eligible,
                 cache_savings_usd: (!self.savings_missing).then(|| fmt_usd(self.cache_savings)),
                 reasoning_reported: !self.reasoning_missing,
-                unreported: self.unreported.into_iter().collect(),
+                unreported: ["input", "output", "cacheRead", "cacheWrite"]
+                    .into_iter()
+                    .filter(|key| !self.reported.contains(*key))
+                    .map(str::to_owned)
+                    .collect(),
             },
             accounts: {
                 let mut accounts: Vec<_> = self.accounts.into_values().collect();

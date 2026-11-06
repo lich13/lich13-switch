@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   clientName,
   type UsageRecord,
@@ -30,10 +31,33 @@ import {
 export function UsageLogControls({
   settings,
   save,
+  status,
+  onStatusChange,
 }: {
   settings: UsageSettings | undefined;
   save: (settings: UsageSettings) => void;
+  status: string;
+  onStatusChange: (status: string) => void;
 }) {
+  const menu = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      if (menu.current && !menu.current.contains(event.target as Node))
+        menu.current.open = false;
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && menu.current?.open) {
+        menu.current.open = false;
+        menu.current.querySelector("summary")?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, []);
   const visibility = (id: LogColumn, visible: boolean) => {
     if (!settings || id === "time") return;
     save({
@@ -42,21 +66,55 @@ export function UsageLogControls({
     });
   };
   return (
-    <div className="usage-log-controls">
-      <details className="usage-more">
-        <summary>列设置</summary>
+    <div className="usage-log-controls" role="group" aria-label="请求日志工具">
+      <details className="usage-more" ref={menu}>
+        <summary>列表设置</summary>
         <div>
-          {logColumns.map((c) => (
-            <label key={c.id}>
-              <input
-                type="checkbox"
-                disabled={c.id === "time" || !settings}
-                checked={columnVisible(c.id, settings, false)}
-                onChange={(e) => visibility(c.id, e.target.checked)}
-              />
-              {c.label}
-            </label>
-          ))}
+          <label className="usage-list-setting">
+            状态
+            <select
+              aria-label="请求状态"
+              value={status}
+              onChange={(e) => onStatusChange(e.target.value)}
+            >
+              <option value="">全部状态</option>
+              {["2xx", "4xx", "5xx"].map((value) => (
+                <option key={value}>{value}</option>
+              ))}
+              <option value="none">会话 / 无状态码</option>
+            </select>
+          </label>
+          <label className="usage-list-setting">
+            数字
+            <select
+              aria-label="日志数字格式"
+              value={settings?.logNumberMode === "exact" ? "exact" : "compact"}
+              disabled={!settings}
+              onChange={(e) =>
+                settings &&
+                save({
+                  ...settings,
+                  logNumberMode: e.target.value as "compact" | "exact",
+                })
+              }
+            >
+              <option value="compact">紧凑数字</option>
+              <option value="exact">精确数字</option>
+            </select>
+          </label>
+          <div className="usage-column-options">
+            {logColumns.map((column) => (
+              <label key={column.id}>
+                <input
+                  type="checkbox"
+                  disabled={column.id === "time" || !settings}
+                  checked={columnVisible(column.id, settings, false)}
+                  onChange={(e) => visibility(column.id, e.target.checked)}
+                />
+                {column.label}
+              </label>
+            ))}
+          </div>
           <button
             disabled={!settings}
             onClick={() => settings && save({ ...settings, logColumns: {} })}
@@ -65,21 +123,6 @@ export function UsageLogControls({
           </button>
         </div>
       </details>
-      <select
-        aria-label="日志数字格式"
-        value={settings?.logNumberMode === "exact" ? "exact" : "compact"}
-        disabled={!settings}
-        onChange={(e) =>
-          settings &&
-          save({
-            ...settings,
-            logNumberMode: e.target.value as "compact" | "exact",
-          })
-        }
-      >
-        <option value="compact">紧凑数字</option>
-        <option value="exact">精确数字</option>
-      </select>
     </div>
   );
 }

@@ -402,77 +402,34 @@ fn unpack_diagnostic(c: &Connection, body: rusqlite::types::Value, anchor: i64) 
 fn diagnostic_u64(
     c: &Connection,
     body: rusqlite::types::Value,
-    cache: Option<&mut diagnostics::ScanCache>,
+    cache: &mut diagnostics::ScanCache,
     field: &'static str,
 ) -> Result<Option<u64>> {
-    // Resolve only this scalar; no absolute clock restoration or full diagnostic
-    // object copy is needed for aggregation. Cache templates by their bytes so
-    // old WAL snapshots and different databases cannot reuse a stale ID.
-    type CachedTemplate = (&'static str, Vec<u8>, Option<usize>);
-    thread_local! {
-        static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<CachedTemplate>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-    }
-    let read = |tag, value: &Value, templates: Option<&mut diagnostics::TemplateCache>| {
-        let num = if tag == 4 {
-            let values = value
-                .as_array()
-                .ok_or_else(|| failure("用量诊断字段无效"))?;
-            let id = values
-                .first()
-                .and_then(Value::as_i64)
-                .ok_or_else(|| failure("用量诊断结构缺失"))?;
-            let index = if let Some(templates) = templates {
-                templates.index(c, id, field)?
-            } else {
-                let bytes: Vec<u8> = db(db(
-                    c.prepare_cached("SELECT body FROM v12_templates WHERE id=?1")
-                )?
-                .query_row([id], |r| r.get(0)))?;
-                TEMPLATES.with(|cache| -> Result<Option<usize>> {
-                    let mut cache = cache.borrow_mut();
-                    if let Some((_, _, index)) = cache
-                        .iter()
-                        .find(|(f, saved, _)| *f == field && *saved == bytes)
-                    {
-                        return Ok(*index);
-                    }
-                    let shape = unpack(&bytes)?;
-                    let index = shape[field].as_u64().and_then(|n| usize::try_from(n).ok());
-                    if cache.len() == 8 {
-                        cache.pop_front();
-                    }
-                    cache.push_back((field, bytes, index));
-                    Ok(index)
-                })?
-            };
-            index
-                .map(|i| {
-                    values
-                        .get(i + 1)
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| failure("用量诊断字段缺失"))
-                })
-                .transpose()?
-        } else {
-            value[field].as_u64()
-        };
-        Ok(num)
-    };
-    match cache {
-        Some(cache) => cache.inspect(c, body, |tag, value, templates| {
-            read(tag, value, Some(templates))
-        }),
-        None => diagnostics::inspect(c, body, |tag, value| read(tag, value, None)),
-    }
-}
-
-fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<u64>> {
-    Ok(diagnostic_u64(c, body, None, "generationMs")?.filter(|ms| *ms > 50))
+    cache.inspect(c, body, |tag, value, templates| {
+        if tag != 4 {
+            return Ok(value[field].as_u64());
+        }
+        let values = value
+            .as_array()
+            .ok_or_else(|| failure("用量诊断字段无效"))?;
+        let id = values
+            .first()
+            .and_then(Value::as_i64)
+            .ok_or_else(|| failure("用量诊断结构缺失"))?;
+        templates
+            .index(c, id, field)?
+            .map(|index| {
+                values
+                    .get(index + 1)
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| failure("用量诊断字段缺失"))
+            })
+            .transpose()
+    })
 }
 
 pub(super) struct AntigravityAttemptRow {
     pub final_provider: Option<String>,
-    pub repeat_count: u64,
     pub session_id: Option<String>,
     pub provider: Option<String>,
     pub time: i64,
@@ -482,9 +439,10 @@ pub(super) struct AntigravityAttemptRow {
     pub display_name: Option<String>,
     pub tokens: Tokens,
     pub price: Option<std::sync::Arc<PriceSnapshot>>,
-    pub price_tier: Option<String>,
     pub cost: Option<String>,
     pub unpriced: u64,
+    pub request_unpriced: bool,
+    pub provider_unpriced: bool,
     pub duration_ms: u64,
 }
 
@@ -501,7 +459,24 @@ pub(super) fn scan_antigravity_attempts(
 struct StatsShape {
     display_name: Option<String>,
     price: Option<std::sync::Arc<PriceSnapshot>>,
-    tier: Option<String>,
+}
+
+// A request is the filtering/counting unit, while costs and missing prices belong
+// to the provider that actually made each attempt. Buffer only this request.
+pub(super) fn visit_request_attempts(
+    rows: &mut Vec<AntigravityAttemptRow>,
+    mut visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
+) -> Result<()> {
+    let provider = rows.last().and_then(|row| row.provider.clone());
+    let unpriced = rows.iter().any(|row| row.unpriced > 0);
+    let mut providers = std::collections::BTreeSet::new();
+    for mut row in rows.drain(..) {
+        row.final_provider = provider.clone();
+        row.request_unpriced = unpriced;
+        row.provider_unpriced = row.unpriced > 0 && providers.insert(row.provider.clone());
+        visit(row)?;
+    }
+    Ok(())
 }
 
 pub(super) fn scan_client_attempts(
@@ -516,25 +491,39 @@ pub(super) fn scan_client_attempts(
         "SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
          usage_value(m.value),a.shape,shape_value.value,a.body,
          a.inclusive_input,a.input,a.output,a.cache_read,a.cache_write,a.cost,a.unpriced,
-         CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value),
-         a.cache_write_5m,a.cache_write_1h,a.image_input,a.image_output,a.audio_input,a.audio_output,usage_value(fp.value),a.repeat_count
+         CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value),a.operation,r.compaction
          FROM v12_records r
          JOIN v12_all_attempts a ON a.owner=r.rid
-         JOIN v12_all_attempts last ON last.owner=r.rid AND last.ordinal=r.last
          LEFT JOIN v12_dictionary m ON m.id=a.model
          LEFT JOIN v12_dictionary p ON p.id=a.provider
-         LEFT JOIN v12_dictionary fp ON fp.id=last.provider
          LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape
          WHERE r.client=usage_label(?3) AND r.effective=1 AND r.time>=?1 AND r.time<=?2
-         AND (?4 IS NULL OR ?4='' OR ?4=CASE WHEN last.operation=2 THEN 'web_search' WHEN last.operation=1 OR r.compaction THEN 'compaction' ELSE 'model' END)
          ORDER BY r.rid,a.ordinal",
     ))?;
     let mut diagnostics = diagnostics::ScanCache::default();
     let mut shapes: std::collections::BTreeMap<i64, std::sync::Arc<StatsShape>> =
         std::collections::BTreeMap::new();
-    let mut rows = db(stmt.query(params![min_time, max_time, client, operation]))?;
-    let mut request_unpriced = false;
+    let mut rows = db(stmt.query(params![min_time, max_time, client]))?;
+    let mut request_id = None;
+    let mut attempts = Vec::new();
+    let mut request_operation = "model";
+    let flush = |attempts: &mut Vec<AntigravityAttemptRow>, actual: &str, visit: &mut _| {
+        if operation
+            .filter(|s| !s.is_empty())
+            .is_none_or(|wanted| wanted == actual)
+        {
+            visit_request_attempts(attempts, visit)
+        } else {
+            attempts.clear();
+            Ok(())
+        }
+    };
     while let Some(row) = db(rows.next())? {
+        let id: i64 = db(row.get(0))?;
+        if request_id != Some(id) {
+            flush(&mut attempts, request_operation, &mut visit)?;
+            request_id = Some(id);
+        }
         let opt_u64 = |idx: usize| -> Result<Option<u64>> {
             Ok(db(row.get::<_, Option<i64>>(idx))?.and_then(|n| u64::try_from(n).ok()))
         };
@@ -547,18 +536,10 @@ pub(super) fn scan_client_attempts(
                     .as_deref()
                     .and_then(shared_value)
                     .unwrap_or_else(|| json!({}));
-                if value["price"].is_object() {
-                    value["price"]["cost"] = json!("0");
+                if let Some(price) = value["price"].as_object_mut() {
+                    price.insert("cost".into(), json!("0"));
+                    price.remove("basis");
                 }
-                let tier = if value["responseSpeed"]
-                    .as_str()
-                    .or(value["requestedSpeed"].as_str())
-                    == Some("fast")
-                {
-                    Some("fast".into())
-                } else {
-                    value["serviceTier"].as_str().map(str::to_owned)
-                };
                 let price = value
                     .get("price")
                     .filter(|p| !p.is_null())
@@ -571,7 +552,6 @@ pub(super) fn scan_client_attempts(
                 let decoded = std::sync::Arc::new(StatsShape {
                     display_name: value["modelDisplayName"].as_str().map(str::to_owned),
                     price,
-                    tier,
                 });
                 shapes.insert(sid, decoded.clone());
                 Some(decoded)
@@ -581,16 +561,21 @@ pub(super) fn scan_client_attempts(
         };
         let output = opt_u64(11)?;
         let reasoning = if output.is_some_and(|n| n > 0) {
-            let body = db(row.get::<_, rusqlite::types::Value>(8))?;
-            diagnostic_u64(c, body, Some(&mut diagnostics), "reasoningTokens")?
+            diagnostic_u64(c, db(row.get(8))?, &mut diagnostics, "reasoningTokens")?
         } else {
             None
         };
         let is_final = db(row.get::<_, i64>(4))? != 0;
-        request_unpriced |= db(row.get::<_, i64>(15))? > 0;
-        visit(AntigravityAttemptRow {
-            final_provider: db(row.get(24))?,
-            repeat_count: opt_u64(25)?.unwrap_or(1),
+        if is_final {
+            request_operation = match db(row.get::<_, i64>(18))? {
+                2 => "web_search",
+                1 => "compaction",
+                _ if db(row.get::<_, bool>(19))? => "compaction",
+                _ => "model",
+            };
+        }
+        attempts.push(AntigravityAttemptRow {
+            final_provider: None,
             session_id: identifier(db(row.get(1))?)?,
             provider: db(row.get(17))?,
             time: db(row.get(2))?,
@@ -605,35 +590,19 @@ pub(super) fn scan_client_attempts(
                 reasoning,
                 cache_read: opt_u64(12)?,
                 cache_write: opt_u64(13)?,
-                cache_write_5m: opt_u64(18)?,
-                cache_write_1h: opt_u64(19)?,
-                image_input: opt_u64(20)?,
-                image_output: opt_u64(21)?,
-                audio_input: opt_u64(22)?,
-                audio_output: opt_u64(23)?,
-                image_cache_read: if opt_u64(12)?.is_some_and(|n| n > 0) {
-                    diagnostic_u64(
-                        c,
-                        db(row.get(8))?,
-                        Some(&mut diagnostics),
-                        "imageCacheReadTokens",
-                    )?
-                } else {
-                    None
-                },
+                ..Default::default()
             },
             price: shape.as_ref().and_then(|s| s.price.clone()),
-            price_tier: shape.as_ref().and_then(|s| s.tier.clone()),
             cost: db(row.get(14))?,
-            unpriced: u64::from(request_unpriced),
-            duration_ms: u64::try_from(db(row.get::<_, i64>(16))?).unwrap_or(0),
-        })?;
-        if is_final {
-            request_unpriced = false;
-        }
+            unpriced: opt_u64(15)?.unwrap_or(0),
+            request_unpriced: false,
+            provider_unpriced: false,
+            duration_ms: opt_u64(16)?.unwrap_or(0),
+        });
     }
-    Ok(())
+    flush(&mut attempts, request_operation, &mut visit)
 }
+
 fn intern(c: &Connection, v: &Value) -> Result<i64> {
     let payload = wire::encode_v13(v);
     if payload.len() > LIMIT {
@@ -1263,7 +1232,7 @@ fn flush_batch(c: &Connection) -> Result<bool> {
 }
 
 fn metric_select(table: &str, kind: i64) -> String {
-    let generation = "CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,r.time+r.started) ELSE duration-first_token END";
+    let generation = "CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,0) ELSE duration-first_token END";
     format!("SELECT {kind} kind,a.owner,ordinal,usage_value(p.value) provider,usage_value(m.value) model,
       CASE WHEN ordinal=r.last THEN 1 ELSE 0 END requests,repeat_count attempts,
       CASE WHEN ordinal=r.last AND ((status BETWEEN 200 AND 299 OR status=101) OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value)=1)) AND r.completed THEN 1 ELSE 0 END success,
@@ -1304,7 +1273,15 @@ pub(super) fn register_values(c: &Connection) -> Result<()> {
             // The borrowed handle stays on this SQLite callback's thread and
             // only reads the existing bounded diagnostic storage.
             let c = unsafe { ctx.get_connection()? };
-            generation_ms(&c, ctx.get(0)?).map_err(|_| rusqlite::Error::InvalidQuery)
+            // SQLite auxiliary data belongs to this statement; the constant second
+            // argument keeps its bounded cache alive across rows, never across snapshots.
+            let cache = ctx.get_or_create_aux(1, |_| {
+                Ok::<_, rusqlite::Error>(std::sync::Mutex::new(diagnostics::ScanCache::default()))
+            })?;
+            let mut cache = cache.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            diagnostic_u64(&c, ctx.get(0)?, &mut cache, "generationMs")
+                .map(|value| value.filter(|ms| *ms > 50))
+                .map_err(|_| rusqlite::Error::InvalidQuery)
         },
     ))?;
     db(c.create_scalar_function(
@@ -1612,7 +1589,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     ))?;
-    if sql.contains("THEN usage_generation_ms") {
+    if sql.contains("THEN usage_generation_ms(a.body,0)") {
         return Ok(());
     }
     let original = metric_select("v12_raw_attempts", 2)

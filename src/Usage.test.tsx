@@ -409,21 +409,25 @@ describe("usage records", () => {
   it("groups request status, column settings and number format in order only on the request tab", async () => {
     await renderUsage();
     const toolbar = screen.getByRole("group", { name: "请求日志工具" });
+    await userEvent.click(within(toolbar).getByText("列表设置"));
     const status = within(toolbar).getByRole("combobox", { name: "请求状态" });
-    const columns = within(toolbar).getByText("列设置");
+    const columns = within(toolbar).getByText("列表设置");
     const format = within(toolbar).getByRole("combobox", {
       name: "日志数字格式",
     });
     expect(status).toHaveDisplayValue("全部状态");
     expect(format).toHaveDisplayValue("紧凑数字");
     expect(Array.from(toolbar.querySelectorAll("select, summary"))).toEqual([
-      status,
       columns,
+      status,
       format,
     ]);
-    expect(screen.getByRole("tablist", { name: "用量明细" })).toContainElement(
-      toolbar,
-    );
+    expect(
+      screen.getByRole("tablist", { name: "用量明细" }).parentElement,
+    ).toContainElement(toolbar);
+    await userEvent.keyboard("{Escape}");
+    expect(toolbar.querySelector("details")).not.toHaveAttribute("open");
+    expect(columns).toHaveFocus();
     for (const tab of ["供应商", "模型", "定价"]) {
       await userEvent.click(screen.getByRole("tab", { name: tab }));
       expect(
@@ -445,7 +449,7 @@ describe("usage records", () => {
     await renderUsage();
     const toolbar = screen.getByRole("group", { name: "请求日志工具" });
     const initialSettings = structuredClone(state.settings);
-    await userEvent.click(within(toolbar).getByText("列设置"));
+    await userEvent.click(within(toolbar).getByText("列表设置"));
     const output = within(toolbar).getByRole("checkbox", { name: "输出" });
     expect(output).toBeChecked();
     await userEvent.click(output);

@@ -791,7 +791,7 @@ describe("quota display and refresh", () => {
   });
 });
 
-it("backs off failed automatic refreshes to one day, preserves cached data, and restores normal interval on recovery", async () => {
+it("retries failed automatic refreshes at the normal interval and preserves cached data", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-25T00:00:00Z"));
   provider.quota = { ...result(), nextRefreshAt: Date.now() / 1000 - 1, retryAt: Date.now() / 1000 - 2 };
@@ -807,9 +807,7 @@ it("backs off failed automatic refreshes to one day, preserves cached data, and 
   await flush();
   expect(mock.command).toHaveBeenCalledTimes(1);
   expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-  expect(mock.command).toHaveBeenCalledTimes(1);
-  await act(async () => { await vi.advanceTimersByTimeAsync(86_400_000 - 60_001); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
   expect(mock.command).toHaveBeenCalledTimes(1);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   expect(mock.command).toHaveBeenCalledTimes(2);
@@ -903,3 +901,16 @@ it.each(["manual", "event", "provider"])(
     expect(mock.command).toHaveBeenCalledTimes(count + 2);
   },
 );
+
+it("keeps a failed compact query in the refresh control without hiding cached quota", () => {
+  const error = "额度接口连接失败";
+  const props = { provider, refresh: vi.fn(), compact: true };
+  const view = render(<QuotaInfo {...props} quota={{ ...result(), state: "error", error }} />);
+  expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
+  expect(screen.queryByText("查询失败")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: `刷新 ${provider.name} 额度` })).toHaveAttribute("title", error);
+  view.rerender(<QuotaInfo {...props} quota={{ ...result(), state: "error", error, plans: [] }} />);
+  expect(screen.getByText("—")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("—"));
+  expect(screen.getByText(error)).toBeInTheDocument();
+});

@@ -466,8 +466,6 @@ export function usagePreview(
     return {
       account: "f***@example.invalid",
       plan: "Max",
-      fetchedAt: Date.now(),
-      retryAt: null,
       error: null,
       windows: [
         {

@@ -1619,6 +1619,7 @@ fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
     let mut row = record("fixture-ag-reasoning", "antigravity", BASE, None, 100, 20);
     row.client = "antigravity".into();
     row.attempts[0].tokens.reasoning = Some(9);
+    row.attempts[0].generation_ms = Some(900);
     super::antigravity::normalize_record(&mut row);
     writer
         .write_batch(std::slice::from_ref(&row), None)
@@ -1640,19 +1641,35 @@ fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
     assert_eq!(reasoning(&writer), vec![Some(9)]);
     compact_diagnostics_until_done(&mut writer);
     assert_eq!(reasoning(&writer), vec![Some(9)]);
+    let generation = |store: &Store| -> u64 {
+        store
+            .connection
+            .query_row(
+                "SELECT coalesce(sum(generation_ms),0) FROM usage_metrics",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(generation(&writer), 900);
     let reader = Store::reader(dir.path()).unwrap();
     reader
         .snapshot(|snapshot| {
             assert_eq!(reasoning(snapshot), vec![Some(9)]);
+            assert_eq!(generation(snapshot), 900);
             row.attempts[0].tokens.reasoning = Some(7);
+            row.attempts[0].generation_ms = Some(700);
             writer.write_batch(std::slice::from_ref(&row), None)?;
             compact_diagnostics_until_done(&mut writer);
             assert_eq!(reasoning(&writer), vec![Some(7)]);
+            assert_eq!(generation(&writer), 700);
+            assert_eq!(generation(snapshot), 900);
             assert_eq!(reasoning(snapshot), vec![Some(9)]);
             Ok(())
         })
         .unwrap();
     assert_eq!(reasoning(&reader), vec![Some(7)]);
+    assert_eq!(generation(&reader), 700);
 }
 
 #[test]

@@ -328,8 +328,6 @@ export type ClaudeUsageQuota = {
     usedPercent: number;
     resetsAt: number | null;
   }[];
-  fetchedAt: number | null;
-  retryAt: number | null;
   error: string | null;
 };
 export type Dashboard = {

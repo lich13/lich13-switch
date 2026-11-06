@@ -96,6 +96,22 @@ fn independent_stats_keep_dedup_retries_model_ids_and_filters_aligned() {
         assert_eq!(all.requests, 4);
         assert_eq!(all.sessions, 1);
         assert_eq!(all.unpriced_requests, 1);
+        assert_eq!(
+            all.providers
+                .iter()
+                .find(|p| p.id == "first")
+                .unwrap()
+                .unpriced_requests,
+            1
+        );
+        assert_eq!(
+            all.providers
+                .iter()
+                .find(|p| p.id == "last")
+                .unwrap()
+                .unpriced_requests,
+            0
+        );
         assert!(!all.token_mix.reasoning_reported);
         assert_eq!(all.token_mix.thinking_share_percent, None);
         assert_eq!(
@@ -181,7 +197,8 @@ fn saved_tariff_controls_savings_and_missing_basis_stays_unknown() {
         .calculate(&attempt.tokens, Some("fast"));
     attempt.service_tier = Some("fast".into());
     let price = attempt.price.as_ref().unwrap();
-    let expected = super::pricing::cache_savings(price, &attempt.tokens, Some("fast"), 1).unwrap();
+    let expected =
+        super::pricing::cache_savings(price, attempt.tokens.cache_read.unwrap()).unwrap();
     let cost = price.cost.clone();
     store.write_batch(std::slice::from_ref(&row), None).unwrap();
     let selected = Filter {
@@ -232,13 +249,88 @@ fn cache_savings_uses_applied_rates_for_compacted_retries() {
     let price = quote.calculate(&tokens, None).unwrap();
     let mut aggregate = tokens.clone();
     aggregate.add(&tokens);
-    assert_eq!(cache_savings(&price, &aggregate, None, 2), decimal("1800"));
+    assert_eq!(
+        cache_savings(&price, aggregate.cache_read.unwrap()),
+        decimal("1800")
+    );
     let zero_fresh = Tokens {
         input: Some(0),
         ..tokens
     };
     let saved = quote.calculate(&zero_fresh, None).unwrap();
-    assert_eq!(cache_savings(&saved, &zero_fresh, None, 1), decimal("900"));
-    // Without a saved fresh-input rate a merged context cannot be reconstructed.
-    assert_eq!(cache_savings(&saved, &zero_fresh, None, 2), None);
+    assert_eq!(cache_savings(&saved, zero_fresh.cache_read.unwrap()), None);
+}
+
+#[test]
+fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() {
+    for native in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = if native {
+            Store::open(dir.path())
+        } else {
+            Store::open_v11_fixture(dir.path())
+        }
+        .unwrap();
+        let mut row = request(
+            "missing-retries",
+            "proxy",
+            "claude-sonnet-4-6",
+            Operation::Model,
+        );
+        let prices = Pricing::new(dir.path()).unwrap();
+        row.attempts[0].price = prices
+            .quote(Some("claude-sonnet-4-6"), "2")
+            .calculate(&row.attempts[0].tokens, None);
+        for index in 0..2 {
+            let mut retry = row.attempts[0].clone();
+            retry.id = safe_id(&format!("empty-{index}"));
+            retry.provider = Some("first".into());
+            retry.status = Some(503);
+            retry.tokens = Tokens::default();
+            retry.price = None;
+            row.attempts.insert(0, retry);
+        }
+        store.write_batch(&[row], None).unwrap();
+        if native {
+            while store.compact_storage_batch().unwrap() {}
+        }
+        let stats = store.claude_stats(&Filter::default(), AT + 2000).unwrap();
+        assert_eq!(stats.token_mix.input, 100);
+        assert_eq!(stats.token_mix.cache_write, 0);
+        assert!(stats.token_mix.unreported.is_empty());
+        assert_eq!(stats.unpriced_requests, 1);
+        assert_eq!(stats.top_sessions[0].unpriced_requests, 1);
+        assert_eq!(
+            stats
+                .providers
+                .iter()
+                .find(|p| p.id == "first")
+                .unwrap()
+                .unpriced_requests,
+            1
+        );
+        assert_eq!(
+            stats
+                .providers
+                .iter()
+                .find(|p| p.id == "last")
+                .unwrap()
+                .unpriced_requests,
+            0
+        );
+        let mut absent = request("all-missing", "claude", "fixture-model", Operation::Model);
+        absent.session_id = Some(safe_id("absent-session"));
+        absent.attempts[0].tokens = Tokens::default();
+        store.write_batch(&[absent], None).unwrap();
+        let stats = store
+            .claude_stats(
+                &Filter {
+                    session_id: Some(safe_id("absent-session")),
+                    ..Default::default()
+                },
+                AT + 2000,
+            )
+            .unwrap();
+        assert_eq!(stats.token_mix.unreported.len(), 4);
+    }
 }

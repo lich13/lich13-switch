@@ -1347,4 +1347,6 @@
     gap: 10px;
   }
 }
+
+.quota-compact .icon-button.quota-query-error { color: var(--error); }
 }

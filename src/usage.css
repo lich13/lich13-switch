@@ -196,7 +196,8 @@
   outline-offset: 2px;
   border-radius: 2px;
 }
-.usage-tabs {
+.usage-navigation {
+  display: flex;
   align-items: center;
   min-height: 36px;
   padding-bottom: 4px;
@@ -204,6 +205,13 @@
   gap: 6px;
   margin: 8px 0 0;
 }
+.usage-tabs {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+.usage-navigation > .usage-log-controls { flex: 0 0 auto; }
 .usage-tabs > button {
   --tab-tone: var(--accent);
   --tab-soft: var(--accent-soft);
@@ -216,7 +224,9 @@
   border-radius: var(--radius-xs) var(--radius-xs) 0 0;
   background: transparent;
   color: var(--muted);
-  padding: 0 12px;
+  padding: 0 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-bottom: 2px solid transparent;
   font-weight: 540;
   box-sizing: border-box;
@@ -247,14 +257,6 @@
   color: var(--tab-tone);
   font-weight: 600;
 }
-.usage-tabs .usage-toolbar {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.usage-toolbar > select,
 .usage-log-controls select,
 .usage-heading select {
   height: 32px;
@@ -265,9 +267,6 @@
   background: var(--surface-subtle);
   color: var(--ink);
   box-sizing: border-box;
-}
-.usage-toolbar > select {
-  width: 140px;
 }
 .usage-table-scroll {
   min-width: 0;
@@ -378,10 +377,25 @@
   align-items: center;
 }
 .usage-log-controls .usage-more > div {
-  width: 190px;
+  width: 300px;
+  max-height: min(420px, 55dvh);
+  overflow-y: auto;
   display: grid;
   gap: 8px;
   padding: 12px;
+}
+
+.usage-log-controls .usage-list-setting {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+}
+.usage-list-setting select { min-width: 0; width: 100%; }
+.usage-column-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding-block: 8px;
+  border-block: 1px solid var(--line);
 }
 
 /* Stable groups keep corresponding values aligned between requests. */
@@ -1211,7 +1225,6 @@
 .usage-heading button,
 .usage-heading select,
 .usage-tabs button,
-.usage-toolbar > select,
 .usage-pricing-toolbar button,
 .usage-pricing-toolbar input,
 .usage-pricing-toolbar summary,

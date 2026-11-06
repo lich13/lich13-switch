@@ -124,9 +124,16 @@ describe("request log columns", () => {
       logColumns: {},
       logNumberMode: "compact",
     };
-    render(<UsageLogControls settings={settings} save={save} />);
+    render(
+      <UsageLogControls
+        settings={settings}
+        save={save}
+        status=""
+        onStatusChange={vi.fn()}
+      />,
+    );
     expect(save).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText("列设置"));
+    fireEvent.click(screen.getByText("列表设置"));
     expect(screen.getByRole("checkbox", { name: "结束时间" })).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox", { name: "推理" }));
     expect(save).toHaveBeenCalledWith({
@@ -136,11 +143,18 @@ describe("request log columns", () => {
   });
   it("disables settings changes until settings are loaded", () => {
     const save = vi.fn();
-    render(<UsageLogControls settings={undefined} save={save} />);
+    render(
+      <UsageLogControls
+        settings={undefined}
+        save={save}
+        status=""
+        onStatusChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("列表设置"));
     expect(
       screen.getByRole("combobox", { name: "日志数字格式" }),
     ).toBeDisabled();
-    fireEvent.click(screen.getByText("列设置"));
     for (const checkbox of screen.getAllByRole("checkbox")) {
       expect(checkbox).toBeDisabled();
     }

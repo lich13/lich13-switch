@@ -99,7 +99,7 @@ function QuickContent({
         setGateway(s);
       }
     });
-    let frozen: boolean | undefined;
+    let frozen = false;
     watch("gateway-freeze", (state) => {
       if (frozen === state.frozen) return;
       frozen = state.frozen;
@@ -119,8 +119,8 @@ function QuickContent({
     watch("panel-visibility", (value) => {
       receivedVisibility = true;
       setVisible(value);
-      const request = ++gatewaySequence;
-      if (value)
+      if (value) {
+        const request = ++gatewaySequence;
         void command("get_gateway", { clientId })
           .then((next) => {
             if (!disposed && request === gatewaySequence) setGateway(next);
@@ -129,6 +129,7 @@ function QuickContent({
             if (!disposed && request === gatewaySequence)
               setError(errorOf(e).message);
           });
+      }
     });
     watch("switch-notice", setNotice);
     watch("switch-error", (e) => setError(errorOf(e).message));

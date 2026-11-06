@@ -467,8 +467,6 @@ describe("Usage Antigravity statistics tab", () => {
                 resetsAt: null,
               },
             ],
-            fetchedAt: Date.now(),
-            retryAt: null,
             error: null,
           };
         if (name === "get_usage_logs") {
