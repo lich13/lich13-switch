@@ -41,6 +41,13 @@ export function UsageLogControls({
 }) {
   const menu = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
+    const details = menu.current;
+    const fit = () => {
+      if (!details?.open) return;
+      const panel = details.querySelector<HTMLElement>(":scope > div");
+      if (panel)
+        panel.style.maxHeight = `${Math.max(0, Math.min(420, window.innerHeight - panel.getBoundingClientRect().top - 12))}px`;
+    };
     const outside = (event: PointerEvent) => {
       if (menu.current && !menu.current.contains(event.target as Node))
         menu.current.open = false;
@@ -53,9 +60,15 @@ export function UsageLogControls({
     };
     document.addEventListener("pointerdown", outside);
     document.addEventListener("keydown", escape);
+    details?.addEventListener("toggle", fit);
+    window.addEventListener("resize", fit);
+    document.addEventListener("scroll", fit, true);
     return () => {
       document.removeEventListener("pointerdown", outside);
       document.removeEventListener("keydown", escape);
+      details?.removeEventListener("toggle", fit);
+      window.removeEventListener("resize", fit);
+      document.removeEventListener("scroll", fit, true);
     };
   }, []);
   const visibility = (id: LogColumn, visible: boolean) => {

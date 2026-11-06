@@ -749,6 +749,16 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       today: { requests: 18, tokens: 56200, cost: 1.25 },
       totalUsage: { requests: 2400, tokens: 9600000, cost: 28.5 },
     };
+    if (new URLSearchParams(location.search).get("quota") === "error") {
+      result.state = "error";
+      result.error = "额度接口暂时不可用，请稍后重试";
+      result.stale = !provider.id.endsWith("primary");
+      if (!result.stale) {
+        result.successAt = null;
+        result.plans = [];
+        result.subscriptions = [];
+      }
+    }
     provider.quota = result;
     return result;
   }
