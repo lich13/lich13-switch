@@ -933,14 +933,32 @@ impl Store {
     pub fn antigravity_stats(
         &self,
         f: &Filter,
-        pricing: &Pricing,
-        multiplier: &str,
         now_ms: i64,
     ) -> Result<super::antigravity::AntigravityUsageStats> {
+        self.client_stats("antigravity", f, now_ms)
+    }
+    pub fn claude_stats(
+        &self,
+        f: &Filter,
+        now_ms: i64,
+    ) -> Result<super::antigravity::AntigravityUsageStats> {
+        self.client_stats("claude", f, now_ms)
+    }
+    fn client_stats(
+        &self,
+        client: &str,
+        f: &Filter,
+        now_ms: i64,
+    ) -> Result<super::antigravity::AntigravityUsageStats> {
+        let f = &Filter {
+            client: Some(client.into()),
+            ..f.clone()
+        };
         let _snapshot = self.read_snapshot()?;
-        let mut agg = super::antigravity::UsageStatsAggregator::new(f, multiplier, now_ms);
-        let accounts = self
-            .data_dir()
+        let mut agg = super::antigravity::UsageStatsAggregator::new(f, now_ms);
+        let accounts = (client == "antigravity")
+            .then(|| self.data_dir())
+            .flatten()
             .map(crate::antigravity::auth::usage_accounts)
             .transpose()?
             .unwrap_or_default();
@@ -973,51 +991,71 @@ impl Store {
             agg.accounts.insert(id, (order, acc));
         }
         if storage_v12::active(&self.connection) {
-            storage_v12::scan_antigravity_attempts(&self.connection, min_time, max_time, |row| {
-                agg.ingest(row, pricing);
-                Ok(())
-            })?;
+            storage_v12::scan_client_attempts(
+                &self.connection,
+                client,
+                min_time,
+                max_time,
+                f.operation.as_deref(),
+                |row| {
+                    agg.ingest(row);
+                    Ok(())
+                },
+            )?;
         } else {
             let mut stmt = db(self.connection.prepare(
-                "SELECT body FROM records WHERE client='antigravity' AND effective=1 AND time>=?1 AND time<=?2 ORDER BY rowid",
+                "SELECT body FROM records WHERE client=?3 AND effective=1 AND time>=?1 AND time<=?2 ORDER BY rowid",
             ))?;
-            let mut rows = db(stmt.query(params![min_time, max_time]))?;
+            let mut rows = db(stmt.query(params![min_time, max_time, client]))?;
             while let Some(row) = db(rows.next())? {
                 let body: String = db(row.get(0))?;
                 let r: Record = bodies::decode(&self.connection, &body)?;
+                let operation = r.final_attempt().map(|a| {
+                    if a.operation == Operation::WebSearch {
+                        "web_search"
+                    } else if a.operation == Operation::Compaction || a.compaction_kind.is_some() {
+                        "compaction"
+                    } else {
+                        "model"
+                    }
+                });
+                if f.operation
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .is_some_and(|wanted| Some(wanted) != operation)
+                {
+                    continue;
+                }
                 let last_idx = r.attempts.len().saturating_sub(1);
+                let request_unpriced = r.attempts.iter().any(|a| a.unpriced_count() > 0);
                 let time = r.event_time();
                 for (idx, a) in r.attempts.iter().enumerate() {
                     let is_final = idx == last_idx;
-                    agg.ingest(
-                        storage_v12::AntigravityAttemptRow {
-                            session_id: r.session_id.clone(),
-                            provider: a.provider.clone(),
-                            time,
-                            started_at: a.started_at,
-                            is_final,
-                            model: a
-                                .grouping_model()
-                                .map(str::to_owned)
-                                .or_else(|| a.response_model.clone())
-                                .or_else(|| a.requested_model.clone()),
-                            display_name: a.model_display_name.clone(),
-                            inclusive_input: a.tokens.inclusive_input,
-                            input: a.tokens.input,
-                            output: a.tokens.output,
-                            reasoning: a.tokens.reasoning,
-                            cache_read: a.tokens.cache_read,
-                            cache_write: a.tokens.cache_write,
-                            cost: a.price.as_ref().map(|p| p.cost.clone()),
-                            unpriced: a.unpriced_count(),
-                            duration_ms: if is_final {
-                                a.measured_duration_ms().unwrap_or(0)
-                            } else {
-                                0
-                            },
+                    agg.ingest(storage_v12::AntigravityAttemptRow {
+                        final_provider: r.final_attempt().and_then(|a| a.provider.clone()),
+                        repeat_count: a.repeat_count,
+                        session_id: r.session_id.clone(),
+                        provider: a.provider.clone(),
+                        time,
+                        started_at: a.started_at,
+                        is_final,
+                        model: a
+                            .grouping_model()
+                            .map(str::to_owned)
+                            .or_else(|| a.response_model.clone())
+                            .or_else(|| a.requested_model.clone()),
+                        display_name: a.model_display_name.clone(),
+                        tokens: a.tokens.clone(),
+                        price: a.price.clone().map(std::sync::Arc::new),
+                        price_tier: a.price_tier().map(str::to_owned),
+                        cost: a.price.as_ref().map(|p| p.cost.clone()),
+                        unpriced: u64::from(request_unpriced),
+                        duration_ms: if is_final {
+                            a.measured_duration_ms().unwrap_or(0)
+                        } else {
+                            0
                         },
-                        pricing,
-                    );
+                    });
                 }
             }
         }

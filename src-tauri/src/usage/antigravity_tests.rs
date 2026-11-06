@@ -1333,8 +1333,6 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
                     end: Some(now_ms),
                     ..Filter::default()
                 },
-                &pricing,
-                "1",
                 now_ms,
             )
             .unwrap();
@@ -1348,7 +1346,10 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         assert_eq!(stats.token_mix.visible_output, 2_800);
         assert_eq!(stats.token_mix.thinking_share_percent, Some(53.3));
         assert_eq!(stats.token_mix.cache_hit_percent, Some(77.0));
-        assert!(decimal(&stats.token_mix.cache_savings_usd).unwrap() > rust_decimal::Decimal::ZERO);
+        assert!(
+            decimal(stats.token_mix.cache_savings_usd.as_deref().unwrap()).unwrap()
+                > rust_decimal::Decimal::ZERO
+        );
 
         assert_eq!(stats.accounts[0].tracks[0].id, "gemini");
         assert_eq!(stats.accounts[0].tracks[0].burst_5h.requests, 1);
@@ -1420,6 +1421,8 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         price(&mut r, &pricing, &settings);
         let a = &r.attempts[0];
         crate::usage::storage_v12::AntigravityAttemptRow {
+            final_provider: None,
+            repeat_count: 1,
             session_id: None,
             provider: None,
             time: at,
@@ -1427,26 +1430,39 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
             is_final: true,
             model: a.response_model.clone(),
             display_name: None,
-            inclusive_input: None,
-            input: a.tokens.input,
-            output: a.tokens.output,
-            reasoning: None,
-            cache_read: a.tokens.cache_read,
-            cache_write: None,
+            tokens: a.tokens.clone(),
+            price: a.price.clone().map(std::sync::Arc::new),
+            price_tier: a.price_tier().map(str::to_owned),
             cost: a.price.as_ref().map(|p| p.cost.clone()),
             unpriced: 0,
             duration_ms: 1000,
         }
     };
-    let mut single_off_peak = UsageStatsAggregator::new(&Filter::default(), "1", peak_ms + 1_000);
-    single_off_peak.ingest(build_row(off_peak_ms), &pricing);
-    let off_peak_saving = decimal(&single_off_peak.finish().token_mix.cache_savings_usd).unwrap();
+    let mut single_off_peak = UsageStatsAggregator::new(&Filter::default(), peak_ms + 1_000);
+    single_off_peak.ingest(build_row(off_peak_ms));
+    let off_peak_saving = decimal(
+        single_off_peak
+            .finish()
+            .token_mix
+            .cache_savings_usd
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
     assert!(off_peak_saving > rust_decimal::Decimal::ZERO);
 
-    let mut combined = UsageStatsAggregator::new(&Filter::default(), "1", peak_ms + 1_000);
-    combined.ingest(build_row(off_peak_ms), &pricing);
-    combined.ingest(build_row(peak_ms), &pricing);
-    let combined_saving = decimal(&combined.finish().token_mix.cache_savings_usd).unwrap();
+    let mut combined = UsageStatsAggregator::new(&Filter::default(), peak_ms + 1_000);
+    combined.ingest(build_row(off_peak_ms));
+    combined.ingest(build_row(peak_ms));
+    let combined_saving = decimal(
+        combined
+            .finish()
+            .token_mix
+            .cache_savings_usd
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
     // Peak tariff is 2x off-peak for deepseek-chat, so combined savings must be 3x off_peak_saving (not 2x).
     assert_eq!(
         combined_saving,
@@ -1538,8 +1554,6 @@ fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_ma
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
-        let pricing = Pricing::new(dir.path()).unwrap();
-
         // Simulate a record that already ran v02611/v02613 where model_display_name was stripped
         // to "Claude Opus 4.6" and reasoning_effort was mistakenly persisted as "high".
         let mut polluted = parsed(&entry("polluted-opus", 0));
@@ -1603,9 +1617,7 @@ fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_ma
             end: Some(now_ms),
             ..Filter::default()
         };
-        let streamed = store
-            .antigravity_stats(&filter, &pricing, "1", now_ms)
-            .unwrap();
+        let streamed = store.antigravity_stats(&filter, now_ms).unwrap();
         if native {
             let mut batch_rows = Vec::new();
             crate::usage::storage_v12::scan_antigravity_attempts(
@@ -1618,10 +1630,9 @@ fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_ma
                 },
             )
             .unwrap();
-            let mut batch_agg = UsageStatsAggregator::new(&filter, "1", now_ms);
-            let frozen = pricing.frozen();
+            let mut batch_agg = UsageStatsAggregator::new(&filter, now_ms);
             for row in batch_rows {
-                batch_agg.ingest(row, &frozen);
+                batch_agg.ingest(row);
             }
             let batched = batch_agg.finish();
             assert_eq!(
@@ -1937,9 +1948,7 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     provider_ids.sort();
     assert_eq!(provider_ids, vec!["ag-adc-1", "ag-oauth-1", "session"]);
 
-    let stats_all = store
-        .antigravity_stats(&all_ag, &pricing.frozen(), "1", 1_800_000_000_000)
-        .unwrap();
+    let stats_all = store.antigravity_stats(&all_ag, 1_800_000_000_000).unwrap();
     let mut stat_provider_ids: Vec<String> =
         stats_all.providers.iter().map(|p| p.id.clone()).collect();
     stat_provider_ids.sort();
@@ -1952,7 +1961,7 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     };
     assert_eq!(store.dashboard(&oauth_only).unwrap().totals.requests, 1);
     let stats_oauth = store
-        .antigravity_stats(&oauth_only, &pricing.frozen(), "1", 1_800_000_000_000)
+        .antigravity_stats(&oauth_only, 1_800_000_000_000)
         .unwrap();
     assert_eq!(stats_oauth.requests, 1);
     assert_eq!(stats_oauth.token_mix.total, 125);
@@ -2009,7 +2018,7 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     };
     assert_eq!(store.dashboard(&adc_only).unwrap().totals.requests, 1);
     let stats_adc = store
-        .antigravity_stats(&adc_only, &pricing.frozen(), "1", 1_800_000_000_000)
+        .antigravity_stats(&adc_only, 1_800_000_000_000)
         .unwrap();
     assert_eq!(stats_adc.requests, 1);
     assert_eq!(stats_adc.token_mix.total, 250);
@@ -2021,7 +2030,7 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     };
     assert_eq!(store.dashboard(&session_only).unwrap().totals.requests, 1);
     let stats_session = store
-        .antigravity_stats(&session_only, &pricing.frozen(), "1", 1_800_000_000_000)
+        .antigravity_stats(&session_only, 1_800_000_000_000)
         .unwrap();
     assert_eq!(stats_session.requests, 1);
 }
@@ -2249,9 +2258,7 @@ async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
     );
     drop(store);
     let store = Store::open(dir.path()).unwrap();
-    let stats = store
-        .antigravity_stats(&Filter::default(), &pricing, "1", now())
-        .unwrap();
+    let stats = store.antigravity_stats(&Filter::default(), now()).unwrap();
     assert_eq!(stats.top_sessions[0].title.as_deref(), Some("修改后的会话"));
     assert_eq!(stats.top_sessions[0].session_id, safe_id("z-good"));
 }

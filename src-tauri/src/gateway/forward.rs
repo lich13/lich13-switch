@@ -360,7 +360,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         );
     }
     let downstream_upgrade = websocket.then(|| hyper::upgrade::on(&mut request));
-    let traffic = gateway.0.registry.freeze.request_for(gateway.client_id());
+    let traffic = gateway.0.registry.freeze.request();
     let (parts, body) = request.into_parts();
     let replay = match Replay::capture_progress(
         body,

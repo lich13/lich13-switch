@@ -240,7 +240,9 @@ export type AntigravityTokenMix = {
   cacheHitPercent: number | null;
   cacheReadEligible: number;
   cacheInputEligible: number;
-  cacheSavingsUsd: string;
+  unreported?: string[];
+  cacheSavingsUsd: string | null;
+  reasoningReported?: boolean;
 };
 
 export type AntigravityTrackWindow = {
@@ -265,6 +267,7 @@ export type AntigravityProviderGroup = {
   requests: number;
   tokens: number;
   reasoningTokens: number;
+  reasoningReported?: boolean;
   costUsd: string;
   unpricedRequests: number;
   sharePercent: number;
@@ -276,6 +279,7 @@ export type AntigravityFamilyGroup = {
   requests: number;
   tokens: number;
   reasoningTokens: number;
+  reasoningReported?: boolean;
   costUsd: string;
   sharePercent: number;
 };
@@ -288,6 +292,7 @@ export type AntigravitySessionRow = {
   family: string;
   totalTokens: number;
   reasoningTokens: number;
+  reasoningReported?: boolean;
   cacheHitPercent: number | null;
   durationMs: number;
   costUsd: string;
@@ -313,6 +318,19 @@ export type AntigravityUsageStats = {
   providers?: AntigravityProviderGroup[];
   families: AntigravityFamilyGroup[];
   topSessions: AntigravitySessionRow[];
+};
+export type ClaudeUsageQuota = {
+  account: string | null;
+  plan: string | null;
+  windows: {
+    id: string;
+    label: string;
+    usedPercent: number;
+    resetsAt: number | null;
+  }[];
+  fetchedAt: number | null;
+  retryAt: number | null;
+  error: string | null;
 };
 export type Dashboard = {
   dataVersion?: number;

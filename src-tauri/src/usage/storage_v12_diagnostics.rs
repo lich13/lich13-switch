@@ -7,22 +7,55 @@ use std::{cell::RefCell, collections::VecDeque};
 
 // IDs are valid only for the single SELECT snapshot that owns this cache.
 #[derive(Default)]
-pub(super) struct ScanCache(VecDeque<(i64, Value)>);
+pub(super) struct ScanCache {
+    blocks: VecDeque<(i64, Value)>,
+    templates: TemplateCache,
+}
+#[derive(Default)]
+pub(super) struct TemplateCache(VecDeque<(i64, &'static str, Option<usize>)>);
+impl TemplateCache {
+    pub(super) fn index(
+        &mut self,
+        c: &Connection,
+        id: i64,
+        field: &'static str,
+    ) -> Result<Option<usize>> {
+        if let Some((_, _, index)) = self
+            .0
+            .iter()
+            .find(|(saved, key, _)| *saved == id && *key == field)
+        {
+            return Ok(*index);
+        }
+        let bytes: Vec<u8> = db(db(
+            c.prepare_cached("SELECT body FROM v12_templates WHERE id=?1")
+        )?
+        .query_row([id], |r| r.get(0)))?;
+        let index = unpack(&bytes)?[field]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok());
+        if self.0.len() == 8 {
+            self.0.pop_front();
+        }
+        self.0.push_back((id, field, index));
+        Ok(index)
+    }
+}
 impl ScanCache {
     pub(super) fn inspect<T>(
         &mut self,
         c: &Connection,
         body: Sql,
-        read: impl FnOnce(u8, &Value) -> Result<T>,
+        read: impl FnOnce(u8, &Value, &mut TemplateCache) -> Result<T>,
     ) -> Result<T> {
         let Sql::Integer(reference) = body else {
-            return inspect(c, body, read);
+            return inspect(c, body, |tag, value| read(tag, value, &mut self.templates));
         };
         if reference < 2048 {
-            return inspect(c, body, read);
+            return inspect(c, body, |tag, value| read(tag, value, &mut self.templates));
         }
         let id = reference / 2048;
-        let index = if let Some(index) = self.0.iter().position(|(saved, _)| *saved == id) {
+        let index = if let Some(index) = self.blocks.iter().position(|(saved, _)| *saved == id) {
             index
         } else {
             let bytes: Vec<u8> = db(db(
@@ -30,13 +63,15 @@ impl ScanCache {
             )?
             .query_row([id], |r| r.get(0)))?;
             let value = unpack(&bytes)?;
-            if self.0.len() == 4 {
-                self.0.pop_front();
+            if self.blocks.len() == 4 {
+                self.blocks.pop_front();
             }
-            self.0.push_back((id, value));
-            self.0.len() - 1
+            self.blocks.push_back((id, value));
+            self.blocks.len() - 1
         };
-        read_entry(&self.0[index].1, reference, read)
+        read_entry(&self.blocks[index].1, reference, |tag, value| {
+            read(tag, value, &mut self.templates)
+        })
     }
 }
 

@@ -2,21 +2,14 @@ import { render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import type { ClientId, GatewayState, ProviderQuota } from "./types";
-import type { EventMap } from "./bridge-contracts";
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
-  listeners: new Map<
-    string,
-    (s: GatewayState | boolean | EventMap["gateway-activity"]) => void
-  >(),
+  listeners: new Map<string, (s: GatewayState | boolean) => void>(),
 }));
 vi.mock("./bridge", () => ({
   command: mock.command,
   subscribe: vi.fn(
-    async (
-      name: string,
-      fn: (s: GatewayState | boolean | EventMap["gateway-activity"]) => void,
-    ) => {
+    async (name: string, fn: (s: GatewayState | boolean) => void) => {
       mock.listeners.set(name, fn);
       return () => mock.listeners.delete(name);
     },
@@ -46,67 +39,6 @@ beforeEach(() => {
 });
 afterEach(() => localStorage.clear());
 describe("gateway controls", () => {
-  it("keeps current-platform activity ahead of a late initial read and refreshes on show", async () => {
-    let finish!: (value: GatewayState) => void;
-    const initial = new Promise<GatewayState>((resolve) => {
-      finish = resolve;
-    });
-    const original = mock.command.getMockImplementation()!;
-    mock.command.mockImplementation((name, args) =>
-      name === "get_gateway" ? initial : original(name, args),
-    );
-    render(<Gateway notify={() => {}} />);
-    const request = {
-      requestId: "fixture-active",
-      providerId: "primary",
-      model: "fixture-live-model",
-      startedAt: 1000,
-      elapsedSeconds: 3,
-      phase: "compaction",
-      tokensPerSecond: null,
-      waitId: null,
-    };
-    await waitFor(() =>
-      expect(mock.listeners.has("gateway-activity")).toBe(true),
-    );
-    act(() =>
-      mock.listeners.get("gateway-activity")!({
-        clientId: "codex",
-        activeRequests: [request],
-      }),
-    );
-    await act(async () => {
-      finish({ ...state, activeRequests: [] });
-      await initial;
-    });
-    expect(screen.getByText("fixture-live-model")).toBeInTheDocument();
-    expect(screen.getByText("压缩中")).toBeInTheDocument();
-    act(() =>
-      mock.listeners.get("gateway-activity")!({
-        clientId: "claude",
-        activeRequests: [],
-      }),
-    );
-    expect(screen.getByText("fixture-live-model")).toBeInTheDocument();
-    act(() =>
-      mock.listeners.get("gateway-activity")!({
-        clientId: "codex",
-        activeRequests: [
-          { ...request, phase: "streaming", tokensPerSecond: 28 },
-        ],
-      }),
-    );
-    expect(screen.getByText("≈28 tok/s")).toBeInTheDocument();
-    mock.command.mockImplementation(async (name, args) =>
-      name === "get_gateway"
-        ? { ...state, activeRequests: [] }
-        : original(name, args),
-    );
-    act(() => mock.listeners.get("app-visibility")!(true));
-    await waitFor(() =>
-      expect(screen.queryByText("fixture-live-model")).not.toBeInTheDocument(),
-    );
-  });
   it.each(["codex", "claude"] as const)(
     "%s preserves a conflicting provider draft and retries only with a fresh version",
     async (client) => {

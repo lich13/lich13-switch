@@ -913,6 +913,70 @@ async fn fetch(
     }
     Ok((status, bytes, etag))
 }
+/// Compare the same request with and without cache reads using its saved tariff.
+/// Never mix the current catalog or multiplier with a historical bill.
+pub(super) fn cache_savings(
+    snapshot: &PriceSnapshot,
+    tokens: &Tokens,
+    tier: Option<&str>,
+    repeat_count: u64,
+) -> Option<Decimal> {
+    let rate = |rates: &BTreeMap<String, String>, name: &str| {
+        rates
+            .iter()
+            .find(|(key, _)| key.starts_with(name))
+            .and_then(|(_, value)| decimal(value))
+    };
+    let cached = tokens.cache_read?;
+    let images = tokens.image_cache_read.unwrap_or(0).min(cached);
+    let text = cached - images;
+    // Use the applied unit rates, including the original context/tier. A compacted
+    // retry can have aggregate tokens above a price band its attempts never reached.
+    let mut input = rate(&snapshot.rates, "input_cost_per_token");
+    let mut image = rate(&snapshot.rates, "input_cost_per_image_token");
+    if (text > 0 && input.is_none()) || (images > 0 && image.is_none()) {
+        // No fresh input means its rate was not charged/stored. Only an individual
+        // attempt still has enough context to resolve it from the saved price card.
+        if repeat_count > 1 {
+            return None;
+        }
+        let quote = Quote {
+            model: snapshot.model.clone(),
+            data: Some(snapshot.basis.clone()?),
+            version: snapshot.version.clone(),
+            source: snapshot.source.clone(),
+            multiplier: snapshot.multiplier.clone(),
+        };
+        let mut uncached = tokens.clone();
+        uncached.input = Some(tokens.input?.checked_add(cached)?);
+        uncached.cache_read = Some(0);
+        if images > 0 {
+            uncached.image_input = Some(tokens.image_input.unwrap_or(0).checked_add(images)?);
+            uncached.image_cache_read = Some(0);
+        }
+        let resolved = quote.calculate(&uncached, tier)?;
+        input = input.or_else(|| rate(&resolved.rates, "input_cost_per_token"));
+        image = image.or_else(|| rate(&resolved.rates, "input_cost_per_image_token"));
+        if image.is_none() && builtin_pricing::canonical(&snapshot.model).is_some() {
+            image = input;
+        }
+    }
+    let cached_rate = rate(&snapshot.rates, "cache_read_input_token_cost");
+    let image_cached_rate =
+        rate(&snapshot.rates, "cache_read_input_image_token_cost").or(cached_rate);
+    let saving = |count: u64, fresh: Option<Decimal>, read: Option<Decimal>| {
+        if count == 0 {
+            Some(Decimal::ZERO)
+        } else {
+            fresh?.checked_sub(read?)?.checked_mul(Decimal::from(count))
+        }
+    };
+    saving(text, input, cached_rate)?
+        .checked_add(saving(images, image, image_cached_rate)?)?
+        .checked_mul(decimal(&snapshot.multiplier)?)
+        .map(|v| v.max(Decimal::ZERO))
+}
+
 impl Quote {
     pub fn calculate(&self, t: &Tokens, tier: Option<&str>) -> Option<PriceSnapshot> {
         let original = self.data.as_ref()?;

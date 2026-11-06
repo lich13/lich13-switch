@@ -3,6 +3,9 @@ mod billing;
 mod bodies;
 mod body_wire;
 mod builtin_pricing;
+pub(crate) mod claude_quota;
+#[cfg(test)]
+mod claude_stats_tests;
 pub mod commands;
 #[cfg(test)]
 mod decimal_v13_tests;
@@ -59,6 +62,7 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub struct Service(Arc<Inner>);
 struct Inner {
+    claude_quota: claude_quota::Service,
     store: Mutex<Option<store::Store>>,
     overview_cache: store::OverviewCache,
     pub prices: Option<Pricing>,
@@ -236,6 +240,7 @@ impl Service {
         let _ = std::fs::remove_dir(dir.join("pending"));
         let initial_pending = dir.join("pending").exists();
         let inner = Arc::new(Inner {
+            claude_quota: claude_quota::Service::default(),
             store: Mutex::new(opened.ok()),
             overview_cache: Default::default(),
             prices: prices.ok(),

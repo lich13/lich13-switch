@@ -50,9 +50,9 @@ pub fn parse(value: &Value) -> Periods {
                 return None;
             }
             let id = b["bucketId"].as_str()?;
-            let duration = match (id, b["window"].as_str()?) {
-                ("gemini-5h" | "3p-5h", "5h") => 5 * 3_600_000,
-                ("gemini-weekly" | "3p-weekly", "weekly") => 7 * 86_400_000,
+            let duration = match id {
+                "gemini-5h" | "3p-5h" => 5 * 3_600_000,
+                "gemini-weekly" | "3p-weekly" => 7 * 86_400_000,
                 _ => return None,
             };
             let end = time(&b["resetTime"])?;
@@ -129,7 +129,6 @@ impl AccountAccumulator {
         track: Option<&str>,
         amounts: &WindowAcc,
         historical: bool,
-        now: i64,
     ) {
         let add = |w: &mut WindowAcc| {
             w.requests += amounts.requests;
@@ -144,7 +143,7 @@ impl AccountAccumulator {
             }
             return;
         }
-        if at > now || self.periods.is_empty() {
+        if self.periods.is_empty() {
             return;
         }
         let keys = match track {

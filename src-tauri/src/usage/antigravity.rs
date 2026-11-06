@@ -1841,7 +1841,9 @@ pub struct AntigravityTokenMix {
     pub cache_hit_percent: Option<f64>,
     pub cache_read_eligible: u64,
     pub cache_input_eligible: u64,
-    pub cache_savings_usd: String,
+    pub cache_savings_usd: Option<String>,
+    pub reasoning_reported: bool,
+    pub unreported: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1872,6 +1874,7 @@ pub struct AntigravityProviderGroup {
     pub requests: u64,
     pub tokens: u64,
     pub reasoning_tokens: u64,
+    pub reasoning_reported: bool,
     pub cost_usd: String,
     pub unpriced_requests: u64,
     pub share_percent: f64,
@@ -1885,6 +1888,7 @@ pub struct AntigravityFamilyGroup {
     pub requests: u64,
     pub tokens: u64,
     pub reasoning_tokens: u64,
+    pub reasoning_reported: bool,
     pub cost_usd: String,
     pub share_percent: f64,
 }
@@ -1899,6 +1903,7 @@ pub struct AntigravitySessionRow {
     pub family: String,
     pub total_tokens: u64,
     pub reasoning_tokens: u64,
+    pub reasoning_reported: bool,
     pub cache_hit_percent: Option<f64>,
     pub duration_ms: u64,
     pub cost_usd: String,
@@ -2016,16 +2021,18 @@ struct ProviderAcc {
     requests: u64,
     tokens: u64,
     reasoning_tokens: u64,
+    reasoning_missing: bool,
     cost: rust_decimal::Decimal,
     unpriced_requests: u64,
 }
 
 #[derive(Default)]
 struct FamilyAcc {
-    label: &'static str,
+    label: String,
     requests: u64,
     tokens: u64,
     reasoning_tokens: u64,
+    reasoning_missing: bool,
     cost: rust_decimal::Decimal,
 }
 
@@ -2033,9 +2040,10 @@ struct FamilyAcc {
 struct SessionAcc {
     requests: u64,
     models: BTreeMap<String, u64>,
-    family_counts: BTreeMap<&'static str, u64>,
+    family_counts: BTreeMap<String, u64>,
     total_tokens: u64,
     reasoning_tokens: u64,
+    reasoning_missing: bool,
     cache_read_eligible: u64,
     cache_input_eligible: u64,
     duration_ms: u64,
@@ -2048,12 +2056,14 @@ struct SessionAcc {
 pub(super) struct UsageStatsAggregator {
     filter_start: i64,
     filter_end: i64,
-    now: i64,
     pub(super) accounts: BTreeMap<String, (usize, quota::AccountAccumulator)>,
     provider_filter: Option<String>,
     model_filter: Option<String>,
     session_filter: Option<String>,
-    multiplier: String,
+    full_models: bool,
+    reasoning_missing: bool,
+    savings_missing: bool,
+    unreported: BTreeSet<String>,
     requests: u64,
     unpriced_requests: u64,
     total_cost: rust_decimal::Decimal,
@@ -2067,18 +2077,16 @@ pub(super) struct UsageStatsAggregator {
     cache_input_eligible: u64,
     cache_savings: rust_decimal::Decimal,
     providers: BTreeMap<String, ProviderAcc>,
-    families: BTreeMap<&'static str, FamilyAcc>,
+    families: BTreeMap<String, FamilyAcc>,
     sessions: BTreeMap<String, SessionAcc>,
-    quote_cache: BTreeMap<(String, i64), super::pricing::Quote>,
 }
 
 impl UsageStatsAggregator {
-    pub(super) fn new(filter: &Filter, multiplier: &str, now_ms: i64) -> Self {
+    pub(super) fn new(filter: &Filter, now_ms: i64) -> Self {
         let anchor = filter.end.unwrap_or(now_ms);
         Self {
             filter_start: filter.start.unwrap_or(0),
             filter_end: anchor,
-            now: now_ms,
             accounts: BTreeMap::new(),
             provider_filter: filter
                 .provider
@@ -2095,7 +2103,10 @@ impl UsageStatsAggregator {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
-            multiplier: multiplier.to_owned(),
+            full_models: filter.client.as_deref() == Some("claude"),
+            reasoning_missing: false,
+            savings_missing: false,
+            unreported: BTreeSet::new(),
             requests: 0,
             unpriced_requests: 0,
             total_cost: rust_decimal::Decimal::ZERO,
@@ -2111,39 +2122,43 @@ impl UsageStatsAggregator {
             providers: BTreeMap::new(),
             families: BTreeMap::new(),
             sessions: BTreeMap::new(),
-            quote_cache: BTreeMap::new(),
         }
     }
 
-    pub(super) fn ingest(
-        &mut self,
-        row: super::storage_v12::AntigravityAttemptRow,
-        pricing: &Pricing,
-    ) {
+    pub(super) fn ingest(&mut self, row: super::storage_v12::AntigravityAttemptRow) {
         let matches_provider = match self.provider_filter.as_deref() {
-            Some("session") => row.provider.is_none() || row.provider.as_deref() == Some("session"),
-            Some(pf) => row.provider.as_deref() == Some(pf),
+            Some("session") => {
+                row.final_provider.is_none() || row.final_provider.as_deref() == Some("session")
+            }
+            Some(pf) => row.final_provider.as_deref() == Some(pf),
             None => true,
         };
         let (resolved_model, family, family_label, track) =
             classify_model_family(row.model.as_deref(), row.display_name.as_deref());
-        let attempt_tokens = Tokens {
-            inclusive_input: row.inclusive_input,
-            input: row.input,
-            output: row.output,
-            reasoning: row.reasoning,
-            cache_read: row.cache_read,
-            cache_write: row.cache_write,
-            ..Tokens::default()
+        let family = if self.full_models {
+            row.model.clone().unwrap_or_else(|| "未识别".into())
+        } else {
+            family.into()
         };
+        let family_label = if self.full_models {
+            family.clone()
+        } else {
+            family_label.into()
+        };
+        let resolved_model = if self.full_models {
+            row.model.clone()
+        } else {
+            resolved_model
+        };
+        let attempt_tokens = &row.tokens;
         let tok_total = attempt_tokens.total().unwrap_or(0);
-        let tok_reasoning = row.reasoning.unwrap_or(0);
+        let tok_reasoning = row.tokens.reasoning.unwrap_or(0);
         let row_cost = row
             .cost
             .as_deref()
             .and_then(decimal)
             .unwrap_or(rust_decimal::Decimal::ZERO);
-        let is_unpriced_final = row.is_final && row.cost.is_none() && row.unpriced > 0;
+        let is_unpriced_final = row.is_final && row.unpriced > 0;
 
         if let Some((_, account)) = row
             .provider
@@ -2161,7 +2176,6 @@ impl UsageStatsAggregator {
                     unpriced_requests: u64::from(is_unpriced_final),
                 },
                 row.time >= self.filter_start && row.time <= self.filter_end,
-                self.now,
             );
         }
 
@@ -2197,6 +2211,7 @@ impl UsageStatsAggregator {
         prov.tokens = prov.tokens.saturating_add(tok_total);
         prov.reasoning_tokens = prov.reasoning_tokens.saturating_add(tok_reasoning);
         prov.cost += row_cost;
+        prov.reasoning_missing |= row.tokens.reasoning.is_none();
 
         if !matches_provider {
             return;
@@ -2210,10 +2225,20 @@ impl UsageStatsAggregator {
         }
         self.total_cost += row_cost;
 
-        let inp = row.input.unwrap_or(0);
-        let cr = row.cache_read.unwrap_or(0);
-        let cw = row.cache_write.unwrap_or(0);
-        let out = row.output.unwrap_or(0);
+        for (key, value) in [
+            ("input", row.tokens.input),
+            ("output", row.tokens.output),
+            ("cacheRead", row.tokens.cache_read),
+            ("cacheWrite", row.tokens.cache_write),
+        ] {
+            if value.is_none() {
+                self.unreported.insert(key.into());
+            }
+        }
+        let inp = row.tokens.input.unwrap_or(0);
+        let cr = row.tokens.cache_read.unwrap_or(0);
+        let cw = row.tokens.cache_write.unwrap_or(0);
+        let out = row.tokens.output.unwrap_or(0);
         let capped_reasoning = tok_reasoning.min(out);
         self.mix_input = self.mix_input.saturating_add(inp);
         self.mix_cache_read = self.mix_cache_read.saturating_add(cr);
@@ -2229,43 +2254,35 @@ impl UsageStatsAggregator {
             self.cache_input_eligible = self.cache_input_eligible.saturating_add(elig_input);
         }
 
-        if cr > 0 && row.cost.is_some() {
-            if let Some(model_name) = resolved_model.as_deref() {
-                let hour_bucket = row.started_at.div_euclid(3_600_000);
-                let multiplier = &self.multiplier;
-                let quote = self
-                    .quote_cache
-                    .entry((model_name.to_owned(), hour_bucket))
-                    .or_insert_with(|| {
-                        pricing.quote_at(Some(model_name), multiplier, row.started_at)
-                    });
-                let uncached_tokens = Tokens {
-                    input: Some(inp.saturating_add(cr)),
-                    output: Some(out),
-                    cache_read: Some(0),
-                    cache_write: row.cache_write,
-                    ..Tokens::default()
-                };
-                if let Some(uncached_snap) = quote.calculate(&uncached_tokens, None) {
-                    if let Some(uncached_cost) = decimal(&uncached_snap.cost) {
-                        if uncached_cost > row_cost {
-                            self.cache_savings += uncached_cost - row_cost;
-                        }
-                    }
-                }
+        if cr > 0 {
+            match row.price.as_ref().and_then(|price| {
+                super::pricing::cache_savings(
+                    price,
+                    attempt_tokens,
+                    row.price_tier.as_deref(),
+                    row.repeat_count,
+                )
+            }) {
+                Some(savings) => self.cache_savings += savings,
+                None => self.savings_missing = true,
             }
         }
-
-        let fam = self.families.entry(family).or_insert_with(|| FamilyAcc {
-            label: family_label,
-            ..FamilyAcc::default()
-        });
+        let missing_reasoning = row.tokens.reasoning.is_none();
+        self.reasoning_missing |= missing_reasoning;
+        let fam = self
+            .families
+            .entry(family.clone())
+            .or_insert_with(|| FamilyAcc {
+                label: family_label,
+                ..FamilyAcc::default()
+            });
         if row.is_final {
             fam.requests += 1;
         }
         fam.tokens = fam.tokens.saturating_add(tok_total);
         fam.reasoning_tokens = fam.reasoning_tokens.saturating_add(tok_reasoning);
         fam.cost += row_cost;
+        fam.reasoning_missing |= missing_reasoning;
 
         if let Some(sid) = row.session_id.filter(|s| !s.is_empty()) {
             let sess = self.sessions.entry(sid).or_default();
@@ -2287,6 +2304,7 @@ impl UsageStatsAggregator {
                 sess.cache_input_eligible = sess.cache_input_eligible.saturating_add(ei);
             }
             sess.cost += row_cost;
+            sess.reasoning_missing |= missing_reasoning;
             sess.started_at = Some(
                 sess.started_at
                     .map_or(row.started_at, |prev| prev.min(row.started_at)),
@@ -2304,8 +2322,9 @@ impl UsageStatsAggregator {
             .saturating_add(self.mix_cache_read)
             .saturating_add(self.mix_cache_write)
             .saturating_add(self.mix_output);
-        let thinking_share_percent =
-            round_pct(self.mix_reasoning.min(self.mix_output), self.mix_output);
+        let thinking_share_percent = (!self.reasoning_missing)
+            .then(|| round_pct(self.mix_reasoning.min(self.mix_output), self.mix_output))
+            .flatten();
         let cache_hit_percent = round_pct(self.cache_read_eligible, self.cache_input_eligible);
         let providers_total_tokens: u64 = self.providers.values().map(|acc| acc.tokens).sum();
 
@@ -2317,6 +2336,7 @@ impl UsageStatsAggregator {
                 requests: acc.requests,
                 tokens: acc.tokens,
                 reasoning_tokens: acc.reasoning_tokens,
+                reasoning_reported: !acc.reasoning_missing,
                 cost_usd: fmt_usd(acc.cost),
                 unpriced_requests: acc.unpriced_requests,
                 share_percent: round_pct(acc.tokens, providers_total_tokens).unwrap_or(0.0),
@@ -2338,6 +2358,7 @@ impl UsageStatsAggregator {
                 requests: acc.requests,
                 tokens: acc.tokens,
                 reasoning_tokens: acc.reasoning_tokens,
+                reasoning_reported: !acc.reasoning_missing,
                 cost_usd: fmt_usd(acc.cost),
                 share_percent: round_pct(acc.tokens, mix_total).unwrap_or(0.0),
             })
@@ -2365,7 +2386,7 @@ impl UsageStatsAggregator {
                     .into_iter()
                     .max_by(|(fa, ca), (fb, cb)| ca.cmp(cb).then_with(|| fb.cmp(fa)))
                     .map(|(f, _)| f)
-                    .unwrap_or("other")
+                    .unwrap_or_else(|| "other".into())
                     .to_owned();
                 AntigravitySessionRow {
                     session_id,
@@ -2375,6 +2396,7 @@ impl UsageStatsAggregator {
                     family,
                     total_tokens: acc.total_tokens,
                     reasoning_tokens: acc.reasoning_tokens,
+                    reasoning_reported: !acc.reasoning_missing,
                     cache_hit_percent: round_pct(acc.cache_read_eligible, acc.cache_input_eligible),
                     duration_ms: acc.duration_ms,
                     cost_usd: fmt_usd(acc.cost),
@@ -2410,7 +2432,9 @@ impl UsageStatsAggregator {
                 cache_hit_percent,
                 cache_read_eligible: self.cache_read_eligible,
                 cache_input_eligible: self.cache_input_eligible,
-                cache_savings_usd: fmt_usd(self.cache_savings),
+                cache_savings_usd: (!self.savings_missing).then(|| fmt_usd(self.cache_savings)),
+                reasoning_reported: !self.reasoning_missing,
+                unreported: self.unreported.into_iter().collect(),
             },
             accounts: {
                 let mut accounts: Vec<_> = self.accounts.into_values().collect();

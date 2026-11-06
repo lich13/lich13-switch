@@ -1039,8 +1039,7 @@
   padding: 20px 22px;
   position: sticky;
   top: 0;
-  background:
-    linear-gradient(
+    background: linear-gradient(
       180deg,
       color-mix(in srgb, var(--accent-soft) 36%, var(--surface)) 0%,
       var(--surface) 100%
@@ -1365,7 +1364,7 @@
   text-overflow: ellipsis;
 }
 .usage-ag-kpis > div > strong {
-  font-size: 15px;
+    font-size: 18px;
   font-weight: 620;
   color: var(--ink);
   overflow-wrap: anywhere;
@@ -1400,7 +1399,11 @@
 }
 .usage-ag-mix-seg.is-input,
 .usage-ag-dot.is-input {
-  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-blue) 100%);
+    background: linear-gradient(
+      90deg,
+      var(--accent) 0%,
+      var(--accent-blue) 100%
+    );
 }
 .usage-ag-mix-seg.is-cacheRead,
 .usage-ag-dot.is-cacheRead {
@@ -1637,9 +1640,9 @@
   line-height: 1.5;
 }
 .usage-ag-session-btn {
-  min-height: 28px;
-  padding: 3px 9px;
-  font-size: 12px;
+  min-height: 36px;
+  padding: 0 10px;
+  font: inherit;
   border-radius: var(--radius-xs);
 }
 @container (max-width: 720px) {
@@ -1688,4 +1691,28 @@
   font-size: 12px;
   margin: 0;
   font-variant-numeric: tabular-nums;
+}
+
+.usage-claude-quota {
+  --fam-tone: var(--accent);
+  margin-bottom: 16px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-claude-quota .usage-ag-track-head {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.usage-claude-quota .usage-ag-track-head > span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.usage-claude-windows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 12px;
+}
+.usage-ag-family-top strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }

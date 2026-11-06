@@ -138,10 +138,10 @@ impl Service {
         // Restoration belongs exclusively to the privileged helper. An unverified
         // legacy user/script record must never supply a battery sleep value.
         if let Err(error) = self.system.apply(&before, enabled, before.battery_sleep) {
-            if repaired || !matches!(error.code.as_str(), code::POWER_HELPER | code::POWER_AUTH) {
+            if repaired || error.code != code::POWER_HELPER {
                 return Err(error);
             }
-            // An authorization can expire between read and set. At most one repair,
+            // A helper connection can fail between read and set. At most one repair,
             // then a fresh physical-state check before retrying the intended operation.
             let repaired = self.repair_for_toggle(&before)?;
             if !allowed() {
@@ -582,11 +582,11 @@ mod tests {
     }
 
     #[test]
-    fn ownership_changes_during_expired_authorization_repair_require_a_new_revision() {
+    fn ownership_changes_during_helper_repair_require_a_new_revision() {
         let original = state(true, 0, "application", false);
         let external = state(true, 0, "external", true);
         let (_dir, service, helper) = fixture(original.clone());
-        helper.reply(original.clone(), Some(code::POWER_AUTH));
+        helper.reply(original.clone(), Some(code::POWER_HELPER));
         *helper.after_prepare.lock().unwrap() = Some(external.clone());
         assert_eq!(
             service.set(false, &original.revision).unwrap_err().code,

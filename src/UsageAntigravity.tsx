@@ -91,12 +91,14 @@ function TrackWindowBlock({
 export default function UsageAntigravity({
   stats,
   busy,
+  client = "antigravity",
   currentAccountId,
   selectedProvider,
   providerName,
   onSelectProvider,
   onSelectSession,
 }: {
+  client?: "antigravity" | "claude";
   stats: AntigravityUsageStats | null;
   busy: boolean;
   currentAccountId: string | null;
@@ -119,10 +121,11 @@ export default function UsageAntigravity({
       );
     }
   }, [stats, currentAccountId]);
+  const clientName = client === "claude" ? "Claude Code" : "Antigravity";
   if (!stats) {
     return (
       <p className="usage-empty">
-        {busy ? "正在加载 Antigravity 统计…" : "暂无 Antigravity 用量数据"}
+        {busy ? `正在加载 ${clientName} 统计…` : `暂无 ${clientName} 用量数据`}
       </p>
     );
   }
@@ -133,8 +136,12 @@ export default function UsageAntigravity({
     { key: "input", label: "新输入", value: mix.input },
     { key: "cacheRead", label: "缓存读取", value: mix.cacheRead },
     { key: "cacheWrite", label: "缓存写入", value: mix.cacheWrite },
-    { key: "visibleOutput", label: "可见输出", value: mix.visibleOutput },
-    { key: "reasoning", label: "思考输出", value: mix.reasoning },
+    ...(mix.reasoningReported === false
+      ? [{ key: "visibleOutput", label: "输出", value: mix.output }]
+      : [
+          { key: "visibleOutput", label: "可见输出", value: mix.visibleOutput },
+          { key: "reasoning", label: "思考输出", value: mix.reasoning },
+        ]),
   ];
   const segmentTotal = segments.reduce((sum, item) => sum + item.value, 0);
 
@@ -188,8 +195,11 @@ export default function UsageAntigravity({
           </div>
           <div>
             <span>缓存估算节省</span>
-            <strong className="usage-ag-savings" title={mix.cacheSavingsUsd}>
-              {money(mix.cacheSavingsUsd)}
+            <strong
+              className="usage-ag-savings"
+              title={mix.cacheSavingsUsd ?? undefined}
+            >
+              {mix.cacheSavingsUsd == null ? "—" : money(mix.cacheSavingsUsd)}
             </strong>
           </div>
         </div>
@@ -220,88 +230,109 @@ export default function UsageAntigravity({
             <span key={s.key} className="usage-ag-legend-item">
               <i className={`usage-ag-dot is-${s.key}`} aria-hidden="true" />
               <span>{s.label}</span>
-              <b title={numeric(s.value)}>{compact(s.value)}</b>
+              <b
+                title={
+                  mix.unreported?.includes(
+                    s.key === "visibleOutput" ? "output" : s.key,
+                  )
+                    ? undefined
+                    : numeric(s.value)
+                }
+              >
+                {mix.unreported?.includes(
+                  s.key === "visibleOutput" ? "output" : s.key,
+                )
+                  ? "—"
+                  : compact(s.value)}
+              </b>
             </span>
           ))}
         </div>
       </section>
 
-      <section className="usage-ag-accounts" aria-label="账号周期用量">
-        <label className="usage-ag-account-picker">
-          <span>账号用量</span>
-          <select
-            aria-label="Antigravity 用量账号"
-            value={accountId}
-            disabled={!stats.accounts.length}
-            onChange={(e) => setAccountId(e.target.value)}
-          >
-            <option value="" disabled>
-              {stats.accounts.length ? "选择账号" : "暂无账号"}
-            </option>
-            {stats.accounts.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name} ·{" "}
-                {a.kind === "oauth"
-                  ? "OAuth"
-                  : a.kind === "adc"
-                    ? "ADC"
-                    : "Vertex Key"}
-                {a.id === currentAccountId ? "（当前）" : ""}
+      {client === "antigravity" && (
+        <section className="usage-ag-accounts" aria-label="账号周期用量">
+          <label className="usage-ag-account-picker">
+            <span>账号用量</span>
+            <select
+              aria-label="Antigravity 用量账号"
+              value={accountId}
+              disabled={!stats.accounts.length}
+              onChange={(e) => setAccountId(e.target.value)}
+            >
+              <option value="" disabled>
+                {stats.accounts.length ? "选择账号" : "暂无账号"}
               </option>
-            ))}
-          </select>
-        </label>
-        {stats.quotaError && (
-          <p className="form-error" role="alert">
-            {stats.quotaError}
-          </p>
-        )}
-        {account && (
-          <section
-            key={account.id}
-            aria-label={account.name}
-            className="usage-ag-account"
-          >
-            {account.kind === "oauth" ? (
-              <div className="usage-ag-tracks">
-                {account.tracks.map((track) => (
-                  <article
-                    key={track.id}
-                    className="usage-ag-card usage-ag-track-card"
-                    data-track={track.id}
-                  >
-                    <header className="usage-ag-track-head">
-                      <h3>{track.label}</h3>
-                    </header>
-                    <div className="usage-ag-windows">
-                      <TrackWindowBlock
-                        title="当前 5h"
-                        window={track.burst5h}
-                      />
-                      <TrackWindowBlock
-                        title="当前 7d"
-                        window={track.weekly7d}
-                      />
-                    </div>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <article className="usage-ag-card">
-                <TrackWindowBlock
-                  title={`${account.kind === "vertex_key" ? "Vertex Key" : "ADC"} · 所选日期`}
-                  window={account.total}
-                  current={false}
-                />
-              </article>
-            )}
-          </section>
-        )}
-      </section>
+              {stats.accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ·{" "}
+                  {a.kind === "oauth"
+                    ? "OAuth"
+                    : a.kind === "adc"
+                      ? "ADC"
+                      : "Vertex Key"}
+                  {a.id === currentAccountId ? "（当前）" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          {stats.quotaError && (
+            <p className="form-error" role="alert">
+              {stats.quotaError}
+            </p>
+          )}
+          {account && (
+            <section
+              key={account.id}
+              aria-label={account.name}
+              className="usage-ag-account"
+            >
+              {account.kind === "oauth" ? (
+                <div className="usage-ag-tracks">
+                  {account.tracks.map((track) => (
+                    <article
+                      key={track.id}
+                      className="usage-ag-card usage-ag-track-card"
+                      data-track={track.id}
+                    >
+                      <header className="usage-ag-track-head">
+                        <h3>{track.label}</h3>
+                      </header>
+                      <div className="usage-ag-windows">
+                        <TrackWindowBlock
+                          title="当前 5h"
+                          window={track.burst5h}
+                        />
+                        <TrackWindowBlock
+                          title="当前 7d"
+                          window={track.weekly7d}
+                        />
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <article className="usage-ag-card">
+                  <TrackWindowBlock
+                    title={`${account.kind === "vertex_key" ? "Vertex Key" : "ADC"} · 所选日期`}
+                    window={account.total}
+                    current={false}
+                  />
+                </article>
+              )}
+            </section>
+          )}
+        </section>
+      )}
 
       {(stats.providers ?? []).length > 0 && (
-        <section className="usage-ag-card" aria-label="账号与凭据分布">
-          <h2 className="usage-ag-section-title">账号与凭据分布</h2>
+        <section
+          className="usage-ag-card"
+          aria-label={client === "claude" ? "供应商分布" : "账号与凭据分布"}
+        >
+          <h2 className="usage-ag-section-title">
+            {client === "claude" ? "供应商分布" : "账号与凭据分布"}
+          </h2>
           <div className="usage-ag-families">
             {(stats.providers ?? []).map((prov) => {
               const label = providerName
@@ -334,8 +365,13 @@ export default function UsageAntigravity({
                     <span title={`${numeric(prov.tokens)} Token`}>
                       {compact(prov.tokens)} Token
                     </span>
-                    <span title={`思考 ${numeric(prov.reasoningTokens)}`}>
-                      思考 {compact(prov.reasoningTokens)}
+                    <span
+                      title={`思考 ${prov.reasoningReported === false ? "—" : numeric(prov.reasoningTokens)}`}
+                    >
+                      思考{" "}
+                      {prov.reasoningReported === false
+                        ? "—"
+                        : compact(prov.reasoningTokens)}
                     </span>
                     <b title={prov.costUsd}>
                       {formatCostOrUnpriced(
@@ -366,8 +402,13 @@ export default function UsageAntigravity({
       )}
 
       {stats.families.length > 0 && (
-        <section className="usage-ag-card" aria-label="模型家族分布">
-          <h2 className="usage-ag-section-title">模型家族分布</h2>
+        <section
+          className="usage-ag-card"
+          aria-label={client === "claude" ? "模型分布" : "模型家族分布"}
+        >
+          <h2 className="usage-ag-section-title">
+            {client === "claude" ? "模型分布" : "模型家族分布"}
+          </h2>
           <div className="usage-ag-families">
             {stats.families.map((fam) => (
               <div
@@ -393,8 +434,13 @@ export default function UsageAntigravity({
                   <span title={`${numeric(fam.tokens)} Token`}>
                     {compact(fam.tokens)} Token
                   </span>
-                  <span title={`思考 ${numeric(fam.reasoningTokens)}`}>
-                    思考 {compact(fam.reasoningTokens)}
+                  <span
+                    title={`思考 ${fam.reasoningReported === false ? "—" : numeric(fam.reasoningTokens)}`}
+                  >
+                    思考{" "}
+                    {fam.reasoningReported === false
+                      ? "—"
+                      : compact(fam.reasoningTokens)}
                   </span>
                   <b title={fam.costUsd}>{money(fam.costUsd)}</b>
                 </div>
@@ -407,7 +453,7 @@ export default function UsageAntigravity({
       <section className="usage-ag-card" aria-label="会话排行">
         <h2 className="usage-ag-section-title">会话排行</h2>
         {stats.topSessions.length === 0 ? (
-          <p className="usage-empty">当前时间范围暂无 Antigravity 会话记录</p>
+          <p className="usage-empty">当前时间范围暂无 {clientName} 会话记录</p>
         ) : (
           <div className="usage-table-scroll">
             <table className="usage-table usage-ag-session-table">
@@ -429,7 +475,10 @@ export default function UsageAntigravity({
                   <tr key={row.sessionId}>
                     <td>
                       <span className="usage-ag-session-title">
-                        {row.title || "未命名会话"}
+                        {row.title ||
+                          (client === "claude"
+                            ? row.sessionId.slice(0, 12)
+                            : "未命名会话")}
                       </span>
                     </td>
                     <td className="usage-model" title={row.primaryModel}>
@@ -437,10 +486,12 @@ export default function UsageAntigravity({
                     </td>
                     <td>{numeric(row.requests)}</td>
                     <td
-                      title={`总计 ${numeric(row.totalTokens)} · 思考 ${numeric(row.reasoningTokens)}`}
+                      title={`总计 ${numeric(row.totalTokens)} · 思考 ${row.reasoningReported === false ? "—" : numeric(row.reasoningTokens)}`}
                     >
                       {compact(row.totalTokens)} /{" "}
-                      {compact(row.reasoningTokens)}
+                      {row.reasoningReported === false
+                        ? "—"
+                        : compact(row.reasoningTokens)}
                     </td>
                     <td>
                       {row.cacheHitPercent == null
@@ -460,11 +511,14 @@ export default function UsageAntigravity({
                       <button
                         type="button"
                         className="usage-ag-session-btn"
-                        aria-label={`查看会话 ${row.title || "未命名会话"} 请求`}
+                        aria-label={`查看会话 ${row.title || (client === "claude" ? row.sessionId.slice(0, 12) : "未命名会话")} 请求`}
                         onClick={() =>
                           onSelectSession(
                             row.sessionId,
-                            row.title || "未命名会话",
+                            row.title ||
+                              (client === "claude"
+                                ? row.sessionId.slice(0, 12)
+                                : "未命名会话"),
                           )
                         }
                       >

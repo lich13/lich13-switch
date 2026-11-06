@@ -360,6 +360,8 @@ export const usageCommands = [
   "get_usage_state",
   "get_usage_dashboard",
   "get_antigravity_usage_stats",
+  "get_claude_usage_stats",
+  "get_claude_usage_quota",
   "get_usage_logs",
   "get_usage_detail",
   "set_usage_settings",
@@ -460,7 +462,38 @@ export function usagePreview(
     .sort(
       (a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt),
     );
-  if (name === "get_antigravity_usage_stats") {
+  if (name === "get_claude_usage_quota")
+    return {
+      account: "f***@example.invalid",
+      plan: "Max",
+      fetchedAt: Date.now(),
+      retryAt: null,
+      error: null,
+      windows: [
+        {
+          id: "five_hour",
+          label: "当前 5h",
+          usedPercent: 32.4,
+          resetsAt: Date.now() + 7200000,
+        },
+        {
+          id: "seven_day",
+          label: "当前 7d",
+          usedPercent: 61.7,
+          resetsAt: Date.now() + 172800000,
+        },
+        {
+          id: "seven_day_sonnet",
+          label: "Sonnet · 当前 7d",
+          usedPercent: 12,
+          resetsAt: Date.now() + 172800000,
+        },
+      ],
+    };
+  if (
+    name === "get_antigravity_usage_stats" ||
+    name === "get_claude_usage_stats"
+  ) {
     const now = Date.now();
     const previewStats: AntigravityUsageStats = {
       requests: 18,
@@ -555,10 +588,12 @@ export function usagePreview(
             },
           ],
         },
-        ...([
-          ["ag-adc-1", "GCP Project Alpha", "adc"],
-          ["ag-vertex-1", "Vertex Preview", "vertex_key"],
-        ] as const).map(([id, name, kind]) => ({
+        ...(
+          [
+            ["ag-adc-1", "GCP Project Alpha", "adc"],
+            ["ag-vertex-1", "Vertex Preview", "vertex_key"],
+          ] as const
+        ).map(([id, name, kind]) => ({
           id,
           name,
           kind,
@@ -613,6 +648,33 @@ export function usagePreview(
         },
       ],
     };
+    if (name === "get_claude_usage_stats") {
+      previewStats.accounts = [];
+      previewStats.tokenMix.reasoningReported = false;
+      previewStats.tokenMix.thinkingSharePercent = null;
+      previewStats.families.forEach((family, i) => {
+        family.family = family.label = i
+          ? "claude-opus-4-6"
+          : "claude-sonnet-4-6";
+        family.reasoningReported = false;
+      });
+      previewStats.topSessions.forEach((session) => {
+        session.primaryModel = "claude-sonnet-4-6";
+        session.reasoningReported = false;
+      });
+      previewStats.providers = [
+        {
+          id: "session",
+          requests: 18,
+          tokens: 417400,
+          reasoningTokens: 0,
+          reasoningReported: false,
+          costUsd: "1.4826",
+          unpricedRequests: 0,
+          sharePercent: 100,
+        },
+      ];
+    }
     return previewStats;
   }
   if (name === "get_usage_logs") {

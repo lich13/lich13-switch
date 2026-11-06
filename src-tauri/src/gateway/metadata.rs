@@ -8,104 +8,6 @@ const FIELD: usize = 2048;
 const ITEMS: usize = 64;
 const METADATA_BUDGET: usize = 1024 * 1024;
 
-// Quarter-token units, counted while decoding strings without retaining content.
-#[derive(Default)]
-struct TextUnits {
-    units: u64,
-    escape: u8,
-    unicode: u16,
-    high: bool,
-}
-impl TextUnits {
-    fn push(&mut self, b: u8) {
-        match self.escape {
-            0 if b == b'\\' => self.escape = 1,
-            0 => {
-                if b.is_ascii() {
-                    self.units += 1;
-                } else if b & 0xc0 != 0x80 {
-                    self.units += 4;
-                }
-            }
-            1 if b == b'u' => {
-                self.escape = 2;
-                self.unicode = 0;
-            }
-            1 => {
-                self.units += 1;
-                self.escape = 0;
-            }
-            _ => {
-                self.unicode = (self.unicode << 4) | (b as char).to_digit(16).unwrap_or(0) as u16;
-                self.escape += 1;
-                if self.escape == 6 {
-                    if (0xd800..=0xdbff).contains(&self.unicode) {
-                        self.high = true;
-                    } else {
-                        self.units += if self.unicode < 128 && !self.high {
-                            1
-                        } else {
-                            4
-                        };
-                        self.high = false;
-                    }
-                    self.escape = 0;
-                }
-            }
-        }
-    }
-}
-fn text_units(text: &str) -> u64 {
-    text.chars().map(|c| if c.is_ascii() { 1 } else { 4 }).sum()
-}
-fn output_total(value: &Value, event: &str, counts: [u64; 4]) -> u64 {
-    if value.get("error").is_some_and(|e| !e.is_null()) {
-        return 0;
-    }
-    match value["type"].as_str().unwrap_or(event) {
-        "response.output_text.delta"
-        | "response.reasoning_text.delta"
-        | "response.reasoning_summary_text.delta"
-        | "response.function_call_arguments.delta" => counts[0],
-        "content_block_delta" => counts[1],
-        "" | "chat.completion.chunk" => counts[2] + counts[3],
-        _ => 0,
-    }
-}
-pub(super) fn output_units(value: &Value) -> u64 {
-    let count = |v: &Value| v.as_str().map_or(0, text_units);
-    let mut counts = [count(&value["delta"]), 0, 0, 0];
-    for key in ["text", "thinking", "partial_json"] {
-        counts[1] += count(&value["delta"][key]);
-    }
-    if let Some(choices) = value["choices"].as_array() {
-        for choice in choices {
-            let delta = &choice["delta"];
-            for key in ["content", "reasoning_content", "reasoning"] {
-                counts[2] += count(&delta[key]);
-            }
-            counts[2] += count(&delta["function_call"]["arguments"]);
-            if let Some(calls) = delta["tool_calls"].as_array() {
-                counts[2] += calls
-                    .iter()
-                    .map(|v| count(&v["function"]["arguments"]))
-                    .sum::<u64>();
-            }
-        }
-    }
-    if let Some(candidates) = value["candidates"].as_array() {
-        for candidate in candidates {
-            if let Some(parts) = candidate
-                .pointer("/content/parts")
-                .and_then(Value::as_array)
-            {
-                counts[3] += parts.iter().map(|part| count(&part["text"])).sum::<u64>();
-            }
-        }
-    }
-    output_total(value, "", counts)
-}
-
 // Hash decoded JSON string bytes incrementally; never retain an opaque window.
 #[derive(Default)]
 struct StringDigest {
@@ -215,7 +117,6 @@ enum Lex {
         large: bool,
         digest: Option<StringDigest>,
         nonempty: bool,
-        output: Option<(usize, TextUnits)>,
     },
     Atom(Vec<u8>),
 }
@@ -225,8 +126,6 @@ pub struct Projector {
     root: Option<Value>,
     failed: bool,
     retained_bytes: usize,
-    measure_output: bool,
-    output: [u64; 4],
 }
 impl Default for Projector {
     fn default() -> Self {
@@ -236,8 +135,6 @@ impl Default for Projector {
             root: None,
             failed: false,
             retained_bytes: 0,
-            measure_output: false,
-            output: [0; 4],
         }
     }
 }
@@ -393,72 +290,6 @@ fn content(key: &str) -> bool {
     )
 }
 impl Projector {
-    pub fn stream() -> Self {
-        Self {
-            measure_output: true,
-            ..Self::default()
-        }
-    }
-    fn output_field(&self) -> Option<usize> {
-        if !self.measure_output {
-            return None;
-        }
-        let last = self.stack.last()?;
-        // Object keys are not output text.
-        if matches!(last.value, Container::Object(_)) && matches!(last.state, 0 | 4) {
-            return None;
-        }
-        let key = last.key.as_deref()?;
-        let roles = |i: usize, role: &str| self.stack.get(i).is_some_and(|f| f.role == role);
-        match self.stack.len() {
-            1 if key == "delta" => Some(0),
-            2 if roles(1, "delta") && matches!(key, "text" | "thinking" | "partial_json") => {
-                Some(1)
-            }
-            4 if roles(1, "choices")
-                && roles(2, "choices")
-                && roles(3, "delta")
-                && matches!(key, "content" | "reasoning_content" | "reasoning") =>
-            {
-                Some(2)
-            }
-            5 if roles(1, "choices")
-                && roles(2, "choices")
-                && roles(3, "delta")
-                && roles(4, "function_call")
-                && key == "arguments" =>
-            {
-                Some(2)
-            }
-            7 if roles(1, "choices")
-                && roles(2, "choices")
-                && roles(3, "delta")
-                && roles(4, "tool_calls")
-                && roles(5, "tool_calls")
-                && roles(6, "function")
-                && key == "arguments" =>
-            {
-                Some(2)
-            }
-            6 if roles(1, "candidates")
-                && roles(2, "candidates")
-                && roles(3, "content")
-                && roles(4, "parts")
-                && roles(5, "parts")
-                && key == "text" =>
-            {
-                Some(3)
-            }
-            _ => None,
-        }
-    }
-    pub fn finish_with_output(self, event: &str) -> Option<(Value, u64)> {
-        let counts = self.output;
-        self.finish().map(|value| {
-            let units = output_total(&value, event, counts);
-            (value, units)
-        })
-    }
     fn target(&self) -> (String, bool) {
         self.stack
             .last()
@@ -690,7 +521,6 @@ impl Projector {
                     mut large,
                     mut digest,
                     mut nonempty,
-                    mut output,
                 } => {
                     if b < 0x20 {
                         self.failed = true;
@@ -701,16 +531,10 @@ impl Projector {
                             bytes.push(b);
                         }
                         self.string(bytes, large, digest, nonempty);
-                        if let Some((kind, text)) = output {
-                            self.output[kind] += text.units;
-                        }
                         continue;
                     }
                     if let Some(digest) = &mut digest {
                         digest.push(b);
-                    }
-                    if let Some((_, text)) = &mut output {
-                        text.push(b);
                     }
                     nonempty = true;
                     if bytes.len() < FIELD {
@@ -724,7 +548,6 @@ impl Projector {
                         large,
                         digest,
                         nonempty,
-                        output,
                     };
                     continue;
                 }
@@ -785,7 +608,6 @@ impl Projector {
                     }
                 }
                 b'"' => {
-                    let output = self.output_field().map(|kind| (kind, TextUnits::default()));
                     self.lex = Lex::String {
                         bytes: vec![b'"'],
                         escaped: false,
@@ -793,7 +615,6 @@ impl Projector {
                         digest: (self.target().0 == "encrypted_content")
                             .then(StringDigest::default),
                         nonempty: false,
-                        output,
                     }
                 }
                 b':' => match self.stack.last_mut() {
@@ -850,47 +671,6 @@ impl Projector {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn output_units_decode_fragmented_unicode_and_only_count_generated_deltas() {
-        let bodies = [
-            r#"{"type":"response.output_text.delta","delta":"AB\u4e2d\ud83d\ude00\n\"\\"}"#,
-            r#"{"delta":"AB中😀\n\"\\","type":"response.reasoning_summary_text.delta"}"#,
-            r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"AB中😀\n\"\\"}}"#,
-            r#"{"choices":[{"delta":{"content":"AB中😀\n\"\\"}}]}"#,
-            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"AB中😀\n\"\\"}}]}}]}"#,
-            r#"{"candidates":[{"content":{"parts":[{"text":"AB中😀\n\"\\"}]}}]}"#,
-        ];
-        for body in bodies {
-            assert_eq!(output_units(&serde_json::from_str(body).unwrap()), 13);
-            for size in [1, 2, 7, body.len()] {
-                let mut parser = Projector::stream();
-                for chunk in body.as_bytes().chunks(size) {
-                    parser.feed(chunk);
-                }
-                assert_eq!(parser.finish_with_output("").unwrap().1, 13, "{body}");
-            }
-        }
-        for body in [
-            r#"{"type":"response.completed","response":{"output":[{"content":[{"text":"duplicate"}]}],"usage":{"output_tokens":100}}}"#,
-            r#"{"type":"ping","delta":"heartbeat"}"#,
-            r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#,
-            r#"{"type":"response.output_text.delta","delta":"failed","error":{"message":"error"}}"#,
-        ] {
-            let mut parser = Projector::stream();
-            parser.feed(body.as_bytes());
-            assert_eq!(parser.finish_with_output("").unwrap().1, 0);
-            assert_eq!(output_units(&serde_json::from_str(body).unwrap()), 0);
-        }
-        let body = serde_json::json!({"delta":"A".repeat(10000)}).to_string();
-        let mut parser = Projector::stream();
-        parser.feed(body.as_bytes());
-        let (projected, units) = parser
-            .finish_with_output("response.function_call_arguments.delta")
-            .unwrap();
-        assert_eq!(units, 10000);
-        assert_eq!(projected["delta"], "x");
-    }
 
     #[test]
     fn trailing_unterminated_string_is_not_a_complete_metadata_record() {

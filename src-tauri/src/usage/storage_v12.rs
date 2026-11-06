@@ -412,7 +412,7 @@ fn diagnostic_u64(
     thread_local! {
         static TEMPLATES: std::cell::RefCell<std::collections::VecDeque<CachedTemplate>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     }
-    let read = |tag, value: &Value| {
+    let read = |tag, value: &Value, templates: Option<&mut diagnostics::TemplateCache>| {
         let num = if tag == 4 {
             let values = value
                 .as_array()
@@ -421,26 +421,30 @@ fn diagnostic_u64(
                 .first()
                 .and_then(Value::as_i64)
                 .ok_or_else(|| failure("用量诊断结构缺失"))?;
-            let bytes: Vec<u8> = db(db(
-                c.prepare_cached("SELECT body FROM v12_templates WHERE id=?1")
-            )?
-            .query_row([id], |r| r.get(0)))?;
-            let index = TEMPLATES.with(|cache| -> Result<Option<usize>> {
-                let mut cache = cache.borrow_mut();
-                if let Some((_, _, index)) = cache
-                    .iter()
-                    .find(|(f, saved, _)| *f == field && *saved == bytes)
-                {
-                    return Ok(*index);
-                }
-                let shape = unpack(&bytes)?;
-                let index = shape[field].as_u64().and_then(|n| usize::try_from(n).ok());
-                if cache.len() == 8 {
-                    cache.pop_front();
-                }
-                cache.push_back((field, bytes, index));
-                Ok(index)
-            })?;
+            let index = if let Some(templates) = templates {
+                templates.index(c, id, field)?
+            } else {
+                let bytes: Vec<u8> = db(db(
+                    c.prepare_cached("SELECT body FROM v12_templates WHERE id=?1")
+                )?
+                .query_row([id], |r| r.get(0)))?;
+                TEMPLATES.with(|cache| -> Result<Option<usize>> {
+                    let mut cache = cache.borrow_mut();
+                    if let Some((_, _, index)) = cache
+                        .iter()
+                        .find(|(f, saved, _)| *f == field && *saved == bytes)
+                    {
+                        return Ok(*index);
+                    }
+                    let shape = unpack(&bytes)?;
+                    let index = shape[field].as_u64().and_then(|n| usize::try_from(n).ok());
+                    if cache.len() == 8 {
+                        cache.pop_front();
+                    }
+                    cache.push_back((field, bytes, index));
+                    Ok(index)
+                })?
+            };
             index
                 .map(|i| {
                     values
@@ -455,8 +459,10 @@ fn diagnostic_u64(
         Ok(num)
     };
     match cache {
-        Some(cache) => cache.inspect(c, body, read),
-        None => diagnostics::inspect(c, body, read),
+        Some(cache) => cache.inspect(c, body, |tag, value, templates| {
+            read(tag, value, Some(templates))
+        }),
+        None => diagnostics::inspect(c, body, |tag, value| read(tag, value, None)),
     }
 }
 
@@ -465,6 +471,8 @@ fn generation_ms(c: &Connection, body: rusqlite::types::Value) -> Result<Option<
 }
 
 pub(super) struct AntigravityAttemptRow {
+    pub final_provider: Option<String>,
+    pub repeat_count: u64,
     pub session_id: Option<String>,
     pub provider: Option<String>,
     pub time: i64,
@@ -472,55 +480,101 @@ pub(super) struct AntigravityAttemptRow {
     pub is_final: bool,
     pub model: Option<String>,
     pub display_name: Option<String>,
-    pub inclusive_input: Option<u64>,
-    pub input: Option<u64>,
-    pub output: Option<u64>,
-    pub reasoning: Option<u64>,
-    pub cache_read: Option<u64>,
-    pub cache_write: Option<u64>,
+    pub tokens: Tokens,
+    pub price: Option<std::sync::Arc<PriceSnapshot>>,
+    pub price_tier: Option<String>,
     pub cost: Option<String>,
     pub unpriced: u64,
     pub duration_ms: u64,
 }
 
+#[cfg(test)]
 pub(super) fn scan_antigravity_attempts(
     c: &Connection,
     min_time: i64,
     max_time: i64,
+    visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
+) -> Result<()> {
+    scan_client_attempts(c, "antigravity", min_time, max_time, None, visit)
+}
+
+struct StatsShape {
+    display_name: Option<String>,
+    price: Option<std::sync::Arc<PriceSnapshot>>,
+    tier: Option<String>,
+}
+
+pub(super) fn scan_client_attempts(
+    c: &Connection,
+    client: &str,
+    min_time: i64,
+    max_time: i64,
+    operation: Option<&str>,
     mut visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
 ) -> Result<()> {
     let mut stmt = db(c.prepare_cached(
         "SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
          usage_value(m.value),a.shape,shape_value.value,a.body,
          a.inclusive_input,a.input,a.output,a.cache_read,a.cache_write,a.cost,a.unpriced,
-         CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value)
+         CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value),
+         a.cache_write_5m,a.cache_write_1h,a.image_input,a.image_output,a.audio_input,a.audio_output,usage_value(fp.value),a.repeat_count
          FROM v12_records r
-         JOIN v12_sessions a ON a.owner=r.rid
+         JOIN v12_all_attempts a ON a.owner=r.rid
+         JOIN v12_all_attempts last ON last.owner=r.rid AND last.ordinal=r.last
          LEFT JOIN v12_dictionary m ON m.id=a.model
          LEFT JOIN v12_dictionary p ON p.id=a.provider
+         LEFT JOIN v12_dictionary fp ON fp.id=last.provider
          LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape
-         WHERE r.client=usage_label('antigravity') AND r.effective=1 AND r.time>=?1 AND r.time<=?2
+         WHERE r.client=usage_label(?3) AND r.effective=1 AND r.time>=?1 AND r.time<=?2
+         AND (?4 IS NULL OR ?4='' OR ?4=CASE WHEN last.operation=2 THEN 'web_search' WHEN last.operation=1 OR r.compaction THEN 'compaction' ELSE 'model' END)
          ORDER BY r.rid,a.ordinal",
     ))?;
     let mut diagnostics = diagnostics::ScanCache::default();
-    let mut shape_display_cache: std::collections::BTreeMap<i64, Option<String>> =
+    let mut shapes: std::collections::BTreeMap<i64, std::sync::Arc<StatsShape>> =
         std::collections::BTreeMap::new();
-    let mut rows = db(stmt.query(params![min_time, max_time]))?;
+    let mut rows = db(stmt.query(params![min_time, max_time, client, operation]))?;
+    let mut request_unpriced = false;
     while let Some(row) = db(rows.next())? {
         let opt_u64 = |idx: usize| -> Result<Option<u64>> {
             Ok(db(row.get::<_, Option<i64>>(idx))?.and_then(|n| u64::try_from(n).ok()))
         };
         let shape_id = db(row.get::<_, Option<i64>>(6))?;
-        let display_name = if let Some(sid) = shape_id {
-            if let Some(cached) = shape_display_cache.get(&sid) {
-                cached.clone()
+        let shape = if let Some(sid) = shape_id {
+            if let Some(cached) = shapes.get(&sid) {
+                Some(cached.clone())
             } else {
-                let decoded = db(row.get::<_, Option<Vec<u8>>>(7))?
+                let mut value = db(row.get::<_, Option<Vec<u8>>>(7))?
                     .as_deref()
                     .and_then(shared_value)
-                    .and_then(|v| v["modelDisplayName"].as_str().map(str::to_owned));
-                shape_display_cache.insert(sid, decoded.clone());
-                decoded
+                    .unwrap_or_else(|| json!({}));
+                if value["price"].is_object() {
+                    value["price"]["cost"] = json!("0");
+                }
+                let tier = if value["responseSpeed"]
+                    .as_str()
+                    .or(value["requestedSpeed"].as_str())
+                    == Some("fast")
+                {
+                    Some("fast".into())
+                } else {
+                    value["serviceTier"].as_str().map(str::to_owned)
+                };
+                let price = value
+                    .get("price")
+                    .filter(|p| !p.is_null())
+                    .map(|p| {
+                        serde_json::from_value(p.clone())
+                            .map(std::sync::Arc::new)
+                            .map_err(json_error)
+                    })
+                    .transpose()?;
+                let decoded = std::sync::Arc::new(StatsShape {
+                    display_name: value["modelDisplayName"].as_str().map(str::to_owned),
+                    price,
+                    tier,
+                });
+                shapes.insert(sid, decoded.clone());
+                Some(decoded)
             }
         } else {
             None
@@ -532,24 +586,51 @@ pub(super) fn scan_antigravity_attempts(
         } else {
             None
         };
+        let is_final = db(row.get::<_, i64>(4))? != 0;
+        request_unpriced |= db(row.get::<_, i64>(15))? > 0;
         visit(AntigravityAttemptRow {
+            final_provider: db(row.get(24))?,
+            repeat_count: opt_u64(25)?.unwrap_or(1),
             session_id: identifier(db(row.get(1))?)?,
             provider: db(row.get(17))?,
             time: db(row.get(2))?,
             started_at: db(row.get(3))?,
-            is_final: db(row.get::<_, i64>(4))? != 0,
+            is_final,
             model: db(row.get(5))?,
-            display_name,
-            inclusive_input: opt_u64(9)?,
-            input: opt_u64(10)?,
-            output,
-            reasoning,
-            cache_read: opt_u64(12)?,
-            cache_write: opt_u64(13)?,
+            display_name: shape.as_ref().and_then(|s| s.display_name.clone()),
+            tokens: Tokens {
+                inclusive_input: opt_u64(9)?,
+                input: opt_u64(10)?,
+                output,
+                reasoning,
+                cache_read: opt_u64(12)?,
+                cache_write: opt_u64(13)?,
+                cache_write_5m: opt_u64(18)?,
+                cache_write_1h: opt_u64(19)?,
+                image_input: opt_u64(20)?,
+                image_output: opt_u64(21)?,
+                audio_input: opt_u64(22)?,
+                audio_output: opt_u64(23)?,
+                image_cache_read: if opt_u64(12)?.is_some_and(|n| n > 0) {
+                    diagnostic_u64(
+                        c,
+                        db(row.get(8))?,
+                        Some(&mut diagnostics),
+                        "imageCacheReadTokens",
+                    )?
+                } else {
+                    None
+                },
+            },
+            price: shape.as_ref().and_then(|s| s.price.clone()),
+            price_tier: shape.as_ref().and_then(|s| s.tier.clone()),
             cost: db(row.get(14))?,
-            unpriced: u64::try_from(db(row.get::<_, i64>(15))?).unwrap_or(0),
+            unpriced: u64::from(request_unpriced),
             duration_ms: u64::try_from(db(row.get::<_, i64>(16))?).unwrap_or(0),
         })?;
+        if is_final {
+            request_unpriced = false;
+        }
     }
     Ok(())
 }
@@ -1270,15 +1351,6 @@ fn validate(c: &Connection) -> Result<()> {
       SELECT EXISTS(SELECT * FROM old EXCEPT SELECT * FROM new) OR EXISTS(SELECT * FROM new EXCEPT SELECT * FROM old)",[],|r|r.get(0)))?;
     if metadata_differs {
         return Err(failure("用量迁移来源、顺序或关联核对失败，旧数据已保留"));
-    }
-    // Earlier batches may have been committed in another process. Re-read every
-    // detail in this final transaction so a damaged body or missing shared shape
-    // cannot pass the SQL facts comparison and discard the authoritative layout.
-    // Keep one record in memory at a time, including all of its attempts.
-    let mut details = db(c.prepare("SELECT rid FROM v12_rows ORDER BY rid"))?;
-    let mut rows = db(details.query([]))?;
-    while let Some(row) = db(rows.next())? {
-        let _: Record = serde_json::from_value(load(c, db(row.get(0))?)?).map_err(json_error)?;
     }
     let bad:bool=db(c.query_row("SELECT EXISTS(SELECT 1 FROM v12_rows unresolved WHERE unresolved.archived_duplicate IS NOT NULL AND NOT EXISTS(SELECT 1 FROM v12_rows r WHERE usage_hint(r.key)=usage_hint(usage_key(unresolved.archived_duplicate)) AND r.key=usage_key(unresolved.archived_duplicate)) AND NOT EXISTS(SELECT 1 FROM receipts r WHERE r.id=unresolved.archived_duplicate))",[],|r|r.get(0)))?;
     if bad {

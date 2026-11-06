@@ -24,6 +24,7 @@ import type {
 } from "./types";
 import type {
   AntigravityUsageStats,
+  ClaudeUsageQuota,
   Dashboard,
   ModelsDevState,
   PriceComparison,
@@ -807,6 +808,8 @@ export type CommandMap = {
     { filter: UsageFilter },
     AntigravityUsageStats
   >;
+  get_claude_usage_stats: Call<{ filter: UsageFilter }, AntigravityUsageStats>;
+  get_claude_usage_quota: Call<{ refresh: boolean }, ClaudeUsageQuota>;
   get_usage_logs: Call<{ filter: UsageFilter }, UsagePage>;
   get_usage_detail: Call<{ id: string; source?: string }, UsageRecord>;
   set_usage_settings: Call<{ settings: UsageSettings }, UsageState>;
@@ -855,10 +858,6 @@ export type EventMap = {
   "switch-error": AppError;
   "switch-notice": string;
   "gateway-state": GatewayState;
-  "gateway-activity": {
-    clientId: ClientId;
-    activeRequests: NonNullable<GatewayState["activeRequests"]>;
-  };
   "gateway-freeze": GatewayFreeze;
   "provider-quota": { clientId: ClientId; quota: ProviderQuota };
   "config-state": {

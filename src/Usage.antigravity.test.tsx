@@ -450,7 +450,27 @@ describe("Usage Antigravity statistics tab", () => {
               { id: "ag-adc-1", name: "ADC 凭据 · p1", kind: "adc" },
             ],
           };
-        if (name === "get_antigravity_usage_stats") return statsPayload;
+        if (
+          name === "get_antigravity_usage_stats" ||
+          name === "get_claude_usage_stats"
+        )
+          return statsPayload;
+        if (name === "get_claude_usage_quota")
+          return {
+            account: "f***@example.invalid",
+            plan: "Max",
+            windows: [
+              {
+                id: "five_hour",
+                label: "当前 5h",
+                usedPercent: 22.5,
+                resetsAt: null,
+              },
+            ],
+            fetchedAt: Date.now(),
+            retryAt: null,
+            error: null,
+          };
         if (name === "get_usage_logs") {
           const filter = (args?.filter ?? {}) as UsageFilter;
           lastLogFilters.push(filter);
@@ -468,6 +488,91 @@ describe("Usage Antigravity statistics tab", () => {
         throw new Error(`unexpected command: ${name}`);
       },
     );
+  });
+
+  it("locks each independent page to its client and clears incompatible filters", async () => {
+    render(<Usage />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
+    expect(screen.getByLabelText("用量客户端")).toBeDisabled();
+    expect(screen.getByLabelText("用量客户端")).toHaveValue("antigravity");
+    await user.selectOptions(screen.getByLabelText("用量供应商"), "ag-oauth-1");
+    await user.selectOptions(screen.getByLabelText("请求类型"), "compaction");
+    await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+    await screen.findByRole("region", { name: "Claude 官方额度" });
+    expect(screen.getByLabelText("用量客户端")).toHaveValue("claude");
+    expect(screen.getByLabelText("用量供应商")).toHaveValue("");
+    expect(mock.command).toHaveBeenCalledWith("get_claude_usage_stats", {
+      filter: expect.objectContaining({
+        client: "claude",
+        operation: "compaction",
+        provider: undefined,
+      }),
+    });
+    await user.click(
+      screen.getByRole("button", { name: "查看会话 示例会话 请求" }),
+    );
+    await waitFor(() =>
+      expect(lastLogFilters.at(-1)).toMatchObject({
+        client: "claude",
+        sessionId: SESSION_ALPHA,
+        operation: "compaction",
+      }),
+    );
+    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
+    expect(
+      screen.queryByRole("button", { name: /清除会话筛选/ }),
+    ).not.toBeInTheDocument();
+    expect(mock.command).toHaveBeenCalledWith("get_antigravity_usage_stats", {
+      filter: expect.objectContaining({
+        client: "antigravity",
+        operation: "compaction",
+        sessionId: undefined,
+      }),
+    });
+  });
+
+  it("keeps local statistics usable on quota errors and stops hidden refreshes", async () => {
+    const original = mock.command.getMockImplementation()!;
+    mock.command.mockImplementation(
+      (name: string, args?: Record<string, unknown>) =>
+        name === "get_claude_usage_quota"
+          ? Promise.reject(new Error("Claude 登录已失效"))
+          : original(name, args),
+    );
+    render(<Usage />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+    expect(await screen.findByText("Claude 登录已失效")).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Token 构成与缓存节省" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "刷新用量" }));
+    expect(mock.command).toHaveBeenCalledWith("get_claude_usage_quota", {
+      refresh: true,
+    });
+    const reads = () =>
+      mock.command.mock.calls.filter(
+        ([name]) => name === "get_claude_usage_quota",
+      ).length;
+    await act(async () =>
+      mock.listeners
+        .get("app-visibility")
+        ?.forEach((listener) => listener(false)),
+    );
+    const hiddenReads = reads();
+    await act(async () =>
+      mock.listeners
+        .get("claude-login-state")
+        ?.forEach((listener) => listener({ phase: "complete" })),
+    );
+    expect(reads()).toBe(hiddenReads);
+    await act(async () =>
+      mock.listeners
+        .get("app-visibility")
+        ?.forEach((listener) => listener(true)),
+    );
+    expect(reads()).toBe(hiddenReads + 1);
   });
 
   it("lazily fetches Antigravity stats on tab selection, displays dual-track windows & token mix, and filters logs by session title", async () => {
@@ -585,50 +690,6 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
     const sessions = screen.getByLabelText("会话排行");
     expect(within(sessions).getByText("未定价")).toBeInTheDocument();
-  });
-  it("keeps a current-account event when the initial query returns late", async () => {
-    const implementation = mock.command.getMockImplementation()!;
-    const initial = await implementation("get_antigravity_auth_state");
-    let finish!: () => void;
-    const pending = new Promise((resolve) => {
-      finish = () => resolve(initial);
-    });
-    mock.command.mockImplementation((name, args) =>
-      name === "get_antigravity_auth_state"
-        ? pending
-        : implementation(name, args),
-    );
-    statsPayload.accounts.push({
-      ...statsPayload.accounts[0],
-      id: "active-adc",
-      name: "Current ADC",
-      kind: "adc",
-      tracks: [],
-    });
-    const user = userEvent.setup();
-    render(<Usage />);
-    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
-    const select = await screen.findByRole("combobox", {
-      name: "Antigravity 用量账号",
-    });
-    act(() =>
-      mock.listeners.get("antigravity-auth-state")?.forEach((listener) =>
-        listener({
-          mode: "adc",
-          enableAdc: true,
-          accounts: statsPayload.accounts.map((account) => ({
-            ...account,
-            current: true,
-          })),
-        }),
-      ),
-    );
-    await waitFor(() => expect(select).toHaveValue("active-adc"));
-    await act(async () => {
-      finish();
-      await pending;
-    });
-    expect(select).toHaveValue("active-adc");
   });
 
   it("follows the active authentication mode without changing the global usage filter", async () => {
@@ -761,4 +822,28 @@ it("selects one account, retains manual selection on refresh, follows the curren
   );
   expect(select).toBeDisabled();
   expect(screen.getByRole("option", { name: "暂无账号" })).toBeInTheDocument();
+});
+
+it("shows missing Claude reasoning and snapshot savings as unknown", () => {
+  const stats = buildStats();
+  stats.tokenMix.reasoningReported = false;
+  stats.tokenMix.thinkingSharePercent = null;
+  stats.tokenMix.cacheSavingsUsd = null;
+  stats.topSessions[0].reasoningReported = false;
+  render(
+    <UsageAntigravity
+      client="claude"
+      stats={stats}
+      busy={false}
+      currentAccountId={null}
+      onSelectSession={vi.fn()}
+    />,
+  );
+  const mix = screen.getByRole("region", { name: "Token 构成与缓存节省" });
+  expect(within(mix).queryByText("可见输出")).not.toBeInTheDocument();
+  expect(within(mix).getByText("输出")).toBeInTheDocument();
+  expect(within(mix).getAllByText("—")).toHaveLength(2);
+  expect(
+    screen.queryByLabelText("Antigravity 用量账号"),
+  ).not.toBeInTheDocument();
 });

@@ -44,58 +44,6 @@ beforeEach(() => {
   );
 });
 afterEach(() => localStorage.clear());
-it("isolates activity by platform and refreshes the snapshot after being hidden", async () => {
-  const original = mock.command.getMockImplementation()!;
-  let finish!: (value: GatewayState) => void;
-  const initial = new Promise<GatewayState>((resolve) => {
-    finish = resolve;
-  });
-  mock.command.mockImplementation((name, args) =>
-    name === "get_gateway" ? initial : original(name, args),
-  );
-  render(<QuickPanel />);
-  const request = {
-    requestId: "fixture-active",
-    providerId: "primary",
-    model: "fixture-live-model",
-    startedAt: 1000,
-    elapsedSeconds: 2,
-    phase: "streaming",
-    tokensPerSecond: 12,
-    waitId: null,
-  };
-  await waitFor(() =>
-    expect(mock.listeners.has("gateway-activity")).toBe(true),
-  );
-  act(() =>
-    mock.listeners.get("gateway-activity")!({
-      clientId: "codex",
-      activeRequests: [request],
-    }),
-  );
-  await act(async () => {
-    finish({ ...gatewayDemo, activeRequests: [] });
-    await initial;
-  });
-  expect(screen.getByText("≈12 tok/s")).toBeInTheDocument();
-  act(() =>
-    mock.listeners.get("gateway-activity")!({
-      clientId: "claude",
-      activeRequests: [],
-    }),
-  );
-  expect(screen.getByText("≈12 tok/s")).toBeInTheDocument();
-  act(() => mock.listeners.get("panel-visibility")!(false));
-  mock.command.mockImplementation(async (name, args) =>
-    name === "get_gateway"
-      ? { ...gatewayDemo, activeRequests: [] }
-      : original(name, args),
-  );
-  act(() => mock.listeners.get("panel-visibility")!(true));
-  await waitFor(() =>
-    expect(screen.queryByText("≈12 tok/s")).not.toBeInTheDocument(),
-  );
-});
 it("keeps a newer hide event when the initial visibility read resolves late", async () => {
   let finish!: (value: {
     pinned: boolean;
@@ -222,6 +170,27 @@ it("omits the provider/account tab row, hides wallet placeholder badges, and com
     name: "87.5K",
   });
   expect(valueButton).toHaveAttribute("title", "剩余 87,495.917 USD");
+});
+
+it("refreshes the waiting budget once on freeze and thaw", async () => {
+  render(<QuickPanel />);
+  await screen.findByText("api.example.com");
+  await waitFor(() => expect(mock.listeners.has("gateway-freeze")).toBe(true));
+  const reads = () =>
+    mock.command.mock.calls.filter(([name]) => name === "get_gateway").length;
+  const before = reads();
+  await act(async () =>
+    mock.listeners.get("gateway-freeze")?.({ frozen: true }),
+  );
+  expect(reads()).toBe(before + 1);
+  await act(async () =>
+    mock.listeners.get("gateway-freeze")?.({ frozen: true, queued: 2 }),
+  );
+  expect(reads()).toBe(before + 1);
+  await act(async () =>
+    mock.listeners.get("gateway-freeze")?.({ frozen: false }),
+  );
+  expect(reads()).toBe(before + 2);
 });
 
 it("uses current revisions for quick actions without initializing the main window", async () => {

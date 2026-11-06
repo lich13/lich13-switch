@@ -363,9 +363,6 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       (r) => r.requestId !== args.requestId,
     );
     s.waitingRequests = s.pendingRequests?.length ?? 0;
-    s.activeRequests = s.activeRequests?.filter(
-      (r) => r.waitId !== args.requestId,
-    );
     return found;
   }
   if (["get_models_dev", "update_models_dev"].includes(name)) return modelIndex;
@@ -1378,23 +1375,7 @@ if (densePreview) {
     phase: ["compaction", "capacity", "retry", "ws_wait"][i],
   }));
   gatewayDemo.waitingRequests = 4;
-  gatewayDemo.activeRequests = gatewayDemo.pendingRequests.map((r, i) => ({
-    ...r,
-    requestId: `fixture-active-${i}`,
-    waitId: r.requestId,
-    phase: i === 0 ? "compaction" : r.phase,
-    tokensPerSecond: null,
-  }));
-  gatewayDemo.activeRequests.push({
-    requestId: "fixture-stream",
-    providerId: "primary",
-    model: "fixture-model-long-context-preview",
-    startedAt: Math.floor(Date.now() / 1000) - 24,
-    elapsedSeconds: 24,
-    phase: "streaming",
-    tokensPerSecond: 28.5,
-    waitId: null,
-  });
+
 }
 
 // Internal policy samples use the same read-only catalog shape as native.

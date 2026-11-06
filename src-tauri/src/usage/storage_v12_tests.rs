@@ -1630,7 +1630,7 @@ fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
             BASE,
             BASE + 1000,
             |attempt| {
-                values.push(attempt.reasoning);
+                values.push(attempt.tokens.reasoning);
                 Ok(())
             },
         )
@@ -1940,116 +1940,6 @@ fn v12_final_cutover_rejects_shadow_effective_mismatch_and_keeps_legacy_authorit
         )
         .unwrap();
     assert_eq!(legacy_effective, 1);
-}
-
-#[test]
-fn v12_final_cutover_rejects_corrupt_detail_before_switch_and_keeps_legacy_authority() {
-    for corrupt_body in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut legacy = Store::open_v11_fixture(dir.path()).unwrap();
-        let row = record(
-            if corrupt_body {
-                "fixture-v12-final-cutover-body"
-            } else {
-                "fixture-v12-final-cutover-shape"
-            },
-            "codex",
-            BASE,
-            Some("fixture-v12-final-cutover-detail-response"),
-            13,
-            5,
-        );
-        legacy
-            .write_batch(std::slice::from_ref(&row), None)
-            .unwrap();
-        let expected_detail = serde_json::to_value(legacy.detail(&row.id).unwrap()).unwrap();
-        let expected_body: String = Connection::open(dir.path().join("usage.sqlite"))
-            .unwrap()
-            .query_row("SELECT body FROM records WHERE id=?1", [&row.id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        drop(legacy);
-
-        let mut migrating = Store::open(dir.path()).unwrap();
-        let mut copied = false;
-        for _ in 0..32 {
-            assert!(migrating.compact_storage_batch().is_ok());
-            let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-            let after: String = database
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='storage_v12_after'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            if !after.is_empty() {
-                copied = true;
-                break;
-            }
-        }
-        assert!(copied, "the test must inject after one copied batch");
-
-        let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-        super::storage_v12::register(&database).unwrap();
-        let rid: i64 = database
-            .query_row("SELECT rid FROM v12_rows LIMIT 1", [], |r| r.get(0))
-            .unwrap();
-        if corrupt_body {
-            database
-                .execute(
-                    "UPDATE v12_rows SET body=?1 WHERE rid=?2",
-                    params![vec![0xff_u8], rid],
-                )
-                .unwrap();
-        } else {
-            let shape: i64 = database
-                .query_row("SELECT shape FROM v12_rows WHERE rid=?1", [rid], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            database
-                .execute("DELETE FROM v12_dictionary WHERE id=?1", [shape])
-                .unwrap();
-        }
-        database.execute("DELETE FROM v12_dirty", []).unwrap();
-        drop(database);
-
-        let mut validation_error = false;
-        for _ in 0..32 {
-            match migrating.compact_storage_batch() {
-                Ok(true) => continue,
-                Ok(false) => break,
-                Err(_) => {
-                    validation_error = true;
-                    break;
-                }
-            }
-        }
-        assert!(
-            validation_error,
-            "final cutover must reject corrupted v12 detail"
-        );
-        let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-        let status: String = database
-            .query_row(
-                "SELECT value FROM metadata WHERE key='storage_v12'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_ne!(status, "ready");
-        let body: String = database
-            .query_row("SELECT body FROM records WHERE id=?1", [&row.id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(body, expected_body);
-        assert_eq!(
-            serde_json::to_value(migrating.detail(&row.id).unwrap()).unwrap(),
-            expected_detail
-        );
-    }
 }
 
 #[test]

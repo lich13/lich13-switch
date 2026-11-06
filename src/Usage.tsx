@@ -33,8 +33,10 @@ import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import Pricing from "./UsagePricing";
 import UsageAntigravity from "./UsageAntigravity";
+import UsageClaudeQuota from "./UsageClaudeQuota";
 import {
   type AntigravityUsageStats,
+  type ClaudeUsageQuota,
   averageFirstToken,
   firstTokenLabel,
   firstTokenTitle,
@@ -113,6 +115,8 @@ export default function Usage({
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
+  const independent = tab === "antigravity" || tab === "claude";
+  const [claudeQuota, setClaudeQuota] = useState<ClaudeUsageQuota | null>(null);
   const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
     [agBusy, setAgBusy] = useState(false),
     [agCurrentAccount, setAgCurrentAccount] = useState<string | null>(null);
@@ -120,6 +124,9 @@ export default function Usage({
     [logs, setLogs] = useState<UsagePage>(empty),
     [state, setState] = useState<UsageState | null>(null);
   const [providers, setProviders] = useState<Record<string, string>>({}),
+    [claudeProviders, setClaudeProviders] = useState<Record<string, string>>(
+      {},
+    ),
     [agProviders, setAgProviders] = useState<Record<string, string>>({}),
     [selected, setSelected] = useState<UsageRecord | null>(null),
     [sheet, setSheet] = useState(false),
@@ -158,6 +165,17 @@ export default function Usage({
       !(await confirmAction("离开定价会丢弃未保存的修改。"))
     )
       return;
+    if ((next === "antigravity" || next === "claude") && next !== client) {
+      setClient(next);
+      setProvider("");
+      setSessionId("");
+      setSessionTitle("");
+      resetPages();
+    }
+    if (next !== tab) {
+      setAgStats(null);
+      setAgBusy(false);
+    }
     setTab(next);
   };
   const [visible, setVisible] = useState(document.visibilityState !== "hidden"),
@@ -253,7 +271,7 @@ export default function Usage({
       if (id === rowsSequence.current) setRowsBusy(false);
     }
   }, [query, status, page, request]);
-  const loadAntigravity = useCallback(async () => {
+  const loadClientStats = useCallback(async () => {
     const id = ++agSequence.current;
     setAgBusy(true);
     try {
@@ -264,7 +282,12 @@ export default function Usage({
           filter.start > (filter.end ?? Date.now()))
       )
         throw new Error("请选择有效时间范围");
-      const stats = await request("get_antigravity_usage_stats", { filter });
+      const stats = await request(
+        tab === "claude"
+          ? "get_claude_usage_stats"
+          : "get_antigravity_usage_stats",
+        { filter },
+      );
       if (id === agSequence.current) {
         setAgStats(stats);
         setError("");
@@ -274,7 +297,24 @@ export default function Usage({
     } finally {
       if (id === agSequence.current) setAgBusy(false);
     }
-  }, [query, request]);
+  }, [query, request, tab]);
+  const loadClaudeQuota = useCallback(
+    async (refresh = false) => {
+      try {
+        setClaudeQuota(await request("get_claude_usage_quota", { refresh }));
+      } catch (error) {
+        setClaudeQuota({
+          account: null,
+          plan: null,
+          windows: [],
+          fetchedAt: null,
+          retryAt: null,
+          error: errorOf(error).message,
+        });
+      }
+    },
+    [request],
+  );
   const loadState = useCallback(
     async (fresh = false) => {
       if (fresh) pending.current.delete("get_usage_state{}");
@@ -289,26 +329,34 @@ export default function Usage({
     [request],
   );
   const loadData = useCallback(
-    (fresh = false) => {
+    (fresh = false, refreshQuota = false) => {
       if (fresh) pending.current.clear();
       return Promise.all([
-        loadOverview(),
+        ...(!independent ? [loadOverview()] : []),
         ...(tab === "requests" ? [loadRows()] : []),
-        ...(tab === "antigravity" ? [loadAntigravity()] : []),
+        ...(independent ? [loadClientStats()] : []),
+        ...(tab === "claude" ? [loadClaudeQuota(refreshQuota)] : []),
       ]);
     },
-    [loadOverview, loadRows, loadAntigravity, tab],
+    [
+      loadOverview,
+      loadRows,
+      loadClientStats,
+      loadClaudeQuota,
+      independent,
+      tab,
+    ],
   );
   const load = useCallback(
-    (fresh = false) => Promise.all([loadData(fresh), loadState()]),
+    (fresh = false) => Promise.all([loadData(fresh, fresh), loadState()]),
     [loadData, loadState],
   );
   useEffect(() => {
-    if (visible && nativeVisible) void loadOverview();
+    if (visible && nativeVisible && !independent) void loadOverview();
     return () => {
       sequence.current++;
     };
-  }, [loadOverview, visible, nativeVisible]);
+  }, [loadOverview, visible, nativeVisible, independent]);
   useEffect(() => {
     if (visible && nativeVisible && tab === "requests") void loadRows();
     return () => {
@@ -316,15 +364,24 @@ export default function Usage({
     };
   }, [loadRows, visible, nativeVisible, tab]);
   useEffect(() => {
-    if (!visible || !nativeVisible || tab !== "antigravity") return;
-    void loadAntigravity();
+    if (!visible || !nativeVisible || !independent) return;
+    void loadClientStats();
     return () => {
       agSequence.current++;
     };
-  }, [loadAntigravity, visible, nativeVisible, tab]);
+  }, [loadClientStats, visible, nativeVisible, independent]);
+  useEffect(() => {
+    if (!visible || !nativeVisible || tab !== "claude") return;
+    void loadClaudeQuota();
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    events.watch("claude-login-state", (value) => {
+      if (value.phase === "complete") void loadClaudeQuota(true);
+    });
+    return () => events.dispose();
+  }, [visible, nativeVisible, tab, loadClaudeQuota]);
   const reloadAccountStats = useEffectEvent(() => {
     pending.current.clear();
-    if (tab === "antigravity") void loadAntigravity();
+    if (tab === "antigravity") void loadClientStats();
   });
   useEffect(() => {
     if (!visible || !nativeVisible) return;
@@ -345,7 +402,6 @@ export default function Usage({
   useEffect(() => {
     if (!visible || !nativeVisible) return;
     let gone = false;
-    let latestAccounts: AntigravityAuthState | null = null;
     const updateAccounts = (ag: AntigravityAuthState | null) => {
       const kind =
         ag?.mode === "vertex_key"
@@ -379,14 +435,16 @@ export default function Usage({
             s.providers.map((p) => [p.id, p.name]),
           ),
         );
-        const agMap = updateAccounts(latestAccounts ?? ag);
+        setClaudeProviders(
+          Object.fromEntries(claude.providers.map((p) => [p.id, p.name])),
+        );
+        const agMap = updateAccounts(ag);
         setProviders({ ...gw, ...agMap });
       })
       .catch(() => {});
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("antigravity-auth-state", (ag) => {
       if (gone) return;
-      latestAccounts = ag;
       const agMap = updateAccounts(ag);
       setProviders((prev) => ({ ...prev, ...agMap }));
       reloadAccountStats();
@@ -482,6 +540,7 @@ export default function Usage({
             onClick={(e) => {
               e.currentTarget.focus();
               setSheet(true);
+              if (independent) void loadOverview();
             }}
           >
             <Database size={17} />
@@ -489,7 +548,7 @@ export default function Usage({
           <button
             className="icon-button"
             aria-label="刷新用量"
-            disabled={busy}
+            disabled={independent ? agBusy : busy}
             onClick={() => void load(true)}
           >
             <RefreshCw size={17} />
@@ -501,37 +560,41 @@ export default function Usage({
           {billResult}
         </p>
       )}
-      <div className="usage-metrics">
-        <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
-        <Metric
-          label="已报告 Token"
-          value={t ? compact(tokenTotal(t.tokens)) : "—"}
-          title={t ? numeric(tokenTotal(t.tokens)) : undefined}
-        />
-        <Metric
-          label="缓存命中率"
-          value={cacheRate == null ? "—" : `${cacheRate.toFixed(1)}%`}
-          title={
-            cacheRate == null
-              ? "无有效缓存样本"
-              : `${numeric(t?.cacheReadEligible)} / ${numeric(t?.cacheInputEligible)}`
-          }
-        />
-        <Metric
-          label="平均首字"
-          value={firstTokenLabel(averageFirstToken(t))}
-          title={firstTokenTitle(t)}
-        />
-      </div>
+      {!independent && (
+        <div className="usage-metrics">
+          <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
+          <Metric
+            label="已报告 Token"
+            value={t ? compact(tokenTotal(t.tokens)) : "—"}
+            title={t ? numeric(tokenTotal(t.tokens)) : undefined}
+          />
+          <Metric
+            label="缓存命中率"
+            value={cacheRate == null ? "—" : `${cacheRate.toFixed(1)}%`}
+            title={
+              cacheRate == null
+                ? "无有效缓存样本"
+                : `${numeric(t?.cacheReadEligible)} / ${numeric(t?.cacheInputEligible)}`
+            }
+          />
+          <Metric
+            label="平均首字"
+            value={firstTokenLabel(averageFirstToken(t))}
+            title={firstTokenTitle(t)}
+          />
+        </div>
+      )}
       <div className="usage-filters">
         <select
           aria-label="用量客户端"
           value={client}
+          disabled={independent}
           onChange={(e) => {
             const next = e.target.value;
             choose(setClient, next);
             setProvider("");
-            if (next !== "antigravity") setSessionId("");
+            setSessionId("");
+            setSessionTitle("");
           }}
         >
           <option value="">全部客户端</option>
@@ -550,7 +613,9 @@ export default function Usage({
           {Object.entries(
             client === "antigravity" || tab === "antigravity"
               ? agProviders
-              : providers,
+              : client === "claude"
+                ? claudeProviders
+                : providers,
           ).map(([id, n]) => (
             <option key={id} value={id}>
               {n}
@@ -558,6 +623,7 @@ export default function Usage({
           ))}
           {(client === "antigravity" ||
             tab === "antigravity" ||
+            client === "claude" ||
             provider === "session") && (
             <option value="session">本机会话（未归属）</option>
           )}
@@ -628,6 +694,7 @@ export default function Usage({
           ["providers", "供应商"],
           ["models", "模型"],
           ["antigravity", "Antigravity"],
+          ["claude", "Claude Code"],
           ["pricing", "定价"],
         ].map(([id, n]) => (
           <button
@@ -675,26 +742,30 @@ export default function Usage({
           />
           <Pagination page={logs.page} total={logs.total} onChange={setPage} />
         </>
-      ) : tab === "antigravity" ? (
-        <UsageAntigravity
-          stats={agStats}
-          busy={agBusy}
-          currentAccountId={agCurrentAccount}
-          selectedProvider={provider}
-          providerName={name}
-          onSelectProvider={(nextProvider) => {
-            if (nextProvider) setClient("antigravity");
-            setProvider(nextProvider);
-            resetPages();
-          }}
-          onSelectSession={(nextSessionId, title) => {
-            setSessionTitle(title);
-            setClient("antigravity");
-            setSessionId(nextSessionId);
-            resetPages();
-            setTab("requests");
-          }}
-        />
+      ) : independent ? (
+        <>
+          {tab === "claude" && <UsageClaudeQuota quota={claudeQuota} />}
+          <UsageAntigravity
+            client={tab as "claude" | "antigravity"}
+            stats={agStats}
+            busy={agBusy}
+            currentAccountId={agCurrentAccount}
+            selectedProvider={provider}
+            providerName={name}
+            onSelectProvider={(nextProvider) => {
+              if (nextProvider) setClient(tab);
+              setProvider(nextProvider);
+              resetPages();
+            }}
+            onSelectSession={(nextSessionId, title) => {
+              setSessionTitle(title);
+              setClient(tab);
+              setSessionId(nextSessionId);
+              resetPages();
+              setTab("requests");
+            }}
+          />
+        </>
       ) : tab === "pricing" ? (
         <Pricing onDirtyChange={priceDirty} />
       ) : (
@@ -1119,42 +1190,43 @@ function Ranking({
             </tr>
           </thead>
           <tbody>
-            {sorted
-              .slice((page - 1) * 20, page * 20)
-              .map((group) => {
-                const { id, totals: t } = group;
-                const ratio =
-                  maxMetric > 0
-                    ? Math.min(100, Math.max(2, (metricOf(group) / maxMetric) * 100))
-                    : 0;
-                return (
-                  <tr key={id}>
-                    <td title={name(id)}>
-                      <div className="usage-rank-cell">
-                        <span>{name(id)}</span>
-                        <i className="usage-rank-bar" aria-hidden="true">
-                          <b style={{ width: `${ratio}%` }} />
-                        </i>
-                      </div>
-                    </td>
-                    <td>
-                      <NumberValue value={t.requests} />
-                    </td>
-                    <td>
-                      <NumberValue value={tokenTotal(t.tokens)} />
-                    </td>
-                    <td title={t.cost}>{money(t.cost)}</td>
-                    <td>
-                      {t.statusKnown
-                        ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
-                        : "—"}
-                    </td>
-                    <td>
-                      <FirstTokenValue totals={t} />
-                    </td>
-                  </tr>
-                );
-              })}
+            {sorted.slice((page - 1) * 20, page * 20).map((group) => {
+              const { id, totals: t } = group;
+              const ratio =
+                maxMetric > 0
+                  ? Math.min(
+                      100,
+                      Math.max(2, (metricOf(group) / maxMetric) * 100),
+                    )
+                  : 0;
+              return (
+                <tr key={id}>
+                  <td title={name(id)}>
+                    <div className="usage-rank-cell">
+                      <span>{name(id)}</span>
+                      <i className="usage-rank-bar" aria-hidden="true">
+                        <b style={{ width: `${ratio}%` }} />
+                      </i>
+                    </div>
+                  </td>
+                  <td>
+                    <NumberValue value={t.requests} />
+                  </td>
+                  <td>
+                    <NumberValue value={tokenTotal(t.tokens)} />
+                  </td>
+                  <td title={t.cost}>{money(t.cost)}</td>
+                  <td>
+                    {t.statusKnown
+                      ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
+                      : "—"}
+                  </td>
+                  <td>
+                    <FirstTokenValue totals={t} />
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         {!sorted.length && <div className="usage-empty">暂无数据</div>}

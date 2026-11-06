@@ -20,16 +20,32 @@ pub async fn get_antigravity_usage_stats(
 ) -> Result<super::antigravity::AntigravityUsageStats> {
     let s = r.usage.clone();
     let quota_error = s.refresh_antigravity_quota().await.err().map(|e| e.message);
-    let prices = s.prices()?.frozen();
-    let multiplier = s.settings().multiplier;
     let now_ms = now();
     tokio::task::spawn_blocking(move || {
-        let mut stats = s.read(|db| db.antigravity_stats(&filter, &prices, &multiplier, now_ms))?;
+        let mut stats = s.read(|db| db.antigravity_stats(&filter, now_ms))?;
         stats.quota_error = quota_error;
         Ok(stats)
     })
     .await
     .map_err(|_| failure("Antigravity 统计查询中断"))?
+}
+#[tauri::command]
+pub async fn get_claude_usage_stats(
+    r: R<'_>,
+    filter: Filter,
+) -> Result<super::antigravity::AntigravityUsageStats> {
+    let s = r.usage.clone();
+    tokio::task::spawn_blocking(move || s.read(|db| db.claude_stats(&filter, now())))
+        .await
+        .map_err(|_| failure("Claude 统计查询中断"))?
+}
+#[tauri::command]
+pub async fn get_claude_usage_quota(r: R<'_>, refresh: bool) -> Result<super::claude_quota::View> {
+    Ok(r.usage
+        .0
+        .claude_quota
+        .get(r.home(crate::gateway::ClientId::Claude)?, refresh)
+        .await)
 }
 #[tauri::command]
 pub async fn get_usage_logs(r: R<'_>, filter: Filter) -> Result<store::Page> {

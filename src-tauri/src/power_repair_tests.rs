@@ -267,8 +267,8 @@ fn ready_helper_is_reused_without_authorization() {
 }
 
 #[test]
-fn authorization_expiring_at_apply_repairs_only_once_even_if_retry_fails() {
-    for expired_code in ["POWER_AUTH", "POWER_HELPER"] {
+fn helper_failure_at_apply_repairs_only_once_even_if_retry_fails() {
+    for expired_code in ["POWER_HELPER"] {
         for retry_error in [None, Some(expired_code)] {
             let original = state("ready", false, 7, "none", "fixture-before");
             let unavailable = state("needsRepair", false, 7, "none", "fixture-expired");
@@ -342,7 +342,7 @@ fn ready_ownership_change_during_authorization_repair_stops_the_retry() {
 
 #[test]
 fn non_authorization_apply_errors_are_returned_without_retry_or_rollback() {
-    for code in ["POWER", "CONFLICT", "FIXTURE_UNKNOWN"] {
+    for code in ["POWER", "POWER_AUTH", "CONFLICT", "FIXTURE_UNKNOWN"] {
         let original = state("ready", false, 7, "none", "fixture-before");
         let mut external = state("ready", false, 19, "external", "fixture-external");
         external.external_changed = true;
@@ -365,7 +365,7 @@ fn cancelled_reauthorization_after_expired_apply_does_not_retry_the_toggle() {
     let original = state("ready", false, 7, "none", "fixture-before");
     let (_dir, service, helper) = fixture(original.clone());
     legacy(&service);
-    helper.reply(original.clone(), Some("POWER_AUTH"));
+    helper.reply(original.clone(), Some("POWER_HELPER"));
     *helper.repair_error.lock().unwrap() = Some("POWER_AUTH");
     assert_eq!(
         service.set(true, &original.revision).unwrap_err().code,

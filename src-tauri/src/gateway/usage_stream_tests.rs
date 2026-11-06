@@ -60,66 +60,6 @@ fn feed_fragmented(protocol: &mut Protocol, bytes: &[u8], size: usize) {
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn activity_rates_match_compressed_sse_and_websocket_without_changing_usage() {
-    for encoding in ["identity", "gzip", "deflate", "br", "zstd", "ws", "json"] {
-        let gate = super::freeze::Gate::default();
-        let traffic = gate.request_for(super::ClientId::Codex);
-        let budget = super::wait_budget::WaitBudget::new(60);
-        budget.begin();
-        budget.attach_traffic(&traffic);
-        budget.describe(Some("fixture-provider"), Some("fixture-model"), "headers");
-        traffic.dispatch();
-        let mut protocol = Protocol::new(encoding != "json");
-        protocol.attach_wait_budget(&budget);
-        let delta = json!({"type":"response.output_text.delta","delta":"abcd中"});
-        let final_value = json!({"type":"response.completed","response":{"id":"fixture-response","status":"completed","output":[{"content":[{"text":"abcd中"}]}],"usage":{"input_tokens":100,"output_tokens":987}}});
-        if encoding == "ws" {
-            protocol.value_raw(&delta, delta.to_string().as_bytes());
-        } else {
-            protocol.response(
-                200,
-                encoding != "json",
-                if encoding == "json" {
-                    "identity"
-                } else {
-                    encoding
-                },
-            );
-            let bytes = if encoding == "json" {
-                final_value.to_string()
-            } else {
-                format!("data: {delta}\n\ndata: {final_value}\n\n")
-            };
-            let bytes = encode(bytes.as_bytes(), encoding);
-            feed_fragmented(&mut protocol, &bytes, 7);
-        }
-        protocol.output_handed(true);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        let live = gate.active_requests(super::ClientId::Codex).remove(0);
-        assert_eq!(
-            live.tokens_per_second,
-            if encoding == "json" { None } else { Some(2.0) },
-            "{encoding}"
-        );
-        if encoding != "json" {
-            assert!(live.wait_id.is_none());
-        }
-        assert_eq!(live.phase, "streaming");
-        // The final usage and repeated full output do not add rate samples.
-        protocol.value_raw(&final_value, final_value.to_string().as_bytes());
-        protocol.finish(Some(200), "complete");
-        assert_eq!(protocol.observation.meter.tokens.output, Some(987));
-        traffic.finishing();
-        assert_eq!(
-            gate.active_requests(super::ClientId::Codex)[0].phase,
-            "finishing"
-        );
-        traffic.finish();
-        assert!(gate.active_requests(super::ClientId::Codex).is_empty());
-    }
-}
-
 #[test]
 fn zstd_observes_output_and_errors_before_the_compressed_frame_closes() {
     let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();

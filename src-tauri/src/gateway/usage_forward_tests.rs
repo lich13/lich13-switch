@@ -390,13 +390,6 @@ async fn freeze_drains_http_and_releases_only_connected_requests() {
     let head = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(head.starts_with(b"data: "));
     settled(|| gate.view().streaming == 1).await;
-    let active = fixture.gateway.view().active_requests;
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].phase, "streaming");
-    assert_eq!(active[0].model.as_deref(), Some("gpt-request-fixture"));
-    assert!(active[0].tokens_per_second.is_some());
-    assert!(active[0].wait_id.is_none());
-    assert!(gate.active_requests(ClientId::Claude).is_empty());
     assert_eq!(gate.set(true).unwrap().draining, 1);
     assert!(gate.set(false).is_err());
 
@@ -433,16 +426,11 @@ async fn freeze_drains_http_and_releases_only_connected_requests() {
     assert!(String::from_utf8_lossy(&tail).contains("response.completed"));
     settled(|| gate.view().draining == 0).await;
     assert_eq!(gate.view().queued, 1);
-    let active = gate.active_requests(ClientId::Codex);
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].phase, "frozen");
-    assert!(active[0].wait_id.is_some());
     assert!(gate.view().frozen);
     gate.set(false).unwrap();
     assert_eq!(queued.await.unwrap(), HTTP_RESPONSE);
     settled(|| gate.view().draining == 0).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2);
-    assert!(fixture.gateway.view().active_requests.is_empty());
     fixture.stop().await;
 }
 
@@ -505,10 +493,6 @@ async fn freeze_holds_websocket_next_turn_and_honors_cancel_and_disconnect() {
         next_text_frame(&mut socket).await.payload().as_ref(),
         WS_DELTA.as_bytes()
     );
-    let active = fixture.gateway.view().active_requests;
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].model.as_deref(), Some("gpt-ws-fixture"));
-    assert!(active[0].tokens_per_second.is_some());
     gate.set(true).unwrap();
     socket.send(yawc::Frame::text(create)).await.unwrap();
     settled(|| gate.view().queued == 1).await;
@@ -552,7 +536,6 @@ async fn freeze_holds_websocket_next_turn_and_honors_cancel_and_disconnect() {
         .unwrap();
     drop(socket);
     settled(|| gate.view().queued == 0).await;
-    assert!(gate.active_requests(ClientId::Codex).is_empty());
     gate.set(false).unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     fixture.stop().await;

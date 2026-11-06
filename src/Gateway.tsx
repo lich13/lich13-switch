@@ -1,5 +1,4 @@
 import ConnectionTestIcon from "./ConnectionTestIcon";
-import QuickWaits from "./QuickWaits";
 import Advanced from "./GatewayAdvanced";
 import type { FailureFocus } from "./failure-policy-types";
 import DshProfile, { connectDsh } from "./DshProfile";
@@ -187,11 +186,9 @@ function GatewayContent({
   useEffect(() => {
     let disposed = false;
     let sequence = 0;
-    let latestActivity: GatewayState["activeRequests"];
     const events = subscriptions((e) => setError(errorOf(e).message));
     const refresh = async () => {
       const request = ++sequence;
-      const beforeActivity = latestActivity;
       try {
         const value = await command("get_gateway", { clientId });
         if (
@@ -199,13 +196,7 @@ function GatewayContent({
           request === sequence &&
           (value.clientId ?? "codex") === clientId
         )
-          setState({
-            ...value,
-            activeRequests:
-              latestActivity === beforeActivity
-                ? value.activeRequests
-                : latestActivity,
-          });
+          setState(value);
       } catch (e) {
         if (!disposed && request === sequence) setError(errorOf(e).message);
       }
@@ -218,17 +209,8 @@ function GatewayContent({
     events.watch("gateway-state", (s) => {
       if ((s.clientId ?? "codex") === clientId) {
         sequence++;
-        latestActivity = s.activeRequests;
         setState(s);
       }
-    });
-    events.watch("gateway-activity", (activity) => {
-      if (activity.clientId !== clientId) return;
-      latestActivity = activity.activeRequests;
-      setState(
-        (previous) =>
-          previous && { ...previous, activeRequests: activity.activeRequests },
-      );
     });
     return () => {
       disposed = true;
@@ -469,12 +451,6 @@ function GatewayContent({
         {state.waitingRequests > 0 && (
           <div className="gateway-waiting">等待 {state.waitingRequests}</div>
         )}
-        <QuickWaits
-          gateway={state}
-          clientId={clientId}
-          notify={notify}
-          error={setError}
-        />
         <div className="provider-list">
           {!state.providers.length && (
             <div className="empty">

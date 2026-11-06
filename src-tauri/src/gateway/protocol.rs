@@ -6,7 +6,6 @@ use std::io::Write;
 
 #[derive(Default, Clone, Debug)]
 pub struct Observation {
-    output_units: u64,
     pub failure_rules: Vec<super::failure_rules::Rule>,
     pub meter: crate::usage::model::Meter,
     pub error: crate::events::Details,
@@ -114,7 +113,6 @@ pub fn identifier(v: Option<&Value>) -> Option<String> {
 }
 impl Observation {
     pub fn value(&mut self, outer: &Value) {
-        self.output_units += super::metadata::output_units(outer);
         let sequence = self.fault_sequence;
         self.value_projected(outer, false);
         if self.fault_sequence != sequence {
@@ -427,11 +425,7 @@ impl Sink {
     fn new(stream: bool) -> Self {
         Self {
             observation: Observation::default(),
-            json: if stream {
-                Projector::stream()
-            } else {
-                Projector::default()
-            },
+            json: Projector::default(),
             stream,
             field: vec![],
             line_kind: 0,
@@ -460,7 +454,7 @@ impl Sink {
             self.raw_wire = crate::event_raw::Capture::default();
             return;
         }
-        let json = std::mem::replace(&mut self.json, Projector::stream());
+        let json = std::mem::take(&mut self.json);
         let raw = std::mem::take(&mut self.raw).finish(
             self.observation.raw_headers.clone(),
             (!self.event.is_empty()).then(|| self.event.clone()),
@@ -480,14 +474,14 @@ impl Sink {
         }
         if self.data_len <= 16 && self.data_prefix.trim_ascii() == b"[DONE]" {
             self.observation.done();
-        } else if let Some((mut v, units)) = json.finish_with_output(&self.event).or_else(|| {
+        } else if let Some(mut v) = json.finish().or_else(|| {
             raw.text()
                 .ok()
                 .filter(|text| {
                     matches!(self.event.as_str(), "error" | "response.failed")
                         || super::failure_policy::bare_capacity(text)
                 })
-                .map(|text| (serde_json::json!({"type":"error", "message":text}), 0))
+                .map(|text| serde_json::json!({"type":"error", "message":text}))
         }) {
             if matches!(self.event.as_str(), "error" | "response.failed")
                 || super::failure_policy::has_error(&v)
@@ -502,7 +496,6 @@ impl Sink {
                 }
             }
             let sequence = self.observation.fault_sequence;
-            self.observation.output_units += units;
             self.observation.value_projected(&v, true);
             if self.observation.fault_sequence != sequence {
                 self.observation.error.raw = Some(std::sync::Arc::new(wire));
@@ -796,7 +789,6 @@ impl Delivery {
     }
 }
 pub struct Protocol {
-    output_units: u64,
     business: Option<(super::Gateway, super::testing::BusinessIdentity)>,
     wait_budget: Option<(super::wait_budget::WaitBudget, Option<tokio::time::Instant>)>,
     traffic: Option<super::freeze::Ticket>,
@@ -839,7 +831,6 @@ pub struct Protocol {
 impl Protocol {
     pub fn new(stream: bool) -> Self {
         Self {
-            output_units: 0,
             business: None,
             wait_budget: None,
             traffic: None,
@@ -1261,16 +1252,6 @@ impl Protocol {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
     fn record_usage(&mut self) {
-        let units = self
-            .observation
-            .output_units
-            .saturating_sub(self.output_units);
-        self.output_units = self.observation.output_units;
-        if self.stream && self.status.is_none_or(|status| status < 400) && units > 0 {
-            if let Some(traffic) = &self.traffic {
-                traffic.output(units);
-            }
-        }
         // Diagnostic retention is sticky across observations. A later success
         // or downstream close must not hide an earlier upstream/parse fault.
         let error = &self.observation.error;
@@ -1338,7 +1319,6 @@ impl Protocol {
         self.status = Some(status);
     }
     pub fn response(&mut self, status: u16, stream: bool, encoding: &str) {
-        self.output_units = 0;
         self.status = Some(status);
         self.stream = stream;
         let mut observer = Observer::new(stream, encoding);
@@ -1383,7 +1363,6 @@ impl Protocol {
         self.record_usage();
     }
     pub fn value_raw(&mut self, value: &Value, bytes: &[u8]) {
-        self.observation.output_units += super::metadata::output_units(value);
         let sequence = self.observation.fault_sequence;
         self.observation.value_projected(value, false);
         if self.observation.fault_sequence != sequence {
@@ -1905,8 +1884,7 @@ impl Observer {
             Decoder::Brotli(d) => d.write_all(bytes),
             Decoder::Gzip(d) => d.write_all(bytes),
             Decoder::Deflate(d) => d.write_all(bytes),
-            // zstd retains the last decoded output until another write or flush.
-            // Expose it now so a quiet stream reports output and errors promptly.
+            // Flush decoded output promptly even when the compressed stream is quiet.
             Decoder::Zstd(d) => d.write_all(bytes).and_then(|()| d.flush()),
         };
         if result.is_err() {

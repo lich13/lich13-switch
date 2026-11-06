@@ -1,5 +1,5 @@
 use super::*;
-use crate::usage::{model::*, pricing::Pricing, store::Store};
+use crate::usage::{model::*, store::Store};
 
 fn summary() -> Value {
     json!({"response":{"groups":[
@@ -25,13 +25,6 @@ fn each_group_uses_its_observed_reset_and_half_open_window() {
     assert!(!gemini.contains(gemini.start - 1));
     assert!(!gemini.contains(gemini.end));
     assert!(!gemini.current(gemini.end));
-    let mut mismatched = summary();
-    mismatched["response"]["groups"][0]["buckets"][0]["window"] = json!("weekly");
-    assert!(!parse(&mismatched).contains_key("gemini-5h"));
-    assert!(
-        parse(&json!({"response":{"buckets":summary()["response"]["groups"][0]["buckets"]}}))
-            .is_empty()
-    );
 }
 
 #[test]
@@ -105,7 +98,6 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
                     make("before", "a", "gemini-3-flash", start - 1),
                     make("included", "a", "gemini-3-flash", start),
                     make("current", "a", "gemini-3-flash", now),
-                    make("future", "a", "gemini-3-flash", now + 500),
                     make("reset", "a", "gemini-3-flash", periods["gemini-5h"].end),
                     make("claude-before", "a", "claude-opus-4-6", start),
                     make(
@@ -122,13 +114,12 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
                 None,
             )
             .unwrap();
-        let prices = Pricing::new(dir.path()).unwrap();
         let filter = Filter {
             start: Some(now),
             end: Some(now + 1000),
             ..Filter::default()
         };
-        let stats = store.antigravity_stats(&filter, &prices, "1", now).unwrap();
+        let stats = store.antigravity_stats(&filter, now).unwrap();
         assert_eq!(
             stats
                 .accounts
@@ -157,7 +148,7 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
         }
         // A previously seen inactive account can use its still-current periods.
         store.save_antigravity_quota("b", &periods).unwrap();
-        let other = store.antigravity_stats(&filter, &prices, "1", now).unwrap();
+        let other = store.antigravity_stats(&filter, now).unwrap();
         assert_eq!(
             other.accounts.iter().find(|a| a.id == "b").unwrap().tracks[0]
                 .burst_5h
@@ -165,9 +156,7 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
             1
         );
         let expired_at = periods["3p-weekly"].end;
-        let expired = store
-            .antigravity_stats(&filter, &prices, "1", expired_at)
-            .unwrap();
+        let expired = store.antigravity_stats(&filter, expired_at).unwrap();
         assert!(expired.accounts.iter().flat_map(|a| &a.tracks).all(|t| t
             .burst_5h
             .period
