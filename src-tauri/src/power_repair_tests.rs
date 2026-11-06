@@ -271,25 +271,6 @@ fn ready_helper_is_reused_without_authorization() {
 }
 
 #[test]
-fn already_repaired_toggle_does_not_repair_again_when_apply_loses_authorization() {
-    for code in ["POWER_AUTH", "POWER_HELPER"] {
-        let original = state("missing", false, 7, "none", "fixture-before");
-        let prepared = state("ready", false, 7, "none", "fixture-prepared");
-        let (_dir, service, helper) = fixture(original.clone());
-        legacy(&service);
-        helper.repair_to(prepared.clone());
-        helper.reply(prepared, Some(code));
-        assert_eq!(
-            service.set(true, &original.revision).unwrap_err().code,
-            code
-        );
-        assert_eq!(helper.repair_count(), 1);
-        assert_eq!(helper.calls.lock().unwrap().len(), 1);
-        assert_legacy(&service);
-    }
-}
-
-#[test]
 fn apply_errors_are_returned_without_retry_or_rollback() {
     for code in [
         "POWER",

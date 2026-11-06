@@ -505,43 +505,57 @@ mod tests {
     const BASE: i64 = 1_740_000_000_000;
     #[test]
     fn native_duplicate_digest_matches_cleanup_and_list_detail() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = Service::new(dir.path());
-        let mut linked = row("fixture-linked", "claude", BASE);
-        linked.attempts[0].response_id = Some("fixture-response".into());
-        let mut target = linked.clone();
-        target.id = "fixture-target".into();
-        target.source = "proxy".into();
-        service
-            .query(|store| {
-                store.write_batch(&[target.clone(), linked.clone()], None)?;
-                store.archive_batch(std::slice::from_ref(&target.id))?;
-                let detail = store.detail(&linked.id)?;
-                assert_eq!(detail.duplicate_of.as_deref(), Some("fixture-target"));
-                assert_eq!(
-                    store
-                        .logs(&Filter {
-                            source: Some("sessions".into()),
-                            ..Default::default()
-                        })?
-                        .rows[0]
-                        .duplicate_of,
-                    detail.duplicate_of
-                );
-                Ok(())
-            })
-            .unwrap();
-        let exported = service
-            .export_bill(&request(), &dir.path().join("bill.csv"))
-            .unwrap();
-        assert_eq!(
-            (exported.requests, exported.cleaned, exported.retained),
-            (1, 1, 0)
-        );
-        assert!(exported.cleanup_error.is_none());
-        assert!(std::fs::read_to_string(dir.path().join("bill.csv"))
-            .unwrap()
-            .contains("fixture-target"));
+        let mut previous = None;
+        for migrated in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            if migrated {
+                drop(Store::open_v11_fixture(&dir.path().join("usage")).unwrap());
+            }
+            let service = Service::new(dir.path());
+            service
+                .query(|store| {
+                    while store.compact_storage_batch()? {}
+                    Ok(())
+                })
+                .unwrap();
+            let mut linked = row("fixture-linked", "claude", BASE);
+            linked.attempts[0].response_id = Some("fixture-response".into());
+            let mut target = linked.clone();
+            target.id = "fixture-target".into();
+            target.source = "proxy".into();
+            service
+                .query(|store| {
+                    store.write_batch(&[target.clone(), linked.clone()], None)?;
+                    store.archive_batch(std::slice::from_ref(&target.id))?;
+                    let detail = store.detail(&linked.id)?;
+                    assert_eq!(detail.duplicate_of.as_deref(), Some("fixture-target"));
+                    assert_eq!(
+                        store
+                            .logs(&Filter {
+                                source: Some("sessions".into()),
+                                ..Default::default()
+                            })?
+                            .rows[0]
+                            .duplicate_of,
+                        detail.duplicate_of
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let exported = service
+                .export_bill(&request(), &dir.path().join("bill.csv"))
+                .unwrap();
+            assert_eq!(
+                (exported.requests, exported.cleaned, exported.retained),
+                (1, 1, 0)
+            );
+            assert!(exported.cleanup_error.is_none());
+            let csv = std::fs::read_to_string(dir.path().join("bill.csv")).unwrap();
+            assert!(csv.contains("fixture-target"));
+            if let Some(previous) = previous.replace(csv.clone()) {
+                assert_eq!(previous, csv);
+            }
+        }
     }
     #[test]
     fn temporary_bill_sources_are_removed_when_export_ends() {

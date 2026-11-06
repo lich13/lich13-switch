@@ -240,8 +240,7 @@ export type AntigravityTokenMix = {
   cacheHitPercent: number | null;
   cacheReadEligible: number;
   cacheInputEligible: number;
-  unreported?: string[];
-  cacheSavingsUsd: string | null;
+  cacheSavingsUsd: string;
   reasoningReported?: boolean;
 };
 

@@ -195,11 +195,8 @@ export default function UsageAntigravity({
           </div>
           <div>
             <span>缓存估算节省</span>
-            <strong
-              className="usage-ag-savings"
-              title={mix.cacheSavingsUsd ?? undefined}
-            >
-              {mix.cacheSavingsUsd == null ? "—" : money(mix.cacheSavingsUsd)}
+            <strong className="usage-ag-savings" title={mix.cacheSavingsUsd}>
+              {money(mix.cacheSavingsUsd)}
             </strong>
           </div>
         </div>
@@ -230,21 +227,7 @@ export default function UsageAntigravity({
             <span key={s.key} className="usage-ag-legend-item">
               <i className={`usage-ag-dot is-${s.key}`} aria-hidden="true" />
               <span>{s.label}</span>
-              <b
-                title={
-                  mix.unreported?.includes(
-                    s.key === "visibleOutput" ? "output" : s.key,
-                  )
-                    ? undefined
-                    : numeric(s.value)
-                }
-              >
-                {mix.unreported?.includes(
-                  s.key === "visibleOutput" ? "output" : s.key,
-                )
-                  ? "—"
-                  : compact(s.value)}
-              </b>
+              <b title={numeric(s.value)}>{compact(s.value)}</b>
             </span>
           ))}
         </div>

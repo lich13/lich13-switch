@@ -70,6 +70,33 @@ struct Daily {
     totals: Totals,
     example: Record,
 }
+fn common_schema(c: &Connection, legacy_receipts: bool) -> Result<()> {
+    let operation = if legacy_receipts {
+        ""
+    } else {
+        ",operation TEXT NOT NULL DEFAULT 'model'"
+    };
+    db(c.execute_batch(&format!("          CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS body_shapes(id INTEGER PRIMARY KEY,hash TEXT UNIQUE NOT NULL,body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL{operation});
+          CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
+          CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
+          CREATE INDEX IF NOT EXISTS daily_time ON daily(day);")))
+}
+
+fn protect_sidecars(dir: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        let file = dir.join(format!("usage.sqlite{suffix}"));
+        if file.exists() {
+            storage::protect(&file, false)?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         Self::open_layout(dir, false)
@@ -103,19 +130,31 @@ impl Store {
                 maintenance_deferred: Cell::default(),
             });
         }
-        db(connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
-          CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,model TEXT,status INTEGER,response TEXT,signature TEXT,effective INTEGER NOT NULL DEFAULT 1,duplicate_of TEXT,body TEXT NOT NULL);
+        let empty = version == 0
+            && !legacy
+            && db(connection.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+                [],
+                |row| row.get::<_, bool>(0),
+            ))?;
+        db(connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"))?;
+        if empty {
+            let tx = db(connection.transaction())?;
+            common_schema(&tx, false)?;
+            storage_v12::initialize(&tx)?;
+            db(tx.commit())?;
+            protect_sidecars(dir)?;
+            return Ok(Self {
+                connection,
+                overview_cache: Default::default(),
+                maintenance_deferred: Cell::default(),
+            });
+        }
+        common_schema(&connection, true)?;
+        db(connection.execute_batch("CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,model TEXT,status INTEGER,response TEXT,signature TEXT,effective INTEGER NOT NULL DEFAULT 1,duplicate_of TEXT,body TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS usage_time ON records(time,effective);
           CREATE INDEX IF NOT EXISTS usage_response ON records(client,response);
           CREATE INDEX IF NOT EXISTS usage_signature ON records(client,signature,time);
-          CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS body_shapes(id INTEGER PRIMARY KEY,hash TEXT UNIQUE NOT NULL,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL);
-          CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
-          CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
 "))?;
         query::register(&connection)?;
         query::schema(&connection)?;
@@ -210,12 +249,7 @@ impl Store {
         if version < 9 {
             db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR IGNORE INTO metadata(key,value) VALUES('storage_records_after',''),('storage_daily_after',''),('storage_repack','1'); PRAGMA user_version=9; COMMIT;"))?;
         }
-        for suffix in ["-wal", "-shm"] {
-            let file = dir.join(format!("usage.sqlite{suffix}"));
-            if file.exists() {
-                storage::protect(&file, false)?;
-            }
-        }
+        protect_sidecars(dir)?;
         if version < 10 {
             db(connection.execute_batch("BEGIN IMMEDIATE; ALTER TABLE records ADD COLUMN local_sequence INTEGER NOT NULL DEFAULT 0; UPDATE records SET local_sequence=rowid; INSERT OR REPLACE INTO metadata(key,value) SELECT 'record_sequence',coalesce(max(local_sequence),0) FROM records; INSERT OR IGNORE INTO metadata(key,value) VALUES('finish_time_after',''); PRAGMA user_version=10; COMMIT;"))?;
         }

@@ -822,11 +822,12 @@ it("selects one account, retains manual selection on refresh, follows the curren
   expect(screen.getByRole("option", { name: "暂无账号" })).toBeInTheDocument();
 });
 
-it("shows missing Claude reasoning and snapshot savings as unknown", () => {
+it("shows missing Claude reasoning independently of known token and savings totals", () => {
   const stats = buildStats();
   stats.tokenMix.reasoningReported = false;
   stats.tokenMix.thinkingSharePercent = null;
-  stats.tokenMix.cacheSavingsUsd = null;
+  stats.tokenMix.cacheSavingsUsd = "0";
+  stats.tokenMix.cacheWrite = 0;
   stats.topSessions[0].reasoningReported = false;
   render(
     <UsageAntigravity
@@ -840,7 +841,9 @@ it("shows missing Claude reasoning and snapshot savings as unknown", () => {
   const mix = screen.getByRole("region", { name: "Token 构成与缓存节省" });
   expect(within(mix).queryByText("可见输出")).not.toBeInTheDocument();
   expect(within(mix).getByText("输出")).toBeInTheDocument();
-  expect(within(mix).getAllByText("—")).toHaveLength(2);
+  expect(within(mix).getAllByText("—")).toHaveLength(1);
+  expect(within(mix).getByText("$0.0000")).toBeInTheDocument();
+  expect(within(mix).getByText("0")).toBeInTheDocument();
   expect(
     screen.queryByLabelText("Antigravity 用量账号"),
   ).not.toBeInTheDocument();

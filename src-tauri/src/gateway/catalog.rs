@@ -121,7 +121,7 @@ impl Service {
     fn write(&self, file: &File) -> Result<()> {
         let bytes = serde_json::to_vec(file)
             .map_err(|_| AppError::new(code::MODELS, "无法保存模型缓存"))?;
-        storage::replace_cache_bounded(&self.path, &bytes, LIMIT as u64)
+        storage::atomic_write_bounded(&self.path, &bytes, None, LIMIT as u64)
     }
     pub fn remove(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {

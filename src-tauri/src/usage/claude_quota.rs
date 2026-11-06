@@ -113,13 +113,13 @@ async fn read_credentials_with(
     home: &Path,
     lookup: impl AsyncFn(&str) -> Result<Option<Vec<u8>>>,
 ) -> Result<Credentials> {
-    // Match the directory Vela passes to Claude Code, then its default login.
+    // Claude Code's default directory uses the unsuffixed keychain entry.
     let mut services = vec![format!(
         "Claude Code-credentials-{}",
         &storage::digest(home.to_string_lossy().as_bytes())[..8]
     )];
     if dirs::home_dir().is_some_and(|dir| home == dir.join(".claude")) {
-        services.push("Claude Code-credentials".into());
+        services.insert(0, "Claude Code-credentials".into());
     }
     let mut error = None;
     for service in services {
@@ -181,12 +181,11 @@ fn parse(value: &Value) -> Result<Vec<Window>> {
 
 impl Service {
     pub async fn get(&self, home: PathBuf, refresh: bool) -> View {
-        let auth = read_credentials(&home).await;
         self.get_at(
-            home,
+            home.clone(),
             refresh,
             "https://api.anthropic.com/api/oauth/usage",
-            auth,
+            read_credentials(&home),
         )
         .await
     }
@@ -195,11 +194,17 @@ impl Service {
         home: PathBuf,
         refresh: bool,
         endpoint: &str,
-        auth: Result<Credentials>,
+        auth: impl std::future::Future<Output = Result<Credentials>>,
     ) -> View {
         let mut cache = self.cache.lock().await;
+        if let Some(saved) = cache
+            .as_ref()
+            .filter(|c| !refresh && c.home == home && c.at.elapsed() < Duration::from_secs(300))
+        {
+            return saved.view.clone();
+        }
         let now = super::model::now();
-        let auth = match auth {
+        let auth = match auth.await {
             Ok(auth) => auth,
             Err(error) => {
                 *cache = None;
@@ -214,9 +219,7 @@ impl Service {
             .as_ref()
             .filter(|c| c.home == home && c.fingerprint == fingerprint)
         {
-            if saved.retry_at.is_some_and(|at| at > now)
-                || (!refresh && saved.at.elapsed() < Duration::from_secs(300))
-            {
+            if saved.retry_at.is_some_and(|at| at > now) {
                 return saved.view.clone();
             }
         }
@@ -323,6 +326,33 @@ mod tests {
     }
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn keychain_name_matches_default_and_custom_directories() {
+        let default = dirs::home_dir().unwrap().join(".claude");
+        let custom = tempfile::tempdir().unwrap();
+        for home in [default.as_path(), custom.path()] {
+            let expected = if home == default {
+                "Claude Code-credentials".into()
+            } else {
+                format!(
+                    "Claude Code-credentials-{}",
+                    &storage::digest(home.to_string_lossy().as_bytes())[..8]
+                )
+            };
+            let auth = read_credentials_with(home, async |service: &str| {
+                assert_eq!(service, expected);
+                Ok(Some(
+                    json!({"claudeAiOauth":{"accessToken":"fixture-login"}})
+                        .to_string()
+                        .into_bytes(),
+                ))
+            })
+            .await
+            .unwrap();
+            assert_eq!(auth.token, "fixture-login");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn invalid_keychain_candidate_does_not_hide_a_valid_file_login() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -387,23 +417,31 @@ mod tests {
         .unwrap();
         let service = Service::default();
         let absent = service
-            .get_at(home.clone(), false, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), false, &endpoint, async {
+                file_credentials(&home)
+            })
             .await;
         assert!(absent.error.unwrap().contains("登录"));
         assert!(service.cache.lock().await.is_none());
         write("fixture-one");
         let first = service
-            .get_at(home.clone(), false, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), false, &endpoint, async {
+                file_credentials(&home)
+            })
             .await;
         assert_eq!(first.account.as_deref(), Some("f***@example.invalid"));
         assert_eq!(first.windows.len(), 2);
         assert!(first.error.is_none());
         service
-            .get_at(home.clone(), false, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), false, &endpoint, async {
+                panic!("cached quota must not read credentials")
+            })
             .await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let limited = service
-            .get_at(home.clone(), true, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), true, &endpoint, async {
+                file_credentials(&home)
+            })
             .await;
         assert!(limited.error.unwrap().contains("受限"));
         assert!(
@@ -418,28 +456,47 @@ mod tests {
                 >= super::super::model::now() + 50_000
         );
         service
-            .get_at(home.clone(), true, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), true, &endpoint, async {
+                file_credentials(&home)
+            })
             .await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        // A newly logged-in account does not inherit another account's quota or throttle.
+        // Automatic refresh can keep the previous account for five minutes.
         write("fixture-two");
+        let cached = service
+            .get_at(home.clone(), false, &endpoint, async {
+                panic!("fresh cache must not read the changed account")
+            })
+            .await;
+        assert!(cached.error.unwrap().contains("受限"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Manual refresh reads the new account without inheriting the old throttle.
         assert!(service
-            .get_at(home.clone(), false, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), true, &endpoint, async {
+                file_credentials(&home)
+            })
             .await
             .error
             .is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         let expired = service
-            .get_at(home.clone(), true, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), true, &endpoint, async {
+                file_credentials(&home)
+            })
             .await;
         assert!(expired.error.unwrap().contains("失效"));
         let denied = service
-            .get_at(home.clone(), true, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), true, &endpoint, async {
+                file_credentials(&home)
+            })
             .await;
         assert!(denied.error.unwrap().contains("权限"));
         std::fs::remove_file(home.join(".credentials.json")).unwrap();
+        service.cache.lock().await.as_mut().unwrap().at -= Duration::from_secs(301);
         let absent = service
-            .get_at(home.clone(), false, &endpoint, file_credentials(&home))
+            .get_at(home.clone(), false, &endpoint, async {
+                file_credentials(&home)
+            })
             .await;
         assert!(absent.error.unwrap().contains("登录"));
         assert!(absent.windows.is_empty());

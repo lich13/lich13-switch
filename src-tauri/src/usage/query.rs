@@ -98,8 +98,8 @@ pub fn register(c: &Connection) -> Result<()> {
 fn operation_expression(body: &str, root: &str) -> String {
     format!("CASE WHEN json_extract({body},'{root}.attempts[#-1].operation')='web_search' THEN 'web_search' WHEN json_extract({body},'{root}.attempts[#-1].operation')='compaction' OR json_extract({body},'{root}.attempts[#-1].compactionKind') IS NOT NULL THEN 'compaction' ELSE 'model' END")
 }
-pub fn schema(c: &Connection) -> Result<()> {
-    db(c.execute_batch("CREATE TABLE IF NOT EXISTS usage_metrics(
+pub(super) fn metrics_schema(c: &Connection, table: &str) -> Result<()> {
+    db(c.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {table}(
       kind INTEGER NOT NULL,owner TEXT NOT NULL,ordinal INTEGER NOT NULL,
       provider TEXT,model TEXT,requests INTEGER NOT NULL,attempts INTEGER NOT NULL,
       success INTEGER NOT NULL,status_known INTEGER NOT NULL,sessions INTEGER NOT NULL,
@@ -108,13 +108,19 @@ pub fn schema(c: &Connection) -> Result<()> {
       cost TEXT NOT NULL,unpriced INTEGER NOT NULL,duration_ms INTEGER NOT NULL,measured_outputs INTEGER NOT NULL,generation_ms INTEGER NOT NULL,
       first_token_sum_ms INTEGER NOT NULL DEFAULT 0,first_token_samples INTEGER NOT NULL DEFAULT 0,
       cache_read_eligible INTEGER NOT NULL DEFAULT 0,cache_input_eligible INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;
-      CREATE INDEX IF NOT EXISTS usage_filter_client ON records(client,time DESC);
+      PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;")))
+}
+
+pub fn schema(c: &Connection) -> Result<()> {
+    metrics_schema(c, "usage_metrics")?;
+    db(c.execute_batch(
+        "      CREATE INDEX IF NOT EXISTS usage_filter_client ON records(client,time DESC);
       CREATE INDEX IF NOT EXISTS usage_filter_provider ON records(provider,time DESC);
       CREATE INDEX IF NOT EXISTS usage_filter_model ON records(model,time DESC);
       CREATE INDEX IF NOT EXISTS usage_page ON records(effective,time DESC);
       CREATE INDEX IF NOT EXISTS usage_duplicate ON records(duplicate_of,source);
-      CREATE INDEX IF NOT EXISTS daily_time ON daily(day);"))?;
+",
+    ))?;
     db(c.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS usage_filter_operation ON records({},time DESC);",
         operation_expression("body", "$")

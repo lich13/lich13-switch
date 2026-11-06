@@ -140,7 +140,6 @@ export const ErrorCodes = {
   StoreVersion: "STORE_VERSION",
   StreamInterrupted: "STREAM_INTERRUPTED",
   StreamTimeout: "STREAM_TIMEOUT",
-  Sub2ApiFile: "SUB2API_FILE",
   Symlink: "SYMLINK",
   Theme: "THEME",
   ThreadHandoff: "THREAD_HANDOFF",

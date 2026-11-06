@@ -1841,9 +1841,8 @@ pub struct AntigravityTokenMix {
     pub cache_hit_percent: Option<f64>,
     pub cache_read_eligible: u64,
     pub cache_input_eligible: u64,
-    pub cache_savings_usd: Option<String>,
+    pub cache_savings_usd: String,
     pub reasoning_reported: bool,
-    pub unreported: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -2062,8 +2061,6 @@ pub(super) struct UsageStatsAggregator {
     session_filter: Option<String>,
     full_models: bool,
     reasoning_reported: bool,
-    savings_missing: bool,
-    reported: [bool; 4],
     requests: u64,
     unpriced_requests: u64,
     total_cost: rust_decimal::Decimal,
@@ -2105,8 +2102,6 @@ impl UsageStatsAggregator {
                 .map(str::to_owned),
             full_models: filter.client.as_deref() == Some("claude"),
             reasoning_reported: false,
-            savings_missing: false,
-            reported: [false; 4],
             requests: 0,
             unpriced_requests: 0,
             total_cost: rust_decimal::Decimal::ZERO,
@@ -2215,14 +2210,6 @@ impl UsageStatsAggregator {
         }
         self.total_cost += row_cost;
 
-        for (reported, value) in self.reported.iter_mut().zip([
-            row.tokens.input,
-            row.tokens.output,
-            row.tokens.cache_read,
-            row.tokens.cache_write,
-        ]) {
-            *reported |= value.is_some();
-        }
         let inp = row.tokens.input.unwrap_or(0);
         let cr = row.tokens.cache_read.unwrap_or(0);
         let cw = row.tokens.cache_write.unwrap_or(0);
@@ -2243,12 +2230,11 @@ impl UsageStatsAggregator {
         }
 
         if cr > 0 {
-            match row
+            if let Some(savings) = row
                 .cache_savings_rates
                 .and_then(|rates| super::pricing::cache_savings(rates, cr))
             {
-                Some(savings) => self.cache_savings += savings,
-                None => self.savings_missing = true,
+                self.cache_savings += savings;
             }
         }
         let reported_reasoning = row.tokens.reasoning.is_some();
@@ -2417,14 +2403,8 @@ impl UsageStatsAggregator {
                 cache_hit_percent,
                 cache_read_eligible: self.cache_read_eligible,
                 cache_input_eligible: self.cache_input_eligible,
-                cache_savings_usd: (!self.savings_missing).then(|| fmt_usd(self.cache_savings)),
+                cache_savings_usd: fmt_usd(self.cache_savings),
                 reasoning_reported: self.reasoning_reported,
-                unreported: ["input", "output", "cacheRead", "cacheWrite"]
-                    .into_iter()
-                    .zip(self.reported)
-                    .filter(|(_, reported)| !reported)
-                    .map(|(key, _)| key.to_owned())
-                    .collect(),
             },
             accounts: {
                 let mut accounts: Vec<_> = self.accounts.into_values().collect();

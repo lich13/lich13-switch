@@ -162,7 +162,6 @@ local_codes! {
     StoreVersion => STORE_VERSION = "STORE_VERSION",
     StreamInterrupted => STREAM_INTERRUPTED = "STREAM_INTERRUPTED",
     StreamTimeout => STREAM_TIMEOUT = "STREAM_TIMEOUT",
-    Sub2ApiFile => SUB2API_FILE = "SUB2API_FILE",
     Symlink => SYMLINK = "SYMLINK",
     Theme => THEME = "THEME",
     ThreadHandoff => THREAD_HANDOFF = "THREAD_HANDOFF",

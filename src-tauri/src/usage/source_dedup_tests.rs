@@ -543,6 +543,13 @@ fn retained_cache_correlations_are_repaired_once_after_restart() {
     let (dir, mut store, _) = fixture();
     let (proxy, session) = cache_pair();
     // Reproduce a database written before the alias was understood.
+    store
+        .connection
+        .execute(
+            "DELETE FROM metadata WHERE key='correlation_zero_cache'",
+            [],
+        )
+        .unwrap();
     for (sequence, row) in [proxy, session].iter().enumerate() {
         super::storage_v12::save(&store.connection, row, 1, sequence as i64 + 1).unwrap();
     }

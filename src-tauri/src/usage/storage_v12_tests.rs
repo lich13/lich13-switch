@@ -214,6 +214,151 @@ fn compact_diagnostics_until_done(store: &mut Store) {
 }
 
 #[test]
+fn fresh_database_matches_migrated_schema_and_needs_no_historical_repairs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fresh = Store::open(dir.path()).unwrap();
+    let (_old_dir, mut migrated) = migrated_empty();
+    let schema = |store: &Store| {
+        store.connection.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?.replace([' ', '\n', '"'], ""))))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    assert_eq!(schema(&fresh), schema(&migrated));
+    assert_eq!(
+        fresh
+            .connection
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    let metadata = |store: &Store| {
+        store
+            .connection
+            .prepare("SELECT key,value FROM metadata ORDER BY key")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let before = metadata(&fresh);
+    assert!(!fresh.compact_storage_batch().unwrap());
+    assert!(!fresh.repair_metadata_batch().unwrap());
+    assert!(!fresh.repair_correlations_batch().unwrap());
+    fresh.reclaim_space().unwrap();
+    assert!(fresh.maintenance_status().is_none());
+    assert_eq!(metadata(&fresh), before);
+    assert_eq!(
+        before,
+        vec![
+            ("antigravity_fields_v02619".into(), "complete".into()),
+            ("billing_success_completed".into(), "done".into()),
+            ("correlation_zero_cache".into(), "done".into()),
+            ("record_sequence".into(), "0".into()),
+            ("storage_v12".into(), "ready".into()),
+        ]
+    );
+
+    let gateway = priced_record("fixture-fresh", BASE, 100, 20, "1.4");
+    let mut session = gateway.clone();
+    session.id = "fixture-fresh-session".into();
+    session.source = "codex".into();
+    session.attempts[0].provider = None;
+    for store in [&mut fresh, &mut migrated] {
+        store
+            .write_batch(&[gateway.clone(), session.clone()], None)
+            .unwrap();
+    }
+    assert_eq!(
+        page_value(&fresh, &all_time()),
+        page_value(&migrated, &all_time())
+    );
+    assert_eq!(fresh.logs(&all_time()).unwrap().total, 1);
+    assert_eq!(
+        serde_json::to_value(fresh.detail(&gateway.id).unwrap()).unwrap(),
+        serde_json::to_value(migrated.detail(&gateway.id).unwrap()).unwrap()
+    );
+    let totals = dashboard_value(&fresh, &all_time());
+    for store in [&mut fresh, &mut migrated] {
+        store
+            .archive_batch(&[gateway.id.clone(), session.id.clone()])
+            .unwrap();
+    }
+    assert_eq!(
+        dashboard_value(&fresh, &all_time()),
+        dashboard_value(&migrated, &all_time())
+    );
+    assert_eq!(
+        dashboard_value(&fresh, &all_time())["totals"],
+        totals["totals"]
+    );
+}
+
+#[test]
+fn unversioned_existing_database_keeps_legacy_migration_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let connection = Connection::open(dir.path().join("usage.sqlite")).unwrap();
+    connection.execute_batch("CREATE TABLE fixture_existing(value TEXT); INSERT INTO fixture_existing VALUES('preserved');").unwrap();
+    drop(connection);
+    let mut store = Store::open(dir.path()).unwrap();
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT value FROM fixture_existing", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "preserved"
+    );
+    assert!(store
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    compact_diagnostics_until_done(&mut store);
+    assert!(super::storage_v12::active(&store.connection));
+}
+
+#[test]
+fn diagnostic_templates_are_inserted_only_when_used_and_reused_losslessly() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let tx = store.connection.unchecked_transaction().unwrap();
+    let count = || {
+        tx.query_row("SELECT count(*) FROM v12_templates", [], |r| {
+            r.get::<_, u64>(0)
+        })
+        .unwrap()
+    };
+    let scalars = Value::Array(
+        (0..150u64)
+            .map(|i| json!(i.wrapping_mul(2654435761)))
+            .collect(),
+    );
+    let id = super::storage_v12::save_archive(&tx, &scalars).unwrap();
+    assert_eq!(super::storage_v12::load_archive(&tx, id).unwrap(), scalars);
+    assert_eq!(count(), 0);
+    for offset in [0, 1] {
+        let fields = Value::Object(
+            (0..150u64)
+                .map(|i| {
+                    (
+                        format!("fixture-field-{i}"),
+                        json!(i.wrapping_mul(2654435761) + offset),
+                    )
+                })
+                .collect(),
+        );
+        let id = super::storage_v12::save_archive(&tx, &fields).unwrap();
+        assert_eq!(super::storage_v12::load_archive(&tx, id).unwrap(), fields);
+        assert_eq!(count(), 1);
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
 fn v12_ready_database_removes_legacy_links_on_open() {
     let (dir, store) = migrated_empty();
     let has_links = |store: &Store| {

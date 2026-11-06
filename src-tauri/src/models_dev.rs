@@ -287,7 +287,7 @@ impl Catalog {
             if bytes.len() as u64 > CACHE_LIMIT {
                 return Err(failure("models.dev 裁剪目录超过 4 MiB"));
             }
-            storage::replace_cache_bounded(&self.path, &bytes, CACHE_LIMIT)?;
+            storage::atomic_write_bounded(&self.path, &bytes, None, CACHE_LIMIT)?;
             Ok((index, storage::digest(&bytes)))
         });
         let mut state = self.state.write().unwrap();

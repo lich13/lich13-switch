@@ -85,6 +85,46 @@ fn stage_size_and_revision_conflicts_leave_existing_target_unchanged() {
 }
 
 #[test]
+fn unconditional_replacement_accepts_oversized_old_cache_but_keeps_limits_and_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cache.fixture");
+    fs::write(&path, b"oversized old cache").unwrap();
+    assert_eq!(
+        atomic_write_bounded(&path, b"new", Some("missing"), 3)
+            .unwrap_err()
+            .code,
+        code::FILE_TYPE
+    );
+    atomic_write_bounded(&path, b"new", None, 3).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+    assert_eq!(
+        atomic_write_bounded(&path, b"large", None, 3)
+            .unwrap_err()
+            .code,
+        code::FILE_SIZE
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+    assert_eq!(
+        atomic_write_bounded(temp.path(), b"new", None, 3)
+            .unwrap_err()
+            .code,
+        code::FILE_TYPE
+    );
+    #[cfg(unix)]
+    {
+        let link = temp.path().join("link.fixture");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(
+            atomic_write_bounded(&link, b"bad", None, 3)
+                .unwrap_err()
+                .code,
+            code::SYMLINK
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+    }
+}
+
+#[test]
 fn preserve_corrupt_keeps_original_and_deduplicates_by_digest() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("settings.fixture");

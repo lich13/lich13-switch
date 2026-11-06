@@ -801,7 +801,6 @@ struct Journal {
 impl Journal {
     fn needs_write(&self, path: &Path) -> bool {
         self.dirty
-            || self.error.is_some()
             || !path.exists()
             || self
                 .records
@@ -960,7 +959,10 @@ fn load(path: &Path) -> Journal {
                             j.dirty = true;
                         }
                     }
-                    _ => j.error = Some("日志包含损坏记录，已跳过；其余记录仍可查看".into()),
+                    _ => {
+                        j.dirty = true;
+                        j.error = Some("日志包含损坏记录，已跳过；其余记录仍可查看".into());
+                    }
                 }
             }
         }
@@ -991,7 +993,6 @@ fn append_lines<'a>(path: &Path, rows: impl Iterator<Item = &'a Record>) -> Resu
         .open(path)
         .map_err(storage::io_error)?;
     file.write_all(&buf).map_err(storage::io_error)?;
-    storage::protect(path, false)?;
     Ok(())
 }
 fn resolve_cause_id<'a, I>(r: &mut Record, aliases: &VecDeque<(String, String)>, records: I)
@@ -1767,9 +1768,13 @@ mod routing_visibility_tests {
             .unwrap()
             .contains("invalid-fixture-id"));
         std::fs::write(&path, "invalid fixture\n").unwrap();
-        let damaged = load(&path);
+        let mut damaged = load(&path);
         assert!(damaged.error.is_some());
         assert!(damaged.needs_write(&path));
+        persist(&mut damaged, &path, false).unwrap();
+        assert!(damaged.error.is_some());
+        assert!(!damaged.needs_write(&path));
+        assert!(std::fs::read(&path).unwrap().is_empty());
     }
 
     #[test]
@@ -1898,6 +1903,10 @@ mod routing_visibility_tests {
         rx.recv().await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
 
+        service.journal.lock().unwrap().error = Some("fixture attachment warning".into());
+        // Keep a handle to the old file: append updates it, atomic replacement does not.
+        let mut original = std::fs::File::open(&path).unwrap();
+
         let second = Record::new(
             Some(ClientId::Codex),
             None,
@@ -1910,6 +1919,10 @@ mod routing_visibility_tests {
         service.emit(second.clone());
         rx.recv().await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        let mut appended = String::new();
+        std::io::Read::read_to_string(&mut original, &mut appended).unwrap();
+        assert_eq!(appended.lines().count(), 2);
+        assert!(service.query(Filter::default()).error.is_some());
 
         let mut repeated = second;
         repeated.id = uuid::Uuid::new_v4().to_string();

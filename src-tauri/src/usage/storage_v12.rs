@@ -365,11 +365,28 @@ fn pack_diagnostic(
         let mut values = Vec::new();
         let shape = diagnostic_shape(&value, "", &mut values);
         let shape = pack(&shape)?;
-        let id = intern_blob(c, "v12_templates", "body", &shape)?;
+        let existing: Option<i64> = db(db(c.prepare_cached(
+            "SELECT id FROM v12_templates WHERE usage_hint(body)=usage_hint(?1) AND body=?1",
+        ))?
+        .query_row([&shape], |row| row.get(0))
+        .optional())?;
+        let id = match existing {
+            Some(id) => id,
+            None => db(
+                db(c.prepare_cached("SELECT coalesce(max(id),0)+1 FROM v12_templates"))?
+                    .query_row([], |row| row.get(0)),
+            )?,
+        };
         values.insert(0, json!(id));
         let mut compact = pack(&Value::Array(values))?;
         compact[0] = 4;
         if compact.len() < bytes.len() {
+            if existing.is_none() {
+                db(
+                    db(c.prepare_cached("INSERT INTO v12_templates(id,body) VALUES(?1,?2)"))?
+                        .execute(params![id, shape]),
+                )?;
+            }
             bytes = compact;
         }
     }
@@ -558,7 +575,11 @@ pub(super) fn scan_client_attempts(
             None
         };
         let output = opt_u64(11)?;
-        let reasoning = diagnostic_u64(c, db(row.get(8))?, &mut diagnostics, "reasoningTokens")?;
+        let reasoning = if output.is_some_and(|n| n > 0) {
+            diagnostic_u64(c, db(row.get(8))?, &mut diagnostics, "reasoningTokens")?
+        } else {
+            None
+        };
         let is_final = db(row.get::<_, i64>(4))? != 0;
         if is_final {
             request_operation = match db(row.get::<_, i64>(18))? {
@@ -663,7 +684,23 @@ pub(super) fn install(c: &Connection) -> Result<()> {
         return Ok(());
     }
     let tx = db(c.unchecked_transaction())?;
-    db(tx.execute_batch("CREATE TABLE v12_dictionary(id INTEGER PRIMARY KEY,value BLOB NOT NULL);
+    create_tables(&tx)?;
+    db(tx.execute_batch(
+        "CREATE TABLE v12_dirty(id TEXT PRIMARY KEY) WITHOUT ROWID;
+      INSERT OR REPLACE INTO metadata VALUES('storage_v12','copy'),('storage_v12_after','');
+      PRAGMA user_version=13;",
+    ))?;
+    for (name, event, id) in [
+        ("insert", "INSERT", "NEW.id"),
+        ("update", "UPDATE", "NEW.id"),
+        ("delete", "DELETE", "OLD.id"),
+    ] {
+        db(tx.execute_batch(&format!("CREATE TRIGGER v12_track_{name} AFTER {event} ON records BEGIN INSERT OR IGNORE INTO v12_dirty VALUES({id}); END;")))?;
+    }
+    db(tx.commit())
+}
+fn create_tables(c: &Connection) -> Result<()> {
+    db(c.execute_batch("CREATE TABLE v12_dictionary(id INTEGER PRIMARY KEY,value BLOB NOT NULL);
       CREATE INDEX v12_dictionary_hint ON v12_dictionary(usage_hint(value));
       CREATE TABLE v12_templates(id INTEGER PRIMARY KEY,body BLOB NOT NULL);
       CREATE INDEX v12_templates_hint ON v12_templates(usage_hint(body));
@@ -681,11 +718,8 @@ pub(super) fn install(c: &Connection) -> Result<()> {
       CREATE INDEX v12_duplicate ON v12_rows(duplicate) WHERE duplicate IS NOT NULL;
       CREATE INDEX v12_archived_duplicate ON v12_rows(archived_duplicate,time) WHERE archived_duplicate IS NOT NULL;
       CREATE TRIGGER v12_record_update INSTEAD OF UPDATE OF body,effective,duplicate,archived_duplicate ON v12_records BEGIN UPDATE v12_rows SET body=NEW.body,effective=NEW.effective,duplicate=NEW.duplicate,archived_duplicate=NEW.archived_duplicate WHERE rid=OLD.rid; END;
-      CREATE TRIGGER v12_record_delete INSTEAD OF DELETE ON v12_records BEGIN DELETE FROM v12_rows WHERE rid=OLD.rid; END;
-      CREATE TABLE v12_dirty(id TEXT PRIMARY KEY) WITHOUT ROWID;
-      INSERT OR REPLACE INTO metadata VALUES('storage_v12','copy'),('storage_v12_after','');
-      PRAGMA user_version=13;"))?;
-    db(tx.execute_batch("CREATE TABLE v12_measures(id INTEGER PRIMARY KEY,hint INTEGER NOT NULL,
+      CREATE TRIGGER v12_record_delete INSTEAD OF DELETE ON v12_records BEGIN DELETE FROM v12_rows WHERE rid=OLD.rid; END;"))?;
+    db(c.execute_batch("CREATE TABLE v12_measures(id INTEGER PRIMARY KEY,hint INTEGER NOT NULL,
       inclusive_input INTEGER,input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
       cost TEXT,unpriced INTEGER NOT NULL,duration INTEGER NOT NULL,repeat_count INTEGER NOT NULL);
       CREATE INDEX v12_measure_hint ON v12_measures(hint);
@@ -694,14 +728,14 @@ pub(super) fn install(c: &Connection) -> Result<()> {
         ("v12_attempt_rows", "v12_attempts"),
         ("v12_session_rows", "v12_sessions"),
     ] {
-        db(tx.execute_batch(&format!("CREATE TABLE {table}(owner INTEGER NOT NULL,ordinal INTEGER NOT NULL,shape INTEGER NOT NULL,body BLOB NOT NULL,measure INTEGER NOT NULL,first_token INTEGER,PRIMARY KEY(owner,ordinal)) WITHOUT ROWID;
+        db(c.execute_batch(&format!("CREATE TABLE {table}(owner INTEGER NOT NULL,ordinal INTEGER NOT NULL,shape INTEGER NOT NULL,body BLOB NOT NULL,measure INTEGER NOT NULL,first_token INTEGER,PRIMARY KEY(owner,ordinal)) WITHOUT ROWID;
           CREATE INDEX {table}_shape ON {table}(shape);
           CREATE VIEW {view} AS SELECT a.owner,a.ordinal,a.shape,a.body,m.inclusive_input,m.input,m.output,m.cache_read,m.cache_write,m.cache_write_5m,m.cache_write_1h,m.image_input,m.image_output,m.audio_input,m.audio_output,m.cost,m.unpriced,m.duration,a.first_token,m.repeat_count,d.provider,d.model,d.status,d.stream,d.operation FROM {table} a JOIN v12_measures m ON m.id=a.measure JOIN v12_dimensions d ON d.shape=a.shape;")))?;
     }
-    db(tx.execute_batch("CREATE TABLE v12_original(owner INTEGER NOT NULL,ordinal INTEGER NOT NULL,shape INTEGER,body BLOB,
+    db(c.execute_batch("CREATE TABLE v12_original(owner INTEGER NOT NULL,ordinal INTEGER NOT NULL,shape INTEGER,body BLOB,
       inclusive_input INTEGER,input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
       cost TEXT,unpriced INTEGER,duration INTEGER,first_token INTEGER,repeat_count INTEGER,provider INTEGER,model INTEGER,status INTEGER,stream INTEGER,operation INTEGER,mask INTEGER NOT NULL DEFAULT 0,metrics_changed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(owner,ordinal)) WITHOUT ROWID;"))?;
-    db(tx.execute_batch("CREATE VIEW v12_all_attempts AS SELECT * FROM v12_attempts UNION ALL SELECT * FROM v12_sessions;"))?;
+    db(c.execute_batch("CREATE VIEW v12_all_attempts AS SELECT * FROM v12_attempts UNION ALL SELECT * FROM v12_sessions;"))?;
     for table in [
         "v12_rows",
         "v12_archives",
@@ -714,8 +748,8 @@ pub(super) fn install(c: &Connection) -> Result<()> {
         } else {
             "owner,ordinal"
         };
-        db(tx.execute_batch(&format!("CREATE INDEX {table}_unpacked ON {table}({columns}) WHERE typeof(body)='blob' AND body<>x'00';")))?;
-        db(tx.execute_batch(&format!("CREATE TRIGGER {table}_diagnostic_delete AFTER DELETE ON {table} WHEN typeof(OLD.body)='integer' AND OLD.body>=2048 BEGIN INSERT OR IGNORE INTO v12_dead_diagnostics VALUES(OLD.body/2048,OLD.body%2048); END;
+        db(c.execute_batch(&format!("CREATE INDEX {table}_unpacked ON {table}({columns}) WHERE typeof(body)='blob' AND body<>x'00';")))?;
+        db(c.execute_batch(&format!("CREATE TRIGGER {table}_diagnostic_delete AFTER DELETE ON {table} WHEN typeof(OLD.body)='integer' AND OLD.body>=2048 BEGIN INSERT OR IGNORE INTO v12_dead_diagnostics VALUES(OLD.body/2048,OLD.body%2048); END;
           CREATE TRIGGER {table}_diagnostic_update AFTER UPDATE OF body ON {table} WHEN typeof(OLD.body)='integer' AND OLD.body>=2048 AND OLD.body IS NOT NEW.body BEGIN INSERT OR IGNORE INTO v12_dead_diagnostics VALUES(OLD.body/2048,OLD.body%2048); END;")))?;
     }
     let columns = ATTEMPT_COLUMNS
@@ -733,16 +767,20 @@ pub(super) fn install(c: &Connection) -> Result<()> {
         })
         .collect::<Vec<_>>()
         .join(",");
-    db(tx.execute_batch(&format!("CREATE VIEW v12_raw_attempts AS SELECT {columns} FROM v12_all_attempts a LEFT JOIN v12_original o ON a.owner=o.owner AND a.ordinal=o.ordinal;")))?;
-    for (name, event, id) in [
-        ("insert", "INSERT", "NEW.id"),
-        ("update", "UPDATE", "NEW.id"),
-        ("delete", "DELETE", "OLD.id"),
-    ] {
-        db(tx.execute_batch(&format!("CREATE TRIGGER v12_track_{name} AFTER {event} ON records BEGIN INSERT OR IGNORE INTO v12_dirty VALUES({id}); END;")))?;
-    }
-    db(tx.commit())
+    db(c.execute_batch(&format!("CREATE VIEW v12_raw_attempts AS SELECT {columns} FROM v12_all_attempts a LEFT JOIN v12_original o ON a.owner=o.owner AND a.ordinal=o.ordinal;")))?;
+    Ok(())
 }
+
+pub(super) fn initialize(c: &Connection) -> Result<()> {
+    create_tables(c)?;
+    query::metrics_schema(c, "usage_daily_metrics")?;
+    create_views(c)?;
+    db(c.execute_batch("CREATE INDEX v12_daily_unpacked ON daily(id) WHERE json_extract(body,'$._usageArchive') IS NULL;
+      INSERT INTO metadata VALUES('storage_v12','ready'),('record_sequence','0'),
+        ('billing_success_completed','done'),('correlation_zero_cache','done'),('antigravity_fields_v02619','complete');
+      PRAGMA user_version=13;"))
+}
+
 fn record_state(c: &Connection, values: &[rusqlite::types::Value]) -> Result<i64> {
     const FIELDS: &str = "started,finished,completed,last,archived,original,compaction,ended";
     if let Some(id) = db(db(c.prepare_cached(&format!(

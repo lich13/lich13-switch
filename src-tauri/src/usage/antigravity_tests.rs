@@ -139,6 +139,13 @@ fn historical_repair_preserves_prices_and_identity_in_both_storage_formats() {
         let price = super::super::pricing::Quote { model:"fixture-response".into(), data:Some(json!({"input_cost_per_token":1,"output_cost_per_token":2,"cache_read_input_token_cost":0})), version:"historical".into(), source:"fixed".into(), multiplier:"1".into() }.calculate(&old.attempts[0].tokens,None).unwrap();
         old.attempts[0].price = Some(price.clone());
         store.write_batch(&[old.clone()], None).unwrap();
+        store
+            .connection
+            .execute(
+                "DELETE FROM metadata WHERE key='antigravity_fields_v02619'",
+                [],
+            )
+            .unwrap();
         while store.repair_metadata_batch().unwrap() {}
         let repaired = store.detail(&old.id).unwrap();
         assert_eq!(repaired.attempts[0].id, old.attempts[0].id);
@@ -1346,10 +1353,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         assert_eq!(stats.token_mix.visible_output, 2_800);
         assert_eq!(stats.token_mix.thinking_share_percent, Some(53.3));
         assert_eq!(stats.token_mix.cache_hit_percent, Some(77.0));
-        assert!(
-            decimal(stats.token_mix.cache_savings_usd.as_deref().unwrap()).unwrap()
-                > rust_decimal::Decimal::ZERO
-        );
+        assert!(decimal(&stats.token_mix.cache_savings_usd).unwrap() > rust_decimal::Decimal::ZERO);
 
         assert_eq!(stats.accounts[0].tracks[0].id, "gemini");
         assert_eq!(stats.accounts[0].tracks[0].burst_5h.requests, 1);
@@ -1442,29 +1446,13 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
     };
     let mut single_off_peak = UsageStatsAggregator::new(&Filter::default(), peak_ms + 1_000);
     single_off_peak.ingest(build_row(off_peak_ms));
-    let off_peak_saving = decimal(
-        single_off_peak
-            .finish()
-            .token_mix
-            .cache_savings_usd
-            .as_deref()
-            .unwrap(),
-    )
-    .unwrap();
+    let off_peak_saving = decimal(&single_off_peak.finish().token_mix.cache_savings_usd).unwrap();
     assert!(off_peak_saving > rust_decimal::Decimal::ZERO);
 
     let mut combined = UsageStatsAggregator::new(&Filter::default(), peak_ms + 1_000);
     combined.ingest(build_row(off_peak_ms));
     combined.ingest(build_row(peak_ms));
-    let combined_saving = decimal(
-        combined
-            .finish()
-            .token_mix
-            .cache_savings_usd
-            .as_deref()
-            .unwrap(),
-    )
-    .unwrap();
+    let combined_saving = decimal(&combined.finish().token_mix.cache_savings_usd).unwrap();
     // Peak tariff is 2x off-peak for deepseek-chat, so combined savings must be 3x off_peak_saving (not 2x).
     assert_eq!(
         combined_saving,
@@ -1587,7 +1575,7 @@ fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_ma
         store
             .connection
             .execute(
-                "DELETE FROM metadata WHERE key='antigravity_fields_v02614'",
+                "DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02619')",
                 [],
             )
             .unwrap();

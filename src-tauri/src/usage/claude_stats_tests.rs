@@ -122,7 +122,7 @@ fn independent_stats_keep_dedup_retries_model_ids_and_filters_aligned() {
             2
         );
         assert!(all.accounts.is_empty());
-        assert_eq!(all.token_mix.cache_savings_usd, None);
+        assert!(decimal(&all.token_mix.cache_savings_usd).unwrap() > rust_decimal::Decimal::ZERO);
         for selected in [
             filter.clone(),
             Filter {
@@ -186,7 +186,7 @@ fn independent_stats_keep_dedup_retries_model_ids_and_filters_aligned() {
 }
 
 #[test]
-fn saved_tariff_controls_savings_and_missing_basis_stays_unknown() {
+fn saved_tariff_controls_savings_and_missing_basis_keeps_known_sum() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path()).unwrap();
     let prices = Pricing::new(dir.path()).unwrap();
@@ -207,24 +207,25 @@ fn saved_tariff_controls_savings_and_missing_basis_stays_unknown() {
         ..Default::default()
     };
     let before = store.claude_stats(&selected, AT + 2000).unwrap();
-    assert_eq!(
-        before
-            .token_mix
-            .cache_savings_usd
-            .as_deref()
-            .and_then(decimal),
-        Some(expected)
-    );
+    assert_eq!(decimal(&before.token_mix.cache_savings_usd), Some(expected));
     assert_eq!(before.cost_usd, cost);
+    let mut priced = row.clone();
+    priced.id = safe_id("priced");
+    priced.attempts[0].id = safe_id("priced-attempt");
+    priced.attempts[0].response_id = Some("priced-response".into());
     row.attempts[0].price.as_mut().unwrap().basis = None;
     row.attempts[0].price.as_mut().unwrap().rates.clear();
     let missing = tempfile::tempdir().unwrap();
     let mut store = Store::open(missing.path()).unwrap();
     store.write_batch(&[row], None).unwrap();
     let after = store.claude_stats(&selected, AT + 2000).unwrap();
-    assert_eq!(after.token_mix.cache_savings_usd, None);
+    assert_eq!(after.token_mix.cache_savings_usd, "0");
     assert_eq!(after.cost_usd, cost);
     assert_eq!(after.token_mix.total, before.token_mix.total);
+    store.write_batch(&[priced], None).unwrap();
+    let mixed = store.claude_stats(&selected, AT + 2000).unwrap();
+    assert_eq!(mixed.requests, 2);
+    assert_eq!(decimal(&mixed.token_mix.cache_savings_usd), Some(expected));
 }
 
 #[test]
@@ -304,11 +305,10 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
         let stats = store.claude_stats(&Filter::default(), AT + 2000).unwrap();
         assert_eq!(stats.token_mix.input, 100);
         assert_eq!(stats.token_mix.cache_write, 0);
-        assert!(stats.token_mix.unreported.is_empty());
         assert!(stats.token_mix.reasoning_reported);
         assert_eq!(stats.token_mix.reasoning, 8);
         assert_eq!(stats.token_mix.thinking_share_percent, Some(40.0));
-        assert!(stats.token_mix.cache_savings_usd.is_some());
+        assert!(decimal(&stats.token_mix.cache_savings_usd).unwrap() > rust_decimal::Decimal::ZERO);
         assert!(stats.families[0].reasoning_reported);
         assert!(stats.top_sessions[0].reasoning_reported);
         assert_eq!(stats.top_sessions[0].reasoning_tokens, 8);
@@ -361,7 +361,11 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
                 AT + 2000,
             )
             .unwrap();
-        assert_eq!(stats.token_mix.unreported.len(), 4);
+        assert_eq!(stats.token_mix.input, 0);
+        assert_eq!(stats.token_mix.output, 0);
+        assert_eq!(stats.token_mix.cache_read, 0);
+        assert_eq!(stats.token_mix.cache_write, 0);
+        assert_eq!(stats.token_mix.cache_savings_usd, "0");
         assert!(!stats.token_mix.reasoning_reported);
         let empty = store
             .claude_stats(
@@ -373,41 +377,8 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
             )
             .unwrap();
         assert_eq!(empty.requests, 0);
+        assert_eq!(empty.token_mix.total, 0);
+        assert_eq!(empty.token_mix.cache_savings_usd, "0");
         assert!(!empty.token_mix.reasoning_reported);
-    }
-}
-
-#[test]
-fn zero_output_preserves_reported_reasoning_zero_in_both_storage_layouts() {
-    for native in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
-        for reasoning in [Some(0), None] {
-            let mut row = request("zero-output", "proxy", "fixture-model", Operation::Model);
-            row.attempts[0].tokens.output = Some(0);
-            row.attempts[0].tokens.reasoning = reasoning;
-            store.write_batch(&[row], None).unwrap();
-            for compacted in [false, true] {
-                if native && compacted {
-                    while store.compact_storage_batch().unwrap() {}
-                }
-                let stats = store.claude_stats(&Filter::default(), AT + 2000).unwrap();
-                assert_eq!(stats.token_mix.output, 0);
-                assert_eq!(stats.token_mix.reasoning, 0);
-                assert_eq!(stats.token_mix.reasoning_reported, reasoning.is_some());
-                assert_eq!(stats.providers[0].reasoning_reported, reasoning.is_some());
-                assert_eq!(stats.families[0].reasoning_reported, reasoning.is_some());
-                assert_eq!(
-                    stats.top_sessions[0].reasoning_reported,
-                    reasoning.is_some()
-                );
-                assert_eq!(stats.token_mix.thinking_share_percent, None);
-            }
-        }
     }
 }

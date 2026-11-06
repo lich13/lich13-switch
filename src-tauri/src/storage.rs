@@ -221,12 +221,32 @@ pub fn atomic_write_bounded(
         private_dir(parent)?;
     }
     let temp = stage_write(parent, bytes, limit)?;
-    let current = read_bounded(path, limit)?;
-    if expected.is_some_and(|e| e != revision(current.as_deref())) {
-        return Err(AppError::new(
-            code::CONFLICT,
-            "文件已被其他程序修改，请重新读取后再操作",
-        ));
+    if let Some(expected) = expected {
+        let current = read_bounded(path, limit)?;
+        if expected != revision(current.as_deref()) {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "文件已被其他程序修改，请重新读取后再操作",
+            ));
+        }
+    } else {
+        match fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(AppError::new(
+                    code::SYMLINK,
+                    "目标文件是符号链接，请选择实际文件所在目录",
+                ))
+            }
+            Ok(m) if !m.is_file() => {
+                return Err(AppError::new(
+                    code::FILE_TYPE,
+                    "文件不是普通文件或超过允许大小",
+                ))
+            }
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(io_error(e)),
+        }
     }
     #[cfg(test)]
     faults::check(faults::Point::Replace)?;
@@ -299,27 +319,6 @@ pub fn atomic_write_stream(
         ));
     }
     Ok(())
-}
-
-/// A successfully refreshed public cache may replace an oversized old cache
-/// without reading that old file into memory. Other writes retain normal CAS.
-pub fn replace_cache_bounded(path: &Path, bytes: &[u8], limit: u64) -> Result<()> {
-    match read_bounded(path, limit) {
-        Err(error) if error.code == code::FILE_TYPE => {
-            let parent = path
-                .parent()
-                .ok_or_else(|| AppError::new(code::PATH, "缓存路径无效"))?;
-            let staged = stage_write(parent, bytes, limit)?;
-            let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-            if !metadata.file_type().is_file() {
-                return Err(AppError::new(code::PATH, "缓存必须是普通文件"));
-            }
-            staged.persist(path).map_err(|e| io_error(e.error))?;
-            sync_parent(path)
-        }
-        Err(error) => Err(error),
-        Ok(_) => atomic_write_bounded(path, bytes, None, limit),
-    }
 }
 
 #[cfg(test)]
