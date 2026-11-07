@@ -793,13 +793,18 @@ async fn fixed_provider_connection_retry_recovers_and_can_be_stopped() {
 
 #[tokio::test]
 async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt() {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let calls = Arc::new(Mutex::new(0));
     let seen = calls.clone();
-    let upstream = server(move |_| {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let received = started.clone();
+    let upstream = server(move |request| {
         let seen = seen.clone();
+        let received = received.clone();
         async move {
+            request.into_body().collect().await.unwrap();
             *seen.lock().unwrap() += 1;
+            received.notify_one();
             Response::builder()
                 .status(502)
                 .body(replay::full("fixture bad gateway"))
@@ -809,6 +814,7 @@ async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt()
     .await;
     let fixture = Fixture::new(&[upstream.url("/v1")], false).await;
     retry_settings(&fixture, 3);
+    let mut changes = fixture.gateway.subscribe();
     let token = fixture
         .gateway
         .0
@@ -826,19 +832,26 @@ async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt()
         json!({"model": models::FLASH, "messages": [{"role": "user", "content": "fixture"}]})
             .to_string();
     client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    // RPM persistence and the first connection precede the retry under test.
+    tokio::select! {
+        () = started.notified() => {}
+        result = client.read_u8() => {
+            panic!("gateway replied before the first upstream request: {result:?}");
+        }
+    }
     tokio::time::timeout(Duration::from_secs(3), async {
         while fixture.gateway.view().transient_retries.is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            changes.recv().await.unwrap();
         }
     })
     .await
-    .unwrap();
+    .expect("first upstream failure did not enter retry wait");
     #[allow(deprecated)]
     client.set_linger(Some(Duration::ZERO)).unwrap();
     drop(client);
     tokio::time::timeout(Duration::from_secs(2), async {
         while !fixture.gateway.view().transient_retries.is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            changes.recv().await.unwrap();
         }
     })
     .await
