@@ -175,10 +175,10 @@ mod windows_acl {
             GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
         },
         Security::{
-            EqualSid, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
-            GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-            DACL_SECURITY_INFORMATION, INHERITED_ACE, OWNER_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+            EqualSid, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, TokenUser,
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERITED_ACE,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+            TOKEN_QUERY, TOKEN_USER,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };

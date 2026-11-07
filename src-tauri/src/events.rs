@@ -1922,6 +1922,7 @@ mod routing_visibility_tests {
         let mut appended = String::new();
         std::io::Read::read_to_string(&mut original, &mut appended).unwrap();
         assert_eq!(appended.lines().count(), 2);
+        drop(original);
         assert!(service.query(Filter::default()).error.is_some());
 
         let mut repeated = second;
