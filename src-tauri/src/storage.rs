@@ -107,21 +107,11 @@ pub fn stage_write(parent: &Path, bytes: &[u8], limit: u64) -> Result<tempfile::
         return Err(AppError::new(code::FILE_SIZE, "文件超过允许大小"));
     }
     let mut temp = private_tempfile(parent)?;
-    #[cfg(test)]
-    if faults::take(faults::Point::ShortWrite) {
-        temp.write_all(&bytes[..bytes.len() / 2])
-            .map_err(io_error)?;
-        return Err(faults::error());
-    }
     temp.write_all(bytes).map_err(io_error)?;
-    #[cfg(test)]
-    faults::check(faults::Point::FileSync)?;
     temp.as_file().sync_all().map_err(io_error)?;
     Ok(temp)
 }
 pub fn sync_parent(path: &Path) -> Result<()> {
-    #[cfg(test)]
-    faults::check(faults::Point::DirectorySync)?;
     #[cfg(unix)]
     {
         let parent = path
@@ -179,29 +169,26 @@ pub fn preserve_corrupt(path: &Path, bytes: &[u8]) -> Result<()> {
         .and_then(|v| v.to_str())
         .ok_or_else(|| AppError::new(code::PATH, "目标路径无效"))?;
     let backup = parent.join(format!("{name}.corrupt-{}", digest(bytes)));
-    match read_optional(&backup)? {
-        Some(existing) if existing == bytes => return protect(&backup, false),
-        Some(_) => {
-            return Err(AppError::new(
-                code::VERIFY,
-                "损坏文件备份已变化，原文件已保留",
-            ))
-        }
-        None => {}
+    let existing = || match fs::symlink_metadata(&backup) {
+        Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
+            code::SYMLINK,
+            "目标文件是符号链接，请选择实际文件所在目录",
+        )),
+        Ok(m) if !m.is_file() => Err(AppError::new(
+            code::FILE_TYPE,
+            "文件不是普通文件或超过允许大小",
+        )),
+        Ok(_) => protect(&backup, false).map(|_| true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_error(e)),
+    };
+    if existing()? {
+        return Ok(());
     }
     let temp = stage_write(parent, bytes, 2 * 1024 * 1024)?;
     match temp.persist_noclobber(&backup) {
         Ok(_) => sync_parent(&backup),
-        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if read_optional(&backup)?.as_deref() == Some(bytes) {
-                Ok(())
-            } else {
-                Err(AppError::new(
-                    code::VERIFY,
-                    "损坏文件备份已变化，原文件已保留",
-                ))
-            }
-        }
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => existing().map(|_| ()),
         Err(e) => Err(io_error(e.error)),
     }
 }
@@ -248,18 +235,8 @@ pub fn atomic_write_bounded(
             Err(e) => return Err(io_error(e)),
         }
     }
-    #[cfg(test)]
-    faults::check(faults::Point::Replace)?;
     temp.persist(path).map_err(|e| io_error(e.error))?;
-    sync_parent(path)?;
-    let actual = read_bounded(path, limit)?;
-    if actual.as_deref() != Some(bytes) {
-        return Err(AppError::new(
-            code::VERIFY,
-            "文件写入后发生变化，请重新读取确认",
-        ));
-    }
-    Ok(())
+    sync_parent(path)
 }
 
 /// Replace an unbounded journal without holding its serialized contents in RAM.
@@ -268,7 +245,7 @@ pub fn atomic_write_stream(
     path: &Path,
     write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
 ) -> Result<()> {
-    use std::io::{BufReader, BufWriter};
+    use std::io::BufWriter;
     let parent = path
         .parent()
         .ok_or_else(|| AppError::new(code::PATH, "目标路径无效"))?;
@@ -281,91 +258,24 @@ pub fn atomic_write_stream(
         write(&mut writer).map_err(io_error)?;
         writer.flush().map_err(io_error)?;
     }
-    #[cfg(test)]
-    faults::check(faults::Point::ShortWrite)?;
-    #[cfg(test)]
-    faults::check(faults::Point::FileSync)?;
     temp.as_file().sync_all().map_err(io_error)?;
-    let hash = |file: fs::File| -> Result<_> {
-        let mut digest = Sha256::new();
-        std::io::copy(&mut BufReader::new(file), &mut digest).map_err(io_error)?;
-        Ok(digest.finalize())
-    };
-    let expected = hash(temp.reopen().map_err(io_error)?)?;
-    let open = || -> Result<Option<fs::File>> {
-        match fs::symlink_metadata(path) {
-            Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
-                code::SYMLINK,
-                "目标文件是符号链接，请选择实际文件所在目录",
-            )),
-            Ok(m) if !m.is_file() => Err(AppError::new(
-                code::FILE_TYPE,
-                "文件不是普通文件或超过允许大小",
-            )),
-            Ok(_) => fs::File::open(path).map(Some).map_err(io_error),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(io_error(e)),
-        }
-    };
-    open()?;
-    #[cfg(test)]
-    faults::check(faults::Point::Replace)?;
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
+            code::SYMLINK,
+            "目标文件是符号链接，请选择实际文件所在目录",
+        )),
+        Ok(m) if !m.is_file() => Err(AppError::new(
+            code::FILE_TYPE,
+            "文件不是普通文件或超过允许大小",
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_error(e)),
+    }?;
     temp.persist(path).map_err(|e| io_error(e.error))?;
-    sync_parent(path)?;
-    if open()?.map(hash).transpose()?.as_ref() != Some(&expected) {
-        return Err(AppError::new(
-            code::VERIFY,
-            "文件写入后发生变化，请重新读取确认",
-        ));
-    }
-    Ok(())
+    sync_parent(path)
 }
 
-#[cfg(test)]
-#[path = "storage_fault_tests.rs"]
-mod fault_tests;
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
-
-// Thread-local, single-use faults leave parallel tests and release builds alone.
-#[cfg(test)]
-pub(crate) mod faults {
-    use super::{io_error, AppError, Result};
-    use std::cell::Cell;
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    pub enum Point {
-        ShortWrite,
-        FileSync,
-        Replace,
-        DirectorySync,
-    }
-    thread_local! { static NEXT: Cell<Option<Point>> = const { Cell::new(None) }; }
-    pub struct Guard(Option<Point>);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            NEXT.set(self.0);
-        }
-    }
-    pub fn inject(point: Point) -> Guard {
-        Guard(NEXT.replace(Some(point)))
-    }
-    pub fn take(point: Point) -> bool {
-        if NEXT.get() == Some(point) {
-            NEXT.set(None);
-            true
-        } else {
-            false
-        }
-    }
-    pub fn error() -> AppError {
-        io_error(std::io::Error::other("injected storage failure"))
-    }
-    pub fn check(point: Point) -> Result<()> {
-        if take(point) {
-            Err(error())
-        } else {
-            Ok(())
-        }
-    }
-}

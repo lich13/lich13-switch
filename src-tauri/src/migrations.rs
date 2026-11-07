@@ -180,13 +180,6 @@ fn copy_verified_private_file(
         let _ = std::fs::remove_file(&temp);
         return Err(crate::storage::io_error(e));
     }
-    let final_digest = file_digest(dst)?;
-    if final_digest != expected_digest {
-        return Err(crate::storage::AppError::new(
-            crate::errors::code::STORE,
-            &format!("数据文件落盘摘要校验不一致（{}）", rel_path.display()),
-        ));
-    }
     Ok(())
 }
 

@@ -60,8 +60,6 @@ pub(super) struct Provider {
     completed: VecDeque<Stamp>,
     // None means still observing. Some means an uncertain end, protected to a deadline.
     inflight: HashMap<String, Option<Stamp>>,
-    // Retained for v2 ledger compatibility, not used to pace sends.
-    last: Option<Stamp>,
     backoff: Option<Stamp>,
     initialize: Option<Stamp>,
 }
@@ -92,8 +90,6 @@ struct SavedProtection {
     completed: Vec<i64>,
     #[serde(default)]
     inflight: HashMap<String, Option<i64>>,
-    #[serde(default)]
-    last: Option<i64>,
     #[serde(default)]
     backoff: Option<i64>,
     #[serde(default)]
@@ -128,7 +124,7 @@ impl Ledger {
     pub(super) fn load(path: &Path) -> (Self, bool) {
         let raw = match storage::read_optional(path) {
             Ok(None) => return (Self::default(), false),
-            Ok(Some(raw)) if raw.len() <= 8 * 1024 * 1024 => raw,
+            Ok(Some(raw)) => raw,
             _ => return (Self::default(), true),
         };
         let saved = match serde_json::from_slice::<Saved>(&raw) {
@@ -149,7 +145,6 @@ impl Ledger {
             let p = ledger.providers.entry(id).or_default();
             p.starts = values.into_iter().filter_map(Stamp::history).collect();
             p.starts.make_contiguous().sort_by_key(|s| s.at);
-            p.last = p.starts.back().copied();
         }
         for (id, protection) in saved.protection {
             let p = ledger.providers.entry(id).or_default();
@@ -159,7 +154,6 @@ impl Ledger {
                 .filter_map(Stamp::history)
                 .collect();
             p.completed.make_contiguous().sort_by_key(|s| s.at);
-            p.last = protection.last.and_then(Stamp::history).or(p.last);
             p.backoff = protection
                 .backoff
                 .and_then(|at| Stamp::deadline(at, Duration::from_secs(86400)));
@@ -204,7 +198,6 @@ impl Ledger {
                                 .iter()
                                 .map(|(id, deadline)| (id.clone(), deadline.map(|s| s.wall)))
                                 .collect(),
-                            last: p.last.map(|s| s.wall),
                             backoff: p.backoff.map(|s| s.wall),
                             initialize: p.initialize.map(|s| s.wall),
                         },
@@ -227,9 +220,6 @@ impl Ledger {
             p.completed.retain(|s| now.duration_since(s.at) < WINDOW);
             p.inflight
                 .retain(|_, until| until.is_none_or(|s| s.at > now));
-            if p.last.is_some_and(|s| now.duration_since(s.at) >= WINDOW) {
-                p.last = None;
-            }
             if p.backoff.is_some_and(|s| s.at <= now) {
                 p.backoff = None;
             }
@@ -239,7 +229,6 @@ impl Ledger {
             !p.starts.is_empty()
                 || !p.completed.is_empty()
                 || !p.inflight.is_empty()
-                || p.last.is_some()
                 || p.backoff.is_some()
                 || p.initialize.is_some()
         });
@@ -316,7 +305,6 @@ impl Ledger {
         let token = uuid::Uuid::new_v4().to_string();
         let p = self.providers.entry(id.into()).or_default();
         p.starts.push_back(at);
-        p.last = Some(at);
         p.inflight.insert(token.clone(), None);
         Charge { token, at }
     }
@@ -332,9 +320,6 @@ impl Ledger {
             .position(|s| s.at == charge.at.at && s.wall == charge.at.wall)
         {
             p.starts.remove(index);
-        }
-        if p.last.is_some_and(|s| s.at == charge.at.at) {
-            p.last = p.starts.back().copied();
         }
     }
     #[cfg(test)]

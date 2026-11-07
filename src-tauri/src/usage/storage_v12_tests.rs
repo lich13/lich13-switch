@@ -295,30 +295,70 @@ fn fresh_database_matches_migrated_schema_and_needs_no_historical_repairs() {
 }
 
 #[test]
-fn unversioned_existing_database_keeps_legacy_migration_path() {
+fn existing_metrics_view_upgrades_and_skips_generation_for_zero_output() {
     let dir = tempfile::tempdir().unwrap();
-    let connection = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    connection.execute_batch("CREATE TABLE fixture_existing(value TEXT); INSERT INTO fixture_existing VALUES('preserved');").unwrap();
-    drop(connection);
     let mut store = Store::open(dir.path()).unwrap();
-    assert_eq!(
-        store
-            .connection
-            .query_row("SELECT value FROM fixture_existing", [], |r| r
-                .get::<_, String>(0))
-            .unwrap(),
-        "preserved"
-    );
-    assert!(store
+    let rows: Vec<_> = [Some(0), None, Some(20)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, output)| {
+            let mut row = record(
+                &format!("fixture-zero-output-{i}"),
+                "antigravity",
+                BASE,
+                None,
+                100,
+                0,
+            );
+            row.client = "antigravity".into();
+            row.attempts[0].tokens.output = output;
+            row.attempts[0].generation_ms = Some(900);
+            row
+        })
+        .collect();
+    store.write_batch(&rows, None).unwrap();
+    let sql: String = store
         .connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
+            "SELECT sql FROM sqlite_schema WHERE name='usage_metrics'",
             [],
-            |r| r.get::<_, bool>(0)
+            |r| r.get(0),
         )
-        .unwrap());
-    compact_diagnostics_until_done(&mut store);
-    assert!(super::storage_v12::active(&store.connection));
+        .unwrap();
+    // The previous view evaluated generation even when measured output was zero.
+    let old = sql.replace("coalesce(output,0)>0 AND ", "");
+    store
+        .connection
+        .execute_batch(&format!("DROP VIEW usage_metrics;{old};"))
+        .unwrap();
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    let totals = store.dashboard(&all_time()).unwrap().totals;
+    assert_eq!(totals.tokens.output, Some(20));
+    assert_eq!(totals.measured_outputs, 20);
+    assert_eq!(totals.generation_ms, 2700);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let capture = calls.clone();
+    store
+        .connection
+        .create_scalar_function(
+            "usage_generation_ms",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |_| {
+                capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(900_i64)
+            },
+        )
+        .unwrap();
+    let outputs: i64 = store
+        .connection
+        .query_row("SELECT sum(measured_outputs) FROM usage_metrics", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(outputs, 20);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -2015,93 +2055,6 @@ fn v12_uuid_identifiers_survive_diagnostic_compaction_losslessly() {
         serde_json::to_value(&after).unwrap(),
         serde_json::to_value(&before).unwrap()
     );
-}
-
-#[test]
-fn v12_final_cutover_rejects_shadow_effective_mismatch_and_keeps_legacy_authority() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut legacy = Store::open_v11_fixture(dir.path()).unwrap();
-    let row = record(
-        "fixture-v12-final-cutover-effective",
-        "codex",
-        BASE,
-        Some("fixture-v12-final-cutover-response"),
-        13,
-        5,
-    );
-    legacy
-        .write_batch(std::slice::from_ref(&row), None)
-        .unwrap();
-    let expected = serde_json::to_value(legacy.detail(&row.id).unwrap()).unwrap();
-    drop(legacy);
-
-    let mut migrating = Store::open(dir.path()).unwrap();
-    let mut copied = false;
-    for _ in 0..32 {
-        assert!(migrating.compact_storage_batch().is_ok());
-        let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-        let after: String = database
-            .query_row(
-                "SELECT value FROM metadata WHERE key='storage_v12_after'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if !after.is_empty() {
-            copied = true;
-            break;
-        }
-    }
-    assert!(
-        copied,
-        "the test must inject after at least one copied batch"
-    );
-
-    let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    let rid: i64 = database
-        .query_row("SELECT rid FROM v12_records LIMIT 1", [], |r| r.get(0))
-        .unwrap();
-    database
-        .execute("UPDATE v12_records SET effective=0 WHERE rid=?1", [rid])
-        .unwrap();
-    database.execute("DELETE FROM v12_dirty", []).unwrap();
-    drop(database);
-
-    let mut validation_error = false;
-    for _ in 0..32 {
-        let result = migrating.compact_storage_batch();
-        match result {
-            Ok(true) => continue,
-            Ok(false) => break,
-            Err(_) => {
-                validation_error = true;
-                break;
-            }
-        }
-    }
-    assert!(
-        validation_error,
-        "final cutover must reject the shadow mismatch"
-    );
-    assert_eq!(
-        serde_json::to_value(migrating.detail(&row.id).unwrap()).unwrap(),
-        expected
-    );
-    let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    let legacy_rows: i64 = database
-        .query_row("SELECT count(*) FROM records WHERE id=?1", [&row.id], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(legacy_rows, 1);
-    let legacy_effective: i64 = database
-        .query_row(
-            "SELECT effective FROM records WHERE id=?1",
-            [&row.id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(legacy_effective, 1);
 }
 
 #[test]

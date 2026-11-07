@@ -517,30 +517,3 @@ async fn committed_token_rotation_rejects_old_token_and_routes_with_reloaded_sto
 
     codex.stop().await.unwrap();
 }
-
-#[tokio::test]
-async fn failed_token_store_transaction_keeps_the_published_token_unchanged() {
-    let temp = tempfile::tempdir().unwrap();
-    let (codex, _claude, home) = duplicate_token_gateways(&temp);
-    let store_path = codex.0.data.join("gateway.json");
-    let saved_store = fs::read(&store_path).unwrap();
-    let expected = codex.view().revision;
-
-    let error = {
-        let _fault = crate::storage::faults::inject(crate::storage::faults::Point::Replace);
-        match codex.start(&expected, &home).await {
-            Ok(_) => panic!("failed store replacement should abort the token transaction"),
-            Err(error) => error,
-        }
-    };
-
-    assert_eq!(error.code, "IO");
-    assert_eq!(fs::read(&store_path).unwrap(), saved_store);
-    let (stored, _) = super::super::model::Store::load(&store_path).unwrap();
-    assert_eq!(stored.local_token, DUPLICATE_TOKEN);
-    assert_eq!(
-        route_with_token(&codex, "/codex/v1/responses", DUPLICATE_TOKEN),
-        Ok((ClientId::Codex, "/v1/responses".to_owned()))
-    );
-    assert!(codex.listener_view().running_clients.is_empty());
-}

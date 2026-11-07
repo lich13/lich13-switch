@@ -646,12 +646,19 @@ fn smart_tiers_config_versions_and_corrupt_bank_fallback() {
         bank::Resource::load(&bad).snapshot.unwrap().1,
         modeltrace::bundled().unwrap().1
     );
-    assert!(bank::Resource::load(&bad).status(&bad, false)["error"].is_string());
+    assert!(
+        bank::Resource::load(&bad).status(bad.checked_at, bad.error.as_deref(), false)["error"]
+            .is_string()
+    );
     let same_version = SavedBank {
         version: Some(modeltrace::bundled().unwrap().1),
         ..bad
     };
-    let status = bank::Resource::load(&same_version).status(&same_version, false);
+    let status = bank::Resource::load(&same_version).status(
+        same_version.checked_at,
+        same_version.error.as_deref(),
+        false,
+    );
     assert!(status["error"].is_string());
     assert_eq!(status["source"], "builtin");
 }

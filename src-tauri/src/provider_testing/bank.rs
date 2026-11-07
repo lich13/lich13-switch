@@ -139,13 +139,13 @@ impl Resource {
         };
         Self { snapshot, metadata }
     }
-    pub fn status(&self, saved: &super::types::SavedBank, updating: bool) -> Value {
+    pub fn status(&self, checked_at: Option<i64>, error: Option<&str>, updating: bool) -> Value {
         let mut status = self.metadata.clone();
         status["updating"] = updating.into();
         if self.snapshot.is_ok() {
-            status["checkedAt"] = saved.checked_at.into();
-            if let Some(error) = &saved.error {
-                status["error"] = error.clone().into();
+            status["checkedAt"] = checked_at.into();
+            if let Some(error) = error {
+                status["error"] = error.into();
             }
         }
         status

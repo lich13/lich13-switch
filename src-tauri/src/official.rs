@@ -566,21 +566,11 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         account_id: account_id.into(),
         stage: "enabling".into(),
     };
+    verify_record(&output, &record)?;
     save(data, &record)?;
     if let Err(error) = storage::atomic_write(&path, output.as_bytes(), Some(expected)) {
         let _ = fs::remove_file(record_path(data));
         return Err(error);
-    }
-    let written = storage::read_optional(&path)?
-        .ok_or_else(|| AppError::new(code::VERIFY, "官方配置写入后无法读取"))?;
-    let written_text = String::from_utf8(written)
-        .map_err(|_| AppError::new(code::VERIFY, "官方配置写入后不是 UTF-8"))?;
-    if verify_record(&written_text, &record).is_err() {
-        let rollback = restore_record(data, home, &record);
-        let _ = fs::remove_file(record_path(data));
-        return Err(rollback.err().unwrap_or_else(|| {
-            AppError::new(code::VERIFY, "官方账号配置写入后校验失败，请处理现场")
-        }));
     }
     if let Err(error) = switch_account() {
         match restore_record(data, home, &record) {
@@ -617,15 +607,12 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         }
         return Err(error);
     }
-    let current = view(data, home);
-    if current.enabled {
-        Ok(current)
-    } else {
-        Err(AppError::new(
-            code::VERIFY,
-            "官方账号配置写入后校验失败，请处理现场",
-        ))
-    }
+    Ok(OfficialModeView {
+        enabled: true,
+        state: "enabled".into(),
+        account_id: Some(record.account_id),
+        error: None,
+    })
 }
 
 fn restore_record(_data: &Path, home: &Path, record: &Record) -> Result<()> {
@@ -674,7 +661,6 @@ pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeV
     }
     let mut staged = record.clone();
     staged.stage = "disabling".into();
-    save(data, &staged)?;
     let mut replacements = Vec::new();
     for (n, field) in record.fields.iter().enumerate() {
         if let (Some(i), Some(original)) = (managed_scan.comments[n], &field.original) {
@@ -682,22 +668,19 @@ pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeV
         }
     }
     let output = replace_lines(&text, &managed_scan, &replacements);
-    storage::atomic_write(
-        &path,
-        output.as_bytes(),
-        Some(&storage::revision(Some(text.as_bytes()))),
-    )?;
-    let restored = storage::read_optional(&path)?
-        .ok_or_else(|| AppError::new(code::VERIFY, "恢复后无法读取 Codex 配置"))?;
-    let restored_text = String::from_utf8(restored)
-        .map_err(|_| AppError::new(code::VERIFY, "恢复后配置不是 UTF-8"))?;
-    let restored_scan = scan(&restored_text)?;
+    let restored_scan = scan(&output)?;
     for (n, field) in record.fields.iter().enumerate() {
         match (&field.original, restored_scan.fields[n]) {
             (Some(_), Some(_)) | (None, None) => {}
             _ => return Err(AppError::new(code::VERIFY, "官方账号配置恢复校验失败")),
         }
     }
+    save(data, &staged)?;
+    storage::atomic_write(
+        &path,
+        output.as_bytes(),
+        Some(&storage::revision(Some(text.as_bytes()))),
+    )?;
     fs::remove_file(record_path(data)).map_err(storage::io_error)?;
     Ok(OfficialModeView::default())
 }

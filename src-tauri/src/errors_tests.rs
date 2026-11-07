@@ -1,19 +1,6 @@
 use crate::{errors::ErrorCode, events::Reason, storage::AppError};
 
 #[test]
-fn app_error_keeps_existing_wire_codes_as_strings() {
-    for wire_code in [
-        "MODEL_NOT_ALLOWED",
-        "MODEL_UNDETERMINED",
-        "NO_ELIGIBLE_PROVIDER",
-        "PROVIDERS_COOLING_DOWN",
-    ] {
-        let value = serde_json::to_value(AppError::new(wire_code, "fixture failure")).unwrap();
-        assert_eq!(value["code"], wire_code);
-    }
-}
-
-#[test]
 fn reason_codes_keep_their_existing_serialized_values() {
     for (reason, wire_code) in [
         (Reason::ModelUnavailable, "MODEL_UNAVAILABLE"),

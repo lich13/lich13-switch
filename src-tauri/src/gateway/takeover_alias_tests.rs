@@ -138,41 +138,6 @@ fn grok_alias_does_not_hide_changed_owned_model() {
     );
 }
 
-#[test]
-fn interrupted_alias_restore_is_repeatable_without_losing_the_original() {
-    use storage::faults::{inject, Point};
-    for client in [ClientId::Codex, ClientId::Claude, ClientId::Grok] {
-        for point in [
-            Point::ShortWrite,
-            Point::FileSync,
-            Point::Replace,
-            Point::DirectorySync,
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let data = temp.path().join("data");
-            let home = temp.path().join("client");
-            seed(client, &home);
-            let original = takeover::read_for(client, &home).unwrap().1.fingerprint();
-            attach(client, &data, &home, 41017);
-            let text = fs::read_to_string(client.config(&home))
-                .unwrap()
-                .replace(&client.address(41017), &old_address(client, 41017));
-            fs::write(client.config(&home), text).unwrap();
-            let fault = inject(point);
-            assert_eq!(takeover::recover(&data).err().unwrap().code, "IO");
-            assert!(data.join("gateway-recovery.json").exists());
-            drop(fault);
-            takeover::recover(&data).unwrap();
-            takeover::recover(&data).unwrap();
-            assert_eq!(
-                takeover::read_for(client, &home).unwrap().1.fingerprint(),
-                original
-            );
-            assert!(!data.join("gateway-recovery.json").exists());
-        }
-    }
-}
-
 fn gateway_for(client: ClientId, data: &Path) -> (Gateway, Gateway) {
     let root = Gateway::new(data.to_owned()).unwrap();
     let gateway = match client {

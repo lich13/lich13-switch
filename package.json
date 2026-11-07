@@ -1,6 +1,6 @@
 {
   "name": "vela",
-  "version": "0.26.29",
+  "version": "0.26.30",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.15.0",

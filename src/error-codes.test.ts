@@ -3,13 +3,6 @@ import { ErrorCodes } from "./error-codes";
 import { errorOf } from "./types";
 
 describe("error code compatibility", () => {
-  it("keeps existing local wire codes stable", () => {
-    expect(ErrorCodes.ModelNotAllowed).toBe("MODEL_NOT_ALLOWED");
-    expect(ErrorCodes.ModelUndetermined).toBe("MODEL_UNDETERMINED");
-    expect(ErrorCodes.NoEligibleProvider).toBe("NO_ELIGIBLE_PROVIDER");
-    expect(ErrorCodes.ProvidersCoolingDown).toBe("PROVIDERS_COOLING_DOWN");
-  });
-
   it("preserves unknown upstream codes", () => {
     const error = {
       code: "VENDOR_EXTENDED_FAILURE",

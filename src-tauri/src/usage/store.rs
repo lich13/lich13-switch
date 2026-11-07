@@ -130,13 +130,7 @@ impl Store {
                 maintenance_deferred: Cell::default(),
             });
         }
-        let empty = version == 0
-            && !legacy
-            && db(connection.query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
-                [],
-                |row| row.get::<_, bool>(0),
-            ))?;
+        let empty = version == 0 && !legacy;
         db(connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"))?;
         if empty {
             let tx = db(connection.transaction())?;

@@ -42,6 +42,7 @@ export function UsageLogControls({
   const menu = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     const details = menu.current;
+    const scroller = details?.closest(".usage-page");
     const fit = () => {
       if (!details?.open) return;
       const panel = details.querySelector<HTMLElement>(":scope > div");
@@ -60,11 +61,11 @@ export function UsageLogControls({
     };
     const watchPosition = () => {
       window.removeEventListener("resize", fit);
-      document.removeEventListener("scroll", fit, true);
+      scroller?.removeEventListener("scroll", fit);
       if (details?.open) {
         fit();
         window.addEventListener("resize", fit);
-        document.addEventListener("scroll", fit, true);
+        scroller?.addEventListener("scroll", fit);
       }
     };
     document.addEventListener("pointerdown", outside);
@@ -75,7 +76,7 @@ export function UsageLogControls({
       document.removeEventListener("keydown", escape);
       details?.removeEventListener("toggle", watchPosition);
       window.removeEventListener("resize", fit);
-      document.removeEventListener("scroll", fit, true);
+      scroller?.removeEventListener("scroll", fit);
     };
   }, []);
   const visibility = (id: LogColumn, visible: boolean) => {

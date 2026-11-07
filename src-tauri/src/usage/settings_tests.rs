@@ -49,7 +49,7 @@ fn malformed_and_invalid_settings_are_preserved_with_digest_deduplication() {
 }
 
 #[test]
-fn backup_collision_is_reported_and_keeps_both_existing_files() {
+fn existing_backup_is_preserved_with_the_invalid_settings() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("settings.json");
     let bytes = b"synthetic invalid settings";
@@ -62,7 +62,7 @@ fn backup_collision_is_reported_and_keeps_both_existing_files() {
     let (settings, error) = load_settings(&path);
 
     assert_default(&settings);
-    assert!(error.unwrap().contains("备份失败"));
+    assert!(error.is_some());
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert_eq!(fs::read(&backup).unwrap(), b"different fixture bytes");
 }

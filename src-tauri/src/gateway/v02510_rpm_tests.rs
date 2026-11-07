@@ -815,7 +815,6 @@ async fn send_window_expires_at_61_seconds_and_completion_and_inflight_are_indep
     let token = ledger.commit(PROVIDER, 1).expect("inflight start");
     let p = ledger.providers.get_mut(PROVIDER).unwrap();
     p.starts.clear();
-    p.last = None;
     let (delay, reason) = gate_delay(&ledger, 1);
     assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
     assert_eq!(delay, Duration::from_millis(200));
@@ -827,7 +826,6 @@ async fn send_window_expires_at_61_seconds_and_completion_and_inflight_are_indep
     let success = ledger.commit(PROVIDER, 1).expect("completed start");
     let p = ledger.providers.get_mut(PROVIDER).unwrap();
     p.starts.clear();
-    p.last = None;
     ledger.settle(PROVIDER, &success, Settlement::Success);
     let (delay, reason) = gate_delay(&ledger, 1);
     assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
@@ -1031,7 +1029,7 @@ fn recovery_preserves_crash_inflight_and_clamps_future_wall_clock_starts() {
         serde_json::to_vec(&json!({
             "version": 2,
             "providers": {PROVIDER: [now + 3_600_000]},
-            "protection": {PROVIDER: {"inflight": {"crashed": null}}},
+            "protection": {PROVIDER: {"inflight": {"crashed": null}, "last": now}},
         }))
         .unwrap(),
     )
@@ -1039,11 +1037,13 @@ fn recovery_preserves_crash_inflight_and_clamps_future_wall_clock_starts() {
     let loaded_at = StdInstant::now();
     let (mut ledger, error) = Ledger::load(&path);
     assert!(!error);
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["version"], 2);
+    assert!(saved["protection"][PROVIDER].get("last").is_none());
     assert_eq!(ledger.used(PROVIDER), 1);
     let p = ledger.providers.get_mut(PROVIDER).expect("provider ledger");
     assert_eq!(p.inflight.len(), 1);
     p.starts.clear();
-    p.last = None;
     let (delay, reason) = gate_delay(&ledger, 1);
     assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
     assert!(delay <= WINDOW);

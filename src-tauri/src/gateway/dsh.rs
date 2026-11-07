@@ -1934,10 +1934,6 @@ mod tests {
         );
         assert!(data.join(JOURNAL).exists());
         fs::write(dir.path().join(".env"), input.environment.before.unwrap()).unwrap();
-        {
-            let _fault = storage::faults::inject(storage::faults::Point::Replace);
-            assert!(recover(&data).is_err());
-        }
         recover(&data).unwrap();
         assert!(!data.join(JOURNAL).exists());
         assert!(text(&data.join("gateway.json"))

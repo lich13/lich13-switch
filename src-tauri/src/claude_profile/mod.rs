@@ -160,9 +160,12 @@ pub fn recovery_pending(data: &Path) -> bool {
 }
 fn load(data: &Path, home: &Path) -> Result<Option<Profile>> {
     let bytes = storage::read_bounded(&directory(data).join(PROFILE), LIMIT)?;
+    decode_profile(bytes.as_deref(), home)
+}
+fn decode_profile(bytes: Option<&[u8]>, home: &Path) -> Result<Option<Profile>> {
     let profile = bytes
         .map(|b| {
-            serde_json::from_slice::<Profile>(&b).map_err(|_| fail("Claude 配置档损坏，已保留现场"))
+            serde_json::from_slice::<Profile>(b).map_err(|_| fail("Claude 配置档损坏，已保留现场"))
         })
         .transpose()?;
     if profile
@@ -219,7 +222,7 @@ fn fingerprint(files: &BTreeMap<Role, Option<String>>, profile: Option<&[u8]>) -
 pub fn view(data: &Path, home: &Path, user_home: &Path) -> Result<View> {
     let files = snapshot(home, user_home)?;
     let raw = storage::read_bounded(&directory(data).join(PROFILE), LIMIT)?;
-    let p = load(data, home)?;
+    let p = decode_profile(raw.as_deref(), home)?;
     let error = if directory(data).join(JOURNAL).exists() {
         Some("存在未完成的配置切换，请恢复事务".into())
     } else {
@@ -268,13 +271,12 @@ pub fn guard_save(data: &Path, home: &Path, user_home: &Path, text: &str) -> Res
     Ok(())
 }
 fn set_file(path: &Path, before: Option<&str>, after: Option<&str>) -> Result<()> {
-    let current = read_text(path)?;
-    if current.as_deref() != before {
-        return Err(conflict());
-    }
     match after {
         Some(text) => storage::atomic_write(path, text.as_bytes(), Some(&revision(before))),
         None => {
+            if read_text(path)?.as_deref() != before {
+                return Err(conflict());
+            }
             if before.is_some() {
                 std::fs::remove_file(path).map_err(storage::io_error)?;
                 #[cfg(unix)]
@@ -284,11 +286,7 @@ fn set_file(path: &Path, before: Option<&str>, after: Option<&str>) -> Result<()
             }
             Ok(())
         }
-    }?;
-    if read_text(path)?.as_deref() != after {
-        return Err(conflict());
     }
-    Ok(())
 }
 fn write_profile(data: &Path, text: Option<&str>, expected: Option<&str>) -> Result<()> {
     let file = directory(data).join(PROFILE);

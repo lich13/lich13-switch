@@ -1,6 +1,6 @@
 //! ModelTrace scoring, ported from Hanmo123/ModelTrace (MIT).
 //! The bundled data and upstream attribution are in resources/modeltrace.
-use super::{compat::sha256, failure};
+use super::failure;
 use crate::storage::Result;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -22,12 +22,8 @@ pub fn manifest() -> Value {
 pub fn bundled() -> Result<(Value, Value)> {
     let manifest = manifest();
     let raw = include_str!("../../resources/modeltrace/unified_bank.json");
-    let digest = sha256(raw);
-    if manifest["files"]["bank"]["sha256"] != digest {
-        return Err(failure("模型指纹库校验失败"));
-    }
     let data: Value = serde_json::from_str(raw).map_err(|_| failure("内置指纹库数据无效"))?;
-    let version = json!({"revision":manifest["revision"],"sha256":digest,"built_at":data["built_at"],"analyzer_version":manifest.get("analyzerVersion").unwrap_or(&json!(1))});
+    let version = json!({"revision":manifest["revision"],"sha256":manifest["files"]["bank"]["sha256"],"built_at":data["built_at"],"analyzer_version":manifest.get("analyzerVersion").unwrap_or(&json!(1))});
     Ok((data, version))
 }
 fn choose(n: usize) -> usize {

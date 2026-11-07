@@ -297,10 +297,6 @@ impl Pricing {
             ),
         };
         let mut error = None;
-        let seed = include_bytes!("../../resources/usage-prices.json");
-        if storage::digest(seed) != include_str!("../../resources/usage-prices.sha256").trim() {
-            return Err(failure("初始价格库校验失败"));
-        }
         let cached = storage::read_bounded(&cache_path, LIMIT)
             .ok()
             .flatten()
@@ -309,17 +305,25 @@ impl Pricing {
         if cache_path.exists() && cached.is_none() {
             error = Some("价格缓存校验失败，正在使用初始价格库".into());
         }
-        let seed_catalog: Catalog =
-            serde_json::from_slice(seed).map_err(|_| failure("初始价格库无效"))?;
-        let cache = cached.unwrap_or(Cache {
-            catalog_hash: catalog_hash(&seed_catalog),
-            catalog: seed_catalog,
-            hash: storage::digest(seed),
-            updated_at: chrono::DateTime::parse_from_rfc3339("2026-10-08T00:00:00Z")
-                .ok()
-                .map(|d| d.timestamp_millis()),
-            ..Cache::default()
-        });
+        let cache = match cached {
+            Some(cache) => cache,
+            None => {
+                let seed_catalog: Catalog =
+                    serde_json::from_slice(include_bytes!("../../resources/usage-prices.json"))
+                        .map_err(|_| failure("初始价格库无效"))?;
+                Cache {
+                    catalog_hash: catalog_hash(&seed_catalog),
+                    catalog: seed_catalog,
+                    hash: include_str!("../../resources/usage-prices.sha256")
+                        .trim()
+                        .into(),
+                    updated_at: chrono::DateTime::parse_from_rfc3339("2026-10-08T00:00:00Z")
+                        .ok()
+                        .map(|d| d.timestamp_millis()),
+                    ..Cache::default()
+                }
+            }
+        };
         Ok(Self {
             models_dev: crate::models_dev::Catalog::new(dir),
             path,

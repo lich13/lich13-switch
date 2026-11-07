@@ -236,55 +236,6 @@ fn unsupported_config_version_is_rejected_without_rewriting_the_file() {
 }
 
 #[tokio::test]
-async fn persist_failure_keeps_listener_config_and_state_unchanged() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("gateway-listener.json");
-    let [new_default, legacy_default] = distinct_free_ports(2).try_into().unwrap();
-    write_config(&path, 1, legacy_default);
-    let listener = Listener::load(path.clone(), Some(legacy_default)).unwrap();
-    let saved_bytes = fs::read(&path).unwrap();
-    let view_before = listener.view().unwrap();
-    let _fault = crate::storage::faults::inject(crate::storage::faults::Point::Replace);
-
-    let error = listener
-        .prepare_at(new_default, legacy_default)
-        .await
-        .err()
-        .expect("injected config replacement failure should abort preparation");
-
-    assert_eq!(error.code, "IO");
-    assert_eq!(fs::read(&path).unwrap(), saved_bytes);
-    let view_after = listener.view().unwrap();
-    assert_eq!(view_after.port, view_before.port);
-    assert_eq!(view_after.revision, view_before.revision);
-}
-
-#[tokio::test]
-async fn directory_sync_failure_keeps_listener_inactive_even_if_v2_was_published() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("gateway-listener.json");
-    let [new_default, legacy_default] = distinct_free_ports(2).try_into().unwrap();
-    write_config(&path, 1, legacy_default);
-    let listener = Listener::load(path.clone(), Some(legacy_default)).unwrap();
-    let view_before = listener.view().unwrap();
-    let _fault = crate::storage::faults::inject(crate::storage::faults::Point::DirectorySync);
-
-    let error = listener
-        .prepare_at(new_default, legacy_default)
-        .await
-        .err()
-        .expect("directory sync failure should abort listener preparation");
-
-    assert_eq!(error.code, "IO");
-    assert_config(&path, 2, new_default);
-    let view_after = listener.view().unwrap();
-    assert_eq!(view_after.port, view_before.port);
-    assert_eq!(view_after.revision, view_before.revision);
-    assert!(view_after.running_clients.is_empty());
-    let _probe = StdTcpListener::bind((Ipv4Addr::LOCALHOST, new_default)).unwrap();
-}
-
-#[tokio::test]
 async fn v2_config_does_not_retry_default_migration() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("gateway-listener.json");

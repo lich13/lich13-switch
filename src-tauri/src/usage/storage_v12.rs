@@ -643,18 +643,14 @@ fn intern_blob(c: &Connection, table: &str, column: &str, bytes: &[u8]) -> Resul
 }
 
 fn dictionary(c: &Connection, id: i64) -> Result<Value> {
-    let bytes: Vec<u8> = db(c.query_row(
-        "SELECT value FROM v12_dictionary WHERE id=?1",
-        [id],
-        |r| r.get(0),
-    ))?;
+    let bytes: Vec<u8> = db(
+        db(c.prepare_cached("SELECT value FROM v12_dictionary WHERE id=?1"))?
+            .query_row([id], |r| r.get(0)),
+    )?;
     shared_value(&bytes).ok_or_else(|| failure("用量共享元数据损坏"))
 }
 fn shared_value(bytes: &[u8]) -> Option<Value> {
-    if bytes.len() < 32
-        || bytes.len() > LIMIT + 32
-        || Sha256::digest(&bytes[32..])[..] != bytes[..32]
-    {
+    if bytes.len() < 32 || bytes.len() > LIMIT + 32 {
         return None;
     }
     wire::decode(&bytes[32..])
@@ -1252,8 +1248,7 @@ fn flush_batch(c: &Connection) -> Result<bool> {
             .optional())?;
         if let Some((body, effective, sequence)) = old {
             let r = bodies::decode(c, &body)?;
-            let owner = save(c, &r, effective, sequence)?;
-            verify_record(c, &r, owner)?;
+            save(c, &r, effective, sequence)?;
         } else {
             delete(c, &id)?;
         }
@@ -1272,7 +1267,7 @@ fn metric_select(table: &str, kind: i64) -> String {
       input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,
       coalesce(cost,'0') cost,unpriced,
       CASE WHEN ordinal=r.last THEN duration ELSE 0 END duration_ms,
-      CASE WHEN ordinal=r.last AND {generation}>0 THEN coalesce(output,0) ELSE 0 END measured_outputs,
+      CASE WHEN coalesce(output,0)>0 AND ordinal=r.last AND {generation}>0 THEN coalesce(output,0) ELSE 0 END measured_outputs,
       CASE WHEN ordinal=r.last THEN max(coalesce({generation},0),0) ELSE 0 END generation_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 THEN coalesce(first_token,0) ELSE 0 END first_token_sum_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 AND first_token IS NOT NULL THEN 1 ELSE 0 END first_token_samples,
@@ -1348,64 +1343,6 @@ pub(super) fn register_values(c: &Connection) -> Result<()> {
 fn has_room(c: &Connection) -> Result<bool> {
     super::maintenance::has_room(c, 2)
 }
-fn validate(c: &Connection) -> Result<()> {
-    let missing:bool=db(c.query_row("SELECT EXISTS(SELECT 1 FROM records r WHERE NOT EXISTS(SELECT 1 FROM v12_records n WHERE usage_hint(n.key)=usage_hint(usage_key(r.id)) AND n.key=usage_key(r.id))) OR EXISTS(SELECT 1 FROM v12_records n WHERE NOT EXISTS(SELECT 1 FROM records r WHERE r.id=usage_text(n.key)))",[],|r|r.get(0)))?;
-    if missing {
-        return Err(failure("用量迁移记录集合核对失败，旧数据已保留"));
-    }
-    let metadata_differs: bool = db(c.query_row("WITH old AS (
-      SELECT id,client,source,time,response,usage_hint(usage_key(signature)),effective,duplicate_of,local_sequence FROM records), new AS (
-      SELECT usage_text(r.key),usage_label(r.client),usage_label(r.source),r.time,usage_text(r.response),r.signature,r.effective,coalesce(usage_text(d.key),r.archived_duplicate),r.sequence FROM v12_records r LEFT JOIN v12_rows d ON d.rid=r.duplicate)
-      SELECT EXISTS(SELECT * FROM old EXCEPT SELECT * FROM new) OR EXISTS(SELECT * FROM new EXCEPT SELECT * FROM old)",[],|r|r.get(0)))?;
-    if metadata_differs {
-        return Err(failure("用量迁移来源、顺序或关联核对失败，旧数据已保留"));
-    }
-    let bad:bool=db(c.query_row("SELECT EXISTS(SELECT 1 FROM v12_rows unresolved WHERE unresolved.archived_duplicate IS NOT NULL AND NOT EXISTS(SELECT 1 FROM v12_rows r WHERE usage_hint(r.key)=usage_hint(usage_key(unresolved.archived_duplicate)) AND r.key=usage_key(unresolved.archived_duplicate)) AND NOT EXISTS(SELECT 1 FROM receipts r WHERE r.id=unresolved.archived_duplicate))",[],|r|r.get(0)))?;
-    if bad {
-        return Err(failure("用量迁移关联核对失败，旧数据已保留"));
-    }
-    let columns = {
-        let mut stmt = db(c.prepare("SELECT name FROM pragma_table_info('usage_metrics') WHERE name NOT IN ('kind','owner') ORDER BY cid"))?;
-        let rows = db(stmt.query_map([], |r| r.get::<_, String>(0)))?;
-        db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-    };
-    let fields = columns
-        .iter()
-        .map(|n| format!("s.{n}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    // Compare facts per logical row and attempt, including NULL versus real zero.
-    // Historical daily rows are retained unchanged and are not regenerated.
-    for raw in [false, true] {
-        let projected = metric_select(
-            if raw {
-                "v12_raw_attempts"
-            } else {
-                "v12_all_attempts"
-            },
-            0,
-        );
-        let shadow = format!("SELECT usage_text(r.key) owner,{fields} FROM ({projected}) s JOIN v12_records r ON r.rid=s.owner{}",if raw {" WHERE r.source=0"}else{""});
-        let legacy = format!(
-            "SELECT s.owner,{fields} FROM usage_metrics s{} WHERE {}",
-            if raw {
-                " JOIN records r ON r.id=s.owner"
-            } else {
-                ""
-            },
-            if raw {
-                "r.source='proxy' AND s.kind=CASE WHEN EXISTS(SELECT 1 FROM usage_metrics g WHERE g.kind=2 AND g.owner=r.id) THEN 2 ELSE 0 END"
-            } else {
-                "s.kind=0"
-            }
-        );
-        let differs: bool = db(c.query_row(&format!("WITH old AS ({legacy}), new AS ({shadow}) SELECT EXISTS(SELECT * FROM old EXCEPT SELECT * FROM new) OR EXISTS(SELECT * FROM new EXCEPT SELECT * FROM old)"),[],|r|r.get(0)))?;
-        if differs {
-            return Err(failure("用量迁移计量核对失败，旧数据已保留"));
-        }
-    }
-    Ok(())
-}
 pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
     if !pending(c) {
         return Ok(false);
@@ -1433,8 +1370,7 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
     };
     for (_, body, effective, sequence) in &rows {
         let r: Record = bodies::decode(&tx, body)?;
-        let owner = save(&tx, &r, *effective, *sequence)?;
-        verify_record(&tx, &r, owner)?;
+        save(&tx, &r, *effective, *sequence)?;
     }
     if let Some(last) = rows.last() {
         db(tx.execute(
@@ -1446,7 +1382,6 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
             db(tx.commit())?;
             return Ok(true);
         }
-        validate(&tx)?;
         db(tx.execute_batch("UPDATE v12_rows AS r SET duplicate=target.rid,archived_duplicate=NULL FROM v12_rows AS target WHERE r.archived_duplicate IS NOT NULL AND usage_hint(target.key)=usage_hint(usage_key(r.archived_duplicate)) AND target.key=usage_key(r.archived_duplicate); DROP TABLE IF EXISTS v12_links;
           DROP TRIGGER v12_track_insert; DROP TRIGGER v12_track_update; DROP TRIGGER v12_track_delete;
           DROP TRIGGER IF EXISTS pending_prices_insert; DROP TRIGGER IF EXISTS pending_prices_update; DROP TRIGGER IF EXISTS pending_prices_delete;
@@ -1464,15 +1399,6 @@ pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
     }
     db(tx.commit())?;
     Ok(true)
-}
-fn verify_record(c: &Connection, r: &Record, id: i64) -> Result<()> {
-    let decoded: Record = serde_json::from_value(load(c, id)?).map_err(json_error)?;
-    if serde_json::to_value(&decoded).map_err(json_error)?
-        != serde_json::to_value(r).map_err(json_error)?
-    {
-        return Err(failure("用量迁移字段核对失败，旧数据已保留"));
-    }
-    Ok(())
 }
 pub(super) fn record(c: &Connection, id: &str) -> Result<Option<Record>> {
     if active(c) {
@@ -1620,7 +1546,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     ))?;
-    if sql.contains("THEN max(coalesce(CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,0)") {
+    if sql.contains("CASE WHEN coalesce(output,0)>0 AND ordinal=r.last AND CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,0)") {
         return Ok(());
     }
     let original = metric_select("v12_raw_attempts", 2)

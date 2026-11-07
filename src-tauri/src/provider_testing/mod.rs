@@ -309,8 +309,11 @@ impl Service {
             .is_some_and(|p| p.search_only);
         let mut data = lock(&self.0.data);
         let updating = data.bank_updating;
-        let saved_bank = data.saved.bank.clone();
-        let model_trace_status = data.ensure_bank().status(&saved_bank, updating);
+        let checked_at = data.saved.bank.checked_at;
+        let error = data.saved.bank.error.clone();
+        let model_trace_status = data
+            .ensure_bank()
+            .status(checked_at, error.as_deref(), updating);
         let scope = |job: &&Job| job.client_id == client && job.provider_id == provider;
         let key = scope_key(client, provider);
         let detection = data
@@ -830,8 +833,11 @@ impl Service {
         if let Some(resource) = resource {
             data.bank = Some(resource);
         }
-        let saved_bank = data.saved.bank.clone();
-        let result = data.ensure_bank().status(&saved_bank, false);
+        let checked_at = data.saved.bank.checked_at;
+        let error = data.saved.bank.error.clone();
+        let result = data
+            .ensure_bank()
+            .status(checked_at, error.as_deref(), false);
         drop(data);
         self.changed();
         Ok(result)

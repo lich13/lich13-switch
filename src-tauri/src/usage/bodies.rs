@@ -189,16 +189,10 @@ pub(super) fn unpack(connection: &Connection, body: &str) -> Result<Value> {
             .get("_usageShape")
             .and_then(Value::as_i64)
             .ok_or_else(|| failure("用量共享元数据无效，原记录已保留"))?;
-        let (hash, shape): (String, String) = connection
-            .query_row(
-                "SELECT hash,body FROM body_shapes WHERE id=?1",
-                [shape_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let shape: String = connection
+            .prepare_cached("SELECT body FROM body_shapes WHERE id=?1")
+            .and_then(|mut statement| statement.query_row([shape_id], |row| row.get(0)))
             .map_err(|_| failure("用量共享元数据缺失，原记录已保留"))?;
-        if storage::digest(shape.as_bytes()) != hash {
-            return Err(failure("用量共享元数据损坏，原记录已保留"));
-        }
         let shape: Value = serde_json::from_str(&shape)
             .map_err(|_| failure("用量共享元数据无效，原记录已保留"))?;
         compact::expand(&unpacked, &shape).ok_or_else(|| failure("用量元数据无效，原记录已保留"))
@@ -300,9 +294,6 @@ pub(super) fn decode<T: DeserializeOwned>(connection: &Connection, body: &str) -
             .prepare_cached("SELECT body FROM price_bases WHERE hash=?1")
             .and_then(|mut statement| statement.query_row([reference], |row| row.get(0)))
             .map_err(|_| failure("价格快照缺失，记录已保留"))?;
-        if storage::digest(basis.as_bytes()) != reference {
-            return Err(failure("价格快照校验失败，记录已保留"));
-        }
         let basis = serde_json::from_str(&basis).map_err(|_| failure("价格快照无效"))?;
         let object = price.as_object_mut().expect("price object checked");
         object.remove("basisRef");

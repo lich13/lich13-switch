@@ -988,6 +988,7 @@ impl Core {
             && !optional_auth
             && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
                 || newer_token);
+        let mut accounts_changed = false;
         if changed {
             // A valid intermediate JSON document can still be part of a non-atomic write.
             if self.checked_auth.as_ref() != Some(&(root.clone(), auth_revision.clone())) {
@@ -1016,6 +1017,7 @@ impl Core {
                         )
                     } else if raw != profile.auth {
                         account_identity::replace_profile(profile, raw)?;
+                        accounts_changed = true;
                         ("updated", Some(profile.id.clone()), "账号凭据已更新")
                     } else {
                         ("synced", Some(profile.id.clone()), "")
@@ -1040,6 +1042,7 @@ impl Core {
                         exchange: BTreeMap::new(),
                         extensions: BTreeMap::new(),
                     });
+                    accounts_changed = true;
                     ("added", Some(id), "新账号已自动加入切换列表")
                 };
                 self.store
@@ -1099,7 +1102,7 @@ impl Core {
                 }
             }
         }
-        let matched = if normalization_error.is_none() {
+        let matched = if accounts_changed {
             info.as_ref()
                 .and_then(|i| i.as_ref().ok())
                 .map(|info| self.matching_profile(info))

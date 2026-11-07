@@ -35,7 +35,7 @@ struct Cached {
 }
 pub struct Service {
     cache: tokio::sync::Mutex<Option<Cached>>,
-    client: Result<reqwest::Client>,
+    client: reqwest::Client,
 }
 impl Default for Service {
     fn default() -> Self {
@@ -46,7 +46,7 @@ impl Default for Service {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(10))
                 .build()
-                .map_err(|_| fail("Claude 额度连接初始化失败")),
+                .expect("Claude 额度连接初始化失败"),
         }
     }
 }
@@ -87,33 +87,9 @@ fn file_credentials(home: &Path) -> Result<Credentials> {
         .ok_or_else(|| fail("请先在 Claude Code 登录官方账号"))?;
     parse_credentials(&raw)
 }
-async fn read_credentials(home: &Path) -> Result<Credentials> {
-    #[cfg(target_os = "macos")]
-    return read_credentials_with(home, async |service: &str| {
-        let output = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/usr/bin/security")
-                .args(["find-generic-password", "-s", service, "-w"])
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| fail("Claude 登录读取超时，请重试"))?
-        .map_err(|_| fail("无法读取 Claude 登录凭据"))?;
-        Ok(output.status.success().then_some(output.stdout))
-    })
-    .await;
-    #[cfg(not(target_os = "macos"))]
-    file_credentials(home)
-}
 #[cfg(target_os = "macos")]
-async fn read_credentials_with(
-    home: &Path,
-    lookup: impl AsyncFn(&str) -> Result<Option<Vec<u8>>>,
-) -> Result<Credentials> {
-    // Claude Code's default directory uses the unsuffixed keychain entry.
+fn keychain_services(home: &Path) -> Vec<String> {
+    // CLAUDE_CONFIG_DIR also gives the default directory a hashed entry name.
     let mut services = vec![format!(
         "Claude Code-credentials-{}",
         &storage::digest(home.to_string_lossy().as_bytes())[..8]
@@ -121,19 +97,39 @@ async fn read_credentials_with(
     if dirs::home_dir().is_some_and(|dir| home == dir.join(".claude")) {
         services.insert(0, "Claude Code-credentials".into());
     }
-    let mut error = None;
-    for service in services {
-        if let Some(raw) = lookup(&service).await? {
-            match parse_credentials(&raw) {
-                Ok(auth) => return Ok(auth),
-                Err(e) => error = Some(e),
+    services
+}
+async fn read_credentials(home: &Path) -> Result<Credentials> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut error = None;
+        for service in keychain_services(home) {
+            let output = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::process::Command::new("/usr/bin/security")
+                    .args(["find-generic-password", "-s", &service, "-w"])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .map_err(|_| fail("Claude 登录读取超时，请重试"))?
+            .map_err(|_| fail("无法读取 Claude 登录凭据"))?;
+            if output.status.success() {
+                match parse_credentials(&output.stdout) {
+                    Ok(auth) => return Ok(auth),
+                    Err(e) => error = Some(e),
+                }
             }
         }
+        if let Some(raw) = storage::read_optional(&home.join(".credentials.json"))? {
+            return parse_credentials(&raw);
+        }
+        Err(error.unwrap_or_else(|| fail("请先在 Claude Code 登录官方账号")))
     }
-    if let Some(raw) = storage::read_optional(&home.join(".credentials.json"))? {
-        return parse_credentials(&raw);
-    }
-    Err(error.unwrap_or_else(|| fail("请先在 Claude Code 登录官方账号")))
+    #[cfg(not(target_os = "macos"))]
+    file_credentials(home)
 }
 
 fn account_label(home: &Path) -> Option<String> {
@@ -233,8 +229,8 @@ impl Service {
         view.error = None;
         let mut retry_at = None;
         let result = async {
-            let client = self.client.as_ref().map_err(Clone::clone)?;
-            let response = client
+            let response = self
+                .client
                 .get(endpoint)
                 .bearer_auth(&auth.token)
                 .header("anthropic-beta", "oauth-2025-04-20")
@@ -247,14 +243,7 @@ impl Service {
                     .headers()
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| {
-                        v.parse::<u64>().ok().or_else(|| {
-                            httpdate::parse_http_date(v)
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::SystemTime::now()).ok())
-                                .map(|d| d.as_secs())
-                        })
-                    })
+                    .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(300)
                     .max(1);
                 retry_at = Some(
@@ -325,56 +314,21 @@ mod tests {
         .is_ok());
     }
     #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn keychain_name_matches_default_and_custom_directories() {
+    #[test]
+    fn keychain_name_matches_default_and_custom_directories() {
         let default = dirs::home_dir().unwrap().join(".claude");
-        let custom = tempfile::tempdir().unwrap();
-        for home in [default.as_path(), custom.path()] {
-            let expected = if home == default {
-                "Claude Code-credentials".into()
-            } else {
-                format!(
-                    "Claude Code-credentials-{}",
-                    &storage::digest(home.to_string_lossy().as_bytes())[..8]
-                )
-            };
-            let auth = read_credentials_with(home, async |service: &str| {
-                assert_eq!(service, expected);
-                Ok(Some(
-                    json!({"claudeAiOauth":{"accessToken":"fixture-login"}})
-                        .to_string()
-                        .into_bytes(),
-                ))
-            })
-            .await
-            .unwrap();
-            assert_eq!(auth.token, "fixture-login");
-        }
-    }
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn invalid_keychain_candidate_does_not_hide_a_valid_file_login() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".credentials.json"),
-            json!({"claudeAiOauth":{
-            "accessToken":"fixture-valid", "scopes":["user:profile"]}})
-            .to_string(),
-        )
-        .unwrap();
-        for raw in [
-            b"invalid-json".to_vec(),
-            json!({"claudeAiOauth":{
-            "accessToken":"fixture-expired", "expiresAt":1}})
-            .to_string()
-            .into_bytes(),
-        ] {
-            let auth =
-                read_credentials_with(dir.path(), async |_service: &str| Ok(Some(raw.clone())))
-                    .await
-                    .unwrap();
-            assert_eq!(auth.token, "fixture-valid");
-        }
+        let custom = Path::new("/fixture/claude");
+        let hashed = |home: &Path| {
+            format!(
+                "Claude Code-credentials-{}",
+                &storage::digest(home.to_string_lossy().as_bytes())[..8]
+            )
+        };
+        assert_eq!(
+            keychain_services(&default),
+            vec!["Claude Code-credentials".to_owned(), hashed(&default)]
+        );
+        assert_eq!(keychain_services(custom), vec![hashed(custom)]);
     }
     #[tokio::test]
     async fn cache_refresh_account_switch_and_http_failures() {
@@ -400,6 +354,7 @@ mod tests {
                     1 => ("429 Too Many Requests", "Retry-After: 60\r\n", "{}".into()),
                     3 => ("401 Unauthorized", "", "{}".into()),
                     4 => ("403 Forbidden", "", "{}".into()),
+                    5 => ("429 Too Many Requests", "Retry-After: Tue, 01 Jan 2030 00:00:00 GMT\r\n", "{}".into()),
                     _ => ("200 OK", "", json!({"five_hour":{"utilization":30.0,"resets_at":null},"seven_day":{"utilization":40.0,"resets_at":null}}).to_string()),
                 };
                 stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
@@ -491,6 +446,22 @@ mod tests {
             })
             .await;
         assert!(denied.error.unwrap().contains("权限"));
+        let before = super::super::model::now();
+        let date_limited = service
+            .get_at(home.clone(), true, &endpoint, async {
+                file_credentials(&home)
+            })
+            .await;
+        assert!(date_limited.error.unwrap().contains("受限"));
+        let retry_at = service
+            .cache
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .retry_at
+            .unwrap();
+        assert!((before + 300_000..=super::super::model::now() + 300_000).contains(&retry_at));
         std::fs::remove_file(home.join(".credentials.json")).unwrap();
         service.cache.lock().await.as_mut().unwrap().at -= Duration::from_secs(301);
         let absent = service

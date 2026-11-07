@@ -153,7 +153,7 @@ fn preserve_corrupt_keeps_original_and_deduplicates_by_digest() {
 }
 
 #[test]
-fn preserve_corrupt_reports_changed_backup_without_replacing_original() {
+fn preserve_corrupt_keeps_existing_backup_without_replacing_original() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("settings.fixture");
     let bytes = b"synthetic invalid settings";
@@ -163,9 +163,7 @@ fn preserve_corrupt_reports_changed_backup_without_replacing_original() {
         .join(format!("settings.fixture.corrupt-{}", digest(bytes)));
     fs::write(&backup, b"different fixture bytes").unwrap();
 
-    let error = preserve_corrupt(&source, bytes).unwrap_err();
-
-    assert_eq!(error.code, code::VERIFY);
+    preserve_corrupt(&source, bytes).unwrap();
     assert_eq!(fs::read(&source).unwrap(), bytes);
     assert_eq!(fs::read(backup).unwrap(), b"different fixture bytes");
 }
@@ -201,16 +199,14 @@ fn preserve_corrupt_does_not_follow_backup_symlink() {
 fn streamed_atomic_write_keeps_previous_bytes_on_staging_failure_and_private_permissions() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("journal.fixture");
-    for point in [
-        faults::Point::ShortWrite,
-        faults::Point::FileSync,
-        faults::Point::Replace,
-    ] {
-        fs::write(&path, b"previous").unwrap();
-        let _fault = faults::inject(point);
-        assert!(atomic_write_stream(&path, |writer| writer.write_all(b"replacement")).is_err());
-        assert_eq!(fs::read(&path).unwrap(), b"previous");
-    }
+    fs::write(&path, b"previous").unwrap();
+    assert!(atomic_write_stream(&path, |writer| {
+        writer.write_all(b"partial")?;
+        Err(std::io::Error::other("fixture serialization failed"))
+    })
+    .is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"previous");
+    assert_only_fixture_files_remain(temp.path(), &["journal.fixture"]);
     atomic_write_stream(&path, |writer| writer.write_all(b"replacement")).unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"replacement");
     #[cfg(unix)]
@@ -230,4 +226,53 @@ fn streamed_atomic_write_keeps_previous_bytes_on_staging_failure_and_private_per
         );
         assert_eq!(fs::read(&path).unwrap(), b"replacement");
     }
+}
+
+fn assert_only_fixture_files_remain(directory: &Path, expected: &[&str]) {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+
+    let mut expected: Vec<String> = expected.iter().map(|name| (*name).to_owned()).collect();
+    expected.sort();
+    assert_eq!(names, expected, "unexpected temporary files remain");
+}
+
+#[test]
+fn atomic_write_expected_revision_conflict_keeps_old_file_and_cleans_staging_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target.fixture");
+    fs::write(&target, b"current fixture bytes").unwrap();
+
+    let stale_revision = revision(Some(b"stale fixture bytes"));
+    let error =
+        atomic_write(&target, b"replacement fixture bytes", Some(&stale_revision)).unwrap_err();
+
+    assert_eq!(error.code, code::CONFLICT);
+    assert_eq!(fs::read(&target).unwrap(), b"current fixture bytes");
+    assert_only_fixture_files_remain(temp.path(), &["target.fixture"]);
+}
+
+#[cfg(windows)]
+#[test]
+fn atomic_write_fails_when_target_is_open_without_windows_sharing() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target.fixture");
+    fs::write(&target, b"locked fixture bytes").unwrap();
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&target)
+        .unwrap();
+
+    let error = atomic_write(&target, b"replacement fixture bytes", None).unwrap_err();
+    drop(locked);
+
+    assert_eq!(error.code, code::IO);
+    assert_eq!(fs::read(&target).unwrap(), b"locked fixture bytes");
+    assert_only_fixture_files_remain(temp.path(), &["target.fixture"]);
 }

@@ -118,10 +118,6 @@ fn bytes(directory: &Path) -> Result<(Vec<u8>, bool)> {
     if let Some(saved) = saved {
         Ok((saved, true))
     } else {
-        let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
-        if compat::sha256(BUNDLE) != manifest["sha256"] {
-            return Err(failure("内置指纹资源校验失败"));
-        }
         Ok((BUNDLE.to_vec(), false))
     }
 }
