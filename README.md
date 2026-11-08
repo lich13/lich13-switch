@@ -146,8 +146,8 @@ Get-FileHash .\Vela_*.exe -Algorithm SHA256
 ## 本地开发与验证
 
 ### 环境要求
-- **Node.js**：版本见 [.nvmrc](.nvmrc)
-- **pnpm**：版本固定于 [package.json](package.json) 的 `packageManager` 字段（项目启用 `pmOnFail: ignore` 以保持单文档锁文件兼容 GitHub 依赖图，请通过 `corepack` 启用对应版本）
+- **Node.js**：使用本机当前稳定版，CI 跟随官方稳定渠道
+- **pnpm**：使用当前稳定版；项目启用 `pmOnFail: ignore`，使用本机安装的包管理器和提交的锁文件
 - **Rust**：工具链与组件见 [rust-toolchain.toml](rust-toolchain.toml)
 - **平台系统依赖**：参见 [Tauri v2 Prerequisites](https://v2.tauri.app/start/prerequisites/)
 
@@ -155,12 +155,12 @@ Get-FileHash .\Vela_*.exe -Algorithm SHA256
 
 ```sh
 # 1. 核对包管理器并安装前端依赖
-corepack pnpm --version
-corepack pnpm install --frozen-lockfile
+pnpm --version
+pnpm install --frozen-lockfile
 
 # 2. 前端测试、类型检查与生产构建
-corepack pnpm test
-corepack pnpm build
+pnpm test
+pnpm build
 
 # 3. Rust 单元测试、Clippy 静态检查与格式校验
 cargo test --locked --manifest-path src-tauri/Cargo.toml
@@ -173,11 +173,11 @@ python3 scripts/check-error-codes.py
 python3 -m unittest discover -s scripts -p "test_*.py"
 
 # 5. 重新生成全套应用与托盘图标 / 启动桌面开发模式
-corepack pnpm icons
-corepack pnpm tauri dev
+pnpm icons
+pnpm tauri dev
 ```
 
-- `corepack pnpm dev` 仅启动带「预览」标识的浏览器模拟界面，不读写任何真实客户端凭据。
+- `pnpm dev` 仅启动带「预览」标识的浏览器模拟界面，不读写任何真实客户端凭据。
 - 桌面构建产物支持 `--smoke-test <绝对输出路径>` 参数：在独立临时目录中端到端验证 WebView、托盘、账号切换、共享网关鉴权、配置事务写入与退出恢复，全程不触碰本机真实客户端目录。
 
 ---
@@ -188,7 +188,7 @@ corepack pnpm tauri dev
 - **关键兼容约束**：
   - `tauri` 运行时保持 `2.11` 系列，宏、构建与代码生成组件保持兼容的 `2.6` 系列，升级主包时成组评估。
   - `yaml-edit` 固定 `0.3.2`，保障 DSH 空数组、注释及外部修改保护往返测试稳定通过。
-- **漏洞审计**：执行 `cargo audit --file src-tauri/Cargo.lock` 与 `corepack pnpm audit`。当前 `Cargo.lock` 中仅存 5 条由 Tauri Linux GTK 3 / D-Bus 单实例链路引入的上游间接警告（`proc-macro-error 1.0.4` / `RUSTSEC-2024-0370`、`glib 0.18.5` / `RUSTSEC-2024-0429`、`zvariant 5.15.1` / `RUSTSEC-2026-0370`、`zbus_names 4.3.5` / `RUSTSEC-2026-0371`、`zvariant_derive 5.15.1` / `RUSTSEC-2026-0372`），均不在 macOS 与 Windows 目标依赖树中，遵循不添加忽略列表隐藏警告的原则保留可见并随上游迁移更新。
+- **漏洞审计**：执行 `cargo audit --file src-tauri/Cargo.lock` 与 `pnpm audit`。当前 `Cargo.lock` 中仅存 5 条由 Tauri Linux GTK 3 / D-Bus 单实例链路引入的上游间接警告（`proc-macro-error 1.0.4` / `RUSTSEC-2024-0370`、`glib 0.18.5` / `RUSTSEC-2024-0429`、`zvariant 5.15.1` / `RUSTSEC-2026-0370`、`zbus_names 4.3.5` / `RUSTSEC-2026-0371`、`zvariant_derive 5.15.1` / `RUSTSEC-2026-0372`），均不在 macOS 与 Windows 目标依赖树中，遵循不添加忽略列表隐藏警告的原则保留可见并随上游迁移更新。
 
 ---
 
