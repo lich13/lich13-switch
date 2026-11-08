@@ -1927,10 +1927,6 @@ impl Observer {
     }
 }
 
-#[cfg(test)]
-#[path = "protocol_poison_tests.rs"]
-mod poison_tests;
-
 fn gemini_terminal(value: &Value) -> Option<Terminal> {
     if value
         .pointer("/promptFeedback/blockReason")

@@ -12,17 +12,27 @@ const RETIRED_STATISTICS: &[&str] = &[
 ];
 
 fn legacy_gateway(data: &Path) -> Vec<u8> {
-    let value = json!({
-        "schema": 1,
-        "providers": [{
-            "id": "fixture-provider",
-            "name": "fixture provider",
-            "proxyId": "fixture-proxy",
-            "futureProviderField": {"keep": true}
-        }],
-        "proxies": [{"id": "fixture-proxy", "label": "fixture-only"}],
-        "futureRootField": {"keep": true}
-    });
+    let mut value = serde_json::to_value(crate::gateway::Store::default()).unwrap();
+    value.as_object_mut().unwrap().extend(
+        json!({
+            "schema": 1,
+            "providers": [{
+                "id": "fixture-provider",
+                "name": "fixture provider",
+                "baseUrl": "https://example.invalid/v1",
+                "token": "fixture-token",
+                "version": "fixture-version",
+                "queued": false,
+                "proxyId": "fixture-proxy",
+                "futureProviderField": {"keep": true}
+            }],
+            "proxies": [{"id": "fixture-proxy", "label": "fixture-only"}],
+            "futureRootField": {"keep": true}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
     let bytes = serde_json::to_vec_pretty(&value).unwrap();
     fs::write(data.join("gateway.json"), &bytes).unwrap();
     bytes
@@ -146,7 +156,10 @@ fn corrupt_or_incomplete_recovery_does_not_delete_legacy_proxy_state() {
 fn retired_grok_native_snapshot_is_removed_without_touching_current_connection() {
     let data = tempfile::tempdir().unwrap();
     let path = data.path().join("gateway.json");
-    let old = json!({"schema": 2, "providers": [], "grokNative": {"before": "fixture-private-history", "environment": {}}, "grokApiModel": "grok-fixture", "future": true});
+    let mut old = serde_json::to_value(crate::gateway::Store::default()).unwrap();
+    old["grokNative"] = json!({"before":"fixture-private-history","environment":{}});
+    old["grokApiModel"] = "grok-fixture".into();
+    old["future"] = true.into();
     fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     gateway(data.path()).unwrap();
     let bytes = fs::read(&path).unwrap();

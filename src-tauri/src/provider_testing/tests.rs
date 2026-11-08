@@ -2941,7 +2941,6 @@ fn replace_modeltrace_resource(service: &Service) {
         provenance: Some(json!({
             "core_blob": manifest["files"]["core"]["gitBlob"],
             "challenge_blob": manifest["files"]["challenge"]["gitBlob"],
-            "stored_sha256": compat::sha256(bank.to_string()),
         })),
         data: Some(bank),
         version: Some(version),

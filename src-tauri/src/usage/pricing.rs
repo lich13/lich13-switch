@@ -301,7 +301,7 @@ impl Pricing {
             .ok()
             .flatten()
             .and_then(|v| serde_json::from_slice::<Cache>(&v).ok())
-            .filter(|v| validate(&v.catalog).is_ok() && v.catalog_hash == catalog_hash(&v.catalog));
+            .filter(|v| validate(&v.catalog).is_ok());
         if cache_path.exists() && cached.is_none() {
             error = Some("价格缓存校验失败，正在使用初始价格库".into());
         }

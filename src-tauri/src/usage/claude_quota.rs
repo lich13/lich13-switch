@@ -199,7 +199,6 @@ impl Service {
         {
             return saved.view.clone();
         }
-        let now = super::model::now();
         let auth = match auth.await {
             Ok(auth) => auth,
             Err(error) => {
@@ -210,6 +209,7 @@ impl Service {
                 };
             }
         };
+        let now = super::model::now();
         let fingerprint = storage::digest(auth.token.as_bytes());
         if let Some(saved) = cache
             .as_ref()
@@ -239,19 +239,32 @@ impl Service {
                 .map_err(|_| fail("Claude 额度查询失败，请重试"))?;
             let status = response.status();
             if status.as_u16() == 429 {
-                let delay = response
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(300)
-                    .max(1);
+                let received = super::model::now();
                 retry_at = Some(
-                    now.saturating_add(
-                        i64::try_from(delay)
-                            .unwrap_or(i64::MAX)
-                            .saturating_mul(1000),
-                    ),
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| {
+                            v.parse::<u64>()
+                                .ok()
+                                .map(|seconds| {
+                                    received.saturating_add(
+                                        i64::try_from(seconds)
+                                            .unwrap_or(i64::MAX)
+                                            .saturating_mul(1000),
+                                    )
+                                })
+                                .or_else(|| {
+                                    httpdate::parse_http_date(v)
+                                        .ok()?
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .ok()
+                                        .and_then(|time| i64::try_from(time.as_millis()).ok())
+                                })
+                        })
+                        .unwrap_or_else(|| received.saturating_add(300_000))
+                        .max(received.saturating_add(1000)),
                 );
                 return Err(fail("Claude 额度查询受限，请稍后重试"));
             }
@@ -341,6 +354,13 @@ mod tests {
         let counter = calls.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let retry_date = std::time::SystemTime::now() + Duration::from_secs(120);
+        let date_at = (retry_date
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            * 1000) as i64;
+        let date_header = format!("Retry-After: {}\r\n", httpdate::fmt_http_date(retry_date));
         let task = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -354,7 +374,7 @@ mod tests {
                     1 => ("429 Too Many Requests", "Retry-After: 60\r\n", "{}".into()),
                     3 => ("401 Unauthorized", "", "{}".into()),
                     4 => ("403 Forbidden", "", "{}".into()),
-                    5 => ("429 Too Many Requests", "Retry-After: Tue, 01 Jan 2030 00:00:00 GMT\r\n", "{}".into()),
+                    5 => ("429 Too Many Requests", date_header.as_str(), "{}".into()),
                     _ => ("200 OK", "", json!({"five_hour":{"utilization":30.0,"resets_at":null},"seven_day":{"utilization":40.0,"resets_at":null}}).to_string()),
                 };
                 stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
@@ -446,7 +466,6 @@ mod tests {
             })
             .await;
         assert!(denied.error.unwrap().contains("权限"));
-        let before = super::super::model::now();
         let date_limited = service
             .get_at(home.clone(), true, &endpoint, async {
                 file_credentials(&home)
@@ -461,7 +480,7 @@ mod tests {
             .unwrap()
             .retry_at
             .unwrap();
-        assert!((before + 300_000..=super::super::model::now() + 300_000).contains(&retry_at));
+        assert_eq!(retry_at, date_at);
         std::fs::remove_file(home.join(".credentials.json")).unwrap();
         service.cache.lock().await.as_mut().unwrap().at -= Duration::from_secs(301);
         let absent = service

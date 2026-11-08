@@ -481,7 +481,14 @@ fn selection(c: &Connection, f: &Filter) -> (String, Vec<Value>) {
     } else {
         ("", "")
     };
-    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.*{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
+    // Native detail rows derive measured output from the generation value already
+    // materialized here. Historical rollups retain their stored weighted totals.
+    let metrics = if super::storage_v12::active(c) {
+        "x.kind,x.owner,x.ordinal,x.provider,x.model,x.requests,x.attempts,x.success,x.status_known,x.sessions,x.input,x.output,x.cache_read,x.cache_write,x.cache_write_5m,x.cache_write_1h,x.image_input,x.image_output,x.audio_input,x.audio_output,x.cost,x.unpriced,x.duration_ms,CASE WHEN x.kind=1 THEN (SELECT d.measured_outputs FROM usage_daily_metrics d WHERE d.kind=1 AND d.owner=x.owner AND d.ordinal=x.ordinal) ELSE 0 END measured_outputs,x.generation_ms,x.first_token_sum_ms,x.first_token_samples,x.cache_read_eligible,x.cache_input_eligible"
+    } else {
+        "x.*"
+    };
+    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,{metrics}{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
     (cte, args)
 }
 fn grok_model_filter(f: &Filter) -> Option<&str> {
@@ -506,6 +513,11 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
             .replace("sum(sessions)", "sum(matched_rounds)")
     } else {
         SUM.to_owned()
+    };
+    let sum = if super::storage_v12::active(c) {
+        sum.replace("sum(measured_outputs)", "sum(CASE WHEN kind=1 THEN measured_outputs WHEN requests>0 AND output>0 AND generation_ms>0 THEN output ELSE 0 END)")
+    } else {
+        sum
     };
     let total_sum = if grok_model_filter(f).is_some() {
         sum.clone()

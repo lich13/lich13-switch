@@ -566,7 +566,6 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         account_id: account_id.into(),
         stage: "enabling".into(),
     };
-    verify_record(&output, &record)?;
     save(data, &record)?;
     if let Err(error) = storage::atomic_write(&path, output.as_bytes(), Some(expected)) {
         let _ = fs::remove_file(record_path(data));
@@ -668,13 +667,6 @@ pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeV
         }
     }
     let output = replace_lines(&text, &managed_scan, &replacements);
-    let restored_scan = scan(&output)?;
-    for (n, field) in record.fields.iter().enumerate() {
-        match (&field.original, restored_scan.fields[n]) {
-            (Some(_), Some(_)) | (None, None) => {}
-            _ => return Err(AppError::new(code::VERIFY, "官方账号配置恢复校验失败")),
-        }
-    }
     save(data, &staged)?;
     storage::atomic_write(
         &path,

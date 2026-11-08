@@ -179,12 +179,14 @@ pub(super) fn require_chat(protocol: Protocol) -> Result<()> {
 }
 
 /// Normalize old saved catalogs while keeping official capabilities authoritative.
-pub(crate) fn normalize(model: &mut serde_json::Value) {
+pub(crate) fn normalize(model: &mut serde_json::Value) -> bool {
     let Some(fields) = model.as_object_mut() else {
-        return;
+        return false;
     };
+    let mut changed = false;
     if let Some(old) = fields.remove("inputModalities") {
         fields.entry("input").or_insert(old);
+        changed = true;
     }
     if !fields.contains_key("input") {
         let input = if fields.get("id").and_then(|v| v.as_str()) == Some(FLASH) {
@@ -193,11 +195,17 @@ pub(crate) fn normalize(model: &mut serde_json::Value) {
             serde_json::json!(["text"])
         };
         fields.insert("input".into(), input);
+        changed = true;
     }
-    if matches!(fields.get("id").and_then(|v| v.as_str()), Some(FLASH | PRO)) {
+    if matches!(fields.get("id").and_then(|v| v.as_str()), Some(FLASH | PRO))
+        && !fields.contains_key("reasoningEfforts")
+    {
         // The managed provider has no built-in catalog to inherit reasoning from.
-        fields.entry("reasoningEfforts").or_insert_with(
-            || serde_json::json!({"off":"none", "low":"low", "high":"high", "max":"max"}),
+        fields.insert(
+            "reasoningEfforts".into(),
+            serde_json::json!({"off":"none", "low":"low", "high":"high", "max":"max"}),
         );
+        changed = true;
     }
+    changed
 }

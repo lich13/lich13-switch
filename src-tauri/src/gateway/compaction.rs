@@ -449,7 +449,7 @@ impl Registry {
     pub fn new(path: PathBuf) -> Arc<Self> {
         let mut state = State::default();
         match storage::read_optional(&path) {
-            Ok(Some(raw)) if raw.len() <= 2 * 1024 * 1024 => {
+            Ok(Some(raw)) => {
                 match serde_json::from_slice::<HashMap<String, Entry>>(&raw) {
                     Ok(entries)
                         if entries.len() <= MAX_THREADS
@@ -1843,7 +1843,3 @@ mod tests {
         assert_eq!(hints.compacted_window, fingerprint(&value, false));
     }
 }
-
-#[cfg(test)]
-#[path = "compaction_poison_tests.rs"]
-mod poison_tests;

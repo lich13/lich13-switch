@@ -189,7 +189,6 @@ pub struct Core {
     data_dir: PathBuf,
     store: Store,
     auth_sync: Option<AuthSync>,
-    checked_auth: Option<(String, String)>,
     auth_cache: crate::auth_cache::Cache<PolledAuth>,
     config_cache: crate::auth_cache::Cache<PolledConfig>,
     official_cache: crate::official::ViewCache,
@@ -591,7 +590,6 @@ impl Core {
             data_dir,
             store,
             auth_sync: None,
-            checked_auth: None,
             auth_cache: Default::default(),
             config_cache: Default::default(),
             official_cache: Default::default(),
@@ -724,7 +722,6 @@ impl Core {
                 self.store.preferences.codex_home.clone(),
                 storage::digest(raw.as_bytes()),
             );
-            self.checked_auth = None;
             self.persist()?;
             self.set_sync("updated", Some(id), "当前账号凭据已更新");
         }
@@ -840,7 +837,6 @@ impl Core {
             }
             return Err(error);
         }
-        self.checked_auth = None;
         self.set_sync("updated", Some(target.id.clone()), "指定账号凭据已更新");
         Ok(target.current)
     }
@@ -924,7 +920,6 @@ impl Core {
                     let _ = std::fs::File::open(parent).and_then(|f| f.sync_all());
                 }
                 self.auth_cache.clear();
-                self.checked_auth = None;
                 self.store.observed_auth_revisions.insert(
                     self.store.preferences.codex_home.clone(),
                     storage::revision(None),
@@ -954,7 +949,7 @@ impl Core {
         }
         let managed = crate::gateway::manages_auth(&self.data_dir, &self.home());
         let info = if managed { None } else { polled.info.clone() };
-        let matched = match info
+        let mut matched = match info
             .as_ref()
             .and_then(|i| i.as_ref().ok())
             .map(|info| self.matching_profile(info))
@@ -977,10 +972,7 @@ impl Core {
             .as_deref()
             .and_then(|b| std::str::from_utf8(b).ok())
             .is_some_and(|_| {
-                self.store
-                    .profiles
-                    .iter()
-                    .enumerate().find(|(index, _)| Some(*index) == matched).map(|(_, p)| p)
+                matched.and_then(|index| self.store.profiles.get(index))
                     .is_some_and(|p| matches!((incoming_times.1, credential_times(&p.auth).1), (Some(a), Some(b)) if a > b))
             });
         let changed = normalization_error.is_none()
@@ -988,20 +980,7 @@ impl Core {
             && !optional_auth
             && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
                 || newer_token);
-        let mut accounts_changed = false;
         if changed {
-            // A valid intermediate JSON document can still be part of a non-atomic write.
-            if self.checked_auth.as_ref() != Some(&(root.clone(), auth_revision.clone())) {
-                std::thread::sleep(std::time::Duration::from_millis(60));
-                if storage::read_optional(&self.home().join("auth.json"))? != *auth {
-                    self.auth_cache.clear();
-                    return Err(AppError::new(
-                        code::AUTH_PENDING,
-                        "账号文件正在写入，稍后自动重试",
-                    ));
-                }
-                self.checked_auth = Some((root.clone(), auth_revision.clone()));
-            }
             if let (Some(Ok(info)), Some(raw)) = (
                 &info,
                 auth.as_deref().and_then(|b| std::str::from_utf8(b).ok()),
@@ -1017,7 +996,6 @@ impl Core {
                         )
                     } else if raw != profile.auth {
                         account_identity::replace_profile(profile, raw)?;
-                        accounts_changed = true;
                         ("updated", Some(profile.id.clone()), "账号凭据已更新")
                     } else {
                         ("synced", Some(profile.id.clone()), "")
@@ -1042,7 +1020,7 @@ impl Core {
                         exchange: BTreeMap::new(),
                         extensions: BTreeMap::new(),
                     });
-                    accounts_changed = true;
+                    matched = Some(self.store.profiles.len() - 1);
                     ("added", Some(id), "新账号已自动加入切换列表")
                 };
                 self.store
@@ -1079,14 +1057,7 @@ impl Core {
             {
                 self.set_sync("synced", None, "");
             }
-            if let Some(profile) = self
-                .store
-                .profiles
-                .iter()
-                .enumerate()
-                .find(|(index, _)| Some(*index) == matched)
-                .map(|(_, p)| p)
-            {
+            if let Some(profile) = matched.and_then(|index| self.store.profiles.get(index)) {
                 if auth
                     .as_deref()
                     .and_then(|b| std::str::from_utf8(b).ok())
@@ -1102,15 +1073,6 @@ impl Core {
                 }
             }
         }
-        let matched = if accounts_changed {
-            info.as_ref()
-                .and_then(|i| i.as_ref().ok())
-                .map(|info| self.matching_profile(info))
-                .transpose()?
-                .flatten()
-        } else {
-            matched
-        };
         let accounts: Vec<_> = self
             .store
             .profiles

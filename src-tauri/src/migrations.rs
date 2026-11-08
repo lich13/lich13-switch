@@ -189,27 +189,12 @@ pub fn before_services(data: &Path) -> Result<()> {
     crate::cleanup::retired_statistics(data)
 }
 
-/// v0.9.0: settle recovery before removing retired proxy fields. Called both
-/// before loading a client gateway and by its existing recovery/retry path.
-pub fn gateway(data: &Path) -> Result<()> {
+/// Recover interrupted transactions before normalizing and loading their final store.
+pub(crate) fn gateway(data: &Path) -> Result<(crate::gateway::Store, String)> {
     crate::gateway::recover_for_migration(data)?;
-    crate::gateway::retire_legacy_proxy(data)?;
-    let path = data.join("gateway.json");
-    if let Some(raw) = crate::storage::read_optional(&path)? {
-        let mut value: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| {
-            crate::storage::AppError::new(crate::errors::code::STORE, "网关存储无法读取")
-        })?;
-        if value
-            .as_object_mut()
-            .is_some_and(|v| v.remove("grokNative").is_some())
-        {
-            let next = serde_json::to_vec_pretty(&value).map_err(|_| {
-                crate::storage::AppError::new(crate::errors::code::STORE, "网关存储无法保存")
-            })?;
-            crate::storage::atomic_write(&path, &next, Some(&crate::storage::digest(&raw)))?;
-        }
-    }
-    Ok(())
+    let loaded = crate::gateway::Store::load_migrated(&data.join("gateway.json"))?;
+    crate::gateway::cleanup_legacy_proxy(data)?;
+    Ok(loaded)
 }
 
 /// Product rename and old startup preferences: native state must be available,
@@ -222,7 +207,8 @@ pub fn login_items(service: &startup::Service) -> Result<()> {
 mod tests;
 
 /// v0.25.18: convert the two original slots to stable official model IDs.
-pub(crate) fn dsh_model_mappings(value: &mut serde_json::Value) {
+pub(crate) fn dsh_model_mappings(value: &mut serde_json::Value) -> bool {
+    let mut changed = false;
     if let Some(providers) = value.get_mut("dshModels").and_then(|v| v.as_object_mut()) {
         for mapping in providers.values_mut().filter_map(|v| v.as_object_mut()) {
             for (old, id) in [
@@ -231,19 +217,22 @@ pub(crate) fn dsh_model_mappings(value: &mut serde_json::Value) {
             ] {
                 if let Some(model) = mapping.remove(old) {
                     mapping.entry(id).or_insert(model);
+                    changed = true;
                 }
             }
         }
     }
+    changed
 }
 
 /// Missing retryBudgetSeconds identifies the old, ineffective totalSeconds setting.
 /// No separate migration marker: once persisted, explicit user values remain intact.
-pub(crate) fn gateway_wait_budget(value: &mut serde_json::Value) {
+pub(crate) fn gateway_wait_budget(value: &mut serde_json::Value) -> bool {
     let Some(settings) = value.get_mut("settings").and_then(|v| v.as_object_mut()) else {
-        return;
+        return false;
     };
-    if !settings.contains_key("retryBudgetSeconds") {
+    let changed = !settings.contains_key("retryBudgetSeconds");
+    if changed {
         for key in [
             "connectSeconds",
             "firstByteSeconds",
@@ -255,35 +244,40 @@ pub(crate) fn gateway_wait_budget(value: &mut serde_json::Value) {
             settings.insert(key.into(), 300.into());
         }
     }
-    settings.remove("totalSeconds");
+    settings.remove("totalSeconds").is_some() || changed
+}
+
+/// In-memory compatibility shared by ordinary loads and persistent upgrades.
+pub(crate) fn gateway_fields(value: &mut serde_json::Value) -> bool {
+    let mut changed = gateway_wait_budget(value);
+    changed |= dsh_model_mappings(value);
+    if let Some(models) = value.get_mut("dshCatalog").and_then(|v| v.as_array_mut()) {
+        for model in models {
+            changed |= crate::gateway::dsh::models::normalize(model);
+        }
+    }
+    changed
 }
 
 /// Compact persistent state only after all interrupted file transactions finish.
-pub(crate) fn gateway_state_after_recovery(data: &Path) -> Result<()> {
-    let path = data.join("gateway.json");
-    let Some(raw) = crate::storage::read_optional(&path)? else {
-        return Ok(());
-    };
-    let invalid = || {
-        crate::storage::AppError::new(crate::errors::code::STORE, "网关存储无法迁移，已保留原文件")
-    };
-    let mut value: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| invalid())?;
-    let before = value.clone();
-    gateway_wait_budget(&mut value);
-    dsh_model_mappings(&mut value);
-    if let Some(models) = value.get_mut("dshCatalog").and_then(|v| v.as_array_mut()) {
-        for model in models {
-            crate::gateway::dsh::models::normalize(model);
-        }
-    }
+pub(crate) fn gateway_state_after_recovery(value: &mut serde_json::Value) -> Result<bool> {
+    let mut changed = crate::gateway::normalize_legacy_proxy(value)?;
+    changed |= value
+        .as_object_mut()
+        .is_some_and(|v| v.remove("grokNative").is_some());
+    changed |= gateway_fields(value);
     if let Some(snapshot) = value.get_mut("dsh").filter(|v| !v.is_null()) {
+        let invalid = || {
+            crate::storage::AppError::new(
+                crate::errors::code::STORE,
+                "网关存储无法迁移，已保留原文件",
+            )
+        };
         let parsed: crate::gateway::dsh::Snapshot =
             serde_json::from_value(snapshot.clone()).map_err(|_| invalid())?;
-        *snapshot = serde_json::to_value(parsed).map_err(|_| invalid())?;
+        let compact = serde_json::to_value(parsed).map_err(|_| invalid())?;
+        changed |= *snapshot != compact;
+        *snapshot = compact;
     }
-    if value != before {
-        let next = serde_json::to_vec_pretty(&value).map_err(|_| invalid())?;
-        crate::storage::atomic_write(&path, &next, Some(&crate::storage::digest(&raw)))?;
-    }
-    Ok(())
+    Ok(changed)
 }

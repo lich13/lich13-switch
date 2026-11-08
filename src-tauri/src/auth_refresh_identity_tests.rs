@@ -117,7 +117,6 @@ struct Snapshot {
     config: Option<Vec<u8>>,
     previous_auth: Option<Vec<u8>>,
     sync: Option<AuthSync>,
-    checked_auth: Option<(String, String)>,
 }
 
 fn snapshot(core: &Core) -> Snapshot {
@@ -128,7 +127,6 @@ fn snapshot(core: &Core) -> Snapshot {
         config: storage::read_optional(&core.home().join("config.toml")).unwrap(),
         previous_auth: storage::read_optional(&core.data_dir.join("previous-auth.json")).unwrap(),
         sync: core.auth_sync.clone(),
-        checked_auth: core.checked_auth.clone(),
     }
 }
 
@@ -1023,7 +1021,6 @@ fn a_failed_vault_write_rolls_back_memory_and_current_auth_for_either_target_kin
             before.previous_auth
         );
         assert_eq!(core.auth_sync, before.sync);
-        assert_eq!(core.checked_auth, before.checked_auth);
         std::fs::remove_dir(&vault).unwrap();
         std::fs::write(&vault, before.vault.as_ref().unwrap()).unwrap();
         assert_eq!(snapshot(&core), before);

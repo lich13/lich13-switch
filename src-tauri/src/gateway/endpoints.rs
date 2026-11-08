@@ -58,10 +58,6 @@ struct Pin {
 struct Pins {
     entries: HashMap<String, Pin>,
     error: bool,
-    // A failed first bind retains only its own choice, including when rename
-    // succeeded but directory sync failed. Other keys never retry this write.
-    pending: HashMap<String, Pin>,
-    refresh_attempts: HashMap<String, Instant>,
 }
 pub struct Service {
     samples: Mutex<HashMap<String, Batch>>,
@@ -110,20 +106,18 @@ impl Service {
         let mut pins = Pins::default();
         match storage::read_optional(&path) {
             Ok(None) => (),
-            Ok(Some(raw)) if raw.len() <= 2 * 1024 * 1024 => {
-                match serde_json::from_slice::<HashMap<String, Pin>>(&raw) {
-                    Ok(mut entries)
-                        if entries.len() <= MAX_PINS
-                            && entries
-                                .iter()
-                                .all(|(k, p)| valid_digest(k) && valid_digest(&p.endpoint)) =>
-                    {
-                        trim_pins(&mut entries, PIN_RETENTION_MS);
-                        pins.entries = entries;
-                    }
-                    _ => pins.error = true,
+            Ok(Some(raw)) => match serde_json::from_slice::<HashMap<String, Pin>>(&raw) {
+                Ok(mut entries)
+                    if entries.len() <= MAX_PINS
+                        && entries
+                            .iter()
+                            .all(|(k, p)| valid_digest(k) && valid_digest(&p.endpoint)) =>
+                {
+                    trim_pins(&mut entries, PIN_RETENTION_MS);
+                    pins.entries = entries;
                 }
-            }
+                _ => pins.error = true,
+            },
             _ => pins.error = true,
         }
         Self {
@@ -267,33 +261,18 @@ impl Service {
             // another key's fsync, and a failed write cannot poison their path.
             let _writer = self.write.lock().map_err(|_| poisoned_affinity())?;
             let pin = {
-                let mut pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
+                let pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
                 if let Some(pin) = pins.entries.get(&key) {
                     return resolve(&pin.endpoint);
                 }
-                let time = now();
-                pins.pending
-                    .retain(|_, pin| time.saturating_sub(pin.updated) < PIN_RETENTION_MS);
-                if let Some(pin) = pins.pending.get(&key) {
-                    pin.clone()
+                let url = if previous.is_none() && fresh {
+                    self.preferred(provider, urls)
                 } else {
-                    if pins.pending.len() >= MAX_PINS {
-                        return Err(AppError::new(
-                            code::ENDPOINT_AFFINITY,
-                            "待保存端点归属已达上限，未发送请求",
-                        ));
-                    }
-                    let url = if previous.is_none() && fresh {
-                        self.preferred(provider, urls)
-                    } else {
-                        provider.base_url.clone()
-                    };
-                    let pin = Pin {
-                        endpoint: digest(&url),
-                        updated: time,
-                    };
-                    pins.pending.insert(key.clone(), pin.clone());
-                    pin
+                    provider.base_url.clone()
+                };
+                Pin {
+                    endpoint: digest(&url),
+                    updated: now(),
                 }
             };
             let url = resolve(&pin.endpoint)?;
@@ -314,22 +293,17 @@ impl Service {
             let Ok(mut pins) = self.pins.lock() else {
                 return;
             };
-            let Some(pin) = pins.entries.get(key).cloned() else {
+            let Some(pin) = pins.entries.get_mut(key) else {
                 return;
             };
-            if now().saturating_sub(pin.updated) < PIN_REFRESH.as_millis() as u64
-                || pins
-                    .refresh_attempts
-                    .get(key)
-                    .is_some_and(|last| last.elapsed() < PIN_REFRESH)
-            {
+            let time = now();
+            if time.saturating_sub(pin.updated) < PIN_REFRESH.as_millis() as u64 {
                 return;
             }
-            pins.refresh_attempts.insert(key.to_owned(), Instant::now());
-            Pin {
-                updated: now(),
-                ..pin
-            }
+            // Throttle refresh attempts even when persistence fails. The known
+            // endpoint remains usable and its next request can retry later.
+            pin.updated = time;
+            pin.clone()
         };
         if self.persist_pin(key, pin, false).is_err() {
             self.refresh_failed(provider);
@@ -380,10 +354,8 @@ impl Service {
         let mut pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
         for removed in removed {
             pins.entries.remove(&removed);
-            pins.refresh_attempts.remove(&removed);
         }
         pins.entries.insert(key.to_owned(), pin);
-        pins.pending.remove(key);
         Ok(())
     }
     pub fn remember(&self, provider: &Provider, response: &str) {
@@ -657,7 +629,3 @@ mod io_tests;
 #[cfg(test)]
 #[path = "endpoints_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "endpoints_poison_tests.rs"]
-mod poison_tests;

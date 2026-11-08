@@ -92,8 +92,12 @@ fn command(home: &Path) -> Result<Command> {
     let mut cmd = windows_command(&path)?;
     #[cfg(not(windows))]
     let mut cmd = Command::new(path);
-    cmd.env("CLAUDE_CONFIG_DIR", home)
-        .current_dir(home)
+    if dirs::home_dir().is_some_and(|user| home == user.join(".claude")) {
+        cmd.env_remove("CLAUDE_CONFIG_DIR");
+    } else {
+        cmd.env("CLAUDE_CONFIG_DIR", home);
+    }
+    cmd.current_dir(home)
         .stdin(Stdio::null())
         .kill_on_drop(true);
     // Only this explicitly launched login process gets a clean connection env.

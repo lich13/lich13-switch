@@ -39,7 +39,7 @@ impl Retention {
         };
         let saved: Vec<Saved> = match storage::read_optional(path) {
             Ok(None) => return state,
-            Ok(Some(raw)) if raw.len() <= 4 * 1024 * 1024 => match serde_json::from_slice(&raw) {
+            Ok(Some(raw)) => match serde_json::from_slice(&raw) {
                 Ok(v) => v,
                 Err(_) => {
                     state.error = true;

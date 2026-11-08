@@ -344,7 +344,7 @@ impl Replay {
                         let f = storage::private_tempfile(dir)?;
                         let mut file = tokio::fs::File::from_std(f.reopen()?);
                         file.write_all(&memory).await?;
-                        memory.clear();
+                        memory = BytesMut::new();
                         writer = Some(file);
                         disk = Some(Arc::new(f));
                     }

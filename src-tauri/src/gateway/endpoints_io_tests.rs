@@ -94,6 +94,36 @@ fn failed_pin_write_for_another_thread_does_not_block_existing_selection() {
         .select(&provider, &urls, Some(existing_thread), None, false)
         .expect("another thread's failed pin write must not block an existing pin");
     assert_eq!(selected, primary);
+    // A failed refresh preserves the known endpoint and waits before retrying.
+    let key = pin_key(&provider, "thread", existing_thread);
+    service
+        .pins
+        .lock()
+        .unwrap()
+        .entries
+        .get_mut(&key)
+        .unwrap()
+        .updated = now().saturating_sub(60_001);
+    let before_refresh = now();
+    assert_eq!(
+        service
+            .select(&provider, &urls, Some(existing_thread), None, false)
+            .unwrap(),
+        primary
+    );
+    let attempted = service.pins.lock().unwrap().entries[&key].updated;
+    assert!(attempted >= before_refresh);
+    assert_eq!(
+        service
+            .select(&provider, &urls, Some(existing_thread), None, false)
+            .unwrap(),
+        primary
+    );
+    assert_eq!(
+        service.pins.lock().unwrap().entries[&key].updated,
+        attempted
+    );
+    assert!(path.is_dir());
 }
 
 #[test]

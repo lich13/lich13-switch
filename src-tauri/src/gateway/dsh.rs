@@ -1152,8 +1152,7 @@ pub(super) fn commit_mapping(
 impl Gateway {
     fn recover_dsh_state(&self) -> Result<()> {
         if self.0.data.join(JOURNAL).exists() {
-            recover(&self.0.data)?;
-            let (store, revision) = super::model::Store::load(&self.0.data.join("gateway.json"))?;
+            let (store, revision) = crate::migrations::gateway(&self.0.data)?;
             let mut state = self.0.inner.lock().unwrap();
             self.replace_store(&mut state, store);
             state.revision = revision;

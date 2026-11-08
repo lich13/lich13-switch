@@ -82,6 +82,7 @@ fn stage_size_and_revision_conflicts_leave_existing_target_unchanged() {
     let conflict = atomic_write(&target, b"new target", Some("stale-version")).unwrap_err();
     assert_eq!(conflict.code, code::CONFLICT);
     assert_eq!(fs::read(&target).unwrap(), b"original target");
+    assert_only_fixture_files_remain(temp.path(), &["target.fixture"]);
 }
 
 #[test]
@@ -238,21 +239,6 @@ fn assert_only_fixture_files_remain(directory: &Path, expected: &[&str]) {
     let mut expected: Vec<String> = expected.iter().map(|name| (*name).to_owned()).collect();
     expected.sort();
     assert_eq!(names, expected, "unexpected temporary files remain");
-}
-
-#[test]
-fn atomic_write_expected_revision_conflict_keeps_old_file_and_cleans_staging_file() {
-    let temp = tempfile::tempdir().unwrap();
-    let target = temp.path().join("target.fixture");
-    fs::write(&target, b"current fixture bytes").unwrap();
-
-    let stale_revision = revision(Some(b"stale fixture bytes"));
-    let error =
-        atomic_write(&target, b"replacement fixture bytes", Some(&stale_revision)).unwrap_err();
-
-    assert_eq!(error.code, code::CONFLICT);
-    assert_eq!(fs::read(&target).unwrap(), b"current fixture bytes");
-    assert_only_fixture_files_remain(temp.path(), &["target.fixture"]);
 }
 
 #[cfg(windows)]

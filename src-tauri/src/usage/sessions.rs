@@ -403,14 +403,12 @@ pub fn sync(
     for path in paths {
         let key = safe_id(&format!("{client}:{}", path.to_string_lossy()));
         let saved_raw = if rebuild { None } else { store.cursor(&key)? };
+        let saved = saved_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
+            .filter(|c| c.generation == generation);
         if !rebuild && !store.requires_complete_history() {
-            if let (Ok(st), Some(c)) = (
-                std::fs::metadata(&path),
-                saved_raw
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
-                    .filter(|c| c.generation == generation),
-            ) {
+            if let (Ok(st), Some(c)) = (std::fs::metadata(&path), saved.as_ref()) {
                 let modified = file_modified(&st);
                 if c.complete
                     && !modified.is_empty()
@@ -433,15 +431,7 @@ pub fn sync(
             let file_len = file_meta.len();
             let modified = file_modified(&file_meta);
             let id = identity_meta(&file_meta);
-            let mut c = if rebuild {
-                Cursor::default()
-            } else {
-                saved_raw
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
-                    .filter(|c| c.generation == generation)
-                    .unwrap_or_default()
-            };
+            let mut c = saved.unwrap_or_default();
             let mut verified_tail = None;
             let valid_prefix = c.identity == id && file_len >= c.offset && {
                 let digest = tail(&mut file, c.offset)?;

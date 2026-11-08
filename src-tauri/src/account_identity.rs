@@ -252,7 +252,6 @@ impl Core {
                 return Err(error);
             }
             self.store = next;
-            self.checked_auth = None;
         }
         self.normalization_revision.replace(None);
         Ok(())

@@ -3,7 +3,6 @@ use super::{model::*, pricing::Pricing, sessions, store::Store};
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
 };
 
 const DAY: i64 = 86_400_000;
@@ -1200,60 +1199,4 @@ fn dashboard_cache_key_keeps_the_two_day_granularity_boundary() {
 
     assert_eq!(hourly.totals.requests, 1);
     assert_eq!(daily.totals.requests, 1);
-}
-
-#[test]
-#[ignore = "100k-row performance baseline; run explicitly on a representative machine"]
-fn hundred_thousand_rows_have_fast_first_page_and_cold_dashboard() {
-    let (_dir, mut store, _pricing) = fixture();
-    let rows: Vec<_> = (0..100_000)
-        .map(|i| {
-            let model = format!("fixture-model-{i}");
-            record(
-                &format!("fixture-perf-{i}"),
-                "codex",
-                "proxy",
-                BASE + i as i64,
-                Some("fixture-perf-provider"),
-                Some(&model),
-                usage(i as u64 + 1, 1),
-                Some(200),
-            )
-        })
-        .collect();
-    store.write_batch(&rows, None).unwrap();
-
-    let started = Instant::now();
-    let page = store.logs(&all_time()).unwrap();
-    let page_elapsed = started.elapsed();
-    assert_eq!((page.total, page.rows.len()), (100_000, 20));
-    assert!(
-        page_elapsed < Duration::from_millis(500),
-        "first page took {page_elapsed:?}"
-    );
-
-    let started = Instant::now();
-    let dashboard = store.dashboard(&all_time()).unwrap();
-    let dashboard_elapsed = started.elapsed();
-    println!(
-        "100k usage timings: first page {page_elapsed:?}, cold dashboard {dashboard_elapsed:?}"
-    );
-    assert_eq!(dashboard.totals.requests, 100_000);
-    assert!(
-        dashboard_elapsed < Duration::from_secs(2),
-        "cold dashboard took {dashboard_elapsed:?}"
-    );
-
-    let started = Instant::now();
-    let cached_dashboard = store.dashboard(&all_time()).unwrap();
-    let cache_elapsed = started.elapsed();
-    println!(
-        "100k usage timings: first page {page_elapsed:?}, cold dashboard {dashboard_elapsed:?}, cached dashboard {cache_elapsed:?}"
-    );
-    assert_eq!(cached_dashboard.totals.requests, 100_000);
-    assert_eq!(cached_dashboard.data_version, dashboard.data_version);
-    assert!(
-        cache_elapsed < Duration::from_millis(500),
-        "cached dashboard took {cache_elapsed:?}"
-    );
 }

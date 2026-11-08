@@ -428,14 +428,27 @@ fn quota_site(base: &str) -> String {
 }
 impl Store {
     pub fn load(path: &Path) -> Result<(Self, String)> {
+        Self::load_inner(path, false)
+    }
+    pub(crate) fn load_migrated(path: &Path) -> Result<(Self, String)> {
+        Self::load_inner(path, true)
+    }
+    fn load_inner(path: &Path, migrate: bool) -> Result<(Self, String)> {
         let raw = storage::read_optional(path)?;
+        let invalid = || AppError::new(code::STORE, "网关存储无法读取，请保留原文件");
+        let mut next = None;
         let mut store: Self = match &raw {
             Some(raw) => {
-                let invalid = || AppError::new(code::STORE, "网关存储无法读取，请保留原文件");
                 let mut value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
-                crate::migrations::dsh_model_mappings(&mut value);
-                crate::migrations::gateway_wait_budget(&mut value);
+                let changed = if migrate {
+                    crate::migrations::gateway_state_after_recovery(&mut value)?
+                } else {
+                    crate::migrations::gateway_fields(&mut value)
+                };
+                if migrate && changed {
+                    next = Some(serde_json::to_vec_pretty(&value).map_err(|_| invalid())?);
+                }
                 serde_json::from_value(value).map_err(|_| invalid())?
             }
             None => Self::default(),
@@ -444,9 +457,6 @@ impl Store {
             return Err(AppError::new(code::STORE, "网关存储版本不受支持"));
         }
         store.phase_timeouts = true;
-        for model in &mut store.dsh_catalog {
-            super::dsh::models::normalize(model);
-        }
         store.settings.validate()?;
         store
             .quota_access_tokens
@@ -459,7 +469,14 @@ impl Store {
                 *values = endpoint_urls(&p.base_url, values, store.settings.port)?;
             }
         }
-        Ok((store, storage::revision(raw.as_deref())))
+        let revision = storage::revision(raw.as_deref());
+        let revision = if let Some(next) = next {
+            storage::atomic_write(path, &next, Some(&revision))?;
+            storage::digest(&next)
+        } else {
+            revision
+        };
+        Ok((store, revision))
     }
     pub fn persist(&self, path: &Path, expected: &str) -> Result<String> {
         let raw = serde_json::to_vec_pretty(self)

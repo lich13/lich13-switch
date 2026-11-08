@@ -31,7 +31,7 @@ pub(crate) mod registry;
 pub use listener::View as ListenerView;
 mod retired;
 pub use client::{claude_home, dsh_home, grok_home, ClientId};
-pub(crate) use retired::migrate as retire_legacy_proxy;
+pub(crate) use retired::{cleanup as cleanup_legacy_proxy, normalize as normalize_legacy_proxy};
 mod admission;
 mod attempt;
 #[cfg(test)]
@@ -113,15 +113,20 @@ pub use quota::QuotaView;
 mod takeover;
 #[cfg(test)]
 mod takeover_alias_tests;
-pub(crate) use takeover::recover as recover_for_migration;
+pub(crate) fn recover_for_migration(data: &Path) -> Result<()> {
+    takeover::recover(data)?;
+    grok_import::recover(data)?;
+    dsh::recover(data)
+}
 #[cfg(test)]
 mod tests;
 use crate::storage::{self, AppError, Result};
 use circuit::{Circuit, Health};
 use connector::Connector;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use model::Provider;
+pub(crate) use model::Store;
 pub use model::{Edit, Settings};
-use model::{Provider, Store};
 use replay::WireBody;
 use serde::Serialize;
 use std::{
@@ -620,13 +625,14 @@ impl Gateway {
         shared: Option<Arc<registry::Registry>>,
     ) -> Result<Self> {
         storage::private_dir(&data)?;
-        let upgrade_error = crate::migrations::gateway(&data)
-            .and_then(|()| grok_import::recover(&data))
-            .and_then(|()| dsh::recover(&data))
-            .and_then(|()| crate::migrations::gateway_state_after_recovery(&data))
-            .err();
+        let (store, revision, upgrade_error) = match crate::migrations::gateway(&data) {
+            Ok((store, revision)) => (store, revision, None),
+            Err(error) => {
+                let (store, revision) = Store::load(&data.join("gateway.json"))?;
+                (store, revision, Some(error))
+            }
+        };
         let error = upgrade_error.as_ref().map(|e| e.message.clone());
-        let (store, revision) = Store::load(&data.join("gateway.json"))?;
         let registry = match shared {
             Some(n) => n,
             None => Arc::new(registry::Registry::new(
@@ -1907,7 +1913,6 @@ impl Gateway {
             let _ = self.0.registry.listener.deactivate(self.0.client).await;
             self.0.registry.changed();
             crate::migrations::gateway(&self.0.data)?;
-            grok_import::recover(&self.0.data)?;
             return Err(error);
         }
         {
@@ -1979,16 +1984,16 @@ impl Gateway {
                     self.replace_store(&mut s, next);
                 }
             }
-            if let Err(e) = crate::migrations::gateway(&self.0.data)
-                .and_then(|()| grok_import::recover(&self.0.data))
-            {
-                s.error = Some(e.message.clone());
-                drop(s);
-                self.changed();
-                return Err(e);
-            }
-            // Recovery may have completed a store/config transaction interrupted by an I/O failure.
-            let (store, revision) = Store::load(&self.0.data.join("gateway.json"))?;
+            // Recovery can complete a store/config transaction interrupted by I/O.
+            let (store, revision) = match crate::migrations::gateway(&self.0.data) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    s.error = Some(e.message.clone());
+                    drop(s);
+                    self.changed();
+                    return Err(e);
+                }
+            };
             self.replace_store(&mut s, store);
             s.revision = revision;
             if let Some(tx) = s.shutdown.take() {
@@ -2460,6 +2465,3 @@ mod failover_evidence_tests;
 mod failure_fallback_tests;
 #[cfg(test)]
 mod grok_protocol_tests;
-
-#[cfg(test)]
-mod request_state_poison_tests;

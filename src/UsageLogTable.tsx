@@ -41,14 +41,6 @@ export function UsageLogControls({
 }) {
   const menu = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
-    const details = menu.current;
-    const scroller = details?.closest(".usage-page");
-    const fit = () => {
-      if (!details?.open) return;
-      const panel = details.querySelector<HTMLElement>(":scope > div");
-      if (panel)
-        panel.style.maxHeight = `${Math.max(0, Math.min(420, window.innerHeight - panel.getBoundingClientRect().top - 12))}px`;
-    };
     const outside = (event: PointerEvent) => {
       if (menu.current && !menu.current.contains(event.target as Node))
         menu.current.open = false;
@@ -59,24 +51,11 @@ export function UsageLogControls({
         menu.current.querySelector("summary")?.focus();
       }
     };
-    const watchPosition = () => {
-      window.removeEventListener("resize", fit);
-      scroller?.removeEventListener("scroll", fit);
-      if (details?.open) {
-        fit();
-        window.addEventListener("resize", fit);
-        scroller?.addEventListener("scroll", fit);
-      }
-    };
     document.addEventListener("pointerdown", outside);
     document.addEventListener("keydown", escape);
-    details?.addEventListener("toggle", watchPosition);
     return () => {
       document.removeEventListener("pointerdown", outside);
       document.removeEventListener("keydown", escape);
-      details?.removeEventListener("toggle", watchPosition);
-      window.removeEventListener("resize", fit);
-      scroller?.removeEventListener("scroll", fit);
     };
   }, []);
   const visibility = (id: LogColumn, visible: boolean) => {

@@ -223,18 +223,31 @@ pub fn view(data: &Path, home: &Path, user_home: &Path) -> Result<View> {
     let files = snapshot(home, user_home)?;
     let raw = storage::read_bounded(&directory(data).join(PROFILE), LIMIT)?;
     let p = decode_profile(raw.as_deref(), home)?;
-    let error = if directory(data).join(JOURNAL).exists() {
+    Ok(snapshot_view(
+        &files,
+        raw.as_deref(),
+        p.as_ref(),
+        recovery_pending(data),
+    ))
+}
+fn snapshot_view(
+    files: &BTreeMap<Role, Option<String>>,
+    raw: Option<&[u8]>,
+    profile: Option<&Profile>,
+    pending: bool,
+) -> View {
+    let error = if pending {
         Some("存在未完成的配置切换，请恢复事务".into())
     } else {
-        p.as_ref()
+        profile
             .filter(|p| p.mode == Mode::Official)
-            .and_then(|p| assert_official(&files, p).err())
+            .and_then(|p| assert_official(files, p).err())
             .map(|e| e.message)
     };
-    Ok(View {
-        mode: p.as_ref().map(|p| p.mode).unwrap_or(Mode::Api),
-        revision: fingerprint(&files, raw.as_deref()),
-        initialized: p.is_some(),
+    View {
+        mode: profile.map(|p| p.mode).unwrap_or(Mode::Api),
+        revision: fingerprint(files, raw),
+        initialized: profile.is_some(),
         conflict: error,
         files: files
             .iter()
@@ -245,7 +258,7 @@ pub fn view(data: &Path, home: &Path, user_home: &Path) -> Result<View> {
             })
             .collect(),
         warnings: catalog::external(),
-    })
+    }
 }
 pub fn blocks(data: &Path) -> bool {
     directory(data).join(JOURNAL).exists()
@@ -279,10 +292,7 @@ fn set_file(path: &Path, before: Option<&str>, after: Option<&str>) -> Result<()
             }
             if before.is_some() {
                 std::fs::remove_file(path).map_err(storage::io_error)?;
-                #[cfg(unix)]
-                std::fs::File::open(path.parent().ok_or_else(conflict)?)
-                    .and_then(|f| f.sync_all())
-                    .map_err(storage::io_error)?;
+                storage::sync_parent(path)?;
             }
             Ok(())
         }
@@ -366,7 +376,15 @@ pub fn switch(
     expected: &str,
     logged_in: bool,
 ) -> Result<View> {
-    let current = view(data, home, user_home)?;
+    let files = snapshot(home, user_home)?;
+    let raw = storage::read_bounded(&directory(data).join(PROFILE), LIMIT)?;
+    let profile = decode_profile(raw.as_deref(), home)?;
+    let current = snapshot_view(
+        &files,
+        raw.as_deref(),
+        profile.as_ref(),
+        recovery_pending(data),
+    );
     if current.revision != expected {
         return Err(conflict());
     }
@@ -376,11 +394,10 @@ pub fn switch(
     if current.mode == target && current.initialized {
         return Ok(current);
     }
-    let files = snapshot(home, user_home)?;
-    let old = storage::read_bounded(&directory(data).join(PROFILE), LIMIT)?
+    let old = raw
         .map(|b| String::from_utf8(b).map_err(|_| fail("配置档无效")))
         .transpose()?;
-    let mut p = load(data, home)?.unwrap_or(Profile {
+    let mut p = profile.unwrap_or(Profile {
         version: 1,
         home: home.into(),
         mode: Mode::Api,
@@ -478,7 +495,12 @@ pub fn switch(
         return Err(error);
     }
     std::fs::remove_file(directory(data).join(JOURNAL)).map_err(storage::io_error)?;
-    view(data, home, user_home)
+    Ok(snapshot_view(
+        &desired,
+        Some(tx.after_profile.as_bytes()),
+        Some(&p),
+        false,
+    ))
 }
 pub fn user_home() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| fail("无法确定当前用户目录"))

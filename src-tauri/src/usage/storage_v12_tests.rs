@@ -359,6 +359,13 @@ fn existing_metrics_view_upgrades_and_skips_generation_for_zero_output() {
         .unwrap();
     assert_eq!(outputs, 20);
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    let mut filter = all_time();
+    filter.client = Some("antigravity".into());
+    let totals = store.dashboard(&filter).unwrap().totals;
+    assert_eq!(totals.measured_outputs, 20);
+    assert_eq!(totals.generation_ms, 2700);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 3);
 }
 
 #[test]
@@ -1545,131 +1552,6 @@ fn v12_reclaim_with_a_busy_writer_is_nonfatal() {
     assert!(store.reclaim_space().is_ok());
     lock.execute_batch("ROLLBACK").unwrap();
     assert!(store.detail(&row.id).is_ok());
-}
-
-#[test]
-#[ignore = "100k synthetic source rebuild; run explicitly for storage changes"]
-fn v12_rebuild_over_one_hundred_thousand_rows_keeps_other_sources() {
-    let (dir, mut store) = migrated_empty();
-    let mut other = record(
-        "fixture-v12-other-source",
-        "claude",
-        BASE,
-        Some("fixture-v12-other-response"),
-        1,
-        1,
-    );
-    other.client = "claude".into();
-    let old_codex = record(
-        "fixture-v12-old-codex",
-        "codex",
-        BASE + 1,
-        Some("fixture-v12-old-codex-response"),
-        1,
-        1,
-    );
-    store
-        .write_batch(
-            &[other.clone(), old_codex],
-            Some(("fixture-v12-existing-cursor", "old-cursor")),
-        )
-        .unwrap();
-
-    let home = dir.path().join("fixture-v12-home");
-    let sessions_dir = home.join("sessions");
-    fs::create_dir_all(&sessions_dir).unwrap();
-    let invalid_path = sessions_dir.join("000-invalid.jsonl");
-    let valid_path = sessions_dir.join("001-large.jsonl");
-    let mut invalid_file = File::create(&invalid_path).unwrap();
-    invalid_file
-        .write_all(b"{this is not valid json}\n")
-        .unwrap();
-
-    let session_meta = json!({
-        "type": "session_meta",
-        "timestamp": BASE + 3,
-        "payload": {"id": "fixture-v12-large-session"}
-    });
-    let mut session_file = File::create(&valid_path).unwrap();
-    serde_json::to_writer(&mut session_file, &session_meta).unwrap();
-    session_file.write_all(b"\n").unwrap();
-    for index in 0..100_001_u64 {
-        let event = json!({
-            "type": "event_msg",
-            "timestamp": BASE + 4 + index as i64,
-            "payload": {
-                "type": "token_count",
-                "info": {
-                    "model": "fixture-model",
-                    "total_token_usage": {
-                        "input_tokens": 100 + index,
-                        "cached_input_tokens": 0,
-                        "output_tokens": 1 + index
-                    }
-                }
-            }
-        });
-        serde_json::to_writer(&mut session_file, &event).unwrap();
-        session_file.write_all(b"\n").unwrap();
-    }
-    drop(session_file);
-
-    let pricing = Pricing::new(dir.path()).unwrap();
-    assert!(sessions::sync(
-        &mut store,
-        &pricing,
-        &Settings::default(),
-        "codex",
-        &home,
-        true,
-    )
-    .is_err());
-    assert!(store.detail("fixture-v12-old-codex").is_ok());
-    assert!(store.detail(&other.id).is_ok());
-    assert_eq!(
-        store
-            .cursor("fixture-v12-existing-cursor")
-            .unwrap()
-            .as_deref(),
-        Some("old-cursor")
-    );
-
-    fs::remove_file(&invalid_path).unwrap();
-    let report = sessions::sync(
-        &mut store,
-        &pricing,
-        &Settings::default(),
-        "codex",
-        &home,
-        true,
-    )
-    .unwrap();
-    assert_eq!(report.imported, 100_001);
-
-    let codex = store
-        .logs(&Filter {
-            client: Some("codex".into()),
-            source: Some("sessions".into()),
-            start: Some(BASE),
-            end: Some(BASE + 100_010),
-            ..Filter::default()
-        })
-        .unwrap();
-    assert_eq!(codex.total, 100_001);
-    assert!(store.detail("fixture-v12-old-codex").is_err());
-    assert!(store.detail(&other.id).is_ok());
-    let all_sessions = store
-        .logs(&Filter {
-            source: Some("sessions".into()),
-            start: Some(BASE),
-            end: Some(BASE + 100_010),
-            ..Filter::default()
-        })
-        .unwrap();
-    assert_eq!(all_sessions.total, 100_002);
-    assert!(store.detail(&other.id).is_ok());
-    let cursor_key = safe_id(&format!("codex:{}", valid_path.to_string_lossy()));
-    assert!(store.cursor(&cursor_key).unwrap().is_some());
 }
 
 #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "vela"
-version = "0.26.30"
+version = "0.26.31"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -80,7 +80,7 @@ tokio-tungstenite = "0.29"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(all(not(target_os = "macos"), not(windows)))'.dependencies]
 sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
 
 [target.'cfg(windows)'.dependencies]

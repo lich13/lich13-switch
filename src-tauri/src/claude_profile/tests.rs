@@ -57,6 +57,10 @@ fn api_and_legacy_files_round_trip_and_missing_files_stay_missing() {
     let official = switch(&f, Mode::Official, true).unwrap();
     assert_eq!(official.mode, Mode::Official);
     assert_eq!(
+        serde_json::to_value(&official).unwrap(),
+        serde_json::to_value(current(&f)).unwrap()
+    );
+    assert_eq!(
         read(&f, Role::Settings).as_deref(),
         Some("{\n  \"env\": {}\n}\n")
     );
@@ -64,6 +68,10 @@ fn api_and_legacy_files_round_trip_and_missing_files_stay_missing() {
 
     let api = switch(&f, Mode::Api, true).unwrap();
     assert_eq!(api.mode, Mode::Api);
+    assert_eq!(
+        serde_json::to_value(&api).unwrap(),
+        serde_json::to_value(current(&f)).unwrap()
+    );
     assert_eq!(read(&f, Role::Settings).as_deref(), Some(settings));
     assert_eq!(read(&f, Role::Legacy).as_deref(), Some(legacy));
 

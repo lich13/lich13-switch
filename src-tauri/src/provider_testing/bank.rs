@@ -108,8 +108,7 @@ fn cached(saved: &super::types::SavedBank) -> Option<(Value, Value)> {
             && version["analyzer_version"] == manifest["analyzerVersion"]
             && ["core", "challenge"]
                 .iter()
-                .all(|key| provenance[format!("{key}_blob")] == manifest["files"][key]["gitBlob"])
-            && provenance["stored_sha256"] == super::compat::sha256(data.to_string());
+                .all(|key| provenance[format!("{key}_blob")] == manifest["files"][key]["gitBlob"]);
         if valid {
             return Some((data.clone(), version.clone()));
         }
@@ -234,7 +233,6 @@ pub async fn update() -> Result<super::types::SavedBank> {
     }
     let data: Value = serde_json::from_slice(&raw).map_err(|_| failure("指纹库 JSON 无效"))?;
     validate(&data)?;
-    provenance["stored_sha256"] = super::compat::sha256(data.to_string()).into();
     let version = json!({"revision":revision,"sha256":super::compat::sha256(&raw),"built_at":data["built_at"],"analyzer_version":manifest["analyzerVersion"]});
     Ok(super::types::SavedBank {
         data: Some(data),

@@ -42,7 +42,29 @@ fn vacuum_has_room(connection: &Connection, copies: u64) -> rusqlite::Result<boo
         let stats = unsafe { stats.assume_init() };
         stats.f_bavail.saturating_mul(u64::from(stats.f_bsize))
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let available = {
+        use std::os::windows::ffi::OsStrExt;
+        let directory = path
+            .parent()
+            .ok_or_else(|| Error::InvalidPath(path.to_owned()))?;
+        let directory: Vec<u16> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut available = 0;
+        // Query the database volume directly, including space available to this user.
+        if unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                directory.as_ptr(),
+                &mut available,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(Error::InvalidQuery);
+        }
+        available
+    };
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     let available = sysinfo::Disks::new_with_refreshed_list()
         .iter()
         .filter(|disk| path.starts_with(disk.mount_point()))
@@ -63,6 +85,19 @@ fn filesystem_probe_handles_database_paths_and_reports_missing_files() {
     assert!(has_room(&connection, 2).is_ok());
     std::fs::remove_file(&path).unwrap();
     assert!(has_room(&connection, 2).is_err());
+    assert!(has_room(&Connection::open_in_memory().unwrap(), 2).unwrap());
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn filesystem_probe_queries_database_directory_with_unicode_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixture 数据.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE fixture(value TEXT)")
+        .unwrap();
+    assert!(has_room(&connection, 2).is_ok());
     assert!(has_room(&Connection::open_in_memory().unwrap(), 2).unwrap());
 }
 

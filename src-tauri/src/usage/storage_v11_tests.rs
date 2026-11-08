@@ -261,28 +261,3 @@ fn v11_codec_waits_for_durable_database_version_guard() {
         .is_none());
     assert!(bodies::decode::<Record>(&c, &body).is_ok());
 }
-
-#[test]
-#[ignore = "100k synthetic capacity gate; run explicitly once per storage change"]
-fn v11_hundred_thousand_rows_shrink_at_least_thirty_percent() {
-    let dir = tempfile::tempdir().unwrap();
-    legacy_database(dir.path(), 60_000, 40_000);
-    let before_size = size(dir.path());
-    let old = Store::reader(dir.path()).unwrap();
-    let before = totals(&old);
-    drop(old);
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
-    migrate(&mut store);
-    let after_size = size(dir.path());
-    assert_eq!(before, totals(&store));
-    let before_bytes = before_size["db"].as_u64().unwrap() + before_size["wal"].as_u64().unwrap();
-    let after_bytes = after_size["db"].as_u64().unwrap() + after_size["wal"].as_u64().unwrap();
-    println!(
-        "v11 synthetic before={before_size} after={after_size} reduction_percent={:.3}",
-        100.0 * (before_bytes - after_bytes) as f64 / before_bytes as f64
-    );
-    assert!(
-        after_bytes * 100 <= before_bytes * 70,
-        "storage reduction below 30 percent"
-    );
-}

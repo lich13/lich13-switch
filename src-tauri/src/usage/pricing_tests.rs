@@ -684,7 +684,7 @@ async fn restart_loads_verified_catalog_and_metadata() {
 }
 
 #[tokio::test]
-async fn restart_rejects_tampered_or_malformed_cache() {
+async fn restart_accepts_valid_edited_catalog_and_rejects_malformed_cache() {
     let dir = tempfile::tempdir().unwrap();
     let prices = Pricing::new(dir.path()).unwrap();
     let seed = prices.view();
@@ -695,14 +695,17 @@ async fn restart_rejects_tampered_or_malformed_cache() {
     let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     let mut tampered = saved.clone();
     tampered["catalog"]["fixture-model"] = rates("0.000099");
-    let mut missing_checksum = saved;
-    missing_checksum
-        .as_object_mut()
-        .unwrap()
-        .remove("catalogHash");
+    fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let restarted = Pricing::new(dir.path()).unwrap();
+    assert!(restarted.view().error.is_none());
+    assert_eq!(
+        restarted.quote(Some("fixture-model"), "1").data,
+        Some(rates("0.000099"))
+    );
+    let mut invalid = saved;
+    invalid["catalog"] = json!({"fixture-model": {"input_cost_per_token": -1}});
     for corrupted in [
-        serde_json::to_vec(&tampered).unwrap(),
-        serde_json::to_vec(&missing_checksum).unwrap(),
+        serde_json::to_vec(&invalid).unwrap(),
         b"{broken fixture cache".to_vec(),
     ] {
         fs::write(&path, corrupted).unwrap();

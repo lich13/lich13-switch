@@ -27,7 +27,6 @@ local_codes! {
     AccountSyncError => ACCOUNT_SYNC_ERROR = "ACCOUNT_SYNC_ERROR",
     Auth => AUTH = "AUTH",
     AuthenticationFailed => AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED",
-    AuthPending => AUTH_PENDING = "AUTH_PENDING",
     Body => BODY = "BODY",
     Busy => BUSY = "BUSY",
     Cancelled => CANCELLED = "CANCELLED",

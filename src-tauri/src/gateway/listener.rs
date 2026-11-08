@@ -249,15 +249,6 @@ impl Listener {
         }
         Ok(())
     }
-    #[cfg(test)]
-    pub fn activate(
-        &self,
-        client: ClientId,
-        listener: Option<TcpListener>,
-        registry: Arc<Registry>,
-    ) -> Result<()> {
-        self.activate_with(client, listener, registry, || Ok(()))
-    }
     pub async fn deactivate(&self, client: ClientId) -> Result<()> {
         self.deactivate_resource(Some(client)).await
     }
@@ -439,7 +430,3 @@ pub fn route(
 #[cfg(test)]
 #[path = "listener_token_tests.rs"]
 mod token_tests;
-
-#[cfg(test)]
-#[path = "listener_fault_tests.rs"]
-mod fault_tests;

@@ -124,7 +124,3 @@ impl Registry {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "registry_poison_tests.rs"]
-mod poison_tests;

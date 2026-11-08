@@ -5,7 +5,6 @@ export const ErrorCodes = {
   AccountSyncError: "ACCOUNT_SYNC_ERROR",
   Auth: "AUTH",
   AuthenticationFailed: "AUTHENTICATION_FAILED",
-  AuthPending: "AUTH_PENDING",
   Body: "BODY",
   Busy: "BUSY",
   Cancelled: "CANCELLED",

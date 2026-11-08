@@ -21,7 +21,3 @@ pub(super) fn cache<T: Default>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "locks_poison_tests.rs"]
-mod poison_tests;

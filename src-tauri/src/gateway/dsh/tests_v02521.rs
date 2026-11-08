@@ -63,9 +63,9 @@ async fn legacy_routes_and_full_snapshots_upgrade_without_false_conflicts() {
         serde_json::to_vec(&legacy).unwrap(),
     )
     .unwrap();
-    crate::migrations::gateway_state_after_recovery(&data).unwrap();
+    crate::migrations::gateway(&data).unwrap();
     let once = fs::read(data.join("gateway.json")).unwrap();
-    crate::migrations::gateway_state_after_recovery(&data).unwrap();
+    crate::migrations::gateway(&data).unwrap();
     assert_eq!(once, fs::read(data.join("gateway.json")).unwrap());
     let migrated: serde_json::Value = serde_json::from_slice(&once).unwrap();
     assert_eq!(migrated["futureSetting"], "fixture-preserved");

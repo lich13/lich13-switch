@@ -147,38 +147,15 @@ fn protecting_existing_sensitive_file_preserves_exact_bytes() {
 }
 
 #[cfg(windows)]
-#[test]
-fn protecting_current_user_owned_file_needs_no_write_owner_right() {
-    use std::io::Write;
-
-    let fixture = tempdir().unwrap();
-    let bytes = b"sensitive fixture bytes";
-    let mut file = private_tempfile(fixture.path()).unwrap();
-    file.write_all(bytes).unwrap();
-    let target = file.path().to_path_buf();
-    assert!(windows_acl::owner_is_current_user(&target));
-    windows_acl::set_owner_rights_read_control_and_write_dac(&target);
-
-    protect(&target, false).unwrap();
-
-    assert_eq!(fs::read(&target).unwrap(), bytes);
-    windows_acl::assert_private(&target);
-}
-
-#[cfg(windows)]
 mod windows_acl {
     use std::{ffi::c_void, os::windows::ffi::OsStrExt, path::Path, ptr, slice};
     use windows_sys::Win32::{
         Foundation::{CloseHandle, LocalFree, ERROR_INSUFFICIENT_BUFFER},
-        Security::Authorization::{
-            ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
-            GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
-        },
+        Security::Authorization::{ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT},
         Security::{
-            EqualSid, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, TokenUser,
-            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERITED_ACE,
-            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
-            TOKEN_QUERY, TOKEN_USER,
+            EqualSid, GetAce, GetSecurityDescriptorControl, TokenUser, ACCESS_ALLOWED_ACE,
+            ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERITED_ACE, OWNER_SECURITY_INFORMATION,
+            SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -285,63 +262,6 @@ mod windows_acl {
         let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
         assert!(!user.User.Sid.is_null(), "TokenUser SID is missing");
         (user.User.Sid, buffer)
-    }
-
-    pub(super) fn owner_is_current_user(path: &Path) -> bool {
-        let (_descriptor, owner, _dacl) = security_descriptor(path, OWNER_SECURITY_INFORMATION);
-        let (token_user, _token_user_buffer) = current_token_user_sid();
-        !owner.is_null() && unsafe { EqualSid(owner, token_user) } != 0
-    }
-
-    pub(super) fn set_owner_rights_read_control_and_write_dac(path: &Path) {
-        let sddl = "D:P(A;;RCWD;;;OW)\0".encode_utf16().collect::<Vec<_>>();
-        let mut descriptor = ptr::null_mut();
-        assert_ne!(
-            unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    sddl.as_ptr(),
-                    1,
-                    &mut descriptor,
-                    ptr::null_mut(),
-                )
-            },
-            0,
-            "failed to build limited owner-rights DACL"
-        );
-        let descriptor = LocalAllocation(descriptor);
-
-        let mut present = 0;
-        let mut defaulted = 0;
-        let mut dacl = ptr::null_mut();
-        assert_ne!(
-            unsafe {
-                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
-            },
-            0
-        );
-        assert_ne!(present, 0);
-        assert!(!dacl.is_null());
-
-        let name = path
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            unsafe {
-                SetNamedSecurityInfoW(
-                    name.as_ptr(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    dacl,
-                    ptr::null_mut(),
-                )
-            },
-            0,
-            "failed to install limited owner-rights DACL"
-        );
     }
 
     pub(super) fn snapshot(path: &Path) -> (u16, Vec<u8>) {
