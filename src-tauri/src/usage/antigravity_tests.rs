@@ -1232,6 +1232,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
                     quota::Period {
                         start: now_ms + 1 - duration,
                         end: now_ms + 1,
+                        remaining_percent: None,
                     },
                 )
             })

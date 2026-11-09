@@ -1849,6 +1849,8 @@ pub struct AntigravityTokenMix {
 #[serde(rename_all = "camelCase")]
 pub struct AntigravityTrackWindow {
     pub period: Option<quota::Period>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_percent: Option<f64>,
     pub requests: u64,
     pub tokens: u64,
     pub reasoning_tokens: u64,
@@ -2001,6 +2003,7 @@ impl WindowAcc {
     fn into_view(self, hours: f64) -> AntigravityTrackWindow {
         AntigravityTrackWindow {
             period: None,
+            remaining_percent: None,
             requests: self.requests,
             tokens: self.tokens,
             reasoning_tokens: self.reasoning_tokens,

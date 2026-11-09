@@ -3,8 +3,8 @@ use crate::usage::{model::*, store::Store};
 
 fn summary() -> Value {
     json!({"response":{"groups":[
-        {"buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2026-01-08T05:00:00Z"},{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2026-01-09T00:00:00Z"}]},
-        {"buckets":[{"bucketId":"3p-5h","window":"5h","resetTime":"2026-01-08T06:00:00Z"},{"bucketId":"3p-weekly","window":"weekly","resetTime":"2026-01-10T00:00:00Z"}]}
+        {"buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2026-01-08T05:00:00Z","remainingFraction":0.745},{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2026-01-09T00:00:00Z","remainingFraction":0.86}]},
+        {"buckets":[{"bucketId":"3p-5h","window":"5h","resetTime":"2026-01-08T06:00:00Z","remainingFraction":0.42},{"bucketId":"3p-weekly","window":"weekly","resetTime":"2026-01-10T00:00:00Z","remainingFraction":0.685}]}
     ]}})
 }
 
@@ -15,11 +15,15 @@ fn each_group_uses_its_observed_reset_and_half_open_window() {
     let gemini = &p["gemini-5h"];
     let third_party = &p["3p-5h"];
     assert_eq!(gemini.end - gemini.start, 5 * 3_600_000);
+    assert_eq!(gemini.remaining_percent, Some(74.5));
+    assert_eq!(third_party.remaining_percent, Some(42.0));
     assert_eq!(third_party.start - gemini.start, 3_600_000);
     assert_eq!(
         p["gemini-weekly"].end - p["gemini-weekly"].start,
         7 * 86_400_000
     );
+    assert_eq!(p["gemini-weekly"].remaining_percent, Some(86.0));
+    assert_eq!(p["3p-weekly"].remaining_percent, Some(68.5));
     assert_ne!(p["gemini-weekly"], p["3p-weekly"]);
     assert!(gemini.contains(gemini.start));
     assert!(!gemini.contains(gemini.start - 1));

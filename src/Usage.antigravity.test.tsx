@@ -218,7 +218,9 @@ function buildStats(
               period: {
                 start: 1_760_000_000_000 - 5 * 3_600_000,
                 end: 1_760_000_000_000,
+                remainingPercent: 74.5,
               },
+              remainingPercent: 74.5,
               requests: 6,
               tokens: 110_000,
               reasoningTokens: 7_200,
@@ -230,7 +232,9 @@ function buildStats(
               period: {
                 start: 1_760_000_000_000 - 168 * 3_600_000,
                 end: 1_760_000_000_000,
+                remainingPercent: 86.0,
               },
+              remainingPercent: 86.0,
               requests: 10,
               tokens: 175_000,
               reasoningTokens: 10_400,
@@ -246,7 +250,9 @@ function buildStats(
               period: {
                 start: 1_760_000_000_000 - 5 * 3_600_000,
                 end: 1_760_000_000_000,
+                remainingPercent: 42.0,
               },
+              remainingPercent: 42.0,
               requests: 3,
               tokens: 52_000,
               reasoningTokens: 3_600,
@@ -258,7 +264,9 @@ function buildStats(
               period: {
                 start: 1_760_000_000_000 - 168 * 3_600_000,
                 end: 1_760_000_000_000,
+                remainingPercent: 68.5,
               },
+              remainingPercent: 68.5,
               requests: 5,
               tokens: 85_000,
               reasoningTokens: 5_800,
@@ -497,7 +505,12 @@ describe("Usage Antigravity statistics tab", () => {
     await user.selectOptions(screen.getByLabelText("用量供应商"), "ag-oauth-1");
     await user.selectOptions(screen.getByLabelText("请求类型"), "compaction");
     await user.click(screen.getByRole("tab", { name: "Claude Code" }));
-    await screen.findByRole("region", { name: "Claude 官方额度" });
+    const claudeQuota = await screen.findByRole("region", {
+      name: "Claude 官方额度",
+    });
+    expect(within(claudeQuota).getByText("最紧剩余 77.5%")).toBeInTheDocument();
+    expect(within(claudeQuota).getByText("剩余 77.5%")).toBeInTheDocument();
+    expect(within(claudeQuota).getByText("已用 22.5%")).toBeInTheDocument();
     expect(screen.getByLabelText("用量客户端")).toHaveValue("claude");
     expect(screen.getByLabelText("用量供应商")).toHaveValue("");
     expect(mock.command).toHaveBeenCalledWith("get_claude_usage_stats", {
@@ -600,12 +613,18 @@ describe("Usage Antigravity statistics tab", () => {
 
     const summary = await screen.findByLabelText("Token 构成与缓存节省");
     expect(within(summary).getByText("54.0%")).toBeInTheDocument();
+    expect(within(summary).getByText("可见剩余 46.0%")).toBeInTheDocument();
     expect(within(summary).getByText("78.3%")).toBeInTheDocument();
+    expect(within(summary).getByText("未命中剩余 21.7%")).toBeInTheDocument();
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();
 
     const tracks = screen.getByLabelText("账号周期用量");
     expect(within(tracks).getAllByText("当前 5h")).toHaveLength(2);
     expect(within(tracks).getAllByText("当前 7d")).toHaveLength(2);
+    expect(within(tracks).getByText("最低剩余 74.5%")).toBeInTheDocument();
+    expect(within(tracks).getByText("最低剩余 42.0%")).toBeInTheDocument();
+    expect(within(tracks).getByText("配额剩余 74.5%")).toBeInTheDocument();
+    expect(within(tracks).getByText("配额剩余 42.0%")).toBeInTheDocument();
 
     const creds = screen.getByLabelText("账号与凭据分布");
     expect(

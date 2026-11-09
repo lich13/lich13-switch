@@ -245,7 +245,12 @@ export type AntigravityTokenMix = {
 };
 
 export type AntigravityTrackWindow = {
-  period: { start: number; end: number } | null;
+  period: {
+    start: number;
+    end: number;
+    remainingPercent?: number | null;
+  } | null;
+  remainingPercent?: number | null;
   requests: number;
   tokens: number;
   reasoningTokens: number;

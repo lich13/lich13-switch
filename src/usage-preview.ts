@@ -535,7 +535,9 @@ export function usagePreview(
                 period: {
                   start: now - 4 * 3_600_000,
                   end: now + 3_600_000,
+                  remainingPercent: 74.5,
                 },
+                remainingPercent: 74.5,
                 requests: 7,
                 tokens: 182400,
                 reasoningTokens: 8200,
@@ -547,7 +549,9 @@ export function usagePreview(
                 period: {
                   start: now - 144 * 3_600_000,
                   end: now + 24 * 3_600_000,
+                  remainingPercent: 86,
                 },
+                remainingPercent: 86,
                 requests: 12,
                 tokens: 286000,
                 reasoningTokens: 11800,
@@ -563,7 +567,9 @@ export function usagePreview(
                 period: {
                   start: now - 3 * 3_600_000,
                   end: now + 2 * 3_600_000,
+                  remainingPercent: 42,
                 },
+                remainingPercent: 42,
                 requests: 4,
                 tokens: 94200,
                 reasoningTokens: 5400,
@@ -575,7 +581,9 @@ export function usagePreview(
                 period: {
                   start: now - 120 * 3_600_000,
                   end: now + 48 * 3_600_000,
+                  remainingPercent: 68.5,
                 },
+                remainingPercent: 68.5,
                 requests: 6,
                 tokens: 131400,
                 reasoningTokens: 6600,

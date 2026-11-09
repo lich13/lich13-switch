@@ -8,11 +8,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Period {
     pub start: i64,
     pub end: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_percent: Option<f64>,
 }
 impl Period {
     fn current(&self, now: i64) -> bool {
@@ -38,33 +40,65 @@ pub struct AccountUsage {
     pub tracks: Vec<AntigravityQuotaTrack>,
     pub total: AntigravityTrackWindow,
 }
+fn parse_remaining_percent(bucket: &Value) -> Option<f64> {
+    if let Some(fraction) = bucket["remainingFraction"]
+        .as_f64()
+        .or_else(|| bucket["remaining_fraction"].as_f64())
+        .filter(|v| v.is_finite())
+    {
+        return Some(((fraction.clamp(0.0, 1.0) * 100.0) * 10.0).round() / 10.0);
+    }
+    bucket["remainingPercent"]
+        .as_f64()
+        .or_else(|| bucket["remaining_percent"].as_f64())
+        .filter(|v| v.is_finite())
+        .map(|pct| (pct.clamp(0.0, 100.0) * 10.0).round() / 10.0)
+}
 pub fn parse(value: &Value) -> Periods {
     let response = &value["response"];
-    response["groups"]
+    let mut periods = Periods::new();
+    for b in response["groups"]
         .as_array()
         .into_iter()
         .flatten()
         .flat_map(|g| g["buckets"].as_array().into_iter().flatten())
-        .filter_map(|b| {
-            if b["disabled"] == true {
-                return None;
+    {
+        if b["disabled"] == true {
+            continue;
+        }
+        let Some(id) = b["bucketId"].as_str() else {
+            continue;
+        };
+        let duration = match id {
+            "gemini-5h" | "3p-5h" => 5 * 3_600_000,
+            "gemini-weekly" | "3p-weekly" => 7 * 86_400_000,
+            _ => continue,
+        };
+        let Some(end) = time(&b["resetTime"]) else {
+            continue;
+        };
+        let remaining_percent = parse_remaining_percent(b);
+        let next = Period {
+            start: end.saturating_sub(duration),
+            end,
+            remaining_percent,
+        };
+        match periods.get_mut(id) {
+            Some(existing) => {
+                existing.start = next.start;
+                existing.end = next.end;
+                existing.remaining_percent = match (existing.remaining_percent, remaining_percent) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, b) => b,
+                };
             }
-            let id = b["bucketId"].as_str()?;
-            let duration = match id {
-                "gemini-5h" | "3p-5h" => 5 * 3_600_000,
-                "gemini-weekly" | "3p-weekly" => 7 * 86_400_000,
-                _ => return None,
-            };
-            let end = time(&b["resetTime"])?;
-            Some((
-                id.to_owned(),
-                Period {
-                    start: end.saturating_sub(duration),
-                    end,
-                },
-            ))
-        })
-        .collect()
+            None => {
+                periods.insert(id.to_owned(), next);
+            }
+        }
+    }
+    periods
 }
 impl Api {
     pub(super) async fn quota(
@@ -170,7 +204,9 @@ impl AccountAccumulator {
                         .remove(key)
                         .unwrap_or_default()
                         .into_view(hours);
-                    w.period = self.periods.remove(key);
+                    let period = self.periods.remove(key);
+                    w.remaining_percent = period.as_ref().and_then(|p| p.remaining_percent);
+                    w.period = period;
                     w
                 };
                 tracks.push(AntigravityQuotaTrack {

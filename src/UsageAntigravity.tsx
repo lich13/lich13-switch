@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { date } from "./usage-format";
+import { formatRemainingPercent, quotaTone } from "./UsageClaudeQuota";
 import {
   compact,
   money,
@@ -31,6 +32,13 @@ function formatCostOrUnpriced(
   return money(costUsd);
 }
 
+function windowRemainingPercent(w: AntigravityTrackWindow): number | null {
+  const value = w.remainingPercent ?? w.period?.remainingPercent ?? null;
+  return value != null && Number.isFinite(value)
+    ? Math.max(0, Math.min(100, value))
+    : null;
+}
+
 function TrackWindowBlock({
   title,
   window: w,
@@ -47,14 +55,41 @@ function TrackWindowBlock({
         <p className="usage-empty">未获取当前周期</p>
       </div>
     );
+  const remaining = current ? windowRemainingPercent(w) : null;
+  const tone = remaining != null ? quotaTone(remaining) : null;
   return (
-    <div className="usage-ag-window">
+    <div
+      className={`usage-ag-window${tone ? ` is-${tone}` : ""}`}
+      data-tone={tone ?? undefined}
+    >
       <div className="usage-ag-window-head">
         <span>{title}</span>
-        <strong title={w.costUsd}>
-          {formatCostOrUnpriced(w.costUsd, w.unpricedRequests, w.requests)}
-        </strong>
+        <div className="usage-ag-window-badges">
+          {remaining != null && tone && (
+            <span className={`usage-quota-remaining-pill is-${tone}`}>
+              配额剩余 {formatRemainingPercent(remaining)}
+            </span>
+          )}
+          <strong title={w.costUsd}>
+            {formatCostOrUnpriced(w.costUsd, w.unpricedRequests, w.requests)}
+          </strong>
+        </div>
       </div>
+      {remaining != null && tone && (
+        <div
+          className={`usage-ag-family-bar usage-quota-dual-bar is-${tone}`}
+          role="meter"
+          aria-label={`${title} 配额剩余`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Number(remaining.toFixed(1))}
+        >
+          <span
+            className="usage-quota-fill-remaining"
+            style={{ width: `${remaining}%` }}
+          />
+        </div>
+      )}
       {w.period && (
         <p className="usage-ag-period">
           {date(w.period.start)} — {date(w.period.end)}
@@ -150,6 +185,14 @@ export default function UsageAntigravity({
     stats.unpricedRequests,
     stats.requests,
   );
+  const visibleSharePercent =
+    mix.thinkingSharePercent == null
+      ? null
+      : Math.max(0, Math.min(100, 100 - mix.thinkingSharePercent));
+  const cacheMissPercent =
+    mix.cacheHitPercent == null
+      ? null
+      : Math.max(0, Math.min(100, 100 - mix.cacheHitPercent));
 
   return (
     <div className="usage-ag-panel" aria-busy={busy}>
@@ -178,6 +221,20 @@ export default function UsageAntigravity({
                 ? "—"
                 : `${mix.thinkingSharePercent.toFixed(1)}%`}
             </strong>
+            {visibleSharePercent != null && (
+              <>
+                <div className="usage-ag-kpi-meter" aria-hidden="true">
+                  <span
+                    style={{
+                      width: `${Math.max(0, Math.min(100, mix.thinkingSharePercent!))}%`,
+                    }}
+                  />
+                </div>
+                <small className="usage-ag-kpi-sub">
+                  可见剩余 {formatRemainingPercent(visibleSharePercent)}
+                </small>
+              </>
+            )}
           </div>
           <div>
             <span>缓存命中率</span>
@@ -192,6 +249,20 @@ export default function UsageAntigravity({
                 ? "—"
                 : `${mix.cacheHitPercent.toFixed(1)}%`}
             </strong>
+            {cacheMissPercent != null && (
+              <>
+                <div className="usage-ag-kpi-meter is-cache" aria-hidden="true">
+                  <span
+                    style={{
+                      width: `${Math.max(0, Math.min(100, mix.cacheHitPercent!))}%`,
+                    }}
+                  />
+                </div>
+                <small className="usage-ag-kpi-sub">
+                  未命中剩余 {formatRemainingPercent(cacheMissPercent)}
+                </small>
+              </>
+            )}
           </div>
           <div>
             <span>缓存估算节省</span>
@@ -272,27 +343,45 @@ export default function UsageAntigravity({
             >
               {account.kind === "oauth" ? (
                 <div className="usage-ag-tracks">
-                  {account.tracks.map((track) => (
-                    <article
-                      key={track.id}
-                      className="usage-ag-card usage-ag-track-card"
-                      data-track={track.id}
-                    >
-                      <header className="usage-ag-track-head">
-                        <h3>{track.label}</h3>
-                      </header>
-                      <div className="usage-ag-windows">
-                        <TrackWindowBlock
-                          title="当前 5h"
-                          window={track.burst5h}
-                        />
-                        <TrackWindowBlock
-                          title="当前 7d"
-                          window={track.weekly7d}
-                        />
-                      </div>
-                    </article>
-                  ))}
+                  {account.tracks.map((track) => {
+                    const trackRemainingCandidates = [
+                      windowRemainingPercent(track.burst5h),
+                      windowRemainingPercent(track.weekly7d),
+                    ].filter((v): v is number => v != null);
+                    const trackRemaining = trackRemainingCandidates.length
+                      ? Math.min(...trackRemainingCandidates)
+                      : null;
+                    const trackTone =
+                      trackRemaining != null ? quotaTone(trackRemaining) : null;
+                    return (
+                      <article
+                        key={track.id}
+                        className="usage-ag-card usage-ag-track-card"
+                        data-track={track.id}
+                      >
+                        <header className="usage-ag-track-head">
+                          <h3>{track.label}</h3>
+                          {trackRemaining != null && trackTone && (
+                            <span
+                              className={`usage-quota-remaining-pill is-${trackTone}`}
+                            >
+                              最低剩余 {formatRemainingPercent(trackRemaining)}
+                            </span>
+                          )}
+                        </header>
+                        <div className="usage-ag-windows">
+                          <TrackWindowBlock
+                            title="当前 5h"
+                            window={track.burst5h}
+                          />
+                          <TrackWindowBlock
+                            title="当前 7d"
+                            window={track.weekly7d}
+                          />
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
               ) : (
                 <article className="usage-ag-card">
