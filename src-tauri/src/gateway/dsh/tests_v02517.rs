@@ -519,7 +519,7 @@ async fn exhausted_candidates_return_failure_within_the_retry_budget() {
             *count.lock().unwrap() += 1;
             Response::builder()
                 .status(429)
-                .header("retry-after", "1")
+                .header("retry-after", "5")
                 .header("content-type", "application/json")
                 .body(replay::full(r#"{"error":{"code":"rate_limit"}}"#))
                 .unwrap()
@@ -528,7 +528,8 @@ async fn exhausted_candidates_return_failure_within_the_retry_budget() {
     .await;
     let fixture = Fixture::new(&[upstream.url("/v1"), upstream.url("/other/v1")], false).await;
     let mut settings = fixture.gateway.view().settings;
-    settings.retry_budget_seconds = 1;
+    settings.first_byte_seconds = 3;
+    settings.retry_budget_seconds = 2;
     fixture
         .gateway
         .edit(
