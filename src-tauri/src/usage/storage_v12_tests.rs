@@ -326,7 +326,10 @@ fn existing_metrics_view_upgrades_and_skips_generation_for_zero_output() {
         )
         .unwrap();
     // The previous view evaluated generation even when measured output was zero.
-    let old = sql.replace("0 measured_outputs,", "coalesce(output,0) measured_outputs,");
+    let old = sql.replace(
+        "0 measured_outputs,",
+        "coalesce(output,0) measured_outputs,",
+    );
     store
         .connection
         .execute_batch(&format!("DROP VIEW usage_metrics;{old};"))

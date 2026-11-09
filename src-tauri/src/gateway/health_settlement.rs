@@ -115,13 +115,12 @@ pub(super) fn settle_protocol(
     }
 }
 pub(super) fn publish(g: &Gateway, event: crate::events::Record) -> Reported {
-    let queued = g
-        .0
-        .diagnostics
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|service| service.emit_checked(event.clone()));
+    let queued =
+        g.0.diagnostics
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|service| service.emit_checked(event.clone()));
     Reported {
         record: event,
         queued,

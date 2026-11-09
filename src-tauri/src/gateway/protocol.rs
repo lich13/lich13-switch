@@ -910,14 +910,20 @@ impl Protocol {
         self.thread = thread;
     }
     pub fn diagnostics(&mut self, gateway: &super::Gateway, provider: &str, model: Option<&str>) {
-        self.diagnostics = gateway.0.diagnostics.lock().unwrap().clone().map(|service| {
-            (
-                service,
-                gateway.client_id(),
-                provider.into(),
-                model.map(str::to_owned),
-            )
-        });
+        self.diagnostics = gateway
+            .0
+            .diagnostics
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|service| {
+                (
+                    service,
+                    gateway.client_id(),
+                    provider.into(),
+                    model.map(str::to_owned),
+                )
+            });
     }
     pub fn downstream_closed(&mut self, activity: &super::wire_progress::Activity, writing: bool) {
         super::attempt::DownstreamEnd::PeerClosed {

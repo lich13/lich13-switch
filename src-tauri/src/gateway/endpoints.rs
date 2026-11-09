@@ -269,12 +269,11 @@ impl Service {
             provider.base_url.clone()
         })
     }
-    fn write_pins(path: & std::path::Path, entries: &HashMap<String, Pin>) -> Result<()> {
+    fn write_pins(path: &std::path::Path, entries: &HashMap<String, Pin>) -> Result<()> {
         let raw = serde_json::to_vec(entries)
             .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存"))?;
-        storage::atomic_write(path, &raw, None).map_err(|_| {
-            AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求")
-        })
+        storage::atomic_write(path, &raw, None)
+            .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求"))
     }
     fn persist_pin(path: &std::path::Path, pins: &mut Pins, key: &str, pin: Pin) -> Result<()> {
         let time = now();
