@@ -1,57 +1,70 @@
 # Vela
 
-<img src="assets/icon.svg" alt="Vela icon" width="96" />
+<p align="left">
+  <img src="assets/icon.svg" alt="Vela icon" width="96" />
+</p>
 
-面向 **macOS** 与 **Windows** 的本地多客户端 AI 账号、配置与 API 网关工作台（基于 **Tauri 2 + Rust + React** 构建）。统一管理 **Codex**、**Claude Code**、**Grok Build**、**DSH** 的独立供应商队列与本地流量调度，并原生支持 **Antigravity app** 的账号管理、Vertex API Key 接入、双模配置编辑、增量会话用量核算与账单导出。
+<p align="left">
+  <strong>简体中文</strong> | <a href="./README.en.md">English</a>
+</p>
 
-> **安全提示**：所有账号凭据、供应商密钥与配置文件均保存在本机当前系统账户目录下（默认未加密），不会上传至任何第三方或项目服务。请按原客户端凭据的安全级别妥善保管本机文件；官方与第三方 API 配置隔离不承诺规避上游平台风控。
+<p align="left">
+  <img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2" />
+  <img src="https://img.shields.io/badge/Rust-Stable-000000?logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" alt="React 19" />
+  <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-4A90E2" alt="Platform" />
+  <img src="https://img.shields.io/badge/Privacy-Local--First%20%26%20Zero%20Telemetry-10B981" alt="Privacy" />
+  <img src="https://img.shields.io/badge/License-MIT-F59E0B" alt="MIT License" />
+</p>
+
+面向 **macOS** 与 **Windows** 的本地多客户端 AI 账号金库、双模配置中心与高可用 API 网关工作台（基于 **Tauri 2 + Rust + React 19** 构建）。一站式管理 **Codex**、**Claude Code**、**Grok Build**、**DSH** 的独立供应商队列与本地流量调度，并原生支持 **Antigravity app** 的多源凭据切换、Vertex API Key 路由、实时剩余配额透视、增量会话用量核算与账单导出。
+
+> **安全与隐私承诺**：所有账号凭据、供应商密钥与配置文件均保存在本机当前系统账户私有目录下（`~/.vela`，权限 `0700`/`0600`），**零遥测、零云端同步、不上传任何第三方或项目服务**。官方与第三方 API 配置隔离仅作用于本机文件，不承诺规避上游平台风控。
 
 ---
 
-## 核心特性
+## 六大核心特色
 
-### 1. 共享端口与多客户端隔离网关
-- **单端口令牌分流**：默认监听 `127.0.0.1:43721`，通过各客户端独立的本地访问令牌在根路径／`/v1` 精确鉴权与分流，同时保留 `/codex`、`/claude`、`/grok` 兼容前缀；HTTP、SSE 与原生 WebSocket 全程保持原协议透传，不做有损消息转换。
-- **精细准入与限流**：四客户端各自隔离供应商优先级队列、并发上限（含 Codex 线程空闲预留明细）、滚动一分钟 RPM 窗口保护以及模型级健康作用域（`客户端 + 供应商 + 凭据版本 + 请求模型`）。
-- **多端点测速优选**：每家供应商支持主地址与最多 8 个辅助 `base_url`；网关按需对多端点发起无凭据预热与响应头延迟探测，新连接自动优选最低延迟可达端点，固定线程与响应游标保持原端点不漂移。
-- **安全启停与恢复**：首次安装所有网关默认关闭；后续启动按上次启用意图恢复（支持开机静默启动），跨文件接入写入具备私有事务快照与外部修改冲突保护。
+### 1. Claude Code & Antigravity 实时剩余配额与缓存节省透视
+- **剩余百分比高亮徽章**：在 **Claude Code**（`5h`、`7d`、`Sonnet`、`Opus`）与 **Antigravity**（`Gemini`、`Claude / GPT` 双轨 `5h` / `7d`）配额卡片右上角突出展示 **`剩余 XX%`** / **`配额剩余 XX%`** 语义胶囊（`>=50%` 翠绿、`20%–49%` 琥珀橙、`<20%` 珊瑚红），头部配备 **5h 剩余电量微型环形指示器（SVG Ring）** 与 **`最紧剩余 XX%`** 汇总胶囊。
+- **Token 构成与互补占比微缩槽**：自动拆解新输入、缓存读取、缓存写入、可见输出与思考输出，直观呈现**缓存命中率 vs 未命中剩余**、**思考占输出比 vs 可见剩余**微缩对比进度条，并按请求保存的历史快照精确核算**缓存估算节省金额（USD）**。
+- **双向增量去重与账单导出**：网关流式计量（TTFT 首字延迟、生成 TPS、缓存 TTL 明细、推理 Token、网络搜索计费）与本机四端会话文件增量游标自动关联去重；支持导出精确到秒的 **Claude Code** 与 **Antigravity app** 核对账单，并可选按截止秒原子清理已结清历史。
 
-### 2. Codex 线程亲和、压缩交接与故障策略引擎
-- **线程归属与按代次接管**：精确识别 Codex `thread-id`（排除缓存亲和性 `session-id` 与空预热），支持按供应商独立开启「新线程接管」与「上下文压缩后接管」，按 owner epoch 与压缩边界代次原子交接，严守已输出内容不重放边界。
-- **统一故障策略与搜索**：内置结构化错误封套分类器（区分 RPM／Token／并发临时限流、周期额度／余额耗尽、认证失效、5xx 与传输断流）；支持单框粘贴 HTTP 状态码、业务错误码、原始消息或 JSON 自动定位命中策略，并可添加客户端自定义故障规则。
+### 2. 菜单栏圆润快捷面板与全局休眠冻结
+- **极速简写胶囊切换**：菜单栏／托盘左键直达独立拆包的圆润快捷面板（`420×720`），顶栏提供 **`Codex` · `Claude` · `Grok` · `DSH`** 简写胶囊切换（可在设置中按需隐藏不常用平台），与主窗口状态独立记忆、实时同步。
+- **就地队列与限流操控**：无需打开主窗口即可拖拽调整供应商优先级、查看紧凑余额额度、就地修改并发上限与 RPM 限流、一键重置熔断、逐条中止超 60 秒长等待请求，或按平台安全退出后台 CLI 进程。
+- **全局冻结与防合盖休眠**：支持一键**「全局冻结」**（等待在途请求安全收尾后进入冰晶休眠就绪态，唤醒后按剩余预算无损恢复）与 macOS 防合盖休眠电源助手（`lmfpd`）。
 
-### 3. 供应商连接测试与模型真伪核验
-- **直连对话与数字指纹**：按供应商独立执行流式连接测试（全局共用测试文案自动保存）、**ModelTrace** 与 **LM Detector** 模型指纹挑战及可选分词器探测，所有评分均在本地完成。
-- **自适应定时巡检**：支持固定周期或按近一小时真实业务请求量动态分档（5–30 分钟，零调用自动暂停）的智能定时检测；识别低家族混用或汇总降智时自动标记并移出自动队列。
+### 3. 单端口多客户端高可用网关与零停机故障转移
+- **单端口令牌分流**：默认监听 `127.0.0.1:43721`，通过各客户端独立的本地访问令牌在根路径／`/v1` 精确鉴权与分流，同时保留 `/codex`、`/claude`、`/grok` 兼容前缀；HTTP、SSE 与原生 WebSocket 全程保持原协议零有损透传。
+- **Codex 线程亲和与压缩交接**：精准识别 Codex `thread-id`（排除缓存亲和 `session-id` 与空预热），支持按供应商独立开启「新线程接管」与「上下文压缩后接管」，按 owner epoch 与压缩代次原子交接，严守已输出内容不重放边界。
+- **多端点测速与故障策略引擎**：每家供应商支持主地址与最多 8 个辅助 `base_url`，按需发起无凭据响应头延迟探测并优选最快可达端点；内置结构化错误封套分类器，支持单框粘贴状态码、错误码或原始 JSON 快速定位命中策略。
 
-### 4. 多客户端账号切换与双模配置中心
-- **Codex 账号库**：支持 ChatGPT 浏览器登录、设备码登录（一键复制链接与设备码）、指定账号设备码无损刷新、官方账号直连模式，以及 Codex / Sub2API / CLIProxyAPI 批量导入导出与 CC Switch 链接队列导入。
-- **跨客户端接入管理**：Claude Code 支持「官方／API」全局配置档独立切换与官方 CLI 登录；Grok Build 支持只读发现、`endpoint.env` 字面量解析并迁入独立 API 模型（与原生官方模型并存）；DSH 支持多 profile 统一接入与官方模型目录映射。
-- **双模配置编辑器**：
-  - **Claude Code**（`settings.json`）与 **Antigravity app**（`config.json`）提供「可视化 | JSON」双模同步编辑，支持分组表单、高级 JSON 树无损保留未知／插件字段、敏感值遮蔽、脱敏改动对比、私有快照备份与「恢复上次配置」。
-  - **Codex / Grok Build**（`config.toml`）与 **DSH**（profile / home YAML patch）提供语法高亮、即时校验与外部文件变更监听（干净草稿自动同步，未保存草稿触发版本冲突保护）。
+### 4. 多平台账号金库与双模无损配置中心
+- **全能账号金库**：Codex 支持浏览器 OAuth、设备码登录、指定账号无损刷新、官方直连模式及 Codex / Sub2API / CLIProxyAPI / CC Switch 批量导入导出；Claude Code 支持「官方／API」配置档隔离切换；Antigravity 支持 OAuth、ADC 与 Vertex API Key 多账号管理。
+- **可视化 + 代码双模编辑**：
+  - **Claude Code**（`settings.json`）与 **Antigravity app**（`config.json`）提供分组表单与 JSON 树双模同步编辑，**无损保留未知字段与插件配置**，内置敏感值遮蔽、脱敏 Diff 预览与一键「恢复上次配置」。
+  - **Codex / Grok Build**（`config.toml`）与 **DSH**（YAML patch）提供语法高亮、即时校验与外部修改冲突保护。
 
-### 5. 去重用量核算、压缩存储与账单导出
-- **双向增量去重**：网关流式计量（含首字延迟 TTFT、输出 TPS、缓存读／写 TTL 明细、推理 Token 与网络搜索计费）与本机 Codex、Claude Code、Grok Build、Antigravity app 会话文件增量扫描自动关联补齐，未变化会话按文件游标跳过重扫。
-- **紧凑本地存储**：SQLite 用量库采用计量列分离、内容摘要共享定价基座与带校验和的 Zstd 字典无损压缩，主库与 WAL 合计以约 `80 MiB` 为常态维护目标（7 天后归档无异常成功请求的细粒度诊断，30 天后收敛历史明细为日汇总）。
-- **多源定价与账单导出**：支持固定价格优先、`Wei-Shaw` 自动价格同步、`models.dev` 索引补缺及供应商模型精确映射；支持导出 **Claude Code** 与 **Antigravity app** 精确到秒的核对账单，并可选按导出截止秒原子清理已结清历史记录。
+### 5. 供应商直连测试与模型真伪核验
+- **直连流式测试与数字指纹**：按供应商独立发起流式对话测试、**ModelTrace** 与 **LM Detector** 模型指纹挑战及可选分词器探测，所有评分均在本地完成。
+- **自适应定时巡检**：支持固定周期或按近一小时真实业务请求量动态分档（5–30 分钟，零调用自动暂停）的智能巡检；识别低家族混用或汇总降级时自动标记并移出自动路由队列。
 
-### 6. 圆润快捷面板、全局冻结与低占用后台
-- **多色调界面与按窗口动态拆包**：采用青、钴蓝、靛紫多色调深浅主题与模块化样式架构；托盘窗口（`?panel=quick`）与主窗口按入口动态拆包加载，互不冗余占用前端资源。
-- **卡片式圆润快捷面板**：菜单栏／托盘左键直达独立圆润面板，集成全局冻结卡、平台胶囊切换、供应商拖拽排序、实时额度与并发／RPM 就地调整、超 60 秒长等待请求逐条中止，以及分平台一键退出客户端 CLI 进程。
-- **全局冻结与电源助手**：支持一键「全局冻结」（等待在途请求与网关任务安全收尾后展示冰晶休眠就绪态）与 macOS 防合盖休眠电源助手（`lmfpd`）；窗口隐藏时自动挂起非必要前端广播与轮询，空闲状态下后台线程按事件按需唤醒。
+### 6. 原子级配置事务与紧凑 Zstd 本地存储
+- **跨文件事务自愈**：所有客户端配置接管与还原均通过私有事务日志（`gateway-takeover.json` 等）与乐观锁版本校验执行；即便遭遇进程异常中断，下次启动也会在加载服务前自动完成事务回滚或补齐，绝不污染用户原配置。
+- **Zstd 字典压缩 SQLite**：用量库采用计量列分离、内容摘要共享定价基座与带校验和的 Zstd 字典无损压缩，主库与 WAL 合计以约 `80 MiB` 为常态维护目标（7 天归档常规诊断正文，30 天收敛为日汇总）。
 
 ---
 
 ## 客户端支持矩阵
 
-| 客户端 | 默认本地网关入口 | 接入与认证机制 | 配置编辑支持 | 用量采集与账单 |
-| --- | --- | --- | --- | --- |
-| **Codex** | `127.0.0.1:43721/v1` | Bearer 两字段或普通 API 跨文件事务；ChatGPT OAuth 账号库与官方直连 | `config.toml` 原文校验、受管字段保护与上次配置恢复 | 网关实时计量 + 本机活跃／归档会话双向去重 |
-| **Claude Code** | `127.0.0.1:43721` | `settings.json` 环境变量接入；官方／API 配置档隔离切换 | `settings.json` **可视化（5 分组）+ JSON** 双模编辑 | 网关实时计量 + 主／子代理会话去重 + **账单导出** |
-| **Grok Build** | `127.0.0.1:43721/v1` | 独立受管 API 模型接入，保留原生官方 OAuth 模型自由切换 | `config.toml` 原文校验与 `endpoint.env` 导入预览 | 网关实时计量 + 原生多模型轮次独立统计 |
-| **DSH** | `127.0.0.1:43721/v1` | Chat Completions 协议；全 profile 事务同步与官方模型目录映射 | `desktop` / 各 profile YAML patch 编辑与恢复 | 网关实时请求与模型调用计量 |
-| **Antigravity app** | Vertex Key：`127.0.0.1:43721/antigravity` | OAuth／ADC 由 App 直连；Vertex API Key 通过 Vela 转发至 Google，使用时需保持 Vela 运行 | `config.json` **可视化（4 分组）+ JSON** 双模编辑；账号切换事务管理认证及企业网关设置 | 本机 RPC／`brain` 会话增量采集、原名展示 + **账单导出与清理** |
+| 客户端 | 快捷面板简写 | 默认本地网关入口 | 接入与认证机制 | 配置编辑支持 | 用量采集与配额透视 |
+| --- | --- | --- | --- | --- | --- |
+| **Codex** | `Codex` | `127.0.0.1:43721/v1` | Bearer 或 API Key 跨文件事务；ChatGPT OAuth 账号库与官方直连 | `config.toml` 原文校验、受管字段保护与备份恢复 | 网关实时计量 + 本机活跃／归档会话双向去重 |
+| **Claude Code** | `Claude` | `127.0.0.1:43721` | `settings.json` 环境变量接入；官方／API 配置档隔离切换 | `settings.json` **可视化（5 分组）+ JSON** 双模编辑 | **官方 5h/7d/Sonnet 剩余百分比徽章** + 主／子代理会话去重 + **账单导出** |
+| **Grok Build** | `Grok` | `127.0.0.1:43721/v1` | 独立受管 API 模型接入，保留原生官方 OAuth 模型自由切换 | `config.toml` 原文校验与 `endpoint.env` 导入预览 | 网关实时计量 + 原生多模型轮次独立统计 |
+| **DSH** | `DSH` | `127.0.0.1:43721/v1` | Chat Completions 协议；全 profile 事务同步与官方模型目录映射 | `desktop` / 各 profile YAML patch 编辑与恢复 | 网关实时请求与模型调用计量 |
+| **Antigravity app** | — | Vertex Key：`127.0.0.1:43721/antigravity` | OAuth／ADC 由 App 直连；Vertex API Key 通过 Vela 转发至 Google | `config.json` **可视化（4 分组）+ JSON** 双模编辑 | **Gemini & Claude/GPT 双轨配额剩余百分比** + 会话增量采集 + **账单导出** |
 
 ---
 
@@ -67,26 +80,26 @@ flowchart LR
     AG["Antigravity app"]
   end
 
-  subgraph Core["Vela (Tauri 2 / Rust)"]
+  subgraph Core["Vela 核心引擎 (Tauri 2 / Rust)"]
     GW["共享回环网关\n127.0.0.1:43721"]
-    Watch["配置事务与文件监听"]
-    Sync["会话增量同步与去重引擎"]
-    DB[("SQLite 用量库 (Zstd)\n+ 私有配置与诊断存储")]
+    Watch["原子配置事务与文件监听"]
+    Sync["会话增量同步与配额采集"]
+    DB[("SQLite 用量库 (Zstd)\n+ 私有凭据与事务快照")]
   end
 
-  subgraph UI["按窗口动态拆包前端 (React)"]
+  subgraph UI["按窗口动态拆包前端 (React 19)"]
     Main["主窗口 (AppEntry)\n账号 / 配置 / 网关 / 用量 / 日志"]
-    Quick["托盘圆润快捷面板 (QuickEntry)\n全局冻结 / 供应商队列 / 进程控制"]
+    Quick["托盘圆润快捷面板 (QuickEntry)\nCodex · Claude · Grok · DSH"]
   end
 
-  Upstreams["已配置的各家上游供应商端点"]
+  Upstreams["上游供应商端点集群"]
   Vertex["Google Vertex AI"]
 
   Codex & Claude & Grok & DSH -->|"独立本地令牌 (HTTP / SSE / WS)"| GW
   GW -->|"故障策略 / 线程亲和 / 多端点优选"| Upstreams
   AG -->|"Vertex Key 专用路由与本地令牌"| GW
   GW -->|"Vertex 请求直接转发"| Vertex
-  Codex & Claude & Grok & DSH & AG <-->|"受管事务写入 / 变更通知 / 只读采集"| Watch & Sync
+  Codex & Claude & Grok & DSH & AG <-->|"原子事务写入 / 变更监听 / 只读采集"| Watch & Sync
   GW & Sync --> DB
   Main & Quick <-->|"可见窗口按需 IPC"| Core
 ```
@@ -97,10 +110,10 @@ flowchart LR
 
 从 [GitHub Releases](https://github.com/lich13/vela/releases) 下载对应平台安装包：
 
-- **macOS（Apple Silicon）**：`.dmg` 磁盘映像（采用 ad-hoc 签名，首次打开如遇系统拦截请按 macOS 提示在「系统设置 → 隐私与安全性」中确认打开）。
-- **Windows（x64）**：NSIS `.exe` 安装程序（未附带商业代码签名，SmartScreen 提示时确认运行即可）。
+- **macOS（Apple Silicon）**：`.dmg` 磁盘映像（采用 ad-hoc 签名；首次打开如遇系统拦截，请按 macOS 提示在「系统设置 → 隐私与安全性」中确认打开）。
+- **Windows（x64）**：NSIS `.exe` 安装程序（SmartScreen 提示时确认运行即可）。
 
-下载后建议使用同一 Release 附带的 `SHA256SUMS` 校验安装包哈希：
+下载后建议使用同一 Release 附带的 `SHA256SUMS` 校验安装包完整性：
 
 ```sh
 # macOS
@@ -112,53 +125,38 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 Get-FileHash .\Vela_*.exe -Algorithm SHA256
 ```
 
-历史版本演进详见 [发布说明 (RELEASE.md)](RELEASE.md)。
+历史版本演进详见 [发布说明 (RELEASE.md)](./RELEASE.md)。
 
 ---
 
 ## 快速上手
 
-1. **配置并启用网关**：打开主窗口「网关」页，选择目标客户端（Codex / Claude Code / Grok Build / DSH），添加至少一家供应商并按需调整队列顺序、并发与 RPM 上限；打开网关开关后，按提示重新打开对应客户端使连接生效（运行中切换供应商仅作用于新请求，不中断已有流）。
-2. **管理 Codex 账号与多端接入**：在「账号」页登录 ChatGPT 或导入已有 `auth.json`／Sub2API／CLIProxyAPI 凭据；Claude Code 可在网关页或配置页一键切换「官方／API」模式；Grok Build 与 DSH 可通过页头入口完成首次配置识别与接入。
-3. **双模编辑客户端配置**：在「配置」页切换客户端，使用可视化表单或代码编辑器维护配置；保存前可通过「查看改动」核对脱敏差异，误改后可点击「恢复上次配置」载入最近一次私有备份草稿。
-4. **使用托盘快捷面板与全局冻结**：左键点击系统菜单栏／托盘图标唤起圆润快捷面板，随时切换供应商、查看余额额度、中止超时长等待请求或退出后台 CLI 进程；合盖或休眠前可点击顶部「全局冻结」，待指示灯变为冰蓝色「可休眠」后安全休眠。
-5. **核对用量、导出账单与排查异常**：在「用量」页按时间、客户端、供应商与模型查看去重费用及首字性能，或点击「导出账单」导出 Claude Code 与 Antigravity app 账单；遇到上游报错或熔断时，在「日志」页查看脱敏原始响应并一键跳转定位「故障策略」。
+1. **配置并启用网关**：打开主窗口「网关」页，选择目标客户端（Codex / Claude Code / Grok Build / DSH），添加供应商并调整队列顺序、并发与 RPM 上限；打开网关开关后重新打开对应客户端即可生效（运行中切换供应商仅作用于新请求，不中断已有流）。
+2. **快捷面板极速操控**：点击菜单栏／托盘图标唤起快捷面板，在 **`Codex` / `Claude` / `Grok` / `DSH`** 之间一键切换，随时调序、查看余额、中止超时长等待请求或开启「全局冻结」。
+3. **监控剩余配额与缓存节省**：在「用量」页切换至 **Claude Code** 或 **Antigravity** 专属视图，实时查看各周期 **`剩余 XX%`** 高亮徽章、Token 构成、缓存命中节省金额与会话排行，或点击「导出账单」生成核对账单。
+4. **双模安全改配**：在「配置」页使用可视化表单或代码编辑器维护客户端配置，保存前通过「查看改动」核对脱敏差异，误操作可随时点击「恢复上次配置」。
 
-更多分专题说明：
-- [设计系统与完整交互规范 (DESIGN.md)](DESIGN.md)
-- [账号登录、导入导出与客户端配置 (docs/clients.md)](docs/clients.md)
-- [客户端网关、线程调度与故障转移 (docs/gateway.md)](docs/gateway.md)
-- [快捷面板、额度展示与系统控制 (docs/controls.md)](docs/controls.md)
-- [用量采集、去重与计价口径 (docs/usage.md)](docs/usage.md)
-- [本地数据目录、事务恢复与清理边界 (docs/data.md)](docs/data.md)
-
----
-
-## 隐私、网络与存储边界
-
-- **零遥测与本地自治**：应用不含广告、统计埋点或云端账号同步。内部应用标识为 `com.lich13.vela`，本地私有数据目录统一位于 `~/.vela`（升级自动迁移旧目录数据）。
-- **明确的网络边界**：业务转发、额度刷新、模型目录拉取、无凭据多端点测速与模型指纹挑战发往用户显式配置的供应商地址；启用 Antigravity Vertex Key 后，请求转发至 Google Vertex AI 的全局或所选地区端点。其余应用直接请求仅限用户检查更新（GitHub Releases API）、自动／手动同步公开模型价格（`Wei-Shaw/model-price-repo` / `models.dev`）以及用户手动更新公开指纹库资源。源码硬编码域名由 `scripts/check-network-hosts.py` 与 `scripts/network-hosts.json` 离线静态门禁严格校验。
-- **脱敏诊断与仓库规范**：诊断日志自动过滤敏感头与路径，不保存请求／响应正文或账号邮箱；仓库源码与测试统一使用 `example.invalid`、回环地址与 `fixture` 脱敏夹具。
-- 完整数据清单与网络矩阵请参阅 **[隐私与安全 (PRIVACY.md)](PRIVACY.md)**。发现安全隐患请通过 [GitHub Security Advisories](https://github.com/lich13/vela/security/advisories/new) 私下报告。
+更多专题文档：
+- [设计系统与交互规范 (DESIGN.md)](./DESIGN.md) · [隐私与安全边界 (PRIVACY.md)](./PRIVACY.md)
+- [客户端接入与配置 (docs/clients.md)](./docs/clients.md) · [网关调度与故障转移 (docs/gateway.md)](./docs/gateway.md)
+- [快捷面板与系统控制 (docs/controls.md)](./docs/controls.md) · [用量核算与计价口径 (docs/usage.md)](./docs/usage.md) · [数据目录与事务恢复 (docs/data.md)](./docs/data.md)
 
 ---
 
 ## 本地开发与验证
 
 ### 环境要求
-- **Node.js**：使用本机当前稳定版，CI 跟随官方稳定渠道
-- **pnpm**：使用当前稳定版；项目启用 `pmOnFail: ignore`，使用本机安装的包管理器和提交的锁文件
-- **Rust**：工具链与组件见 [rust-toolchain.toml](rust-toolchain.toml)
-- **平台系统依赖**：参见 [Tauri v2 Prerequisites](https://v2.tauri.app/start/prerequisites/)
+- **Node.js** & **pnpm**：使用当前稳定版（启用 `--frozen-lockfile`）
+- **Rust**：稳定版工具链（见 [rust-toolchain.toml](./rust-toolchain.toml)）
+- **系统依赖**：参见 [Tauri v2 Prerequisites](https://v2.tauri.app/start/prerequisites/)
 
-### 常用命令
+### 常用验证命令
 
 ```sh
-# 1. 核对包管理器并安装前端依赖
-pnpm --version
+# 1. 安装前端依赖
 pnpm install --frozen-lockfile
 
-# 2. 前端测试、类型检查与生产构建
+# 2. 前端单元测试、类型检查与生产构建
 pnpm test
 pnpm build
 
@@ -171,24 +169,10 @@ cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 python3 scripts/check-network-hosts.py
 python3 scripts/check-error-codes.py
 python3 -m unittest discover -s scripts -p "test_*.py"
-
-# 5. 重新生成全套应用与托盘图标 / 启动桌面开发模式
-pnpm icons
-pnpm tauri dev
 ```
 
-- `pnpm dev` 仅启动带「预览」标识的浏览器模拟界面，不读写任何真实客户端凭据。
-- 桌面构建产物支持 `--smoke-test <绝对输出路径>` 参数：在独立临时目录中端到端验证 WebView、托盘、账号切换、共享网关鉴权、配置事务写入与退出恢复，全程不触碰本机真实客户端目录。
-
----
-
-## 依赖维护与安全审计
-
-- **Dependabot 策略**：每周一 `09:00 (Asia/Taipei)` 检查 Cargo、前端与 GitHub Actions（普通更新冷却 7 天，安全更新走独立通道立即触发）。Cargo 采用 `lockfile-only` 与兼容 `minor/patch` 约束维护主锁文件（含本地 `lmfpd` 审计）；前端按 React 核心（保持 `react` 与 `react-dom` 同版本）、运行依赖、开发工具分 3 组；GitHub Actions 保持固定提交 SHA。
-- **关键兼容约束**：
-  - `tauri` 运行时保持 `2.11` 系列，宏、构建与代码生成组件保持兼容的 `2.6` 系列，升级主包时成组评估。
-  - `yaml-edit` 固定 `0.3.2`，保障 DSH 空数组、注释及外部修改保护往返测试稳定通过。
-- **漏洞审计**：执行 `cargo audit --file src-tauri/Cargo.lock` 与 `pnpm audit`。当前 `Cargo.lock` 中仅存 5 条由 Tauri Linux GTK 3 / D-Bus 单实例链路引入的上游间接警告（`proc-macro-error 1.0.4` / `RUSTSEC-2024-0370`、`glib 0.18.5` / `RUSTSEC-2024-0429`、`zvariant 5.15.1` / `RUSTSEC-2026-0370`、`zbus_names 4.3.5` / `RUSTSEC-2026-0371`、`zvariant_derive 5.15.1` / `RUSTSEC-2026-0372`），均不在 macOS 与 Windows 目标依赖树中，遵循不添加忽略列表隐藏警告的原则保留可见并随上游迁移更新。
+- **Dependabot 与依赖策略**：每周一自动检查 Cargo、npm 与 GitHub Actions 的兼容 `minor/patch` 更新（自动忽略跨主版本破坏性升级，前端合并为单一 `frontend-compatible` 组避免锁文件冲突）。
+- **安全报告**：发现安全问题请通过 [GitHub Security Advisories](https://github.com/lich13/vela/security/advisories/new) 私下报告。
 
 ---
 
