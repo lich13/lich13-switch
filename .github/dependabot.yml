@@ -16,6 +16,9 @@ updates:
     ignore:
       - dependency-name: '*'
         update-types: ['version-update:semver-major']
+      # Keep @tauri-apps/api on 2.11.x to match the pinned tauri ~2.11 Rust crate.
+      - dependency-name: '@tauri-apps/api'
+        update-types: ['version-update:semver-minor']
     groups:
       frontend-compatible:
         applies-to: version-updates
