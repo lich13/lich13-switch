@@ -378,7 +378,8 @@ it("switches and remembers the quick client independently and routes actions usi
   const user = userEvent.setup();
   const view = render(<QuickPanel />);
   await screen.findByText(gatewayDemo.providers[0].name);
-  await user.click(screen.getByRole("button", { name: "Claude Code" }));
+  expect(screen.getByRole("button", { name: "Grok" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Claude" }));
   await screen.findByText(claudeGatewayDemo.providers[0].name);
   expect(mock.command).toHaveBeenCalledWith("get_gateway", {
     clientId: "claude",
@@ -428,7 +429,7 @@ it("switches and remembers the quick client independently and routes actions usi
   view.unmount();
   render(<QuickPanel />);
   await screen.findByText(claudeGatewayDemo.providers[0].name);
-  expect(screen.getByRole("button", { name: "Claude Code" })).toHaveAttribute(
+  expect(screen.getByRole("button", { name: "Claude" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
@@ -444,7 +445,7 @@ it("protects an unsaved quick concurrency draft until a client switch is confirm
   const cap = screen.getByRole("spinbutton", { name: "上限（0 不限）" });
   await user.clear(cap);
   await user.type(cap, "12");
-  await user.click(screen.getByRole("button", { name: "Claude Code" }));
+  await user.click(screen.getByRole("button", { name: "Claude" }));
   await user.click(
     within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
       "button",
@@ -458,7 +459,7 @@ it("protects an unsaved quick concurrency draft until a client switch is confirm
   expect(mock.command).not.toHaveBeenCalledWith("get_gateway", {
     clientId: "claude",
   });
-  await user.click(screen.getByRole("button", { name: "Claude Code" }));
+  await user.click(screen.getByRole("button", { name: "Claude" }));
   await user.click(
     within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
       "button",
@@ -528,7 +529,7 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
     }),
   );
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Claude Code" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "Claude" })).toHaveAttribute(
       "aria-pressed",
       "true",
     ),

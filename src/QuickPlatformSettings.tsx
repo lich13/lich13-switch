@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { command } from "./bridge";
-import { clients, clientName } from "./ClientSelection";
+import { clients, quickClientName } from "./ClientSelection";
 import { subscriptions } from "./subscriptions";
 import { errorOf, type ClientId } from "./types";
 export default function QuickPlatformSettings() {
@@ -36,7 +36,7 @@ export default function QuickPlatformSettings() {
       <div>
         {clients.map((id) => (
           <label key={id}>
-            <span>{clientName(id)}</span>
+            <span>{quickClientName(id)}</span>
             <input
               type="checkbox"
               checked={!hidden?.includes(id)}

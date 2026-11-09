@@ -12,6 +12,14 @@ export const clientName = (client: ConfigClientId) =>
     dsh: "DSH",
     antigravity: "Antigravity app",
   })[client];
+export const quickClientName = (client: ConfigClientId) =>
+  ({
+    codex: "Codex",
+    claude: "Claude",
+    grok: "Grok",
+    dsh: "DSH",
+    antigravity: "Antigravity app",
+  })[client];
 export function useClientSelection(
   surface: "config",
 ): readonly [
@@ -66,12 +74,14 @@ export default function ClientSelection<C extends ConfigClientId = ClientId>({
   disabled = false,
   includeDsh = true,
   visibleClients = clients as unknown as readonly C[],
+  label = clientName,
 }: {
   client: C;
   select: (id: C) => void;
   disabled?: boolean;
   includeDsh?: boolean;
   visibleClients?: readonly C[];
+  label?: (id: C) => string;
 }) {
   return (
     <nav className="segmented client-selection" aria-label="客户端">
@@ -87,7 +97,7 @@ export default function ClientSelection<C extends ConfigClientId = ClientId>({
             aria-pressed={id === client}
             onClick={() => select(id)}
           >
-            {clientName(id)}
+            {label(id)}
           </button>
         ))}
     </nav>

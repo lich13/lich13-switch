@@ -5,6 +5,7 @@ import type { GatewayEdit } from "./bridge-contracts";
 import ClientSelection, {
   useClientSelection,
   clientName,
+  quickClientName,
   clients,
 } from "./ClientSelection";
 import { saveGatewayEdit, type EditRevision } from "./gateway-edit";
@@ -233,6 +234,7 @@ function QuickContent({
             visibleClients={visibleClients}
             disabled={busy}
             select={onClientChange}
+            label={quickClientName}
           />
         )}
         <span className="quick-spacer" />
