@@ -1042,5 +1042,23 @@ it("switches between strict and relaxed verdict modes and persists the degraded 
       }),
     }),
   );
+
+  await screen.findByRole("option", { name: "Fixture (fixture-model)" });
+  await user.clear(degradedInput);
+  await user.type(degradedInput, "gpt-5.6-luna");
+  await user.click(screen.getByRole("button", { name: "开始测试" }));
+  await screen.findByRole("button", { name: "停止测试" });
+  expect(states[gateway.providers[0].id].platform.degradedModelId).toBe(
+    "gpt-5.6-luna",
+  );
+  expect(mock.command).toHaveBeenCalledWith(
+    "provider_test_start",
+    expect.objectContaining({
+      request: expect.objectContaining({
+        kind: "fingerprint",
+        model: "fixture-model",
+      }),
+    }),
+  );
 });
 

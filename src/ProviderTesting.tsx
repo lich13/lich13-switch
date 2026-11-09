@@ -321,7 +321,8 @@ export default function ProviderTesting({
     }
   };
   const leave = async () => {
-    if (busy || !(await flushTestPrompt())) return;
+    if (busy || !(await flushTestPrompt()) || !(await flushDegradedModel()))
+      return;
     if (!dirty || (await confirmAction("放弃未保存的修改？"))) close();
   };
   const scopedJobs =
@@ -346,6 +347,7 @@ export default function ProviderTesting({
   const start = () =>
     perform(async () => {
       if (!(await promptState.flush())) return;
+      if (kind === "fingerprint" && !(await flushDegradedModel())) return;
       const promptSnapshot = promptState.snapshot();
       const current = await command("get_gateway", {
         clientId: gateway.clientId,
@@ -474,21 +476,45 @@ export default function ProviderTesting({
       </div>
     </label>
   );
-  const commitDegradedModel = (raw = degradedModelDraft) => {
-    if (!platform) return;
+  const degradedFlight = useRef<Promise<boolean> | null>(null);
+  const flushDegradedModel = (raw = degradedModelDraft): Promise<boolean> => {
+    if (degradedFlight.current) return degradedFlight.current;
+    if (!platform || verdictMode !== "relaxed") return Promise.resolve(true);
     const next = raw.trim();
     if (!next) {
       setDegradedModelDraft(
         platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL,
       );
-      return;
+      return Promise.resolve(true);
     }
-    if (next === (platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL)) return;
-    void savePlatform({
-      ...platform,
-      verdictMode,
-      degradedModelId: next,
+    if (next === (platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL))
+      return Promise.resolve(true);
+    const work = (async () => {
+      try {
+        setError("");
+        await command("provider_test_set_platform", {
+          clientId: gateway.clientId,
+          platform: {
+            ...platform,
+            verdictMode,
+            degradedModelId: next,
+          },
+        });
+        await refresh();
+        return true;
+      } catch (e) {
+        fail(e);
+        return false;
+      }
+    })();
+    degradedFlight.current = work;
+    void work.finally(() => {
+      if (degradedFlight.current === work) degradedFlight.current = null;
     });
+    return work;
+  };
+  const commitDegradedModel = (raw = degradedModelDraft) => {
+    void flushDegradedModel(raw);
   };
   const platformControls = (manual: boolean) =>
     platform && (
@@ -1145,6 +1171,7 @@ export default function ProviderTesting({
                 }
                 onClick={() =>
                   void perform(async () => {
+                    if (!(await flushDegradedModel())) return;
                     await command("provider_test_set_detection", {
                       ...scope,
                       detection,

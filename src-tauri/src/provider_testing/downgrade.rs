@@ -261,18 +261,47 @@ pub fn lm_contains(detector: &lmfpd::Detector, target: &str) -> bool {
 }
 pub fn relaxed_verdict(job: &Job, report: &Value) -> &'static str {
     let target = normalize(&job.degraded_model_id);
+    let is_lm = job.engine == super::types::Engine::LmDetector;
     if target.is_empty()
+        || ![1, 3].contains(&job.sample_count)
         || job.groups.len() != job.sample_count
         || integer(&report["used_outputs"]) != Some(job.sample_count as i64)
+        || (is_lm
+            && (!matches!(report["decision"].as_str(), Some("partial" | "scored"))
+                || report["merged_class"].as_bool() == Some(true)))
         || job.groups.iter().any(|group| {
             group.status != "completed"
                 || group.uncertain
                 || group.retryable
                 || group.error.is_some()
+                || group.diagnostics["incomplete_reason"].is_string()
+                || group.diagnostics["end_reason"].as_str().is_some_and(|r| {
+                    !matches!(
+                        r,
+                        "completed"
+                            | "stop"
+                            | "done"
+                            | "end_turn"
+                            | "stop_sequence"
+                            | "message_stop"
+                    )
+                })
                 || matches!(
                     group.diagnostics["reason"].as_str(),
-                    Some("length" | "max_tokens" | "model_length")
+                    Some(
+                        "length"
+                            | "max_tokens"
+                            | "model_length"
+                            | "max_output_tokens"
+                            | "content_filter"
+                    )
                 )
+                || (is_lm
+                    && !group.report.as_ref().is_some_and(|r| {
+                        integer(&r["used_outputs"]) == Some(1)
+                            && r["merged_class"].as_bool() != Some(true)
+                            && report_members(r).is_some_and(|m| m.len() == 1)
+                    }))
         })
     {
         return "unknown";
@@ -539,8 +568,20 @@ mod tests {
             "gpt-5.6-luna",
         );
         truncated.degraded_model_id = "gpt-5.6-luna".into();
-        truncated.groups[0].diagnostics = json!({"reason": "max_tokens"});
+        truncated.groups[0].diagnostics = json!({"end_reason": "max_output_tokens"});
         assert_eq!(relaxed_verdict(&truncated, &report), "unknown");
+        truncated.groups[0].diagnostics =
+            json!({"end_reason": "completed", "incomplete_reason": "max_output_tokens"});
+        assert_eq!(relaxed_verdict(&truncated, &report), "unknown");
+        truncated.groups[0].diagnostics = json!({"end_reason": "completed"});
+        assert_eq!(relaxed_verdict(&truncated, &report), "downgrade");
+
+        let mut group_merged = lm_job(
+            &["gpt-5.6-luna", "gpt-6-astra/6.1-sol", "gpt-5.6-luna"],
+            "gpt-5.6-luna",
+        );
+        group_merged.degraded_model_id = "gpt-5.6-luna".into();
+        assert_eq!(relaxed_verdict(&group_merged, &report), "unknown");
     }
 
     #[test]
