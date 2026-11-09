@@ -185,14 +185,6 @@ export default function UsageAntigravity({
     stats.unpricedRequests,
     stats.requests,
   );
-  const visibleSharePercent =
-    mix.thinkingSharePercent == null
-      ? null
-      : Math.max(0, Math.min(100, 100 - mix.thinkingSharePercent));
-  const cacheMissPercent =
-    mix.cacheHitPercent == null
-      ? null
-      : Math.max(0, Math.min(100, 100 - mix.cacheHitPercent));
 
   return (
     <div className="usage-ag-panel" aria-busy={busy}>
@@ -221,20 +213,6 @@ export default function UsageAntigravity({
                 ? "—"
                 : `${mix.thinkingSharePercent.toFixed(1)}%`}
             </strong>
-            {visibleSharePercent != null && (
-              <>
-                <div className="usage-ag-kpi-meter" aria-hidden="true">
-                  <span
-                    style={{
-                      width: `${Math.max(0, Math.min(100, mix.thinkingSharePercent!))}%`,
-                    }}
-                  />
-                </div>
-                <small className="usage-ag-kpi-sub">
-                  可见剩余 {formatRemainingPercent(visibleSharePercent)}
-                </small>
-              </>
-            )}
           </div>
           <div>
             <span>缓存命中率</span>
@@ -249,20 +227,6 @@ export default function UsageAntigravity({
                 ? "—"
                 : `${mix.cacheHitPercent.toFixed(1)}%`}
             </strong>
-            {cacheMissPercent != null && (
-              <>
-                <div className="usage-ag-kpi-meter is-cache" aria-hidden="true">
-                  <span
-                    style={{
-                      width: `${Math.max(0, Math.min(100, mix.cacheHitPercent!))}%`,
-                    }}
-                  />
-                </div>
-                <small className="usage-ag-kpi-sub">
-                  未命中剩余 {formatRemainingPercent(cacheMissPercent)}
-                </small>
-              </>
-            )}
           </div>
           <div>
             <span>缓存估算节省</span>

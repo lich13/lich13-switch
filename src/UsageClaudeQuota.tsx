@@ -20,11 +20,6 @@ export default function UsageClaudeQuota({
   quota: ClaudeUsageQuota | null;
 }) {
   const windows = quota?.windows ?? [];
-  const primaryWindow =
-    windows.find((w) => w.id === "five_hour") ?? windows[0] ?? null;
-  const primaryRemaining = primaryWindow
-    ? Math.max(0, Math.min(100, 100 - primaryWindow.usedPercent))
-    : null;
   const tightestRemaining = windows.length
     ? Math.min(
         ...windows.map((w) => Math.max(0, Math.min(100, 100 - w.usedPercent))),
@@ -32,11 +27,6 @@ export default function UsageClaudeQuota({
     : null;
   const summaryTone =
     tightestRemaining != null ? quotaTone(tightestRemaining) : "healthy";
-  const ringCircumference = 2 * Math.PI * 10;
-  const ringOffset =
-    primaryRemaining == null
-      ? ringCircumference
-      : ringCircumference * (1 - primaryRemaining / 100);
 
   return (
     <section
@@ -51,28 +41,7 @@ export default function UsageClaudeQuota({
               className={`usage-quota-remaining-pill is-${summaryTone}`}
               title="所有周期中最紧窗口的剩余百分比"
             >
-              {primaryRemaining != null && (
-                <svg
-                  className="usage-quota-ring"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <circle
-                    className="usage-quota-ring-track"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                  />
-                  <circle
-                    className="usage-quota-ring-fill"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    strokeDasharray={ringCircumference}
-                    strokeDashoffset={ringOffset}
-                  />
-                </svg>
-              )}
+              <i className="usage-quota-dot" aria-hidden="true" />
               最紧剩余 {formatRemainingPercent(tightestRemaining)}
             </span>
           )}
@@ -117,18 +86,12 @@ export default function UsageClaudeQuota({
                   }}
                 />
               </div>
-              <dl className="usage-ag-window-stats">
-                <div>
-                  <dt>已用</dt>
-                  <dd>已用 {used.toFixed(1)}%</dd>
-                </div>
-                <div>
-                  <dt>重置</dt>
-                  <dd>
-                    {window.resetsAt == null ? "—" : date(window.resetsAt)}
-                  </dd>
-                </div>
-              </dl>
+              <div className="usage-claude-window-foot">
+                <span>已用 {used.toFixed(1)}%</span>
+                <span>
+                  重置 {window.resetsAt == null ? "—" : date(window.resetsAt)}
+                </span>
+              </div>
             </div>
           );
         })}

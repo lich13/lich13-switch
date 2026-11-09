@@ -613,9 +613,7 @@ describe("Usage Antigravity statistics tab", () => {
 
     const summary = await screen.findByLabelText("Token 构成与缓存节省");
     expect(within(summary).getByText("54.0%")).toBeInTheDocument();
-    expect(within(summary).getByText("可见剩余 46.0%")).toBeInTheDocument();
     expect(within(summary).getByText("78.3%")).toBeInTheDocument();
-    expect(within(summary).getByText("未命中剩余 21.7%")).toBeInTheDocument();
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();
 
     const tracks = screen.getByLabelText("账号周期用量");
