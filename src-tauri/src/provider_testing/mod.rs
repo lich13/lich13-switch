@@ -427,11 +427,17 @@ impl Service {
         self.changed();
         Ok(())
     }
-    pub fn set_platform(&self, client: ClientId, settings: PlatformSettings) -> Result<()> {
+    pub fn set_platform(&self, client: ClientId, mut settings: PlatformSettings) -> Result<()> {
         if ![1, 3].contains(&settings.model_trace_samples)
             || ![1, 3].contains(&settings.lm_detector_samples)
         {
             return Err(failure("采样组数只能是 1 或 3"));
+        }
+        settings.degraded_model_id = settings.degraded_model_id.trim().to_owned();
+        if !scheduler::valid_model(&settings.degraded_model_id)
+            || !connection::text_model(&settings.degraded_model_id)
+        {
+            return Err(failure("请输入有效的降智目标模型"));
         }
         let mut data = lock(&self.0.data);
         let mut next = data.saved.clone();
@@ -498,6 +504,19 @@ impl Service {
         } else {
             None
         };
+        if request.kind == Kind::Fingerprint && platform.verdict_mode == VerdictMode::Relaxed {
+            let recognized = match platform.engine {
+                Engine::LmDetector => lm.as_ref().is_some_and(|lm| {
+                    downgrade::lm_contains(&lm.detector, &platform.degraded_model_id)
+                }),
+                Engine::ModelTrace => snapshot.as_ref().is_some_and(|snapshot| {
+                    downgrade::bank_contains(&snapshot.0, &platform.degraded_model_id)
+                }),
+            };
+            if !recognized {
+                return Err(failure("当前检测库无法识别指定的降智模型"));
+            }
+        }
         let challenges = if request.kind == Kind::Fingerprint {
             if platform.engine == Engine::LmDetector {
                 lmfpd::generate_challenges(platform.samples())
@@ -561,6 +580,8 @@ impl Service {
                 .unwrap_or(Value::Null),
             tokenizer: request.tokenizer,
             tokenizer_result: None,
+            verdict_mode: platform.verdict_mode,
+            degraded_model_id: platform.degraded_model_id.clone(),
         };
         let mut next = data.saved.clone();
         next.jobs.push(job.clone());

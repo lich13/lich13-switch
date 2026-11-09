@@ -9,6 +9,7 @@ import { errorOf, type GatewayState, type Provider } from "./types";
 import type {
   DetectionEngine,
   DetectionPlatform,
+  VerdictMode,
   ProviderTestMode,
   ProviderTestKind,
   ProviderTestingState,
@@ -21,6 +22,7 @@ import type {
 } from "./bridge-contracts";
 import "./provider-testing.css";
 
+const DEFAULT_DEGRADED_MODEL = "gpt-5.6-luna";
 const engineNames = { modelTrace: "ModelTrace", lmDetector: "LM Detector" };
 const bankResults: Record<string, string> = {
   updated: "已更新",
@@ -135,16 +137,29 @@ export default function ProviderTesting({
   const [detectionSaved, setDetectionSaved] = useState("");
   const [detectionRevision, setDetectionRevision] = useState("");
   const [now, setNow] = useState(Date.now());
+  const degradedListId = useId();
   const kind: ProviderTestKind =
     tab === "fingerprint" ? "fingerprint" : "connection";
   const testing = tab === "connection" || tab === "fingerprint";
   const fingerprint = !provider.searchOnly;
   const platform = state?.platform;
+  const verdictMode: VerdictMode = platform?.verdictMode ?? "strict";
+  const [degradedModelDraft, setDegradedModelDraft] = useState(
+    DEFAULT_DEGRADED_MODEL,
+  );
+  useEffect(() => {
+    setDegradedModelDraft(
+      platform?.degradedModelId ?? DEFAULT_DEGRADED_MODEL,
+    );
+  }, [platform?.degradedModelId]);
   const sampleCount =
     platform?.engine === "lmDetector"
       ? platform.lmDetectorSamples
       : (platform?.modelTraceSamples ?? 3);
   const selectedBank = state?.banks[bankEngine];
+  const activeBankModels = (
+    state?.banks[platform?.engine ?? "modelTrace"]?.models ?? []
+  ).filter((item) => !item.name.includes("/"));
   const model = chosen[kind];
   const dirty = !!detection && JSON.stringify(detection) !== detectionSaved;
   useEffect(() => {
@@ -459,6 +474,22 @@ export default function ProviderTesting({
       </div>
     </label>
   );
+  const commitDegradedModel = (raw = degradedModelDraft) => {
+    if (!platform) return;
+    const next = raw.trim();
+    if (!next) {
+      setDegradedModelDraft(
+        platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL,
+      );
+      return;
+    }
+    if (next === (platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL)) return;
+    void savePlatform({
+      ...platform,
+      verdictMode,
+      degradedModelId: next,
+    });
+  };
   const platformControls = (manual: boolean) =>
     platform && (
       <div className="provider-test-platform provider-test-full">
@@ -498,6 +529,59 @@ export default function ProviderTesting({
             <option value={3}>3 组 · 汇总判断</option>
           </select>
         </label>
+        <label className="provider-test-field">
+          <span>判定模式</span>
+          <select
+            aria-label="判定模式"
+            value={verdictMode}
+            disabled={busy || (manual && !!running.length)}
+            onChange={(e) => {
+              const nextMode = e.target.value as VerdictMode;
+              const nextModel =
+                degradedModelDraft.trim() ||
+                platform.degradedModelId ||
+                DEFAULT_DEGRADED_MODEL;
+              setDegradedModelDraft(nextModel);
+              void savePlatform({
+                ...platform,
+                verdictMode: nextMode,
+                degradedModelId: nextModel,
+              });
+            }}
+          >
+            <option value="strict">严格模式 · 家族与版本层级</option>
+            <option value="relaxed">宽松模式 · 仅匹配指定降智模型</option>
+          </select>
+        </label>
+        {verdictMode === "relaxed" && (
+          <label className="provider-test-field">
+            <span>降智模型</span>
+            <input
+              aria-label="降智模型"
+              list={degradedListId}
+              value={degradedModelDraft}
+              placeholder={DEFAULT_DEGRADED_MODEL}
+              disabled={busy || (manual && !!running.length)}
+              onChange={(e) => setDegradedModelDraft(e.target.value)}
+              onBlur={(e) => commitDegradedModel(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitDegradedModel(e.currentTarget.value);
+                }
+              }}
+            />
+            <datalist id={degradedListId}>
+              {activeBankModels.map((item) => (
+                <option
+                  key={item.id}
+                  value={item.id}
+                  label={item.name === item.id ? undefined : item.name}
+                />
+              ))}
+            </datalist>
+          </label>
+        )}
         {manual && (
           <label className="provider-test-field">
             <span>并发</span>
@@ -1282,6 +1366,14 @@ function TestResult({
                   )}
               </dd>
             </div>
+            <div>
+              <dt>判定模式</dt>
+              <dd>
+                {(job.report?.verdict_mode ?? job.verdictMode) === "relaxed"
+                  ? `宽松模式 · 目标 ${job.report?.degraded_model_id || job.degradedModelId || DEFAULT_DEGRADED_MODEL}`
+                  : "严格模式"}
+              </dd>
+            </div>
           </>
         )}
         <div>
@@ -1354,7 +1446,16 @@ function TestResult({
                 {i + 1}. {r.display_name || r.model}
               </span>
               <span>{r.score.toFixed(3)}</span>
-              <span>{percent(r.probability)}</span>
+              <span className="provider-test-rank-prob">
+                <i
+                  className="provider-test-rank-bar"
+                  style={{
+                    width: `${Math.max(0, Math.min(100, (r.probability ?? 0) * 100))}%`,
+                  }}
+                  aria-hidden="true"
+                />
+                <em>{percent(r.probability)}</em>
+              </span>
             </div>
           ))}
         </div>

@@ -996,3 +996,51 @@ it("pauses hidden reads and reloads on show without losing the detection draft",
   );
   expect(field.value).toBe("17");
 });
+
+it("switches between strict and relaxed verdict modes and persists the degraded target model", async () => {
+  const user = userEvent.setup();
+  seed();
+  states[gateway.providers[0].id].banks.modelTrace.models = [
+    { id: "gpt-5.6-luna", name: "gpt-5.6-luna" },
+    { id: "grok-4.7", name: "grok-4.7" },
+    { id: "gpt-6-astra", name: "gpt-6-astra/6.1-sol" },
+  ];
+  open();
+  await user.click(await screen.findByRole("tab", { name: "模型指纹" }));
+  const modeSelect = screen.getByRole("combobox", { name: "判定模式" });
+  expect(modeSelect).toHaveValue("strict");
+  expect(
+    screen.queryByRole("combobox", { name: "降智模型" }) ??
+      screen.queryByRole("textbox", { name: "降智模型" }),
+  ).toBeNull();
+
+  await user.selectOptions(modeSelect, "relaxed");
+  const degradedInput = (await screen.findByLabelText(
+    "降智模型",
+  )) as HTMLInputElement;
+  expect(degradedInput).toHaveValue("gpt-5.6-luna");
+  expect(mock.command).toHaveBeenCalledWith(
+    "provider_test_set_platform",
+    expect.objectContaining({
+      clientId: gateway.clientId,
+      platform: expect.objectContaining({
+        verdictMode: "relaxed",
+        degradedModelId: "gpt-5.6-luna",
+      }),
+    }),
+  );
+
+  await user.clear(degradedInput);
+  await user.type(degradedInput, "grok-4.7{Enter}");
+  expect(mock.command).toHaveBeenCalledWith(
+    "provider_test_set_platform",
+    expect.objectContaining({
+      clientId: gateway.clientId,
+      platform: expect.objectContaining({
+        verdictMode: "relaxed",
+        degradedModelId: "grok-4.7",
+      }),
+    }),
+  );
+});
+

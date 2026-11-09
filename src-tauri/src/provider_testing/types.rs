@@ -10,12 +10,26 @@ pub enum Engine {
     ModelTrace,
     LmDetector,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VerdictMode {
+    #[default]
+    Strict,
+    Relaxed,
+}
+pub fn default_degraded_model_id() -> String {
+    super::downgrade::LEGACY_TARGET.into()
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PlatformSettings {
     pub engine: Engine,
     pub model_trace_samples: usize,
     pub lm_detector_samples: usize,
+    #[serde(default)]
+    pub verdict_mode: VerdictMode,
+    #[serde(default = "default_degraded_model_id")]
+    pub degraded_model_id: String,
 }
 impl Default for PlatformSettings {
     fn default() -> Self {
@@ -23,6 +37,8 @@ impl Default for PlatformSettings {
             engine: Engine::ModelTrace,
             model_trace_samples: 3,
             lm_detector_samples: 1,
+            verdict_mode: VerdictMode::Strict,
+            degraded_model_id: default_degraded_model_id(),
         }
     }
 }
@@ -140,6 +156,10 @@ pub struct Job {
     pub tokenizer: bool,
     #[serde(default)]
     pub tokenizer_result: Option<Value>,
+    #[serde(default)]
+    pub verdict_mode: VerdictMode,
+    #[serde(default = "default_degraded_model_id")]
+    pub degraded_model_id: String,
 }
 fn three() -> usize {
     3
@@ -230,6 +250,10 @@ pub struct Degradation {
     pub probability: Option<f64>,
     #[serde(default)]
     pub engine: Engine,
+    #[serde(default)]
+    pub verdict_mode: VerdictMode,
+    #[serde(default = "default_degraded_model_id")]
+    pub degraded_model_id: String,
     #[serde(default)]
     pub basis: Option<DegradationBasis>,
     #[serde(default)]

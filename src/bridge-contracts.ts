@@ -127,10 +127,13 @@ export type ProviderTestMode =
   | "stt"
   | "realtime";
 export type DetectionEngine = "modelTrace" | "lmDetector";
+export type VerdictMode = "strict" | "relaxed";
 export type DetectionPlatform = {
   engine: DetectionEngine;
   modelTraceSamples: 1 | 3;
   lmDetectorSamples: 1 | 3;
+  verdictMode?: VerdictMode;
+  degradedModelId?: string;
 };
 export type ProviderTestKind = "connection" | "fingerprint";
 export type ProviderAction = "settings" | "testing";
@@ -160,6 +163,8 @@ export type FingerprintReport = {
   disposition?: "downgrade" | "notDowngrade" | "unknown";
   disposition_basis?: "aggregate" | "sample_family" | null;
   disposition_group_indexes?: number[];
+  verdict_mode?: VerdictMode;
+  degraded_model_id?: string;
   initial?: boolean;
   ambiguous?: boolean;
   diagnostics?: {
@@ -212,6 +217,8 @@ export type ProviderTestJob = {
   sampleCount: number;
   resourceVersion: Record<string, unknown>;
   tokenizer: boolean;
+  verdictMode?: VerdictMode;
+  degradedModelId?: string;
   tokenizerResult: {
     status: string;
     error?: string;
@@ -262,6 +269,8 @@ export type ProviderDegradation = {
   predictedModel: string;
   probability: number | null;
   engine: DetectionEngine;
+  verdictMode?: VerdictMode;
+  degradedModelId?: string;
   basis?: "aggregate" | "sample_family" | null;
   groupIndexes?: number[];
   queueRemoved: boolean;

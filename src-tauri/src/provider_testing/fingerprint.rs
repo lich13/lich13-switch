@@ -50,7 +50,13 @@ impl Service {
                     .filter(|g| g.status == "completed")
                     .count()
                     == context.sample_count;
-                if context.engine == Engine::LmDetector {
+                if detail.job.verdict_mode == VerdictMode::Relaxed {
+                    let disposition = downgrade::relaxed_verdict(&detail.job, &report);
+                    report["disposition"] = disposition.into();
+                    report["disposition_basis"] =
+                        json!((disposition != "unknown").then_some(DegradationBasis::Aggregate));
+                    report["disposition_group_indexes"] = json!([]);
+                } else if context.engine == Engine::LmDetector {
                     let verdict = downgrade::lm_verdict(&detail.job, &report);
                     report["disposition"] = verdict.disposition.into();
                     report["disposition_basis"] = json!(verdict.basis);
@@ -63,6 +69,8 @@ impl Service {
                     }
                     .into();
                 }
+                report["verdict_mode"] = json!(detail.job.verdict_mode);
+                report["degraded_model_id"] = json!(detail.job.degraded_model_id);
                 report["ambiguous"] = json!(
                     report["disposition"] == "unknown"
                         && compat::string(&report["prediction_name"]).contains('/')
@@ -238,7 +246,12 @@ impl Service {
         let Some(report) = job.report.as_ref() else {
             return;
         };
-        let (basis, group_indexes) = if job.engine == Engine::LmDetector {
+        let (basis, group_indexes) = if job.verdict_mode == VerdictMode::Relaxed {
+            if downgrade::relaxed_verdict(&job, report) != "downgrade" {
+                return;
+            }
+            (Some(DegradationBasis::Aggregate), vec![])
+        } else if job.engine == Engine::LmDetector {
             let verdict = downgrade::lm_verdict(&job, report);
             if verdict.disposition != "downgrade" {
                 return;
@@ -260,6 +273,8 @@ impl Service {
             predicted_model: compat::string(&report["prediction"]).into(),
             probability: report["probability"].as_f64(),
             engine: job.engine,
+            verdict_mode: job.verdict_mode,
+            degraded_model_id: job.degraded_model_id.clone(),
             basis,
             group_indexes,
             queue_removed: false,

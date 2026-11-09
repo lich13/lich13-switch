@@ -2735,6 +2735,8 @@ fn detection_controls_and_marks_are_isolated_for_identical_provider_ids() {
                     predicted_model: "fixture".into(),
                     probability: None,
                     engine: Engine::LmDetector,
+                    verdict_mode: VerdictMode::Strict,
+                    degraded_model_id: default_degraded_model_id(),
                     queue_removed: false,
                     basis: None,
                     group_indexes: vec![],
@@ -3215,6 +3217,8 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
             resource_version: Value::Null,
             tokenizer: false,
             tokenizer_result: None,
+            verdict_mode: VerdictMode::Strict,
+            degraded_model_id: default_degraded_model_id(),
         });
         data.outputs.insert(
             job_id.clone(),
@@ -3258,6 +3262,8 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
         resource_version: Value::Null,
         tokenizer: false,
         tokenizer_result: None,
+        verdict_mode: VerdictMode::Strict,
+        degraded_model_id: default_degraded_model_id(),
     });
     data.outputs.insert(active_id.clone(), Output::default());
     data.contexts.insert(active_id.clone(), make_context());
@@ -3364,6 +3370,8 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
         resource_version: Value::Null,
         tokenizer: false,
         tokenizer_result: None,
+        verdict_mode: VerdictMode::Strict,
+        degraded_model_id: default_degraded_model_id(),
     });
     data.outputs.insert(
         protected_manual_id.clone(),
@@ -3407,6 +3415,8 @@ fn caps_retained_terminal_outputs_and_retry_contexts_while_preserving_job_summar
             resource_version: Value::Null,
             tokenizer: false,
             tokenizer_result: None,
+            verdict_mode: VerdictMode::Strict,
+            degraded_model_id: default_degraded_model_id(),
         });
         data.outputs.insert(
             auto_id.clone(),
@@ -3459,4 +3469,40 @@ fn offline_lm_payloads_preserve_sdk_protocol_defaults() {
         target.model = " ".into();
         assert!(target.lm_payload("fixture prompt").is_err());
     }
+}
+
+#[test]
+fn relaxed_verdict_mode_validates_target_model_and_active_bank_support() {
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, 18089, "responses");
+    ua(&service, ClientId::Codex);
+    seed_catalog(&service, &id, &["gpt-6-sol"]);
+
+    assert!(service
+        .set_platform(
+            ClientId::Codex,
+            PlatformSettings {
+                verdict_mode: VerdictMode::Relaxed,
+                degraded_model_id: "   ".into(),
+                ..PlatformSettings::for_client(ClientId::Codex)
+            },
+        )
+        .is_err());
+
+    service
+        .set_platform(
+            ClientId::Codex,
+            PlatformSettings {
+                verdict_mode: VerdictMode::Relaxed,
+                degraded_model_id: "unrecognized-custom-model".into(),
+                ..PlatformSettings::for_client(ClientId::Codex)
+            },
+        )
+        .unwrap();
+
+    let err = service
+        .start(fingerprint_request(&service, &id, 1))
+        .err()
+        .expect("unrecognized model in relaxed mode should be rejected");
+    assert!(err.message.contains("当前检测库无法识别指定的降智模型"));
 }

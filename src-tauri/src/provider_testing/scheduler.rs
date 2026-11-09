@@ -13,7 +13,7 @@ pub(super) fn smart_interval(requests: u64, minimum: u32) -> Option<u32> {
     };
     Some(minutes.max(minimum.clamp(5, 30)))
 }
-fn valid_model(model: &str) -> bool {
+pub(super) fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control)
 }
 fn period(data: &Data, client: ClientId, config: &Detection, provider: &str) -> Option<u32> {
@@ -463,6 +463,12 @@ impl Service {
                 !key.starts_with(&format!("{}:", client_key(client)))
                     || live.iter().any(|id| scope_key(client, id) == *key)
             });
+            let platform = data
+                .saved
+                .platforms
+                .get(client_key(client))
+                .cloned()
+                .unwrap_or_else(|| PlatformSettings::for_client(client));
             for provider in candidates.iter().filter(|p| !p.search_only) {
                 let config = data
                     .saved
@@ -478,11 +484,13 @@ impl Service {
                         .unwrap_or(0)
                 });
                 let mut cache_error = None;
-                let running = data.saved.jobs.iter().find(|j| {
-                    j.client_id == client && j.provider_id == provider.id && !j.terminal()
-                });
-                let started = running.is_some_and(|j| j.started_at.is_some());
-                let queued = running.is_some() && !started;
+                let (started, queued) = {
+                    let running = data.saved.jobs.iter().find(|j| {
+                        j.client_id == client && j.provider_id == provider.id && !j.terminal()
+                    });
+                    let started = running.is_some_and(|j| j.started_at.is_some());
+                    (started, running.is_some() && !started)
+                };
                 let timing = next_timing
                     .entry(scope_key(client, &provider.id))
                     .or_default();
@@ -522,6 +530,28 @@ impl Service {
                         })
                         .err()
                         .map(|e| e.message);
+                    if cache_error.is_none() && platform.verdict_mode == VerdictMode::Relaxed {
+                        let recognized = match platform.engine {
+                            Engine::LmDetector => downgrade::bank_contains(
+                                &data.lm_status,
+                                &platform.degraded_model_id,
+                            ),
+                            Engine::ModelTrace => data
+                                .ensure_bank()
+                                .snapshot
+                                .as_ref()
+                                .ok()
+                                .is_some_and(|snapshot| {
+                                    downgrade::bank_contains(
+                                        &snapshot.0,
+                                        &platform.degraded_model_id,
+                                    )
+                                }),
+                        };
+                        if !recognized {
+                            cache_error = Some("当前指纹库缺少降智判定模型".into());
+                        }
+                    }
                     if cache_error.is_some() {
                         "modelsUnavailable"
                     } else if queued {

@@ -237,6 +237,62 @@ pub fn lm_verdict(job: &Job, report: &Value) -> LmVerdict {
         group_indexes,
     }
 }
+pub fn matches_model(left: &str, right: &str) -> bool {
+    let (left, right) = (normalize(left), normalize(right));
+    !left.is_empty() && left == right
+}
+pub fn bank_contains(bank: &Value, target: &str) -> bool {
+    bank["models"].as_array().is_some_and(|models| {
+        models.iter().any(|model| {
+            let id = model["id"].as_str().unwrap_or_default();
+            let name = model["display_name"]
+                .as_str()
+                .or_else(|| model["name"].as_str())
+                .unwrap_or(id);
+            !name.contains('/') && (matches_model(id, target) || matches_model(name, target))
+        })
+    })
+}
+pub fn lm_contains(detector: &lmfpd::Detector, target: &str) -> bool {
+    detector.models().iter().any(|model| {
+        !model.display_name.contains('/')
+            && (matches_model(&model.id, target) || matches_model(&model.display_name, target))
+    })
+}
+pub fn relaxed_verdict(job: &Job, report: &Value) -> &'static str {
+    let target = normalize(&job.degraded_model_id);
+    if target.is_empty()
+        || job.groups.len() != job.sample_count
+        || integer(&report["used_outputs"]) != Some(job.sample_count as i64)
+        || job.groups.iter().any(|group| {
+            group.status != "completed"
+                || group.uncertain
+                || group.retryable
+                || group.error.is_some()
+                || matches!(
+                    group.diagnostics["reason"].as_str(),
+                    Some("length" | "max_tokens" | "model_length")
+                )
+        })
+    {
+        return "unknown";
+    }
+    let Some(members) = report_members(report) else {
+        return "unknown";
+    };
+    if members.len() > 1 {
+        return if members.iter().all(|model| matches_model(model, &target)) {
+            "downgrade"
+        } else {
+            "unknown"
+        };
+    }
+    if matches_model(members[0], &target) {
+        "downgrade"
+    } else {
+        "notDowngrade"
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -454,5 +510,49 @@ mod tests {
     #[test]
     fn global_detection_default_matches_reference() {
         assert_eq!(super::super::DEFAULT_DETECTION_MODEL, "gpt-6-luna");
+    }
+
+    #[test]
+    fn relaxed_verdict_checks_only_degraded_model_match_and_sample_completion() {
+        let mut job = lm_job(
+            &["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna"],
+            "gpt-5.6-luna",
+        );
+        job.degraded_model_id = "gpt-5.6-luna".into();
+        let report = job.report.clone().unwrap();
+        assert_eq!(relaxed_verdict(&job, &report), "downgrade");
+
+        job.degraded_model_id = "grok-4.7".into();
+        assert_eq!(relaxed_verdict(&job, &report), "notDowngrade");
+
+        let merged_report = json!({
+            "prediction": "gpt-6-astra",
+            "prediction_name": "gpt-6-astra/6.1-sol",
+            "used_outputs": 3,
+            "decision": "scored"
+        });
+        job.degraded_model_id = "gpt-6-astra".into();
+        assert_eq!(relaxed_verdict(&job, &merged_report), "unknown");
+
+        let mut truncated = lm_job(
+            &["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna"],
+            "gpt-5.6-luna",
+        );
+        truncated.degraded_model_id = "gpt-5.6-luna".into();
+        truncated.groups[0].diagnostics = json!({"reason": "max_tokens"});
+        assert_eq!(relaxed_verdict(&truncated, &report), "unknown");
+    }
+
+    #[test]
+    fn bank_and_lm_detector_only_match_unmerged_target_models() {
+        let bank = json!({
+            "models": [
+                {"id": "gpt-5.6-luna", "display_name": "gpt-5.6-luna"},
+                {"id": "gpt-6-astra", "display_name": "gpt-6-astra/6.1-sol"}
+            ]
+        });
+        assert!(bank_contains(&bank, "openai/gpt-5.6-luna:latest"));
+        assert!(!bank_contains(&bank, "gpt-6-astra"));
+        assert!(!bank_contains(&bank, "unknown-model"));
     }
 }
