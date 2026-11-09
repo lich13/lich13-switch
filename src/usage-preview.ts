@@ -495,7 +495,6 @@ export function usagePreview(
     const now = Date.now();
     const previewStats: AntigravityUsageStats = {
       requests: 18,
-      sessions: 3,
       costUsd: "1.4826",
       unpricedRequests: 0,
       tokenMix: {
@@ -635,24 +634,6 @@ export function usagePreview(
           sharePercent: 31.5,
         },
       ],
-      topSessions: [
-        {
-          sessionId:
-            "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-          title: "界面布局调整",
-          requests: 10,
-          primaryModel: "gemini-3.1-pro",
-          family: "gemini",
-          totalTokens: 242000,
-          reasoningTokens: 10400,
-          cacheHitPercent: 81.2,
-          durationMs: 42600,
-          costUsd: "0.684",
-          unpricedRequests: 0,
-          startedAt: now - 7200000,
-          lastActiveAt: now - 600000,
-        },
-      ],
     };
     if (name === "get_claude_usage_stats") {
       previewStats.accounts = [];
@@ -663,10 +644,6 @@ export function usagePreview(
           ? "claude-opus-4-6"
           : "claude-sonnet-4-6";
         family.reasoningReported = false;
-      });
-      previewStats.topSessions.forEach((session) => {
-        session.primaryModel = "claude-sonnet-4-6";
-        session.reasoningReported = false;
       });
       previewStats.providers = [
         {

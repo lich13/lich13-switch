@@ -9,14 +9,6 @@ import {
   type AntigravityUsageStats,
 } from "./usage-types";
 
-function formatDuration(ms: number): string {
-  if (!ms || ms <= 0) return "—";
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
-  return `${minutes}m ${seconds}s`;
-}
-
 function formatCostOrUnpriced(
   costUsd: string,
   unpricedRequests: number,
@@ -51,7 +43,9 @@ function TrackWindowBlock({
   if (current && !w.period)
     return (
       <div className="usage-ag-window">
-        <div className="usage-ag-window-head">{title}</div>
+        <div className="usage-ag-window-head">
+          <span>{title}</span>
+        </div>
         <p className="usage-empty">未获取当前周期</p>
       </div>
     );
@@ -95,7 +89,7 @@ function TrackWindowBlock({
           {date(w.period.start)} — {date(w.period.end)}
         </p>
       )}
-      <dl className="usage-ag-window-stats">
+      <dl className={`usage-ag-window-stats${current ? "" : " is-three"}`}>
         <div>
           <dt>请求</dt>
           <dd title={numeric(w.requests)}>{compact(w.requests)}</dd>
@@ -131,7 +125,6 @@ export default function UsageAntigravity({
   selectedProvider,
   providerName,
   onSelectProvider,
-  onSelectSession,
 }: {
   client?: "antigravity" | "claude";
   stats: AntigravityUsageStats | null;
@@ -140,7 +133,6 @@ export default function UsageAntigravity({
   selectedProvider?: string;
   providerName?: (id: string | null) => string;
   onSelectProvider?: (providerId: string) => void;
-  onSelectSession: (sessionId: string, title: string) => void;
 }) {
   const [accountId, setAccountId] = useState(currentAccountId ?? "");
   useEffect(() => setAccountId(currentAccountId ?? ""), [currentAccountId]);
@@ -194,12 +186,6 @@ export default function UsageAntigravity({
             <span>请求轮次</span>
             <strong title={numeric(stats.requests)}>
               {compact(stats.requests)}
-            </strong>
-          </div>
-          <div>
-            <span>会话</span>
-            <strong title={numeric(stats.sessions)}>
-              {compact(stats.sessions)}
             </strong>
           </div>
           <div>
@@ -385,7 +371,24 @@ export default function UsageAntigravity({
                 >
                   <div className="usage-ag-family-top">
                     <strong>{label}</strong>
-                    <span>{prov.sharePercent.toFixed(1)}%</span>
+                    <div className="usage-ag-family-actions">
+                      <span>{prov.sharePercent.toFixed(1)}%</span>
+                      {onSelectProvider && (
+                        <button
+                          type="button"
+                          className={`usage-ag-filter-btn${active ? " is-active" : ""}`}
+                          aria-pressed={active}
+                          aria-label={
+                            active ? `取消按 ${label} 筛选` : `按 ${label} 筛选`
+                          }
+                          onClick={() =>
+                            onSelectProvider(active ? "" : prov.id)
+                          }
+                        >
+                          {active ? "已筛选" : "筛选"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="usage-ag-family-bar" aria-hidden="true">
                     <span
@@ -416,19 +419,6 @@ export default function UsageAntigravity({
                         prov.requests,
                       )}
                     </b>
-                    {onSelectProvider && (
-                      <button
-                        type="button"
-                        className="usage-ag-session-btn"
-                        aria-pressed={active}
-                        aria-label={
-                          active ? `取消按 ${label} 筛选` : `按 ${label} 筛选`
-                        }
-                        onClick={() => onSelectProvider(active ? "" : prov.id)}
-                      >
-                        {active ? "已筛选" : "筛选"}
-                      </button>
-                    )}
                   </div>
                 </div>
               );
@@ -485,89 +475,6 @@ export default function UsageAntigravity({
           </div>
         </section>
       )}
-
-      <section className="usage-ag-card" aria-label="会话排行">
-        <h2 className="usage-ag-section-title">会话排行</h2>
-        {stats.topSessions.length === 0 ? (
-          <p className="usage-empty">当前时间范围暂无 {clientName} 会话记录</p>
-        ) : (
-          <div className="usage-table-scroll">
-            <table className="usage-table usage-ag-session-table">
-              <thead>
-                <tr>
-                  <th>会话</th>
-                  <th>主要模型</th>
-                  <th>轮次</th>
-                  <th>Token / 思考</th>
-                  <th>缓存命中</th>
-                  <th>累计耗时</th>
-                  <th>估算费用</th>
-                  <th>最近活跃</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.topSessions.map((row) => (
-                  <tr key={row.sessionId}>
-                    <td>
-                      <span className="usage-ag-session-title">
-                        {row.title ||
-                          (client === "claude"
-                            ? row.sessionId.slice(0, 12)
-                            : "未命名会话")}
-                      </span>
-                    </td>
-                    <td className="usage-model" title={row.primaryModel}>
-                      {row.primaryModel}
-                    </td>
-                    <td>{numeric(row.requests)}</td>
-                    <td
-                      title={`总计 ${numeric(row.totalTokens)} · 思考 ${row.reasoningReported === false ? "—" : numeric(row.reasoningTokens)}`}
-                    >
-                      {compact(row.totalTokens)} /{" "}
-                      {row.reasoningReported === false
-                        ? "—"
-                        : compact(row.reasoningTokens)}
-                    </td>
-                    <td>
-                      {row.cacheHitPercent == null
-                        ? "—"
-                        : `${row.cacheHitPercent.toFixed(1)}%`}
-                    </td>
-                    <td>{formatDuration(row.durationMs)}</td>
-                    <td title={row.costUsd}>
-                      {formatCostOrUnpriced(
-                        row.costUsd,
-                        row.unpricedRequests,
-                        row.requests,
-                      )}
-                    </td>
-                    <td>{date(row.lastActiveAt)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="usage-ag-session-btn"
-                        aria-label={`查看会话 ${row.title || (client === "claude" ? row.sessionId.slice(0, 12) : "未命名会话")} 请求`}
-                        onClick={() =>
-                          onSelectSession(
-                            row.sessionId,
-                            row.title ||
-                              (client === "claude"
-                                ? row.sessionId.slice(0, 12)
-                                : "未命名会话"),
-                          )
-                        }
-                      >
-                        查看请求
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
     </div>
   );
 }

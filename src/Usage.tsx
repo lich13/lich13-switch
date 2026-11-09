@@ -110,8 +110,6 @@ export default function Usage({
   const [client, setClient] = useState(""),
     [provider, setProvider] = useState(""),
     [operation, setOperation] = useState(""),
-    [sessionId, setSessionId] = useState(""),
-    [sessionTitle, setSessionTitle] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
@@ -168,8 +166,6 @@ export default function Usage({
     if ((next === "antigravity" || next === "claude") && next !== client) {
       setClient(next);
       setProvider("");
-      setSessionId("");
-      setSessionTitle("");
       resetPages();
     }
     if (next !== tab) {
@@ -230,9 +226,8 @@ export default function Usage({
       client: client || undefined,
       provider: provider || undefined,
       operation: operation || undefined,
-      sessionId: sessionId || undefined,
     };
-  }, [range, from, to, live, client, provider, operation, sessionId]);
+  }, [range, from, to, live, client, provider, operation]);
   const loadOverview = useCallback(async () => {
     const id = ++sequence.current;
     setBusy(true);
@@ -591,8 +586,6 @@ export default function Usage({
             const next = e.target.value;
             choose(setClient, next);
             setProvider("");
-            setSessionId("");
-            setSessionTitle("");
           }}
         >
           <option value="">全部客户端</option>
@@ -648,20 +641,6 @@ export default function Usage({
           {ranges.find(([id]) => id === range)?.[1]}
           <ChevronDown size={13} />
         </button>
-        {sessionId && (
-          <button
-            type="button"
-            className="usage-session-chip"
-            aria-label={`清除会话筛选 ${sessionTitle}`}
-            onClick={() => {
-              setSessionId("");
-              resetPages();
-            }}
-          >
-            <span>{sessionTitle || "未命名会话"}</span>
-            <span aria-hidden="true">×</span>
-          </button>
-        )}
       </div>
       {timeOpen && (
         <TimeRange
@@ -745,13 +724,6 @@ export default function Usage({
               if (nextProvider) setClient(tab);
               setProvider(nextProvider);
               resetPages();
-            }}
-            onSelectSession={(nextSessionId, title) => {
-              setSessionTitle(title);
-              setClient(tab);
-              setSessionId(nextSessionId);
-              resetPages();
-              setTab("requests");
             }}
           />
         </>

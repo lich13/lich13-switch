@@ -266,7 +266,6 @@ beforeEach(() => {
         case "get_antigravity_usage_stats":
           return {
             requests: 1,
-            sessions: 1,
             costUsd: "0.0045678",
             unpricedRequests: 0,
             tokenMix: {
@@ -286,7 +285,6 @@ beforeEach(() => {
             accounts: [],
             quotaError: null,
             families: [],
-            topSessions: [],
           };
         case "get_usage_dashboard":
           return structuredClone(dashboard);

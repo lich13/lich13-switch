@@ -27,6 +27,7 @@ export default function UsageClaudeQuota({
     : null;
   const summaryTone =
     tightestRemaining != null ? quotaTone(tightestRemaining) : "healthy";
+  const accountMeta = [quota?.account, quota?.plan].filter(Boolean).join(" · ");
 
   return (
     <section
@@ -46,7 +47,9 @@ export default function UsageClaudeQuota({
             </span>
           )}
         </div>
-        <span>{[quota?.account, quota?.plan].filter(Boolean).join(" · ")}</span>
+        {accountMeta && (
+          <span className="usage-claude-meta">{accountMeta}</span>
+        )}
       </header>
       {!quota && <p className="usage-empty">正在读取官方额度…</p>}
       {quota?.error && (
@@ -54,48 +57,50 @@ export default function UsageClaudeQuota({
           {quota.error}
         </p>
       )}
-      <div className="usage-claude-windows">
-        {windows.map((window) => {
-          const used = Math.min(100, Math.max(0, window.usedPercent));
-          const remaining = Math.min(100, Math.max(0, 100 - used));
-          const tone = quotaTone(remaining);
-          return (
-            <div
-              className={`usage-ag-window usage-claude-window is-${tone}`}
-              data-tone={tone}
-              key={window.id}
-            >
-              <div className="usage-ag-window-head">
-                <span>{window.label}</span>
-                <span className={`usage-quota-remaining-pill is-${tone}`}>
-                  剩余 {formatRemainingPercent(remaining)}
-                </span>
-              </div>
+      {windows.length > 0 && (
+        <div className="usage-claude-windows">
+          {windows.map((window) => {
+            const used = Math.min(100, Math.max(0, window.usedPercent));
+            const remaining = Math.min(100, Math.max(0, 100 - used));
+            const tone = quotaTone(remaining);
+            return (
               <div
-                className={`usage-ag-family-bar usage-quota-dual-bar is-${tone}`}
-                role="meter"
-                aria-label={window.label}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Number(remaining.toFixed(1))}
+                className={`usage-ag-window usage-claude-window is-${tone}`}
+                data-tone={tone}
+                key={window.id}
               >
-                <span
-                  className="usage-quota-fill-remaining"
-                  style={{
-                    width: `${remaining}%`,
-                  }}
-                />
+                <div className="usage-ag-window-head">
+                  <span>{window.label}</span>
+                  <span className={`usage-quota-remaining-pill is-${tone}`}>
+                    剩余 {formatRemainingPercent(remaining)}
+                  </span>
+                </div>
+                <div
+                  className={`usage-ag-family-bar usage-quota-dual-bar is-${tone}`}
+                  role="meter"
+                  aria-label={window.label}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Number(remaining.toFixed(1))}
+                >
+                  <span
+                    className="usage-quota-fill-remaining"
+                    style={{
+                      width: `${remaining}%`,
+                    }}
+                  />
+                </div>
+                <div className="usage-claude-window-foot">
+                  <span>已用 {used.toFixed(1)}%</span>
+                  <span>
+                    重置 {window.resetsAt == null ? "—" : date(window.resetsAt)}
+                  </span>
+                </div>
               </div>
-              <div className="usage-claude-window-foot">
-                <span>已用 {used.toFixed(1)}%</span>
-                <span>
-                  重置 {window.resetsAt == null ? "—" : date(window.resetsAt)}
-                </span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }

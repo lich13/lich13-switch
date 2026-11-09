@@ -288,26 +288,8 @@ export type AntigravityFamilyGroup = {
   sharePercent: number;
 };
 
-export type AntigravitySessionRow = {
-  sessionId: string;
-  title: string | null;
-  requests: number;
-  primaryModel: string;
-  family: string;
-  totalTokens: number;
-  reasoningTokens: number;
-  reasoningReported?: boolean;
-  cacheHitPercent: number | null;
-  durationMs: number;
-  costUsd: string;
-  unpricedRequests: number;
-  startedAt: number;
-  lastActiveAt: number;
-};
-
 export type AntigravityUsageStats = {
   requests: number;
-  sessions: number;
   costUsd: string;
   unpricedRequests: number;
   tokenMix: AntigravityTokenMix;
@@ -321,7 +303,6 @@ export type AntigravityUsageStats = {
   quotaError: string | null;
   providers?: AntigravityProviderGroup[];
   families: AntigravityFamilyGroup[];
-  topSessions: AntigravitySessionRow[];
 };
 export type ClaudeUsageQuota = {
   account: string | null;

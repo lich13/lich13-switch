@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AntigravityUsageStats,
   Dashboard,
-  UsageFilter,
   UsageRecord,
   UsageSettings,
   UsageState,
@@ -170,15 +169,11 @@ it("runs explicit app history repair through the existing synchronization comman
   expect(changed).toHaveBeenCalledWith(state);
 });
 
-const SESSION_ALPHA =
-  "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
-
 function buildStats(
   overrides: Partial<AntigravityUsageStats> = {},
 ): AntigravityUsageStats {
   return {
     requests: 15,
-    sessions: 2,
     costUsd: "1.2450",
     unpricedRequests: 0,
     tokenMix: {
@@ -318,36 +313,17 @@ function buildStats(
         sharePercent: 32.7,
       },
     ],
-    topSessions: [
-      {
-        sessionId: SESSION_ALPHA,
-        title: "示例会话",
-        requests: 9,
-        primaryModel: "gemini-3.1-pro",
-        family: "gemini",
-        totalTokens: 158_000,
-        reasoningTokens: 9_600,
-        cacheHitPercent: 80.5,
-        durationMs: 38_400,
-        costUsd: "0.6120",
-        unpricedRequests: 0,
-        startedAt: Date.UTC(2026, 9, 30, 7, 0, 0),
-        lastActiveAt: Date.UTC(2026, 9, 30, 8, 30, 0),
-      },
-    ],
     ...overrides,
   };
 }
 
 describe("Usage Antigravity statistics tab", () => {
   let statsPayload: AntigravityUsageStats;
-  let lastLogFilters: UsageFilter[];
 
   beforeEach(() => {
     mock.command.mockReset();
     mock.listeners.clear();
     statsPayload = buildStats();
-    lastLogFilters = [];
     Object.defineProperty(document, "visibilityState", {
       configurable: true,
       value: "visible",
@@ -397,7 +373,7 @@ describe("Usage Antigravity statistics tab", () => {
       source: "antigravity",
       startedAt: Date.UTC(2026, 9, 30, 8, 29, 0),
       finishedAt: Date.UTC(2026, 9, 30, 8, 29, 4),
-      sessionId: SESSION_ALPHA,
+      sessionId: null,
       completed: true,
       estimatedSpeed: false,
       duplicateOf: null,
@@ -440,7 +416,7 @@ describe("Usage Antigravity statistics tab", () => {
     };
 
     mock.command.mockImplementation(
-      async (name: string, args?: Record<string, unknown>) => {
+      async (name: string) => {
         if (name === "get_usage_dashboard") return dashboard;
         if (name === "get_usage_state") return usageState;
         if (name === "get_gateway") return { providers: [] };
@@ -478,15 +454,9 @@ describe("Usage Antigravity statistics tab", () => {
             error: null,
           };
         if (name === "get_usage_logs") {
-          const filter = (args?.filter ?? {}) as UsageFilter;
-          lastLogFilters.push(filter);
-          const rows =
-            !filter.sessionId || filter.sessionId === SESSION_ALPHA
-              ? [sampleRow]
-              : [];
           return {
-            rows,
-            total: rows.length,
+            rows: [sampleRow],
+            total: 1,
             page: 1,
             detailSince: 0,
           };
@@ -520,25 +490,12 @@ describe("Usage Antigravity statistics tab", () => {
         provider: undefined,
       }),
     });
-    await user.click(
-      screen.getByRole("button", { name: "查看会话 示例会话 请求" }),
-    );
-    await waitFor(() =>
-      expect(lastLogFilters.at(-1)).toMatchObject({
-        client: "claude",
-        sessionId: SESSION_ALPHA,
-        operation: "compaction",
-      }),
-    );
     await user.click(screen.getByRole("tab", { name: "Antigravity" }));
-    expect(
-      screen.queryByRole("button", { name: /清除会话筛选/ }),
-    ).not.toBeInTheDocument();
     expect(mock.command).toHaveBeenCalledWith("get_antigravity_usage_stats", {
       filter: expect.objectContaining({
         client: "antigravity",
         operation: "compaction",
-        sessionId: undefined,
+        provider: undefined,
       }),
     });
   });
@@ -586,7 +543,7 @@ describe("Usage Antigravity statistics tab", () => {
     expect(reads()).toBe(hiddenReads + 1);
   });
 
-  it("lazily fetches Antigravity stats on tab selection, displays dual-track windows & token mix, and filters logs by session title", async () => {
+  it("lazily fetches Antigravity stats on tab selection, displays dual-track windows & token mix, and filters by provider", async () => {
     const user = userEvent.setup();
     render(<Usage />);
 
@@ -615,6 +572,8 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(summary).getByText("54.0%")).toBeInTheDocument();
     expect(within(summary).getByText("78.3%")).toBeInTheDocument();
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();
+    expect(within(summary).queryByText("会话")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("会话排行")).not.toBeInTheDocument();
 
     const tracks = screen.getByLabelText("账号周期用量");
     expect(within(tracks).getAllByText("当前 5h")).toHaveLength(2);
@@ -635,40 +594,27 @@ describe("Usage Antigravity statistics tab", () => {
       }),
     );
 
-    const sessions = screen.getByLabelText("会话排行");
-    expect(within(sessions).getByText("示例会话")).toBeInTheDocument();
-    expect(within(sessions).getByText("gemini-3.1-pro")).toBeInTheDocument();
-
-    await user.click(
-      screen.getByRole("button", { name: "查看会话 示例会话 请求" }),
-    );
-
     await waitFor(() => {
-      expect(
-        screen.getByRole("tab", { name: "请求日志", selected: true }),
-      ).toBeInTheDocument();
-      expect(lastLogFilters.at(-1)).toMatchObject({
-        client: "antigravity",
-        provider: "ag-oauth-1",
-        sessionId: SESSION_ALPHA,
+      expect(mock.command).toHaveBeenCalledWith("get_antigravity_usage_stats", {
+        filter: expect.objectContaining({
+          client: "antigravity",
+          provider: "ag-oauth-1",
+        }),
       });
     });
 
-    const chip = screen.getByRole("button", {
-      name: "清除会话筛选 示例会话",
+    const cancelBtn = within(creds).getByRole("button", {
+      name: "取消按 oauth@example.invalid (OAuth) 筛选",
     });
-    expect(chip).toBeInTheDocument();
-    await user.click(chip);
+    expect(cancelBtn).toHaveAttribute("aria-pressed", "true");
+    await user.click(cancelBtn);
 
     await waitFor(() => {
-      expect(
-        screen.queryByRole("button", { name: "清除会话筛选 示例会话" }),
-      ).not.toBeInTheDocument();
-      expect(lastLogFilters.at(-1)?.sessionId).toBeUndefined();
+      expect(screen.getByLabelText("用量供应商")).toHaveValue("");
     });
   });
 
-  it("formats unpriced requests as 未定价 across summary, track windows, and session rows", async () => {
+  it("formats unpriced requests as 未定价 across summary, track windows, and provider rows", async () => {
     statsPayload = buildStats({
       costUsd: "0",
       unpricedRequests: 15,
@@ -688,10 +634,10 @@ describe("Usage Antigravity statistics tab", () => {
           },
         })),
       })),
-      topSessions: buildStats().topSessions.map((s) => ({
-        ...s,
+      providers: buildStats().providers?.map((p) => ({
+        ...p,
         costUsd: "0",
-        unpricedRequests: s.requests,
+        unpricedRequests: p.requests,
       })),
     });
     const user = userEvent.setup();
@@ -703,8 +649,8 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(summary).getByText("未定价")).toBeInTheDocument();
     const tracks = screen.getByLabelText("账号周期用量");
     expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
-    const sessions = screen.getByLabelText("会话排行");
-    expect(within(sessions).getByText("未定价")).toBeInTheDocument();
+    const creds = screen.getByLabelText("账号与凭据分布");
+    expect(within(creds).getAllByText("未定价")).toHaveLength(2);
   });
 
   it("follows the active authentication mode without changing the global usage filter", async () => {
@@ -787,7 +733,6 @@ it("selects one account, retains manual selection on refresh, follows the curren
     stats: { ...base, accounts },
     busy: false,
     currentAccountId: "ag-oauth-1",
-    onSelectSession: vi.fn(),
   };
   const view = render(<UsageAntigravity {...props} />);
   const select = screen.getByRole("combobox", { name: "Antigravity 用量账号" });
@@ -810,6 +755,9 @@ it("selects one account, retains manual selection on refresh, follows the curren
     expect(within(section).getByText(/所选日期/)).toBeInTheDocument();
     expect(within(section).queryByText("当前 5h")).not.toBeInTheDocument();
     expect(within(section).getByText("请求")).toBeInTheDocument();
+    expect(
+      section.querySelector(".usage-ag-window-stats.is-three"),
+    ).not.toBeNull();
   }
   expect(screen.getByLabelText("Token 构成与缓存节省")).toHaveTextContent(
     "$1.2450",
@@ -845,17 +793,16 @@ it("shows missing Claude reasoning independently of known token and savings tota
   stats.tokenMix.thinkingSharePercent = null;
   stats.tokenMix.cacheSavingsUsd = "0";
   stats.tokenMix.cacheWrite = 0;
-  stats.topSessions[0].reasoningReported = false;
   render(
     <UsageAntigravity
       client="claude"
       stats={stats}
       busy={false}
       currentAccountId={null}
-      onSelectSession={vi.fn()}
     />,
   );
   const mix = screen.getByRole("region", { name: "Token 构成与缓存节省" });
+  expect(mix.querySelectorAll(".usage-ag-kpis > div")).toHaveLength(5);
   expect(within(mix).queryByText("可见输出")).not.toBeInTheDocument();
   expect(within(mix).getByText("输出")).toBeInTheDocument();
   expect(within(mix).getAllByText("—")).toHaveLength(1);
