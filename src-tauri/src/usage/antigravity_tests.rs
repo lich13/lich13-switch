@@ -2429,7 +2429,7 @@ fn settled_transcript_purges_newly_covered_steps_and_inherits_rpc_last_model() {
         )
         .unwrap();
 
-    // Re-scan with repair=false; step 6 must be purged even if file is complete/unchanged.
+    // Re-scan with repair=false; step 6 must be purged and step 7 must inherit rpc.last_model.
     let mut report = Report::default();
     scan_home(
         &mut store,
@@ -2441,8 +2441,34 @@ fn settled_transcript_purges_newly_covered_steps_and_inherits_rpc_last_model() {
     )
     .unwrap();
     assert!(store.detail(&step6_id).is_err());
+    let step7_record = store.detail(&step7_id).unwrap();
+    assert_eq!(
+        step7_record.attempts[0].response_model.as_deref(),
+        Some("gemini-3.1-pro")
+    );
 
-    // Re-scan with repair=true so step 7 is re-evaluated with rpc.last_model fallback.
+    // Mark file cursor complete again (now with fc.model = Some("gemini-3.1-pro")) and expand
+    // rpc.covered to include step 7; repair=false early-return path must purge step 7.
+    let mut fc: FileCursor =
+        serde_json::from_str(&store.cursor(&file_key).unwrap().unwrap()).unwrap();
+    assert_eq!(fc.model.as_deref(), Some("gemini-3.1-pro"));
+    fc.complete = true;
+    fc.modified = file_modified(&meta).unwrap_or_default();
+    store
+        .write_batch(&[], Some((&file_key, &serde_json::to_string(&fc).unwrap())))
+        .unwrap();
+    let rpc = serde_json::to_string(&Cursor {
+        covered: BTreeSet::from([6, 7]),
+        last_model: Some("gemini-3.1-pro".into()),
+        ..Cursor::default()
+    })
+    .unwrap();
+    store
+        .write_batch(
+            &[],
+            Some((&safe_id("antigravity:rpc:subagent-cascade"), &rpc)),
+        )
+        .unwrap();
     let mut report = Report::default();
     scan_home(
         &mut store,
@@ -2450,12 +2476,8 @@ fn settled_transcript_purges_newly_covered_steps_and_inherits_rpc_last_model() {
         &pricing,
         &Settings::default(),
         &mut report,
-        true,
+        false,
     )
     .unwrap();
-    let step7_record = store.detail(&step7_id).unwrap();
-    assert_eq!(
-        step7_record.attempts[0].response_model.as_deref(),
-        Some("gemini-3.1-pro")
-    );
+    assert!(store.detail(&step7_id).is_err());
 }

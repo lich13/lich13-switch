@@ -854,16 +854,7 @@ fn record(
         } else {
             "in_progress"
         };
-        let alias_hint = resolve_model_alias(text(u, &["model"]))
-            .or_else(|| resolve_model_alias(text(&info["usage"], &["model"])))
-            .or_else(|| resolve_model_alias(text(info, &["responseModel"])))
-            .or_else(|| {
-                final_info
-                    .then(|| resolve_model_alias(text(chat, &["responseModel"])))
-                    .flatten()
-            })
-            .or_else(|| resolve_model_alias(text(chat, &["model"])));
-        let response_model = non_enum_model(text(u, &["model"]))
+        let explicit_attempt_model = non_enum_model(text(u, &["model"]))
             .or_else(|| non_enum_model(text(&info["usage"], &["model"])))
             .or_else(|| non_enum_model(text(info, &["responseModel"])))
             .or_else(|| {
@@ -878,8 +869,32 @@ fn record(
                 final_info
                     .then(|| actual_model(text(chat, &["responseModel"])))
                     .flatten()
+            });
+        let alias_hint = resolve_model_alias(text(u, &["model"]))
+            .or_else(|| resolve_model_alias(text(&info["usage"], &["model"])))
+            .or_else(|| resolve_model_alias(text(info, &["responseModel"])))
+            .or_else(|| {
+                final_info
+                    .then(|| resolve_model_alias(text(chat, &["responseModel"])))
+                    .flatten()
             })
-            .or_else(|| alias_hint.map(|alias| alias.canonical.to_owned()));
+            .or_else(|| resolve_model_alias(text(chat, &["model"])))
+            .or_else(|| {
+                explicit_attempt_model
+                    .is_none()
+                    .then(|| {
+                        resolve_model_alias(
+                            text(info, &["modelDisplayName"])
+                                .or_else(|| text(chat, &["modelDisplayName"]))
+                                .or_else(|| {
+                                    text(entry, &["StepMetadata", "chatModel", "modelDisplayName"])
+                                }),
+                        )
+                    })
+                    .flatten()
+            });
+        let response_model =
+            explicit_attempt_model.or_else(|| alias_hint.map(|alias| alias.canonical.to_owned()));
         let mut a = Attempt {
             id: safe_id(&format!("{}:{attempt_key}", r.id)),
             response_id: response_id(u).map(safe_id),
@@ -1600,7 +1615,9 @@ fn scan_file(
     let meta = std::fs::metadata(path).map_err(storage::io_error)?;
     let identity = file_identity(&meta);
     let modified = file_modified(&meta).unwrap_or_default();
+    let needs_rpc_model = c.model.is_none() && !c.model_invalid && rpc.last_model.is_some();
     if !repair
+        && !needs_rpc_model
         && c.complete
         && !modified.is_empty()
         && c.identity == identity
@@ -1634,7 +1651,7 @@ fn scan_file(
         Ok(storage::digest(&b))
     };
     let mut verified_tail = None;
-    let valid_prefix = c.identity == identity && meta.len() >= c.offset && {
+    let valid_prefix = !needs_rpc_model && c.identity == identity && meta.len() >= c.offset && {
         let digest = tail(&mut file, c.offset)?;
         let ok = digest == c.tail;
         if ok {
@@ -1811,6 +1828,9 @@ fn scan_file(
         None => tail(reader.get_mut(), c.offset)?,
     };
     let need_purge = !rpc.covered.is_empty() && c.purged_covered != rpc.covered.len();
+    if c.model.is_none() && !c.model_invalid {
+        c.model = rpc.last_model.clone();
+    }
     c.complete = !gap && !partial_tail && c.offset == meta.len();
     c.modified = if c.complete { modified } else { String::new() };
     c.purged_covered = rpc.covered.len();
