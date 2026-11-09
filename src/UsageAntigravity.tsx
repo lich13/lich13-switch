@@ -370,7 +370,7 @@ export default function UsageAntigravity({
                   data-provider={prov.id}
                 >
                   <div className="usage-ag-family-top">
-                    <strong>{label}</strong>
+                    <strong title={label}>{label}</strong>
                     <div className="usage-ag-family-actions">
                       <span>{prov.sharePercent.toFixed(1)}%</span>
                       {onSelectProvider && (
@@ -443,7 +443,7 @@ export default function UsageAntigravity({
                 data-family={fam.family}
               >
                 <div className="usage-ag-family-top">
-                  <strong>{fam.label}</strong>
+                  <strong title={fam.label}>{fam.label}</strong>
                   <span>{fam.sharePercent.toFixed(1)}%</span>
                 </div>
                 <div className="usage-ag-family-bar" aria-hidden="true">

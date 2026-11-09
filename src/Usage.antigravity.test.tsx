@@ -512,6 +512,9 @@ describe("Usage Antigravity statistics tab", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("tab", { name: "Claude Code" }));
     expect(await screen.findByText("Claude 登录已失效")).toBeInTheDocument();
+    const claudeQuota = screen.getByRole("region", { name: "Claude 官方额度" });
+    expect(claudeQuota.querySelector(".usage-claude-meta")).toBeNull();
+    expect(claudeQuota.querySelector(".usage-claude-windows")).toBeNull();
     expect(
       screen.getByRole("region", { name: "Token 构成与缓存节省" }),
     ).toBeInTheDocument();
@@ -811,4 +814,7 @@ it("shows missing Claude reasoning independently of known token and savings tota
   expect(
     screen.queryByLabelText("Antigravity 用量账号"),
   ).not.toBeInTheDocument();
+  const models = screen.getByRole("region", { name: "模型分布" });
+  expect(within(models).getByText("Gemini")).toHaveAttribute("title", "Gemini");
 });
+
