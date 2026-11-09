@@ -28,6 +28,7 @@ struct Cursor {
     modified: String,
     count: usize,
     covered: BTreeSet<u64>,
+    last_model: Option<String>,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,6 +40,7 @@ struct FileCursor {
     complete: bool,
     model: Option<String>,
     model_invalid: bool,
+    purged_covered: usize,
 }
 fn file_identity(meta: &std::fs::Metadata) -> String {
     #[cfg(unix)]
@@ -506,6 +508,33 @@ pub(super) fn normalize_record(r: &mut Record) -> bool {
     for a in &mut r.attempts {
         changed |= normalize_attempt(a);
     }
+    let fallback = r.attempts.iter().rev().find_map(|a| {
+        let model = a
+            .response_model
+            .as_deref()
+            .or(a.requested_model.as_deref())
+            .or(a.pricing_model.as_deref())?;
+        Some((
+            a.requested_model.clone(),
+            model.to_owned(),
+            a.pricing_model.clone().or_else(|| Some(model.to_owned())),
+        ))
+    });
+    if let Some((requested_model, response_model, pricing_model)) = fallback {
+        for a in &mut r.attempts {
+            if a.requested_model.is_none()
+                && a.response_model.is_none()
+                && a.pricing_model.is_none()
+            {
+                a.requested_model = requested_model.clone();
+                a.response_model = Some(response_model.clone());
+                if a.price.is_none() {
+                    a.pricing_model = pricing_model.clone();
+                }
+                changed = true;
+            }
+        }
+    }
     if let Some(a) = r.final_attempt() {
         if r.finished_at.is_some_and(|end| end <= a.started_at) && a.duration_ms > 0 {
             if let Some(end) = i64::try_from(a.duration_ms)
@@ -923,6 +952,7 @@ fn record(
         r.finished_at = completed_at;
         r.attempts.push(a);
     }
+    normalize_record(&mut r);
     r.completed = r.final_attempt().is_some_and(|a| a.outcome == "success");
     Ok(Some(r))
 }
@@ -1358,6 +1388,14 @@ impl Api {
                             let complete = r.finished_at.is_some()
                                 && r.final_attempt()
                                     .is_some_and(|a| a.outcome != "in_progress");
+                            if let Some(m) = r.final_attempt().and_then(|a| {
+                                a.response_model
+                                    .as_deref()
+                                    .or(a.requested_model.as_deref())
+                                    .or(a.pricing_model.as_deref())
+                            }) {
+                                cursor.last_model = Some(m.to_owned());
+                            }
                             for a in &mut r.attempts {
                                 if a.provider.is_none() {
                                     a.provider =
@@ -1554,6 +1592,11 @@ fn scan_file(
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
+    let cascade = cascade_id(brain, path)?;
+    let rpc: Cursor = store
+        .cursor(&safe_id(&format!("antigravity:rpc:{cascade}")))?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     let meta = std::fs::metadata(path).map_err(storage::io_error)?;
     let identity = file_identity(&meta);
     let modified = file_modified(&meta).unwrap_or_default();
@@ -1565,13 +1608,19 @@ fn scan_file(
         && c.modified == modified
         && file_settled(&meta)
     {
+        if !rpc.covered.is_empty() && c.purged_covered != rpc.covered.len() {
+            let superseded: Vec<String> = rpc
+                .covered
+                .iter()
+                .map(|step_idx| safe_id(&format!("antigravity:request:{cascade}:step:{step_idx}")))
+                .collect();
+            c.purged_covered = rpc.covered.len();
+            let cursor =
+                serde_json::to_string(&c).map_err(|_| failure("Antigravity 历史同步位置无效"))?;
+            store.write_batch_with_superseded(&[], &superseded, Some((&key, &cursor)))?;
+        }
         return Ok(());
     }
-    let cascade = cascade_id(brain, path)?;
-    let rpc: Cursor = store
-        .cursor(&safe_id(&format!("antigravity:rpc:{cascade}")))?
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
     let mut file = File::open(path).map_err(storage::io_error)?;
     let meta = file.metadata().map_err(storage::io_error)?;
     let identity = file_identity(&meta);
@@ -1662,7 +1711,12 @@ fn scan_file(
                     .flatten();
                 let explicit_model = text(&v, &["model", "response_model"]);
                 let request = text(&v, &["request_id"]).or(step_request.as_deref());
-                let model = explicit_model.or(c.model.as_deref());
+                let inherited_rpc_model = (!c.model_invalid && c.model.is_none())
+                    .then_some(rpc.last_model.as_deref())
+                    .flatten();
+                let model = explicit_model
+                    .or(c.model.as_deref())
+                    .or(inherited_rpc_model);
                 let at = time(&v["completed_at"]).or_else(|| time(&v["created_at"]));
                 let (Some(request), Some(at)) = (request, at) else {
                     return Err(failure(
@@ -1676,7 +1730,9 @@ fn scan_file(
                 }
                 let id = safe_id(&format!("antigravity:request:{request}"));
                 let alias = resolve_model_alias(model);
-                let model_for_id = explicit_model.or_else(|| alias.map(|a| a.canonical));
+                let model_for_id = explicit_model
+                    .or_else(|| alias.map(|a| a.canonical))
+                    .or(inherited_rpc_model);
                 let is_failed = failed(&v);
                 let mut attempt = Attempt {
                     id: safe_id(&format!("{id}:final")),
@@ -1754,11 +1810,21 @@ fn scan_file(
         Some(digest) => digest,
         None => tail(reader.get_mut(), c.offset)?,
     };
+    let need_purge = !rpc.covered.is_empty() && c.purged_covered != rpc.covered.len();
     c.complete = !gap && !partial_tail && c.offset == meta.len();
     c.modified = if c.complete { modified } else { String::new() };
+    c.purged_covered = rpc.covered.len();
     let cursor = serde_json::to_string(&c).map_err(|_| failure("Antigravity 历史同步位置无效"))?;
-    if !rows.is_empty() || saved_raw.as_deref() != Some(cursor.as_str()) {
-        store.write_batch(&rows, Some((&key, &cursor)))?;
+    if !rows.is_empty() || need_purge || saved_raw.as_deref() != Some(cursor.as_str()) {
+        let superseded: Vec<String> = if need_purge {
+            rpc.covered
+                .iter()
+                .map(|step_idx| safe_id(&format!("antigravity:request:{cascade}:step:{step_idx}")))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        store.write_batch_with_superseded(&rows, &superseded, Some((&key, &cursor)))?;
     }
     Ok(())
 }

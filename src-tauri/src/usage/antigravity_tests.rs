@@ -2323,3 +2323,139 @@ fn antigravity_repair_resumes_legacy_cursor_and_skips_completed_v12_maintenance(
         );
     }
 }
+
+#[test]
+fn retry_attempt_without_model_inherits_final_attempt_model_and_repairs_existing_records() {
+    let mut v = entry("retry-inherit", 0);
+    v["chatModel"]["model"] = json!("MODEL_PLACEHOLDER_UNKNOWN_FUTURE");
+    v["chatModel"]["responseModel"] = json!("gemini-3.1-pro-high");
+    v["chatModel"]["modelDisplayName"] = json!("Gemini 4 Argon (High)");
+    v["chatModel"]["retryInfos"] = json!([
+        {
+            "traceId": "retry-0",
+            "error": "unavailable",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "completedAt": "2026-01-01T00:00:01Z",
+            "usage": {
+                "inputTokens": "10",
+                "outputTokens": "0"
+            }
+        }
+    ]);
+    let r = parsed(&v);
+    assert_eq!(r.attempts.len(), 2);
+    assert_eq!(
+        r.attempts[0].response_model.as_deref(),
+        Some("gemini-3.1-pro-high")
+    );
+    assert_eq!(r.attempts[0].model_display_name, None);
+
+    // Simulate a legacy DB record whose first retry attempt had no model fields.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let mut legacy = r.clone();
+    legacy.attempts[0].requested_model = None;
+    legacy.attempts[0].response_model = None;
+    legacy.attempts[0].pricing_model = None;
+    store.write_batch(&[legacy], None).unwrap();
+    assert!(store.repair_metadata_batch().unwrap());
+    assert!(!store.repair_metadata_batch().unwrap());
+    let repaired = store.detail(&r.id).unwrap();
+    assert_eq!(
+        repaired.attempts[0].response_model.as_deref(),
+        Some("gemini-3.1-pro-high")
+    );
+    assert_eq!(repaired.attempts[0].model_display_name, None);
+}
+
+#[test]
+fn settled_transcript_purges_newly_covered_steps_and_inherits_rpc_last_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let brain = dir.path().join("antigravity/brain");
+    let path = brain
+        .join("subagent-cascade")
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let step6 = "{\"type\":\"PLANNER_RESPONSE\",\"step_index\":6,\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":12,\"output_tokens\":4}\n";
+    let step7 = "{\"type\":\"PLANNER_RESPONSE\",\"step_index\":7,\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:05Z\",\"input_tokens\":15,\"output_tokens\":5}\n";
+    std::fs::write(&path, format!("{step6}{step7}")).unwrap();
+
+    let db_dir = dir.path().join("db");
+    let mut store = Store::open(&db_dir).unwrap();
+    let pricing = Pricing::new(&db_dir).unwrap();
+
+    let mut report = Report::default();
+    scan_home(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .unwrap();
+    let step6_id = safe_id("antigravity:request:subagent-cascade:step:6");
+    let step7_id = safe_id("antigravity:request:subagent-cascade:step:7");
+    assert!(store.detail(&step6_id).is_ok());
+    assert!(store.detail(&step7_id).is_ok());
+
+    // Mark file cursor as complete with purged_covered = 0, then record RPC coverage for step 6
+    // and last_model on the RPC cursor.
+    let file_key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
+    let mut fc: FileCursor =
+        serde_json::from_str(&store.cursor(&file_key).unwrap().unwrap()).unwrap();
+    fc.complete = true;
+    fc.purged_covered = 0;
+    let meta = std::fs::metadata(&path).unwrap();
+    fc.modified = file_modified(&meta).unwrap_or_default();
+    store
+        .write_batch(&[], Some((&file_key, &serde_json::to_string(&fc).unwrap())))
+        .unwrap();
+
+    let mut rpc_record = parsed(&entry("rpc-step-6", 0));
+    rpc_record.session_id = Some(safe_id("subagent-cascade"));
+    let rpc = serde_json::to_string(&Cursor {
+        covered: BTreeSet::from([6]),
+        last_model: Some("gemini-3.1-pro".into()),
+        ..Cursor::default()
+    })
+    .unwrap();
+    store
+        .write_batch(
+            &[rpc_record],
+            Some((&safe_id("antigravity:rpc:subagent-cascade"), &rpc)),
+        )
+        .unwrap();
+
+    // Re-scan with repair=false; step 6 must be purged even if file is complete/unchanged.
+    let mut report = Report::default();
+    scan_home(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .unwrap();
+    assert!(store.detail(&step6_id).is_err());
+
+    // Re-scan with repair=true so step 7 is re-evaluated with rpc.last_model fallback.
+    let mut report = Report::default();
+    scan_home(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        true,
+    )
+    .unwrap();
+    let step7_record = store.detail(&step7_id).unwrap();
+    assert_eq!(
+        step7_record.attempts[0].response_model.as_deref(),
+        Some("gemini-3.1-pro")
+    );
+}

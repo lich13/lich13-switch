@@ -692,6 +692,18 @@ impl sessions::Repository for SessionStore {
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
         self.service.query(|db| db.write_batch(rows, cursor))
     }
+    fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
+        self.service.query(|db| db.remove_superseded(ids))
+    }
+    fn write_batch_with_superseded(
+        &mut self,
+        rows: &[Record],
+        superseded_ids: &[String],
+        cursor: Option<(&str, &str)>,
+    ) -> Result<()> {
+        self.service
+            .query(|db| db.write_batch_with_superseded(rows, superseded_ids, cursor))
+    }
     fn begin_rebuild(&mut self, source: &str) -> Result<()> {
         self.service.query(|db| db.begin_rebuild(source))
     }

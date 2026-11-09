@@ -537,7 +537,7 @@ impl Store {
     }
     /// Bounded, restartable metadata repair. Old rate snapshots remain unchanged.
     pub fn repair_metadata_batch(&mut self) -> Result<bool> {
-        if self.repair_antigravity_batch()? {
+        if self.repair_antigravity_batch()? || self.repair_antigravity_retry_batch()? {
             return Ok(true);
         }
         if storage_v12::active(&self.connection) {
@@ -718,6 +718,94 @@ impl Store {
         }
         db(tx.commit())?;
         Ok(!rows.is_empty())
+    }
+    fn repair_antigravity_retry_batch(&mut self) -> Result<bool> {
+        if storage_v12::pending(&self.connection) {
+            return Ok(false);
+        }
+        let progress: Option<String> = db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='antigravity_fields_v02633'",
+                [],
+                |r| r.get(0),
+            )
+            .optional())?;
+        if progress.as_deref() == Some("complete") {
+            return Ok(false);
+        }
+        let after = progress
+            .as_deref()
+            .and_then(|p| p.strip_prefix("after:"))
+            .unwrap_or("");
+        let tx = db(self.connection.transaction())?;
+        let rows = if storage_v12::active(&tx) {
+            let mut stmt = db(tx.prepare(
+                "SELECT usage_text(row.key),row.rid FROM v12_rows row \
+                 JOIN v12_records r ON r.rid=row.rid \
+                 WHERE row.source=usage_label('antigravity') AND r.last>0 AND usage_text(row.key)>?1 \
+                 AND EXISTS(SELECT 1 FROM v12_all_attempts a WHERE a.owner=row.rid AND a.model IS NULL) \
+                 ORDER BY usage_text(row.key) LIMIT 128",
+            ))?;
+            let rows = db(stmt.query_map([after], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+                .into_iter()
+                .map(|(id, rid)| Ok((id, storage_v12::load_record(&tx, rid)?)))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            let mut stmt = db(tx.prepare(
+                "SELECT r.id,r.body FROM records r \
+                 WHERE r.source='antigravity' AND r.id>?1 \
+                 AND EXISTS(SELECT 1 FROM usage_metrics m WHERE m.kind=0 AND m.owner=r.id AND m.model='') \
+                 ORDER BY r.id LIMIT 128",
+            ))?;
+            let rows = db(stmt.query_map([after], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }))?;
+            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+                .into_iter()
+                .map(|(id, body)| Ok((id, bodies::decode::<Record>(&tx, &body)?)))
+                .collect::<Result<Vec<_>>>()?
+        };
+        if rows.is_empty() {
+            if progress.is_some() {
+                db(tx.execute(
+                    "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02633','complete')",
+                    [],
+                ))?;
+                db(tx.commit())?;
+            }
+            return Ok(false);
+        }
+        let mut changed = false;
+        for (id, record) in &rows {
+            let mut r = record.clone();
+            if super::antigravity::normalize_record(&mut r) {
+                query::project(&tx, 0, id, &r, 1, None)?;
+                storage_v12::update(&tx, &r)?;
+                changed = true;
+            }
+        }
+        let next = if rows.len() < 128 {
+            "complete".to_owned()
+        } else {
+            format!("after:{}", rows.last().unwrap().0)
+        };
+        db(tx.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02633',?1)",
+            [next],
+        ))?;
+        if changed {
+            db(tx.execute(
+                "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
+                [],
+            ))?;
+            query::changed(&tx)?;
+        }
+        db(tx.commit())?;
+        Ok(true)
     }
     /// Revisit retained evidence once after the cache-read correlation change.
     /// Daily summaries have no one-to-one evidence and are deliberately untouched.
