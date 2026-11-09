@@ -9,22 +9,18 @@ updates:
       timezone: Asia/Taipei
     cooldown:
       default-days: 7
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     allow:
       - dependency-type: all
         update-types: ['version-update:semver-minor', 'version-update:semver-patch']
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
     groups:
-      react:
+      frontend-compatible:
         applies-to: version-updates
-        patterns: ['react', 'react-dom', '@types/react', '@types/react-dom']
-      frontend-runtime:
-        applies-to: version-updates
-        dependency-type: production
-        exclude-patterns: ['react', 'react-dom']
-      frontend-tooling:
-        applies-to: version-updates
-        dependency-type: development
-        exclude-patterns: ['@types/react', '@types/react-dom']
+        patterns: ['*']
+        update-types: ['minor', 'patch']
       frontend-security:
         applies-to: security-updates
         patterns: ['*']
@@ -43,10 +39,14 @@ updates:
       - dependency-type: all
         # Filter breaking candidates before Cargo resolution, including 0.x minor bumps.
         update-types: ['version-update:semver-minor', 'version-update:semver-patch']
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
     groups:
       rust-compatible:
         applies-to: version-updates
         patterns: ['*']
+        update-types: ['minor', 'patch']
       rust-security:
         applies-to: security-updates
         patterns: ['*']
@@ -63,10 +63,14 @@ updates:
     allow:
       - dependency-type: all
         update-types: ['version-update:semver-minor', 'version-update:semver-patch']
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
     groups:
       actions-compatible:
         applies-to: version-updates
         patterns: ['*']
+        update-types: ['minor', 'patch']
       actions-security:
         applies-to: security-updates
         patterns: ['*']
