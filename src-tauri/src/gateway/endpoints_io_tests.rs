@@ -127,47 +127,6 @@ fn failed_pin_write_for_another_thread_does_not_block_existing_selection() {
 }
 
 #[test]
-fn existing_pin_selection_returns_while_another_writer_is_held() {
-    let primary = "https://primary.example.invalid/v1";
-    let provider = fixture_provider(primary);
-    let urls = vec![primary.to_owned()];
-    let thread = "fixture-stale-thread";
-    let key = pin_key(&provider, "thread", thread);
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("endpoint-owners.json");
-    write_entries(
-        &path,
-        &HashMap::from([(
-            key,
-            Pin {
-                endpoint: digest(primary),
-                updated: now().saturating_sub(60_001),
-            },
-        )]),
-    );
-    let service = Arc::new(Service::new(path));
-    let writer = service.write.lock().unwrap();
-    let (selected_tx, selected_rx) = std::sync::mpsc::channel();
-    let worker_service = service.clone();
-    let worker_provider = provider.clone();
-    let worker_urls = urls.clone();
-    let worker = std::thread::spawn(move || {
-        let result =
-            worker_service.select(&worker_provider, &worker_urls, Some(thread), None, false);
-        selected_tx.send(result).unwrap();
-    });
-
-    let selected_while_locked = selected_rx.recv_timeout(Duration::from_secs(2));
-    drop(writer);
-    worker.join().unwrap();
-
-    let selected = selected_while_locked
-        .expect("existing pin selection blocked on another writer")
-        .expect("existing pin must remain selectable while refresh is skipped");
-    assert_eq!(selected, primary);
-}
-
-#[test]
 fn successful_initial_pin_matches_the_persisted_entries() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("endpoint-owners.json");

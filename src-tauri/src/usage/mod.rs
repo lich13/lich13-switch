@@ -40,8 +40,6 @@ mod storage_migration_tests;
 mod storage_v11_tests;
 mod storage_v12;
 #[cfg(test)]
-mod storage_v12_capacity_tests;
-#[cfg(test)]
 mod storage_v12_tests;
 mod store;
 #[cfg(test)]

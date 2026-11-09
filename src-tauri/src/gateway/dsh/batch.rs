@@ -235,9 +235,7 @@ impl Gateway {
                     if let Some(record) =
                         crate::events::Record::configuration_failure(ClientId::Dsh, &error, false)
                     {
-                        if let Some(events) =
-                            super::super::locks::published(&self.0.diagnostics).as_ref()
-                        {
+                        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
                             events.emit(record);
                         }
                     }

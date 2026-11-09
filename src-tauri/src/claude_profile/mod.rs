@@ -116,17 +116,34 @@ fn read_text(path: &Path) -> Result<Option<String>> {
 fn revision(text: Option<&str>) -> String {
     storage::revision(text.map(str::as_bytes))
 }
-fn snapshot(home: &Path, user_home: &Path) -> Result<BTreeMap<Role, Option<String>>> {
+#[derive(Clone, PartialEq)]
+struct FileState {
+    text: Option<String>,
+    value: Option<serde_json::Value>,
+    revision: String,
+}
+fn snapshot(home: &Path, user_home: &Path) -> Result<BTreeMap<Role, FileState>> {
     [Role::Settings, Role::Legacy, Role::Plugin, Role::Global]
         .into_iter()
         .map(|role| {
             let text = read_text(&path(home, user_home, role))?;
-            if let Some(text) = &text {
-                let value = configuration::parse_object(text)
-                    .map_err(|e| fail(&format!("{}：{}", role.label(), e.message)))?;
-                validate_role(role, &value)?;
-            }
-            Ok((role, text))
+            let value = match &text {
+                Some(text) => {
+                    let value = configuration::parse_object(text)
+                        .map_err(|e| fail(&format!("{}：{}", role.label(), e.message)))?;
+                    validate_role(role, &value)?;
+                    Some(value)
+                }
+                None => None,
+            };
+            Ok((
+                role,
+                FileState {
+                    revision: revision(text.as_deref()),
+                    text,
+                    value,
+                },
+            ))
         })
         .collect()
 }
@@ -176,16 +193,15 @@ fn decode_profile(bytes: Option<&[u8]>, home: &Path) -> Result<Option<Profile>> 
     }
     Ok(profile)
 }
-fn assert_official(files: &BTreeMap<Role, Option<String>>, p: &Profile) -> Result<()> {
-    if files[&Role::Legacy].is_some() {
+fn assert_official(files: &BTreeMap<Role, FileState>, p: &Profile) -> Result<()> {
+    if files[&Role::Legacy].text.is_some() {
         return Err(conflict());
     }
-    let settings = files[&Role::Settings].as_deref().ok_or_else(conflict)?;
-    let value = configuration::parse_object(settings)?;
+    let value = files[&Role::Settings].value.as_ref().ok_or_else(conflict)?;
     // User may edit their official model/preferences. Authentication and routing
     // remain protected; baseline keys are compared, never all CLAUDE_CODE_*.
     let baseline = configuration::parse_object(&p.official_settings)?;
-    let keys = catalog::connection_fields(&value);
+    let keys = catalog::connection_fields(value);
     for key in keys {
         if catalog::official_preference(&key) {
             continue;
@@ -200,21 +216,20 @@ fn assert_official(files: &BTreeMap<Role, Option<String>>, p: &Profile) -> Resul
         (Role::Global, "customApiKeyResponses"),
     ] {
         if files[&role]
-            .as_deref()
-            .map(|s| json::field(s, key))
-            .transpose()?
-            .flatten()
-            .is_some()
+            .value
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .is_some_and(|m| m.contains_key(key))
         {
             return Err(conflict());
         }
     }
     Ok(())
 }
-fn fingerprint(files: &BTreeMap<Role, Option<String>>, profile: Option<&[u8]>) -> String {
+fn fingerprint(files: &[FileView], profile: Option<&[u8]>) -> String {
     let mut bytes = Vec::new();
-    for text in files.values() {
-        bytes.extend_from_slice(revision(text.as_deref()).as_bytes());
+    for file in files {
+        bytes.extend_from_slice(file.revision.as_bytes());
     }
     bytes.extend_from_slice(storage::revision(profile).as_bytes());
     storage::digest(&bytes)
@@ -231,7 +246,7 @@ pub fn view(data: &Path, home: &Path, user_home: &Path) -> Result<View> {
     ))
 }
 fn snapshot_view(
-    files: &BTreeMap<Role, Option<String>>,
+    files: &BTreeMap<Role, FileState>,
     raw: Option<&[u8]>,
     profile: Option<&Profile>,
     pending: bool,
@@ -244,19 +259,20 @@ fn snapshot_view(
             .and_then(|p| assert_official(files, p).err())
             .map(|e| e.message)
     };
+    let file_views: Vec<FileView> = files
+        .iter()
+        .map(|(role, file)| FileView {
+            role: role.label(),
+            exists: file.text.is_some(),
+            revision: file.revision.clone(),
+        })
+        .collect();
     View {
         mode: profile.map(|p| p.mode).unwrap_or(Mode::Api),
-        revision: fingerprint(files, raw),
+        revision: fingerprint(&file_views, raw),
         initialized: profile.is_some(),
         conflict: error,
-        files: files
-            .iter()
-            .map(|(role, text)| FileView {
-                role: role.label(),
-                exists: text.is_some(),
-                revision: revision(text.as_deref()),
-            })
-            .collect(),
+        files: file_views,
         warnings: catalog::external(),
     }
 }
@@ -278,7 +294,15 @@ pub fn guard_save(data: &Path, home: &Path, user_home: &Path, text: &str) -> Res
     }
     if let Some(p) = load(data, home)?.filter(|p| p.mode == Mode::Official) {
         let mut files = snapshot(home, user_home)?;
-        files.insert(Role::Settings, Some(text.into()));
+        let value = configuration::parse_object(text)?;
+        files.insert(
+            Role::Settings,
+            FileState {
+                revision: revision(Some(text)),
+                text: Some(text.into()),
+                value: Some(value),
+            },
+        );
         assert_official(&files, &p)?;
     }
     Ok(())
@@ -407,16 +431,21 @@ pub fn switch(
         primary_key: None,
         api_approvals: None,
     });
-    let mut desired = files.clone();
+    let mut desired: BTreeMap<Role, Option<String>> = files
+        .iter()
+        .map(|(role, file)| (*role, file.text.clone()))
+        .collect();
     if target == Mode::Official {
-        p.api_settings = files[&Role::Settings].clone();
-        p.api_legacy = files[&Role::Legacy].clone();
+        p.api_settings = files[&Role::Settings].text.clone();
+        p.api_legacy = files[&Role::Legacy].text.clone();
         p.primary_key = files[&Role::Plugin]
+            .text
             .as_deref()
             .map(|s| json::field(s, "primaryApiKey"))
             .transpose()?
             .flatten();
         p.api_approvals = files[&Role::Global]
+            .text
             .as_deref()
             .map(|s| json::field(s, "customApiKeyResponses"))
             .transpose()?
@@ -427,7 +456,7 @@ pub fn switch(
             (Role::Plugin, "primaryApiKey"),
             (Role::Global, "customApiKeyResponses"),
         ] {
-            if let Some(text) = &files[&role] {
+            if let Some(text) = &files[&role].text {
                 desired.insert(role, Some(json::set(text, key, None)?));
             }
         }
@@ -435,8 +464,12 @@ pub fn switch(
         // reset a valid account's onboarding, machine ID, MCP or project trust.
         if old.is_none() && !logged_in {
             if let Some(text) = &desired[&Role::Global] {
-                let v = configuration::parse_object(text)?;
-                if v.get("oauthAccount").is_none() {
+                if files[&Role::Global]
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.get("oauthAccount"))
+                    .is_none()
+                {
                     desired.insert(
                         Role::Global,
                         Some(json::set(text, "hasCompletedOnboarding", None)?),
@@ -445,15 +478,17 @@ pub fn switch(
             }
         }
     } else {
-        assert_official(&files, &p)?;
-        p.official_settings = files[&Role::Settings].clone().ok_or_else(conflict)?;
+        if !current.initialized {
+            assert_official(&files, &p)?;
+        }
+        p.official_settings = files[&Role::Settings].text.clone().ok_or_else(conflict)?;
         desired.insert(Role::Settings, p.api_settings.clone());
         desired.insert(Role::Legacy, p.api_legacy.clone());
         for (role, key, value) in [
             (Role::Plugin, "primaryApiKey", &p.primary_key),
             (Role::Global, "customApiKeyResponses", &p.api_approvals),
         ] {
-            match &files[&role] {
+            match &files[&role].text {
                 Some(text) => {
                     desired.insert(role, Some(json::set(text, key, value.as_deref())?));
                 }
@@ -470,10 +505,10 @@ pub fn switch(
         after_profile: serde_json::to_string(&p).map_err(|_| fail("配置档无法保存"))?,
         changes: files
             .iter()
-            .filter(|(role, before)| *before != &desired[role])
+            .filter(|(role, before)| before.text != desired[role])
             .map(|(role, before)| Change {
                 role: *role,
-                before: before.clone(),
+                before: before.text.clone(),
                 after: desired[role].clone(),
             })
             .collect(),
@@ -495,12 +530,26 @@ pub fn switch(
         return Err(error);
     }
     std::fs::remove_file(directory(data).join(JOURNAL)).map_err(storage::io_error)?;
-    Ok(snapshot_view(
-        &desired,
-        Some(tx.after_profile.as_bytes()),
-        Some(&p),
-        false,
-    ))
+    let file_views: Vec<FileView> = desired
+        .iter()
+        .map(|(role, text)| FileView {
+            role: role.label(),
+            exists: text.is_some(),
+            revision: if files[role].text == *text {
+                files[role].revision.clone()
+            } else {
+                revision(text.as_deref())
+            },
+        })
+        .collect();
+    Ok(View {
+        mode: target,
+        revision: fingerprint(&file_views, Some(tx.after_profile.as_bytes())),
+        initialized: true,
+        conflict: None,
+        files: file_views,
+        warnings: catalog::external(),
+    })
 }
 pub fn user_home() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| fail("无法确定当前用户目录"))

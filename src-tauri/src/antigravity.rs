@@ -148,12 +148,19 @@ fn save_at(home: &Path, data: &Path, text: &str, expected: &str) -> Result<Docum
             "配置已被外部修改，草稿已保留",
         ));
     }
-    if let Some(bytes) = previous {
-        storage::atomic_write(&backup(data), &bytes, None)?;
+    if let Some(bytes) = previous.as_ref() {
+        storage::atomic_write(&backup(data), bytes, None)?;
     }
     // The shared atomic writer compares the bytes immediately before replacement.
     storage::atomic_write(&path, text.as_bytes(), Some(expected))?;
-    read_at(home, data)
+    Ok(Document {
+        client_id: "antigravity",
+        text: text.to_owned(),
+        revision: storage::digest(text.as_bytes()),
+        path: path.to_string_lossy().into(),
+        guarded: false,
+        can_restore: previous.is_some() || backup(data).is_file(),
+    })
 }
 
 fn previous_at(data: &Path) -> Result<String> {

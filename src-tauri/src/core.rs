@@ -208,7 +208,7 @@ impl PolledConfig {
     }
 }
 #[derive(Clone)]
-struct AuthInfo {
+pub(crate) struct AuthInfo {
     identity: String,
     kind: String,
     email: Option<String>,
@@ -247,6 +247,9 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
     }
     let d: Value =
         serde_json::from_str(raw).map_err(|_| AppError::new(code::AUTH, "凭据不是有效的 JSON"))?;
+    auth_info_value(&d)
+}
+pub(crate) fn auth_info_value(d: &Value) -> Result<AuthInfo> {
     let mode = d.get("auth_mode").and_then(Value::as_str);
     if mode == Some("apikey")
         || (mode.is_none()
@@ -302,7 +305,7 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
                 "无法识别 ChatGPT 账号身份，请重新登录或导入完整凭据",
             )
         })?;
-    let principal = login_principal(raw)?;
+    let principal = login_principal_tokens(&d["tokens"])?;
     let mut workspaces: Vec<_> = [
         tokens.get("account_id"),
         id["https://api.openai.com/auth"].get("chatgpt_account_id"),
@@ -340,16 +343,19 @@ fn auth_info(raw: &str) -> Result<AuthInfo> {
 }
 // A login refresh follows the person, not the workspace selected by OAuth.
 #[derive(Clone)]
-struct LoginPrincipal {
+pub(crate) struct LoginPrincipal {
     user: Option<String>,
     subject: Option<String>,
 }
 fn login_principal(raw: &str) -> Result<LoginPrincipal> {
     let value: Value =
         serde_json::from_str(raw).map_err(|_| AppError::new(code::AUTH, "凭据不是有效的 JSON"))?;
+    login_principal_tokens(&value["tokens"])
+}
+pub(crate) fn login_principal_tokens(tokens: &Value) -> Result<LoginPrincipal> {
     let claims: Vec<_> = ["id_token", "access_token"]
         .iter()
-        .filter_map(|field| value["tokens"][field].as_str().and_then(claims))
+        .filter_map(|field| tokens[field].as_str().and_then(claims))
         .collect();
     let text = |value: &Value| {
         value

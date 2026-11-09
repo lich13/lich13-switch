@@ -14,11 +14,7 @@ struct Fingerprint([u64; 8]);
 fn fingerprint(path: &Path) -> Option<Fingerprint> {
     use std::os::unix::fs::MetadataExt;
     let m = fs::symlink_metadata(path).ok()?;
-    if !m.is_file()
-        || m.len() > 2 * 1024 * 1024
-        || m.ino() == 0
-        || (m.mtime_nsec() == 0 && m.ctime_nsec() == 0)
-    {
+    if !m.is_file() || m.len() > 2 * 1024 * 1024 || m.ino() == 0 {
         return None;
     }
     Some(Fingerprint([

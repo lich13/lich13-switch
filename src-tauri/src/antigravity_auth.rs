@@ -404,7 +404,7 @@ fn payload_digest(raw: &str) -> String {
     storage::digest(raw.trim().as_bytes())
 }
 fn with_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _g = AUTH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = AUTH_LOCK.lock().unwrap();
     f()
 }
 fn oauth_refresh_token(raw: &str) -> Option<String> {
@@ -598,7 +598,6 @@ pub(crate) fn write_enable_adc(paths: &Paths, enable: bool) -> Result<()> {
     let pretty = serde_json::to_string_pretty(&doc)
         .map_err(|_| err(code::JSON, "无法序列化 config.json"))?;
     let formatted = format!("{pretty}\n");
-    super::validate_text(&formatted)?;
     if let Some(p) = paths.config_file().parent() {
         fs::create_dir_all(p).map_err(storage::io_error)?;
     }

@@ -110,7 +110,7 @@ fn retain_terminal_ids<'a>(
     kept
 }
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
+    mutex.lock().unwrap()
 }
 #[derive(Clone)]
 struct Context {

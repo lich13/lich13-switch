@@ -64,12 +64,26 @@ fn vacuum_has_room(connection: &Connection, copies: u64) -> rusqlite::Result<boo
         }
         available
     };
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
-    let available = sysinfo::Disks::new_with_refreshed_list()
-        .iter()
-        .filter(|disk| path.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .map_or(0, |disk| disk.available_space());
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let available = {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::InvalidPath(path.to_owned()))?;
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+            return Err(Error::InvalidQuery);
+        }
+        let stats = unsafe { stats.assume_init() };
+        #[allow(clippy::unnecessary_cast)]
+        let bavail = stats.f_bavail as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let frsize = if stats.f_frsize > 0 {
+            stats.f_frsize as u64
+        } else {
+            stats.f_bsize as u64
+        };
+        bavail.saturating_mul(frsize)
+    };
     Ok(available >= required)
 }
 

@@ -14,13 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn poisoned_affinity() -> AppError {
-    AppError::new(
-        code::ENDPOINT_AFFINITY,
-        "端点归属状态不可用，已停止自动切换",
-    )
-}
-
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_PINS: usize = 8192;
 const PIN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -64,7 +57,6 @@ pub struct Service {
     flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     permits: tokio::sync::Semaphore,
     pins: Mutex<Pins>,
-    write: Mutex<()>,
     diagnostics: Mutex<Option<(super::ClientId, crate::events::Service)>>,
     responses: Mutex<HashMap<String, Pin>>,
     path: PathBuf,
@@ -125,7 +117,6 @@ impl Service {
             flights: Mutex::new(HashMap::new()),
             permits: tokio::sync::Semaphore::new(4),
             pins: Mutex::new(pins),
-            write: Mutex::new(()),
             diagnostics: Mutex::new(None),
             responses: Mutex::new(HashMap::new()),
             path,
@@ -141,7 +132,7 @@ impl Service {
     }
     pub fn measurements(&self, provider: &Provider, urls: &[String]) -> Vec<Measurement> {
         Self::fresh(
-            &super::locks::cache(&self.samples),
+            &self.samples.lock().unwrap(),
             &provider.id,
             &Self::config(provider, urls),
         )
@@ -169,7 +160,7 @@ impl Service {
             return None;
         }
         let interval = Duration::from_secs(seconds);
-        let samples = super::locks::cache(&self.samples);
+        let samples = self.samples.lock().unwrap();
         Some(
             match Self::fresh(&samples, &provider.id, &Self::config(provider, urls)) {
                 Some(batch) => interval.saturating_sub(batch.checked.elapsed()),
@@ -179,15 +170,15 @@ impl Service {
     }
     pub fn retain(&self, providers: &[Provider]) {
         let contains = |id: &String| providers.iter().any(|p| &p.id == id);
-        super::locks::cache(&self.samples).retain(|id, _| contains(id));
-        super::locks::cache(&self.flights).retain(|id, _| contains(id));
+        self.samples.lock().unwrap().retain(|id, _| contains(id));
+        self.flights.lock().unwrap().retain(|id, _| contains(id));
     }
     pub fn diagnostics(&self, client: super::ClientId, events: crate::events::Service) {
-        *super::locks::published(&self.diagnostics) = Some((client, events));
+        *self.diagnostics.lock().unwrap() = Some((client, events));
     }
     fn refresh_failed(&self, provider: &Provider) {
         use crate::events::{Action, Details, ErrorCode, Level, Phase, Reason, Record};
-        if let Some((client, events)) = super::locks::published(&self.diagnostics).as_ref() {
+        if let Some((client, events)) = self.diagnostics.lock().unwrap().as_ref() {
             let mut event = Record::new(
                 Some(*client),
                 Some(&provider.id),
@@ -230,7 +221,7 @@ impl Service {
                 })
         };
         if let Some(previous) = previous {
-            let responses = self.responses.lock().map_err(|_| poisoned_affinity())?;
+            let responses = self.responses.lock().unwrap();
             if let Some(pin) = responses
                 .get(&pin_key(provider, "response", previous))
                 .filter(|pin| now().saturating_sub(pin.updated) < 60 * 60 * 1000)
@@ -240,43 +231,36 @@ impl Service {
         }
         if let Some(thread) = thread {
             let key = pin_key(provider, "thread", thread);
-            let existing = {
-                let pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
-                if pins.error {
-                    return Err(AppError::new(
-                        code::ENDPOINT_AFFINITY,
-                        "端点归属记录无法读取，已停止自动切换",
-                    ));
-                }
-                pins.entries.get(&key).cloned()
-            };
-            if let Some(pin) = existing {
+            let mut pins = self.pins.lock().unwrap();
+            if pins.error {
+                return Err(AppError::new(
+                    code::ENDPOINT_AFFINITY,
+                    "端点归属记录无法读取，已停止自动切换",
+                ));
+            }
+            if let Some(pin) = pins.entries.get_mut(&key) {
                 let url = resolve(&pin.endpoint)?;
-                if now().saturating_sub(pin.updated) >= PIN_REFRESH.as_millis() as u64 {
-                    self.refresh(&key, provider);
+                let time = now();
+                if time.saturating_sub(pin.updated) >= PIN_REFRESH.as_millis() as u64 {
+                    pin.updated = time;
+                    if Self::write_pins(&self.path, &pins.entries).is_err() {
+                        drop(pins);
+                        self.refresh_failed(provider);
+                    }
                 }
                 return Ok(url);
             }
-            // Only writers serialize. Existing ownership reads do not wait for
-            // another key's fsync, and a failed write cannot poison their path.
-            let _writer = self.write.lock().map_err(|_| poisoned_affinity())?;
-            let pin = {
-                let pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
-                if let Some(pin) = pins.entries.get(&key) {
-                    return resolve(&pin.endpoint);
-                }
-                let url = if previous.is_none() && fresh {
-                    self.preferred(provider, urls)
-                } else {
-                    provider.base_url.clone()
-                };
-                Pin {
-                    endpoint: digest(&url),
-                    updated: now(),
-                }
+            let url = if previous.is_none() && fresh {
+                self.preferred(provider, urls)
+            } else {
+                provider.base_url.clone()
+            };
+            let pin = Pin {
+                endpoint: digest(&url),
+                updated: now(),
             };
             let url = resolve(&pin.endpoint)?;
-            self.persist_pin(&key, pin, true)?;
+            Self::persist_pin(&self.path, &mut pins, &key, pin)?;
             return Ok(url);
         }
         Ok(if previous.is_none() {
@@ -285,86 +269,40 @@ impl Service {
             provider.base_url.clone()
         })
     }
-    fn refresh(&self, key: &str, provider: &Provider) {
-        let Ok(_writer) = self.write.try_lock() else {
-            return;
-        };
-        let pin = {
-            let Ok(mut pins) = self.pins.lock() else {
-                return;
-            };
-            let Some(pin) = pins.entries.get_mut(key) else {
-                return;
-            };
-            let time = now();
-            if time.saturating_sub(pin.updated) < PIN_REFRESH.as_millis() as u64 {
-                return;
-            }
-            // Throttle refresh attempts even when persistence fails. The known
-            // endpoint remains usable and its next request can retry later.
-            pin.updated = time;
-            pin.clone()
-        };
-        if self.persist_pin(key, pin, false).is_err() {
-            self.refresh_failed(provider);
-        }
-    }
-    /// Caller owns the writer lock. Serialize a borrowed view, release the state
-    /// lock for disk I/O, then publish only the successfully persisted changes.
-    fn persist_pin(&self, key: &str, pin: Pin, trim: bool) -> Result<()> {
-        let (raw, removed) = {
-            let pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
-            let mut candidate: HashMap<&str, &Pin> = pins
-                .entries
-                .iter()
-                .map(|(key, pin)| (key.as_str(), pin))
-                .collect();
-            if trim {
-                let time = now();
-                candidate.retain(|_, pin| {
-                    time.saturating_sub(pin.updated) < PIN_RETENTION_MS
-                        && pin.updated <= time.saturating_add(60_000)
-                });
-                while candidate.len() >= MAX_PINS {
-                    let oldest = candidate
-                        .iter()
-                        .min_by_key(|(_, pin)| pin.updated)
-                        .map(|(key, _)| *key);
-                    if let Some(oldest) = oldest {
-                        candidate.remove(oldest);
-                    } else {
-                        break;
-                    }
-                }
-            }
-            candidate.insert(key, &pin);
-            let removed: Vec<_> = pins
-                .entries
-                .keys()
-                .filter(|key| !candidate.contains_key(key.as_str()))
-                .cloned()
-                .collect();
-            let raw = serde_json::to_vec(&candidate)
-                .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存"))?;
-            (raw, removed)
-        };
-        storage::atomic_write(&self.path, &raw, None).map_err(|_| {
+    fn write_pins(path: & std::path::Path, entries: &HashMap<String, Pin>) -> Result<()> {
+        let raw = serde_json::to_vec(entries)
+            .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存"))?;
+        storage::atomic_write(path, &raw, None).map_err(|_| {
             AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求")
-        })?;
-        let mut pins = self.pins.lock().map_err(|_| poisoned_affinity())?;
-        for removed in removed {
-            pins.entries.remove(&removed);
+        })
+    }
+    fn persist_pin(path: &std::path::Path, pins: &mut Pins, key: &str, pin: Pin) -> Result<()> {
+        let time = now();
+        let needs_trim = pins.entries.len() >= MAX_PINS
+            || pins.entries.values().any(|p| {
+                time.saturating_sub(p.updated) >= PIN_RETENTION_MS
+                    || p.updated > time.saturating_add(60_000)
+            });
+        let backup = needs_trim.then(|| pins.entries.clone());
+        if needs_trim {
+            trim_pins(&mut pins.entries, PIN_RETENTION_MS);
         }
         pins.entries.insert(key.to_owned(), pin);
+        if let Err(err) = Self::write_pins(path, &pins.entries) {
+            if let Some(backup) = backup {
+                pins.entries = backup;
+            } else {
+                pins.entries.remove(key);
+            }
+            return Err(err);
+        }
         Ok(())
     }
     pub fn remember(&self, provider: &Provider, response: &str) {
         if response.is_empty() || response.len() > 1024 {
             return;
         }
-        let Ok(mut pins) = self.responses.lock() else {
-            return;
-        };
+        let mut pins = self.responses.lock().unwrap();
         trim_pins(&mut pins, 60 * 60 * 1000);
         pins.insert(
             pin_key(provider, "response", response),
@@ -494,7 +432,12 @@ impl Gateway {
             return Err(AppError::new(code::PROVIDER, "供应商不存在"));
         }
         let requested = Instant::now();
-        let gate = super::locks::cache(&self.0.endpoints.flights)
+        let gate = self
+            .0
+            .endpoints
+            .flights
+            .lock()
+            .unwrap()
             .entry(id.to_owned())
             .or_default()
             .clone();
@@ -518,7 +461,7 @@ impl Gateway {
             )
         };
         let config = Service::config(&provider, &urls);
-        let recent = Service::fresh(&super::locks::cache(&self.0.endpoints.samples), id, &config)
+        let recent = Service::fresh(&self.0.endpoints.samples.lock().unwrap(), id, &config)
             .is_some_and(|b| b.checked >= requested);
         if recent || (!force && !self.0.endpoints.due(&provider, &urls, seconds)) {
             return self.try_view();
@@ -559,7 +502,7 @@ impl Gateway {
         let s = self.request_state()?;
         if let Some(current) = s.store.providers.iter().find(|p| p.id == id) {
             if Service::config(current, &Self::endpoint_urls(&s.store, current)) == config {
-                super::locks::cache(&self.0.endpoints.samples).insert(
+                self.0.endpoints.samples.lock().unwrap().insert(
                     id.to_owned(),
                     Batch {
                         config,

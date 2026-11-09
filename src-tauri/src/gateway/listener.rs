@@ -83,18 +83,10 @@ impl Listener {
         })
     }
     pub(super) fn request_port(&self) -> Result<u16> {
-        self.state
-            .lock()
-            .map(|state| state.port)
-            .map_err(|_| AppError::new(code::STORE, "共享网关状态不可用，请重新打开应用"))
-    }
-    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, State>> {
-        self.state
-            .lock()
-            .map_err(|_| AppError::new(code::STORE, "共享网关状态不可用，请重新打开应用"))
+        Ok(self.state.lock().unwrap().port)
     }
     pub fn view(&self) -> Result<View> {
-        let s = self.lock_state()?;
+        let s = self.state.lock().unwrap();
         Ok(View {
             port: s.port,
             revision: s.revision.clone(),
@@ -114,7 +106,7 @@ impl Listener {
         Ok(())
     }
     pub fn set_port(&self, port: u16, expected: &str) -> Result<()> {
-        let mut s = self.lock_state()?;
+        let mut s = self.state.lock().unwrap();
         if expected != s.revision {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -147,9 +139,24 @@ impl Listener {
         .await
     }
     async fn prepare_at(&self, default_port: u16, legacy_default_port: u16) -> Result<Prepared> {
-        self.check_revision()?;
-        let view = self.view()?;
-        let version = self.lock_state()?.version;
+        let (view, version) = {
+            let s = self.state.lock().unwrap();
+            (
+                View {
+                    port: s.port,
+                    revision: s.revision.clone(),
+                    running_clients: s.clients.clone(),
+                    antigravity_active: s.antigravity_active,
+                },
+                s.version,
+            )
+        };
+        if storage::revision(storage::read_optional(&self.path)?.as_deref()) != view.revision {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "共享网关配置已被外部修改，请重新打开应用后重试",
+            ));
+        }
         if !view.running_clients.is_empty() || view.antigravity_active {
             return Ok(Prepared {
                 socket: None,
@@ -176,7 +183,6 @@ impl Listener {
                 ),
                 Err(_) => return Err(Self::port_error()),
             };
-        self.check_revision()?;
         let port = socket.local_addr().map_err(storage::io_error)?.port();
         if migrate_default && port != view.port && notice.is_none() {
             notice = Some(format!(
@@ -186,7 +192,7 @@ impl Listener {
         let revision = if version == 1 {
             let bytes = serde_json::to_vec_pretty(&Config { version: 2, port })
                 .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;
-            let mut state = self.lock_state()?;
+            let mut state = self.state.lock().unwrap();
             storage::atomic_write(&self.path, &bytes, Some(&view.revision))?;
             state.port = port;
             state.version = 2;
@@ -233,7 +239,7 @@ impl Listener {
         registry: Arc<Registry>,
         commit: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        let mut s = self.lock_state()?;
+        let mut s = self.state.lock().unwrap();
         commit()?;
         if let Some(client) = client {
             if !s.clients.contains(&client) {
@@ -256,41 +262,26 @@ impl Listener {
         self.deactivate_resource(None).await
     }
     async fn deactivate_resource(&self, client: Option<ClientId>) -> Result<()> {
-        let (task, poisoned) = {
-            let (mut s, poisoned) = match self.state.lock() {
-                Ok(state) => (state, false),
-                // Only extract actual resource handles. Never trust or repair the
-                // poisoned lifecycle metadata, and never clear the poison flag.
-                Err(error) => (error.into_inner(), true),
-            };
-            if !poisoned {
-                if let Some(client) = client {
-                    s.clients.retain(|id| *id != client);
-                } else {
-                    s.antigravity_active = false;
-                }
+        let task = {
+            let mut s = self.state.lock().unwrap();
+            if let Some(client) = client {
+                s.clients.retain(|id| *id != client);
+            } else {
+                s.antigravity_active = false;
             }
-            let task = if poisoned || (s.clients.is_empty() && !s.antigravity_active) {
+            if s.clients.is_empty() && !s.antigravity_active {
                 if let Some(shutdown) = s.shutdown.take() {
                     let _ = shutdown.send(true);
                 }
                 s.task.take()
             } else {
                 None
-            };
-            (task, poisoned)
+            }
         };
         if let Some(task) = task {
             let _ = task.await;
         }
-        if poisoned {
-            Err(AppError::new(
-                code::STORE,
-                "共享网关状态不可用，监听资源已停止，请重新打开应用",
-            ))
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 

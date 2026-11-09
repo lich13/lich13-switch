@@ -155,17 +155,16 @@ pub fn read_connection(
     }
 }
 fn stored_connection(store: Option<&str>) -> Result<Connection> {
+    #[derive(Deserialize)]
+    struct Stored {
+        #[serde(default)]
+        connection: Connection,
+    }
     let Some(store) = store else {
         return Ok(Connection::Bearer);
     };
-    let value: serde_json::Value =
-        serde_json::from_str(store).map_err(|_| AppError::new(code::STORE, "网关连接方式无效"))?;
-    value
-        .get("connection")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map(|v| v.unwrap_or_default())
+    serde_json::from_str::<Stored>(store)
+        .map(|v| v.connection)
         .map_err(|_| AppError::new(code::STORE, "网关连接方式无效"))
 }
 fn write_record(
@@ -310,9 +309,6 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
     for (span, value) in edits {
         output.replace_range(span, &value);
     }
-    if pair(&parse(&output)?)? != *target {
-        return Err(AppError::new(code::VERIFY, "两字段配置验证失败"));
-    }
     Ok(output)
 }
 fn write_pair(
@@ -357,13 +353,11 @@ fn write_pair(
     Ok(())
 }
 fn save(data: &Path, record: &Journal) -> Result<()> {
-    let path = data.join(FILE);
-    let prior = storage::read_optional(&path)?;
     storage::atomic_write(
-        &path,
+        &data.join(FILE),
         &serde_json::to_vec(record)
             .map_err(|_| AppError::new(code::RECOVERY, "无法生成事务记录"))?,
-        Some(&storage::revision(prior.as_deref())),
+        None,
     )
 }
 fn load(data: &Path) -> Result<Option<Journal>> {
@@ -382,7 +376,7 @@ fn load(data: &Path) -> Result<Option<Journal>> {
         .map(Some)
         .map_err(|_| AppError::new(code::RECOVERY, "恢复记录格式无效"))
 }
-fn complete_store(data: &Path, record: &mut Journal) -> Result<()> {
+fn complete_store(data: &Path, record: &mut Journal, keep_journal: bool) -> Result<()> {
     if let Some(after) = &record.store_after {
         let path = data.join("gateway.json");
         let current = storage::read_optional(&path)?;
@@ -397,7 +391,9 @@ fn complete_store(data: &Path, record: &mut Journal) -> Result<()> {
         }
         record.store_before = None;
         record.store_after = None;
-        save(data, record)?;
+        if keep_journal {
+            save(data, record)?;
+        }
     }
     Ok(())
 }
@@ -490,8 +486,11 @@ pub fn attach_store_for(
         return Err(e);
     }
     record.config_applied = true;
-    save(data, &record)?;
-    complete_store(data, &mut record)
+    if record.store_after.is_some() {
+        complete_store(data, &mut record, true)
+    } else {
+        save(data, &record)
+    }
 }
 fn grok_snapshot(
     client: ClientId,
@@ -541,16 +540,20 @@ fn grok_snapshot(
         },
     ))
 }
-pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
-    let record = load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 配置事务"))?;
+fn grok_record_unchanged(record: &Journal, text: &str) -> Result<bool> {
     let snapshot = record
         .grok
+        .as_ref()
         .ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 配置事务"))?;
     if record.live {
         snapshot.gateway_unchanged(text)
     } else {
         snapshot.unchanged(text)
     }
+}
+pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
+    let record = load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 配置事务"))?;
+    grok_record_unchanged(&record, text)
 }
 pub fn exit_pair(data: &Path) -> Result<Option<Pair>> {
     Ok(load(data)?.map(|r| r.exit))
@@ -578,7 +581,7 @@ pub fn commit_store_for(
         let (_, current) = read_connection(client, home, &record.connection)?;
         if (current != record.applied && !managed_alias(&record, &current))
             || (client == ClientId::Grok
-                && !grok_unchanged(data, &super::grok_config::read(home)?.1)?)
+                && !grok_record_unchanged(&record, &super::grok_config::read(home)?.1)?)
         {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -615,8 +618,12 @@ pub fn commit_store_for(
     }
     record.store_before = before_store;
     record.store_after = Some(after_store);
-    save(data, &record)?;
-    if !running {
+    if running {
+        record.config_applied = true;
+        save(data, &record)?;
+        complete_store(data, &mut record, true)?;
+    } else {
+        save(data, &record)?;
         write_record(
             data,
             &record,
@@ -624,11 +631,9 @@ pub fn commit_store_for(
             expected_config,
             Some(&[&record.before, &record.applied]),
         )?;
-    }
-    record.config_applied = true;
-    save(data, &record)?;
-    complete_store(data, &mut record)?;
-    if !running {
+        record.config_applied = true;
+        save(data, &record)?;
+        complete_store(data, &mut record, false)?;
         fs::remove_file(data.join(FILE)).map_err(storage::io_error)?;
     }
     Ok(())
@@ -646,11 +651,7 @@ pub fn update_exit(data: &Path, target: Pair) -> Result<()> {
     }
     Ok(())
 }
-/// Startup, normal stop and exit all finish the same transaction, preserving unrelated edits.
-pub fn detach(data: &Path) -> Result<()> {
-    let Some(mut record) = load(data)? else {
-        return Ok(());
-    };
+fn detach_record(data: &Path, mut record: Journal) -> Result<()> {
     let current = if record.grok.is_none() {
         let home = record
             .path
@@ -679,8 +680,16 @@ pub fn detach(data: &Path) -> Result<()> {
     } else {
         write_record(data, &record, &record.exit, None, Some(&allowed))?;
     }
-    complete_store(data, &mut record)?;
+    complete_store(data, &mut record, false)?;
     fs::remove_file(data.join(FILE)).map_err(storage::io_error)
+}
+/// Startup, normal stop and exit all finish the same transaction, preserving unrelated edits.
+#[cfg(test)]
+pub fn detach(data: &Path) -> Result<()> {
+    let Some(record) = load(data)? else {
+        return Ok(());
+    };
+    detach_record(data, record)
 }
 pub fn recover(data: &Path) -> Result<()> {
     codex_api::recover_write(data)?;
@@ -690,7 +699,9 @@ pub fn recover(data: &Path) -> Result<()> {
     let v: serde_json::Value =
         serde_json::from_slice(&raw).map_err(|_| AppError::new(code::RECOVERY, "恢复记录损坏"))?;
     if v.get("version").and_then(|v| v.as_u64()) == Some(2) {
-        return detach(data);
+        let record = serde_json::from_value(v)
+            .map_err(|_| AppError::new(code::RECOVERY, "恢复记录格式无效"))?;
+        return detach_record(data, record);
     }
     // v0.2 could leave a journal after the user already restored custom. Do not replay it.
     let path = v

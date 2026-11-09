@@ -720,7 +720,7 @@ impl Delivery {
             activity.begin_request(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        *super::locks::published(&self.activity) = Some(activity.clone());
+        *self.activity.lock().unwrap() = Some(activity.clone());
         activity.track(self);
     }
     pub fn is_settled(&self) -> bool {
@@ -743,7 +743,7 @@ impl Delivery {
         }
     }
     pub async fn wait(&self) {
-        if super::locks::published(&self.activity).is_none() {
+        if self.activity.lock().unwrap().is_none() {
             return;
         }
         while !self.is_settled() {
@@ -759,7 +759,7 @@ impl Delivery {
         }
     }
     pub fn event(&self, kind: &str) {
-        if let Some(activity) = super::locks::published(&self.activity).as_ref() {
+        if let Some(activity) = self.activity.lock().unwrap().as_ref() {
             activity.event(kind);
         }
     }
@@ -767,7 +767,7 @@ impl Delivery {
         if self.finished.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let activity = super::locks::published(&self.activity);
+        let activity = self.activity.lock().unwrap();
         let code = activity.as_ref().map_or(0, |a| a.error_code());
         if let Some(activity) = activity.as_ref() {
             activity.event("response_body_cancelled");
@@ -910,16 +910,14 @@ impl Protocol {
         self.thread = thread;
     }
     pub fn diagnostics(&mut self, gateway: &super::Gateway, provider: &str, model: Option<&str>) {
-        self.diagnostics = super::locks::published(&gateway.0.diagnostics)
-            .clone()
-            .map(|service| {
-                (
-                    service,
-                    gateway.client_id(),
-                    provider.into(),
-                    model.map(str::to_owned),
-                )
-            });
+        self.diagnostics = gateway.0.diagnostics.lock().unwrap().clone().map(|service| {
+            (
+                service,
+                gateway.client_id(),
+                provider.into(),
+                model.map(str::to_owned),
+            )
+        });
     }
     pub fn downstream_closed(&mut self, activity: &super::wire_progress::Activity, writing: bool) {
         super::attempt::DownstreamEnd::PeerClosed {
@@ -1614,7 +1612,11 @@ impl Protocol {
         self.transfer.terminal_event = self.observation.terminal_event.clone();
         self.transfer.terminal_status = self.observation.terminal_status.clone();
         self.transfer.incomplete_reason = self.observation.incomplete_reason.clone();
-        self.transfer.connection = super::locks::published(&self.delivery.activity)
+        self.transfer.connection = self
+            .delivery
+            .activity
+            .lock()
+            .unwrap()
             .as_ref()
             .map(|activity| activity.snapshot(self.delivery.request_sequence.load(Relaxed)));
         self.transfer.response_hash = self

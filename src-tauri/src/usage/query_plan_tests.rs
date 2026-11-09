@@ -15,7 +15,7 @@ use std::{
 
 const DAY_MS: i64 = 86_400_000;
 const BASE: i64 = 1_700_000_000_000;
-const PLAN_ROWS: u64 = 6_000;
+const PLAN_ROWS: u64 = 64;
 
 fn fixture_record(index: u64, source: &str, at: i64) -> Record {
     let operation = match index % 3 {

@@ -45,7 +45,7 @@ pub async fn switch_claude_profile(
     let mut edit_revision = expected_revision;
     if mode == Mode::Official {
         let was_running = r.claude.guarded_home();
-        let expected_config = revision(before[&Role::Settings].as_deref());
+        let expected_config = before[&Role::Settings].revision.clone();
         r.claude
             .stop_checked(if was_running {
                 Some(&expected_config)

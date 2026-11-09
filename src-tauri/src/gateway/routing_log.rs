@@ -41,7 +41,7 @@ pub(super) struct RoutingLog {
 }
 impl RoutingLog {
     pub fn new(gateway: &super::Gateway) -> Option<Arc<Self>> {
-        let service = super::locks::published(&gateway.0.diagnostics).clone()?;
+        let service = gateway.0.diagnostics.lock().unwrap().clone()?;
         Some(Arc::new(Self {
             service,
             client: gateway.client_id(),

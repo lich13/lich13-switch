@@ -481,14 +481,7 @@ fn selection(c: &Connection, f: &Filter) -> (String, Vec<Value>) {
     } else {
         ("", "")
     };
-    // Native detail rows derive measured output from the generation value already
-    // materialized here. Historical rollups retain their stored weighted totals.
-    let metrics = if super::storage_v12::active(c) {
-        "x.kind,x.owner,x.ordinal,x.provider,x.model,x.requests,x.attempts,x.success,x.status_known,x.sessions,x.input,x.output,x.cache_read,x.cache_write,x.cache_write_5m,x.cache_write_1h,x.image_input,x.image_output,x.audio_input,x.audio_output,x.cost,x.unpriced,x.duration_ms,CASE WHEN x.kind=1 THEN (SELECT d.measured_outputs FROM usage_daily_metrics d WHERE d.kind=1 AND d.owner=x.owner AND d.ordinal=x.ordinal) ELSE 0 END measured_outputs,x.generation_ms,x.first_token_sum_ms,x.first_token_samples,x.cache_read_eligible,x.cache_input_eligible"
-    } else {
-        "x.*"
-    };
-    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,{metrics}{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
+    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.*{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
     (cte, args)
 }
 fn grok_model_filter(f: &Filter) -> Option<&str> {

@@ -1,10 +1,7 @@
 //! Top-level field edits preserve every unrelated byte, including CRLF/indent.
 use crate::errors::code;
-use crate::{
-    configuration,
-    storage::{AppError, Result},
-};
-use serde_json::Value;
+use crate::storage::{AppError, Result};
+use serde::de::IgnoredAny;
 use std::ops::Range;
 #[derive(Clone)]
 struct Member {
@@ -24,15 +21,18 @@ fn whitespace(text: &str, at: &mut usize) {
         *at += 1;
     }
 }
-fn one(text: &str, at: &mut usize) -> Result<Value> {
-    let mut stream = serde_json::Deserializer::from_str(&text[*at..]).into_iter::<Value>();
+fn one<T: serde::de::DeserializeOwned>(text: &str, at: &mut usize) -> Result<T> {
+    let mut stream = serde_json::Deserializer::from_str(&text[*at..]).into_iter::<T>();
     let value = stream.next().ok_or_else(invalid)?.map_err(|_| invalid())?;
     *at += stream.byte_offset();
     Ok(value)
 }
 fn members(text: &str) -> Result<Vec<Member>> {
-    configuration::parse_object(text)?;
-    let mut at = text.len() - text.trim_start().len() + 1;
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('{') {
+        return Err(invalid());
+    }
+    let mut at = text.len() - trimmed.len() + 1;
     let mut out = Vec::new();
     loop {
         whitespace(text, &mut at);
@@ -40,7 +40,7 @@ fn members(text: &str) -> Result<Vec<Member>> {
             break;
         }
         let key_start = at;
-        let key = one(text, &mut at)?.as_str().ok_or_else(invalid)?.to_owned();
+        let key: String = one(text, &mut at)?;
         whitespace(text, &mut at);
         if text.as_bytes().get(at) != Some(&b':') {
             return Err(invalid());
@@ -48,7 +48,7 @@ fn members(text: &str) -> Result<Vec<Member>> {
         at += 1;
         whitespace(text, &mut at);
         let start = at;
-        one(text, &mut at)?;
+        let _: IgnoredAny = one(text, &mut at)?;
         out.push(Member {
             key,
             key_start,
@@ -72,7 +72,7 @@ pub fn field(text: &str, key: &str) -> Result<Option<String>> {
 pub fn set(text: &str, key: &str, value: Option<&str>) -> Result<String> {
     let fields = members(text)?;
     if let Some(value) = value {
-        let _: Value = serde_json::from_str(value).map_err(|_| invalid())?;
+        let _: IgnoredAny = serde_json::from_str(value).map_err(|_| invalid())?;
     }
     let mut out = text.to_owned();
     if let Some(i) = fields.iter().position(|m| m.key == key) {
@@ -108,6 +108,5 @@ pub fn set(text: &str, key: &str, value: Option<&str>) -> Result<String> {
         );
         out.insert_str(at, &insertion);
     }
-    configuration::parse_object(&out)?;
     Ok(out)
 }

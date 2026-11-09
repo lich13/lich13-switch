@@ -198,16 +198,12 @@ pub fn atomic_write_bounded(
     expected: Option<&str>,
     limit: u64,
 ) -> Result<()> {
-    if bytes.len() as u64 > limit {
-        return Err(AppError::new(code::FILE_SIZE, "文件超过允许大小"));
-    }
     let parent = path
         .parent()
         .ok_or_else(|| AppError::new(code::PATH, "目标路径无效"))?;
     if !parent.exists() {
         private_dir(parent)?;
     }
-    let temp = stage_write(parent, bytes, limit)?;
     if let Some(expected) = expected {
         let current = read_bounded(path, limit)?;
         if expected != revision(current.as_deref()) {
@@ -235,6 +231,7 @@ pub fn atomic_write_bounded(
             Err(e) => return Err(io_error(e)),
         }
     }
+    let temp = stage_write(parent, bytes, limit)?;
     temp.persist(path).map_err(|e| io_error(e.error))?;
     sync_parent(path)
 }
@@ -252,13 +249,6 @@ pub fn atomic_write_stream(
     if !parent.exists() {
         private_dir(parent)?;
     }
-    let mut temp = private_tempfile(parent)?;
-    {
-        let mut writer = BufWriter::new(temp.as_file_mut());
-        write(&mut writer).map_err(io_error)?;
-        writer.flush().map_err(io_error)?;
-    }
-    temp.as_file().sync_all().map_err(io_error)?;
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
             code::SYMLINK,
@@ -272,6 +262,13 @@ pub fn atomic_write_stream(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(io_error(e)),
     }?;
+    let mut temp = private_tempfile(parent)?;
+    {
+        let mut writer = BufWriter::new(temp.as_file_mut());
+        write(&mut writer).map_err(io_error)?;
+        writer.flush().map_err(io_error)?;
+    }
+    temp.as_file().sync_all().map_err(io_error)?;
     temp.persist(path).map_err(|e| io_error(e.error))?;
     sync_parent(path)
 }

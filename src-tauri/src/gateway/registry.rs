@@ -48,18 +48,10 @@ impl Registry {
             .collect()
     }
     pub(super) fn tokens_snapshot(&self) -> Arc<Vec<TokenEntry>> {
-        // The guarded value is only ever replaced with a fully built immutable
-        // snapshot. A poisoned lock therefore still contains a valid snapshot.
-        self.tokens
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.tokens.read().unwrap().clone()
     }
     fn update_tokens(&self, edit: impl FnOnce(&mut Vec<TokenEntry>)) {
-        let mut current = self
-            .tokens
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = self.tokens.write().unwrap();
         let mut next = current.as_ref().clone();
         // Do not upgrade and drop a final Shared while holding this write lock:
         // Shared::drop unregisters itself. A weak entry never keeps it alive.
@@ -120,7 +112,7 @@ impl Registry {
     pub fn update_ports(&self) -> Result<()> {
         // Published as a whole after a listener transaction; never mutate in place.
         let port = self.listener.view()?.port;
-        *super::locks::published(&self.ports) = vec![port];
+        *self.ports.lock().unwrap() = vec![port];
         Ok(())
     }
 }

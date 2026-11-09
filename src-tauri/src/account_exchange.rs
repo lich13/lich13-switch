@@ -35,7 +35,7 @@ pub(super) fn rebind_sources(
         if source.identity != old
             && source.identity != next
             && !parse_account(&source.account, format, None)
-                .is_ok_and(|account| account.identity == next)
+                .is_ok_and(|account| account.info.identity == next)
         {
             return Err(conflict());
         }
@@ -169,7 +169,7 @@ impl std::io::Write for VaultWriter {
 struct Candidate {
     auth: String,
     name: String,
-    identity: String,
+    info: super::AuthInfo,
     source: Option<(String, Source)>,
     duplicate: Option<(String, String)>,
 }
@@ -286,7 +286,7 @@ fn token_claims(tokens: &Value) -> Result<(Value, Value)> {
     let access = claims(tokens["access_token"].as_str().unwrap())
         .ok_or_else(|| invalid("access_token 无法读取"))?;
     text(&id["sub"]).ok_or_else(|| invalid("id_token 缺少账号身份"))?;
-    super::login_principal(&json!({"tokens": tokens}).to_string())?;
+    super::login_principal_tokens(tokens)?;
     if text(&access["client_id"]).is_some_and(|s| s != CLIENT_ID) {
         return Err(invalid("此 OAuth client_id 与 Codex 刷新流程不兼容"));
     }
@@ -347,13 +347,13 @@ fn parse_account(value: &Value, format: &str, envelope: Option<Envelope>) -> Res
             .transpose()?
             .unwrap_or_else(|| "ChatGPT 账号".into());
     }
-    if auth_info(&auth.to_string())?.kind != "chatgpt" {
+    if super::auth_info_value(&auth)?.kind != "chatgpt" {
         return Err(invalid("此入口仅交换 ChatGPT/Codex 官方 OAuth 账号"));
     }
     let (id, access) = token_claims(&auth["tokens"])?;
     auth["tokens"]["account_id"] = Value::String(workspace(&auth["tokens"], &id, &access)?);
+    let info = super::auth_info_value(&auth)?;
     let raw = auth.to_string();
-    let info = auth_info(&raw)?;
     let source = (format != "codex").then(|| {
         (
             format.into(),
@@ -368,7 +368,7 @@ fn parse_account(value: &Value, format: &str, envelope: Option<Envelope>) -> Res
     Ok(Candidate {
         auth: raw,
         name,
-        identity: info.identity,
+        info,
         source,
         duplicate: None,
     })
@@ -442,11 +442,9 @@ impl Core {
                 }
                 let mut parsed = parse_account(&item, format, envelope.clone());
                 if let Ok(candidate) = parsed.as_mut() {
-                    if !seen.insert(candidate.identity.clone()) {
+                    if !seen.insert(candidate.info.identity.clone()) {
                         parsed = Err(invalid("本次选择中有重复账号，请保留一项"));
-                    } else if let Some(index) =
-                        self.matching_profile(&auth_info(&candidate.auth)?)?
-                    {
+                    } else if let Some(index) = self.matching_profile(&candidate.info)? {
                         let existing = &self.store.profiles[index];
                         if older(&candidate.auth, &existing.auth) {
                             parsed = Err(invalid("导入凭据早于账号库版本，已阻止覆盖"));
@@ -461,7 +459,7 @@ impl Core {
                 let (name, hint, duplicate, error) = match &parsed {
                     Ok(c) => (
                         c.name.clone(),
-                        Some(c.identity[..12].to_owned()),
+                        Some(c.info.identity[..12].to_owned()),
                         c.duplicate.is_some(),
                         None,
                     ),
@@ -530,10 +528,7 @@ impl Core {
                 .get(selection.id)
                 .and_then(Option::as_ref)
                 .ok_or_else(|| invalid("选择项无法导入"))?;
-            let info = auth_info(&c.auth)?;
-            if info.identity != c.identity {
-                return Err(conflict());
-            }
+            let info = &c.info;
             let profile = if let Some((id, revision)) = &c.duplicate {
                 if !selection.update {
                     return Err(invalid("重复账号默认跳过；需明确选择更新"));
@@ -541,7 +536,7 @@ impl Core {
                 let existing = next
                     .profiles
                     .iter_mut()
-                    .find(|p| p.id == *id && auth_info(&p.auth).is_ok_and(|p| p.matches(&info)))
+                    .find(|p| p.id == *id && auth_info(&p.auth).is_ok_and(|p| p.matches(info)))
                     .ok_or_else(conflict)?;
                 if storage::digest(existing.auth.as_bytes()) != *revision
                     || older(&c.auth, &existing.auth)
@@ -554,16 +549,16 @@ impl Core {
                 if next
                     .profiles
                     .iter()
-                    .any(|p| auth_info(&p.auth).is_ok_and(|p| p.matches(&info)))
+                    .any(|p| auth_info(&p.auth).is_ok_and(|p| p.matches(info)))
                 {
                     return Err(conflict());
                 }
                 next.profiles.push(Profile {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: c.name.clone(),
-                    identity: c.identity.clone(),
-                    kind: info.kind,
-                    email: info.email,
+                    identity: info.identity.clone(),
+                    kind: info.kind.clone(),
+                    email: info.email.clone(),
                     auth: c.auth.clone(),
                     updated_at: now(),
                     exchange: BTreeMap::new(),
@@ -587,7 +582,7 @@ impl Core {
                     selected.iter().any(|s| {
                         pending.candidates[s.id]
                             .as_ref()
-                            .is_some_and(|c| auth_info(&c.auth).is_ok_and(|c| c.matches(&info)))
+                            .is_some_and(|c| c.info.matches(&info))
                     })
                 })
             {

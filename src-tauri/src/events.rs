@@ -1396,10 +1396,7 @@ impl Service {
     }
     pub fn sync_antigravity_logs(&self, home: &Path) {
         let cutoff = now().saturating_sub(RETENTION);
-        let mut cursors = self
-            .antigravity_cursors
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cursors = self.antigravity_cursors.lock().unwrap();
         let mut discovered = Vec::new();
         let brain = home.join(".gemini/antigravity/brain");
         if let Ok(entries) = std::fs::read_dir(&brain) {

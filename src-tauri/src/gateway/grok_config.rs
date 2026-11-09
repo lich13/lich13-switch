@@ -27,8 +27,7 @@ fn error(message: &str) -> AppError {
 fn parse(text: &str) -> Result<DocumentMut> {
     text.parse().map_err(|_| error("Grok 配置不是有效的 TOML"))
 }
-pub fn validate(text: &str) -> Result<()> {
-    let doc = parse(text)?;
+fn validate_doc(doc: &DocumentMut) -> Result<()> {
     if doc
         .get("models")
         .is_some_and(|v| v.as_table_like().is_none())
@@ -43,6 +42,9 @@ pub fn validate(text: &str) -> Result<()> {
         return Err(error("Grok 模型配置类型无效"));
     }
     Ok(())
+}
+pub fn validate(text: &str) -> Result<()> {
+    validate_doc(&parse(text)?)
 }
 fn string(table: &Table, key: &str) -> Result<Option<String>> {
     table
@@ -129,8 +131,14 @@ pub fn profile(text: &str) -> Result<Profile> {
     profile_with_env(text, &|name| std::env::var(name).ok())
 }
 pub fn profile_with_env(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Result<Profile> {
-    validate(text)?;
     let doc = parse(text)?;
+    profile_doc_with_env(&doc, resolve)
+}
+pub(super) fn profile_doc_with_env(
+    doc: &DocumentMut,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Result<Profile> {
+    validate_doc(doc)?;
     let selected = doc
         .get("models")
         .and_then(|v| v.get("default"))
@@ -334,13 +342,16 @@ pub fn pair(text: &str) -> Result<Pair> {
 }
 pub fn api_profile(text: &str) -> Result<Profile> {
     let mut doc = parse(text)?;
+    api_profile_doc(&mut doc)
+}
+fn api_profile_doc(doc: &mut DocumentMut) -> Result<Profile> {
     if doc.get("model").and_then(|v| v.get(MANAGED)).is_some() {
         if !doc.contains_key("models") {
             doc["models"] = Item::Table(Table::new());
         }
         doc["models"]["default"] = value(MANAGED);
     }
-    profile(&doc.to_string())
+    profile_doc_with_env(doc, &|name| std::env::var(name).ok())
 }
 pub(super) fn missing_recovery(text: &str) -> AppError {
     let profile = api_profile(text).ok();
@@ -454,15 +465,16 @@ impl Snapshot {
         connection: Option<&Connection>,
         independent: bool,
     ) -> Result<Self> {
+        let mut doc = parse(text)?;
         let profile = if independent {
-            api_profile(text)?
+            let mut profile_doc = doc.clone();
+            api_profile_doc(&mut profile_doc)?
         } else {
-            profile(text)?
+            profile_doc_with_env(&doc, &|name| std::env::var(name).ok())?
         };
         if profile.model.is_empty() {
             return Err(error("Grok 未明确选择模型，无法创建 API 模型入口"));
         }
-        let mut doc = parse(text)?;
         let selected = doc
             .get("models")
             .and_then(|v| v.get("default"))

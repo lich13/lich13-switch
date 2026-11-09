@@ -124,7 +124,7 @@ impl Gateway {
                 record.details.error_basis = Some(ErrorBasis::QuotaExhausted);
                 record.details.wait_seconds = None;
             }
-            if let Some(service) = super::locks::published(&self.0.diagnostics).as_ref() {
+            if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
                 service.emit(record);
             }
         }

@@ -8,7 +8,7 @@ use serde::{
     Deserialize, Deserializer, Serialize,
 };
 use serde_json::Value;
-use std::{collections::HashSet, fmt, path::Path};
+use std::{fmt, path::Path};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,7 +22,7 @@ pub struct Document {
 }
 
 // Deserialize every object explicitly: Value alone silently accepts duplicate keys.
-struct Unique;
+struct Unique(Value);
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         struct Check;
@@ -35,39 +35,58 @@ impl<'de> Deserialize<'de> for Unique {
                 self,
                 mut m: M,
             ) -> std::result::Result<Unique, M::Error> {
-                let mut keys = HashSet::new();
-                while let Some(k) = m.next_key::<String>()? {
-                    if !keys.insert(k) {
+                let Some(first_key) = m.next_key::<String>()? else {
+                    return Ok(Unique(Value::Object(serde_json::Map::new())));
+                };
+                if first_key == "$serde_json::private::Number" {
+                    let raw: String = m.next_value()?;
+                    let num = raw
+                        .parse::<serde_json::Number>()
+                        .map_err(de::Error::custom)?;
+                    return Ok(Unique(Value::Number(num)));
+                }
+                let mut map = serde_json::Map::with_capacity(m.size_hint().unwrap_or(0) + 1);
+                let Unique(first_val) = m.next_value()?;
+                map.insert(first_key, first_val);
+                while let Some((k, Unique(v))) = m.next_entry::<String, Unique>()? {
+                    if map.insert(k, v).is_some() {
                         return Err(de::Error::custom("配置包含重复字段"));
                     }
-                    m.next_value::<Unique>()?;
                 }
-                Ok(Unique)
+                Ok(Unique(Value::Object(map)))
             }
             fn visit_seq<S: SeqAccess<'de>>(
                 self,
                 mut s: S,
             ) -> std::result::Result<Unique, S::Error> {
-                while s.next_element::<Unique>()?.is_some() {}
-                Ok(Unique)
+                let mut seq = Vec::with_capacity(s.size_hint().unwrap_or(0));
+                while let Some(Unique(v)) = s.next_element::<Unique>()? {
+                    seq.push(v);
+                }
+                Ok(Unique(Value::Array(seq)))
             }
-            fn visit_bool<E: de::Error>(self, _: bool) -> std::result::Result<Unique, E> {
-                Ok(Unique)
+            fn visit_bool<E: de::Error>(self, v: bool) -> std::result::Result<Unique, E> {
+                Ok(Unique(Value::Bool(v)))
             }
-            fn visit_str<E: de::Error>(self, _: &str) -> std::result::Result<Unique, E> {
-                Ok(Unique)
+            fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Unique, E> {
+                Ok(Unique(Value::String(v.to_owned())))
             }
-            fn visit_i64<E: de::Error>(self, _: i64) -> std::result::Result<Unique, E> {
-                Ok(Unique)
+            fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Unique, E> {
+                Ok(Unique(Value::String(v)))
             }
-            fn visit_u64<E: de::Error>(self, _: u64) -> std::result::Result<Unique, E> {
-                Ok(Unique)
+            fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<Unique, E> {
+                Ok(Unique(Value::Number(v.into())))
             }
-            fn visit_f64<E: de::Error>(self, _: f64) -> std::result::Result<Unique, E> {
-                Ok(Unique)
+            fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<Unique, E> {
+                Ok(Unique(Value::Number(v.into())))
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<Unique, E> {
+                serde_json::Number::from_f64(v)
+                    .map(|n| Unique(Value::Number(n)))
+                    .ok_or_else(|| de::Error::custom("JSON 数值无效"))
             }
             fn visit_unit<E: de::Error>(self) -> std::result::Result<Unique, E> {
-                Ok(Unique)
+                Ok(Unique(Value::Null))
             }
         }
         d.deserialize_any(Check)
@@ -87,8 +106,7 @@ fn json_error(e: serde_json::Error) -> AppError {
     }
 }
 pub(crate) fn parse_object(text: &str) -> Result<Value> {
-    serde_json::from_str::<Unique>(text).map_err(json_error)?;
-    let v: Value = serde_json::from_str(text).map_err(json_error)?;
+    let Unique(v) = serde_json::from_str(text).map_err(json_error)?;
     if !v.is_object() {
         return Err(AppError::new(code::JSON, "配置根节点必须是对象"));
     }
@@ -205,11 +223,18 @@ pub fn save(
             "配置已被其他程序修改，草稿已保留。请重新读取后合并",
         ));
     }
-    if let Some(bytes) = previous {
-        storage::atomic_write(&backup(client, data), &bytes, None)?;
+    if let Some(bytes) = previous.as_ref() {
+        storage::atomic_write(&backup(client, data), bytes, None)?;
     }
     storage::atomic_write(&path, text.as_bytes(), Some(expected))?;
-    read(client, home, data, guarded)
+    Ok(Document {
+        client_id: client,
+        path: path.to_string_lossy().into(),
+        text: text.to_owned(),
+        revision: storage::revision(Some(text.as_bytes())),
+        guarded,
+        can_restore: previous.is_some() || backup(client, data).is_file(),
+    })
 }
 
 #[cfg(test)]

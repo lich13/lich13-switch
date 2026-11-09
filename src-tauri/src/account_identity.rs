@@ -217,31 +217,15 @@ impl Core {
                     "账号库已被外部修改，未合并旧记录",
                 ));
             }
-            let before = before.ok_or_else(conflict)?;
+            if before.is_none() {
+                return Err(conflict());
+            }
             // The official-mode reference is remapped first to an ID already in
             // both vault versions. A crash here is safe and normalization retries.
             let official = crate::official::remap_account(&self.data_dir, &aliases)?;
             if let Err(error) =
                 storage::atomic_write_bounded(&path, &bytes, Some(&expected), exchange::VAULT_LIMIT)
             {
-                // Directory sync can fail after rename. Roll back only our
-                // exact revision, never a file changed by another writer.
-                let current = storage::read_bounded(&path, exchange::VAULT_LIMIT)?;
-                let revision = storage::revision(current.as_deref());
-                let applied = storage::digest(&bytes);
-                if revision == applied {
-                    storage::atomic_write_bounded(
-                        &path,
-                        &before,
-                        Some(&applied),
-                        exchange::VAULT_LIMIT,
-                    )?;
-                } else if revision != expected {
-                    return Err(AppError::new(
-                        code::CONFLICT,
-                        "账号库已被外部修改，未覆盖当前文件",
-                    ));
-                }
                 if let Some((before, applied)) = official {
                     storage::atomic_write(
                         &self.data_dir.join("official-mode.json"),

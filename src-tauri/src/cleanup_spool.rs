@@ -64,11 +64,11 @@ fn clean_directory_with(path: &Path, allowed_file: fn(&std::ffi::OsStr) -> bool)
     // Do not recurse: unexpected subdirectories, links or newly created entries
     // remain intact. A failed unlink/removal leaves the remainder for a later run.
     for file in files {
-        if !owned(&file, false) || fs::remove_file(&file).is_err() {
+        if fs::remove_file(&file).is_err() {
             return false;
         }
     }
-    owned(path, true) && fs::remove_dir(path).is_ok()
+    fs::remove_dir(path).is_ok()
 }
 
 pub fn clean(data: &Path) -> usize {
@@ -85,7 +85,7 @@ pub fn clean(data: &Path) -> usize {
         data.join("dsh"),
         data.join("agy"),
     ] {
-        if !owned(&root, true) {
+        if root != data && !owned(&root, true) {
             continue;
         }
         let Ok(entries) = fs::read_dir(root) else {

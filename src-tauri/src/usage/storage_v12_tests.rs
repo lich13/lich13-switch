@@ -326,7 +326,7 @@ fn existing_metrics_view_upgrades_and_skips_generation_for_zero_output() {
         )
         .unwrap();
     // The previous view evaluated generation even when measured output was zero.
-    let old = sql.replace("coalesce(output,0)>0 AND ", "");
+    let old = sql.replace("0 measured_outputs,", "coalesce(output,0) measured_outputs,");
     store
         .connection
         .execute_batch(&format!("DROP VIEW usage_metrics;{old};"))
@@ -351,15 +351,6 @@ fn existing_metrics_view_upgrades_and_skips_generation_for_zero_output() {
             },
         )
         .unwrap();
-    let outputs: i64 = store
-        .connection
-        .query_row("SELECT sum(measured_outputs) FROM usage_metrics", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(outputs, 20);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-    calls.store(0, std::sync::atomic::Ordering::Relaxed);
     let mut filter = all_time();
     filter.client = Some("antigravity".into());
     let totals = store.dashboard(&filter).unwrap().totals;

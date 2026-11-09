@@ -1267,7 +1267,7 @@ fn metric_select(table: &str, kind: i64) -> String {
       input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,
       coalesce(cost,'0') cost,unpriced,
       CASE WHEN ordinal=r.last THEN duration ELSE 0 END duration_ms,
-      CASE WHEN coalesce(output,0)>0 AND ordinal=r.last AND {generation}>0 THEN coalesce(output,0) ELSE 0 END measured_outputs,
+      0 measured_outputs,
       CASE WHEN ordinal=r.last THEN max(coalesce({generation},0),0) ELSE 0 END generation_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 THEN coalesce(first_token,0) ELSE 0 END first_token_sum_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 AND first_token IS NOT NULL THEN 1 ELSE 0 END first_token_samples,
@@ -1304,7 +1304,7 @@ pub(super) fn register_values(c: &Connection) -> Result<()> {
             let cache = ctx.get_or_create_aux(1, |_| {
                 Ok::<_, rusqlite::Error>(std::sync::Mutex::new(diagnostics::ScanCache::default()))
             })?;
-            let mut cache = cache.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let mut cache = cache.lock().unwrap();
             diagnostic_u64(&c, ctx.get(0)?, &mut cache, "generationMs")
                 .map(|value| value.filter(|ms| *ms > 50))
                 .map_err(|_| rusqlite::Error::InvalidQuery)
@@ -1546,7 +1546,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     ))?;
-    if sql.contains("CASE WHEN coalesce(output,0)>0 AND ordinal=r.last AND CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,0)") {
+    if sql.contains("0 measured_outputs,") {
         return Ok(());
     }
     let original = metric_select("v12_raw_attempts", 2)

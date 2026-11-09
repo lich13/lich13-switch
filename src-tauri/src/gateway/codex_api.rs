@@ -154,12 +154,12 @@ pub fn detect(home: &Path) -> Result<Connection> {
     {
         return Ok(Connection::Bearer);
     }
-    let connection = binding(home)?;
+    compatible(&doc, &id)?;
     let raw = storage::read_bounded(&home.join("auth.json"), LIMIT)?;
     if api_key(&auth(raw.as_deref())?)?.is_none() {
         return Err(invalid("未识别到普通 API 登录，现有认证已保留"));
     }
-    Ok(connection)
+    Ok(Connection::ApiKey { provider: id })
 }
 pub fn base(text: &str, id: &str) -> Result<Option<String>> {
     let doc = document(text)?;
@@ -298,9 +298,6 @@ fn patch_base(config: &str, id: &str, value: &str) -> Result<String> {
             output.insert_str(end, &format!("{lead}{assignment}{newline}"));
         }
     }
-    if base(&output, id)?.as_deref() != Some(value) {
-        return Err(invalid("base_url 回读校验失败"));
-    }
     Ok(output)
 }
 
@@ -362,18 +359,19 @@ pub fn write(
     }
     let config_before = text(home)?;
     let auth_before = storage::read_bounded(&home.join("auth.json"), LIMIT)?;
-    let (revision, current) = read(home, id)?;
+    let mut value = auth(auth_before.as_deref())?;
+    let current = Pair {
+        base_url: base(&config_before, id)?,
+        token: api_key(&value)?,
+    };
+    let config_rev = storage::digest(config_before.as_bytes());
+    let auth_rev = storage::revision(auth_before.as_deref());
+    let revision = pair_revision(&config_rev, &auth_rev);
     if expected.is_some_and(|e| e != revision) || allowed.is_some_and(|a| !a.contains(&&current)) {
         return Err(AppError::new(
             code::CONFLICT,
             "base_url 或 auth.json 已变化，请刷新后重试",
         ));
-    }
-    // Recheck the exact bytes used for both patches before publishing a journal.
-    if config_before != text(home)?
-        || auth_before != storage::read_bounded(&home.join("auth.json"), LIMIT)?
-    {
-        return Err(AppError::new(code::CONFLICT, "API 配置正在变化，请重试"));
     }
     let url = target
         .base_url
@@ -384,7 +382,6 @@ pub fn write(
         .as_deref()
         .filter(|k| !k.is_empty())
         .ok_or_else(|| invalid("缺少 API Key"))?;
-    let mut value = auth(auth_before.as_deref())?;
     value["auth_mode"] = "apikey".into();
     value["OPENAI_API_KEY"] = key.into();
     let tx = Write {
@@ -405,16 +402,9 @@ pub fn write(
         storage::atomic_write(
             &home.join("config.toml"),
             tx.config_after.as_bytes(),
-            Some(&storage::digest(tx.config_before.as_bytes())),
+            Some(&config_rev),
         )?;
-        storage::atomic_write(
-            &home.join("auth.json"),
-            &tx.auth_after,
-            Some(&storage::revision(tx.auth_before.as_deref())),
-        )?;
-        if read(home, id)?.1 != *target {
-            return Err(invalid("API 连接回读校验失败"));
-        }
+        storage::atomic_write(&home.join("auth.json"), &tx.auth_after, Some(&auth_rev))?;
         Ok(())
     })();
     if let Err(error) = result {

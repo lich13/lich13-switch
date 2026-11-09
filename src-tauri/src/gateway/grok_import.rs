@@ -240,7 +240,7 @@ pub fn discover(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Result
             set_selected(&mut selected, &key);
             Ok(model_view(
                 key,
-                &grok_config::profile_with_env(&selected.to_string(), resolve),
+                &grok_config::profile_doc_with_env(&selected, resolve),
             ))
         })
         .collect()
@@ -375,13 +375,14 @@ impl Transaction {
             return Err(error("Grok 导入恢复记录无效"));
         }
         let files = self.files(data);
+        let mut staged = Vec::with_capacity(files.len());
         // Preflight every participant before any further write; external edits
         // are never rolled back, even following an interrupted commit.
-        for (path, change) in &files {
+        for (path, change) in files {
             if change.after.len() as u64 > FILE_LIMIT {
                 return Err(AppError::new(code::FILE_SIZE, "Grok 导入文件超过允许大小"));
             }
-            let raw = storage::read_optional(path)?;
+            let raw = storage::read_optional(&path)?;
             if raw.as_deref() != change.before.as_deref().map(str::as_bytes)
                 && raw.as_deref() != Some(change.after.as_bytes())
             {
@@ -390,9 +391,9 @@ impl Transaction {
                     "Grok 导入文件被外部修改，已保留恢复事务和当前配置",
                 ));
             }
+            staged.push((path, change, raw));
         }
-        for (path, change) in files {
-            let raw = storage::read_optional(&path)?;
+        for (path, change, raw) in staged {
             if raw.as_deref() != Some(change.after.as_bytes()) {
                 storage::atomic_write(
                     &path,
@@ -494,7 +495,7 @@ impl Gateway {
             if preview.selected.is_empty() {
                 return Err(error("默认模型未确定，请选择要导入的模型"));
             }
-            let p = grok_config::profile_with_env(&doc.to_string(), &resolve)?;
+            let p = grok_config::profile_doc_with_env(&doc, &resolve)?;
             if p.pair
                 .token
                 .as_deref()

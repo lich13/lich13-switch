@@ -51,7 +51,7 @@ fn object(text: &str, start: usize) -> Result<Vec<Member>> {
         at += 1;
         skip(text, &mut at);
         let begin = at;
-        let _: Value = one(text, &mut at)?;
+        let _: serde::de::IgnoredAny = one(text, &mut at)?;
         members.push(Member {
             key,
             span: begin..at,
@@ -77,7 +77,7 @@ fn unique<'a>(members: &'a [Member], key: &str) -> Result<Option<&'a Member>> {
 }
 type ObjectLocations = (Vec<Member>, Option<Range<usize>>, Vec<Member>);
 fn locations(text: &str) -> Result<ObjectLocations> {
-    let _: Value = serde_json::from_str(text).map_err(|_| invalid())?;
+    let _: serde::de::IgnoredAny = serde_json::from_str(text).map_err(|_| invalid())?;
     let start = text.len() - text.trim_start().len();
     let root = object(text, start)?;
     let env = unique(&root, "env")?.map(|m| m.span.clone());
@@ -188,9 +188,6 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
     let mut out = text.to_owned();
     for (range, value) in edits {
         out.replace_range(range, &value);
-    }
-    if pair(&out)? != *target {
-        return Err(invalid());
     }
     Ok(out)
 }

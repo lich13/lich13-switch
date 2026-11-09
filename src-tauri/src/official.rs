@@ -468,21 +468,7 @@ pub(crate) fn remap_account(
         .map_err(|_| AppError::new(code::STORE, "无法更新官方账号记录"))?;
     let expected = storage::digest(&before);
     let applied = storage::digest(&bytes);
-    if let Err(error) = storage::atomic_write(&path, &bytes, Some(&expected)) {
-        // A failed directory sync may follow a successful rename. Restore the
-        // old reference only while the file still contains our exact write.
-        let current = storage::read_optional(&path)?;
-        let revision = storage::revision(current.as_deref());
-        if revision == applied {
-            storage::atomic_write(&path, &before, Some(&applied))?;
-        } else if revision != expected {
-            return Err(AppError::new(
-                code::CONFLICT,
-                "官方账号记录已被外部修改，未覆盖当前文件",
-            ));
-        }
-        return Err(error);
-    }
+    storage::atomic_write(&path, &bytes, Some(&expected))?;
     Ok(Some((before, applied)))
 }
 

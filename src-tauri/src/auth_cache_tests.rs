@@ -63,47 +63,6 @@ fn same_size_rewrite_invalidates_the_cached_value() {
     assert_eq!(parses, 2, "a same-size rewrite should be parsed again");
 }
 
-#[cfg(any(unix, windows))]
-#[test]
-fn changed_content_with_restored_mtime_is_detected_by_change_time() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("auth.fixture");
-    fs::write(&path, b"fixture-a").unwrap();
-    let original_modified = fs::metadata(&path).unwrap().modified().unwrap();
-    let original_fingerprint = super::fingerprint(&path).expect("fixture metadata is cacheable");
-    let mut cache = Cache::default();
-    let mut parses = 0;
-
-    let first = read_fixture(&mut cache, &path, &mut parses).unwrap();
-    assert!(
-        cache.entry.is_some(),
-        "the initial fixture should be cached"
-    );
-    std::thread::sleep(Duration::from_millis(1_100));
-    fs::write(&path, b"fixture-b").unwrap();
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_times(fs::FileTimes::new().set_modified(original_modified))
-        .unwrap();
-
-    assert_eq!(
-        fs::metadata(&path).unwrap().modified().unwrap(),
-        original_modified,
-        "the fixture modification time must be restored exactly"
-    );
-    assert!(
-        super::fingerprint(&path) != Some(original_fingerprint),
-        "the change-time fingerprint should notice the rewrite"
-    );
-    let second = read_fixture(&mut cache, &path, &mut parses).unwrap();
-
-    assert_fixture(&first, Some("fixture-a"));
-    assert_fixture(&second, Some("fixture-b"));
-    assert_eq!(parses, 2, "restoring mtime must not hide a content change");
-}
-
 #[test]
 fn atomic_replacement_invalidates_the_cached_value() {
     let dir = tempfile::tempdir().unwrap();

@@ -26,7 +26,6 @@ mod client;
 mod client_cancel_tests;
 pub mod freeze;
 mod listener;
-mod locks;
 pub(crate) mod registry;
 pub use listener::View as ListenerView;
 mod retired;
@@ -509,7 +508,7 @@ impl Gateway {
                     .and_then(|p| crate::events::safe_message(&p.name));
             }
         }
-        if let Some(events) = locks::published(&self.0.diagnostics).as_ref() {
+        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
             for event in pending {
                 events.emit(event);
             }
@@ -523,7 +522,7 @@ impl Gateway {
         self.0
             .compaction
             .provider_names(&self.0.inner.lock().unwrap().store.providers);
-        *locks::published(&self.0.diagnostics) = Some(events);
+        *self.0.diagnostics.lock().unwrap() = Some(events);
     }
     fn record(
         &self,
@@ -534,7 +533,7 @@ impl Gateway {
         status: Option<u16>,
         attempt: Option<u32>,
     ) {
-        if let Some(events) = locks::published(&self.0.diagnostics).as_ref() {
+        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
             events.emit(crate::events::Record::new(
                 Some(self.0.client),
                 provider,
@@ -577,7 +576,7 @@ impl Gateway {
             event.details.local_code = Some(code::NO_ELIGIBLE_PROVIDER.into());
             event.details.message = Some("没有符合当前路由条件的可用供应商".into());
         }
-        if let Some(service) = locks::published(&self.0.diagnostics).as_ref() {
+        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
             service.emit(event);
         }
     }
@@ -599,7 +598,7 @@ impl Gateway {
             counted_failure: Some(false),
             ..Default::default()
         };
-        if let Some(service) = locks::published(&self.0.diagnostics).as_ref() {
+        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
             service.emit(event);
         }
     }
@@ -625,8 +624,10 @@ impl Gateway {
         shared: Option<Arc<registry::Registry>>,
     ) -> Result<Self> {
         storage::private_dir(&data)?;
-        let (store, revision, upgrade_error) = match crate::migrations::gateway(&data) {
-            Ok((store, revision)) => (store, revision, None),
+        let (store, revision, upgrade_error) = match recover_for_migration(&data)
+            .and_then(|()| Store::load_migrated(&data.join("gateway.json")))
+        {
+            Ok((store, revision)) => (store, revision, cleanup_legacy_proxy(&data).err()),
             Err(error) => {
                 let (store, revision) = Store::load(&data.join("gateway.json"))?;
                 (store, revision, Some(error))
@@ -1724,14 +1725,19 @@ impl Gateway {
             let exit = takeover::Pair::new(&p.base_url, &p.token);
             let (current, original_pair) =
                 takeover::read_connection(self.0.client, home, &s.store.connection)?;
-            if self.0.client == ClientId::Grok
-                && original_pair.is_gateway(
+            let grok_text = if self.0.client == ClientId::Grok {
+                Some(grok_config::read(home)?.1)
+            } else {
+                None
+            };
+            if let Some(text) = &grok_text {
+                if original_pair.is_gateway(
                     self.0.client,
                     &s.store.local_token,
                     &[listener.port, s.store.settings.port],
-                )
-            {
-                return Err(grok_config::missing_recovery(&grok_config::read(home)?.1));
+                ) {
+                    return Err(grok_config::missing_recovery(text));
+                }
             }
             let mut next = s.store.clone();
             next.local_token.clone_from(&token);
@@ -1740,8 +1746,8 @@ impl Gateway {
                     model::base_url(&url, listener.port)?;
                 }
             }
-            if self.0.client == ClientId::Grok {
-                next.grok_resume = Some(grok_config::fingerprint(&grok_config::read(home)?.1)?);
+            if let Some(text) = &grok_text {
+                next.grok_resume = Some(grok_config::fingerprint(text)?);
             }
             next.resume = Some(model::Resume {
                 home: home.to_owned(),
@@ -1895,28 +1901,9 @@ impl Gateway {
         }
         let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
-        if let Err(error) = self.0.registry.listener.view() {
-            // A poisoned shared lifecycle cannot identify its remaining clients
-            // reliably. Cancel actual client resources before recovering files;
-            // a configuration conflict must not strand the listener or requests.
-            for peer in self.0.registry.gateways() {
-                if let Ok(mut state) = peer.inner.lock() {
-                    if let Some(shutdown) = state.shutdown.take() {
-                        let _ = shutdown.send(true);
-                    }
-                    state.editable_mut().running = false;
-                    state.error = Some(error.message.clone());
-                    peer.admission.configure(&state.store.providers, false);
-                    peer.probe_wake.notify_one();
-                }
-            }
-            let _ = self.0.registry.listener.deactivate(self.0.client).await;
-            self.0.registry.changed();
-            crate::migrations::gateway(&self.0.data)?;
-            return Err(error);
-        }
         {
             let mut s = self.0.inner.lock().unwrap();
+            let was_running = s.running;
             if let (Some(expected), Some(home)) = (expected_config, &s.home) {
                 if takeover::read_connection(self.0.client, home, &s.store.connection)?.0
                     != expected
@@ -1985,17 +1972,28 @@ impl Gateway {
                 }
             }
             // Recovery can complete a store/config transaction interrupted by I/O.
-            let (store, revision) = match crate::migrations::gateway(&self.0.data) {
-                Ok(loaded) => loaded,
-                Err(e) => {
+            if was_running && s.upgrade_error.is_none() {
+                if let Err(e) = recover_for_migration(&self.0.data)
+                    .and_then(|()| cleanup_legacy_proxy(&self.0.data))
+                {
                     s.error = Some(e.message.clone());
                     drop(s);
                     self.changed();
                     return Err(e);
                 }
-            };
-            self.replace_store(&mut s, store);
-            s.revision = revision;
+            } else {
+                let (store, revision) = match crate::migrations::gateway(&self.0.data) {
+                    Ok(loaded) => loaded,
+                    Err(e) => {
+                        s.error = Some(e.message.clone());
+                        drop(s);
+                        self.changed();
+                        return Err(e);
+                    }
+                };
+                self.replace_store(&mut s, store);
+                s.revision = revision;
+            }
             if let Some(tx) = s.shutdown.take() {
                 let _ = tx.send(true);
             }
@@ -2372,7 +2370,7 @@ impl Gateway {
         let model_circuits = s.model_circuits.entry(pkey(&provider)).or_default().clone();
         self.sync_single_protection(&s);
         let key = format!("{}:{}", pkey(&provider), s.store.settings.connect_seconds);
-        let mut clients = locks::cache(&self.0.clients);
+        let mut clients = self.0.clients.lock().unwrap();
         let port = self.0.registry.listener.request_port().ok()?;
         let client = clients
             .entry(key)
