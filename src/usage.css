@@ -557,9 +557,11 @@
 .usage-badge {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  height: 20px;
   font-size: 12px;
-  line-height: 14px;
-  padding: 1px 7px;
+  line-height: 1;
+  padding: 0 7px;
   border-radius: var(--radius-pill);
   border: 1px solid color-mix(in srgb, var(--accent-amber) 24%, var(--line));
   color: var(--accent-amber);
@@ -1367,7 +1369,7 @@
   text-align: center;
   gap: 6px;
   min-width: 0;
-  min-height: 82px;
+  min-height: 86px;
   padding: 12px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
