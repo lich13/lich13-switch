@@ -1,3 +1,6 @@
+#[cfg(not(any(target_os = "macos", windows)))]
+compile_error!("Vela supports only macOS and Windows");
+
 mod antigravity;
 use crate::errors::code;
 mod auth_cache;
@@ -25,6 +28,7 @@ mod power_macos;
 mod process_control;
 mod provider_testing;
 mod quick;
+mod smoke;
 mod startup;
 #[cfg(target_os = "macos")]
 mod startup_macos;
@@ -65,7 +69,7 @@ struct Runtime {
     quitting: AtomicBool,
     quit_pending: AtomicBool,
     smoke: Option<PathBuf>,
-    smoke_result: Mutex<Option<Result<SmokeSnapshot>>>,
+    smoke_result: Mutex<Option<Result<smoke::SmokeSnapshot>>>,
     fixture: Mutex<Option<tempfile::TempDir>>,
     startup: startup::Service,
     start_silently: bool,
@@ -215,7 +219,7 @@ impl Runtime {
         }
     }
     fn home(&self, client: gateway::ClientId) -> Result<PathBuf> {
-        let core = lock(&self.core)?;
+        let core = self.core.lock().unwrap();
         Ok(match client {
             gateway::ClientId::Codex => core.home(),
             gateway::ClientId::Claude => PathBuf::from(core.preferences().claude_home),
@@ -234,13 +238,6 @@ impl Runtime {
         let e = gateway::antigravity::stop(&registry).await;
         a.and(b).and(c).and(d).and(e).map(|_| ())
     }
-}
-struct SmokeSnapshot {
-    claude_home: PathBuf,
-    claude_config: Option<Vec<u8>>,
-    home: PathBuf,
-    auth: Option<Vec<u8>>,
-    config: Option<Vec<u8>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -269,10 +266,6 @@ fn application_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 }
 fn login_active(s: &login::LoginState) -> bool {
     ["starting", "waiting", "cancelling"].contains(&s.phase.as_str())
-}
-fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
-    m.lock()
-        .map_err(|_| AppError::new(code::STATE, "应用状态异常，请重新启动 Vela"))
 }
 pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindow> {
     ["main", "quick"]
@@ -522,11 +515,10 @@ fn poll_account_state_step(
     gateway: &gateway::Gateway,
     last: &mut Option<ViewState>,
 ) -> PollStateUpdate {
-    let result = lock(core).and_then(|mut c| {
-        let s = c.state()?;
-        let home = c.home();
-        Ok((s, home))
-    });
+    let result = {
+        let mut c = core.lock().unwrap();
+        c.state().map(|s| (s, c.home()))
+    };
     match result {
         Ok((s, home)) => {
             if last.as_ref() != Some(&s) {
@@ -561,7 +553,7 @@ fn publish(app: &tauri::AppHandle, state: ViewState) {
 }
 fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     let state = state_for(r)?;
-    let home = lock(&r.core)?.home();
+    let home = r.core.lock().unwrap().home();
     r.gateway.observe_home(&home);
     publish(app, state.clone());
     Ok(state)
@@ -621,7 +613,7 @@ fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
     }
 }
 fn state_for(r: &Runtime) -> Result<ViewState> {
-    lock(&r.core)?.state()
+    r.core.lock().unwrap().state()
 }
 #[tauri::command]
 async fn list_provider_models(
@@ -644,7 +636,7 @@ async fn switch_account(
     expected_revision: String,
 ) -> Result<ViewState> {
     let _connection_guard = r.official_tx.lock().await;
-    let mut core = lock(&r.core)?;
+    let mut core = r.core.lock().unwrap();
     let official_view = core.official_view();
     if official::blocks_gateway(&r.data) && official_view.account_id.as_deref() != Some(id.as_str())
     {
@@ -720,7 +712,9 @@ async fn use_official_account(
     }
     let auth_revision = expected_auth_revision.clone();
     official::enable_with_switch(&r.data, &home, &account_id, &config_revision, || {
-        lock(&r.core)?
+        r.core
+            .lock()
+            .unwrap()
             .switch_account(&account_id, &auth_revision)
             .map(|_| ())
     })?;
@@ -744,7 +738,7 @@ async fn disable_official_account(
 }
 #[tauri::command]
 fn import_current(app: tauri::AppHandle, r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
-    let mut c = lock(&r.core)?;
+    let mut c = r.core.lock().unwrap();
     let path = c.home().join("auth.json");
     c.import_file(&path, None)?;
     drop(c);
@@ -769,7 +763,7 @@ async fn import_auth_file(
         let path = path
             .into_path()
             .map_err(|_| AppError::new(code::PATH, "请选择本地文件"))?;
-        lock(&r.core)?.import_file(&path, None)?;
+        r.core.lock().unwrap().import_file(&path, None)?;
         Ok(Some(refresh(&app, &r)?))
     } else {
         Ok(None)
@@ -782,7 +776,7 @@ fn rename_account(
     id: String,
     name: String,
 ) -> Result<ViewState> {
-    lock(&r.core)?.rename(&id, &name)?;
+    r.core.lock().unwrap().rename(&id, &name)?;
     refresh(&app, &r)
 }
 #[tauri::command]
@@ -801,7 +795,7 @@ fn delete_account(
             ));
         }
     }
-    lock(&r.core)?.delete(&id)?;
+    r.core.lock().unwrap().delete(&id)?;
     refresh(&app, &r)
 }
 #[tauri::command]
@@ -857,7 +851,11 @@ fn set_quota_refresh(
     seconds: u64,
     expected_seconds: u64,
 ) -> Result<ViewState> {
-    let state = lock(&r.core)?.set_quota_refresh(seconds, expected_seconds)?;
+    let state = r
+        .core
+        .lock()
+        .unwrap()
+        .set_quota_refresh(seconds, expected_seconds)?;
     r.gateway.set_quota_interval(seconds);
     r.claude.set_quota_interval(seconds);
     r.grok.set_quota_interval(seconds);
@@ -875,18 +873,18 @@ async fn set_preferences(
     if matches!(
         r.claude_login.lock().unwrap().state.phase.as_str(),
         "waiting" | "cancelling"
-    ) && lock(&r.core)?.preferences().claude_home != preferences.claude_home
+    ) && r.core.lock().unwrap().preferences().claude_home != preferences.claude_home
     {
         return Err(AppError::new(
             code::LOGIN_BUSY,
             "请先完成或取消 Claude 登录",
         ));
     }
-    if login_active(&lock(&r.login)?.state) {
+    if login_active(&r.login.lock().unwrap().state) {
         return Err(AppError::new(code::LOGIN_BUSY, "请先完成或取消登录"));
     }
     if (r.gateway.guarded_home() || official::blocks_gateway(&r.data))
-        && lock(&r.core)?.preferences().codex_home != preferences.codex_home
+        && r.core.lock().unwrap().preferences().codex_home != preferences.codex_home
     {
         return Err(AppError::new(
             code::GATEWAY_ACTIVE,
@@ -894,27 +892,30 @@ async fn set_preferences(
         ));
     }
     if (r.claude.guarded_home() || claude_profile::blocks(&r.data))
-        && lock(&r.core)?.preferences().claude_home != preferences.claude_home
+        && r.core.lock().unwrap().preferences().claude_home != preferences.claude_home
     {
         return Err(AppError::new(
             code::GATEWAY,
             "请先停止 Claude Code 网关并处理恢复事务",
         ));
     }
-    if r.dsh.guarded_home() && lock(&r.core)?.preferences().dsh_home != preferences.dsh_home {
+    if r.dsh.guarded_home() && r.core.lock().unwrap().preferences().dsh_home != preferences.dsh_home
+    {
         return Err(AppError::new(
             code::GATEWAY,
             "请先停止 DSH 网关并处理恢复事务",
         ));
     }
-    if r.grok.guarded_home() && lock(&r.core)?.preferences().grok_home != preferences.grok_home {
+    if r.grok.guarded_home()
+        && r.core.lock().unwrap().preferences().grok_home != preferences.grok_home
+    {
         return Err(AppError::new(
             code::GATEWAY,
             "请先停止 Grok Build 网关并处理恢复事务",
         ));
     }
     let s = {
-        let mut core = lock(&r.core)?;
+        let mut core = r.core.lock().unwrap();
         preferences.quota_refresh_seconds = core.preferences().quota_refresh_seconds;
         core.set_preferences(preferences)?
     };
@@ -974,7 +975,7 @@ async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>
 }
 #[tauri::command]
 fn get_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<login::LoginState> {
-    Ok(lock(&r.login)?.state.clone())
+    Ok(r.login.lock().unwrap().state.clone())
 }
 #[tauri::command]
 fn start_login(
@@ -987,10 +988,10 @@ fn start_login(
     if !["browser", "device"].contains(&mode.as_str()) {
         return Err(AppError::new(code::LOGIN_MODE, "登录方式无效"));
     }
-    let prefs = lock(&r.core)?.preferences();
+    let prefs = r.core.lock().unwrap().preferences();
     let cli = login::resolve_cli(&prefs.cli_path)?;
     let target = match target_account_id.as_deref() {
-        Some(id) if mode == "device" => Some(lock(&r.core)?.login_target(
+        Some(id) if mode == "device" => Some(r.core.lock().unwrap().login_target(
             id,
             expected_credential_revision.as_deref().unwrap_or_default(),
         )?),
@@ -1002,7 +1003,7 @@ fn start_login(
         }
         None => None,
     };
-    let mut session = lock(&r.login)?;
+    let mut session = r.login.lock().unwrap();
     if login_active(&session.state) {
         return Err(AppError::new(code::LOGIN_BUSY, "已有登录正在进行"));
     }
@@ -1044,16 +1045,17 @@ fn start_login(
         };
         let _connection_guard = runtime.official_tx.lock().await;
         let mut final_state = match result {
-            Ok(Some(raw)) => match lock(&runtime.login).and_then(|s| {
+            Ok(Some(raw)) => match (|| -> Result<bool> {
+                let s = runtime.login.lock().unwrap();
                 if s.cancel.is_none() {
                     return Err(AppError::new(code::LOGIN_CANCELLED, "登录已取消"));
                 }
-                let mut c = lock(&runtime.core)?;
+                let mut c = runtime.core.lock().unwrap();
                 match target.as_ref() {
                     Some(target) => c.complete_target_login(&raw, target),
                     None => c.complete_login(&raw),
                 }
-            }) {
+            })() {
                 Ok(updated) => login::LoginState {
                     phase: "success".into(),
                     mode: mode.clone(),
@@ -1103,7 +1105,7 @@ fn start_login(
 }
 #[tauri::command]
 fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
-    let mut s = lock(&r.login)?;
+    let mut s = r.login.lock().unwrap();
     if let Some(tx) = s.cancel.take() {
         let _ = tx.send(());
         s.state.phase = "cancelling".into();
@@ -1113,7 +1115,7 @@ fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
 }
 #[tauri::command]
 fn open_login_url(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
-    let s = lock(&r.login)?;
+    let s = r.login.lock().unwrap();
     let url = s
         .state
         .auth_url
@@ -1129,7 +1131,10 @@ fn copy_login_value(
     kind: login::CopyKind,
 ) -> Result<()> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    lock(&r.login)?.copy_value(kind, |value| app.clipboard().write_text(value))
+    r.login
+        .lock()
+        .unwrap()
+        .copy_value(kind, |value| app.clipboard().write_text(value))
 }
 #[tauri::command]
 async fn complete_login_callback(
@@ -1138,7 +1143,7 @@ async fn complete_login_callback(
     callback_url: String,
 ) -> Result<login::LoginState> {
     let callback = {
-        let session = lock(&r.login)?;
+        let session = r.login.lock().unwrap();
         if session.cancel.is_none()
             || session.state.mode != "browser"
             || !["starting", "waiting"].contains(&session.state.phase.as_str())
@@ -1162,7 +1167,7 @@ async fn complete_login_callback(
     result
         .await
         .map_err(|_| AppError::new(code::LOGIN_STATE, "登录会话已结束，请重新开始"))??;
-    let mut session = lock(&r.login)?;
+    let mut session = r.login.lock().unwrap();
     if session.cancel.is_none() || !login_active(&session.state) {
         return Err(AppError::new(
             code::LOGIN_STATE,
@@ -1608,36 +1613,7 @@ async fn frontend_ready(
         notifications::on_manual_open(&app);
     }
     if r.smoke.is_some() {
-        let result = (|| -> Result<()> {
-            #[cfg(windows)]
-            startup::smoke_registration()?;
-            let mut c = lock(&r.core)?;
-            let a = c.add_api_key("Smoke A", "fixture-only-a")?;
-            let b = c.add_api_key("Smoke B", "fixture-only-b")?;
-            let text = "# smoke\nmodel = 'fixture'\nmodel_provider = 'custom'\n[model_providers.custom]\nbase_url = \"https://example.invalid/v1\"\nexperimental_bearer_token = \"fixture-only\"\nwire_api = 'responses'\n[future]\nkeep = true\n";
-            c.save_config(text, "missing")?;
-            let cfg = c.state()?.config_revision;
-            for id in [&a, &b, &a] {
-                let rev = c.state()?.auth_revision;
-                c.switch_account(id, &rev)?;
-                if c.state()?.config_revision != cfg {
-                    return Err(AppError::new(code::SMOKE, "配置发生意外变化"));
-                }
-            }
-            Ok(())
-        })();
-        let result = match result {
-            Ok(()) => gateway_smoke(&r).await,
-            Err(e) => Err(e),
-        };
-        let result = match result {
-            Ok(()) => prepare_exit_smoke(&r).await,
-            Err(e) => Err(e),
-        };
-        *lock(&r.smoke_result)? = Some(result);
-        // Exercise a coded exit request while the gateway is still active.
-        // The report is written only after the exit handler verifies restoration.
-        app.exit(0);
+        return smoke::run(&app, &r).await;
     } else {
         for client in [
             gateway::ClientId::Codex,
@@ -1663,166 +1639,6 @@ async fn frontend_ready(
         if !r.start_silently {
             show(&app, None)?;
         }
-    }
-    Ok(())
-}
-async fn prepare_exit_smoke(r: &Runtime) -> Result<SmokeSnapshot> {
-    let home = lock(&r.core)?.home();
-    let claude_home = r.home(gateway::ClientId::Claude)?;
-    let snapshot = SmokeSnapshot {
-        claude_config: storage::read_optional(&claude_home.join("settings.json"))?,
-        claude_home,
-        auth: storage::read_optional(&home.join("auth.json"))?,
-        config: storage::read_optional(&home.join("config.toml"))?.map(|raw| {
-            String::from_utf8(raw)
-                .unwrap()
-                .replace("https://backup.invalid/v1", "https://example.invalid/v1")
-                .replace("fixture-backup", "fixture-only")
-                .into_bytes()
-        }),
-        home,
-    };
-    r.gateway
-        .start(&r.gateway.try_view()?.revision, &snapshot.home)
-        .await?;
-    r.gateway.edit(
-        gateway::Edit::Select {
-            id: r.gateway.try_view()?.providers[0].id.clone(),
-        },
-        &r.gateway.try_view()?.revision,
-        &snapshot.home,
-    )?;
-    r.claude
-        .start(&r.claude.try_view()?.revision, &snapshot.claude_home)
-        .await?;
-    Ok(snapshot)
-}
-fn report_exit_smoke(app: &tauri::AppHandle, r: &Runtime, restored: Result<()>) -> Result<()> {
-    let result = (|| -> Result<()> {
-        let snapshot = lock(&r.smoke_result)?
-            .take()
-            .ok_or_else(|| AppError::new(code::SMOKE, "退出验收未初始化"))??;
-        restored?;
-        if !r.quit_pending.load(Ordering::Relaxed)
-            || r.gateway.guarded_home()
-            || r.claude.guarded_home()
-            || snapshot.claude_config
-                != storage::read_optional(&snapshot.claude_home.join("settings.json"))?
-            || snapshot.auth != storage::read_optional(&snapshot.home.join("auth.json"))?
-            || snapshot.config != storage::read_optional(&snapshot.home.join("config.toml"))?
-        {
-            return Err(AppError::new(code::SMOKE, "正常退出未恢复配置"));
-        }
-        Ok(())
-    })();
-    let data = serde_json::json!({"safeExit":result.is_ok(),"gateway":result.is_ok(),"ok":result.is_ok(),"version":env!("CARGO_PKG_VERSION"),"revision":env!("VELA_REVISION"),"webview":true,"tray":app.tray_by_id("switch").is_some(),"platform":std::env::consts::OS,"error":result.err()});
-    storage::atomic_write(
-        r.smoke.as_ref().unwrap(),
-        serde_json::to_string_pretty(&data).unwrap().as_bytes(),
-        None,
-    )?;
-    if let Some(fixture) = lock(&r.fixture)?.take() {
-        fixture.close().map_err(storage::io_error)?;
-    }
-    Ok(())
-}
-async fn gateway_smoke(r: &Runtime) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let home = lock(&r.core)?.home();
-    let auth = storage::read_optional(&home.join("auth.json"))?;
-    let config = storage::read_optional(&home.join("config.toml"))?;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(storage::io_error)?;
-    let port = listener.local_addr().map_err(storage::io_error)?.port();
-    drop(listener);
-    r.gateway.edit(
-        gateway::Edit::Settings {
-            settings: gateway::Settings {
-                port,
-                ..Default::default()
-            },
-        },
-        &r.gateway.try_view()?.revision,
-        &home,
-    )?;
-    r.gateway.edit(
-        gateway::Edit::SaveProvider {
-            search_only: None,
-            quota_access_token: None,
-            id: None,
-            base_url: "https://example.invalid/v1".into(),
-            token: "fixture-only".into(),
-            name: None,
-        },
-        &r.gateway.try_view()?.revision,
-        &home,
-    )?;
-    r.gateway.edit(
-        gateway::Edit::SaveProvider {
-            search_only: None,
-            quota_access_token: None,
-            id: None,
-            base_url: "https://backup.invalid/v1".into(),
-            token: "fixture-backup".into(),
-            name: None,
-        },
-        &r.gateway.try_view()?.revision,
-        &home,
-    )?;
-    let claude_home = r.home(gateway::ClientId::Claude)?;
-    storage::atomic_write(&claude_home.join("settings.json"), br#"{"env":{"ANTHROPIC_BASE_URL":"https://claude.example.invalid","ANTHROPIC_AUTH_TOKEN":"fixture-claude"},"model":"keep"}"#, Some("missing"))?;
-    r.claude.import_initial(&claude_home)?;
-    r.gateway
-        .start(&r.gateway.try_view()?.revision, &home)
-        .await?;
-    r.claude
-        .start(&r.claude.try_view()?.revision, &claude_home)
-        .await?;
-    if r.gateway.try_view()?.settings.port != port || r.claude.try_view()?.settings.port != port {
-        return Err(AppError::new(code::SMOKE, "共享网关端口不一致"));
-    }
-    let live = storage::read_optional(&home.join("config.toml"))?;
-    r.gateway.edit(
-        gateway::Edit::Select {
-            id: r.gateway.try_view()?.providers[1].id.clone(),
-        },
-        &r.gateway.try_view()?.revision,
-        &home,
-    )?;
-    if live != storage::read_optional(&home.join("config.toml"))? {
-        return Err(AppError::new(code::SMOKE, "运行中换商修改了配置"));
-    }
-    let config = config.map(|raw| {
-        String::from_utf8(raw)
-            .unwrap()
-            .replace("https://example.invalid/v1", "https://backup.invalid/v1")
-            .replace("fixture-only", "fixture-backup")
-            .into_bytes()
-    });
-    let mut connection = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .map_err(storage::io_error)?;
-    connection
-        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .await
-        .map_err(storage::io_error)?;
-    let mut response = Vec::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        connection.read_to_end(&mut response),
-    )
-    .await
-    .map_err(|_| AppError::new(code::SMOKE, "网关响应超时"))?
-    .map_err(storage::io_error)?;
-    r.gateway.stop().await?;
-    if !r.claude.try_view()?.running {
-        return Err(AppError::new(code::SMOKE, "双网关状态未隔离"));
-    }
-    r.claude.stop().await?;
-    if !response.starts_with(b"HTTP/1.1 401")
-        || auth != storage::read_optional(&home.join("auth.json"))?
-        || config != storage::read_optional(&home.join("config.toml"))?
-    {
-        return Err(AppError::new(code::SMOKE, "网关或恢复校验失败"));
     }
     Ok(())
 }
@@ -1977,7 +1793,9 @@ pub fn run() {
                 window_visible: [AtomicBool::new(!start_silently), AtomicBool::new(false)],
                 pending_main: PendingMainEvents::default(),
             });
-            runtime.gateway.observe_home(&lock(&runtime.core)?.home());
+            runtime
+                .gateway
+                .observe_home(&runtime.core.lock().unwrap().home());
             runtime
                 .claude
                 .observe_home(&runtime.home(gateway::ClientId::Claude)?);
@@ -2539,7 +2357,7 @@ pub fn run() {
                 // Serialize restoration with any in-flight takeover before returning to the OS.
                 let restored = tauri::async_runtime::block_on(r.stop_gateways());
                 if r.smoke.is_some() {
-                    let _ = report_exit_smoke(app, &r, restored);
+                    let _ = smoke::report_exit(app, &r, restored);
                 }
             }
         });

@@ -182,7 +182,7 @@ fn backup(client: ClientId, data: &Path) -> std::path::PathBuf {
 }
 pub fn read(client: ClientId, home: &Path, data: &Path, guarded: bool) -> Result<Document> {
     let path = client.config(home);
-    let raw = storage::read_optional(&path)?;
+    let raw = storage::read_user_optional(&path)?;
     let revision = storage::revision(raw.as_deref());
     let text = String::from_utf8(raw.unwrap_or_else(|| {
         if matches!(client, ClientId::Claude) {
@@ -216,7 +216,7 @@ pub fn save(
 ) -> Result<Document> {
     validate(client, text)?;
     let path = client.config(home);
-    let previous = storage::read_optional(&path)?;
+    let previous = storage::read_user_optional(&path)?;
     if storage::revision(previous.as_deref()) != expected {
         return Err(AppError::new(
             code::CONFLICT,
@@ -226,7 +226,7 @@ pub fn save(
     if let Some(bytes) = previous.as_ref() {
         storage::atomic_write(&backup(client, data), bytes, None)?;
     }
-    storage::atomic_write(&path, text.as_bytes(), Some(expected))?;
+    storage::atomic_write_user(&path, text.as_bytes(), Some(expected))?;
     Ok(Document {
         client_id: client,
         path: path.to_string_lossy().into(),
@@ -318,5 +318,42 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_user_config_preserves_link_and_updates_target() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("claude");
+        let dotfiles = t.path().join("dotfiles");
+        let data = t.path().join("data");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        storage::private_dir(&data).unwrap();
+        let real = dotfiles.join("settings.json");
+        let link = home.join("settings.json");
+        std::fs::write(&real, "{\"language\":\"en\"}\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let doc = read(ClientId::Claude, &home, &data, false).unwrap();
+        assert_eq!(doc.text, "{\"language\":\"en\"}\n");
+        let saved = save(
+            ClientId::Claude,
+            &home,
+            &data,
+            "{\"language\":\"zh\"}\n",
+            &doc.revision,
+            false,
+        )
+        .unwrap();
+        assert_eq!(saved.text, "{\"language\":\"zh\"}\n");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "{\"language\":\"zh\"}\n"
+        );
     }
 }

@@ -229,7 +229,7 @@ pub fn receive(app: &tauri::AppHandle, urls: impl IntoIterator<Item = String>) {
         return;
     };
     for url in urls.into_iter().filter(|url| url.starts_with("ccswitch:")) {
-        let outcome = crate::lock(&r.imports).and_then(|mut queue| queue.enqueue(&url));
+        let outcome = r.imports.lock().unwrap().enqueue(&url);
         match outcome {
             Ok(true) => {
                 let _ = app.emit("provider-imports", ());
@@ -267,7 +267,9 @@ pub fn get_provider_imports(
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<Vec<LinkPreview>> {
     main_only(&window)?;
-    Ok(crate::lock(&r.imports)?
+    Ok(r.imports
+        .lock()
+        .unwrap()
         .pending
         .iter()
         .filter(|p| !p.processing)
@@ -281,7 +283,7 @@ pub fn cancel_provider_import(
     id: String,
 ) -> Result<()> {
     main_only(&window)?;
-    let mut queue = crate::lock(&r.imports)?;
+    let mut queue = r.imports.lock().unwrap();
     queue.claim(&id)?;
     queue.remove(&id);
     let _ = window.emit("provider-imports", ());
@@ -297,7 +299,7 @@ pub fn confirm_provider_import(
     protocol: gateway::provider_protocol::Protocol,
 ) -> Result<()> {
     main_only(&window)?;
-    let raw = crate::lock(&r.imports)?.claim(&id)?;
+    let raw = r.imports.lock().unwrap().claim(&id)?;
     let outcome: Result<()> = (|| {
         let p = parse(&raw)?;
         let home = r.home(client_id)?;
@@ -315,22 +317,15 @@ pub fn confirm_provider_import(
         Ok(())
     })();
     if let Err(error) = outcome {
-        crate::lock(&r.imports)?.release(&id, Some(error.message.clone()));
+        r.imports
+            .lock()
+            .unwrap()
+            .release(&id, Some(error.message.clone()));
         return Err(error);
     }
-    crate::lock(&r.imports)?.remove(&id);
+    r.imports.lock().unwrap().remove(&id);
     let _ = window.emit("provider-imports", ());
     Ok(())
-}
-#[cfg(not(any(target_os = "macos", windows)))]
-mod platform {
-    use super::*;
-    pub fn installed() -> bool {
-        false
-    }
-    pub fn ensure(tx: tokio::sync::oneshot::Sender<Result<()>>) {
-        let _ = tx.send(Err(invalid("当前平台不支持协议关联")));
-    }
 }
 
 #[cfg(test)]

@@ -109,7 +109,7 @@ fn path(home: &Path, user_home: &Path, role: Role) -> PathBuf {
     }
 }
 fn read_text(path: &Path) -> Result<Option<String>> {
-    storage::read_optional(path)?
+    storage::read_user_optional(path)?
         .map(|v| String::from_utf8(v).map_err(|_| fail("Claude 配置必须为 UTF-8")))
         .transpose()
 }
@@ -309,7 +309,7 @@ pub fn guard_save(data: &Path, home: &Path, user_home: &Path, text: &str) -> Res
 }
 fn set_file(path: &Path, before: Option<&str>, after: Option<&str>) -> Result<()> {
     match after {
-        Some(text) => storage::atomic_write(path, text.as_bytes(), Some(&revision(before))),
+        Some(text) => storage::atomic_write_user(path, text.as_bytes(), Some(&revision(before))),
         None => {
             if read_text(path)?.as_deref() != before {
                 return Err(conflict());

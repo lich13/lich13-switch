@@ -27,8 +27,8 @@ mod client_cancel_tests;
 pub mod freeze;
 mod listener;
 pub(crate) mod registry;
-pub use listener::View as ListenerView;
 pub use client::{claude_home, dsh_home, grok_home, ClientId};
+pub use listener::View as ListenerView;
 mod admission;
 mod attempt;
 #[cfg(test)]
@@ -1053,18 +1053,20 @@ impl Gateway {
             let cache = &mut *cache_guard;
             match (self.0.client, home) {
                 (ClientId::Claude, Some(home)) => {
-                    match cache.claude.read(&self.0.client.config(home), |bytes| {
-                        (
-                            takeover::read_raw(ClientId::Claude, bytes.as_deref()),
-                            bytes.as_deref().and_then(claude_config::warning),
-                        )
-                    }) {
+                    match cache
+                        .claude
+                        .read_user(&self.0.client.config(home), |bytes| {
+                            (
+                                takeover::read_raw(ClientId::Claude, bytes.as_deref()),
+                                bytes.as_deref().and_then(claude_config::warning),
+                            )
+                        }) {
                         Ok(entry) => (None, Some(entry.0.clone()), entry.1.clone()),
                         Err(e) => (None, Some(Err(e)), None),
                     }
                 }
                 (ClientId::Grok, Some(home)) => {
-                    match cache.grok.read(&self.0.client.config(home), |bytes| {
+                    match cache.grok.read_user(&self.0.client.config(home), |bytes| {
                         let parsed = takeover::read_raw(ClientId::Grok, bytes.as_deref());
                         (bytes, parsed)
                     }) {
@@ -1083,7 +1085,7 @@ impl Gateway {
                         codex_api::Connection::Bearer => {
                             match cache
                                 .codex_bearer
-                                .read(&self.0.client.config(home), |bytes| {
+                                .read_user(&self.0.client.config(home), |bytes| {
                                     takeover::read_raw(ClientId::Codex, bytes.as_deref())
                                 }) {
                                 Ok(entry) => entry.as_ref().clone(),
@@ -1219,7 +1221,7 @@ impl Gateway {
             return Err(AppError::new(code::CONFIG, "请在 DSH 接入面板选择 profile"));
         }
         let path = self.0.client.config(home);
-        let revision = cache.read(&path, |raw| {
+        let revision = cache.read_user(&path, |raw| {
             if let Some(bytes) = &raw {
                 std::str::from_utf8(bytes)
                     .map_err(|_| AppError::new(code::UTF8, "配置必须使用 UTF-8 编码"))?;
@@ -2251,18 +2253,11 @@ impl Gateway {
             }
         }
     }
-    // Poison may follow a partial config/affinity transaction. Request paths
-    // must fail closed instead of reusing that state or panicking again.
     fn request_state(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
-        self.0
-            .inner
-            .lock()
-            .map_err(|_| AppError::new(code::STORE, "网关状态不可用，请重新打开应用"))
+        Ok(self.0.inner.lock().unwrap())
     }
     fn routing_ids(&self, pinned: Option<&str>) -> Vec<String> {
-        let Ok(s) = self.request_state() else {
-            return vec![];
-        };
+        let s = self.0.inner.lock().unwrap();
         s.store
             .providers
             .iter()
@@ -2281,16 +2276,13 @@ impl Gateway {
         if self.client_id() != ClientId::Codex {
             return vec![];
         }
-        self.request_state()
-            .map(|s| {
-                s.store
-                    .providers
-                    .iter()
-                    .filter(|p| p.queued && p.search_only)
-                    .map(|p| p.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let s = self.0.inner.lock().unwrap();
+        s.store
+            .providers
+            .iter()
+            .filter(|p| p.queued && p.search_only)
+            .map(|p| p.id.clone())
+            .collect()
     }
     #[cfg(test)]
     pub(crate) fn successful_user_agent(&self) -> Result<hyper::header::HeaderValue> {

@@ -67,10 +67,6 @@ pub fn permission(_request: bool, id: &str) -> Result<String> {
     }
     .into())
 }
-#[cfg(not(any(target_os = "macos", windows)))]
-pub fn permission(_request: bool, _id: &str) -> Result<String> {
-    Ok("unknown".into())
-}
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -177,11 +173,4 @@ pub fn send(id: &str, title: &str, body: &str) -> Result<()> {
             &format!("系统拒绝通知（{:08X}）", e.code().0 as u32),
         )
     })
-}
-#[cfg(not(any(target_os = "macos", windows)))]
-pub fn send(_id: &str, _title: &str, _body: &str) -> Result<()> {
-    Err(AppError::new(
-        code::NOTIFICATION,
-        "此平台未提供原生通知通道",
-    ))
 }

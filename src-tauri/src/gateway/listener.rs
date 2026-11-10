@@ -296,10 +296,7 @@ pub fn route(
     registry: &Registry,
 ) -> std::result::Result<(ClientId, hyper::Uri), RouteError> {
     let path = uri.path();
-    if path != "/v1"
-        && !path.starts_with("/v1/")
-        && path.trim_end_matches('/') != "/alpha/search"
-    {
+    if path != "/v1" && !path.starts_with("/v1/") && path.trim_end_matches('/') != "/alpha/search" {
         return Err(RouteError::NotFound);
     }
     // Authentication must not wait for any client's configuration transaction.

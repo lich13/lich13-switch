@@ -122,8 +122,9 @@ impl Store {
         query::register(&connection)?;
         if storage_v12::ready(&connection) {
             storage_v12::protect_encoding(&connection)?;
-            db(connection
-                .execute_batch("DROP TABLE IF EXISTS v12_links; DROP TABLE IF EXISTS body_shapes;"))?;
+            db(connection.execute_batch(
+                "DROP TABLE IF EXISTS v12_links; DROP TABLE IF EXISTS body_shapes;",
+            ))?;
             storage_v12::refresh_metrics(&connection)?;
             return Ok(Self {
                 connection,

@@ -101,7 +101,7 @@ fn compatible(doc: &Document<&str>, id: &str) -> Result<()> {
     Ok(())
 }
 fn text(home: &Path) -> Result<String> {
-    let raw = storage::read_bounded(&home.join("config.toml"), LIMIT)?
+    let raw = storage::read_user_bounded(&home.join("config.toml"), LIMIT)?
         .ok_or_else(|| invalid("未找到 Codex config.toml"))?;
     String::from_utf8(raw).map_err(|_| invalid("Codex 配置必须使用 UTF-8"))
 }
@@ -155,7 +155,7 @@ pub fn detect(home: &Path) -> Result<Connection> {
         return Ok(Connection::Bearer);
     }
     compatible(&doc, &id)?;
-    let raw = storage::read_bounded(&home.join("auth.json"), LIMIT)?;
+    let raw = storage::read_user_bounded(&home.join("auth.json"), LIMIT)?;
     if api_key(&auth(raw.as_deref())?)?.is_none() {
         return Err(invalid("未识别到普通 API 登录，现有认证已保留"));
     }
@@ -196,14 +196,16 @@ pub(super) fn read_cached(
         toml_cache.1.clear();
     }
     let provider_id = provider.to_owned();
-    let toml_entry = toml_cache.1.read(&home.join("config.toml"), move |bytes| {
-        let raw = bytes.ok_or_else(|| invalid("未找到 Codex config.toml"))?;
-        let text = String::from_utf8(raw).map_err(|_| invalid("Codex 配置必须使用 UTF-8"))?;
-        let base_url = base(&text, &provider_id)?;
-        Ok((storage::digest(text.as_bytes()), base_url))
-    })?;
+    let toml_entry = toml_cache
+        .1
+        .read_user(&home.join("config.toml"), move |bytes| {
+            let raw = bytes.ok_or_else(|| invalid("未找到 Codex config.toml"))?;
+            let text = String::from_utf8(raw).map_err(|_| invalid("Codex 配置必须使用 UTF-8"))?;
+            let base_url = base(&text, &provider_id)?;
+            Ok((storage::digest(text.as_bytes()), base_url))
+        })?;
     let (config_digest, base_url) = toml_entry.as_ref().as_ref().map_err(Clone::clone)?;
-    let auth_entry = auth_cache.read(&home.join("auth.json"), |bytes| {
+    let auth_entry = auth_cache.read_user(&home.join("auth.json"), |bytes| {
         (
             storage::revision(bytes.as_deref()),
             auth_api_key(bytes.as_deref()),
@@ -220,7 +222,7 @@ pub(super) fn read_cached(
 }
 pub fn read(home: &Path, id: &str) -> Result<(String, Pair)> {
     let config = text(home)?;
-    let raw = storage::read_bounded(&home.join("auth.json"), LIMIT)?;
+    let raw = storage::read_user_bounded(&home.join("auth.json"), LIMIT)?;
     let pair = Pair {
         base_url: base(&config, id)?,
         token: auth_api_key(raw.as_deref())?,
@@ -311,7 +313,7 @@ struct Write {
     auth_after: Vec<u8>,
 }
 fn restore(path: &Path, before: Option<&[u8]>, after: &[u8]) -> Result<()> {
-    let current = storage::read_bounded(path, LIMIT)?;
+    let current = storage::read_user_bounded(path, LIMIT)?;
     if current.as_deref() == before {
         return Ok(());
     }
@@ -319,7 +321,7 @@ fn restore(path: &Path, before: Option<&[u8]>, after: &[u8]) -> Result<()> {
         return Err(invalid("API 连接事务遇到外部修改，已保留恢复记录"));
     }
     match before {
-        Some(bytes) => storage::atomic_write(path, bytes, Some(&storage::digest(after))),
+        Some(bytes) => storage::atomic_write_user(path, bytes, Some(&storage::digest(after))),
         None => fs::remove_file(path).map_err(storage::io_error),
     }
 }
@@ -358,7 +360,7 @@ pub fn write(
         return Err(invalid("请先处理未完成的 API 连接事务"));
     }
     let config_before = text(home)?;
-    let auth_before = storage::read_bounded(&home.join("auth.json"), LIMIT)?;
+    let auth_before = storage::read_user_bounded(&home.join("auth.json"), LIMIT)?;
     let mut value = auth(auth_before.as_deref())?;
     let current = Pair {
         base_url: base(&config_before, id)?,
@@ -399,12 +401,12 @@ pub fn write(
         LIMIT * 16,
     )?;
     let result = (|| {
-        storage::atomic_write(
+        storage::atomic_write_user(
             &home.join("config.toml"),
             tx.config_after.as_bytes(),
             Some(&config_rev),
         )?;
-        storage::atomic_write(&home.join("auth.json"), &tx.auth_after, Some(&auth_rev))?;
+        storage::atomic_write_user(&home.join("auth.json"), &tx.auth_after, Some(&auth_rev))?;
         Ok(())
     })();
     if let Err(error) = result {

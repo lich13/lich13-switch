@@ -119,12 +119,6 @@ pub fn open_notification_settings() -> Result<()> {
     let target = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
     #[cfg(windows)]
     let target = "ms-settings:notifications";
-    #[cfg(not(any(target_os = "macos", windows)))]
-    return Err(AppError::new(
-        code::NOTIFICATION,
-        "此平台不支持系统通知设置入口",
-    ));
-    #[cfg(any(target_os = "macos", windows))]
     open::that(target).map_err(|_| AppError::new(code::NOTIFICATION, "无法打开系统通知设置"))
 }
 pub fn connect(app: &tauri::AppHandle, service: &events::Service) {

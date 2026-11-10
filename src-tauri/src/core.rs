@@ -596,12 +596,7 @@ impl Core {
     fn persist(&self) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(&self.store)
             .map_err(|_| AppError::new(code::STORE, "无法保存账号库"))?;
-        storage::atomic_write_bounded(
-            &self.data_dir.join("accounts.json"),
-            &bytes,
-            None,
-            exchange::VAULT_LIMIT,
-        )
+        storage::atomic_write(&self.data_dir.join("accounts.json"), &bytes, None)
     }
     pub fn home(&self) -> PathBuf {
         PathBuf::from(&self.store.preferences.codex_home)
@@ -620,7 +615,7 @@ impl Core {
             })
             .transpose()?;
         let old = self.store.clone();
-        if let Ok(Some(bytes)) = storage::read_optional(&self.home().join("auth.json")) {
+        if let Ok(Some(bytes)) = storage::read_user_optional(&self.home().join("auth.json")) {
             if std::str::from_utf8(&bytes)
                 .ok()
                 .and_then(|raw| auth_info(raw).ok())
@@ -681,7 +676,7 @@ impl Core {
             ));
         }
         let path = self.home().join("auth.json");
-        let previous = storage::read_optional(&path)?;
+        let previous = storage::read_user_optional(&path)?;
         let expected = storage::revision(previous.as_deref());
         let active = previous
             .as_deref()
@@ -690,12 +685,14 @@ impl Core {
             .is_some_and(|current| current.matches(&info));
         let id = self.import_raw(raw, None)?;
         if active {
-            storage::atomic_write(&path, raw.as_bytes(), Some(&expected)).map_err(|error| {
-                AppError::new(
-                    &error.code,
-                    "新凭据已保存，当前账号文件未能更新，请重新选择该账号",
-                )
-            })?;
+            storage::atomic_write_user(&path, raw.as_bytes(), Some(&expected)).map_err(
+                |error| {
+                    AppError::new(
+                        &error.code,
+                        "新凭据已保存，当前账号文件未能更新，请重新选择该账号",
+                    )
+                },
+            )?;
             self.store.observed_auth_revisions.insert(
                 self.store.preferences.codex_home.clone(),
                 storage::digest(raw.as_bytes()),
@@ -725,7 +722,7 @@ impl Core {
                 "该账号凭据已更新，请刷新列表后重试",
             ));
         }
-        let disk = storage::read_optional(&self.home().join("auth.json"))?;
+        let disk = storage::read_user_optional(&self.home().join("auth.json"))?;
         let current = disk
             .as_deref()
             .and_then(|b| std::str::from_utf8(b).ok())
@@ -777,7 +774,7 @@ impl Core {
             ));
         }
         let path = target.home.join("auth.json");
-        let before = storage::read_optional(&path)?;
+        let before = storage::read_user_optional(&path)?;
         if storage::revision(before.as_deref()) != target.auth_revision {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -789,7 +786,7 @@ impl Core {
         let merged = replacement.auth.clone();
         let old = self.store.clone();
         if target.current {
-            storage::atomic_write(&path, merged.as_bytes(), Some(&target.auth_revision))?;
+            storage::atomic_write_user(&path, merged.as_bytes(), Some(&target.auth_revision))?;
             self.store.observed_auth_revisions.insert(
                 self.store.preferences.codex_home.clone(),
                 storage::digest(merged.as_bytes()),
@@ -800,7 +797,7 @@ impl Core {
             self.store = old;
             if target.current {
                 let revision = storage::digest(merged.as_bytes());
-                if storage::atomic_write(
+                if storage::atomic_write_user(
                     &path,
                     before.as_deref().unwrap_or_default(),
                     Some(&revision),
@@ -873,7 +870,7 @@ impl Core {
         }
         let auth_path = home.join("auth.json");
         let old = self.store.clone();
-        if let Some(bytes) = storage::read_optional(&auth_path)? {
+        if let Some(bytes) = storage::read_user_optional(&auth_path)? {
             let matches_disk = bytes == target.auth.as_bytes()
                 || std::str::from_utf8(&bytes)
                     .ok()
@@ -914,11 +911,11 @@ impl Core {
     pub fn state(&mut self) -> Result<ViewState> {
         let polled = self
             .auth_cache
-            .read(&self.home().join("auth.json"), PolledAuth::parse)?;
+            .read_user(&self.home().join("auth.json"), PolledAuth::parse)?;
         let auth = &polled.bytes;
         let polled_config = self
             .config_cache
-            .read(&self.home().join("config.toml"), PolledConfig::parse)?;
+            .read_user(&self.home().join("config.toml"), PolledConfig::parse)?;
         let auth_source = polled_config.auth_source.clone();
         let optional_auth = auth.is_none() && auth_source.inline_token;
         if optional_auth {
@@ -1132,11 +1129,11 @@ impl Core {
         auth_info(&profile.auth)?;
         let raw = profile.auth.clone();
         let path = self.home().join("auth.json");
-        let previous = storage::read_optional(&path)?;
+        let previous = storage::read_user_optional(&path)?;
         if storage::revision(previous.as_deref()) != expected {
             return Err(AppError::new(code::CONFLICT, "账号文件已变化，请重新选择"));
         }
-        storage::atomic_write(&path, raw.as_bytes(), Some(expected))?;
+        storage::atomic_write_user(&path, raw.as_bytes(), Some(expected))?;
         self.state()
     }
     #[cfg(test)]

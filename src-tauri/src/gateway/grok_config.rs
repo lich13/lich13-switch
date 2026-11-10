@@ -399,7 +399,7 @@ pub fn fingerprint(text: &str) -> Result<String> {
     ))
 }
 pub fn read(home: &Path) -> Result<(String, String)> {
-    let raw = storage::read_optional(&home.join("config.toml"))?;
+    let raw = storage::read_user_optional(&home.join("config.toml"))?;
     let revision = storage::revision(raw.as_deref());
     let text =
         String::from_utf8(raw.unwrap_or_default()).map_err(|_| error("Grok 配置不是 UTF-8"))?;
@@ -637,7 +637,7 @@ impl Snapshot {
         expected: Option<&str>,
         gateway_aliases: bool,
     ) -> Result<()> {
-        let raw = storage::read_optional(path)?;
+        let raw = storage::read_user_optional(path)?;
         let revision = storage::revision(raw.as_deref());
         if expected.is_some_and(|r| r != revision) {
             return Err(AppError::new(code::CONFLICT, "Grok 配置已变化"));
@@ -648,7 +648,7 @@ impl Snapshot {
             return Ok(());
         }
         let output = self.patched(current, target, gateway_aliases)?;
-        storage::atomic_write(path, output.as_bytes(), Some(&revision))
+        storage::atomic_write_user(path, output.as_bytes(), Some(&revision))
     }
     fn patched(&self, current: &str, target: &str, gateway_aliases: bool) -> Result<String> {
         let owned = self.owned(current)?;

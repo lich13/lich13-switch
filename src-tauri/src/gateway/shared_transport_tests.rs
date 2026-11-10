@@ -732,12 +732,9 @@ async fn stopping_claude_closes_its_active_websocket_and_keeps_codex_live() {
 
     let claude_token = fixture.local_token(&fixture.claude);
     let mut socket = yawc::WebSocket::connect(
-        format!(
-            "ws://127.0.0.1:{}/v1/responses",
-            fixture.listener_port
-        )
-        .parse()
-        .unwrap(),
+        format!("ws://127.0.0.1:{}/v1/responses", fixture.listener_port)
+            .parse()
+            .unwrap(),
     )
     .with_options(yawc::Options::default().with_balanced_compression())
     .with_request(

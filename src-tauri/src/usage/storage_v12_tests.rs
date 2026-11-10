@@ -1636,8 +1636,8 @@ fn native_reads_backfill_counts_and_archive_match_legacy() {
         .collect();
     let mut results = Vec::new();
     for native in [false, true] {
-        let mut store = Store::open(&dir.path().join(if native { "native" } else { "legacy" }))
-            .unwrap();
+        let mut store =
+            Store::open(&dir.path().join(if native { "native" } else { "legacy" })).unwrap();
         store.write_batch(&rows, None).unwrap();
         store
             .connection

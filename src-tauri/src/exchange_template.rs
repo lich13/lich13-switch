@@ -283,6 +283,6 @@ impl Service {
             document,
         };
         let bytes = serde_json::to_vec(&saved).map_err(|_| invalid("模板无法保存"))?;
-        storage::atomic_write_bounded(path, &bytes, None, MAX_FILE)
+        storage::atomic_write(path, &bytes, None)
     }
 }

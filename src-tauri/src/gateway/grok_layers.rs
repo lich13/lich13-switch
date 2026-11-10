@@ -174,6 +174,7 @@ fn read_at_config(
         }
         let raw = match config.filter(|_| path == home.join("config.toml")) {
             Some(raw) => raw.clone(),
+            None if path == home.join("config.toml") => storage::read_user_optional(&path)?,
             None => storage::read_optional(&path)?,
         };
         result.files.push((path, storage::revision(raw.as_deref())));
@@ -296,7 +297,12 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
 }
 pub fn unchanged(files: &[(PathBuf, String)]) -> Result<bool> {
     for (path, revision) in files {
-        if storage::revision(storage::read_optional(path)?.as_deref()) != *revision {
+        let raw = if path.file_name().and_then(|s| s.to_str()) == Some("config.toml") {
+            storage::read_user_optional(path)?
+        } else {
+            storage::read_optional(path)?
+        };
+        if storage::revision(raw.as_deref()) != *revision {
             return Ok(false);
         }
     }

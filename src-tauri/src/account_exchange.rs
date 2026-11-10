@@ -153,19 +153,6 @@ impl<'de> Deserialize<'de> for Envelope {
         Value::deserialize(deserializer).map(|v| Self(Arc::new(v)))
     }
 }
-struct VaultWriter(Vec<u8>);
-impl std::io::Write for VaultWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.0.len().saturating_add(bytes.len()) as u64 > VAULT_LIMIT {
-            return Err(std::io::Error::other("vault size limit"));
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 struct Candidate {
     auth: String,
     name: String,
@@ -573,7 +560,7 @@ impl Core {
                 )?;
             }
         }
-        if let Some(bytes) = storage::read_optional(&self.home().join("auth.json"))? {
+        if let Some(bytes) = storage::read_user_optional(&self.home().join("auth.json"))? {
             if std::str::from_utf8(&bytes)
                 .ok()
                 .and_then(|raw| auth_info(raw).ok())
@@ -590,12 +577,10 @@ impl Core {
             }
         }
         // Import is one vault transaction. In particular it does not activate or refresh auth.json.
-        let mut bytes = VaultWriter(Vec::new());
-        serde_json::to_writer_pretty(&mut bytes, &next)
-            .map_err(|_| invalid("账号库超过 64 MiB，无法保存本次导入"))?;
+        let bytes = serde_json::to_vec_pretty(&next).map_err(|_| invalid("无法保存本次导入"))?;
         storage::atomic_write_bounded(
             &self.data_dir.join("accounts.json"),
-            &bytes.0,
+            &bytes,
             Some(&pending.file_revision),
             VAULT_LIMIT,
         )?;
@@ -684,7 +669,7 @@ impl Core {
                 .map(|p| {
                     let bytes = serde_json::to_vec_pretty(&export_account(p, format, None)?)
                         .map_err(|_| invalid("导出无法生成"))?;
-                    let file = storage::stage_write(path, &bytes, u64::MAX)?;
+                    let file = storage::stage_write(path, &bytes)?;
                     Ok((
                         file,
                         path.join(format!("codex-{}.json", uuid::Uuid::new_v4())),
@@ -744,7 +729,7 @@ impl Core {
             template::payload_mut(&mut document)["proxies"] = Value::Array(proxies);
         }
         let bytes = serde_json::to_vec_pretty(&document).map_err(|_| invalid("导出无法生成"))?;
-        storage::atomic_write_bounded(path, &bytes, None, VAULT_LIMIT)
+        storage::atomic_write(path, &bytes, None)
     }
 }
 fn source<'a>(profile: &'a Profile, format: &str) -> Option<&'a Source> {

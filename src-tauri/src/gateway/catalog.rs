@@ -17,6 +17,7 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
+#[cfg(test)]
 const LIMIT: usize = 2 * 1024 * 1024;
 const UNAVAILABLE: &str = "模型缓存不可用，可手动刷新";
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,7 +122,7 @@ impl Service {
     fn write(&self, file: &File) -> Result<()> {
         let bytes = serde_json::to_vec(file)
             .map_err(|_| AppError::new(code::MODELS, "无法保存模型缓存"))?;
-        storage::atomic_write_bounded(&self.path, &bytes, None, LIMIT as u64)
+        storage::atomic_write(&self.path, &bytes, None)
     }
     pub fn remove(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {

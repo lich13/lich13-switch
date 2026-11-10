@@ -28,11 +28,11 @@ fn publish_batch_rolls_back_earlier_files_when_a_destination_exists() {
 
     let staged = vec![
         (
-            stage_write(temp.path(), b"first bytes", 64).unwrap(),
+            stage_write(temp.path(), b"first bytes").unwrap(),
             first.clone(),
         ),
         (
-            stage_write(temp.path(), b"replacement bytes", 64).unwrap(),
+            stage_write(temp.path(), b"replacement bytes").unwrap(),
             occupied.clone(),
         ),
     ];
@@ -54,11 +54,11 @@ fn publish_batch_writes_every_staged_payload() {
     let second = temp.path().join("second.fixture");
     let staged = vec![
         (
-            stage_write(temp.path(), b"first payload", 64).unwrap(),
+            stage_write(temp.path(), b"first payload").unwrap(),
             first.clone(),
         ),
         (
-            stage_write(temp.path(), b"second payload", 64).unwrap(),
+            stage_write(temp.path(), b"second payload").unwrap(),
             second.clone(),
         ),
     ];
@@ -70,14 +70,10 @@ fn publish_batch_writes_every_staged_payload() {
 }
 
 #[test]
-fn stage_size_and_revision_conflicts_leave_existing_target_unchanged() {
+fn revision_conflicts_leave_existing_target_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("target.fixture");
     fs::write(&target, b"original target").unwrap();
-
-    let size_error = stage_write(temp.path(), b"too large", 2).unwrap_err();
-    assert_eq!(size_error.code, code::FILE_SIZE);
-    assert_eq!(fs::read(&target).unwrap(), b"original target");
 
     let conflict = atomic_write(&target, b"new target", Some("stale-version")).unwrap_err();
     assert_eq!(conflict.code, code::CONFLICT);
@@ -98,13 +94,8 @@ fn unconditional_replacement_accepts_oversized_old_cache_but_keeps_limits_and_ty
     );
     atomic_write_bounded(&path, b"new", None, 3).unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"new");
-    assert_eq!(
-        atomic_write_bounded(&path, b"large", None, 3)
-            .unwrap_err()
-            .code,
-        code::FILE_SIZE
-    );
-    assert_eq!(fs::read(&path).unwrap(), b"new");
+    atomic_write_bounded(&path, b"large", None, 3).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"large");
     assert_eq!(
         atomic_write_bounded(temp.path(), b"new", None, 3)
             .unwrap_err()
@@ -121,7 +112,14 @@ fn unconditional_replacement_accepts_oversized_old_cache_but_keeps_limits_and_ty
                 .code,
             code::SYMLINK
         );
-        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read(&path).unwrap(), b"large");
+        assert_eq!(read_user_optional(&link).unwrap().unwrap(), b"large");
+        atomic_write_user(&link, b"updated via symlink", Some(&digest(b"large"))).unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&path).unwrap(), b"updated via symlink");
     }
 }
 

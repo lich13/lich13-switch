@@ -94,6 +94,14 @@ impl<T> Cache<T> {
     pub fn clear(&mut self) {
         self.entry = None;
     }
+    pub fn read_user(
+        &mut self,
+        path: &Path,
+        parse: impl FnOnce(Option<Vec<u8>>) -> T,
+    ) -> Result<Arc<T>> {
+        let resolved = storage::resolve_user_path(path)?;
+        self.read(&resolved, parse)
+    }
     pub fn read(
         &mut self,
         path: &Path,

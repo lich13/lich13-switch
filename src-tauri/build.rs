@@ -113,19 +113,21 @@ fn build_power() {
     println!("cargo:rustc-link-lib=framework=Security");
     // Expose a safe, standalone simulator for the native helper logic to cargo tests.
     let test = out.join("power-helper-tests");
-    let mut args = common.to_vec();
-    args.extend([
-        "-DPOWER_TEST",
-        "-Wno-unused-function",
-        "-Wno-unused-variable",
-        "native/power_helper.m",
-        "-framework",
-        "Foundation",
-        "-framework",
-        "Security",
-        "-o",
-        test.to_str().unwrap(),
-    ]);
-    run("xcrun", &args);
+    if std::env::var("PROFILE").as_deref() != Ok("release") {
+        let mut args = common.to_vec();
+        args.extend([
+            "-DPOWER_TEST",
+            "-Wno-unused-function",
+            "-Wno-unused-variable",
+            "native/power_helper.m",
+            "-framework",
+            "Foundation",
+            "-framework",
+            "Security",
+            "-o",
+            test.to_str().unwrap(),
+        ]);
+        run("xcrun", &args);
+    }
     println!("cargo:rustc-env=GPT_POWER_TEST={}", test.display());
 }

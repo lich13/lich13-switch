@@ -284,10 +284,7 @@ impl Catalog {
             }
             drop(state);
             let bytes = serde_json::to_vec(&index).map_err(|_| failure("models.dev 缓存无效"))?;
-            if bytes.len() as u64 > CACHE_LIMIT {
-                return Err(failure("models.dev 裁剪目录超过 4 MiB"));
-            }
-            storage::atomic_write_bounded(&self.path, &bytes, None, CACHE_LIMIT)?;
+            storage::atomic_write(&self.path, &bytes, None)?;
             Ok((index, storage::digest(&bytes)))
         });
         let mut state = self.state.write().unwrap();
@@ -848,11 +845,10 @@ mod tests {
     use super::*;
     fn catalog(dir: &Path, source: Value) -> Catalog {
         let index = crop(source).unwrap();
-        storage::atomic_write_bounded(
+        storage::atomic_write(
             &dir.join("models-dev-index.json"),
             &serde_json::to_vec(&index).unwrap(),
             None,
-            CACHE_LIMIT,
         )
         .unwrap();
         Catalog::new(dir)

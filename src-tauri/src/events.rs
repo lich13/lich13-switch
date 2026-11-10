@@ -926,8 +926,7 @@ fn load(path: &Path) -> Journal {
                 }
                 match serde_json::from_slice::<Record>(&line) {
                     Ok(r) => {
-                        if r.client_id
-                            == Some(JournalClient::External(ExternalClient::Antigravity))
+                        if r.client_id == Some(JournalClient::External(ExternalClient::Antigravity))
                             && !is_antigravity_log_record(&r)
                         {
                             j.dirty = true;

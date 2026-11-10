@@ -243,11 +243,6 @@ fn official_app(path: &Path) -> bool {
                     || s.starts_with("openai.codex_")
             })
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = path;
-        false
-    }
 }
 #[cfg(target_os = "macos")]
 mod terminal;

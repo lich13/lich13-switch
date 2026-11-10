@@ -460,7 +460,7 @@ fn save_vault(paths: &Paths, vault: &Vault) -> Result<String> {
     storage::private_dir(&paths.data_dir)?;
     let bytes = serde_json::to_vec_pretty(vault)
         .map_err(|_| err(code::STORE, "无法序列化 Antigravity 凭据库"))?;
-    storage::atomic_write_bounded(&paths.vault_file(), &bytes, None, VAULT_LIMIT)?;
+    storage::atomic_write(&paths.vault_file(), &bytes, None)?;
     Ok(storage::revision(Some(&bytes)))
 }
 fn decode_jwt_email(token: &str) -> Option<String> {

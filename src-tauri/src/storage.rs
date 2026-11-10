@@ -42,6 +42,28 @@ pub fn io_error(_: std::io::Error) -> AppError {
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+pub fn resolve_user_path(path: &Path) -> Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AppError::new(
+                    code::SYMLINK,
+                    "目标文件是无效符号链接，请检查链接目标是否存在",
+                )
+            } else {
+                io_error(e)
+            }
+        }),
+        _ => Ok(path.to_path_buf()),
+    }
+}
+pub fn read_user_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_user_bounded(path, 2 * 1024 * 1024)
+}
+pub fn read_user_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    let target = resolve_user_path(path)?;
+    read_bounded(&target, limit)
+}
 pub fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     read_bounded(path, 2 * 1024 * 1024)
 }
@@ -100,14 +122,15 @@ pub fn protect(path: &Path, _directory: bool) -> Result<()> {
         .map_err(|_| AppError::new(code::PERMISSIONS, "无法限制文件访问权限"))
 }
 
+pub fn atomic_write_user(path: &Path, bytes: &[u8], expected: Option<&str>) -> Result<()> {
+    let target = resolve_user_path(path)?;
+    atomic_write(&target, bytes, expected)
+}
 pub fn atomic_write(path: &Path, bytes: &[u8], expected: Option<&str>) -> Result<()> {
     atomic_write_bounded(path, bytes, expected, 2 * 1024 * 1024)
 }
 /// Fully write and sync private bytes before either replacement or batch publish.
-pub fn stage_write(parent: &Path, bytes: &[u8], limit: u64) -> Result<tempfile::NamedTempFile> {
-    if bytes.len() as u64 > limit {
-        return Err(AppError::new(code::FILE_SIZE, "文件超过允许大小"));
-    }
+pub fn stage_write(parent: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
     let mut temp = private_tempfile(parent)?;
     temp.write_all(bytes).map_err(io_error)?;
     temp.as_file().sync_all().map_err(io_error)?;
@@ -197,7 +220,7 @@ pub fn preserve_corrupt(path: &Path, bytes: &[u8]) -> Result<()> {
     if existing()? {
         return Ok(());
     }
-    let temp = stage_write(parent, bytes, 2 * 1024 * 1024)?;
+    let temp = stage_write(parent, bytes)?;
     match temp.persist_noclobber(&backup) {
         Ok(_) => sync_parent(&backup),
         Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => existing().map(|_| ()),
@@ -227,7 +250,7 @@ pub fn atomic_write_bounded(
     } else {
         ensure_existing_regular_file(path)?;
     }
-    let temp = stage_write(parent, bytes, limit)?;
+    let temp = stage_write(parent, bytes)?;
     temp.persist(path).map_err(|e| io_error(e.error))?;
     sync_parent(path)
 }

@@ -53,14 +53,6 @@ import { errorOf, type GatewayState, type Provider } from "./types";
 
 const ProviderTesting = lazy(() => import("./ProviderTesting"));
 
-function safeHost(url: string) {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
-
 type Edit = GatewayEdit;
 type Dialog =
   | {
@@ -632,7 +624,7 @@ function GatewayContent({
                   )}
                   <div className="provider-secondary">
                     <span className="provider-domain" title={p.baseUrl}>
-                      {safeHost(p.baseUrl)}
+                      {new URL(p.baseUrl).host}
                     </span>
                     <ProviderControls
                       clientId={clientId}

@@ -200,7 +200,7 @@ pub(crate) fn manages_auth(data: &Path, home: &Path) -> bool {
     }
 }
 pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
-    let raw = storage::read_optional(&client.config(home))?;
+    let raw = storage::read_user_optional(&client.config(home))?;
     read_raw(client, raw.as_deref())
 }
 pub(super) fn read_raw(client: ClientId, raw: Option<&[u8]>) -> Result<(String, Pair)> {
@@ -313,7 +313,7 @@ fn write_pair(
     expected: Option<&str>,
     allowed: Option<&[&Pair]>,
 ) -> Result<()> {
-    let raw = storage::read_optional(path)?;
+    let raw = storage::read_user_optional(path)?;
     if raw.is_none() && client == ClientId::Codex {
         return Err(AppError::new(code::CONFLICT, "配置已被移除"));
     }
@@ -343,7 +343,7 @@ fn write_pair(
             .to_owned(),
     };
     if raw.is_none() || output != text {
-        storage::atomic_write(path, output.as_bytes(), Some(&revision))?;
+        storage::atomic_write_user(path, output.as_bytes(), Some(&revision))?;
     }
     Ok(())
 }

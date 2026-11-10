@@ -378,11 +378,16 @@ impl Transaction {
         let mut staged = Vec::with_capacity(files.len());
         // Preflight every participant before any further write; external edits
         // are never rolled back, even following an interrupted commit.
+        let store_path = data.join("gateway.json");
         for (path, change) in files {
             if change.after.len() as u64 > FILE_LIMIT {
                 return Err(AppError::new(code::FILE_SIZE, "Grok 导入文件超过允许大小"));
             }
-            let raw = storage::read_optional(&path)?;
+            let raw = if path == store_path {
+                storage::read_optional(&path)?
+            } else {
+                storage::read_user_optional(&path)?
+            };
             if raw.as_deref() != change.before.as_deref().map(str::as_bytes)
                 && raw.as_deref() != Some(change.after.as_bytes())
             {
@@ -395,13 +400,12 @@ impl Transaction {
         }
         for (path, change, raw) in staged {
             if raw.as_deref() != Some(change.after.as_bytes()) {
-                storage::atomic_write(
-                    &path,
-                    change.after.as_bytes(),
-                    Some(&storage::revision(
-                        change.before.as_deref().map(str::as_bytes),
-                    )),
-                )?;
+                let expected = storage::revision(change.before.as_deref().map(str::as_bytes));
+                if path == store_path {
+                    storage::atomic_write(&path, change.after.as_bytes(), Some(&expected))?;
+                } else {
+                    storage::atomic_write_user(&path, change.after.as_bytes(), Some(&expected))?;
+                }
             }
         }
         std::fs::remove_file(data.join(JOURNAL)).map_err(storage::io_error)?;
