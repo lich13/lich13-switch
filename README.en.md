@@ -198,6 +198,14 @@ python3 -m unittest discover -s scripts -p "test_*.py"
 
 ---
 
+## Community
+
+For bug reports and feature requests, please use [GitHub Issues](https://github.com/lich13/vela/issues).
+
+Special thanks to the [LINUX DO](https://linux.do) community for providing an open and welcoming platform for technical exchange.
+
+---
+
 ## License
 
 [MIT License](./LICENSE). Vela is an independent open-source project and is not affiliated with OpenAI, Anthropic, xAI, Google, or any of the integrated third-party open-source projects.

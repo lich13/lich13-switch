@@ -198,6 +198,14 @@ python3 -m unittest discover -s scripts -p "test_*.py"
 
 ---
 
+## 社区
+
+问题反馈与功能建议请使用 [GitHub Issues](https://github.com/lich13/vela/issues)。
+
+感谢 [LINUX DO](https://linux.do) 社区提供开放、友善的技术交流平台。
+
+---
+
 ## 许可证
 
 [MIT License](./LICENSE)。本项目为独立开源项目，与 OpenAI、Anthropic、xAI、Google 等厂商及所接入的第三方开源项目无任何隶属或合作关系。
