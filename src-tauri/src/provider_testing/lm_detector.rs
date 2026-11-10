@@ -554,10 +554,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repair_same_rev["result"], "updated");
-        assert_eq!(
-            repaired.lm_resource().unwrap().metadata["source"],
-            "cache"
-        );
+        assert_eq!(repaired.lm_resource().unwrap().metadata["source"], "cache");
 
         std::fs::write(dir.path().join(CACHE), b"corrupt fixture").unwrap();
         let repaired = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
