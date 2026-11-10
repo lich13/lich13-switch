@@ -92,6 +92,3 @@ strip = "none"
 
 [profile.release.build-override]
 strip = "none"
-
-[patch.crates-io]
-glib = { path = "vendor/glib" }

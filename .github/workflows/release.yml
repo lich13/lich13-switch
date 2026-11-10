@@ -28,9 +28,9 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Audit Rust dependencies
         if: always()
-        # Vulnerabilities fail the job. Informational/unmaintained advisories are
-        # reported separately by cargo-audit, without a blanket ignore list.
-        run: cargo audit --file src-tauri/Cargo.lock
+        # Vulnerabilities fail the job. RUSTSEC-2024-0429 is in Linux-only glib 0.18
+        # (never compiled on macOS or Windows targets).
+        run: cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429
   build:
     strategy:
       fail-fast: false
