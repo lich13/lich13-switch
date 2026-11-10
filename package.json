@@ -1,6 +1,6 @@
 {
   "name": "vela",
-  "version": "0.26.35",
+  "version": "0.26.36",
   "private": true,
   "type": "module",
   "scripts": {
