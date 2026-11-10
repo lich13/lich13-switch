@@ -415,11 +415,11 @@ impl Scheduler {
                     rpm_persistence::flush(&shared);
                     let (snapshot, retry_write) = {
                         let mut state = shared.state.lock().unwrap();
-                        if state.retention.error {
-                            break;
-                        }
                         state.retention.prune();
-                        (state.retention.snapshot_data(), state.retention_write_error)
+                        (
+                            state.retention.snapshot_data(),
+                            state.retention_write_error || state.retention.error,
+                        )
                     };
                     let snapshot = serde_json::to_vec(&snapshot).expect("capacity metadata");
                     if snapshot == previous && !retry_write {
@@ -445,6 +445,7 @@ impl Scheduler {
                         let recovered = {
                             let mut state = shared.state.lock().unwrap();
                             std::mem::take(&mut state.retention_write_error)
+                                | std::mem::take(&mut state.retention.error)
                         };
                         if recovered {
                             shared.wake.notify_waiters();

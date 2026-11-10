@@ -113,19 +113,19 @@ fn unpack_metadata(raw: &[u8], updated: bool) -> Result<Value> {
     validate(&revision, &algorithm)?;
     Ok(metadata_fields(&revision, &bank, updated))
 }
-fn bytes(directory: &Path) -> Result<(Vec<u8>, bool)> {
-    let saved = storage::read_bounded(&directory.join(CACHE), LIMIT)?;
-    if let Some(saved) = saved {
-        Ok((saved, true))
-    } else {
-        Ok((BUNDLE.to_vec(), false))
+fn load_or_fallback<T>(directory: &Path, parse: impl Fn(&[u8], bool) -> Result<T>) -> Result<T> {
+    let cache = directory.join(CACHE);
+    if let Ok(Some(raw)) = storage::read_bounded(&cache, LIMIT) {
+        if let Ok(value) = parse(&raw, true) {
+            return Ok(value);
+        }
+        let _ = storage::preserve_corrupt(&cache, &raw);
     }
+    parse(BUNDLE, false)
 }
 pub fn initial_status(directory: &Path) -> Value {
-    match bytes(directory).and_then(|(raw, updated)| unpack_metadata(&raw, updated)) {
-        Ok(value) => value,
-        Err(error) => json!({"models":[],"error":error.message,"updating":false}),
-    }
+    load_or_fallback(directory, unpack_metadata)
+        .unwrap_or_else(|error| json!({"models":[],"error":error.message,"updating":false}))
 }
 pub(super) fn status(data: &Data) -> Value {
     let mut value = data.lm_status.clone();
@@ -167,8 +167,8 @@ impl Service {
         if let Some(resource) = cached.as_ref() {
             return Ok(resource.clone());
         }
-        let (raw, updated) = bytes(self.0.path.parent().unwrap())?;
-        let resource = Arc::new(load(&raw, updated)?);
+        let dir = self.0.path.parent().unwrap();
+        let resource = Arc::new(load_or_fallback(dir, load)?);
         *cached = Some(resource.clone());
         Ok(resource)
     }

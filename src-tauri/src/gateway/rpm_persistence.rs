@@ -41,24 +41,17 @@ pub(super) struct WriteGate {
     pub resume: std::sync::mpsc::Receiver<()>,
 }
 pub(super) fn flush(shared: &Shared) {
-    let (mut snapshot, path, pending, failed) = {
+    let (mut snapshot, path, pending) = {
         let mut state = shared.state.lock().unwrap();
         if !state.rpm_writes.dirty {
             return;
         }
         let pending = std::mem::take(&mut state.rpm_writes);
-        (
-            state.rpm.clone(),
-            state.rpm_path.clone(),
-            pending,
-            state.rpm_error,
-        )
+        (state.rpm.clone(), state.rpm_path.clone(), pending)
     };
     for settled in &pending.settlements {
         settled.apply(&mut snapshot);
     }
-    // A corrupt or previously failed ledger is never replaced with an empty
-    // recovery. New requests with a finite limit remain closed until restart.
     #[cfg(test)]
     {
         let gate = shared.rpm_write_gate.lock().unwrap().take();
@@ -66,16 +59,15 @@ pub(super) fn flush(shared: &Shared) {
             let _ = gate.entered.send(());
             let _ = gate.resume.recv();
         }
-        if !failed {
-            shared
-                .rpm_writes
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
+        shared
+            .rpm_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
-    let saved = !failed && snapshot.save(&path).is_ok();
+    let saved = snapshot.save(&path).is_ok();
     {
         let mut state = shared.state.lock().unwrap();
         if saved {
+            state.rpm_error = false;
             // Merge only the acknowledged releases. Starts, backoff and config
             // changes arriving during this write already live in state.rpm.
             for settled in &pending.settlements {

@@ -438,7 +438,7 @@ function QuickContent({
                                 page: "gateway",
                                 providerId: p.id,
                                 clientId,
-                              })
+                              }).catch((e) => setError(errorOf(e).message))
                             }
                           >
                             <Settings2 size={14} />
@@ -478,7 +478,7 @@ function QuickContent({
                                 eventId: providerFault(p)?.eventId ?? null,
                                 providerId: providerFault(p) ? p.id : null,
                                 clientId,
-                              })
+                              }).catch((e) => setError(errorOf(e).message))
                             }
                           >
                             {providerRuntimeStatus(p, gateway)}

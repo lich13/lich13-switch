@@ -129,7 +129,15 @@ impl Ledger {
         };
         let saved = match serde_json::from_slice::<Saved>(&raw) {
             Ok(saved) if saved.version <= 2 => saved,
-            _ => return (Self::default(), true),
+            _ => {
+                let ledger = Self {
+                    legacy_until: Some(Stamp::after(WINDOW)),
+                    ..Default::default()
+                };
+                let failed =
+                    storage::preserve_corrupt(path, &raw).is_err() || ledger.save(path).is_err();
+                return (ledger, failed);
+            }
         };
         let mut ledger = Self {
             legacy_until: if saved.version < 2 {

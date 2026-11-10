@@ -146,6 +146,9 @@ async fn failed_release_keeps_the_inflight_guard_and_reports_failure() {
         reserve_attempt(&scheduler),
         Err(Rejected::RateLedger)
     ));
+    std::fs::remove_dir(&path).unwrap();
+    assert!(scheduler.flush_rpm().await);
+    assert!(!scheduler.rpm_status("fixture", 1).3);
 }
 
 #[tokio::test]
@@ -225,25 +228,38 @@ async fn commit_rechecks_stop_credentials_queue_and_limits_after_write() {
 }
 
 #[tokio::test]
-async fn corrupt_ledger_stays_untouched_even_for_unlimited_requests() {
+async fn corrupt_ledger_is_preserved_and_recovers_with_cooldown_guard() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rpm-window.json");
     std::fs::write(&path, b"fixture invalid ledger").unwrap();
     let scheduler = scheduler(&dir, 0);
+    let backups: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rpm-window.json.corrupt-"))
+        })
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        std::fs::read(&backups[0]).unwrap(),
+        b"fixture invalid ledger"
+    );
     let mut reservation = reserve(&scheduler);
     reservation.commit().await.unwrap();
     drop(reservation);
-    assert!(!scheduler.flush_rpm().await);
-    assert_eq!(std::fs::read(&path).unwrap(), b"fixture invalid ledger");
+    assert!(scheduler.flush_rpm().await);
     scheduler
         .0
         .state
         .lock()
         .unwrap()
         .rpm_limits
-        .insert("fixture".into(), 1);
+        .insert("fixture".into(), 2);
     assert!(matches!(
         reserve_attempt(&scheduler),
-        Err(Rejected::RateLedger)
+        Err(Rejected::RateLimited(_))
     ));
 }

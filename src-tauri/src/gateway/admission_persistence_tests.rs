@@ -200,19 +200,34 @@ fn recovery_retries_when_current_snapshot_matches_last_good_snapshot() {
 }
 
 #[test]
-fn corrupt_loaded_reservations_are_not_overwritten() {
+fn corrupt_loaded_reservations_are_preserved_and_self_heal() {
     let dir = tempfile::tempdir().unwrap();
     let path = reservation_path(&dir);
     let original = b"{corrupt fixture";
     fs::write(&path, original).unwrap();
     let scheduler = scheduler(&dir);
-    assert!(scheduler.retention_error());
+    assert!(!scheduler.retention_error());
 
-    for _ in 0..20 {
-        scheduler.signal();
-        thread::sleep(Duration::from_millis(5));
-    }
+    let backups: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("thread-reservations.json.corrupt-"))
+        })
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read(&backups[0]).unwrap(), original);
 
-    assert!(scheduler.retention_error());
-    assert_eq!(fs::read(&path).unwrap(), original);
+    scheduler.signal();
+    wait_until(
+        || {
+            !scheduler.retention_error()
+                && fs::read(&path)
+                    .map(|bytes| bytes.as_slice() == b"[]")
+                    .unwrap_or(false)
+        },
+        "self-healed empty reservation snapshot",
+    );
 }

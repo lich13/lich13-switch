@@ -37,24 +37,21 @@ impl Retention {
             seconds: 300,
             ..Self::default()
         };
-        let saved: Vec<Saved> = match storage::read_optional(path) {
+        let raw = match storage::read_optional(path) {
             Ok(None) => return state,
-            Ok(Some(raw)) => match serde_json::from_slice(&raw) {
-                Ok(v) => v,
-                Err(_) => {
-                    state.error = true;
-                    return state;
-                }
-            },
+            Ok(Some(raw)) => raw,
             _ => {
                 state.error = true;
                 return state;
             }
         };
-        if saved.len() > MAX_RESERVATIONS {
-            state.error = true;
-            return state;
-        }
+        let saved: Vec<Saved> = match serde_json::from_slice::<Vec<Saved>>(&raw) {
+            Ok(v) if v.len() <= MAX_RESERVATIONS => v,
+            _ => {
+                state.error = storage::preserve_corrupt(path, &raw).is_err();
+                return state;
+            }
+        };
         let now = now_wall_ms();
         for item in saved {
             if item.thread.len() != 64
@@ -63,8 +60,8 @@ impl Retention {
                 || item.provider.len() > 256
                 || item.provider.chars().any(char::is_control)
             {
-                state.error = true;
                 state.entries.clear();
+                state.error = storage::preserve_corrupt(path, &raw).is_err();
                 return state;
             }
             // A crash never resurrects an in-flight request. Reserve at most one
