@@ -4,7 +4,7 @@
 //! This module is registered below the v0.20 fixture module so the loopback
 //! gateway helpers remain available. Every persisted value is synthetic.
 use crate::gateway::{
-    admission::{self, Budget, Rejected},
+    admission::{Budget, Rejected},
     compaction::Registry,
     model::{Edit, Provider, Settings, Store},
     protocol::Protocol,
@@ -43,17 +43,6 @@ fn compacted_hints(boundary: &str) -> RequestHints {
         compacted_window: Some(boundary.to_owned()),
         ..Default::default()
     }
-}
-
-fn saved_retention(thread: &str, provider: &str, age_seconds: i64, busy: bool) -> Vec<u8> {
-    let idle_since = admission::now_wall_ms().saturating_sub(age_seconds.saturating_mul(1000));
-    serde_json::to_vec(&json!([{
-        "thread": thread,
-        "provider": provider,
-        "idle_since": idle_since,
-        "busy": busy,
-    }]))
-    .unwrap()
 }
 
 fn snapshot_entry(bytes: &[u8], provider: &str) -> Value {
@@ -104,14 +93,16 @@ fn settings_defaults_and_legacy_phase_timeout_migration_are_idempotent() {
 
 #[test]
 fn retention_pending_entries_survive_prune_until_finish() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("thread-reservations.json");
     let thread = crate::storage::digest(b"fixture-retention-pending");
     let provider = "fixture-owner";
-    std::fs::write(&path, saved_retention(&thread, provider, 600, false)).unwrap();
 
-    let mut retention = Retention::load(&path);
+    let mut retention = Retention::default();
     retention.seconds = 3600;
+    let seed = retention.begin(&thread, None);
+    assert!(retention.admit(seed, provider, true));
+    retention.release(seed, provider, true);
+    retention.finish(seed);
+
     let request = retention.begin(&thread, Some(provider));
     retention.seconds = 0;
     assert!(
@@ -126,14 +117,16 @@ fn retention_pending_entries_survive_prune_until_finish() {
 
 #[test]
 fn retention_counts_parallel_requests_and_starts_idle_after_the_last_finish() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("thread-reservations.json");
     let thread = crate::storage::digest(b"fixture-retention-parallel");
     let provider = "fixture-owner";
-    std::fs::write(&path, saved_retention(&thread, provider, 600, false)).unwrap();
 
-    let mut retention = Retention::load(&path);
+    let mut retention = Retention::default();
     retention.seconds = 3600;
+    let seed = retention.begin(&thread, None);
+    assert!(retention.admit(seed, provider, true));
+    retention.release(seed, provider, true);
+    retention.finish(seed);
+
     let first = retention.begin(&thread, Some(provider));
     assert!(retention.admit(first, provider, true));
     let second = retention.begin(&thread, Some(provider));
@@ -214,30 +207,6 @@ fn retention_successful_handoff_keeps_both_sides_under_short_retention() {
     assert_eq!(retention.reserved(owner), 1);
     assert_eq!(retention.reserved(receiver), 1);
     assert!(!retention.prune());
-}
-
-#[test]
-fn retention_restart_turns_busy_snapshot_into_idle_reservation_without_active_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("thread-reservations.json");
-    let thread = crate::storage::digest(b"fixture-retention-restart");
-    let provider = "fixture-owner";
-
-    let mut running = Retention::default();
-    let request = running.begin(&thread, None);
-    assert!(running.admit(request, provider, true));
-    let busy = running.snapshot();
-    assert!(snapshot_entry(&busy, provider)["busy"].as_bool().unwrap());
-    std::fs::write(&path, busy).unwrap();
-
-    let mut restarted = Retention::load(&path);
-    assert_eq!(restarted.reserved(provider), 1);
-    assert!(!snapshot_entry(&restarted.snapshot(), provider)["busy"]
-        .as_bool()
-        .unwrap());
-    restarted.seconds = 0;
-    assert!(restarted.prune());
-    assert_eq!(restarted.reserved(provider), 0);
 }
 
 #[tokio::test]

@@ -91,11 +91,6 @@ fn metadata_headers(values: &[&str]) -> hyper::HeaderMap {
     headers
 }
 
-fn reservation_snapshot(dir: &tempfile::TempDir) -> Option<Value> {
-    let bytes = std::fs::read(dir.path().join("thread-reservations.json")).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
 fn reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Option<Value> {
     snapshot
         .as_array()?
@@ -105,20 +100,18 @@ fn reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Option<V
 }
 
 async fn wait_for_idle_reservation(
-    dir: &tempfile::TempDir,
+    _dir: &tempfile::TempDir,
     gateway: &Gateway,
     thread: &str,
     provider: &str,
 ) -> (Value, Value) {
-    // Windows runners can take longer to publish the async reservation snapshot.
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if let Some(snapshot) = reservation_snapshot(dir) {
-                if let Some(entry) = reservation_entry(&snapshot, thread, provider) {
-                    let memory: Value = serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
-                    if entry["busy"] == false && reservation_entry(&memory, thread, provider).as_ref() == Some(&entry) {
-                        return (snapshot, entry);
-                    }
+            let memory: Value =
+                serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
+            if let Some(entry) = reservation_entry(&memory, thread, provider) {
+                if entry["busy"] == false {
+                    return (memory, entry);
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -128,10 +121,8 @@ async fn wait_for_idle_reservation(
     .unwrap_or_else(|_| {
         let memory = serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
         panic!(
-            "fixture owner reservation did not become idle: persistence_error={}, memory={:?}, disk={:?}",
-            gateway.0.admission.retention_error(),
+            "fixture owner reservation did not become idle: memory={:?}",
             reservation_entry(&memory, thread, provider),
-            reservation_snapshot(dir).and_then(|snapshot| reservation_entry(&snapshot, thread, provider)),
         )
     })
 }

@@ -1,30 +1,20 @@
 //! Request slots and bounded FIFO admission. Behavior informed by Sub2API
 //! a3eb7ef3 concurrency_service / account scheduler; independently implemented in Rust.
 use super::rpm::{Ledger, Settlement};
-#[path = "rpm_persistence.rs"]
-mod rpm_persistence;
 use super::{
     circuit::Circuit, health_settlement::Permits, model::Provider, routing::Requirement, Route,
 };
-use crate::storage;
-use rpm_persistence::{PendingRpm, Receipt, Settled};
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{
     sync::{broadcast, Notify},
     time::Instant,
 };
-
-#[cfg(test)]
-#[path = "admission_persistence_tests.rs"]
-mod persistence_tests;
-#[cfg(test)]
-#[path = "rpm_persistence_tests.rs"]
-mod rpm_persistence_tests;
 
 #[derive(Clone)]
 pub struct Scheduler(Arc<Shared>);
@@ -32,12 +22,8 @@ struct Shared {
     state: Mutex<State>,
     wake: Notify,
     events: broadcast::Sender<()>,
-    persist: std::sync::mpsc::SyncSender<()>,
-    #[cfg(test)]
-    rpm_write_gate: Mutex<Option<rpm_persistence::WriteGate>>,
-    #[cfg(test)]
-    rpm_writes: std::sync::atomic::AtomicUsize,
 }
+#[derive(Default)]
 struct State {
     running: bool,
     epoch: u64,
@@ -51,47 +37,13 @@ struct State {
     intake: HashMap<String, (bool, bool)>,
     active: HashMap<String, usize>,
     retention: super::thread_capacity::Retention,
-    // A failed write can be retried from the still-authoritative in-memory state.
-    // Retention::error instead means the initial ledger could not be trusted.
-    retention_write_error: bool,
     rpm: Ledger,
     rpm_pending: HashMap<String, usize>,
-    rpm_path: PathBuf,
-    rpm_error: bool,
-    rpm_writes: PendingRpm,
     waiting: VecDeque<(u64, Vec<String>)>,
     capacity_waits: HashMap<u64, (String, Instant, WaitKind)>,
     resets: HashMap<String, u64>,
 }
-impl State {
-    fn new(rpm_path: PathBuf, rpm: Ledger, rpm_error: bool) -> Self {
-        Self {
-            retention: super::thread_capacity::Retention::load(
-                &rpm_path.with_file_name("thread-reservations.json"),
-            ),
-            retention_write_error: false,
-            running: false,
-            epoch: 0,
-            next: 0,
-            limits: HashMap::new(),
-            order: HashMap::new(),
-            queued: Default::default(),
-            versions: HashMap::new(),
-            rpm_limits: HashMap::new(),
-            models: HashMap::new(),
-            intake: HashMap::new(),
-            active: HashMap::new(),
-            rpm,
-            rpm_pending: HashMap::new(),
-            rpm_path,
-            rpm_error,
-            rpm_writes: PendingRpm::default(),
-            waiting: VecDeque::new(),
-            capacity_waits: HashMap::new(),
-            resets: HashMap::new(),
-        }
-    }
-}
+#[cfg(test)]
 pub(super) fn now_wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -162,7 +114,6 @@ struct RpmReservation {
     require_queued: bool,
     epoch: u64,
     completion: Option<Completion>,
-    receipt: Option<tokio::sync::oneshot::Receiver<bool>>,
     committed_limit: u32,
 }
 /// Moved from admission to the protocol observer after actual send commitment.
@@ -178,10 +129,7 @@ impl Completion {
             return;
         };
         let mut s = self.scheduler.0.state.lock().unwrap();
-        s.rpm_writes
-            .settlements
-            .push(Settled::new(self.id.clone(), token, result));
-        s.rpm_writes.dirty = true;
+        s.rpm.settle(&self.id, &token, result);
         drop(s);
         self.scheduler.signal();
     }
@@ -219,7 +167,6 @@ pub enum Rejected {
     Model,
     Policy,
     RateLimited(u64),
-    RateLedger,
 }
 pub struct Budget {
     pub traffic: Option<super::freeze::Ticket>,
@@ -257,35 +204,17 @@ impl RpmReservation {
             if let Some(reason) = rejected {
                 return Err(reason);
             }
-            let charge = s.rpm.charge(&self.id);
-            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let token = s.rpm.charge(&self.id);
             self.completion = Some(Completion {
                 scheduler: self.scheduler.clone(),
                 id: self.id.clone(),
-                token: Some(charge.token.clone()),
+                token: Some(token),
             });
-            s.rpm_writes.receipts.push(Receipt {
-                id: self.id.clone(),
-                charge: Some(charge),
-                limited: limit > 0,
-                sender,
-            });
-            s.rpm_writes.dirty = true;
             Self::release_pending(&mut s, &self.id);
             self.committed = true;
             self.committed_limit = limit;
-            self.receipt = Some(receiver);
             drop(s);
             self.scheduler.signal();
-        }
-        // Keep the receiver on the reservation when this future is cancelled.
-        // A second poll cannot mistake a queued write for a durable send.
-        if let Some(receipt) = &mut self.receipt {
-            let saved = receipt.await.unwrap_or(false);
-            self.receipt = None;
-            if !saved {
-                self.scheduler.0.state.lock().unwrap().rpm_error = true;
-            }
         }
         let s = self.scheduler.0.state.lock().unwrap();
         self.revalidate(&s)?;
@@ -301,8 +230,6 @@ impl RpmReservation {
             || (self.require_queued && !s.queued.contains(&self.id))
         {
             Err(Rejected::Unavailable)
-        } else if s.rpm_error && s.rpm_limits.get(&self.id).copied().unwrap_or(0) > 0 {
-            Err(Rejected::RateLedger)
         } else {
             Ok(())
         }
@@ -387,111 +314,12 @@ impl Budget {
     }
 }
 impl Scheduler {
-    pub fn new(events: broadcast::Sender<()>, rpm_path: PathBuf) -> Self {
-        let (rpm, rpm_error) = Ledger::load(&rpm_path);
-        let (persist, updates) = std::sync::mpsc::sync_channel(1);
-        let path = rpm_path.with_file_name("thread-reservations.json");
-        let shared = Arc::new(Shared {
-            state: Mutex::new(State::new(rpm_path, rpm, rpm_error)),
+    pub fn new(events: broadcast::Sender<()>) -> Self {
+        Self(Arc::new(Shared {
+            state: Mutex::new(State::default()),
             wake: Notify::new(),
             events,
-            persist,
-            #[cfg(test)]
-            rpm_write_gate: Mutex::new(None),
-            #[cfg(test)]
-            rpm_writes: std::sync::atomic::AtomicUsize::new(0),
-        });
-        let weak = Arc::downgrade(&shared);
-        std::thread::spawn(move || {
-            let mut previous = Vec::new();
-            while updates.recv().is_ok() {
-                // A transient failure of the final update otherwise waits forever
-                // for another request. Retry here, without adding a polling task.
-                let delays = [100, 250, 500];
-                for retry in 0..=delays.len() {
-                    let Some(shared) = weak.upgrade() else {
-                        return;
-                    };
-                    rpm_persistence::flush(&shared);
-                    let (snapshot, retry_write, rpm_failed) = {
-                        let mut state = shared.state.lock().unwrap();
-                        state.retention.prune();
-                        (
-                            state.retention.snapshot_data(),
-                            state.retention_write_error || state.retention.error,
-                            state.rpm_error,
-                        )
-                    };
-                    let snapshot = serde_json::to_vec(&snapshot).expect("capacity metadata");
-                    let retention_ok = if snapshot == previous && !retry_write {
-                        true
-                    } else if storage::atomic_write(&path, &snapshot, None).is_err() {
-                        shared.state.lock().unwrap().retention_write_error = true;
-                        let _ = shared.events.send(());
-                        false
-                    } else {
-                        previous = snapshot;
-                        let recovered = {
-                            let mut state = shared.state.lock().unwrap();
-                            std::mem::take(&mut state.retention_write_error)
-                                | std::mem::take(&mut state.retention.error)
-                        };
-                        if recovered {
-                            shared.wake.notify_waiters();
-                            let _ = shared.events.send(());
-                        }
-                        true
-                    };
-                    if retention_ok && !rpm_failed {
-                        break;
-                    }
-                    let Some(delay) = delays.get(retry) else {
-                        break;
-                    };
-                    drop(shared);
-                    // New state can wake the same retry early. Each attempt
-                    // snapshots memory again, never republishes a stale copy.
-                    if matches!(
-                        updates.recv_timeout(Duration::from_millis(*delay)),
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-                    ) {
-                        return;
-                    }
-                }
-            }
-        });
-        Self(shared)
-    }
-    #[cfg(test)]
-    pub(super) fn hold_rpm_write(
-        &self,
-    ) -> (
-        tokio::sync::oneshot::Receiver<()>,
-        std::sync::mpsc::Sender<()>,
-    ) {
-        let (entered, ready) = tokio::sync::oneshot::channel();
-        let (resume, receiver) = std::sync::mpsc::channel();
-        *self.0.rpm_write_gate.lock().unwrap() = Some(rpm_persistence::WriteGate {
-            entered,
-            resume: receiver,
-        });
-        (ready, resume)
-    }
-    #[cfg(test)]
-    pub(super) async fn flush_rpm(&self) -> bool {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        {
-            let mut state = self.0.state.lock().unwrap();
-            state.rpm_writes.dirty = true;
-            state.rpm_writes.receipts.push(Receipt {
-                id: String::new(),
-                charge: None,
-                limited: false,
-                sender,
-            });
-        }
-        self.signal();
-        receiver.await.unwrap_or(false)
+        }))
     }
     pub fn configure_retention(&self, seconds: u64) {
         let mut s = self.0.state.lock().unwrap();
@@ -501,13 +329,13 @@ impl Scheduler {
     pub fn reserved(&self, id: &str) -> usize {
         self.0.state.lock().unwrap().retention.reserved(id)
     }
-    pub fn retention_error(&self) -> bool {
-        let state = self.0.state.lock().unwrap();
-        state.retention.error || state.retention_write_error
-    }
     #[cfg(test)]
     pub(super) fn retention_snapshot(&self) -> Vec<u8> {
         self.0.state.lock().unwrap().retention.snapshot()
+    }
+    #[cfg(test)]
+    pub(super) fn rpm_ledger(&self) -> Ledger {
+        self.0.state.lock().unwrap().rpm.clone()
     }
     fn available(s: &State, id: &str, request: Option<u64>, manual: bool) -> bool {
         let limit = s.limits[id];
@@ -543,14 +371,11 @@ impl Scheduler {
             .iter()
             .map(|p| (p.id.clone(), p.max_concurrency))
             .collect();
-        let mut newly_limited = false;
         for provider in providers {
             if provider.max_rpm > 0 && s.rpm_limits.get(&provider.id) == Some(&0) {
                 s.rpm.enable(&provider.id);
-                newly_limited = true;
             }
         }
-        s.rpm_writes.dirty |= newly_limited;
         s.rpm_limits = providers
             .iter()
             .map(|p| (p.id.clone(), p.max_rpm))
@@ -582,7 +407,7 @@ impl Scheduler {
         drop(s);
         self.signal();
     }
-    pub fn rpm_status(&self, id: &str, limit: u32) -> (usize, u64, bool, bool) {
+    pub fn rpm_status(&self, id: &str, limit: u32) -> (usize, u64, bool) {
         let mut s = self.0.state.lock().unwrap();
         s.rpm.prune();
         let used = if limit == 0 { 0 } else { s.rpm.used(id) };
@@ -595,7 +420,6 @@ impl Scheduler {
             used,
             gate.map_or(0, |(d, _)| d.as_millis().div_ceil(1000) as u64),
             gate.is_some(),
-            s.rpm_error && limit > 0,
         )
     }
     pub(super) fn rpm_wait_reason(
@@ -617,7 +441,6 @@ impl Scheduler {
         let mut s = self.0.state.lock().unwrap();
         s.rpm.prune();
         s.rpm.backoff(id, delay);
-        s.rpm_writes.dirty = true;
         drop(s);
         self.signal();
     }
@@ -629,9 +452,6 @@ impl Scheduler {
         require_queued: bool,
     ) -> Result<RpmReservation, Rejected> {
         state.rpm.prune();
-        if state.rpm_error && limit > 0 {
-            return Err(Rejected::RateLedger);
-        }
         if let Some((delay, _)) = state.rpm.gate(
             id,
             limit,
@@ -651,7 +471,6 @@ impl Scheduler {
             require_queued,
             epoch: state.epoch,
             completion: None,
-            receipt: None,
             committed_limit: limit,
         })
     }
@@ -850,7 +669,6 @@ impl Scheduler {
         self.signal();
     }
     pub fn signal(&self) {
-        let _ = self.0.persist.try_send(());
         self.0.wake.notify_waiters();
         let _ = self.0.events.send(());
     }
@@ -913,7 +731,6 @@ impl Scheduler {
         let mut rpm_waited = Duration::ZERO;
         let mut cooling;
         let mut rate_retry;
-        let mut ledger_error;
         let result = 'admission: loop {
             if let Some(traffic) = &budget.traffic {
                 let next = traffic.paused_for().saturating_sub(paused_before);
@@ -960,9 +777,6 @@ impl Scheduler {
                 }
                 s.retention.prune();
                 let request = budget.thread.as_ref().map(|t| t.ticket);
-                if request.is_some() && (s.retention.error || s.retention_write_error) {
-                    break Err(Rejected::Unavailable);
-                }
                 let matching: Vec<_> = routes
                     .iter()
                     .filter(|r| {
@@ -1041,14 +855,14 @@ impl Scheduler {
                     };
                     s.rpm.prune();
                     let rpm_limit = s.rpm_limits.get(owner).copied().unwrap_or_default();
-                    let rpm_blocked = (s.rpm_error && rpm_limit > 0)
-                        || s.rpm
-                            .gate(
-                                owner,
-                                rpm_limit,
-                                s.rpm_pending.get(owner).copied().unwrap_or_default(),
-                            )
-                            .is_some();
+                    let rpm_blocked = s
+                        .rpm
+                        .gate(
+                            owner,
+                            rpm_limit,
+                            s.rpm_pending.get(owner).copied().unwrap_or_default(),
+                        )
+                        .is_some();
                     if !route.health_for(requirement).available
                         || rpm_blocked
                         || Self::available(&s, owner, request, manual)
@@ -1130,13 +944,11 @@ impl Scheduler {
                             // budget. It must not time out before the head waiter
                             // gets a chance to send when the minute rolls forward.
                             s.rpm.prune();
-                            if !s.rpm_error {
-                                let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
-                                let pending = s.rpm_pending.get(id).copied().unwrap_or_default();
-                                if let Some((delay, _)) = s.rpm.gate(id, limit, pending) {
-                                    let retry = delay.as_millis().div_ceil(1000).max(1) as u64;
-                                    rate_retry = Some(rate_retry.unwrap_or(0).max(retry));
-                                }
+                            let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
+                            let pending = s.rpm_pending.get(id).copied().unwrap_or_default();
+                            if let Some((delay, _)) = s.rpm.gate(id, limit, pending) {
+                                let retry = delay.as_millis().div_ceil(1000).max(1) as u64;
+                                rate_retry = Some(rate_retry.unwrap_or(0).max(retry));
                             }
                             if first_turn && route.provider.take_new_threads {
                                 intake_skip = Some(
@@ -1164,9 +976,6 @@ impl Scheduler {
                         }
                         let rpm_limit = s.rpm_limits.get(id).copied().unwrap_or_default();
                         s.rpm.prune();
-                        if s.rpm_error && rpm_limit > 0 {
-                            break 'selection;
-                        }
                         if let Some((delay, _)) = s.rpm.gate(
                             id,
                             rpm_limit,
@@ -1235,13 +1044,6 @@ impl Scheduler {
                                     drop(permits);
                                     break 'selection;
                                 }
-                                Err(Rejected::RateLedger) => {
-                                    if let Some(t) = &budget.traffic {
-                                        t.waiting();
-                                    }
-                                    drop(permits);
-                                    break 'selection;
-                                }
                                 Err(_) => {
                                     if let Some(t) = &budget.traffic {
                                         t.waiting();
@@ -1264,35 +1066,7 @@ impl Scheduler {
                 if let Some(admission) = accepted {
                     break Ok(admission);
                 }
-                if s.rpm_error
-                    && eligible
-                        .iter()
-                        .any(|r| s.rpm_limits.get(&r.provider.id).copied().unwrap_or(0) > 0)
-                {
-                    if immediate || budget.protected_capacity {
-                        break Err(Rejected::RateLedger);
-                    }
-                    if waiting.is_none() {
-                        if s.waiting.len() + s.capacity_waits.len() >= max_waiting {
-                            break Err(Rejected::Full);
-                        }
-                        s.next += 1;
-                        let ticket = s.next;
-                        s.waiting.push_back((
-                            ticket,
-                            eligible
-                                .iter()
-                                .filter(|r| r.health_for(requirement).available)
-                                .map(|r| r.provider.id.clone())
-                                .collect(),
-                        ));
-                        waiting = Some(Waiting {
-                            scheduler: self.clone(),
-                            ticket,
-                        });
-                        let _ = self.0.events.send(());
-                    }
-                } else if let Some(retry) = rate_retry {
+                if let Some(retry) = rate_retry {
                     if immediate {
                         break Err(Rejected::RateLimited(retry));
                     }
@@ -1317,10 +1091,6 @@ impl Scheduler {
                         let _ = self.0.events.send(());
                     }
                 }
-                ledger_error = s.rpm_error
-                    && eligible
-                        .iter()
-                        .any(|r| s.rpm_limits.get(&r.provider.id).copied().unwrap_or(0) > 0);
                 if immediate {
                     break Err(cooling.map_or(Rejected::Timeout, Rejected::Cooling));
                 }
@@ -1350,12 +1120,12 @@ impl Scheduler {
                 .traffic
                 .as_ref()
                 .map_or(Duration::ZERO, |t| t.paused_for());
-            let waiting_for_rpm = rate_retry.is_some() && !ledger_error;
+            let waiting_for_rpm = rate_retry.is_some();
             tokio::select! {
                 biased;
                 _ = super::freeze::changed(&mut freeze_changes) => {},
                 _ = notified => {},
-                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else if ledger_error { Rejected::RateLedger } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
+                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
                 _ = async {
                     if let Some(at) = next_wake { tokio::time::sleep_until(at).await; }
                     else { std::future::pending::<()>().await; }

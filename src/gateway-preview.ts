@@ -1427,7 +1427,6 @@ failureCatalogPreview.push(
           "RPM_LIMIT",
           "QUEUE",
           "CIRCUIT_OPEN",
-          "RPM_LEDGER",
         ],
         ["queueSeconds", "maxWaiting"],
       ],

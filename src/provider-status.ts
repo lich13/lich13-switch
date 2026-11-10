@@ -107,7 +107,6 @@ export function providerStatus(p: Provider): string {
     return `${reason || "单供应商保护"} · 冷却${seconds}秒`;
   if (h.state === "half_open")
     return ["待请求探测", reason].filter(Boolean).join(" · ");
-  if (p.rpmLedgerError) return "RPM 记录不可用";
   if (p.rpmLimited)
     return `${rpmWaitLabel(p.rpmWaitReason)} · 等待${Math.max(1, p.rpmRetryIn)}秒`;
   const occupied = p.activeRequests + (p.reservedThreads ?? 0);

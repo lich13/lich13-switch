@@ -1,96 +1,50 @@
 //! Capacity reservations are independent of conversation ownership and request slots.
-//! Only digests, provider IDs and activity timestamps cross the persistence boundary.
+#[cfg(test)]
 use super::admission::now_wall_ms;
-use crate::storage;
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
     time::{Duration, Instant},
 };
 const MAX_RESERVATIONS: usize = 8192;
-#[derive(Default)]
 pub(super) struct Retention {
     entries: HashMap<(String, String), Entry>,
     requests: HashMap<u64, (String, HashSet<String>)>,
     next: u64,
     pub seconds: u64,
-    pub error: bool,
+}
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            requests: HashMap::new(),
+            next: 0,
+            seconds: 300,
+        }
+    }
 }
 struct Entry {
     active: usize,
     pending: usize,
     retained: bool,
     idle: Instant,
+    #[cfg(test)]
     wall: i64,
 }
-#[derive(Deserialize, Serialize)]
-pub(super) struct Saved {
+#[cfg(test)]
+#[derive(Serialize)]
+struct Saved {
     thread: String,
     provider: String,
     idle_since: i64,
     busy: bool,
 }
 impl Retention {
-    pub fn load(path: &Path) -> Self {
-        let mut state = Self {
-            seconds: 300,
-            ..Self::default()
-        };
-        let raw = match storage::read_optional(path) {
-            Ok(None) => return state,
-            Ok(Some(raw)) => raw,
-            _ => {
-                state.error = true;
-                return state;
-            }
-        };
-        let saved: Vec<Saved> = match serde_json::from_slice::<Vec<Saved>>(&raw) {
-            Ok(v) if v.len() <= MAX_RESERVATIONS => v,
-            _ => {
-                state.error = storage::preserve_corrupt(path, &raw).is_err()
-                    || storage::atomic_write(path, b"[]", None).is_err();
-                return state;
-            }
-        };
-        let now = now_wall_ms();
-        for item in saved {
-            if item.thread.len() != 64
-                || !item.thread.bytes().all(|b| b.is_ascii_hexdigit())
-                || item.provider.is_empty()
-                || item.provider.len() > 256
-                || item.provider.chars().any(char::is_control)
-            {
-                state.entries.clear();
-                state.error = storage::preserve_corrupt(path, &raw).is_err()
-                    || storage::atomic_write(path, b"[]", None).is_err();
-                return state;
-            }
-            // A crash never resurrects an in-flight request. Reserve at most one
-            // idle slot; future clocks and interrupted requests get one bounded grace.
-            let age = if item.busy {
-                0
-            } else {
-                now.saturating_sub(item.idle_since).max(0) as u64
-            };
-            let instant = Instant::now();
-            state.entries.insert(
-                (item.thread, item.provider),
-                Entry {
-                    active: 0,
-                    pending: 0,
-                    retained: true,
-                    idle: instant
-                        .checked_sub(Duration::from_millis(age))
-                        .unwrap_or(instant),
-                    wall: now.saturating_sub(age.min(i64::MAX as u64) as i64),
-                },
-            );
-        }
-        state
-    }
-    pub fn snapshot_data(&self) -> Vec<Saved> {
-        self.entries
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Vec<u8> {
+        let items: Vec<Saved> = self
+            .entries
             .iter()
             .filter(|(_, e)| e.retained)
             .map(|((thread, provider), e)| Saved {
@@ -99,11 +53,8 @@ impl Retention {
                 idle_since: e.wall,
                 busy: e.active != 0 || e.pending != 0,
             })
-            .collect()
-    }
-    #[cfg(test)]
-    pub fn snapshot(&self) -> Vec<u8> {
-        serde_json::to_vec(&self.snapshot_data()).expect("capacity metadata")
+            .collect();
+        serde_json::to_vec(&items).expect("capacity metadata")
     }
     pub fn configure(&mut self, providers: &HashSet<String>, seconds: u64) {
         self.seconds = seconds;
@@ -146,7 +97,10 @@ impl Retention {
                     entry.pending = entry.pending.saturating_sub(1);
                     if entry.pending == 0 && entry.active == 0 {
                         entry.idle = Instant::now();
-                        entry.wall = now_wall_ms();
+                        #[cfg(test)]
+                        {
+                            entry.wall = now_wall_ms();
+                        }
                     }
                 }
             }
@@ -188,6 +142,7 @@ impl Retention {
             pending: 0,
             retained: false,
             idle: Instant::now(),
+            #[cfg(test)]
             wall: now_wall_ms(),
         });
         if providers.insert(provider.into()) {
@@ -195,7 +150,10 @@ impl Retention {
         }
         entry.active += 1;
         entry.retained |= retain;
-        entry.wall = now_wall_ms();
+        #[cfg(test)]
+        {
+            entry.wall = now_wall_ms();
+        }
         true
     }
     pub fn release(&mut self, request: u64, provider: &str, success: bool) {
@@ -205,7 +163,10 @@ impl Retention {
                 entry.retained |= success;
                 if entry.active == 0 && entry.pending == 0 {
                     entry.idle = Instant::now();
-                    entry.wall = now_wall_ms();
+                    #[cfg(test)]
+                    {
+                        entry.wall = now_wall_ms();
+                    }
                 }
             }
         }

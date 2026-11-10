@@ -170,7 +170,6 @@ export type Provider = {
   rpmRetryIn: number;
   rpmLimited: boolean;
   rpmWaitReason?: string | null;
-  rpmLedgerError?: boolean;
   allowedModels: string[] | null;
   dshModels?: Record<string, string | null> | null;
   handoffAfterCompaction?: boolean;

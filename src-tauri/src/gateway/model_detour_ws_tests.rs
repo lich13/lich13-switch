@@ -226,28 +226,25 @@ fn reservation_entry(snapshot: &Value, session: &str, provider: &str) -> Value {
         .expect("thread reservation was not persisted")
 }
 
-async fn wait_for_reservation(dir: &tempfile::TempDir, session: &str, provider: &str) -> Value {
+async fn wait_for_reservation(gateway: &Gateway, session: &str, provider: &str) -> Value {
     tokio::time::timeout(FIXTURE_WAIT, async {
         loop {
-            let snapshot = std::fs::read(dir.path().join("thread-reservations.json"))
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-            if let Some(snapshot) = snapshot {
-                if snapshot.as_array().is_some_and(|entries| {
-                    entries.iter().any(|entry| {
-                        entry["thread"] == session
-                            && entry["provider"] == provider
-                            && entry["busy"] == false
-                    })
-                }) {
-                    break snapshot;
-                }
+            let snapshot: Value =
+                serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
+            if snapshot.as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry["thread"] == session
+                        && entry["provider"] == provider
+                        && entry["busy"] == false
+                })
+            }) {
+                break snapshot;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("initial owner reservation was not persisted")
+    .expect("initial owner reservation was not recorded")
 }
 
 async fn wait_for_usage_record(
@@ -315,7 +312,7 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
 
     wait_until(|| gateway.0.admission.reserved(&owner) == 1).await;
     assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let before_reservations = wait_for_reservation(&dir, &session_hash, &owner).await;
+    let before_reservations = wait_for_reservation(&gateway, &session_hash, &owner).await;
     let before_reservation = reservation_entry(&before_reservations, &session_hash, &owner);
     assert!(!before_reservation["idle_since"].is_null());
 
@@ -362,10 +359,8 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
     assert_eq!(gateway.view().settings.thread_idle_release_seconds, 300);
     assert_eq!(gateway.0.admission.reserved(&owner), 1);
     assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let after_reservations = std::fs::read(dir.path().join("thread-reservations.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .unwrap();
+    let after_reservations: Value =
+        serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
     assert_eq!(after_reservations.as_array().unwrap().len(), 1);
     assert_eq!(
         reservation_entry(&after_reservations, &session_hash, &owner)["idle_since"],
@@ -505,7 +500,7 @@ async fn native_websocket_side_detour_followup_main_without_cursor_is_rejected_w
     let before_owner = owner_entry(&dir, &session_hash);
     assert_eq!(before_owner["provider"], owner);
     assert_eq!(before_owner["boundary"], boundary);
-    let before_reservations = wait_for_reservation(&dir, &session_hash, &owner).await;
+    let before_reservations = wait_for_reservation(&gateway, &session_hash, &owner).await;
     let before_reservation = reservation_entry(&before_reservations, &session_hash, &owner);
     assert!(!before_reservation["idle_since"].is_null());
 
@@ -546,10 +541,8 @@ async fn native_websocket_side_detour_followup_main_without_cursor_is_rejected_w
     assert_eq!(gateway.view().settings.thread_idle_release_seconds, 300);
     assert_eq!(gateway.0.admission.reserved(&owner), 1);
     assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let after_reservations: Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("thread-reservations.json")).unwrap(),
-    )
-    .unwrap();
+    let after_reservations: Value =
+        serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
     assert_eq!(after_reservations.as_array().unwrap().len(), 1);
     let after_reservation = reservation_entry(&after_reservations, &session_hash, &owner);
     assert_eq!(
@@ -603,7 +596,7 @@ async fn native_websocket_known_side_cursor_stays_pinned_without_rebinding_owner
     let before_owner = owner_entry(&dir, &session_hash);
     assert_eq!(before_owner["provider"], owner);
     assert_eq!(before_owner["boundary"], boundary);
-    let before_reservations = wait_for_reservation(&dir, &session_hash, &owner).await;
+    let before_reservations = wait_for_reservation(&gateway, &session_hash, &owner).await;
     let before_reservation = reservation_entry(&before_reservations, &session_hash, &owner);
     assert!(!before_reservation["idle_since"].is_null());
 
@@ -645,10 +638,8 @@ async fn native_websocket_known_side_cursor_stays_pinned_without_rebinding_owner
     assert_eq!(gateway.view().settings.thread_idle_release_seconds, 300);
     assert_eq!(gateway.0.admission.reserved(&owner), 1);
     assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let after_reservations: Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("thread-reservations.json")).unwrap(),
-    )
-    .unwrap();
+    let after_reservations: Value =
+        serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
     assert_eq!(after_reservations.as_array().unwrap().len(), 1);
     let after_reservation = reservation_entry(&after_reservations, &session_hash, &owner);
     assert_eq!(

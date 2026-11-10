@@ -47,16 +47,11 @@ struct Pin {
     endpoint: String,
     updated: u64,
 }
-#[derive(Default)]
-struct Pins {
-    entries: HashMap<String, Pin>,
-    error: bool,
-}
 pub struct Service {
     samples: Mutex<HashMap<String, Batch>>,
     flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     permits: tokio::sync::Semaphore,
-    pins: Mutex<Pins>,
+    pins: Mutex<HashMap<String, Pin>>,
     diagnostics: Mutex<Option<(super::ClientId, crate::events::Service)>>,
     responses: Mutex<HashMap<String, Pin>>,
     path: PathBuf,
@@ -72,9 +67,6 @@ fn digest(value: &str) -> String {
 }
 fn pin_key(provider: &Provider, kind: &str, id: &str) -> String {
     storage::digest(format!("{}\0{}\0{kind}\0{id}", provider.id, provider.version).as_bytes())
-}
-fn valid_digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 fn trim_pins(entries: &mut HashMap<String, Pin>, retention: u64) {
     let time = now();
@@ -95,23 +87,12 @@ fn trim_pins(entries: &mut HashMap<String, Pin>, retention: u64) {
 }
 impl Service {
     pub fn new(path: PathBuf) -> Self {
-        let mut pins = Pins::default();
-        match storage::read_optional(&path) {
-            Ok(None) => (),
-            Ok(Some(raw)) => match serde_json::from_slice::<HashMap<String, Pin>>(&raw) {
-                Ok(mut entries)
-                    if entries.len() <= MAX_PINS
-                        && entries
-                            .iter()
-                            .all(|(k, p)| valid_digest(k) && valid_digest(&p.endpoint)) =>
-                {
-                    trim_pins(&mut entries, PIN_RETENTION_MS);
-                    pins.entries = entries;
-                }
-                _ => pins.error = true,
-            },
-            _ => pins.error = true,
-        }
+        let mut pins = storage::read_optional(&path)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_slice::<HashMap<String, Pin>>(&raw).ok())
+            .unwrap_or_default();
+        trim_pins(&mut pins, PIN_RETENTION_MS);
         Self {
             samples: Mutex::new(HashMap::new()),
             flights: Mutex::new(HashMap::new()),
@@ -232,18 +213,12 @@ impl Service {
         if let Some(thread) = thread {
             let key = pin_key(provider, "thread", thread);
             let mut pins = self.pins.lock().unwrap();
-            if pins.error {
-                return Err(AppError::new(
-                    code::ENDPOINT_AFFINITY,
-                    "端点归属记录无法读取，已停止自动切换",
-                ));
-            }
-            if let Some(pin) = pins.entries.get_mut(&key) {
+            if let Some(pin) = pins.get_mut(&key) {
                 let url = resolve(&pin.endpoint)?;
                 let time = now();
                 if time.saturating_sub(pin.updated) >= PIN_REFRESH.as_millis() as u64 {
                     pin.updated = time;
-                    if Self::write_pins(&self.path, &pins.entries).is_err() {
+                    if Self::write_pins(&self.path, &pins).is_err() {
                         drop(pins);
                         self.refresh_failed(provider);
                     }
@@ -275,23 +250,28 @@ impl Service {
         storage::atomic_write(path, &raw, None)
             .map_err(|_| AppError::new(code::ENDPOINT_AFFINITY, "端点归属记录无法保存，未发送请求"))
     }
-    fn persist_pin(path: &std::path::Path, pins: &mut Pins, key: &str, pin: Pin) -> Result<()> {
+    fn persist_pin(
+        path: &std::path::Path,
+        pins: &mut HashMap<String, Pin>,
+        key: &str,
+        pin: Pin,
+    ) -> Result<()> {
         let time = now();
-        let needs_trim = pins.entries.len() >= MAX_PINS
-            || pins.entries.values().any(|p| {
+        let needs_trim = pins.len() >= MAX_PINS
+            || pins.values().any(|p| {
                 time.saturating_sub(p.updated) >= PIN_RETENTION_MS
                     || p.updated > time.saturating_add(60_000)
             });
-        let backup = needs_trim.then(|| pins.entries.clone());
+        let backup = needs_trim.then(|| pins.clone());
         if needs_trim {
-            trim_pins(&mut pins.entries, PIN_RETENTION_MS);
+            trim_pins(pins, PIN_RETENTION_MS);
         }
-        pins.entries.insert(key.to_owned(), pin);
-        if let Err(err) = Self::write_pins(path, &pins.entries) {
+        pins.insert(key.to_owned(), pin);
+        if let Err(err) = Self::write_pins(path, pins) {
             if let Some(backup) = backup {
-                pins.entries = backup;
+                *pins = backup;
             } else {
-                pins.entries.remove(key);
+                pins.remove(key);
             }
             return Err(err);
         }

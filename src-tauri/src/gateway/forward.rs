@@ -979,13 +979,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         .insert(header::RETRY_AFTER, seconds.max(1).into());
                     return response;
                 }
-                Err(Rejected::RateLedger) => {
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        code::RPM_LEDGER,
-                        "RPM 状态暂不可用，请稍后重试",
-                    );
-                }
                 Err(Rejected::Stopped) => {
                     return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
                 }
@@ -1199,15 +1192,10 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Rejected::Stopped => {
                         error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
                     }
-                    Rejected::Unavailable => error(
+                    _ => error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         code::STALE,
                         "供应商配置已变化，请重试",
-                    ),
-                    _ => error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        code::RPM_LEDGER,
-                        "RPM 状态暂不可用，请稍后重试",
                     ),
                 };
             }

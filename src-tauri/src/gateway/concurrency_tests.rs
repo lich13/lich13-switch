@@ -359,25 +359,6 @@ async fn http_rpm_limit_waits_in_place_instead_of_spilling_to_the_next_provider(
 }
 
 #[tokio::test]
-async fn rpm_reservations_are_persisted_across_gateway_restart() {
-    let p = server(|_| async { Response::new(full("ok")) }).await;
-    let (t, g) = fixture(vec![format!("http://127.0.0.1:{p}")]).await;
-    rpm_limit(&g, &t, 0, 2);
-    start(&g, &t).await;
-    let routes = routes(&g);
-    let mut first = slot(&g, &routes).await;
-    first.commit_rpm().await.unwrap();
-    drop(first);
-    let raw = std::fs::read(t.path().join("rpm-window.json")).unwrap();
-    assert!(String::from_utf8_lossy(&raw).contains("providers"));
-    let second = Gateway::new(t.path().to_path_buf()).unwrap();
-    second.import_initial(t.path()).unwrap();
-    assert_eq!(second.view().providers[0].rpm_used, 1);
-    assert_eq!(second.view().providers[0].max_rpm, 2);
-    g.stop().await.unwrap();
-}
-
-#[tokio::test]
 async fn rpm_windows_are_isolated_between_codex_and_claude() {
     let (t, codex, claude, home) =
         super::claude_v080::claude_fixture("https://shared.example.test", "fixture-key").await;
@@ -433,8 +414,6 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
 
     assert_eq!(codex.view().providers[0].rpm_used, 1);
     assert_eq!(claude.view().providers[0].rpm_used, 1);
-    assert!(t.path().join("data/rpm-window.json").exists());
-    assert!(t.path().join("data/claude/rpm-window.json").exists());
 }
 #[tokio::test]
 async fn queue_is_fifo_bounded_cancelable_and_does_not_consume_retry_budget() {

@@ -383,7 +383,6 @@ fn rejected(reason: Rejected) -> Failure {
         Rejected::Cooling(_) => (1013, "providers cooling down; retry later"),
         Rejected::Full | Rejected::Timeout => (1013, "provider concurrency full; retry later"),
         Rejected::RateLimited(_) => (1013, "provider RPM limit reached; retry later"),
-        Rejected::RateLedger => (1011, "RPM state unavailable"),
     }
 }
 pub(super) fn accept(

@@ -165,7 +165,6 @@ pub struct ProviderView {
     pub rpm_retry_in: u64,
     pub rpm_limited: bool,
     pub rpm_wait_reason: Option<crate::events::RpmWaitReason>,
-    pub rpm_ledger_error: bool,
     pub allowed_models: Option<Vec<String>>,
     pub dsh_models: Option<dsh::ModelMapping>,
     pub handoff_after_compaction: bool,
@@ -643,7 +642,7 @@ impl Gateway {
         };
         let spool = storage::private_tempdir(&data, "gateway-spool-")?;
         let (events, _) = broadcast::channel(32);
-        let admission = admission::Scheduler::new(events.clone(), data.join("rpm-window.json"));
+        let admission = admission::Scheduler::new(events.clone());
         admission.configure(&store.providers, false);
         admission.configure_retention(store.settings.thread_idle_release_seconds);
         let local_token = store.local_token.clone();
@@ -948,7 +947,7 @@ impl Gateway {
                 .providers
                 .iter()
                 .map(|p| {
-                    let (rpm_used, rpm_retry_in, rpm_limited, rpm_ledger_error) =
+                    let (rpm_used, rpm_retry_in, rpm_limited) =
                         self.0.admission.rpm_status(&p.id, p.max_rpm);
                     let (quota_checking, quota_check) = self
                         .0
@@ -1010,7 +1009,6 @@ impl Gateway {
                         rpm_retry_in,
                         rpm_limited,
                         rpm_wait_reason: self.0.admission.rpm_wait_reason(&p.id, p.max_rpm),
-                        rpm_ledger_error,
                         quota: self
                             .0
                             .quota
@@ -1037,16 +1035,7 @@ impl Gateway {
             } else {
                 vec![]
             },
-            error: s
-                .error
-                .clone()
-                .or_else(|| self.0.compaction.error())
-                .or_else(|| {
-                    self.0
-                        .admission
-                        .retention_error()
-                        .then(|| "线程名额记录不可用，请检查私有数据目录".into())
-                }),
+            error: s.error.clone().or_else(|| self.0.compaction.error()),
             recovery_pending: s.upgrade_error.is_some(),
         };
         // Selection readers need only connection identity and provider matching data.

@@ -125,7 +125,6 @@ export const ErrorCodes = {
   Restore: "RESTORE",
   ResumeConflict: "RESUME_CONFLICT",
   Rpm: "RPM",
-  RpmLedger: "RPM_LEDGER",
   RpmLimit: "RPM_LIMIT",
   Running: "RUNNING",
   Settings: "SETTINGS",

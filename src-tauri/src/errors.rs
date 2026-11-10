@@ -147,7 +147,6 @@ local_codes! {
     Restore => RESTORE = "RESTORE",
     ResumeConflict => RESUME_CONFLICT = "RESUME_CONFLICT",
     Rpm => RPM = "RPM",
-    RpmLedger => RPM_LEDGER = "RPM_LEDGER",
     RpmLimit => RPM_LIMIT = "RPM_LIMIT",
     Running => RUNNING = "RUNNING",
     Settings => SETTINGS = "SETTINGS",

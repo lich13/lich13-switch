@@ -96,7 +96,6 @@ pub fn catalog() -> Vec<Policy> {
                 code::QUEUE,
                 code::PROVIDERS_COOLING_DOWN,
                 code::CIRCUIT_OPEN,
-                code::RPM_LEDGER,
             ],
             vec![
                 "供应商并发已满",

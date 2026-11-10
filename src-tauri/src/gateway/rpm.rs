@@ -1,11 +1,8 @@
 //! Rolling minute budgets for starts and independently reserved completions.
-//! All transitions are made under the admission lock. Wall times are only for
-//! restart recovery; live deadlines use a monotonic clock.
-use crate::{events::RpmWaitReason, storage};
-use serde::{Deserialize, Serialize};
+//! All transitions are made under the admission lock using a monotonic clock.
+use crate::events::RpmWaitReason;
 use std::{
     collections::{HashMap, VecDeque},
-    path::Path,
     time::Duration,
 };
 use tokio::time::Instant;
@@ -22,36 +19,15 @@ pub(super) const WINDOW: Duration = Duration::from_secs(61);
 #[derive(Clone, Copy)]
 pub(super) struct Stamp {
     at: Instant,
-    wall: i64,
 }
 impl Stamp {
     pub(super) fn now() -> Self {
-        Self {
-            at: Instant::now(),
-            wall: super::admission::now_wall_ms(),
-        }
+        Self { at: Instant::now() }
     }
     fn after(delay: Duration) -> Self {
-        let now = Self::now();
         Self {
-            at: now.at + delay,
-            wall: now
-                .wall
-                .saturating_add(delay.as_millis().min(i64::MAX as u128) as i64),
+            at: Instant::now() + delay,
         }
-    }
-    fn history(wall: i64) -> Option<Self> {
-        let now = Self::now();
-        let age = Duration::from_millis(now.wall.saturating_sub(wall).max(0) as u64);
-        (age < WINDOW).then(|| Self {
-            at: now.at.checked_sub(age).unwrap_or(now.at),
-            wall,
-        })
-    }
-    fn deadline(wall: i64, cap: Duration) -> Option<Self> {
-        let delay =
-            Duration::from_millis(wall.saturating_sub(Self::now().wall).max(0) as u64).min(cap);
-        (!delay.is_zero()).then(|| Self::after(delay))
     }
 }
 #[derive(Clone, Default)]
@@ -63,37 +39,9 @@ pub(super) struct Provider {
     backoff: Option<Stamp>,
     initialize: Option<Stamp>,
 }
-pub(super) struct Charge {
-    pub token: String,
-    at: Stamp,
-}
 #[derive(Clone, Default)]
 pub(super) struct Ledger {
     providers: HashMap<String, Provider>,
-    legacy_until: Option<Stamp>,
-}
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct Saved {
-    #[serde(default)]
-    version: u32,
-    providers: HashMap<String, Vec<i64>>,
-    #[serde(default)]
-    protection: HashMap<String, SavedProtection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    legacy_until: Option<i64>,
-}
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct SavedProtection {
-    #[serde(default)]
-    completed: Vec<i64>,
-    #[serde(default)]
-    inflight: HashMap<String, Option<i64>>,
-    #[serde(default)]
-    backoff: Option<i64>,
-    #[serde(default)]
-    initialize: Option<i64>,
 }
 #[derive(Clone, Copy)]
 pub(super) enum Settlement {
@@ -106,10 +54,10 @@ impl Ledger {
     /// Their reservation/settlement signals wake the scheduler instead.
     pub(super) fn next_change(&self, id: &str) -> Option<Instant> {
         let now = Instant::now();
-        self.legacy_until
-            .map(|s| s.at)
+        self.providers
+            .get(id)
             .into_iter()
-            .chain(self.providers.get(id).into_iter().flat_map(|p| {
+            .flat_map(|p| {
                 p.starts
                     .iter()
                     .chain(p.completed.iter())
@@ -117,112 +65,12 @@ impl Ledger {
                     .chain(p.inflight.values().filter_map(|s| s.map(|s| s.at)))
                     .chain(p.backoff.map(|s| s.at))
                     .chain(p.initialize.map(|s| s.at))
-            }))
+            })
             .filter(|at| *at > now)
             .min()
     }
-    pub(super) fn load(path: &Path) -> (Self, bool) {
-        let raw = match storage::read_optional(path) {
-            Ok(None) => return (Self::default(), false),
-            Ok(Some(raw)) => raw,
-            _ => return (Self::default(), true),
-        };
-        let saved = match serde_json::from_slice::<Saved>(&raw) {
-            Ok(saved) if saved.version <= 2 => saved,
-            _ => {
-                let ledger = Self {
-                    legacy_until: Some(Stamp::after(WINDOW)),
-                    ..Default::default()
-                };
-                let failed =
-                    storage::preserve_corrupt(path, &raw).is_err() || ledger.save(path).is_err();
-                return (ledger, failed);
-            }
-        };
-        let mut ledger = Self {
-            legacy_until: if saved.version < 2 {
-                Some(Stamp::after(WINDOW))
-            } else {
-                saved
-                    .legacy_until
-                    .and_then(|at| Stamp::deadline(at, WINDOW))
-            },
-            ..Default::default()
-        };
-        for (id, values) in saved.providers {
-            let p = ledger.providers.entry(id).or_default();
-            p.starts = values.into_iter().filter_map(Stamp::history).collect();
-            p.starts.make_contiguous().sort_by_key(|s| s.at);
-        }
-        for (id, protection) in saved.protection {
-            let p = ledger.providers.entry(id).or_default();
-            p.completed = protection
-                .completed
-                .into_iter()
-                .filter_map(Stamp::history)
-                .collect();
-            p.completed.make_contiguous().sort_by_key(|s| s.at);
-            p.backoff = protection
-                .backoff
-                .and_then(|at| Stamp::deadline(at, Duration::from_secs(86400)));
-            p.initialize = protection
-                .initialize
-                .and_then(|at| Stamp::deadline(at, WINDOW));
-            p.inflight = protection
-                .inflight
-                .into_iter()
-                .filter_map(|(id, deadline)| {
-                    let until = match deadline {
-                        None => Some(Stamp::after(WINDOW)),
-                        Some(at) => Stamp::deadline(at, WINDOW),
-                    };
-                    until.map(|until| (id, Some(until)))
-                })
-                .collect();
-        }
-        // Persist recovery exactly once. A failed conversion must fail closed.
-        let failed = ledger.save(path).is_err();
-        (ledger, failed)
-    }
-    pub(super) fn save(&self, path: &Path) -> storage::Result<()> {
-        let saved = Saved {
-            version: 2,
-            legacy_until: self.legacy_until.map(|s| s.wall),
-            providers: self
-                .providers
-                .iter()
-                .map(|(id, p)| (id.clone(), p.starts.iter().map(|s| s.wall).collect()))
-                .collect(),
-            protection: self
-                .providers
-                .iter()
-                .map(|(id, p)| {
-                    (
-                        id.clone(),
-                        SavedProtection {
-                            completed: p.completed.iter().map(|s| s.wall).collect(),
-                            inflight: p
-                                .inflight
-                                .iter()
-                                .map(|(id, deadline)| (id.clone(), deadline.map(|s| s.wall)))
-                                .collect(),
-                            backoff: p.backoff.map(|s| s.wall),
-                            initialize: p.initialize.map(|s| s.wall),
-                        },
-                    )
-                })
-                .collect(),
-        };
-        let bytes = serde_json::to_vec(&saved).map_err(|_| {
-            storage::AppError::new(crate::errors::code::RPM_LEDGER, "无法保存 RPM 状态")
-        })?;
-        storage::atomic_write(path, &bytes, None)
-    }
     pub(super) fn prune(&mut self) {
         let now = Instant::now();
-        if self.legacy_until.is_some_and(|s| s.at <= now) {
-            self.legacy_until = None;
-        }
         self.providers.retain(|_, p| {
             p.starts.retain(|s| now.duration_since(s.at) < WINDOW);
             p.completed.retain(|s| now.duration_since(s.at) < WINDOW);
@@ -264,9 +112,6 @@ impl Ledger {
         }
         if limit > 0 {
             let limit = limit as usize;
-            if let Some(init) = self.legacy_until {
-                add(init.at, RpmWaitReason::CompletionWindow);
-            }
             let provider = self.providers.get(id);
             let starts = provider.map_or(0, |p| p.starts.len());
             if starts.saturating_add(pending) >= limit {
@@ -308,33 +153,18 @@ impl Ledger {
         }
         blocked.map(|(at, reason)| (at.saturating_duration_since(now), reason))
     }
-    pub(super) fn charge(&mut self, id: &str) -> Charge {
+    pub(super) fn charge(&mut self, id: &str) -> String {
         let at = Stamp::now();
         let token = uuid::Uuid::new_v4().to_string();
         let p = self.providers.entry(id.into()).or_default();
         p.starts.push_back(at);
         p.inflight.insert(token.clone(), None);
-        Charge { token, at }
-    }
-    // Only retract a failed, unsent charge; other concurrent starts stay intact.
-    pub(super) fn retract(&mut self, id: &str, charge: &Charge) {
-        let Some(p) = self.providers.get_mut(id) else {
-            return;
-        };
-        p.inflight.remove(&charge.token);
-        if let Some(index) = p
-            .starts
-            .iter()
-            .position(|s| s.at == charge.at.at && s.wall == charge.at.wall)
-        {
-            p.starts.remove(index);
-        }
+        token
     }
     #[cfg(test)]
     pub(super) fn commit(&mut self, id: &str, _limit: u32) -> Option<String> {
-        Some(self.charge(id).token)
+        Some(self.charge(id))
     }
-    #[cfg(test)]
     pub(super) fn settle(&mut self, id: &str, token: &str, result: Settlement) {
         self.settle_at(id, token, result, Stamp::now());
     }
@@ -349,13 +179,8 @@ impl Ledger {
             Settlement::Success => p.completed.push_back(at),
             Settlement::Failed => (),
             Settlement::Uncertain => {
-                p.inflight.insert(
-                    token.into(),
-                    Some(Stamp {
-                        at: at.at + WINDOW,
-                        wall: at.wall.saturating_add(WINDOW.as_millis() as i64),
-                    }),
-                );
+                p.inflight
+                    .insert(token.into(), Some(Stamp { at: at.at + WINDOW }));
             }
         }
     }

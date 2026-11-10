@@ -96,14 +96,7 @@ fn failed_pin_write_for_another_thread_does_not_block_existing_selection() {
     assert_eq!(selected, primary);
     // A failed refresh preserves the known endpoint and waits before retrying.
     let key = pin_key(&provider, "thread", existing_thread);
-    service
-        .pins
-        .lock()
-        .unwrap()
-        .entries
-        .get_mut(&key)
-        .unwrap()
-        .updated = now().saturating_sub(60_001);
+    service.pins.lock().unwrap().get_mut(&key).unwrap().updated = now().saturating_sub(60_001);
     let before_refresh = now();
     assert_eq!(
         service
@@ -111,7 +104,7 @@ fn failed_pin_write_for_another_thread_does_not_block_existing_selection() {
             .unwrap(),
         primary
     );
-    let attempted = service.pins.lock().unwrap().entries[&key].updated;
+    let attempted = service.pins.lock().unwrap()[&key].updated;
     assert!(attempted >= before_refresh);
     assert_eq!(
         service
@@ -119,10 +112,7 @@ fn failed_pin_write_for_another_thread_does_not_block_existing_selection() {
             .unwrap(),
         primary
     );
-    assert_eq!(
-        service.pins.lock().unwrap().entries[&key].updated,
-        attempted
-    );
+    assert_eq!(service.pins.lock().unwrap()[&key].updated, attempted);
     assert!(path.is_dir());
 }
 
@@ -130,7 +120,9 @@ fn failed_pin_write_for_another_thread_does_not_block_existing_selection() {
 fn successful_initial_pin_matches_the_persisted_entries() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("endpoint-owners.json");
+    fs::write(&path, b"{corrupt").unwrap();
     let service = Service::new(path.clone());
+    assert!(service.pins.lock().unwrap().is_empty());
     let provider = fixture_provider("https://primary.example.invalid/v1");
     let thread = "fixture-thread";
 
@@ -145,7 +137,7 @@ fn successful_initial_pin_matches_the_persisted_entries() {
         .unwrap();
 
     assert_eq!(selected, provider.base_url);
-    let entries = pin_snapshot(&service.pins.lock().unwrap().entries);
+    let entries = pin_snapshot(&service.pins.lock().unwrap());
     let key = pin_key(&provider, "thread", thread);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[&key].0, digest(&provider.base_url));
@@ -254,7 +246,7 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
         }
     };
     let upstream_hits = hits.load(Ordering::SeqCst);
-    let owner_count = gateway.0.endpoints.pins.lock().unwrap().entries.len();
+    let owner_count = gateway.0.endpoints.pins.lock().unwrap().len();
     gateway.stop().await.unwrap();
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

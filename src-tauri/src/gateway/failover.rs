@@ -225,7 +225,7 @@ impl Tracker {
         let category = match reason {
             Rejected::Full | Rejected::Timeout => Some(Exclusion::Capacity),
             Rejected::Cooling(_) => Some(Exclusion::Health),
-            Rejected::RateLimited(_) | Rejected::RateLedger => Some(Exclusion::Rpm),
+            Rejected::RateLimited(_) => Some(Exclusion::Rpm),
             Rejected::Model => Some(Exclusion::Model),
             Rejected::Policy => Some(Exclusion::ConversationPolicy),
             _ => None,

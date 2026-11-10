@@ -40,10 +40,6 @@ const NATIVE_CREATED: &str =
     r#"{"type":"response.created","response":{"id":"fixture-rpm-ws","model":"fixture-model"}}"#;
 const NATIVE_COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-rpm-ws","model":"fixture-model","status":"completed"}}"#;
 
-fn wall_now() -> i64 {
-    super::super::admission::now_wall_ms()
-}
-
 fn provider(version: &str, queued: bool, max_rpm: u32) -> Provider {
     Provider {
         id: PROVIDER.into(),
@@ -82,9 +78,9 @@ fn route(provider: Provider) -> Route {
     }
 }
 
-fn scheduler(path: &Path) -> Scheduler {
+fn scheduler(_path: &Path) -> Scheduler {
     let (events, _) = broadcast::channel(32);
-    Scheduler::new(events, path.to_path_buf())
+    Scheduler::new(events)
 }
 
 async fn fill_failed_rpm_requests(scheduler: &Scheduler, route: &Route, limit: u32) {
@@ -618,7 +614,7 @@ async fn canceled_pending_rpm_reservations_release_capacity_without_serializing_
     held.push(replacement);
 
     drop(held);
-    assert_eq!(scheduler.rpm_status(PROVIDER, 10), (0, 0, false, false));
+    assert_eq!(scheduler.rpm_status(PROVIDER, 10), (0, 0, false));
 }
 
 #[tokio::test(start_paused = true)]
@@ -992,66 +988,6 @@ fn localized_platform_rpm_limits_are_classified_only_in_error_envelopes() {
     assert_ne!(details.error_basis, Some(crate::events::ErrorBasis::Rpm));
 }
 
-#[test]
-fn legacy_ledger_preserves_starts_and_adds_a_61_second_initialization_guard() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("rpm.json");
-    let now = wall_now();
-    fs::write(
-        &path,
-        serde_json::to_vec(&json!({
-            "version": 1,
-            "providers": {PROVIDER: [now]},
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let (ledger, error) = Ledger::load(&path);
-    assert!(!error);
-    assert_eq!(ledger.used(PROVIDER), 1);
-    let init = ledger.legacy_until.expect("legacy initialization guard");
-    assert!(init.at > tokio::time::Instant::now());
-    assert!(init.at.duration_since(tokio::time::Instant::now()) <= WINDOW);
-    // One send does not fill a two-RPM send window, isolating the initialization guard.
-    assert_eq!(
-        ledger.gate(PROVIDER, 2, 0).unwrap().1,
-        crate::events::RpmWaitReason::CompletionWindow
-    );
-}
-
-#[test]
-fn recovery_preserves_crash_inflight_and_clamps_future_wall_clock_starts() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("rpm.json");
-    let now = wall_now();
-    fs::write(
-        &path,
-        serde_json::to_vec(&json!({
-            "version": 2,
-            "providers": {PROVIDER: [now + 3_600_000]},
-            "protection": {PROVIDER: {"inflight": {"crashed": null}, "last": now}},
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let loaded_at = StdInstant::now();
-    let (mut ledger, error) = Ledger::load(&path);
-    assert!(!error);
-    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["version"], 2);
-    assert!(saved["protection"][PROVIDER].get("last").is_none());
-    assert_eq!(ledger.used(PROVIDER), 1);
-    let p = ledger.providers.get_mut(PROVIDER).expect("provider ledger");
-    assert_eq!(p.inflight.len(), 1);
-    p.starts.clear();
-    let (delay, reason) = gate_delay(&ledger, 1);
-    assert_eq!(reason, crate::events::RpmWaitReason::CompletionWindow);
-    assert!(delay <= WINDOW);
-    assert!(
-        delay.saturating_add(loaded_at.elapsed()) >= WINDOW.saturating_sub(Duration::from_secs(1))
-    );
-}
-
 #[tokio::test]
 async fn unlimited_to_limited_revalidates_existing_start_and_enables_initialization_guard() {
     tokio::time::pause();
@@ -1070,56 +1006,9 @@ async fn unlimited_to_limited_revalidates_existing_start_and_enables_initializat
 
     let limited = provider("v1", true, 1);
     scheduler.configure(std::slice::from_ref(&limited), true);
-    let (_, retry, limited_now, error) = scheduler.rpm_status(PROVIDER, 1);
+    let (_, retry, limited_now) = scheduler.rpm_status(PROVIDER, 1);
     assert!(limited_now);
-    assert!(!error);
     assert!(retry >= WINDOW.as_secs());
-}
-
-#[tokio::test]
-async fn persistence_failure_fails_closed_for_limited_rpm() {
-    tokio::time::pause();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("rpm.json");
-    let scheduler = scheduler(&path);
-    let p = provider("v1", true, 1);
-    scheduler.configure(std::slice::from_ref(&p), true);
-    assert!(!scheduler.rpm_status(PROVIDER, 1).3);
-    // Obstruct the destination after a successful load, so this exercises the
-    // pre-send save on every platform, not platform-specific ENOTDIR mapping.
-    fs::create_dir(&path).unwrap();
-    let mut budget = Budget::new(1);
-    let mut admission = scheduler
-        .acquire_for_immediate(
-            &[route(p.clone())],
-            false,
-            8,
-            &mut budget,
-            &Requirement::Resource,
-            true,
-        )
-        .await
-        .expect("reservation before the first write");
-    assert!(matches!(
-        admission.commit_rpm().await,
-        Err(Rejected::RateLedger)
-    ));
-    drop(admission);
-    assert_eq!(scheduler.rpm_status(PROVIDER, 1).0, 0);
-    let (_, _, _, error) = scheduler.rpm_status(PROVIDER, 1);
-    assert!(error);
-    let mut budget = Budget::new(1);
-    let result = scheduler
-        .acquire_for_immediate(
-            &[route(p)],
-            false,
-            8,
-            &mut budget,
-            &Requirement::Resource,
-            true,
-        )
-        .await;
-    assert!(matches!(result, Err(Rejected::RateLedger)));
 }
 
 #[tokio::test]
@@ -1223,11 +1112,10 @@ async fn protocol_failure_releases_completion_but_keeps_send_start_and_output_by
             .load(std::sync::atomic::Ordering::Relaxed),
         17
     );
-    let (used, retry, limited, error) = scheduler.rpm_status(PROVIDER, 1);
+    let (used, retry, limited) = scheduler.rpm_status(PROVIDER, 1);
     assert_eq!(used, 1);
     assert!(limited);
     assert!(retry >= WINDOW.as_secs());
-    assert!(!error);
 }
 
 #[tokio::test]
@@ -1322,9 +1210,7 @@ async fn completion_window_settles_success_once_across_cancellation_tail() {
     protocol.finish_usage_tail("upstream_eof");
     protocol.finish_usage_tail("upstream_eof");
 
-    assert!(scheduler.flush_rpm().await);
-    let (ledger, error) = Ledger::load(&path);
-    assert!(!error);
+    let ledger = scheduler.rpm_ledger();
     let p = ledger.providers.get(PROVIDER).expect("provider ledger");
     assert_eq!(p.completed.len(), 1);
     assert!(p.inflight.is_empty());
@@ -1363,9 +1249,7 @@ data: {"type":"response.created","response":{"id":"fixture"}}
         Some(crate::gateway::protocol::Terminal::Failure)
     );
 
-    assert!(scheduler.flush_rpm().await);
-    let (ledger, error) = Ledger::load(&path);
-    assert!(!error);
+    let ledger = scheduler.rpm_ledger();
     let p = ledger.providers.get(PROVIDER).expect("provider ledger");
     assert!(p.completed.is_empty());
     assert_eq!(p.inflight.len(), 1);
@@ -1411,48 +1295,4 @@ async fn native_websocket_two_rounds_reuse_one_handshake_and_preserve_request_by
     drop(client);
     gateway.stop().await.unwrap();
     drop(dir);
-}
-
-#[tokio::test]
-async fn websocket_cancel_during_rpm_write_does_not_dispatch_and_keeps_connection_usable() {
-    let upstream = native_ws_loopback().await;
-    let (_dir, gateway) = started_native_gateway(upstream.port, 10).await;
-    let mut client = gateway_ws_client(&gateway).await;
-    let (ready, release) = gateway.0.admission.hold_rpm_write();
-    client
-        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), ready)
-        .await
-        .unwrap()
-        .unwrap();
-    client
-        .send(yawc::Frame::text(
-            r#"{"type":"response.cancel"}"#.to_owned(),
-        ))
-        .await
-        .unwrap();
-    assert!(gateway_ws_next(&mut client)
-        .await
-        .as_str()
-        .contains("response.cancelled"));
-    assert_eq!(upstream.seen.lock().unwrap().len(), 0);
-    drop(release);
-    assert!(gateway.0.admission.flush_rpm().await);
-    client
-        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
-        .await
-        .unwrap();
-    assert!(gateway_ws_next(&mut client)
-        .await
-        .as_str()
-        .contains("response.created"));
-    assert!(gateway_ws_next(&mut client)
-        .await
-        .as_str()
-        .contains("response.completed"));
-    assert_eq!(upstream.seen.lock().unwrap().len(), 1);
-    drop(client);
-    gateway.stop().await.unwrap();
 }

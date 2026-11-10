@@ -119,23 +119,8 @@ async fn v0255_wait_for_no_active_requests(gateway: &Gateway) {
     .await;
 }
 
-fn v0255_read_reservations(dir: &tempfile::TempDir) -> std::result::Result<Option<Value>, String> {
-    let bytes = match std::fs::read(dir.path().join("thread-reservations.json")) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("read error kind={:?}", error.kind())),
-    };
-    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-        format!(
-            "invalid JSON at line {} column {}",
-            error.line(),
-            error.column()
-        )
-    })
-}
-
-fn v0255_reservations(dir: &tempfile::TempDir) -> Option<Value> {
-    v0255_read_reservations(dir).ok().flatten()
+fn v0255_reservations(gateway: &Gateway) -> Value {
+    serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap()
 }
 
 fn v0255_reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Option<Value> {
@@ -147,7 +132,7 @@ fn v0255_reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Op
 }
 
 async fn v0255_wait_for_owner_reservation(
-    dir: &tempfile::TempDir,
+    _dir: &tempfile::TempDir,
     gateway: &Gateway,
     thread: &str,
     provider: &str,
@@ -155,22 +140,15 @@ async fn v0255_wait_for_owner_reservation(
     phase: &str,
 ) -> (Value, Value) {
     let mut last_snapshot = json!({"status": "not read"});
-    let mut last_read = String::from("not read");
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match v0255_read_reservations(dir) {
-                Ok(Some(snapshot)) => {
-                    last_read = String::from("ok");
-                    last_snapshot =
-                        v0255_synthetic_reservation_snapshot(&snapshot, thread, fixture_providers);
-                    if let Some(entry) = v0255_reservation_entry(&snapshot, thread, provider) {
-                        if entry["busy"] == false {
-                            break (snapshot, entry);
-                        }
-                    }
+            let snapshot = v0255_reservations(gateway);
+            last_snapshot =
+                v0255_synthetic_reservation_snapshot(&snapshot, thread, fixture_providers);
+            if let Some(entry) = v0255_reservation_entry(&snapshot, thread, provider) {
+                if entry["busy"] == false {
+                    break (snapshot, entry);
                 }
-                Ok(None) => last_read = String::from("not written yet"),
-                Err(error) => last_read = error,
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -193,8 +171,7 @@ async fn v0255_wait_for_owner_reservation(
                 })
                 .collect::<Vec<_>>();
             panic!(
-                "fixture owner reservation timed out at phase={phase}; synthetic_snapshot={last_snapshot}; snapshot_read={last_read}; in_memory={in_memory:?}; retention_error={}",
-                gateway.0.admission.retention_error()
+                "fixture owner reservation timed out at phase={phase}; synthetic_snapshot={last_snapshot}; in_memory={in_memory:?}",
             );
         }
     }
@@ -483,7 +460,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         0,
         "model detours must not add the side provider to the 300-second reservations"
     );
-    let reservations = v0255_reservations(&dir).unwrap();
+    let reservations = v0255_reservations(&gateway);
     assert_eq!(reservations.as_array().unwrap().len(), 1);
     assert!(v0255_reservation_entry(&reservations, &thread_hash, &ids[1]).is_none());
 
