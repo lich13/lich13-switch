@@ -34,6 +34,7 @@ export default function UsageBill({
   const [clients, setClients] = useState("both");
   const [from, setFrom] = useState(localSecond(start ?? 0));
   const [to, setTo] = useState(localSecond(end ?? Date.now()));
+  const [clean, setClean] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -63,6 +64,7 @@ export default function UsageBill({
                 start: first!,
                 end: last!,
                 timezone: zone,
+                clean,
               },
             });
             if (result) saved(result);
@@ -121,6 +123,17 @@ export default function UsageBill({
             />
           </label>
         </div>
+        <label className="usage-bill-clean">
+          <input
+            type="checkbox"
+            checked={clean}
+            disabled={busy}
+            onChange={(e) => setClean(e.target.checked)}
+          />
+          <span>
+            删除历史记录用量（同步清理所选范围已导出的明细与统计汇总）
+          </span>
+        </label>
         <dl className="usage-bill-scope">
           <dt>时区</dt>
           <dd>{zone}</dd>
@@ -130,7 +143,9 @@ export default function UsageBill({
           </dd>
           <dt>清理范围</dt>
           <dd>
-            所选客户端 {display(from)} 至 {display(to)} 的已导出明细与统计汇总。
+            {clean
+              ? `所选客户端 ${display(from)} 至 ${display(to)} 的已导出明细与统计汇总。`
+              : "不删除历史记录（仅导出账单 CSV，保留全部用量明细与统计汇总）。"}
           </dd>
         </dl>
         {error && (
@@ -143,7 +158,7 @@ export default function UsageBill({
             取消
           </button>
           <button className="primary" disabled={busy || !valid}>
-            {busy ? "正在导出…" : "导出并清理"}
+            {busy ? "正在导出…" : clean ? "导出并清理" : "开始导出"}
           </button>
         </div>
       </form>

@@ -1745,7 +1745,7 @@ it.each(["sync", "export"])(
         screen.getByRole("button", { name: "补全 Antigravity 历史" }),
       );
     } else {
-      fireEvent.click(screen.getByRole("button", { name: "导出并清理" }));
+      fireEvent.click(screen.getByRole("button", { name: "开始导出" }));
     }
     await waitFor(() =>
       expect(calls("get_usage_dashboard")).toHaveLength(before + 1),

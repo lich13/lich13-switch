@@ -316,7 +316,11 @@ pub async fn export_usage_bill(
         let Some(file) = app
             .dialog()
             .file()
-            .set_title("导出账单并清理明细")
+            .set_title(if request.clean {
+                "导出账单并清理明细"
+            } else {
+                "导出账单"
+            })
             .set_file_name(&default_name)
             .add_filter("CSV", &["csv"])
             .blocking_save_file()

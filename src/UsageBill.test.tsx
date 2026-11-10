@@ -5,11 +5,11 @@ const mock = vi.hoisted(() => ({ command: vi.fn() }));
 vi.mock("./bridge", () => mock);
 import UsageBill, { billTime, localSecond } from "./UsageBill";
 beforeEach(() => mock.command.mockReset());
-it("exports the selected clients at second boundaries and distinguishes cleanup range", async () => {
+it("exports the selected clients without deleting history by default and cleans when checked", async () => {
   mock.command.mockResolvedValue({
     requests: 28,
     attempts: 30,
-    cleaned: 40,
+    cleaned: 0,
     retained: 0,
     cleanupError: null,
   });
@@ -23,18 +23,35 @@ it("exports the selected clients at second boundaries and distinguishes cleanup 
     />,
   );
   expect(screen.getByLabelText("开始")).toHaveAttribute("step", "1");
-  expect(screen.getByText(/已导出明细与统计汇总/)).toBeVisible();
-  expect(
-    screen.queryByText(/同步清理该范围的明细与统计汇总/),
-  ).not.toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "导出并清理" }));
-  await waitFor(() => expect(saved).toHaveBeenCalled());
-  expect(mock.command).toHaveBeenCalledWith("export_usage_bill", {
+  const cleanBox = screen.getByRole("checkbox", {
+    name: /删除历史记录用量/,
+  });
+  expect(cleanBox).not.toBeChecked();
+  expect(screen.getByText(/不删除历史记录/)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "开始导出" }));
+  await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+  expect(mock.command).toHaveBeenLastCalledWith("export_usage_bill", {
     request: {
       clients: ["claude", "antigravity"],
       start: 1_740_000_001_000,
       end: 1_740_000_099_000,
       timezone: expect.any(String),
+      clean: false,
+    },
+  });
+
+  await userEvent.click(cleanBox);
+  expect(cleanBox).toBeChecked();
+  expect(screen.getByText(/已导出明细与统计汇总。/)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "导出并清理" }));
+  await waitFor(() => expect(saved).toHaveBeenCalledTimes(2));
+  expect(mock.command).toHaveBeenLastCalledWith("export_usage_bill", {
+    request: {
+      clients: ["claude", "antigravity"],
+      start: 1_740_000_001_000,
+      end: 1_740_000_099_000,
+      timezone: expect.any(String),
+      clean: true,
     },
   });
 });
@@ -46,13 +63,13 @@ it("preserves the dialog after native cancellation or failed save", async () => 
     close = vi.fn();
   render(<UsageBill close={close} saved={saved} />);
   await userEvent.selectOptions(screen.getByLabelText("客户端"), "claude");
-  await userEvent.click(screen.getByRole("button", { name: "导出并清理" }));
+  await userEvent.click(screen.getByRole("button", { name: "开始导出" }));
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "导出并清理" })).toBeEnabled(),
+    expect(screen.getByRole("button", { name: "开始导出" })).toBeEnabled(),
   );
   expect(saved).not.toHaveBeenCalled();
   expect(close).not.toHaveBeenCalled();
-  await userEvent.click(screen.getByRole("button", { name: "导出并清理" }));
+  await userEvent.click(screen.getByRole("button", { name: "开始导出" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("保存失败");
   expect(saved).not.toHaveBeenCalled();
 });

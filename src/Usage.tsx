@@ -775,7 +775,9 @@ export default function Usage({
           saved={(result) => {
             setBillOpen(false);
             setBillResult(
-              `已导出 ${numeric(result.requests)} 个请求、${numeric(result.attempts)} 次尝试，清理 ${numeric(result.cleaned)} 条已导出记录与对应统计${result.retained ? `，保留 ${numeric(result.retained)} 条更新记录` : ""}。${result.cleanupError ?? ""}`,
+              result.cleaned || result.retained || result.cleanupError
+                ? `已导出 ${numeric(result.requests)} 个请求、${numeric(result.attempts)} 次尝试，清理 ${numeric(result.cleaned)} 条已导出记录与对应统计${result.retained ? `，保留 ${numeric(result.retained)} 条更新记录` : ""}。${result.cleanupError ?? ""}`
+                : `已导出 ${numeric(result.requests)} 个请求、${numeric(result.attempts)} 次尝试。`,
             );
             void load(true);
           }}

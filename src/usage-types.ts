@@ -459,6 +459,7 @@ export type BillRequest = {
   start: number;
   end: number;
   timezone: string;
+  clean?: boolean;
 };
 export type BillExport = {
   requests: number;

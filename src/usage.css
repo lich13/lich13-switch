@@ -1267,7 +1267,7 @@
   min-width: 0;
 }
 .usage-bill-form select,
-.usage-bill-form input {
+.usage-bill-form input:not([type="checkbox"]) {
   width: 100%;
   min-width: 0;
   height: 36px;
@@ -1277,6 +1277,18 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   font: inherit;
+}
+.usage-bill-form label.usage-bill-clean {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.usage-bill-form input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
 }
 .usage-bill-times {
   display: grid;

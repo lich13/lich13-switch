@@ -23,6 +23,8 @@ pub struct Request {
     pub start: i64,
     pub end: i64,
     pub timezone: String,
+    #[serde(default)]
+    pub clean: bool,
 }
 impl Request {
     pub fn validate(&self) -> Result<()> {
@@ -487,9 +489,11 @@ impl Service {
             let spool = Spool::new(&self.0.directory)?;
             let pending = self.read(|s| snapshot(s, &spool, request, &pricing, &settings))?;
             let mut result = save_csv(&spool, request, path)?;
-            result.retained = pending;
-            if let Err(err) = cleanup(self, &spool, request, &mut result) {
-                result.cleanup_error = Some(err.message);
+            if request.clean {
+                result.retained = pending;
+                if let Err(err) = cleanup(self, &spool, request, &mut result) {
+                    result.cleanup_error = Some(err.message);
+                }
             }
             Ok(result)
         })();
@@ -593,6 +597,7 @@ mod tests {
             start: BASE,
             end: BASE + 1000,
             timezone: "UTC".into(),
+            clean: true,
         }
     }
     #[test]
@@ -936,6 +941,7 @@ mod tests {
             start: BASE,
             end: BASE + 1_000,
             timezone: "UTC".into(),
+            clean: true,
         };
         let exported = service.export_bill(&partial_day_range, &bill_path).unwrap();
         assert_eq!(exported.requests, 2);
@@ -960,6 +966,7 @@ mod tests {
             start: BASE - 86_400_000,
             end: BASE + 172_800_000 - 1_000,
             timezone: "UTC".into(),
+            clean: true,
         };
         let second = service
             .export_bill(&full_day_range, &dir.path().join("full-day-bill.csv"))
@@ -986,6 +993,36 @@ mod tests {
             })
             .unwrap();
         assert_eq!(in_window_dashboard.totals.requests, 0);
+    }
+
+    #[test]
+    fn export_bill_without_clean_preserves_records_and_daily_summaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(&dir.path().join("store"));
+        let live = row("keep-live", "claude", BASE + 200);
+        service
+            .query(|s| s.write_batch(std::slice::from_ref(&live), None))
+            .unwrap();
+        let parsed: Request = serde_json::from_value(serde_json::json!({
+            "clients": ["claude", "antigravity"],
+            "start": BASE - 86_400_000,
+            "end": BASE + 172_800_000 - 1_000,
+            "timezone": "UTC"
+        }))
+        .unwrap();
+        assert!(!parsed.clean);
+        let bill_path = dir.path().join("keep-bill.csv");
+        let exported = service.export_bill(&parsed, &bill_path).unwrap();
+        assert_eq!(exported.requests, 1);
+        assert_eq!(exported.attempts, 1);
+        assert_eq!(exported.cleaned, 0);
+        assert_eq!(exported.retained, 0);
+        assert!(exported.cleanup_error.is_none());
+        let csv = std::fs::read_to_string(&bill_path).unwrap();
+        assert!(csv.contains("keep-live"));
+        assert!(service.read(|s| s.detail(&live.id)).is_ok());
+        let dashboard = service.read(|s| s.dashboard(&Filter::default())).unwrap();
+        assert_eq!(dashboard.totals.requests, 1);
     }
 
     #[test]
