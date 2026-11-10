@@ -396,7 +396,7 @@ async fn shared_tcp_connection_reuses_client_auth_and_preserves_request_and_sse_
     let response = send(
         &mut sender,
         fixture.listener_port,
-        "/codex/v1/responses?state=%2f&next=%2F+%2520",
+        "/v1/responses?state=%2f&next=%2F+%2520",
         &codex_token,
         REQUEST_BODY,
         Some("text/event-stream"),
@@ -408,8 +408,8 @@ async fn shared_tcp_connection_reuses_client_auth_and_preserves_request_and_sse_
     let response = send(
         &mut sender,
         fixture.listener_port,
-        "/claude/v1/messages",
-        &codex_token,
+        "/v1/messages",
+        "gs_fixture_wrong_token",
         REQUEST_BODY,
         None,
     )
@@ -420,7 +420,7 @@ async fn shared_tcp_connection_reuses_client_auth_and_preserves_request_and_sse_
     let response = send(
         &mut sender,
         fixture.listener_port,
-        "/claude/v1/messages",
+        "/v1/messages",
         &claude_token,
         REQUEST_BODY,
         None,
@@ -432,8 +432,8 @@ async fn shared_tcp_connection_reuses_client_auth_and_preserves_request_and_sse_
     let response = send(
         &mut sender,
         fixture.listener_port,
-        "/codex/v1/responses",
-        &claude_token,
+        "/v1/responses",
+        "gs_fixture_wrong_token",
         REQUEST_BODY,
         None,
     )
@@ -444,7 +444,7 @@ async fn shared_tcp_connection_reuses_client_auth_and_preserves_request_and_sse_
     let response = send(
         &mut sender,
         fixture.listener_port,
-        "/codex/v1/responses",
+        "/v1/responses",
         &codex_token,
         REQUEST_BODY,
         Some("text/event-stream"),
@@ -514,7 +514,7 @@ async fn stopping_claude_cancels_an_incomplete_upload_and_keeps_codex_live() {
         .await
         .unwrap();
     let headers = format!(
-        "POST /claude/v1/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n",
+        "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n",
         fixture.listener_port
     );
     upload.write_all(headers.as_bytes()).await.unwrap();
@@ -541,7 +541,7 @@ async fn stopping_claude_cancels_an_incomplete_upload_and_keeps_codex_live() {
 
     let (status, body) = one_request(
         &fixture.codex,
-        "/codex/v1/responses",
+        "/v1/responses",
         br#"{"model":"fixture-shared-model","input":"fixture"}"#,
     )
     .await;
@@ -598,7 +598,7 @@ async fn stopping_claude_cancels_first_byte_wait_while_codex_keeps_serving() {
     let claude_token = fixture.local_token(&fixture.claude);
     let request = Request::builder()
         .method("POST")
-        .uri("/claude/v1/messages")
+        .uri("/v1/messages")
         .header("host", format!("127.0.0.1:{}", fixture.listener_port))
         .header("authorization", format!("Bearer {claude_token}"))
         .header("content-type", "application/json")
@@ -636,7 +636,7 @@ async fn stopping_claude_cancels_first_byte_wait_while_codex_keeps_serving() {
 
     let (status, body) = one_request(
         &fixture.codex,
-        "/codex/v1/responses",
+        "/v1/responses",
         br#"{"model":"fixture-shared-model","input":"fixture"}"#,
     )
     .await;
@@ -733,7 +733,7 @@ async fn stopping_claude_closes_its_active_websocket_and_keeps_codex_live() {
     let claude_token = fixture.local_token(&fixture.claude);
     let mut socket = yawc::WebSocket::connect(
         format!(
-            "ws://127.0.0.1:{}/claude/v1/responses",
+            "ws://127.0.0.1:{}/v1/responses",
             fixture.listener_port
         )
         .parse()
@@ -778,7 +778,7 @@ async fn stopping_claude_closes_its_active_websocket_and_keeps_codex_live() {
 
     let (status, body) = one_request(
         &fixture.codex,
-        "/codex/v1/responses",
+        "/v1/responses",
         br#"{"model":"fixture-shared-model","input":"fixture"}"#,
     )
     .await;

@@ -114,22 +114,10 @@ fn fixture(initial: State) -> (tempfile::TempDir, Service, Arc<MockHelper>) {
         calls: Mutex::new(Vec::new()),
     });
     let service = Service {
-        path: dir.path().join("clamshell-restore.json"),
         system: helper.clone(),
         lock: Mutex::new(()),
     };
     (dir, service, helper)
-}
-
-fn legacy(service: &Service) {
-    std::fs::write(&service.path, r#"{"version":1,"minutes":137}"#).unwrap();
-}
-
-fn assert_legacy(service: &Service) {
-    assert_eq!(
-        std::fs::read_to_string(&service.path).unwrap(),
-        r#"{"version":1,"minutes":137}"#
-    );
 }
 
 #[test]
@@ -150,7 +138,6 @@ fn missing_and_needs_repair_authorize_once_then_apply_the_original_intent() {
                 "fixture-after",
             );
             let (_dir, service, helper) = fixture(original.clone());
-            legacy(&service);
             helper.repair_to(prepared.clone());
             helper.reply(actual.clone(), None);
 
@@ -160,18 +147,16 @@ fn missing_and_needs_repair_authorize_once_then_apply_the_original_intent() {
                 *helper.calls.lock().unwrap(),
                 [(prepared, !enabled, minutes)]
             );
-            assert!(!service.path.exists());
         }
     }
 }
 
 #[test]
-fn cancelled_authorization_and_failed_repair_preserve_power_and_legacy_record() {
+fn cancelled_authorization_and_failed_repair_preserve_power() {
     for helper_status in ["missing", "needsRepair"] {
         for code in ["POWER_AUTH", "POWER_HELPER"] {
             let original = state(helper_status, false, 7, "none", "fixture-before");
             let (_dir, service, helper) = fixture(original.clone());
-            legacy(&service);
             *helper.repair_error.lock().unwrap() = Some(code);
             assert_eq!(
                 service.set(true, &original.revision).unwrap_err().code,
@@ -180,7 +165,6 @@ fn cancelled_authorization_and_failed_repair_preserve_power_and_legacy_record() 
             assert_eq!(service.state().unwrap(), original);
             assert_eq!(helper.repair_count(), 1);
             assert!(helper.calls.lock().unwrap().is_empty());
-            assert_legacy(&service);
         }
     }
 }
@@ -216,7 +200,6 @@ fn external_power_changes_during_repair_stop_before_apply() {
             _ => prepared.external_changed = true,
         }
         let (_dir, service, helper) = fixture(original.clone());
-        legacy(&service);
         helper.repair_to(prepared.clone());
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
@@ -226,7 +209,6 @@ fn external_power_changes_during_repair_stop_before_apply() {
         assert_eq!(service.state().unwrap(), prepared);
         assert_eq!(helper.repair_count(), 1);
         assert!(helper.calls.lock().unwrap().is_empty());
-        assert_legacy(&service);
     }
 }
 
@@ -283,7 +265,6 @@ fn apply_errors_are_returned_without_retry_or_rollback() {
         let mut external = state("ready", false, 19, "external", "fixture-external");
         external.external_changed = true;
         let (_dir, service, helper) = fixture(original.clone());
-        legacy(&service);
         helper.reply(external.clone(), Some(code));
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
@@ -292,7 +273,6 @@ fn apply_errors_are_returned_without_retry_or_rollback() {
         assert_eq!(service.state().unwrap(), external);
         assert_eq!(helper.repair_count(), 0);
         assert_eq!(*helper.calls.lock().unwrap(), [(original, true, 7)]);
-        assert_legacy(&service);
     }
 }
 

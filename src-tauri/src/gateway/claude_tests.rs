@@ -201,53 +201,6 @@ async fn editor_and_gateway_start_are_serial_and_use_revision_checks() {
 }
 
 #[tokio::test]
-async fn retired_credentials_migrate_once_without_changing_provider_or_other_files() {
-    let (temp, codex, claude, home) =
-        claude_fixture("https://fixture.invalid/sub", "fixture-token").await;
-    let before_config = std::fs::read(home.join("settings.json")).unwrap();
-    let data = temp.path().join("data/claude");
-    let path = data.join("gateway.json");
-    let original = std::fs::read(&path).unwrap();
-    let mut old: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    old["schema"] = 1.into();
-    old["proxies"] = serde_json::json!([{"id":"retired","password":"obsolete-fixture"}]);
-    old["providers"][0]["proxyId"] = "retired".into();
-    std::fs::write(&path, old.to_string()).unwrap();
-    std::fs::write(data.join("proxy-profiles.json"), "obsolete-fixture").unwrap();
-    let upgraded = codex.companion(data.clone()).unwrap();
-    assert!(!upgraded.view().recovery_pending);
-    assert_eq!(
-        upgraded.view().providers[0].id,
-        claude.view().providers[0].id
-    );
-    assert_eq!(upgraded.view().selected, claude.view().selected);
-    let bytes = std::fs::read(&path).unwrap();
-    assert!(!String::from_utf8_lossy(&bytes).contains("obsolete-fixture"));
-    assert!(!String::from_utf8_lossy(&bytes).contains("proxyId"));
-    assert!(!data.join("proxy-profiles.json").exists());
-    drop(upgraded);
-    let reopened = codex.companion(data.clone()).unwrap();
-    assert_eq!(bytes, std::fs::read(&path).unwrap());
-    assert_eq!(
-        before_config,
-        std::fs::read(home.join("settings.json")).unwrap()
-    );
-    // Cleanup failures stop import and automatic start until retry succeeds.
-    drop(reopened);
-    std::fs::create_dir(data.join("proxy-profiles.json")).unwrap();
-    let blocked = codex.companion(data.clone()).unwrap();
-    assert!(blocked.view().recovery_pending);
-    assert!(blocked.import_initial(&home).is_err());
-    assert!(blocked
-        .start(&blocked.view().revision, &home)
-        .await
-        .is_err());
-    std::fs::remove_dir(data.join("proxy-profiles.json")).unwrap();
-    blocked.stop().await.unwrap();
-    assert!(!blocked.view().recovery_pending);
-}
-
-#[tokio::test]
 #[ignore = "Explicit real Claude CLI and provider acceptance; reads a supplied private settings file and uses an isolated home"]
 async fn real_claude_http_and_cli_stream_isolated() {
     let settings =

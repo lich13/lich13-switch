@@ -9,7 +9,6 @@ mod errors;
 mod fingerprint;
 mod fingerprint_stream;
 mod lm_detector;
-mod migration;
 mod modeltrace;
 mod scheduler;
 mod tokenizer;
@@ -173,25 +172,19 @@ impl Service {
         let gateways = gateways.into();
         let path = directory.join("provider-tests.json");
         let raw = storage::read_bounded(&path, STATE_LIMIT)?;
-        let mut value: Option<Value> = raw
-            .as_deref()
-            .map(serde_json::from_slice)
-            .transpose()
-            .map_err(|_| failure("测试状态无法读取，已保留原文件"))?;
-        let migrated = value
-            .as_mut()
-            .map(|value| migration::migrate(value, &gateways))
-            .transpose()?
-            .unwrap_or(false);
-        let mut saved: Persisted = value
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|_| failure("测试状态无法读取，已保留原文件"))?
-            .unwrap_or_default();
-        if saved.schema != 3 {
-            return Err(failure("测试状态来自更高版本，请升级应用"));
-        }
-        let mut changed = migrated;
+        let (mut saved, mut changed) = match raw.as_deref() {
+            Some(bytes) => match serde_json::from_slice::<Persisted>(bytes)
+                .ok()
+                .filter(|saved| saved.schema == 3)
+            {
+                Some(saved) => (saved, false),
+                None => {
+                    let _ = storage::preserve_corrupt(&path, bytes);
+                    (Persisted::default(), true)
+                }
+            },
+            None => (Persisted::default(), false),
+        };
         for job in &mut saved.jobs {
             if !job.terminal() {
                 if job.automatic && job.started_at.is_some() {

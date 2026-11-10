@@ -6,7 +6,6 @@ use std::{
     process::Command,
 };
 const LABEL: &str = "com.lich13.vela";
-const LEGACY_LABEL: &str = "com.lich13.gpt-switch";
 fn failure() -> AppError {
     AppError::new(code::STARTUP, "LaunchAgent 操作失败，请检查系统登录项设置")
 }
@@ -14,11 +13,6 @@ fn location() -> Result<PathBuf> {
     Ok(dirs::home_dir()
         .ok_or_else(failure)?
         .join("Library/LaunchAgents/com.lich13.vela.plist"))
-}
-fn legacy_location() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .ok_or_else(failure)?
-        .join("Library/LaunchAgents/com.lich13.gpt-switch.plist"))
 }
 fn domain() -> Result<String> {
     let output = Command::new("/usr/bin/id")
@@ -31,16 +25,12 @@ fn domain() -> Result<String> {
         .map_err(|_| failure())?;
     Ok(format!("gui/{uid}"))
 }
-fn disabled_label(output: &str, label: &str) -> bool {
+fn disabled(output: &str) -> bool {
     output
         .lines()
-        .any(|line| line.trim().starts_with(&format!("\"{label}\"")) && line.contains("=> true"))
+        .any(|line| line.trim().starts_with(&format!("\"{LABEL}\"")) && line.contains("=> true"))
 }
-#[cfg(test)]
-fn disabled(output: &str) -> bool {
-    disabled_label(output, LABEL)
-}
-fn system_enabled_label(label: &str) -> Result<bool> {
+fn system_enabled() -> Result<bool> {
     let output = Command::new("/bin/launchctl")
         .args(["print-disabled", &domain()?])
         .output()
@@ -48,13 +38,7 @@ fn system_enabled_label(label: &str) -> Result<bool> {
     if !output.status.success() {
         return Err(failure());
     }
-    Ok(!disabled_label(
-        &String::from_utf8_lossy(&output.stdout),
-        label,
-    ))
-}
-fn system_enabled() -> Result<bool> {
-    system_enabled_label(LABEL)
+    Ok(!disabled(&String::from_utf8_lossy(&output.stdout)))
 }
 fn enabled(value: bool) -> Result<()> {
     let target = format!("{}/{LABEL}", domain()?);
@@ -69,11 +53,11 @@ fn enabled(value: bool) -> Result<()> {
         Err(failure())
     }
 }
-fn document_for_label(executable: &Path, label: &str) -> Result<Vec<u8>> {
+fn document(executable: &Path) -> Result<Vec<u8>> {
     use plist::{Dictionary, Value};
     let exe = executable.to_str().ok_or_else(failure)?;
     let mut d = Dictionary::new();
-    d.insert("Label".into(), Value::String(label.into()));
+    d.insert("Label".into(), Value::String(LABEL.into()));
     d.insert(
         "ProgramArguments".into(),
         Value::Array(vec![
@@ -93,9 +77,6 @@ fn document_for_label(executable: &Path, label: &str) -> Result<Vec<u8>> {
         .map_err(|_| failure())?;
     Ok(bytes)
 }
-fn document(executable: &Path) -> Result<Vec<u8>> {
-    document_for_label(executable, LABEL)
-}
 pub fn actual(executable: &Path) -> Result<bool> {
     let Some(bytes) = storage::read_optional(&location()?)? else {
         return Ok(false);
@@ -110,165 +91,6 @@ pub fn actual(executable: &Path) -> Result<bool> {
         ));
     }
     system_enabled()
-}
-fn legacy_document(bytes: &[u8], executable: &Path) -> bool {
-    let Ok(value) = plist::Value::from_reader_xml(bytes) else {
-        return false;
-    };
-    let Some(dict) = value.as_dictionary() else {
-        return false;
-    };
-    let Some(label) = dict.get("Label").and_then(plist::Value::as_string) else {
-        return false;
-    };
-    if label != LABEL && label != LEGACY_LABEL {
-        return false;
-    }
-    let Some(args) = dict
-        .get("ProgramArguments")
-        .and_then(plist::Value::as_array)
-    else {
-        return false;
-    };
-    let Some(old_path) = args.first().and_then(plist::Value::as_string) else {
-        return false;
-    };
-    if args.len() != 2 {
-        return false;
-    }
-    let current = executable.to_string_lossy();
-    let Some((_, old_arg)) = [
-        ("Vela.app/Contents/MacOS/vela", super::startup::LOGIN_ARG),
-        (
-            "lich13-switch.app/Contents/MacOS/lich13-switch",
-            super::startup::LEGACY_LICH13_LOGIN_ARG,
-        ),
-        (
-            "lich13-Switch.app/Contents/MacOS/lich13-switch",
-            super::startup::LEGACY_LICH13_LOGIN_ARG,
-        ),
-        (
-            "gpt-Switch.app/Contents/MacOS/gpt-switch",
-            super::startup::LEGACY_LOGIN_ARG,
-        ),
-    ]
-    .into_iter()
-    .find(|(old_bundle, old_arg)| {
-        if *old_bundle == "Vela.app/Contents/MacOS/vela" && label != LEGACY_LABEL {
-            return false;
-        }
-        let expected_old = current.replace("Vela.app/Contents/MacOS/vela", old_bundle);
-        old_path == expected_old && args[1].as_string() == Some(*old_arg)
-    }) else {
-        return false;
-    };
-    let Ok(bytes) = document_for_label(Path::new(old_path), label) else {
-        return false;
-    };
-    let Ok(mut expected) = plist::Value::from_reader_xml(bytes.as_slice()) else {
-        return false;
-    };
-    expected
-        .as_dictionary_mut()
-        .unwrap()
-        .get_mut("ProgramArguments")
-        .unwrap()
-        .as_array_mut()
-        .unwrap()[1] = plist::Value::String(old_arg.into());
-    expected == value
-}
-pub fn migrate(executable: &Path) -> Result<()> {
-    let path = location()?;
-    let legacy_path = legacy_location()?;
-    let (old_path, old_label, old) = if let Some(old) = storage::read_optional(&legacy_path)? {
-        (legacy_path.clone(), LEGACY_LABEL, old)
-    } else if let Some(old) = storage::read_optional(&path)? {
-        (path.clone(), LABEL, old)
-    } else {
-        return Ok(());
-    };
-    if !legacy_document(&old, executable) {
-        return Ok(());
-    }
-    let dom = domain()?;
-    let old_target = format!("{dom}/{old_label}");
-    let target = format!("{dom}/{LABEL}");
-    let was_enabled = system_enabled_label(old_label)?;
-    let job = Command::new("/bin/launchctl")
-        .args(["print", &old_target])
-        .output()
-        .map_err(storage::io_error)?;
-    let own_job = String::from_utf8_lossy(&job.stdout)
-        .lines()
-        .any(|line| line.trim() == format!("pid = {}", std::process::id()));
-    let existing_new = storage::read_optional(&path)?;
-    let result = (|| {
-        storage::atomic_write(
-            &path,
-            &document(executable)?,
-            Some(&storage::revision(existing_new.as_deref())),
-        )?;
-        if old_path != path {
-            let _ = std::fs::remove_file(&old_path);
-        }
-        enabled(was_enabled)?;
-        // Never unload the process hosting this migration. Its next login reads
-        // the updated plist. A manual launch can safely refresh an inactive job.
-        if !own_job {
-            if job.status.success() {
-                let _ = Command::new("/bin/launchctl")
-                    .args(["bootout", &old_target])
-                    .output();
-            }
-            if old_label != LABEL {
-                let _ = Command::new("/bin/launchctl")
-                    .args(["disable", &old_target])
-                    .output();
-            }
-            if was_enabled {
-                let registered = Command::new("/bin/launchctl")
-                    .args(["print", &target])
-                    .output()
-                    .map_err(storage::io_error)?
-                    .status
-                    .success();
-                if !registered
-                    && !Command::new("/bin/launchctl")
-                        .arg("bootstrap")
-                        .arg(&dom)
-                        .arg(&path)
-                        .output()
-                        .map_err(storage::io_error)?
-                        .status
-                        .success()
-                {
-                    return Err(failure());
-                }
-            }
-        }
-        if actual(executable)? != was_enabled {
-            return Err(failure());
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        storage::atomic_write(&old_path, &old, None)?;
-        if old_path != path && existing_new.is_none() {
-            let _ = std::fs::remove_file(&path);
-        }
-        if !own_job && job.status.success() {
-            let _ = Command::new("/bin/launchctl")
-                .args(["bootout", &target])
-                .output();
-            let _ = Command::new("/bin/launchctl")
-                .arg("bootstrap")
-                .arg(&dom)
-                .arg(&old_path)
-                .output();
-        }
-        return Err(failure());
-    }
-    Ok(())
 }
 pub fn set(value: bool, executable: &Path) -> Result<()> {
     let path = location()?;
@@ -345,52 +167,5 @@ mod tests {
         assert_eq!(args[1].as_string(), Some(crate::startup::LOGIN_ARG));
         assert!(!disabled("\"com.lich13.vela-other\" => true"));
         assert!(disabled("\"com.lich13.vela\" => true"));
-        let legacy_vela = document_for_label(
-            Path::new("/Applications/Vela.app/Contents/MacOS/vela"),
-            LEGACY_LABEL,
-        )
-        .unwrap();
-        assert!(legacy_document(
-            &legacy_vela,
-            Path::new("/Applications/Vela.app/Contents/MacOS/vela")
-        ));
-        for (old_app, old_arg) in [
-            (
-                "/Applications/gpt-Switch.app/Contents/MacOS/gpt-switch",
-                crate::startup::LEGACY_LOGIN_ARG,
-            ),
-            (
-                "/Applications/lich13-switch.app/Contents/MacOS/lich13-switch",
-                crate::startup::LEGACY_LICH13_LOGIN_ARG,
-            ),
-            (
-                "/Applications/lich13-Switch.app/Contents/MacOS/lich13-switch",
-                crate::startup::LEGACY_LICH13_LOGIN_ARG,
-            ),
-        ] {
-            let mut legacy = plist::Value::from_reader_xml(
-                document_for_label(Path::new(old_app), LEGACY_LABEL)
-                    .unwrap()
-                    .as_slice(),
-            )
-            .unwrap();
-            legacy
-                .as_dictionary_mut()
-                .unwrap()
-                .get_mut("ProgramArguments")
-                .unwrap()
-                .as_array_mut()
-                .unwrap()[1] = plist::Value::String(old_arg.into());
-            let mut bytes = Vec::new();
-            legacy.to_writer_xml(&mut bytes).unwrap();
-            assert!(legacy_document(
-                &bytes,
-                Path::new("/Applications/Vela.app/Contents/MacOS/vela")
-            ));
-            assert!(!legacy_document(
-                &bytes,
-                Path::new("/tmp/Vela.app/Contents/MacOS/vela")
-            ));
-        }
     }
 }

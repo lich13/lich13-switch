@@ -28,9 +28,7 @@ pub mod freeze;
 mod listener;
 pub(crate) mod registry;
 pub use listener::View as ListenerView;
-mod retired;
 pub use client::{claude_home, dsh_home, grok_home, ClientId};
-pub(crate) use retired::{cleanup as cleanup_legacy_proxy, normalize as normalize_legacy_proxy};
 mod admission;
 mod attempt;
 #[cfg(test)]
@@ -626,7 +624,7 @@ impl Gateway {
         let (store, revision, upgrade_error) = match recover_for_migration(&data)
             .and_then(|()| Store::load_migrated(&data.join("gateway.json")))
         {
-            Ok((store, revision)) => (store, revision, cleanup_legacy_proxy(&data).err()),
+            Ok((store, revision)) => (store, revision, None),
             Err(error) => {
                 let (store, revision) = Store::load(&data.join("gateway.json"))?;
                 (store, revision, Some(error))
@@ -1690,14 +1688,11 @@ impl Gateway {
         };
         let listener = self.0.registry.listener.prepare().await?;
         self.0.registry.update_ports()?;
-        if listener.revision != listener.previous_revision {
-            self.0.registry.changed();
-        }
         self.0.registry.listener.check_revision()?;
         let token = self.0.registry.unique_local_token(self.0.client, &token);
         {
             let s = self.0.inner.lock().unwrap();
-            if self.view_revision_with_listener(&s, &listener.previous_revision) != expected {
+            if self.view_revision_with_listener(&s, &listener.revision) != expected {
                 return Err(AppError::new(
                     code::CONFLICT,
                     "绑定端口期间设置已变化，请重试",
@@ -1707,7 +1702,7 @@ impl Gateway {
         let (tx, _rx) = watch::channel(false);
         {
             let mut s = self.0.inner.lock().unwrap();
-            if self.view_revision_with_listener(&s, &listener.previous_revision) != expected {
+            if self.view_revision_with_listener(&s, &listener.revision) != expected {
                 return Err(AppError::new(code::CONFLICT, "设置已变化，请重试"));
             }
             let p = Self::exit_provider(&s.store, None)?;
@@ -1777,7 +1772,7 @@ impl Gateway {
                     }
                     s.last_successful = None;
                     s.shutdown = Some(tx);
-                    s.error = listener.notice;
+                    s.error = None;
                     self.0.admission.configure(&s.store.providers, true);
                     self.0
                         .admission
@@ -1962,9 +1957,7 @@ impl Gateway {
             }
             // Recovery can complete a store/config transaction interrupted by I/O.
             if was_running && s.upgrade_error.is_none() {
-                if let Err(e) = recover_for_migration(&self.0.data)
-                    .and_then(|()| cleanup_legacy_proxy(&self.0.data))
-                {
+                if let Err(e) = recover_for_migration(&self.0.data) {
                     s.error = Some(e.message.clone());
                     drop(s);
                     self.changed();

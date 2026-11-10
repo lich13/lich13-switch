@@ -28,7 +28,6 @@ pub struct View {
 }
 
 struct State {
-    version: u32,
     port: u16,
     revision: String,
     clients: Vec<ClientId>,
@@ -44,8 +43,6 @@ pub struct Prepared {
     pub socket: Option<TcpListener>,
     pub port: u16,
     pub revision: String,
-    pub previous_revision: String,
-    pub notice: Option<String>,
 }
 impl Listener {
     pub fn load(path: PathBuf, legacy_codex_port: Option<u16>) -> Result<Self> {
@@ -58,7 +55,7 @@ impl Listener {
                 port: legacy_codex_port.unwrap_or(DEFAULT_SHARED_PORT),
             },
         };
-        if !matches!(config.version, 1 | 2) || config.port == 0 {
+        if config.version != 2 || config.port == 0 {
             return Err(AppError::new(code::SETTINGS, "共享网关配置版本或端口无效"));
         }
         let revision = if raw.is_none() {
@@ -72,7 +69,6 @@ impl Listener {
         Ok(Self {
             path,
             state: Mutex::new(State {
-                version: config.version,
                 port: config.port,
                 revision,
                 clients: Vec::new(),
@@ -126,31 +122,12 @@ impl Listener {
             .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;
         storage::atomic_write(&self.path, &bytes, Some(&s.revision))?;
         s.port = port;
-        s.version = 2;
         s.revision = storage::digest(&bytes);
         Ok(())
     }
     /// Caller holds Registry::lifecycle until config commit and activation finish.
     pub async fn prepare(&self) -> Result<Prepared> {
-        self.prepare_at(
-            DEFAULT_SHARED_PORT,
-            ClientId::Codex.legacy_port().expect("Codex legacy port"),
-        )
-        .await
-    }
-    async fn prepare_at(&self, default_port: u16, legacy_default_port: u16) -> Result<Prepared> {
-        let (view, version) = {
-            let s = self.state.lock().unwrap();
-            (
-                View {
-                    port: s.port,
-                    revision: s.revision.clone(),
-                    running_clients: s.clients.clone(),
-                    antigravity_active: s.antigravity_active,
-                },
-                s.version,
-            )
-        };
+        let view = self.view()?;
         if storage::revision(storage::read_optional(&self.path)?.as_deref()) != view.revision {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -161,52 +138,17 @@ impl Listener {
             return Ok(Prepared {
                 socket: None,
                 port: view.port,
-                revision: view.revision.clone(),
-                previous_revision: view.revision,
-                notice: None,
+                revision: view.revision,
             });
         }
-        let migrate_default = version == 1 && view.port == legacy_default_port;
-        let target = if migrate_default {
-            default_port
-        } else {
-            view.port
-        };
-        let (socket, mut notice) =
-            match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, target)).await {
-                Ok(socket) => (socket, None),
-                Err(_) if migrate_default => (
-                    TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, view.port))
-                        .await
-                        .map_err(|_| Self::port_error())?,
-                    Some("新默认端口不可用，已保留原共享端口".to_owned()),
-                ),
-                Err(_) => return Err(Self::port_error()),
-            };
+        let socket = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, view.port))
+            .await
+            .map_err(|_| Self::port_error())?;
         let port = socket.local_addr().map_err(storage::io_error)?.port();
-        if migrate_default && port != view.port && notice.is_none() {
-            notice = Some(format!(
-                "共享端口已迁移到 {port}，请重新打开已启动的 Codex / Claude Code / Grok"
-            ));
-        }
-        let revision = if version == 1 {
-            let bytes = serde_json::to_vec_pretty(&Config { version: 2, port })
-                .map_err(|_| AppError::new(code::STORE, "无法保存共享网关配置"))?;
-            let mut state = self.state.lock().unwrap();
-            storage::atomic_write(&self.path, &bytes, Some(&view.revision))?;
-            state.port = port;
-            state.version = 2;
-            state.revision = storage::digest(&bytes);
-            state.revision.clone()
-        } else {
-            view.revision.clone()
-        };
         Ok(Prepared {
             socket: Some(socket),
             port,
-            revision,
-            previous_revision: view.revision,
-            notice,
+            revision: view.revision,
         })
     }
     fn port_error() -> AppError {
@@ -285,10 +227,6 @@ impl Listener {
     }
 }
 
-#[cfg(test)]
-#[path = "listener_migration_tests.rs"]
-mod migration_tests;
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteError {
     NotFound,
@@ -350,7 +288,7 @@ pub fn authorized(headers: &hyper::HeaderMap, token: &str) -> bool {
             .is_none_or(|v| token_matches(v.as_bytes(), token.as_bytes()))
 }
 
-/// Legacy prefixes are aliases; unprefixed routes use an exact local token.
+/// Unprefixed routes use an exact local token.
 /// Models and protocol paths never infer a client (Grok also supports messages).
 pub fn route(
     uri: &hyper::Uri,
@@ -358,34 +296,20 @@ pub fn route(
     registry: &Registry,
 ) -> std::result::Result<(ClientId, hyper::Uri), RouteError> {
     let path = uri.path();
-    let (explicit, prefix) = if path == "/codex" || path.starts_with("/codex/") {
-        (Some(ClientId::Codex), "/codex")
-    } else if path == "/claude" || path.starts_with("/claude/") {
-        (Some(ClientId::Claude), "/claude")
-    } else if path == "/grok" || path.starts_with("/grok/") {
-        (Some(ClientId::Grok), "/grok")
-    } else if path == "/v1"
-        || path.starts_with("/v1/")
-        || path.trim_end_matches('/') == "/alpha/search"
+    if path != "/v1"
+        && !path.starts_with("/v1/")
+        && path.trim_end_matches('/') != "/alpha/search"
     {
-        (None, "")
-    } else {
         return Err(RouteError::NotFound);
-    };
+    }
     // Authentication must not wait for any client's configuration transaction.
     let snapshot = registry.tokens_snapshot();
     let gateways: Vec<_> = snapshot
         .iter()
         .filter(|entry| entry.shared.strong_count() > 0)
         .collect();
-    if explicit.is_some_and(|client| !gateways.iter().any(|gateway| gateway.client == client)) {
-        return Err(RouteError::NotFound);
-    }
     let mut matched = None;
     for gateway in gateways {
-        if explicit.is_some_and(|client| client != gateway.client) {
-            continue;
-        }
         if authorized(headers, &gateway.token) {
             if matched.is_some() {
                 return Err(RouteError::Unauthorized);
@@ -397,20 +321,7 @@ pub fn route(
     if path.trim_end_matches('/') == "/alpha/search" && client != ClientId::Codex {
         return Err(RouteError::NotFound);
     }
-    let remaining = &uri.path_and_query().ok_or(RouteError::NotFound)?.as_str()[prefix.len()..];
-    let remaining = if remaining.is_empty() {
-        "/".to_owned()
-    } else if remaining.starts_with('?') {
-        format!("/{remaining}")
-    } else {
-        remaining.to_owned()
-    };
-    let mut parts = uri.clone().into_parts();
-    parts.path_and_query = Some(remaining.parse().map_err(|_| RouteError::NotFound)?);
-    Ok((
-        client,
-        hyper::Uri::from_parts(parts).map_err(|_| RouteError::NotFound)?,
-    ))
+    Ok((client, uri.clone()))
 }
 
 #[cfg(test)]

@@ -69,14 +69,12 @@ fn settings_defaults_and_legacy_phase_timeout_migration_are_idempotent() {
         .unwrap()
         .remove("retryBudgetSeconds");
     value["settings"]["totalSeconds"] = 600.into();
-    value["phaseTimeouts"] = false.into();
     value["settings"]["firstByteSeconds"] = 60.into();
     value["settings"]["idleSeconds"] = 120.into();
     value["settings"]["threadIdleReleaseSeconds"] = 17.into();
     std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
-    let (migrated, old_revision) = Store::load(&path).unwrap();
-    assert!(migrated.phase_timeouts);
+    let (migrated, old_revision) = Store::load_migrated(&path).unwrap();
     assert_eq!(migrated.settings.first_byte_seconds, 300);
     assert_eq!(migrated.settings.idle_seconds, 300);
     assert_eq!(migrated.settings.thread_idle_release_seconds, 17);
@@ -84,7 +82,6 @@ fn settings_defaults_and_legacy_phase_timeout_migration_are_idempotent() {
 
     let (loaded, revision) = Store::load(&path).unwrap();
     assert_eq!(loaded.settings, migrated.settings);
-    assert_eq!(loaded.phase_timeouts, migrated.phase_timeouts);
     assert_eq!(revision, new_revision);
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(loaded.persist(&path, &revision).unwrap(), new_revision);

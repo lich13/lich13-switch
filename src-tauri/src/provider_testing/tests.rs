@@ -575,9 +575,6 @@ async fn cancellation_restart_retires_appointments_and_preserves_history() {
     saved["jobs"][0]["status"] = json!("running");
     saved["jobs"][0]["canRetry"] = json!(true);
     saved["jobs"][0]["mode"] = json!("image");
-    saved["schedules"] = json!([{"id":"fixture-pending","at":0,"status":"pending","providers":[{"clientId":"codex","providerId":id,"providerVersion":"fixture","model":"fixture"}]}]);
-    saved["schema"] = json!(1);
-    saved["detection"] = json!({"intervalMinutes":25});
     saved["history"] = json!([saved["jobs"][0].clone()]);
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let reloaded = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
@@ -585,14 +582,9 @@ async fn cancellation_restart_retires_appointments_and_preserves_history() {
     assert_eq!(state.jobs[0].status, "interrupted");
     assert_eq!(state.jobs[0].mode, Mode::Image);
     assert!(!state.jobs[0].can_retry);
-    assert_eq!(state.detection.interval_minutes, 25);
     assert_eq!(lock(&reloaded.0.data).saved.history.len(), 1);
     reloaded.tick(now(), false).unwrap();
     assert_eq!(reloaded.state(ClientId::Codex, &id).unwrap().jobs.len(), 1);
-    let migrated: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert!(migrated.get("schedules").is_none());
-    assert_eq!(migrated["bank"], saved["bank"]);
-    assert_eq!(migrated["degraded"], saved["degraded"]);
 }
 #[test]
 fn smart_tiers_config_versions_and_corrupt_bank_fallback() {
@@ -1826,48 +1818,6 @@ async fn statistics_failure_is_not_zero_and_never_dispatches() {
     assert!(service.state(ClientId::Codex, &id).unwrap().jobs.is_empty());
 }
 #[tokio::test]
-async fn independent_migration_preserves_effective_controls_and_does_not_enable_new_providers() {
-    let (dir, service) = fixture();
-    let a = add(&service, dir.path(), ClientId::Codex, 1, "responses");
-    let b = add(&service, dir.path(), ClientId::Codex, 2, "responses");
-    let path = dir.path().join("provider-tests.json");
-    let old = json!({"schema":1,"detection":{"enabled":true,"mode":"fixed","intervalMinutes":25,"minIntervalMinutes":12,"model":"fixture-global","providers":{a.clone():{"enabled":false,"model":"fixture-local"}}},"jobs":[],"history":[],"bank":{},"degraded":{}});
-    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
-    let restored = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
-    let first = restored.state(ClientId::Codex, &a).unwrap().detection;
-    let second = restored.state(ClientId::Codex, &b).unwrap().detection;
-    assert!(!first.enabled);
-    assert_eq!(first.model, "fixture-local");
-    assert!(second.enabled);
-    assert_eq!(second.interval_minutes, 25);
-    assert_eq!(second.min_interval_minutes, 12);
-    restored.tick(restored.now(), false).unwrap();
-    assert!(restored.state(ClientId::Codex, &b).unwrap().jobs.is_empty());
-    let c = add(&restored, dir.path(), ClientId::Codex, 3, "responses");
-    assert!(
-        !restored
-            .state(ClientId::Codex, &c)
-            .unwrap()
-            .detection
-            .enabled
-    );
-    let again = Service::new(dir.path(), restored.0.gateways.clone()).unwrap();
-    assert!(!again.state(ClientId::Codex, &c).unwrap().detection.enabled);
-    let mut disabled = second;
-    disabled.enabled = false;
-    again
-        .set_detection(
-            ClientId::Codex,
-            &b,
-            disabled,
-            &again.state(ClientId::Codex, &b).unwrap().revision,
-        )
-        .unwrap();
-    let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(raw["schema"], 3);
-    assert_eq!(raw["bank"], json!(SavedBank::default()));
-}
-#[tokio::test]
 async fn endpoint_selection_is_fixed_and_catalogs_are_isolated() {
     let primary = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let hits = primary.clone();
@@ -2588,35 +2538,24 @@ async fn tokenizer_failure_leaves_numeric_result_and_is_not_replayed_by_group_re
     assert!(!done.job.can_retry);
 }
 #[test]
-fn schema_three_migrates_prompt_from_latest_connection_and_keeps_scoped_history() {
+fn non_v3_or_corrupt_schema_is_backed_up_and_reset_while_keeping_scoped_revisions() {
     let (dir, service) = fixture();
     let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
     let path = dir.path().join("provider-tests.json");
-    let mut saved = json!(Persisted::default());
-    saved["schema"] = 2.into();
-    saved.as_object_mut().unwrap().remove("connectionPrompt");
-    saved["connectionPrompts"] =
-        json!({format!("Codex:{id}"):"old fixture", "Claude:other":"latest fixture"});
-    let job = |client: &str, provider: &str, at: i64| json!({"id":format!("fixture-{at}"),"clientId":client,"providerId":provider,"providerName":"Fixture","providerVersion":"fixture","kind":"connection","mode":"text","requestedModel":"fixture-model","forwardedModel":"fixture-model","returnedModel":null,"status":"completed","createdAt":at,"startedAt":null,"completedAt":at,"elapsedMs":0,"firstByteMs":null,"error":null,"report":null,"groups":[],"automatic":false,"batchId":null,"canRetry":false,"completionReason":null});
-    saved["jobs"] = json!([job("codex", &id, 1), job("claude", "other", 2)]);
-    saved["detection"] = json!({id.clone():Detection{enabled:true,..Default::default()}});
-    saved["detectionTiming"] = json!({id.clone():{"anchorAt":123,"lastStartedAt":100}});
-    std::fs::write(&path, saved.to_string()).unwrap();
+    let old_bytes = br#"{"schema":2,"jobs":[]}"#;
+    std::fs::write(&path, old_bytes).unwrap();
     let restored = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
     let state = restored.state(ClientId::Codex, &id).unwrap();
-    assert_eq!(state.connection_prompt, "latest fixture");
-    assert_eq!(state.jobs[0].engine, Engine::ModelTrace);
-    assert_eq!(state.jobs[0].sample_count, 3);
-    assert!(state.detection.enabled);
+    assert_eq!(state.connection_prompt, DEFAULT_CONNECTION_PROMPT);
+    assert!(dir
+        .path()
+        .join(format!(
+            "provider-tests.json.corrupt-{}",
+            storage::digest(old_bytes)
+        ))
+        .exists());
     let saved = &lock(&restored.0.data).saved;
     assert_eq!(saved.schema, 3);
-    assert_eq!(
-        saved.detection_timing[&scope_key(ClientId::Codex, &id)].anchor_at,
-        Some(123)
-    );
-    assert!(!saved
-        .detection
-        .contains_key(&scope_key(ClientId::Claude, &id)));
     let mut next = saved.clone();
     next.detection.insert(
         scope_key(ClientId::Claude, &id),

@@ -705,7 +705,7 @@ async fn claude_capacity_uses_shared_cooldown_and_wait_budget() {
     g.start(&g.view().revision, &home).await.unwrap();
     let r = request(
         &g,
-        "/claude/v1/messages",
+        "/v1/messages",
         br#"{"model":"claude-test"}"#.to_vec(),
         vec![("content-type", "application/json")],
     )

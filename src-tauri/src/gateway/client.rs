@@ -21,14 +21,6 @@ impl ClientId {
             Self::Dsh => "DeepSeek Harness",
         }
     }
-    pub fn legacy_port(self) -> Option<u16> {
-        match self {
-            Self::Codex => Some(15722),
-            Self::Claude => Some(15723),
-            Self::Grok => Some(15724),
-            Self::Dsh => None,
-        }
-    }
     pub fn address(self, port: u16) -> String {
         format!(
             "http://127.0.0.1:{port}{}",
@@ -37,36 +29,6 @@ impl ClientId {
                 Self::Claude => "",
             }
         )
-    }
-    /// Identification only; old ports do not create additional listeners.
-    pub fn legacy_addresses(self, port: u16) -> Vec<String> {
-        let prefix = match self {
-            Self::Codex => "/codex/v1",
-            Self::Claude => "/claude",
-            Self::Grok => "/grok/v1",
-            Self::Dsh => return vec![],
-        };
-        let mut ports = vec![
-            Some(port),
-            Self::Codex.legacy_port(),
-            Self::Claude.legacy_port(),
-            Self::Grok.legacy_port(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-        ports.sort_unstable();
-        ports.dedup();
-        ports
-            .into_iter()
-            .flat_map(|port| {
-                let mut addresses = vec![format!("http://127.0.0.1:{port}{prefix}")];
-                if self == Self::Codex {
-                    addresses.push(format!("http://127.0.0.1:{port}/v1"));
-                }
-                addresses
-            })
-            .collect()
     }
     pub fn config(self, home: &Path) -> PathBuf {
         if self == Self::Dsh {

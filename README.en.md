@@ -38,7 +38,7 @@ Designed for developers working across **Codex**, **Claude Code**, **Grok Build*
 - **Global Freeze & Clamshell Sleep Guard**: Engage **Global Freeze** with one click to allow in-flight requests to finish safely before pausing traffic (resuming remaining timeout budgets upon wake), backed by a native macOS clamshell power helper to prevent system sleep from interrupting long-running tasks.
 
 ### 3. Single-Port Multi-Client Gateway & Zero-Downtime Failover
-- **Single-Port Token Multiplexing**: Listens on `127.0.0.1:43721` by default, authenticating and routing each client via dedicated local bearer tokens on `/` and `/v1` (while preserving `/codex`, `/claude`, and `/grok` prefixes for compatibility). Passes HTTP, SSE, and native WebSocket streams through with zero lossy protocol conversion.
+- **Single-Port Token Multiplexing**: Listens on `127.0.0.1:43721` by default, authenticating and routing each client via dedicated local bearer tokens on `/` and `/v1`. Passes HTTP, SSE, and native WebSocket streams through with zero lossy protocol conversion.
 - **Codex Thread Affinity & Compaction Handoff**: Accurately distinguishes true Codex `thread-id`s from cache `session-id`s and empty warmups. Supports per-provider **New Thread Takeover** and **Post-Compaction Takeover** with atomic epoch handoffs that never replay already-streamed output.
 - **Multi-Endpoint Probing & Fault Policy Search**: Supports 1 primary address and up to 8 auxiliary `base_url`s per provider with credential-free header latency probing to automatically select the fastest healthy endpoint. Includes a structured error classifier with single-box search across HTTP statuses, error codes, and raw JSON payloads to quickly locate matching failover rules.
 

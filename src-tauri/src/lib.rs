@@ -2,7 +2,6 @@ mod antigravity;
 use crate::errors::code;
 mod auth_cache;
 mod claude_profile;
-mod cleanup;
 mod cleanup_spool;
 mod commands;
 mod configuration;
@@ -74,7 +73,6 @@ struct Runtime {
     force_quitting: AtomicBool,
     power: power::Service,
     startup_error: Mutex<Option<AppError>>,
-    cleanup_error: Mutex<Option<AppError>>,
     official_tx: tokio::sync::Mutex<()>,
     window_wake: tokio::sync::Notify,
     window_visible: [AtomicBool; 2],
@@ -1892,19 +1890,8 @@ pub fn run() {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| user_home.join(".codex"))
                 });
-            let mut migration_error = None;
-            if smoke.is_none() {
-                if let Some(dir) = dirs::data_dir() {
-                    let legacy_dirs = [
-                        dir.join("com.lich13.gpt-switch"),
-                        dir.join("com.lich13.lich13-switch"),
-                    ];
-                    migration_error = migrations::migrate_to_vela_home(&data, &legacy_dirs).err();
-                }
-            }
             // Single-instance registration has completed; no current spool exists yet.
             cleanup_spool::clean(&data);
-            let cleanup_error = migration_error.or_else(|| migrations::before_services(&data).err());
             let mut core = Core::new(data.clone(), home)?;
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
@@ -1913,7 +1900,7 @@ pub fn run() {
             let startup = startup::Service::new(&data);
             let start_silently = smoke.is_none() && startup::login_source(&args);
             app.manage(quick::Panel::new(&data)?);
-            let power = power::Service::new(&data);
+            let power = power::Service::new();
             if let Some(fixture) = &fixture {
                 storage::private_dir(&core.home())?;
                 storage::private_dir(&fixture.path().join("claude"))?;
@@ -1985,7 +1972,6 @@ pub fn run() {
                 frontend_started: AtomicBool::new(false),
                 force_quitting: AtomicBool::new(false),
                 startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error).or(vertex_error)),
-                cleanup_error: Mutex::new(cleanup_error),
                 official_tx: tokio::sync::Mutex::new(()),
                 window_wake: tokio::sync::Notify::new(),
                 window_visible: [AtomicBool::new(!start_silently), AtomicBool::new(false)],
@@ -2063,15 +2049,6 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             app.set_menu(application_menu(app.handle())?)?;
-            if runtime.smoke.is_none() {
-                let r = runtime.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    if let Err(e) = migrations::login_items(&r.startup) {
-                        r.diagnostics.emit(events::Record::new(None,None,None,events::Reason::StartupRecovery,events::Action::Stopped,None,None));
-                        *r.startup_error.lock().unwrap() = Some(e);
-                    }
-                });
-            }
             for probe_gateway in [
                 runtime.gateway.clone(),
                 runtime.claude.clone(),

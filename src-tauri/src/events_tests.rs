@@ -312,8 +312,8 @@ fn sync_antigravity_logs_ingests_and_deduplicates_app_errors() {
     assert_eq!(upstream_page.total, 0);
 
     let antigravity_filter = Filter {
-        client_id: Some(crate::events::JournalClient::Retired(
-            crate::events::RetiredClient::Antigravity,
+        client_id: Some(crate::events::JournalClient::External(
+            crate::events::ExternalClient::Antigravity,
         )),
         origin: Some(crate::events::Origin::Antigravity),
         ..Filter::default()

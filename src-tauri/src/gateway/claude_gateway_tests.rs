@@ -271,7 +271,7 @@ async fn shared_listener_keeps_selection_queues_and_concurrency_independent_in_b
         "/codex-a/v1/responses"
     );
     assert_eq!(
-        response_bytes(&f.claude, "/claude/v1/messages").await,
+        response_bytes(&f.claude, "/v1/messages").await,
         "/claude-a/v1/messages"
     );
     let codex_first = f.codex.view().providers[0].id.clone();
@@ -395,7 +395,7 @@ async fn shared_listener_keeps_selection_queues_and_concurrency_independent_in_b
     })
     .await;
     assert_eq!(
-        response_bytes(&f.claude, "/claude/v1/messages").await,
+        response_bytes(&f.claude, "/v1/messages").await,
         "/claude-a/v1/messages"
     );
     start_client(&f.codex, &f.codex_home).await;
@@ -447,7 +447,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
     let payload = br#"{ "model":"claude-fixture", "max_tokens":17, "messages":[{"role":"user","content":"unchanged"}], "metadata":{"fixture":true} }"#.to_vec();
     let response = request(
         &f.claude,
-        "/claude/v1/messages?beta=true&tag=a%2Fb&tag=two",
+        "/v1/messages?beta=true&tag=a%2Fb&tag=two",
         payload.clone(),
         vec![
             ("content-type", "application/json"),
@@ -519,7 +519,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     let fixture_body = || br#"{"model":"claude-fixture"}"#.to_vec();
     let complete_response = request(
         &f.claude,
-        "/claude/v1/messages?case=complete",
+        "/v1/messages?case=complete",
         fixture_body(),
         vec![("content-type", "application/json")],
     )
@@ -549,7 +549,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     assert_eq!(model_health(&f.claude).failures, 0);
     let eof_response = request(
         &f.claude,
-        "/claude/v1/messages?case=eof",
+        "/v1/messages?case=eof",
         fixture_body(),
         vec![("content-type", "application/json")],
     )
@@ -572,7 +572,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     assert_eq!(model_health(&f.claude).failures, 1);
     let mut interrupted = request(
         &f.claude,
-        "/claude/v1/messages?case=abrupt",
+        "/v1/messages?case=abrupt",
         fixture_body(),
         vec![("content-type", "application/json")],
     )

@@ -273,7 +273,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
     let (usage, thread_hash, baseline, baseline_entry) =
         seed_owner(&dir, &gateway, thread, &owner).await;
 
-    for (index, path) in ["/v1/alpha/search", "/codex/alpha/search"]
+    for (index, path) in ["/v1/alpha/search", "/alpha/search"]
         .into_iter()
         .enumerate()
     {
@@ -428,7 +428,7 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
     let second = tokio::spawn(async move {
         search_request(
             &second_gateway,
-            "/codex/alpha/search",
+            "/alpha/search",
             &[("thread-id", thread)],
             SEARCH_REQUEST,
         )
@@ -527,7 +527,7 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
 
     let conflicting = search_request(
         &gateway,
-        "/codex/alpha/search",
+        "/alpha/search",
         &[
             ("thread-id", thread),
             ("thread-id", "fixture-conflicting-thread"),

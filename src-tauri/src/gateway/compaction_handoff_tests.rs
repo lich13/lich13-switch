@@ -203,7 +203,7 @@ async fn incompatible_compaction_context_falls_back_without_circuit_failure_or_b
     call(
         &g,
         "fixture-fallback",
-        "/codex/responses/compact",
+        "/v1/responses/compact",
         ordinary.clone(),
     )
     .await;
@@ -220,14 +220,14 @@ async fn incompatible_compaction_context_falls_back_without_circuit_failure_or_b
     .to_string()
     .into_bytes();
     assert_eq!(
-        call(&g, "fixture-fallback", "/codex/responses", bytes.clone()).await["provider"],
+        call(&g, "fixture-fallback", "/v1/responses", bytes.clone()).await["provider"],
         "old"
     );
     assert_eq!(old.lock().unwrap().last().unwrap(), &bytes);
     assert_eq!(new.lock().unwrap().last().unwrap(), &bytes);
     assert_eq!(g.view().providers[0].health.failures, 0);
     assert_eq!(
-        call(&g, "fixture-fallback", "/codex/responses", ordinary).await["provider"],
+        call(&g, "fixture-fallback", "/v1/responses", ordinary).await["provider"],
         "old"
     );
     g.stop().await.unwrap();
@@ -248,13 +248,13 @@ async fn unobserved_compaction_never_authorizes_handoff() {
     call(
         &g,
         "fixture-unconfirmed",
-        "/codex/responses",
+        "/v1/responses",
         br#"{"model":"fixture-model"}"#.to_vec(),
     )
     .await;
     promote_second(&g, &t);
     assert_eq!(
-        call(&g, "fixture-unconfirmed", "/codex/responses", input()).await["provider"],
+        call(&g, "fixture-unconfirmed", "/v1/responses", input()).await["provider"],
         "old"
     );
     assert!(new.lock().unwrap().is_empty());
@@ -286,14 +286,14 @@ async fn failed_compaction_with_an_output_item_does_not_authorize_handoff() {
     call(
         &g,
         "fixture-failed-compact",
-        "/codex/responses",
+        "/v1/responses",
         ordinary.clone(),
     )
     .await;
     promote_second(&g, &t);
     let rejected = request(
         &g,
-        "/codex/responses/compact",
+        "/v1/responses/compact",
         ordinary,
         vec![
             ("content-type", "application/json"),
@@ -304,7 +304,7 @@ async fn failed_compaction_with_an_output_item_does_not_authorize_handoff() {
     assert_eq!(rejected.status(), 400);
     rejected.into_body().collect().await.unwrap();
     assert_eq!(
-        call(&g, "fixture-failed-compact", "/codex/responses", input()).await["provider"],
+        call(&g, "fixture-failed-compact", "/v1/responses", input()).await["provider"],
         "old"
     );
     assert!(seen.lock().unwrap().is_empty());
@@ -443,7 +443,7 @@ async fn terminal_then_client_disconnect_keeps_completed_without_usage_tail() {
     start(&g, &t).await;
     let (response, sender, task) = super::tests::request_with_reset(
         &g,
-        "/codex/responses",
+        "/v1/responses",
         br#"{"model":"fixture-model","stream":true}"#.to_vec(),
         vec![("content-type", "application/json")],
     )

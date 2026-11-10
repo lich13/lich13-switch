@@ -233,55 +233,22 @@ fn unprefixed_paths_are_selected_by_exact_local_token_and_keep_the_query() {
 }
 
 #[test]
-fn legacy_prefixes_accept_only_their_client_token_and_preserve_query() {
+fn retired_legacy_prefixes_return_not_found() {
     let fixture = Fixture::new();
-    let requests = [
-        (
-            ClientId::Codex,
-            "/codex/v1/responses?model=fixture&state=%2f&state=%2F",
-            "/v1/responses?model=fixture&state=%2f&state=%2F",
-        ),
-        (
-            ClientId::Claude,
-            "/claude/messages/count_tokens?model=fixture&state=%2f&state=%2F",
-            "/messages/count_tokens?model=fixture&state=%2f&state=%2F",
-        ),
-        (
-            ClientId::Grok,
-            "/grok/v1/responses?model=fixture&state=%2f&state=%2F",
-            "/v1/responses?model=fixture&state=%2f&state=%2F",
-        ),
-    ];
-
-    for (target, request, expected_uri) in requests {
-        for (token_client, token) in CLIENTS {
+    for request in [
+        "/codex/v1/responses?model=fixture&state=%2f&state=%2F",
+        "/claude/messages/count_tokens?model=fixture&state=%2f&state=%2F",
+        "/grok/v1/responses?model=fixture&state=%2f&state=%2F",
+    ] {
+        for (_, token) in CLIENTS {
             let authorization = bearer(token);
-            let result =
-                route_with_headers(&fixture, request, &headers(Some(&authorization), None));
-            if token_client == target {
-                assert_eq!(
-                    result,
-                    Ok((target, expected_uri.to_owned())),
-                    "request={request}, token_client={token_client:?}"
-                );
-            } else {
-                assert_eq!(
-                    result,
-                    Err(RouteError::Unauthorized),
-                    "request={request}, token_client={token_client:?}"
-                );
-            }
+            assert_eq!(
+                route_with_headers(&fixture, request, &headers(Some(&authorization), None)),
+                Err(RouteError::NotFound),
+                "request={request}"
+            );
         }
     }
-
-    let claude_request = "/claude/messages?model=fixture&x=one%2Ftwo&x=three+four";
-    assert_eq!(
-        route_with_headers(&fixture, claude_request, &headers(None, Some(CLAUDE_TOKEN)),),
-        Ok((
-            ClientId::Claude,
-            "/messages?model=fixture&x=one%2Ftwo&x=three+four".to_owned()
-        ))
-    );
 }
 
 #[test]
@@ -455,12 +422,12 @@ fn unregistering_an_old_shared_does_not_remove_its_reregistered_replacement() {
     let replacement = codex.companion(claude_data).unwrap();
     set_local_token(&old, STALE_OLD_TOKEN);
     assert_eq!(
-        route_with_token(&codex, "/claude/messages", CLAUDE_TOKEN),
-        Ok((ClientId::Claude, "/messages".to_owned())),
+        route_with_token(&codex, "/v1/messages", CLAUDE_TOKEN),
+        Ok((ClientId::Claude, "/v1/messages".to_owned())),
         "a stale instance must not replace its replacement's published token"
     );
     assert_eq!(
-        route_with_token(&codex, "/claude/messages", STALE_OLD_TOKEN),
+        route_with_token(&codex, "/v1/messages", STALE_OLD_TOKEN),
         Err(RouteError::Unauthorized)
     );
     drop(old);
@@ -474,16 +441,12 @@ fn unregistering_an_old_shared_does_not_remove_its_reregistered_replacement() {
         "unregistering the old instance must preserve its replacement"
     );
     assert_eq!(
-        route_with_token(&codex, "/claude/messages", CLAUDE_TOKEN),
-        Ok((ClientId::Claude, "/messages".to_owned()))
+        route_with_token(&codex, "/v1/messages", CLAUDE_TOKEN),
+        Ok((ClientId::Claude, "/v1/messages".to_owned()))
     );
 
     drop(replacement);
     assert!(registry.gateway(ClientId::Claude).is_none());
-    assert_eq!(
-        route_with_token(&codex, "/claude/messages", CLAUDE_TOKEN),
-        Err(RouteError::NotFound)
-    );
     assert_eq!(
         route_with_token(&codex, "/v1/messages", CLAUDE_TOKEN),
         Err(RouteError::Unauthorized),
@@ -496,8 +459,8 @@ async fn committed_token_rotation_rejects_old_token_and_routes_with_reloaded_sto
     let temp = tempfile::tempdir().unwrap();
     let (codex, _claude, home) = duplicate_token_gateways(&temp);
     assert_eq!(
-        route_with_token(&codex, "/codex/v1/responses", DUPLICATE_TOKEN),
-        Ok((ClientId::Codex, "/v1/responses".to_owned()))
+        route_with_token(&codex, "/v1/responses", DUPLICATE_TOKEN),
+        Err(RouteError::Unauthorized)
     );
 
     let expected = codex.view().revision;
@@ -507,11 +470,11 @@ async fn committed_token_rotation_rejects_old_token_and_routes_with_reloaded_sto
     let (stored, _) = super::super::model::Store::load(&store_path).unwrap();
     assert_ne!(stored.local_token, DUPLICATE_TOKEN);
     assert_eq!(
-        route_with_token(&codex, "/codex/v1/responses", DUPLICATE_TOKEN),
-        Err(RouteError::Unauthorized)
+        route_with_token(&codex, "/v1/responses", DUPLICATE_TOKEN),
+        Ok((ClientId::Claude, "/v1/responses".to_owned()))
     );
     assert_eq!(
-        route_with_token(&codex, "/codex/v1/responses", &stored.local_token),
+        route_with_token(&codex, "/v1/responses", &stored.local_token),
         Ok((ClientId::Codex, "/v1/responses".to_owned()))
     );
 

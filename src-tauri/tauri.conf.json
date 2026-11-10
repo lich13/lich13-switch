@@ -52,8 +52,7 @@
         "installerHooks": "installer-hooks.nsh",
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"],
-        "displayLanguageSelector": false,
-        "template": "installer.nsi"
+        "displayLanguageSelector": false
       }
     }
   }

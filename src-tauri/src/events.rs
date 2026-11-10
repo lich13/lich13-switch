@@ -147,17 +147,16 @@ pub enum Origin {
     Gateway,
     Antigravity,
 }
-// Historical identities must not become executable gateway clients.
+// External identities must not become executable gateway clients.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum JournalClient {
     Active(ClientId),
-    Retired(RetiredClient),
+    External(ExternalClient),
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum RetiredClient {
-    Agy,
+pub enum ExternalClient {
     Antigravity,
 }
 impl From<ClientId> for JournalClient {
@@ -169,14 +168,13 @@ impl JournalClient {
     pub fn active(self) -> Option<ClientId> {
         match self {
             Self::Active(c) => Some(c),
-            Self::Retired(_) => None,
+            Self::External(_) => None,
         }
     }
     fn name(self) -> &'static str {
         match self {
             Self::Active(client) => client.name(),
-            Self::Retired(RetiredClient::Agy) => "Antigravity CLI（历史）",
-            Self::Retired(RetiredClient::Antigravity) => "Antigravity app",
+            Self::External(ExternalClient::Antigravity) => "Antigravity app",
         }
     }
 }
@@ -292,7 +290,7 @@ impl Record {
         })
     }
     pub fn origin(&self) -> Origin {
-        if self.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity)) {
+        if self.client_id == Some(JournalClient::External(ExternalClient::Antigravity)) {
             return Origin::Antigravity;
         }
         let response_error = matches!(
@@ -376,7 +374,7 @@ impl Record {
             first_at: t,
             last_at: t,
             count: 1,
-            client_id: Some(JournalClient::Retired(RetiredClient::Antigravity)),
+            client_id: Some(JournalClient::External(ExternalClient::Antigravity)),
             provider_id: None,
             model: model.and_then(safe_model),
             reason,
@@ -577,7 +575,7 @@ fn raw_log_message(value: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.chars().take(4096).collect())
 }
 fn is_antigravity_log_record(r: &Record) -> bool {
-    r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity))
+    r.client_id == Some(JournalClient::External(ExternalClient::Antigravity))
         && r.provider_id.is_none()
         && matches!(
             r.details.upstream_code.as_deref(),
@@ -927,30 +925,10 @@ fn load(path: &Path) -> Journal {
                     continue;
                 }
                 match serde_json::from_slice::<Record>(&line) {
-                    Ok(mut r)
-                        if uuid::Uuid::parse_str(&r.id).is_ok()
-                            && r.provider_id
-                                .as_deref()
-                                .is_none_or(|s| safe_id(s).is_some())
-                            && r.model.as_deref().is_none_or(|s| safe_model(s).is_some())
-                            && r.last_at <= now().saturating_add(60) =>
-                    {
-                        let sanitized = r.details.clone().sanitized();
-                        j.dirty |= sanitized != r.details;
-                        r.details = sanitized;
-                        if r.details.upstream_type.as_deref() == Some("antigravity_log") {
-                            r.details.upstream_type = None;
-                            j.dirty = true;
-                        }
-                        let redacted_agy = r.client_id
-                            == Some(JournalClient::Retired(RetiredClient::Antigravity))
-                            && r.details
-                                .message
-                                .as_deref()
-                                .is_some_and(|m| m.contains("[已隐去]"));
-                        if (r.client_id == Some(JournalClient::Retired(RetiredClient::Antigravity))
-                            && !is_antigravity_log_record(&r))
-                            || redacted_agy
+                    Ok(r) => {
+                        if r.client_id
+                            == Some(JournalClient::External(ExternalClient::Antigravity))
+                            && !is_antigravity_log_record(&r)
                         {
                             j.dirty = true;
                         } else if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
@@ -959,7 +937,7 @@ fn load(path: &Path) -> Journal {
                             j.dirty = true;
                         }
                     }
-                    _ => {
+                    Err(_) => {
                         j.dirty = true;
                         j.error = Some("日志包含损坏记录，已跳过；其余记录仍可查看".into());
                     }
@@ -1614,11 +1592,12 @@ mod v0232_tests;
 mod v016_tests {
     use super::*;
     #[test]
-    fn retired_cli_journal_identity_is_readable_but_not_executable() {
-        let client: JournalClient = serde_json::from_str(r#""agy""#).unwrap();
+    fn external_journal_identity_is_readable_but_not_executable() {
+        let client: JournalClient = serde_json::from_str(r#""antigravity""#).unwrap();
         assert_eq!(client.active(), None);
-        assert_eq!(serde_json::to_string(&client).unwrap(), r#""agy""#);
-        assert!(serde_json::from_str::<ClientId>(r#""agy""#).is_err());
+        assert_eq!(serde_json::to_string(&client).unwrap(), r#""antigravity""#);
+        assert!(serde_json::from_str::<ClientId>(r#""antigravity""#).is_err());
+        assert!(serde_json::from_str::<JournalClient>(r#""agy""#).is_err());
     }
     #[test]
     fn configuration_diagnostics_preserve_actual_codes_and_safe_causes() {
@@ -1732,10 +1711,10 @@ mod routing_visibility_tests {
     }
 
     #[test]
-    fn loaded_retention_and_sanitization_remain_dirty_until_persisted() {
+    fn loaded_retention_remains_dirty_until_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.jsonl");
-        let mut keep = Record::new(
+        let keep = Record::new(
             None,
             None,
             None,
@@ -1744,7 +1723,6 @@ mod routing_visibility_tests {
             None,
             None,
         );
-        keep.details.custom_rule_id = Some("invalid-fixture-id".into());
         let mut expired = keep.clone();
         expired.id = uuid::Uuid::new_v4().to_string();
         expired.last_at = now() - RETENTION - 1;
@@ -1761,9 +1739,6 @@ mod routing_visibility_tests {
         persist(&mut journal, &path, false).unwrap();
         assert!(!journal.needs_write(&path));
         assert!(!load(&path).dirty);
-        assert!(!std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("invalid-fixture-id"));
         std::fs::write(&path, "invalid fixture\n").unwrap();
         let mut damaged = load(&path);
         assert!(damaged.error.is_some());
@@ -2043,7 +2018,7 @@ mod routing_visibility_tests {
             Some(429),
             Some(1),
         );
-        legacy.client_id = Some(JournalClient::Retired(RetiredClient::Antigravity));
+        legacy.client_id = Some(JournalClient::External(ExternalClient::Antigravity));
         let log_record = Record::antigravity_error(
             "transcript:conv-1:1",
             now(),
@@ -2067,18 +2042,9 @@ mod routing_visibility_tests {
             timeout_record.details.upstream_code.as_deref(),
             Some("STREAM_TIMEOUT")
         );
-        let mut old_redacted = Record::antigravity_error(
-            "transcript:conv-1:2",
-            now(),
-            Some("gemini-2.5-pro"),
-            "429 Too Many Requests",
-        );
-        old_redacted.details.upstream_type = Some("antigravity_log".into());
-        old_redacted.details.message = Some("429 Too Many Requests [已隐去]".into());
         let content = format!(
-            "{}\n{}\n{}\n{}\n",
+            "{}\n{}\n{}\n",
             serde_json::to_string(&legacy).unwrap(),
-            serde_json::to_string(&old_redacted).unwrap(),
             serde_json::to_string(&log_record).unwrap(),
             serde_json::to_string(&timeout_record).unwrap()
         );

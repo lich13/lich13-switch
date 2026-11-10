@@ -39,19 +39,12 @@ fn different_free_port(other: u16) -> u16 {
     }
 }
 
-fn routed(uri: &str) -> Option<(ClientId, String)> {
+fn routed_for(selected: ClientId, uri: &str) -> Option<(ClientId, String)> {
     let uri: Uri = uri.parse().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let codex = Gateway::new(temp.path().join("data")).unwrap();
     let _claude = codex.companion(temp.path().join("data/claude")).unwrap();
     let _grok = codex.grok_companion(temp.path().join("data/grok")).unwrap();
-    let selected = if uri.path().starts_with("/claude") {
-        ClientId::Claude
-    } else if uri.path().starts_with("/grok") {
-        ClientId::Grok
-    } else {
-        ClientId::Codex
-    };
     let token = local_token(&codex.0.registry.gateway(selected).unwrap());
     let mut headers = hyper::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
@@ -68,40 +61,34 @@ fn routed(uri: &str) -> Option<(ClientId, String)> {
         })
 }
 
+fn routed(uri: &str) -> Option<(ClientId, String)> {
+    routed_for(ClientId::Codex, uri)
+}
+
 #[test]
-fn routes_match_client_prefix_boundaries_and_preserve_opaque_queries() {
-    for (request, client, expected) in [
+fn routes_match_v1_boundaries_and_preserve_opaque_queries() {
+    for (request, client) in [
         (
-            "/codex/v1/responses?state=%2f&next=%2F+%2520&state=two",
-            ClientId::Codex,
             "/v1/responses?state=%2f&next=%2F+%2520&state=two",
-        ),
-        (
-            "/claude/v1/messages?api=one%2Ftwo&api=three+four",
-            ClientId::Claude,
-            "/v1/messages?api=one%2Ftwo&api=three+four",
-        ),
-        (
-            "/grok/v1/models?x=%2f%2F&flag&empty=",
-            ClientId::Grok,
-            "/v1/models?x=%2f%2F&flag&empty=",
-        ),
-        (
-            "/codex?sig=%2f&sig=%2F",
             ClientId::Codex,
-            "/?sig=%2f&sig=%2F",
         ),
-        ("/claude?sig=a+b", ClientId::Claude, "/?sig=a+b"),
-        ("/grok?sig=%252f", ClientId::Grok, "/?sig=%252f"),
+        (
+            "/v1/messages?api=one%2Ftwo&api=three+four",
+            ClientId::Claude,
+        ),
+        ("/v1/models?x=%2f%2F&flag&empty=", ClientId::Grok),
     ] {
         assert_eq!(
-            routed(request),
-            Some((client, expected.to_owned())),
+            routed_for(client, request),
+            Some((client, request.to_owned())),
             "{request}"
         );
     }
 
     for request in [
+        "/codex/v1/responses",
+        "/claude/v1/messages",
+        "/grok/v1/responses",
         "/codexish/v1/responses",
         "/claude2/v1/messages",
         "/grok-v1/responses",
@@ -123,14 +110,8 @@ fn unprefixed_v1_keeps_its_path_with_codex_credentials() {
     }
 
     assert_eq!(routed("/messages"), None);
-    assert_eq!(
-        routed("/claude/messages"),
-        Some((ClientId::Claude, "/messages".into()))
-    );
-    assert_eq!(
-        routed("/grok/responses"),
-        Some((ClientId::Grok, "/responses".into()))
-    );
+    assert_eq!(routed_for(ClientId::Claude, "/claude/messages"), None);
+    assert_eq!(routed_for(ClientId::Grok, "/grok/responses"), None);
 }
 
 fn optional_bytes(path: &Path) -> Option<Vec<u8>> {
@@ -520,9 +501,9 @@ async fn shared_tcp_listener_isolates_three_clients_and_releases_after_last_stop
     assert_ne!(tokens[1], tokens[2]);
     assert_ne!(tokens[0], tokens[2]);
     let clients = [
-        (ClientId::Codex, "/codex/v1/responses", tokens[0].clone()),
-        (ClientId::Claude, "/claude/v1/messages", tokens[1].clone()),
-        (ClientId::Grok, "/grok/v1/responses", tokens[2].clone()),
+        (ClientId::Codex, "/v1/responses", tokens[0].clone()),
+        (ClientId::Claude, "/v1/messages", tokens[1].clone()),
+        (ClientId::Grok, "/v1/responses", tokens[2].clone()),
     ];
     let body = serde_json::to_vec(&json!({
         "model": MODEL,
@@ -532,16 +513,13 @@ async fn shared_tcp_listener_isolates_three_clients_and_releases_after_last_stop
     }))
     .unwrap();
 
-    // Each client uses the same model name; only its own local token succeeds.
-    for (target, path, _) in &clients {
-        for (token_owner, _, token) in &clients {
-            let status = post(listener_port, path, token, &body).await;
-            assert_eq!(
-                status,
-                if target == token_owner { 200 } else { 401 },
-                "target={target:?}, token_owner={token_owner:?}"
-            );
-        }
+    // Each client uses the same model name; only a known local token succeeds.
+    for (_, path, token) in &clients {
+        assert_eq!(post(listener_port, path, token, &body).await, 200);
+        assert_eq!(
+            post(listener_port, path, "gs_fixture_unknown_token", &body).await,
+            401
+        );
     }
     let requests = upstream.seen.lock().unwrap().clone();
     assert_eq!(
@@ -587,15 +565,15 @@ async fn shared_tcp_listener_isolates_three_clients_and_releases_after_last_stop
     let running: HashSet<_> = codex.listener_view().running_clients.into_iter().collect();
     assert_eq!(running, HashSet::from([ClientId::Codex, ClientId::Grok]));
     assert_eq!(
-        post(listener_port, "/codex/v1/responses", &tokens[0], &body).await,
+        post(listener_port, "/v1/responses", &tokens[0], &body).await,
         200
     );
     assert_eq!(
-        post(listener_port, "/grok/v1/responses", &tokens[2], &body).await,
+        post(listener_port, "/v1/responses", &tokens[2], &body).await,
         200
     );
     assert_eq!(
-        post(listener_port, "/claude/v1/messages", &tokens[1], &body).await,
+        post(listener_port, "/v1/messages", &tokens[1], &body).await,
         503
     );
 

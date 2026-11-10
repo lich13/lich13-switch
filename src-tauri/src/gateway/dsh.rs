@@ -1359,7 +1359,7 @@ impl Gateway {
             import_selection(home, &options, &mut imported, listener.port)?;
         }
         let mut s = self.0.inner.lock().unwrap();
-        if self.view_revision_with_listener(&s, &listener.previous_revision) != expected {
+        if self.view_revision_with_listener(&s, &listener.revision) != expected {
             return Err(conflict());
         }
         let mut next = imported;
@@ -1389,7 +1389,7 @@ impl Gateway {
                     editable.running = true;
                     editable.home = Some(home.to_owned());
                 }
-                s.error = listener.notice;
+                s.error = None;
                 self.0.admission.configure(&s.store.providers, true);
                 self.0
                     .admission
@@ -1782,7 +1782,6 @@ mod tests {
         )
         .is_err());
         assert!(credentials(Some("refs: {}\n")).is_err());
-        assert!(ClientId::Dsh.legacy_addresses(43721).is_empty());
     }
     #[tokio::test]
     async fn profile_attach_sync_stop_and_recovery_use_shared_listener() {

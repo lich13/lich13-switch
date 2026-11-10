@@ -84,11 +84,7 @@ pub async fn force_quit_agent_clients(
 }
 #[tauri::command]
 pub fn get_startup_error(r: R<'_>) -> Option<AppError> {
-    r.cleanup_error
-        .lock()
-        .unwrap()
-        .clone()
-        .or_else(|| r.startup_error.lock().unwrap().clone())
+    r.startup_error.lock().unwrap().clone()
 }
 
 #[tauri::command]
@@ -102,8 +98,8 @@ pub async fn get_app_events(
             .origin
             .is_none_or(|o| o == crate::events::Origin::Antigravity)
             && filter.client_id.is_none_or(|c| {
-                c == crate::events::JournalClient::Retired(
-                    crate::events::RetiredClient::Antigravity,
+                c == crate::events::JournalClient::External(
+                    crate::events::ExternalClient::Antigravity,
                 )
             })
         {

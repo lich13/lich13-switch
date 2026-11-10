@@ -144,24 +144,6 @@ static NSDictionary *install(uid_t uid, NSString *path, NSString *hash, NSString
         result=binary&&data ? installTransaction(binary,data,@{@"uid":@(uid),@"path":path,@"requirement":requirement,@"version":@1,@"transaction":transaction}) : installFailure(@"READ",@"无法读取安装载荷",@"unchanged");
     }
     writeJSON(InstallReady,nil);
-    if(!result[@"error"]){
-        NSString *legacyRoot=@"/Library/Application Support/gpt-Switch Power";
-        NSString *legacyRestore=[legacyRoot stringByAppendingPathComponent:@"restore.json"];
-        if(lstat(Restore.fileSystemRepresentation,&st)!=0&&safeRootPath(legacyRestore,NO)){
-            NSDictionary *oldRestore=readJSON(legacyRestore);
-            if(oldRestore)writeJSON(Restore,oldRestore);
-        }
-        run(@"/bin/launchctl",@[@"bootout",@"system/com.lich13.gpt-switch.power-helper"],NULL);
-        for(NSString *oldFile in @[@"/Library/LaunchDaemons/com.lich13.gpt-switch.power-helper.plist",
-                                   @"/Library/PrivilegedHelperTools/com.lich13.gpt-switch.power-helper",
-                                   [legacyRoot stringByAppendingPathComponent:@"client.json"],
-                                   legacyRestore,
-                                   [legacyRoot stringByAppendingPathComponent:@"install-ready.json"],
-                                   [legacyRoot stringByAppendingPathComponent:@"install.lock"]]){
-            unlink(oldFile.fileSystemRepresentation);
-        }
-        rmdir(legacyRoot.fileSystemRepresentation);
-    }
     close(lock);
     if(!existed&&result[@"error"]){unlink(lockPath.fileSystemRepresentation);rmdir(Root.fileSystemRepresentation);}
     return result;

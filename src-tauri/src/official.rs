@@ -220,10 +220,7 @@ fn scan(text: &str) -> Result<Scan> {
     // multiline string or a user's comment is never treated as managed state.
     for (i, line) in all.iter().enumerate().take(end).skip(start + 1) {
         let trimmed = line.body.trim_start();
-        let Some(rest) = trimmed
-            .strip_prefix("# vela:official ")
-            .or_else(|| trimmed.strip_prefix("# lich13-switch:official "))
-        else {
+        let Some(rest) = trimmed.strip_prefix("# vela:official ") else {
             continue;
         };
         for (n, key) in KEYS.iter().enumerate() {
@@ -463,33 +460,6 @@ impl ViewCache {
 
 fn view(data: &Path, home: &Path) -> OfficialModeView {
     ViewCache::default().view(data, home)
-}
-
-/// Both the old and retained IDs exist in the pre-migration vault. Updating
-/// this reference before the vault is therefore safe even across interruption.
-pub(crate) fn remap_account(
-    data: &Path,
-    aliases: &std::collections::BTreeMap<String, String>,
-) -> Result<Option<(Vec<u8>, String)>> {
-    if aliases.is_empty() {
-        return Ok(None);
-    }
-    let path = data.join(FILE);
-    let Some(before) = storage::read_optional(&path)? else {
-        return Ok(None);
-    };
-    let mut value: serde_json::Value = serde_json::from_slice(&before)
-        .map_err(|_| AppError::new(code::STORE, "官方账号记录无法读取，原文件已保留"))?;
-    let Some(next) = value["accountId"].as_str().and_then(|id| aliases.get(id)) else {
-        return Ok(None);
-    };
-    value["accountId"] = serde_json::Value::String(next.clone());
-    let bytes = serde_json::to_vec_pretty(&value)
-        .map_err(|_| AppError::new(code::STORE, "无法更新官方账号记录"))?;
-    let expected = storage::digest(&before);
-    let applied = storage::digest(&bytes);
-    storage::atomic_write(&path, &bytes, Some(&expected))?;
-    Ok(Some((before, applied)))
 }
 
 fn cleanup_settled_stage(data: &Path, record: &Record) -> bool {

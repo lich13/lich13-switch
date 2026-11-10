@@ -7,14 +7,14 @@ import type {
   EventMap,
 } from "./bridge-contracts";
 export const native = "__TAURI_INTERNALS__" in window;
-export const preview = !native && import.meta.env.DEV;
+export const preview = import.meta.env.DEV && !native;
 export async function command<K extends CommandName>(
   name: K,
   ...params: CommandParams<K>
 ): Promise<CommandResult<K>> {
   const args = params[0] ?? {};
   if (native) return invoke<CommandResult<K>>(name, args);
-  if (import.meta.env.DEV && preview)
+  if (preview)
     return (await import("./preview")).run(name, args) as Promise<
       CommandResult<K>
     >;
@@ -25,7 +25,6 @@ export async function subscribe<K extends keyof EventMap>(
   fn: (payload: EventMap[K]) => void,
 ): Promise<() => void> {
   if (native) return listen<EventMap[K]>(event, (e) => fn(e.payload));
-  if (import.meta.env.DEV && preview)
-    return (await import("./preview")).subscribe(event, fn);
+  if (preview) return (await import("./preview")).subscribe(event, fn);
   return () => {};
 }

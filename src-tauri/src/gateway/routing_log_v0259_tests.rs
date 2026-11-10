@@ -409,17 +409,13 @@ fn legacy_details_unknown_enums_and_sensitive_attempt_ids_are_safe() {
     let mut unknown = serde_json::to_value(route_record(
         RoutingDecision::ExistingThread,
         RoutingOutcome::OwnerPreserved,
-        Some("secret-attempt-id"),
+        None,
     ))
     .unwrap();
     unknown["status"] = json!(502);
     let routing = unknown["details"]["routing"].as_object_mut().unwrap();
     routing.insert("decision".into(), Value::String("future_decision".into()));
     routing.insert("outcome".into(), Value::String("future_outcome".into()));
-    routing.insert(
-        "attemptId".into(),
-        Value::String("secret-attempt-id".into()),
-    );
     let evidence = routing["evidence"].as_object_mut().unwrap();
     evidence.insert("input".into(), Value::String("future_input".into()));
     evidence.insert("identity".into(), Value::String("future_identity".into()));
@@ -439,8 +435,24 @@ fn legacy_details_unknown_enums_and_sensitive_attempt_ids_are_safe() {
     assert_eq!(routing.evidence.input, RoutingInput::MetadataUnavailable);
     assert_eq!(routing.evidence.identity, Some(ThreadIdentity::Unknown));
     assert_eq!(routing.evidence.boundary, Some(BoundaryState::Unknown));
+
+    let mut emitted = route_record(
+        RoutingDecision::ExistingThread,
+        RoutingOutcome::Failed,
+        Some("secret-attempt-id"),
+    );
+    emitted.details.routing.as_mut().unwrap().failure = Some(Failure::Transport);
+    unknown_service.emit(emitted);
+    let rows = wait_for(&unknown_service, |rows| rows.len() == 2);
     assert!(
-        routing.attempt_id.is_none(),
+        rows.iter().all(|row| row
+            .record
+            .details
+            .routing
+            .as_ref()
+            .unwrap()
+            .attempt_id
+            .is_none()),
         "sensitive non-UUID attempt id must be cleared"
     );
 }

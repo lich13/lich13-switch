@@ -2,15 +2,6 @@ use super::*;
 use serde_json::{json, Value};
 use std::{fs, path::Path};
 
-const RETIRED_STATISTICS: &[&str] = &[
-    "usage.sqlite",
-    "usage.sqlite-wal",
-    "usage.sqlite-shm",
-    "usage.sqlite-journal",
-    "usage-settings.json",
-    "model-pricing.json",
-];
-
 fn legacy_gateway(data: &Path) -> Vec<u8> {
     let mut value = serde_json::to_value(crate::gateway::Store::default()).unwrap();
     value.as_object_mut().unwrap().extend(
@@ -23,10 +14,8 @@ fn legacy_gateway(data: &Path) -> Vec<u8> {
                 "token": "fixture-token",
                 "version": "fixture-version",
                 "queued": false,
-                "proxyId": "fixture-proxy",
                 "futureProviderField": {"keep": true}
             }],
-            "proxies": [{"id": "fixture-proxy", "label": "fixture-only"}],
             "futureRootField": {"keep": true}
         })
         .as_object()
@@ -38,63 +27,10 @@ fn legacy_gateway(data: &Path) -> Vec<u8> {
     bytes
 }
 
-fn assert_recovery_failure_preserves_legacy_state(recovery: &[u8]) {
-    let data = tempfile::tempdir().unwrap();
-    let gateway_before = legacy_gateway(data.path());
-    let proxy_profiles = data.path().join("proxy-profiles.json");
-    fs::write(&proxy_profiles, b"fixture-only legacy proxy metadata").unwrap();
-    let profiles_before = fs::read(&proxy_profiles).unwrap();
-    let recovery_path = data.path().join("gateway-recovery.json");
-    fs::write(&recovery_path, recovery).unwrap();
-
-    assert!(gateway(data.path()).is_err());
-    assert_eq!(
-        fs::read(data.path().join("gateway.json")).unwrap(),
-        gateway_before
-    );
-    assert_eq!(fs::read(&proxy_profiles).unwrap(), profiles_before);
-    assert_eq!(fs::read(&recovery_path).unwrap(), recovery);
-}
-
-#[test]
-fn before_services_is_idempotent_and_removes_only_exact_legacy_statistics_files() {
-    let data = tempfile::tempdir().unwrap();
-    for name in RETIRED_STATISTICS {
-        fs::write(data.path().join(name), b"fixture-only retired statistics").unwrap();
-    }
-    let retained_files = [
-        ("usage.sqlite.backup", b"backup".as_slice()),
-        ("usage-settings.json.old", b"old settings".as_slice()),
-        ("gateway.json", b"gateway state".as_slice()),
-    ];
-    for (name, bytes) in retained_files {
-        fs::write(data.path().join(name), bytes).unwrap();
-    }
-    let archive = data.path().join("usage-archive");
-    fs::create_dir(&archive).unwrap();
-    fs::write(archive.join("keep.json"), b"archive fixture").unwrap();
-
-    before_services(data.path()).unwrap();
-    before_services(data.path()).unwrap();
-
-    for name in RETIRED_STATISTICS {
-        assert!(!data.path().join(name).exists(), "{name}");
-    }
-    for (name, bytes) in retained_files {
-        assert_eq!(fs::read(data.path().join(name)).unwrap(), bytes, "{name}");
-    }
-    assert_eq!(
-        fs::read(archive.join("keep.json")).unwrap(),
-        b"archive fixture"
-    );
-}
-
 #[test]
 fn gateway_recovers_before_migrating_and_preserves_unknown_fields_idempotently() {
     let data = tempfile::tempdir().unwrap();
     let original = legacy_gateway(data.path());
-    let proxy_profiles = data.path().join("proxy-profiles.json");
-    fs::write(&proxy_profiles, b"fixture-only legacy proxy metadata").unwrap();
 
     let config = data.path().join("config.toml");
     let base_url = "https://example.invalid/v1";
@@ -123,17 +59,11 @@ fn gateway_recovers_before_migrating_and_preserves_unknown_fields_idempotently()
         !recovery.exists(),
         "successful recovery should settle its journal"
     );
-    assert!(
-        !proxy_profiles.exists(),
-        "legacy proxy profiles should be retired after recovery"
-    );
 
     let migrated = fs::read(data.path().join("gateway.json")).unwrap();
     let value: Value = serde_json::from_slice(&migrated).unwrap();
     assert_eq!(value["schema"], 2);
-    assert!(value.get("proxies").is_none());
     assert_eq!(value["providers"][0]["id"], "fixture-provider");
-    assert!(value["providers"][0].get("proxyId").is_none());
     assert_eq!(value["providers"][0]["futureProviderField"]["keep"], true);
     assert_eq!(value["futureRootField"]["keep"], true);
 
@@ -143,32 +73,6 @@ fn gateway_recovers_before_migrating_and_preserves_unknown_fields_idempotently()
         migrated
     );
     assert_ne!(original, migrated);
-}
-
-#[test]
-fn corrupt_or_incomplete_recovery_does_not_delete_legacy_proxy_state() {
-    for recovery in [b"{".as_slice(), br#"{"version":2}"#.as_slice()] {
-        assert_recovery_failure_preserves_legacy_state(recovery);
-    }
-}
-
-#[test]
-fn retired_grok_native_snapshot_is_removed_without_touching_current_connection() {
-    let data = tempfile::tempdir().unwrap();
-    let path = data.path().join("gateway.json");
-    let mut old = serde_json::to_value(crate::gateway::Store::default()).unwrap();
-    old["grokNative"] = json!({"before":"fixture-private-history","environment":{}});
-    old["grokApiModel"] = "grok-fixture".into();
-    old["future"] = true.into();
-    fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
-    gateway(data.path()).unwrap();
-    let bytes = fs::read(&path).unwrap();
-    let next: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(next.get("grokNative").is_none());
-    assert_eq!(next["grokApiModel"], old["grokApiModel"]);
-    assert_eq!(next["future"], true);
-    gateway(data.path()).unwrap();
-    assert_eq!(fs::read(path).unwrap(), bytes);
 }
 
 #[test]
@@ -191,111 +95,4 @@ fn request_budget_migration_replaces_legacy_values_once() {
     let saved = value.clone();
     gateway_wait_budget(&mut value);
     assert_eq!(value, saved);
-}
-
-#[test]
-fn migrate_to_vela_home_verifies_sha256_and_cleans_up_legacy_tree() {
-    let root = tempfile::tempdir().unwrap();
-    let legacy = root.path().join("legacy-app-data");
-    let vela = root.path().join(".vela");
-    fs::create_dir_all(legacy.join("grok")).unwrap();
-    fs::create_dir_all(legacy.join("gateway-spool-123")).unwrap();
-    fs::write(legacy.join("gateway-spool-123/spool.sqlite3"), b"temp").unwrap();
-    fs::write(legacy.join("accounts.json"), b"{\"schema\":1}").unwrap();
-    fs::write(
-        legacy.join("grok/gateway.json"),
-        b"{\"grokApiModel\":\"vela\"}",
-    )
-    .unwrap();
-    fs::write(legacy.join(".DS_Store"), b"junk").unwrap();
-    fs::write(legacy.join(".tmpabc"), b"junk").unwrap();
-
-    migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap();
-    assert!(!legacy.exists());
-    assert_eq!(
-        fs::read_to_string(vela.join("accounts.json")).unwrap(),
-        "{\"schema\":1}"
-    );
-    assert_eq!(
-        fs::read_to_string(vela.join("grok/gateway.json")).unwrap(),
-        "{\"grokApiModel\":\"vela\"}"
-    );
-    assert!(!vela.join(".DS_Store").exists());
-    assert!(!vela.join(".tmpabc").exists());
-}
-
-#[test]
-fn migrate_to_vela_home_stops_on_conflicting_destination_and_preserves_legacy_files() {
-    let root = tempfile::tempdir().unwrap();
-    let legacy = root.path().join("legacy-app-data");
-    let vela = root.path().join(".vela");
-    fs::create_dir_all(&legacy).unwrap();
-    fs::create_dir_all(&vela).unwrap();
-
-    let legacy_db = b"real-usage-database-bytes-with-history";
-    fs::write(legacy.join("a_accounts.json"), b"{\"schema\":1}").unwrap();
-    fs::write(legacy.join("b_usage.sqlite"), legacy_db).unwrap();
-    fs::write(legacy.join("c_tail.json"), b"{\"tail\":true}").unwrap();
-
-    // Simulate an empty usage.sqlite created in ~/.vela after an earlier failed run:
-    // even if someone padded it to the same or different length, SHA-256 differs.
-    let conflicting_dst = vec![b'0'; legacy_db.len()];
-    fs::write(vela.join("b_usage.sqlite"), &conflicting_dst).unwrap();
-
-    let err = migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap_err();
-    assert_eq!(err.code, crate::errors::code::CONFLICT);
-    assert!(err.message.contains("b_usage.sqlite"));
-
-    // Source conflicting file and subsequent file must NOT be deleted!
-    assert_eq!(fs::read(legacy.join("b_usage.sqlite")).unwrap(), legacy_db);
-    assert_eq!(
-        fs::read(legacy.join("c_tail.json")).unwrap(),
-        b"{\"tail\":true}"
-    );
-    // Destination file must NOT be overwritten!
-    assert_eq!(
-        fs::read(vela.join("b_usage.sqlite")).unwrap(),
-        conflicting_dst
-    );
-}
-
-#[test]
-fn migrate_to_vela_home_resumes_idempotently_when_destination_has_identical_sha256() {
-    let root = tempfile::tempdir().unwrap();
-    let legacy = root.path().join("legacy-app-data");
-    let vela = root.path().join(".vela");
-    fs::create_dir_all(&legacy).unwrap();
-    fs::create_dir_all(&vela).unwrap();
-
-    let db_bytes = b"identical-usage-sqlite-content";
-    fs::write(legacy.join("usage.sqlite"), db_bytes).unwrap();
-    fs::write(legacy.join("gateway.json"), b"{\"schema\":2}").unwrap();
-    fs::write(vela.join("usage.sqlite"), db_bytes).unwrap();
-
-    migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap();
-    assert!(!legacy.exists());
-    assert_eq!(fs::read(vela.join("usage.sqlite")).unwrap(), db_bytes);
-    assert_eq!(
-        fs::read(vela.join("gateway.json")).unwrap(),
-        b"{\"schema\":2}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn migrate_to_vela_home_aborts_on_midway_symlink_and_retains_remaining_files() {
-    use std::os::unix::fs::symlink;
-    let root = tempfile::tempdir().unwrap();
-    let legacy = root.path().join("legacy-app-data");
-    let vela = root.path().join(".vela");
-    fs::create_dir_all(&legacy).unwrap();
-
-    fs::write(legacy.join("01_first.json"), b"first").unwrap();
-    symlink(root.path().join("outside"), legacy.join("02_bad_link")).unwrap();
-    fs::write(legacy.join("03_after.json"), b"after").unwrap();
-
-    let err = migrate_to_vela_home(&vela, std::slice::from_ref(&legacy)).unwrap_err();
-    assert!(err.message.contains("02_bad_link"));
-    assert_eq!(fs::read(vela.join("01_first.json")).unwrap(), b"first");
-    assert_eq!(fs::read(legacy.join("03_after.json")).unwrap(), b"after");
 }

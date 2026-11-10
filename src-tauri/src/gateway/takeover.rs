@@ -42,12 +42,7 @@ impl Pair {
         }
         ports
             .iter()
-            .flat_map(|port| {
-                let mut addresses = client.legacy_addresses(*port);
-                addresses.push(client.address(*port));
-                addresses
-            })
-            .filter_map(|base| url::Url::parse(&base).ok())
+            .filter_map(|port| url::Url::parse(&client.address(*port)).ok())
             .any(|expected| {
                 url.port_or_known_default() == expected.port_or_known_default()
                     && url.path().trim_end_matches('/') == expected.path().trim_end_matches('/')

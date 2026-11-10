@@ -21,66 +21,10 @@ fn seed(client: ClientId, home: &Path) {
     fs::write(client.config(home), text).unwrap();
 }
 
-fn old_address(client: ClientId, port: u16) -> String {
-    let path = match client {
-        ClientId::Dsh => panic!("DSH profile path is covered separately"),
-        ClientId::Codex => "/codex/v1",
-        ClientId::Claude => "/claude",
-        ClientId::Grok => "/grok/v1",
-    };
-    format!("http://localhost:{port}{path}")
-}
-
 fn attach(client: ClientId, data: &Path, home: &Path, port: u16) {
     storage::private_dir(data).unwrap();
     let (revision, original) = takeover::read_for(client, home).unwrap();
     takeover::attach_store_for(client, data, home, port, LOCAL, original, &revision, None).unwrap();
-}
-
-#[test]
-fn legacy_journals_restore_current_aliases_for_all_three_clients() {
-    for client in [ClientId::Codex, ClientId::Claude, ClientId::Grok] {
-        for current_is_old in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
-            let data = temp.path().join("data");
-            let home = temp.path().join("client");
-            let port = 41017;
-            seed(client, &home);
-            let original = takeover::read_for(client, &home).unwrap().1.fingerprint();
-            attach(client, &data, &home, port);
-            let path = data.join("gateway-recovery.json");
-            let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            let before = record["before"].clone();
-            let exit = record["exit"].clone();
-            let native_before = record["grok"]["before"].clone();
-            let canonical = client.address(port);
-            let old = old_address(client, port);
-            if current_is_old {
-                let text = fs::read_to_string(client.config(&home))
-                    .unwrap()
-                    .replace(&canonical, &old);
-                fs::write(client.config(&home), text).unwrap();
-            } else {
-                record["applied"]["base_url"] = json!(old);
-                if let Some(applied) = record["grok"]["applied"].as_str() {
-                    record["grok"]["applied"] = json!(applied.replace(&canonical, &old));
-                }
-                fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-            }
-            assert_eq!(record["before"], before);
-            assert_eq!(record["exit"], exit);
-            assert_eq!(record["grok"]["before"], native_before);
-            takeover::recover(&data).unwrap();
-            assert_eq!(
-                takeover::read_for(client, &home).unwrap().1.fingerprint(),
-                original
-            );
-            let restored = fs::read(client.config(&home)).unwrap();
-            takeover::recover(&data).unwrap();
-            assert_eq!(fs::read(client.config(&home)).unwrap(), restored);
-            assert!(!path.exists());
-        }
-    }
 }
 
 #[test]
@@ -114,20 +58,14 @@ fn unknown_address_or_token_changes_keep_config_and_recovery_untouched() {
 }
 
 #[test]
-fn grok_alias_does_not_hide_changed_owned_model() {
+fn grok_recovery_does_not_hide_changed_owned_model() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     let home = temp.path().join("client");
     seed(ClientId::Grok, &home);
     attach(ClientId::Grok, &data, &home, 41017);
     let text = fs::read_to_string(ClientId::Grok.config(&home)).unwrap();
-    let mut doc = text
-        .replace(
-            &ClientId::Grok.address(41017),
-            &old_address(ClientId::Grok, 41017),
-        )
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap();
+    let mut doc = text.parse::<toml_edit::DocumentMut>().unwrap();
     doc["model"][super::grok_config::MANAGED]["model"] = toml_edit::value("fixture-other-model");
     let changed = doc.to_string();
     fs::write(ClientId::Grok.config(&home), &changed).unwrap();
@@ -147,73 +85,6 @@ fn gateway_for(client: ClientId, data: &Path) -> (Gateway, Gateway) {
         ClientId::Grok => root.grok_companion(data.join("grok")).unwrap(),
     };
     (root, gateway)
-}
-
-#[tokio::test]
-async fn restart_recovers_old_journal_before_attaching_the_new_address() {
-    for client in [ClientId::Codex, ClientId::Claude, ClientId::Grok] {
-        let temp = tempfile::tempdir().unwrap();
-        let data = temp.path().join("data");
-        let home = temp.path().join("client");
-        seed(client, &home);
-        let original = takeover::read_for(client, &home).unwrap().1.fingerprint();
-        let (root, gateway) = gateway_for(client, &data);
-        provider(&gateway, &home);
-        let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = held.local_addr().unwrap().port();
-        root.set_listener_port(port, &root.listener_view().revision)
-            .unwrap();
-        drop(held);
-        gateway
-            .start(&gateway.view().revision, &home)
-            .await
-            .unwrap();
-        gateway
-            .0
-            .registry
-            .listener
-            .deactivate(client)
-            .await
-            .unwrap();
-        let journal = gateway.0.data.join("gateway-recovery.json");
-        let canonical = client.address(port);
-        let legacy = old_address(client, port);
-        let text = fs::read_to_string(client.config(&home))
-            .unwrap()
-            .replace(&canonical, &legacy);
-        fs::write(client.config(&home), text).unwrap();
-        let mut record: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
-        record["applied"]["base_url"] = json!(legacy);
-        if let Some(applied) = record["grok"]["applied"].as_str() {
-            record["grok"]["applied"] = json!(applied.replace(&canonical, &legacy));
-        }
-        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
-        drop(gateway);
-        drop(root);
-
-        let (_root, gateway) = gateway_for(client, &data);
-        assert_eq!(
-            takeover::read_for(client, &home).unwrap().1.fingerprint(),
-            original
-        );
-        gateway.resume(&home).await.unwrap();
-        assert!(gateway.view().running);
-        assert_eq!(
-            takeover::read_for(client, &home)
-                .unwrap()
-                .1
-                .base_url
-                .as_deref(),
-            Some(canonical.as_str())
-        );
-        let fresh: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
-        assert_eq!(fresh["applied"]["base_url"], canonical);
-        gateway.stop().await.unwrap();
-        assert_eq!(
-            takeover::read_for(client, &home).unwrap().1.fingerprint(),
-            original
-        );
-    }
 }
 
 #[test]
@@ -241,7 +112,7 @@ fn managed_addresses_require_a_known_client_path_port_and_exact_token() {
 }
 
 #[test]
-fn grok_import_does_not_adopt_local_credentials_from_an_old_loopback_address() {
+fn grok_import_does_not_adopt_local_credentials_from_loopback_address() {
     for host in ["localhost", "[::1]", "127.0.0.1"] {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("client");
@@ -249,7 +120,7 @@ fn grok_import_does_not_adopt_local_credentials_from_an_old_loopback_address() {
         let path = ClientId::Grok.config(&home);
         let text = fs::read_to_string(&path)
             .unwrap()
-            .replace(BASE, &format!("http://{host}:15724/grok/v1"))
+            .replace(BASE, &format!("http://{host}:43721/v1"))
             .replace(UPSTREAM, LOCAL);
         fs::write(&path, &text).unwrap();
         let (_root, gateway) = gateway_for(ClientId::Grok, &temp.path().join("data"));

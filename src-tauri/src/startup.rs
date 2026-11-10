@@ -1,6 +1,7 @@
 //! Native login items for installed bundles and hidden launches.
 use crate::errors::code;
 use crate::storage::{self, AppError, Result};
+#[cfg(not(target_os = "macos"))]
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -8,10 +9,8 @@ use std::{
     sync::Mutex,
 };
 pub const LOGIN_ARG: &str = "--vela-login-startup";
-pub const LEGACY_LOGIN_ARG: &str = "--gpt-switch-login-startup";
-pub const LEGACY_LICH13_LOGIN_ARG: &str = "--lich13-switch-login-startup";
 pub fn is_login_argument(arg: &str) -> bool {
-    [LOGIN_ARG, LEGACY_LOGIN_ARG, LEGACY_LICH13_LOGIN_ARG].contains(&arg)
+    arg == LOGIN_ARG
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -54,63 +53,6 @@ impl Service {
             launch_on_boot: registered()?,
             revision,
         })
-    }
-    pub fn migrate(&self) -> Result<()> {
-        let _guard = self.lock.lock().unwrap();
-        #[cfg(target_os = "macos")]
-        {
-            crate::startup_macos::migrate(&executable()?)?;
-            if !self.path.exists() {
-                let old = auto_launch()?;
-                let legacy = old.is_enabled().map_err(system_error)?;
-                if legacy {
-                    let was = registered()?;
-                    register(true)?;
-                    if let Err(e) = old.disable() {
-                        let _ = register(was);
-                        return Err(system_error(e));
-                    }
-                    if old.is_enabled().map_err(system_error)? {
-                        return Err(AppError::new(code::STARTUP, "旧登录项未能移除"));
-                    }
-                }
-            }
-        }
-        #[cfg(windows)]
-        {
-            use winreg::{
-                enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE},
-                RegKey,
-            };
-            let legacy_present = RegKey::predef(HKEY_CURRENT_USER)
-                .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run")
-                .is_ok_and(|key| {
-                    key.get_value::<String, _>("gpt-Switch").is_ok()
-                        || key.get_value::<String, _>("lich13-switch").is_ok()
-                });
-            if legacy_present || auto_launch()?.is_enabled().map_err(system_error)? {
-                register(true)?;
-                if !registered()? {
-                    return Err(AppError::new(code::STARTUP, "启动项迁移失败"));
-                }
-                if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
-                    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-                    KEY_READ | KEY_WRITE,
-                ) {
-                    let _ = key.delete_value("gpt-Switch");
-                    let _ = key.delete_value("lich13-switch");
-                }
-            }
-        }
-        let (prefs, rev) = self.read()?;
-        if rev != "missing" {
-            storage::atomic_write(
-                &self.path,
-                &serde_json::to_vec_pretty(&prefs).unwrap(),
-                Some(&rev),
-            )?;
-        }
-        Ok(())
     }
     pub fn update(&self, enabled: bool, expected: &str) -> Result<View> {
         let _guard = self.lock.lock().unwrap();
@@ -195,6 +137,7 @@ fn register(enabled: bool) -> Result<()> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn system_error(_: auto_launch::Error) -> AppError {
     AppError::new(
         code::STARTUP,
@@ -208,6 +151,7 @@ fn bundle_path(executable: &Path) -> PathBuf {
         .unwrap_or(executable)
         .to_owned()
 }
+#[cfg(not(target_os = "macos"))]
 fn auto_launch() -> Result<AutoLaunch> {
     let executable = std::env::current_exe().map_err(storage::io_error)?;
     let path = if cfg!(target_os = "macos") {
@@ -246,6 +190,7 @@ fn auto_launch() -> Result<AutoLaunch> {
         .build()
         .map_err(system_error)
 }
+#[cfg(any(not(target_os = "macos"), test))]
 fn registration_path(path: &str, windows: bool) -> String {
     if windows {
         format!("\"{path}\"")
@@ -331,8 +276,6 @@ mod tests {
         let _: Preferences =
             serde_json::from_str(r#"{"launchToTray":false,"restoreGateway":true}"#).unwrap();
         assert!(login_source(&[LOGIN_ARG.into()]));
-        assert!(login_source(&[LEGACY_LOGIN_ARG.into()]));
-        assert!(login_source(&[LEGACY_LICH13_LOGIN_ARG.into()]));
         assert!(is_login_event(
             u32::from_be_bytes(*b"oapp"),
             Some(u32::from_be_bytes(*b"lgit"))

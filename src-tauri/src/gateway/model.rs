@@ -172,8 +172,6 @@ pub struct Store {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub successful_codex_identity: Option<super::testing::CodexIdentity>,
     #[serde(default)]
-    pub phase_timeouts: bool,
-    #[serde(default)]
     pub initialized: bool,
     #[serde(default)]
     pub connection: super::codex_api::Connection,
@@ -221,7 +219,6 @@ impl Default for Store {
             schema: 2,
             successful_user_agent: None,
             successful_codex_identity: None,
-            phase_timeouts: true,
             initialized: false,
             connection: Default::default(),
             providers: vec![],
@@ -438,25 +435,21 @@ impl Store {
         let invalid = || AppError::new(code::STORE, "网关存储无法读取，请保留原文件");
         let mut next = None;
         let mut store: Self = match &raw {
-            Some(raw) => {
+            Some(raw) if migrate => {
                 let mut value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
-                let changed = if migrate {
-                    crate::migrations::gateway_state_after_recovery(&mut value)?
-                } else {
-                    crate::migrations::gateway_fields(&mut value)
-                };
-                if migrate && changed {
+                if crate::migrations::gateway_state_after_recovery(&mut value)? {
                     next = Some(serde_json::to_vec_pretty(&value).map_err(|_| invalid())?);
                 }
                 serde_json::from_value(value).map_err(|_| invalid())?
             }
+            Some(raw) => serde_json::from_slice(raw).map_err(|_| invalid())?,
             None => Self::default(),
         };
         if !matches!(store.schema, 1 | 2) {
             return Err(AppError::new(code::STORE, "网关存储版本不受支持"));
         }
-        store.phase_timeouts = true;
+        store.schema = 2;
         store.settings.validate()?;
         store
             .quota_access_tokens

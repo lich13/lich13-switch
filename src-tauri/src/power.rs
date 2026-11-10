@@ -2,10 +2,7 @@
 use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,7 +45,6 @@ struct Native;
 #[path = "power_repair_tests.rs"]
 mod v023_tests;
 pub struct Service {
-    path: PathBuf,
     system: Arc<dyn System>,
     lock: Mutex<()>,
 }
@@ -64,9 +60,8 @@ pub fn close_after_freeze(attempted: &mut bool, frozen: bool, draining: usize) -
     }
 }
 impl Service {
-    pub fn new(data: &std::path::Path) -> Self {
+    pub fn new() -> Self {
         Self {
-            path: data.join("clamshell-restore.json"),
             system: Arc::new(Native),
             lock: Mutex::new(()),
         }
@@ -83,7 +78,6 @@ impl Service {
         let _lock = self.lock.lock().unwrap();
         // The helper restores only the fields it still owns. External settings survive removal.
         self.system.remove()?;
-        self.retire_legacy_record()?;
         self.state()
     }
 
@@ -134,11 +128,8 @@ impl Service {
         } else {
             before
         };
-        // Restoration belongs exclusively to the privileged helper. An unverified
-        // legacy user/script record must never supply a battery sleep value.
-        let actual = self.system.apply(&before, enabled, before.battery_sleep)?;
-        self.retire_legacy_record()?;
-        Ok(actual)
+        // Restoration belongs exclusively to the privileged helper.
+        self.system.apply(&before, enabled, before.battery_sleep)
     }
     fn repair_for_toggle(&self, before: &State) -> Result<State> {
         self.system.prepare()?;
@@ -157,13 +148,6 @@ impl Service {
             return Err(AppError::new(code::POWER_HELPER, "修复后助手仍不可用"));
         }
         Ok(prepared)
-    }
-    fn retire_legacy_record(&self) -> Result<()> {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(AppError::new(code::POWER, "电源已更新，旧恢复记录清理失败")),
-        }
     }
 }
 #[cfg(target_os = "macos")]
@@ -392,7 +376,7 @@ mod tests {
     }
     fn fixture(initial: State) -> (tempfile::TempDir, Service, Arc<MockHelper>) {
         let dir = tempfile::tempdir().unwrap();
-        let mut service = Service::new(dir.path());
+        let mut service = Service::new();
         let helper = Arc::new(MockHelper {
             current: Mutex::new(initial),
             replies: Mutex::new(VecDeque::new()),
@@ -424,41 +408,36 @@ mod tests {
                 calls.as_slice(),
                 &[(original, true, minutes), (owned, false, 0)]
             );
-            assert!(!service.path.exists());
         }
     }
 
     #[test]
-    fn legacy_user_records_never_supply_sleep_or_a_default() {
-        for (minutes, legacy) in [(0, r#"{"version":1,"minutes":7}"#), (9, "invalid record")] {
+    fn external_sleep_minutes_including_zero_are_passed_through_unchanged() {
+        for minutes in [0, 9] {
             let original = state(true, minutes, "external", false);
             let closed = state(false, minutes, "none", false);
             let (_dir, service, helper) = fixture(original.clone());
-            std::fs::write(&service.path, legacy).unwrap();
             helper.reply(closed.clone(), None);
             assert_eq!(service.set(false, &original.revision).unwrap(), closed);
             assert_eq!(
                 helper.calls.lock().unwrap().as_slice(),
                 &[(original, false, minutes)]
             );
-            assert!(!service.path.exists());
         }
     }
 
     #[test]
-    fn authorization_cancellation_preserves_state_and_legacy_record() {
+    fn authorization_cancellation_preserves_state() {
         let mut original = state(false, 3, "none", false);
         original.helper = "missing".into();
         let (_dir, service, helper) = fixture(original.clone());
         helper.ready.store(false, Ordering::SeqCst);
         helper.cancelled.store(true, Ordering::SeqCst);
-        std::fs::write(&service.path, "legacy").unwrap();
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
             code::POWER_AUTH
         );
         assert_eq!(service.state().unwrap(), original);
-        assert_eq!(std::fs::read_to_string(&service.path).unwrap(), "legacy");
         assert!(helper.calls.lock().unwrap().is_empty());
         assert_eq!(helper.approvals.load(Ordering::SeqCst), 1);
     }
@@ -569,7 +548,6 @@ mod tests {
         let original = state(false, 7, "none", false);
         let external = state(false, 4, "none", true);
         let (_dir, service, helper) = fixture(original.clone());
-        std::fs::write(&service.path, "legacy").unwrap();
         helper.reply(external.clone(), Some(code::CONFLICT));
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
@@ -577,7 +555,6 @@ mod tests {
         );
         assert_eq!(service.state().unwrap(), external);
         assert_eq!(helper.calls.lock().unwrap().len(), 1);
-        assert_eq!(std::fs::read_to_string(&service.path).unwrap(), "legacy");
     }
 
     #[test]
@@ -593,7 +570,6 @@ mod tests {
             ),
         ] {
             let (_dir, service, helper) = fixture(original);
-            std::fs::write(&service.path, "legacy").unwrap();
             *helper.remove_reply.lock().unwrap() = Some(Reply {
                 state: removed.clone(),
                 error: None,
@@ -603,22 +579,19 @@ mod tests {
             assert_eq!(helper.removals.load(Ordering::SeqCst), 1);
             assert!(helper.calls.lock().unwrap().is_empty());
             assert!(!helper.ready.load(Ordering::SeqCst));
-            assert!(!service.path.exists());
         }
     }
 
     #[test]
-    fn failed_removal_keeps_legacy_record_and_returns_helper_error() {
+    fn failed_removal_returns_helper_error() {
         let original = state(true, 0, "application", false);
         let (_dir, service, helper) = fixture(original.clone());
-        std::fs::write(&service.path, "legacy").unwrap();
         *helper.remove_reply.lock().unwrap() = Some(Reply {
             state: original.clone(),
             error: Some(code::POWER),
         });
         assert_eq!(service.remove().unwrap_err().code, code::POWER);
         assert_eq!(service.state().unwrap(), original);
-        assert_eq!(std::fs::read_to_string(&service.path).unwrap(), "legacy");
         assert!(helper.calls.lock().unwrap().is_empty());
     }
 

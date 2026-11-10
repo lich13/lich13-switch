@@ -402,7 +402,6 @@ impl Core {
         self.exchange.templates.prune();
     }
     pub fn exchange_preview(&mut self, paths: &[PathBuf]) -> Result<Preview> {
-        self.normalize_accounts()?;
         self.exchange.pending.take();
         if paths.is_empty() || paths.len() > 1000 {
             return Err(invalid("请选择 1–1000 个 JSON 文件"));

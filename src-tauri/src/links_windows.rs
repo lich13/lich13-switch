@@ -1,7 +1,7 @@
 use super::*;
 use std::path::{Path, PathBuf};
 use winreg::{
-    enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE},
+    enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
     RegKey,
 };
 
@@ -31,75 +31,20 @@ pub fn installed() -> bool {
     [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
         .into_iter()
         .any(|hive| {
-            [
-                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Vela",
-                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gpt-Switch",
-            ]
-            .into_iter()
-            .any(|subkey| {
-                let Ok(key) = RegKey::predef(hive).open_subkey(subkey) else {
-                    return false;
-                };
-                key.get_value::<String, _>("InstallLocation")
+            let Ok(key) = RegKey::predef(hive)
+                .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Vela")
+            else {
+                return false;
+            };
+            key.get_value::<String, _>("InstallLocation")
+                .ok()
+                .is_some_and(|path| same_path(&Path::new(&path).join("vela.exe"), &exe))
+                || key
+                    .get_value::<String, _>("DisplayIcon")
                     .ok()
-                    .is_some_and(|path| same_path(&Path::new(&path).join("vela.exe"), &exe))
-                    || key
-                        .get_value::<String, _>("DisplayIcon")
-                        .ok()
-                        .and_then(|s| executable(&s))
-                        .is_some_and(|path| same_path(&path, &exe))
-            })
+                    .and_then(|s| executable(&s))
+                    .is_some_and(|path| same_path(&path, &exe))
         })
-}
-fn owned_external_capability(value: &str) -> bool {
-    [1, 2].iter().any(|n| {
-        value.eq_ignore_ascii_case(&format!(
-            "Software\\gpt-Switch\\LinkHandlers\\{n}\\Capabilities"
-        ))
-    })
-}
-fn cleanup_owned_aliases(root: &RegKey) -> std::io::Result<()> {
-    if let Ok(registered) =
-        root.open_subkey_with_flags("Software\\RegisteredApplications", KEY_READ | KEY_WRITE)
-    {
-        let names: Vec<_> = registered
-            .enum_values()
-            .filter_map(|r| r.ok())
-            .map(|(name, _)| name)
-            .filter(|name| {
-                registered
-                    .get_value::<String, _>(name)
-                    .is_ok_and(|value| owned_external_capability(&value))
-            })
-            .collect();
-        for name in names {
-            registered.delete_value(name)?;
-        }
-        for legacy in [
-            "gpt-Switch Link gpt-Switch",
-            "lich13-switch Link lich13-switch",
-        ] {
-            if registered
-                .get_value::<String, _>(legacy)
-                .is_ok_and(|value| value.eq_ignore_ascii_case(CAPABILITIES))
-            {
-                registered.delete_value(legacy)?;
-            }
-        }
-    }
-    for path in [
-        "Software\\Classes\\gptSwitch.CCSwitch.1",
-        "Software\\Classes\\gptSwitch.CCSwitch.2",
-        "Software\\gpt-Switch\\LinkHandlers\\1",
-        "Software\\gpt-Switch\\LinkHandlers\\2",
-    ] {
-        if let Err(error) = root.delete_subkey_all(path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(error);
-            }
-        }
-    }
-    Ok(())
 }
 fn command_is_self(program: &str, exe: &Path) -> bool {
     [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
@@ -120,7 +65,6 @@ pub fn ensure(tx: tokio::sync::oneshot::Sender<Result<()>>) {
         let exe = std::env::current_exe().map_err(|_| invalid("无法读取已安装应用"))?;
         let root = RegKey::predef(HKEY_CURRENT_USER);
         let write = || -> std::io::Result<()> {
-            cleanup_owned_aliases(&root)?;
             for program in [PROGRAM, "ccswitch"] {
                 let (key, _) = root.create_subkey(format!("Software\\Classes\\{program}"))?;
                 key.set_value("", &"Vela CC Switch Link")?;
@@ -161,24 +105,4 @@ pub fn ensure(tx: tokio::sync::oneshot::Sender<Result<()>>) {
         ))
     })();
     let _ = tx.send(result);
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn cleanup_is_limited_to_our_retired_capabilities() {
-        assert!(owned_external_capability(
-            "Software\\gpt-Switch\\LinkHandlers\\1\\Capabilities"
-        ));
-        assert!(owned_external_capability(
-            "Software\\gpt-Switch\\LinkHandlers\\2\\Capabilities"
-        ));
-        assert!(!owned_external_capability(CAPABILITIES));
-        assert!(!owned_external_capability(
-            "Software\\AnotherApp\\Capabilities"
-        ));
-        assert!(!owned_external_capability(
-            "Software\\gpt-Switch\\LinkHandlers\\10\\Capabilities"
-        ));
-    }
 }

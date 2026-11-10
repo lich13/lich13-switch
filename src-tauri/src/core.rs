@@ -64,8 +64,6 @@ struct Store {
     preferences: Preferences,
     #[serde(default)]
     observed_auth_revisions: BTreeMap<String, String>,
-    #[serde(default)]
-    auth_sync_version: u32,
     #[serde(flatten)]
     extensions: BTreeMap<String, Value>,
 }
@@ -186,7 +184,6 @@ pub struct Core {
     config_cache: crate::auth_cache::Cache<PolledConfig>,
     official_cache: crate::official::ViewCache,
     exchange: exchange::Service,
-    normalization_revision: std::cell::RefCell<Option<String>>,
 }
 struct PolledConfig {
     revision: String,
@@ -557,7 +554,6 @@ impl Core {
         storage::private_dir(&data_dir)?;
         let path = data_dir.join("accounts.json");
         let loaded = storage::read_bounded(&path, exchange::VAULT_LIMIT)?;
-        let normalization_revision = storage::revision(loaded.as_deref());
         let store = match loaded {
             Some(bytes) => serde_json::from_slice::<Store>(&bytes)
                 .map_err(|_| AppError::new(code::STORE, "账号库无法读取，原文件已保留"))?,
@@ -575,7 +571,6 @@ impl Core {
                     system_notifications: true,
                 },
                 observed_auth_revisions: BTreeMap::new(),
-                auth_sync_version: 1,
                 extensions: BTreeMap::new(),
             },
         };
@@ -593,17 +588,7 @@ impl Core {
             config_cache: Default::default(),
             official_cache: Default::default(),
             exchange: exchange::Service::default(),
-            normalization_revision: std::cell::RefCell::new(Some(normalization_revision)),
         };
-        let removed_receiver = core.store.extensions.remove("linkReceiver").is_some()
-            | core.store.extensions.remove("seenRoots").is_some();
-        if core.store.auth_sync_version == 0 || removed_receiver {
-            if core.store.auth_sync_version == 0 {
-                core.store.observed_auth_revisions.clear();
-                core.store.auth_sync_version = 1;
-            }
-            core.persist()?;
-        }
         // Scan on every startup; revisions suppress duplicate imports and re-adding a deletion.
         let _ = core.state();
         Ok(core)
@@ -616,12 +601,7 @@ impl Core {
             &bytes,
             None,
             exchange::VAULT_LIMIT,
-        )?;
-        if self.normalization_revision.borrow().is_some() {
-            self.normalization_revision
-                .replace(Some(storage::digest(&bytes)));
-        }
-        Ok(())
+        )
     }
     pub fn home(&self) -> PathBuf {
         PathBuf::from(&self.store.preferences.codex_home)
@@ -630,7 +610,6 @@ impl Core {
         self.store.preferences.clone()
     }
     pub fn import_raw(&mut self, raw: &str, name: Option<String>) -> Result<String> {
-        self.normalize_accounts()?;
         let info = auth_info(raw)?;
         let matched = self.matching_profile(&info)?;
         let replacement = matched
@@ -933,7 +912,6 @@ impl Core {
         Ok(())
     }
     pub fn state(&mut self) -> Result<ViewState> {
-        let normalization_error = self.normalize_accounts().err();
         let polled = self
             .auth_cache
             .read(&self.home().join("auth.json"), PolledAuth::parse)?;
@@ -948,16 +926,12 @@ impl Core {
         }
         let managed = crate::gateway::manages_auth(&self.data_dir, &self.home());
         let info = if managed { None } else { polled.info.clone() };
-        let mut matched = match info
+        let mut matched = info
             .as_ref()
             .and_then(|i| i.as_ref().ok())
             .map(|info| self.matching_profile(info))
-            .transpose()
-        {
-            Ok(index) => index.flatten(),
-            Err(_) if normalization_error.is_some() => None,
-            Err(error) => return Err(error),
-        };
+            .transpose()?
+            .flatten();
         let identity = info
             .as_ref()
             .and_then(|i| i.as_ref().ok())
@@ -974,8 +948,7 @@ impl Core {
                 matched.and_then(|index| self.store.profiles.get(index))
                     .is_some_and(|p| matches!((incoming_times.1, credential_times(&p.auth).1), (Some(a), Some(b)) if a > b))
             });
-        let changed = normalization_error.is_none()
-            && !managed
+        let changed = !managed
             && !optional_auth
             && (self.store.observed_auth_revisions.get(&root) != Some(&auth_revision)
                 || newer_token);
@@ -1108,7 +1081,7 @@ impl Core {
             current_state: status.into(),
             auth_source,
             preferences: self.preferences(),
-            error: normalization_error.map(|e| e.message),
+            error: None,
             auth_sync: if managed {
                 None
             } else {
@@ -1266,28 +1239,6 @@ mod tests {
         std::fs::create_dir(&h).unwrap();
         let c = Core::new(t.path().join("app"), h).unwrap();
         (t, c)
-    }
-    #[test]
-    fn retired_link_preference_is_removed_instead_of_preserved_as_an_extension() {
-        let (dir, mut core) = setup();
-        core.store
-            .extensions
-            .insert("linkReceiver".into(), json!("fixture-retired-app"));
-        core.store
-            .extensions
-            .insert("seenRoots".into(), json!(["/tmp/codex"]));
-        core.store
-            .extensions
-            .insert("fixtureExtension".into(), json!({"keep": true}));
-        core.persist().unwrap();
-        let mut loaded = Core::new(dir.path().join("app"), core.home()).unwrap();
-        loaded.set_preferences(core.preferences()).unwrap();
-        let value: Value =
-            serde_json::from_slice(&std::fs::read(dir.path().join("app/accounts.json")).unwrap())
-                .unwrap();
-        assert!(value.get("linkReceiver").is_none());
-        assert!(value.get("seenRoots").is_none());
-        assert_eq!(value["fixtureExtension"]["keep"], true);
     }
     fn jwt(subject: &str) -> String {
         format!(
@@ -1583,22 +1534,6 @@ mod tests {
         std::fs::remove_dir(&vault).unwrap();
         c.persist().unwrap();
         assert_eq!(c.state().unwrap().accounts.len(), 2);
-    }
-    #[test]
-    fn upgrade_imports_previously_observed_unsaved_account_once() {
-        let (t, mut c) = setup();
-        let raw = oauth("a", "upgrade");
-        std::fs::write(c.home().join("auth.json"), &raw).unwrap();
-        c.store
-            .observed_auth_revisions
-            .insert(c.preferences().codex_home, storage::digest(raw.as_bytes()));
-        c.store.auth_sync_version = 0;
-        c.persist().unwrap();
-        let mut next = Core::new(t.path().join("app"), c.home()).unwrap();
-        assert_eq!(next.state().unwrap().accounts.len(), 1);
-        drop(next);
-        let mut next = Core::new(t.path().join("app"), c.home()).unwrap();
-        assert_eq!(next.state().unwrap().accounts.len(), 1);
     }
     #[test]
     fn source_reports_independent_auth() {
