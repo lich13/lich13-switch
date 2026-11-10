@@ -1,34 +1,9 @@
 //! Compact immutable metadata without changing records, SQL filters or IPC shapes.
 use super::model::failure;
 use crate::storage::{self, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, Connection};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::io::{Read, Write};
-
-#[path = "body_compact.rs"]
-mod compact;
-use super::body_wire as wire;
-
-const MAX_BODY: usize = 16 * 1024 * 1024;
-const CODEC: &str = "zstd-compact-v2";
-const DICTIONARY_CODEC: &str = "zstd-dict-v1";
-const LEGACY_CODEC: &str = "zstd-v1";
-// Immutable, synthetic field names and empty shapes, never user records. A new
-// dictionary must get its own codec version so old records remain readable.
-const DICTIONARY: &[u8] = include_bytes!("body-dictionary-v1.json");
-fn compact_dictionary() -> &'static [u8] {
-    static DICTIONARY_V2: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    DICTIONARY_V2.get_or_init(|| {
-        let examples: Vec<Value> =
-            serde_json::from_slice(DICTIONARY).expect("immutable dictionary");
-        examples
-            .iter()
-            .flat_map(|v| wire::encode(&compact::compact(v, &compact::shape(v))))
-            .collect()
-    })
-}
 
 // SQL needs only these small projections; pages/details restore the lossless
 // payload. Keep JSON expressions indexable without decompressing every record.
@@ -85,66 +60,13 @@ fn projection(value: &Value) -> Value {
 }
 
 fn pack(connection: &Connection, value: &Value) -> Result<String> {
-    if value.get("example").is_some() && super::storage_v12::active(connection) {
+    if value.get("example").is_some() {
         let id = super::storage_v12::save_archive(connection, value)?;
         let mut projected = projection(value);
         projected["_usageArchive"] = id.into();
         return serde_json::to_string(&projected).map_err(|_| failure("用量归档元数据无效"));
     }
-    let plain = serde_json::to_string(value).map_err(|_| failure("用量元数据无效"))?;
-    let version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|_| failure("用量数据库版本读取失败"))?;
-    // Never make tiny records larger, and keep unusual legacy records readable.
-    // Earlier schema migrations may commit before v11 is installed. Do not
-    // write a new codec until the old-application version guard is durable.
-    if version < 11 || plain.len() < 512 || plain.len() > MAX_BODY {
-        return Ok(plain);
-    }
-    let mut encoder =
-        zstd::stream::write::Encoder::with_dictionary(Vec::new(), 6, compact_dictionary())
-            .map_err(|_| failure("用量记录压缩失败"))?;
-    encoder
-        .include_checksum(true)
-        .map_err(|_| failure("用量记录压缩失败"))?;
-    let shape = compact::shape(value);
-    let shape_body = serde_json::to_string(&shape).map_err(|_| failure("用量元数据无效"))?;
-    let hash = storage::digest(shape_body.as_bytes());
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO body_shapes(hash,body) VALUES(?1,?2)",
-            params![hash, shape_body],
-        )
-        .map_err(|_| failure("用量共享元数据保存失败"))?;
-    let shape_id: i64 = connection
-        .query_row("SELECT id FROM body_shapes WHERE hash=?1", [&hash], |row| {
-            row.get(0)
-        })
-        .map_err(|_| failure("用量共享元数据读取失败"))?;
-    let compact_value = compact::compact(value, &shape);
-    let compact = if version >= 13 {
-        wire::encode_v13(&compact_value)
-    } else {
-        wire::encode(&compact_value)
-    };
-    if compact.len() > MAX_BODY {
-        return Ok(plain);
-    }
-    encoder
-        .write_all(&compact)
-        .map_err(|_| failure("用量记录压缩失败"))?;
-    let packed = encoder.finish().map_err(|_| failure("用量记录压缩失败"))?;
-    let mut projected = projection(value);
-    let object = projected.as_object_mut().expect("projection is an object");
-    object.insert("_usageCodec".into(), Value::String(CODEC.into()));
-    object.insert("_usageShape".into(), shape_id.into());
-    object.insert("_usageBody".into(), Value::String(STANDARD.encode(packed)));
-    let encoded = serde_json::to_string(&projected).map_err(|_| failure("用量元数据无效"))?;
-    Ok(if encoded.len() < plain.len() {
-        encoded
-    } else {
-        plain
-    })
+    serde_json::to_string(value).map_err(|_| failure("用量元数据无效"))
 }
 
 pub(super) fn unpack(connection: &Connection, body: &str) -> Result<Value> {
@@ -155,50 +77,10 @@ pub(super) fn unpack(connection: &Connection, body: &str) -> Result<Value> {
     if let Some(id) = value.get("_usageArchive").and_then(Value::as_i64) {
         return super::storage_v12::load_archive(connection, id);
     }
-    let Some(codec) = value.get("_usageCodec") else {
-        return Ok(value);
-    };
-    let dictionary = match codec.as_str() {
-        Some(CODEC) => compact_dictionary(),
-        Some(DICTIONARY_CODEC) => DICTIONARY,
-        Some(LEGACY_CODEC) => &[],
-        _ => return Err(failure("用量记录编码不支持，原记录已保留")),
-    };
-    let encoded = value
-        .get("_usageBody")
-        .and_then(Value::as_str)
-        .filter(|s| s.len() <= MAX_BODY * 2)
-        .ok_or_else(|| failure("用量记录压缩数据无效，原记录已保留"))?;
-    let packed = STANDARD
-        .decode(encoded)
-        .map_err(|_| failure("用量记录压缩数据无效，原记录已保留"))?;
-    let decoder = zstd::stream::read::Decoder::with_dictionary(packed.as_slice(), dictionary)
-        .map_err(|_| failure("用量记录解压失败，原记录已保留"))?;
-    let mut plain = Vec::new();
-    decoder
-        .take((MAX_BODY + 1) as u64)
-        .read_to_end(&mut plain)
-        .map_err(|_| failure("用量记录解压失败，原记录已保留"))?;
-    if plain.len() > MAX_BODY {
-        return Err(failure("用量记录解压超过安全上限，原记录已保留"));
+    if value.get("_usageCodec").is_some() {
+        return Err(failure("用量记录编码不支持，原记录已保留"));
     }
-    if codec.as_str() == Some(CODEC) {
-        let unpacked =
-            wire::decode(&plain).ok_or_else(|| failure("用量元数据无效，原记录已保留"))?;
-        let shape_id = value
-            .get("_usageShape")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| failure("用量共享元数据无效，原记录已保留"))?;
-        let shape: String = connection
-            .prepare_cached("SELECT body FROM body_shapes WHERE id=?1")
-            .and_then(|mut statement| statement.query_row([shape_id], |row| row.get(0)))
-            .map_err(|_| failure("用量共享元数据缺失，原记录已保留"))?;
-        let shape: Value = serde_json::from_str(&shape)
-            .map_err(|_| failure("用量共享元数据无效，原记录已保留"))?;
-        compact::expand(&unpacked, &shape).ok_or_else(|| failure("用量元数据无效，原记录已保留"))
-    } else {
-        serde_json::from_slice(&plain).map_err(|_| failure("用量元数据无效，原记录已保留"))
-    }
+    Ok(value)
 }
 
 fn prices(value: &mut Value, apply: &mut impl FnMut(&mut Value) -> Result<()>) -> Result<()> {
@@ -274,12 +156,6 @@ pub(super) fn encode(connection: &Connection, value: &impl Serialize) -> Result<
     pack(connection, &value)
 }
 
-pub(super) fn prune_shapes(connection: &Connection) -> Result<()> {
-    connection.execute("DELETE FROM body_shapes WHERE id NOT IN (SELECT json_extract(body,'$._usageShape') FROM records WHERE json_type(body,'$._usageShape')='integer' UNION SELECT json_extract(body,'$._usageShape') FROM daily WHERE json_type(body,'$._usageShape')='integer')", [])
-        .map_err(|_| failure("用量共享元数据整理失败"))?;
-    Ok(())
-}
-
 pub(super) fn decode<T: DeserializeOwned>(connection: &Connection, body: &str) -> Result<T> {
     let mut value = unpack(connection, body)?;
     prices(&mut value, &mut |price| {
@@ -300,5 +176,5 @@ pub(super) fn decode<T: DeserializeOwned>(connection: &Connection, body: &str) -
         object.insert("basis".into(), basis);
         Ok(())
     })?;
-    serde_json::from_value(value).map_err(|_| failure("用量元数据无效"))
+    serde_json::from_value(value).map_err(|_| failure("用量记录无效"))
 }

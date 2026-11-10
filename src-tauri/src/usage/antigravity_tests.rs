@@ -21,12 +21,7 @@ fn parsed(v: &Value) -> Record {
 fn request_timings_override_step_clocks_and_small_generation_is_not_a_speed() {
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
@@ -120,87 +115,41 @@ fn zero_step_clock_uses_request_timings_and_unknown_suffixes_are_preserved() {
 
 #[test]
 fn historical_repair_preserves_prices_and_identity_in_both_storage_formats() {
-    for native in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
-        if native {
-            while store.compact_storage_batch().unwrap() {}
-        }
-        let mut old = parsed(&entry("one", 0));
-        old.attempts[0].model_display_name = Some("Fixture Model (High)".into());
-        old.attempts[0].reasoning_effort = None;
-        old.attempts[0].duration_ms = 0;
-        old.finished_at = Some(old.started_at);
-        let price = super::super::pricing::Quote { model:"fixture-response".into(), data:Some(json!({"input_cost_per_token":1,"output_cost_per_token":2,"cache_read_input_token_cost":0})), version:"historical".into(), source:"fixed".into(), multiplier:"1".into() }.calculate(&old.attempts[0].tokens,None).unwrap();
-        old.attempts[0].price = Some(price.clone());
-        store.write_batch(&[old.clone()], None).unwrap();
-        store
-            .connection
-            .execute(
-                "DELETE FROM metadata WHERE key='antigravity_fields_v02619'",
-                [],
-            )
-            .unwrap();
-        while store.repair_metadata_batch().unwrap() {}
-        let repaired = store.detail(&old.id).unwrap();
-        assert_eq!(repaired.attempts[0].id, old.attempts[0].id);
-        assert_eq!(
-            repaired.attempts[0].reasoning_effort.as_deref(),
-            Some("high")
-        );
-        assert_eq!(repaired.attempts[0].measured_duration_ms(), Some(2000));
-        assert_eq!(repaired.finished_at, Some(old.started_at + 2000));
-        assert_eq!(
-            serde_json::to_value(&repaired.attempts[0].price).unwrap(),
-            serde_json::to_value(Some(&price)).unwrap()
-        );
-        let before = store.connection.total_changes();
-        assert!(!store.repair_metadata_batch().unwrap());
-        assert_eq!(store.connection.total_changes(), before);
-        assert_eq!(
-            store.logs(&super::super::Filter::default()).unwrap().total,
-            1
-        );
-    }
-}
-
-#[test]
-fn history_reprojects_small_generation_even_when_total_was_already_correct() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
-    let mut v = entry("old-small-generation", 0);
-    v["chatModel"]["streamingDuration"] = json!("0.05s");
-    let r = parsed(&v);
-    store.write_batch(std::slice::from_ref(&r), None).unwrap();
-    store
-        .connection
-        .execute(
-            "UPDATE usage_metrics SET generation_ms=50,measured_outputs=20 WHERE owner=?1",
-            [&r.id],
-        )
-        .unwrap();
-    store
-        .connection
-        .execute(
-            "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02610','done')",
-            [],
-        )
-        .unwrap();
-    while store.repair_metadata_batch().unwrap() {}
-    let total = store.dashboard(&Filter::default()).unwrap().totals;
-    assert_eq!(total.generation_ms, 0);
+    let mut store = Store::open(dir.path()).unwrap();
+    let mut old = parsed(&entry("one", 0));
+    old.attempts[0].model_display_name = Some("Fixture Model (High)".into());
+    old.attempts[0].reasoning_effort = None;
+    old.attempts[0].duration_ms = 0;
+    old.finished_at = Some(old.started_at);
+    let price = super::super::pricing::Quote {
+        model: "fixture-response".into(),
+        data: Some(json!({"input_cost_per_token":1,"output_cost_per_token":2,"cache_read_input_token_cost":0})),
+        version: "historical".into(),
+        source: "fixed".into(),
+        multiplier: "1".into(),
+    }
+    .calculate(&old.attempts[0].tokens, None)
+    .unwrap();
+    old.attempts[0].price = Some(price.clone());
+    assert!(normalize_record(&mut old));
+    store.write_batch(&[old.clone()], None).unwrap();
+    let repaired = store.detail(&old.id).unwrap();
+    assert_eq!(repaired.attempts[0].id, old.attempts[0].id);
     assert_eq!(
-        store.detail(&r.id).unwrap().attempts[0].generation_ms,
-        Some(50)
+        repaired.attempts[0].reasoning_effort.as_deref(),
+        Some("high")
     );
-    let before = store.connection.total_changes();
-    assert!(!store.repair_metadata_batch().unwrap());
-    assert_eq!(store.connection.total_changes(), before);
+    assert_eq!(repaired.attempts[0].measured_duration_ms(), Some(2000));
+    assert_eq!(repaired.finished_at, Some(old.started_at + 2000));
+    assert_eq!(
+        serde_json::to_value(&repaired.attempts[0].price).unwrap(),
+        serde_json::to_value(Some(&price)).unwrap()
+    );
+    assert_eq!(
+        store.logs(&super::super::Filter::default()).unwrap().total,
+        1
+    );
 }
 
 #[test]
@@ -1209,12 +1158,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
     let now_ms = 1_760_000_000_000i64;
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
@@ -1477,12 +1421,7 @@ async fn file_imported_planner_step_is_deduplicated_when_later_covered_by_rpc_sy
 
     for native in [false, true] {
         let db_dir = dir.path().join(if native { "db-v12" } else { "db-v11" });
-        let mut store = if native {
-            Store::open(&db_dir)
-        } else {
-            Store::open_v11_fixture(&db_dir)
-        }
-        .unwrap();
+        let mut store = Store::open(&db_dir).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
@@ -1536,12 +1475,7 @@ async fn file_imported_planner_step_is_deduplicated_when_later_covered_by_rpc_sy
 fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_match_batch() {
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
@@ -1562,35 +1496,11 @@ fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_ma
         gemini_high.attempts[0].model_display_name = Some("Gemini 3.1 Pro".into());
         gemini_high.attempts[0].reasoning_effort = Some("high".into());
 
+        assert!(normalize_record(&mut polluted));
+        assert!(!normalize_record(&mut gemini_high));
         store
             .write_batch(&[polluted.clone(), gemini_high.clone()], None)
             .unwrap();
-        // Force the polluted "high" onto disk and mark v02611 as already done.
-        store
-            .connection
-            .execute(
-                "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02611','done')",
-                [],
-            )
-            .unwrap();
-        store
-            .connection
-            .execute(
-                "DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02619')",
-                [],
-            )
-            .unwrap();
-        let mut raw_polluted = store.detail(&polluted.id).unwrap();
-        raw_polluted.attempts[0].reasoning_effort = Some("high".into());
-        crate::usage::storage_v12::update(&store.connection, &raw_polluted).unwrap();
-        assert_eq!(
-            store.detail(&polluted.id).unwrap().attempts[0]
-                .reasoning_effort
-                .as_deref(),
-            Some("high")
-        );
-
-        while store.repair_metadata_batch().unwrap() {}
         assert_eq!(
             store.detail(&polluted.id).unwrap().attempts[0].reasoning_effort,
             None
@@ -1639,12 +1549,7 @@ fn remove_superseded_rejects_invalid_ids_wrong_sources_missing_rpc_and_rolls_bac
 ) {
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
@@ -2255,76 +2160,6 @@ async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
 }
 
 #[test]
-fn antigravity_repair_resumes_legacy_cursor_and_skips_completed_v12_maintenance() {
-    for completed in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path()).unwrap();
-        let records: Vec<_> = ["fixture-a", "fixture-z"]
-            .into_iter()
-            .map(|id| {
-                let mut r = parsed(&entry(id, 0));
-                r.id = id.into();
-                r
-            })
-            .collect();
-        store.write_batch(&records, None).unwrap();
-        for mut r in records {
-            r.attempts[0].requested_model = Some("claude-opus-4-6".into());
-            r.attempts[0].model_display_name = Some("Claude Opus 4.6".into());
-            r.attempts[0].reasoning_effort = Some("high".into());
-            crate::usage::storage_v12::update(&store.connection, &r).unwrap();
-        }
-        store.connection.execute_batch("INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02619','done'); INSERT OR REPLACE INTO metadata VALUES('finish_time_after',''); INSERT OR REPLACE INTO metadata VALUES('repair_v020_after','');").unwrap();
-        store
-            .connection
-            .execute(
-                "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02614',?1)",
-                [if completed { "done" } else { "fixture-a" }],
-            )
-            .unwrap();
-        assert!(!store.repair_finish_times().unwrap());
-        assert_eq!(store.repair_metadata_batch().unwrap(), !completed);
-        drop(store);
-        let mut store = Store::open(dir.path()).unwrap();
-        while store.repair_metadata_batch().unwrap() {}
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='antigravity_fields_v02619'",
-                    [],
-                    |r| r.get::<_, String>(0)
-                )
-                .unwrap(),
-            "complete"
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM metadata WHERE key='antigravity_fields_v02614'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store.detail("fixture-a").unwrap().attempts[0]
-                .reasoning_effort
-                .as_deref(),
-            Some("high")
-        );
-        assert_eq!(
-            store.detail("fixture-z").unwrap().attempts[0]
-                .reasoning_effort
-                .as_deref(),
-            if completed { Some("high") } else { None }
-        );
-    }
-}
-
-#[test]
 fn retry_attempt_without_model_inherits_final_attempt_model_and_repairs_existing_records() {
     let mut v = entry("retry-inherit", 0);
     v["chatModel"]["model"] = json!("MODEL_PLACEHOLDER_UNKNOWN_FUTURE");
@@ -2351,21 +2186,17 @@ fn retry_attempt_without_model_inherits_final_attempt_model_and_repairs_existing
     assert_eq!(r.attempts[0].model_display_name, None);
 
     // Simulate a legacy DB record whose first retry attempt had no model fields.
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
     let mut legacy = r.clone();
     legacy.attempts[0].requested_model = None;
     legacy.attempts[0].response_model = None;
     legacy.attempts[0].pricing_model = None;
-    store.write_batch(&[legacy], None).unwrap();
-    assert!(store.repair_metadata_batch().unwrap());
-    assert!(!store.repair_metadata_batch().unwrap());
-    let repaired = store.detail(&r.id).unwrap();
+    assert!(normalize_record(&mut legacy));
+    assert!(!normalize_record(&mut legacy));
     assert_eq!(
-        repaired.attempts[0].response_model.as_deref(),
+        legacy.attempts[0].response_model.as_deref(),
         Some("gemini-3.1-pro-high")
     );
-    assert_eq!(repaired.attempts[0].model_display_name, None);
+    assert_eq!(legacy.attempts[0].model_display_name, None);
 }
 
 #[test]

@@ -1358,12 +1358,7 @@ fn backfill_preserves_priced_history_and_original_multipliers_in_details_and_dai
 fn backfill_batches_allow_writes_retry_and_freeze_prices() {
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         let prices = Pricing::new(dir.path()).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
@@ -1408,7 +1403,7 @@ fn backfill_batches_allow_writes_retry_and_freeze_prices() {
                 json!({"input_cost_per_token":9,"output_cost_per_token":9,"cache_read_input_token_cost":0}),
             )],
         );
-        let target = if native { "v12_rows" } else { "records" };
+        let target = "v12_rows";
         store.connection.execute_batch(&format!("CREATE TRIGGER fixture_backfill_fail BEFORE UPDATE ON {target} BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")).unwrap();
         assert!(store.backfill_batch(&frozen, &mut cursor).is_err());
         store

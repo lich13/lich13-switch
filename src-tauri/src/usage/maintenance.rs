@@ -161,14 +161,7 @@ pub(super) fn reclaim(
         if migration_ready && (mode == 0 || repack) {
             if vacuum_has_room(connection, 2)? {
                 if repack {
-                    if super::storage_v12::active(connection) {
-                        super::storage_v12::prune(connection).map_err(|_| Error::InvalidQuery)?;
-                    } else {
-                        super::query::compact_indexes(connection)?;
-                    }
-                    // This is a single statement, so concurrent readers retain
-                    // the complete older shape table through their snapshots.
-                    super::bodies::prune_shapes(connection).map_err(|_| Error::InvalidQuery)?;
+                    super::storage_v12::prune(connection).map_err(|_| Error::InvalidQuery)?;
                 }
                 // VACUUM is atomic, including disk-full or interruption. It runs
                 // off the forwarding path and never replaces a live database file.

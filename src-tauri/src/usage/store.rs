@@ -70,21 +70,17 @@ struct Daily {
     totals: Totals,
     example: Record,
 }
-fn common_schema(c: &Connection, legacy_receipts: bool) -> Result<()> {
-    let operation = if legacy_receipts {
-        ""
-    } else {
-        ",operation TEXT NOT NULL DEFAULT 'model'"
-    };
-    db(c.execute_batch(&format!("          CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS body_shapes(id INTEGER PRIMARY KEY,hash TEXT UNIQUE NOT NULL,body TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL{operation});
-          CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
-          CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
-          CREATE INDEX IF NOT EXISTS daily_time ON daily(day);")))
+fn common_schema(c: &Connection) -> Result<()> {
+    db(c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL,operation TEXT NOT NULL DEFAULT 'model');
+         CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
+         CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
+         CREATE INDEX IF NOT EXISTS daily_time ON daily(day);",
+    ))
 }
 
 fn protect_sidecars(dir: &Path) -> Result<()> {
@@ -99,13 +95,6 @@ fn protect_sidecars(dir: &Path) -> Result<()> {
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
-        Self::open_layout(dir, false)
-    }
-    #[cfg(test)]
-    pub fn open_v11_fixture(dir: &Path) -> Result<Self> {
-        Self::open_layout(dir, true)
-    }
-    fn open_layout(dir: &Path, legacy: bool) -> Result<Self> {
         storage::private_dir(dir)?;
         let path = dir.join("usage.sqlite");
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -117,12 +106,24 @@ impl Store {
         if version > 13 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
+        if version != 0 && (version < 12 || !storage_v12::ready(&connection)) {
+            drop(connection);
+            let backup = dir.join(format!("usage.sqlite.legacy-v{version}.bak"));
+            std::fs::rename(&path, &backup).map_err(|_| failure("旧版用量数据库备份失败"))?;
+            let _ = storage::protect(&backup, false);
+            for suffix in ["-wal", "-shm"] {
+                let _ = std::fs::remove_file(dir.join(format!("usage.sqlite{suffix}")));
+            }
+            connection = db(Connection::open(&path))?;
+            storage::protect(&path, false)?;
+        }
         super::maintenance::configure(&connection)?;
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
         query::register(&connection)?;
-        if storage_v12::active(&connection) {
+        if storage_v12::ready(&connection) {
             storage_v12::protect_encoding(&connection)?;
-            db(connection.execute_batch("DROP TABLE IF EXISTS v12_links;"))?;
+            db(connection
+                .execute_batch("DROP TABLE IF EXISTS v12_links; DROP TABLE IF EXISTS body_shapes;"))?;
             storage_v12::refresh_metrics(&connection)?;
             return Ok(Self {
                 connection,
@@ -130,130 +131,12 @@ impl Store {
                 maintenance_deferred: Cell::default(),
             });
         }
-        let empty = version == 0 && !legacy;
         db(connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"))?;
-        if empty {
-            let tx = db(connection.transaction())?;
-            common_schema(&tx, false)?;
-            storage_v12::initialize(&tx)?;
-            db(tx.commit())?;
-            protect_sidecars(dir)?;
-            return Ok(Self {
-                connection,
-                overview_cache: Default::default(),
-                maintenance_deferred: Cell::default(),
-            });
-        }
-        common_schema(&connection, true)?;
-        db(connection.execute_batch("CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,model TEXT,status INTEGER,response TEXT,signature TEXT,effective INTEGER NOT NULL DEFAULT 1,duplicate_of TEXT,body TEXT NOT NULL);
-          CREATE INDEX IF NOT EXISTS usage_time ON records(time,effective);
-          CREATE INDEX IF NOT EXISTS usage_response ON records(client,response);
-          CREATE INDEX IF NOT EXISTS usage_signature ON records(client,signature,time);
-"))?;
-        query::register(&connection)?;
-        query::schema(&connection)?;
-        if version < 7 {
-            let tx = db(connection.transaction())?;
-            if version < 4 {
-                db(tx.execute_batch(
-                    "ALTER TABLE receipts ADD COLUMN operation TEXT NOT NULL DEFAULT 'model';",
-                ))?;
-            }
-            for column in [
-                "first_token_sum_ms",
-                "first_token_samples",
-                "cache_read_eligible",
-                "cache_input_eligible",
-            ] {
-                let exists: bool = db(tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_metrics') WHERE name=?1)",
-                    [column],
-                    |r| r.get(0),
-                ))?;
-                if !exists {
-                    db(tx.execute_batch(&format!(
-                        "ALTER TABLE usage_metrics ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"
-                    )))?;
-                }
-            }
-            let mut after = String::new();
-            loop {
-                let rows = {
-                    let mut stmt = db(
-                        tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 256")
-                    )?;
-                    let rows = db(stmt.query_map([&after], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                    }))?;
-                    db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-                };
-                if rows.is_empty() {
-                    break;
-                }
-                for (id, body) in rows {
-                    let record: Record = bodies::decode(&tx, &body)?;
-                    query::project(&tx, 0, &id, &record, 1, None)?;
-                    if version < 7
-                        && record.source == "proxy"
-                        && record
-                            .final_attempt()
-                            .is_some_and(|a| a.response_id.is_some())
-                    {
-                        super::dedup::supplement(&tx, &id)?;
-                    }
-                    if version < 5 {
-                        db(tx.execute(
-                            "UPDATE records SET signature=?2 WHERE id=?1",
-                            params![id, record.signature()],
-                        ))?;
-                    }
-                    after = id;
-                }
-            }
-            // Old daily summaries contain no reconstructible TTFT; serde defaults
-            // their sample count to zero without altering stored prices or bodies.
-            let rows = {
-                let mut stmt = db(tx.prepare("SELECT id,body FROM daily"))?;
-                let rows =
-                    db(stmt
-                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-                db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-            };
-            for (id, body) in rows {
-                let daily: Daily = bodies::decode(&tx, &body)?;
-                query::project(
-                    &tx,
-                    1,
-                    &id,
-                    &daily.example,
-                    daily.totals.requests,
-                    Some(&daily.totals),
-                )?;
-            }
-            if version > 0 && version < 7 {
-                db(tx.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('repair_codex','1'),('repair_claude','1')", []))?;
-            }
-            db(tx.execute_batch("PRAGMA user_version=7;"))?;
-            query::changed(&tx)?;
-            db(tx.commit())?;
-        }
-        if version < 8 {
-            db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR IGNORE INTO metadata(key,value) VALUES('repair_v020_after',''),('repair_codex','1'),('repair_claude','1'); PRAGMA user_version=8; COMMIT;"))?;
-        }
-        if version < 9 {
-            db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR IGNORE INTO metadata(key,value) VALUES('storage_records_after',''),('storage_daily_after',''),('storage_repack','1'); PRAGMA user_version=9; COMMIT;"))?;
-        }
+        let tx = db(connection.transaction())?;
+        common_schema(&tx)?;
+        storage_v12::initialize(&tx)?;
+        db(tx.commit())?;
         protect_sidecars(dir)?;
-        if version < 10 {
-            db(connection.execute_batch("BEGIN IMMEDIATE; ALTER TABLE records ADD COLUMN local_sequence INTEGER NOT NULL DEFAULT 0; UPDATE records SET local_sequence=rowid; INSERT OR REPLACE INTO metadata(key,value) SELECT 'record_sequence',coalesce(max(local_sequence),0) FROM records; INSERT OR IGNORE INTO metadata(key,value) VALUES('finish_time_after',''); PRAGMA user_version=10; COMMIT;"))?;
-        }
-        if version < 11 {
-            db(connection.execute_batch("BEGIN IMMEDIATE; INSERT OR REPLACE INTO metadata(key,value) VALUES('storage_records_after',''),('storage_daily_after',''),('storage_repack','1'); PRAGMA user_version=11; COMMIT;"))?;
-        }
-        super::pending_prices::ensure(&connection)?;
-        if !legacy {
-            storage_v12::install(&connection)?;
-        }
         Ok(Self {
             connection,
             overview_cache: Default::default(),
@@ -274,10 +157,7 @@ impl Store {
         })
     }
     pub fn reclaim_space(&self) -> Result<()> {
-        let pending: bool = storage_v12::pending(&self.connection) || storage_v12::packing_pending(&self.connection)? || db(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key IN ('storage_records_after','storage_daily_after'))",
-            [], |row| row.get(0),
-        ))?;
+        let pending: bool = storage_v12::packing_pending(&self.connection)?;
         let repack: bool = db(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
             [],
@@ -306,17 +186,7 @@ impl Store {
         if let Some(reason) = self.maintenance_deferred.get() {
             return Some(reason.into());
         }
-        if storage_v12::pending(&self.connection) {
-            let (done, total): (u64, u64) = self
-                .connection
-                .query_row(
-                    "SELECT (SELECT count(*) FROM v12_records),(SELECT count(*) FROM records)",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .ok()?;
-            Some(format!("用量存储整理中：{done} / {total}"))
-        } else if self
+        if self
             .connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
@@ -330,195 +200,10 @@ impl Store {
             None
         }
     }
-    pub fn deferred_backfill(&self) -> bool {
-        !storage_v12::pending(&self.connection)
-            && self
-                .connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='backfill_after_storage')",
-                    [],
-                    |r| r.get::<_, bool>(0),
-                )
-                .unwrap_or(false)
-    }
-    fn repair_business_success_batch(&mut self) -> Result<bool> {
-        let cursor: Option<String> = db(self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='billing_success_completed'",
-                [],
-                |r| r.get(0),
-            )
-            .optional())?;
-        if cursor.as_deref() == Some("done") {
-            return Ok(false);
-        }
-        let native = storage_v12::active(&self.connection);
-        let cursor = cursor.unwrap_or_else(|| if native { "d:".into() } else { "r:".into() });
-        let daily = native || cursor.starts_with("d:");
-        let after = cursor.get(2..).unwrap_or("");
-        let table = if daily { "daily" } else { "records" };
-        let rows = {
-            let mut s = db(self.connection.prepare(&format!(
-                "SELECT id,body FROM {table} WHERE id>?1 ORDER BY id LIMIT 128"
-            )))?;
-            let rows = db(s.query_map([after], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }))?;
-            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-        };
-        let tx = db(self.connection.transaction())?;
-        let metrics = if native {
-            "usage_daily_metrics"
-        } else {
-            "usage_metrics"
-        };
-        let mut changed = false;
-        for (id, body) in &rows {
-            let failed = if daily {
-                let mut d: Daily = bodies::decode(&tx, body)?;
-                if !d.example.completed && d.totals.success > 0 {
-                    d.totals.success = 0;
-                    db(tx.execute(
-                        "UPDATE daily SET body=?2 WHERE id=?1",
-                        params![id, bodies::encode(&tx, &d)?],
-                    ))?;
-                }
-                !d.example.completed
-            } else {
-                !bodies::decode::<Record>(&tx, body)?.completed
-            };
-            if failed {
-                changed |= db(tx.execute(
-                    &format!("UPDATE {metrics} SET success=0 WHERE owner=?1 AND success<>0"),
-                    [id],
-                ))? > 0;
-            }
-        }
-        let next = rows
-            .last()
-            .map(|(id, _)| format!("{}:{id}", if daily { "d" } else { "r" }))
-            .unwrap_or_else(|| if daily { "done".into() } else { "d:".into() });
-        db(tx.execute(
-            "INSERT OR REPLACE INTO metadata VALUES('billing_success_completed',?1)",
-            [next],
-        ))?;
-        if changed {
-            query::changed(&tx)?;
-        }
-        db(tx.commit())?;
-        Ok(!daily || !rows.is_empty())
-    }
     /// Restartable storage-only conversion. Prices and associations remain exact;
     /// identical gateway/source metric projections share the same stored rows.
     pub fn compact_storage_batch(&mut self) -> Result<bool> {
-        let repaired_success = self.repair_business_success_batch()?;
-        if storage_v12::active(&self.connection) {
-            return storage_v12::compact_diagnostics(&self.connection)
-                .map(|changed| changed || repaired_success);
-        }
-        if storage_v12::pending(&self.connection)
-            && (self.repair_metadata_batch()? || self.repair_finish_times()?)
-        {
-            return Ok(true);
-        }
-        for (table, key) in [
-            ("records", "storage_records_after"),
-            ("daily", "storage_daily_after"),
-        ] {
-            let after: Option<String> = db(self
-                .connection
-                .query_row("SELECT value FROM metadata WHERE key=?1", [key], |row| {
-                    row.get(0)
-                })
-                .optional())?;
-            let Some(after) = after else {
-                continue;
-            };
-            let tx = db(self.connection.transaction())?;
-            let rows = {
-                let mut statement = db(tx.prepare(&format!(
-                    "SELECT id,body FROM {table} WHERE id>?1 ORDER BY id LIMIT 2000"
-                )))?;
-                let rows = db(statement.query_map([after], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                }))?;
-                db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-            };
-            if rows.is_empty() {
-                db(tx.execute("DELETE FROM metadata WHERE key=?1", [key]))?;
-            } else {
-                for (id, body) in &rows {
-                    let compact = if table == "records" {
-                        let record = bodies::decode::<Record>(&tx, body)?;
-                        query::project(&tx, 0, id, &record, 1, None)?;
-                        bodies::encode(&tx, &record)?
-                    } else {
-                        bodies::encode(&tx, &bodies::decode::<Daily>(&tx, body)?)?
-                    };
-                    if &compact != body {
-                        db(tx.execute(
-                            &format!("UPDATE {table} SET body=?2 WHERE id=?1"),
-                            params![id, compact],
-                        ))?;
-                    }
-                }
-                db(tx.execute(
-                    "UPDATE metadata SET value=?2 WHERE key=?1",
-                    params![key, rows.last().unwrap().0],
-                ))?;
-            }
-            db(tx.commit())?;
-            super::maintenance::reclaim(&self.connection, false, false)?;
-            return Ok(true);
-        }
-        storage_v12::copy_batch(&mut self.connection)
-    }
-    pub fn repair_finish_times(&mut self) -> Result<bool> {
-        if storage_v12::active(&self.connection) {
-            return Ok(false);
-        }
-        let after: Option<String> = db(self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='finish_time_after'",
-                [],
-                |r| r.get(0),
-            )
-            .optional())?;
-        let Some(after) = after else {
-            return Ok(false);
-        };
-        let tx = db(self.connection.transaction())?;
-        let rows = {
-            let mut stmt =
-                db(tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 128"))?;
-            let values = db(stmt.query_map([after], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }))?;
-            db(values.collect::<rusqlite::Result<Vec<_>>>())?
-        };
-        for (id, body) in &rows {
-            let mut r: Record = bodies::decode(&tx, body)?;
-            r.finished_at = Some(r.event_time());
-            db(tx.execute(
-                "UPDATE records SET time=?2,body=?3 WHERE id=?1",
-                params![id, r.event_time(), bodies::encode(&tx, &r)?],
-            ))?;
-        }
-        if let Some((last, _)) = rows.last() {
-            db(tx.execute(
-                "UPDATE metadata SET value=?1 WHERE key='finish_time_after'",
-                [last],
-            ))?;
-        } else {
-            db(tx.execute("DELETE FROM metadata WHERE key='finish_time_after'", []))?;
-        }
-        if !rows.is_empty() {
-            query::changed(&tx)?;
-        }
-        db(tx.commit())?;
-        Ok(!rows.is_empty())
+        storage_v12::compact_diagnostics(&self.connection)
     }
     pub fn reader_with_cache(dir: &Path, cache: OverviewCache) -> Result<Self> {
         let mut reader = Self::reader(dir)?;
@@ -531,343 +216,6 @@ impl Store {
         let end = db(self.connection.execute_batch("ROLLBACK;"));
         result.and_then(|value| end.map(|()| value))
     }
-    /// Bounded, restartable metadata repair. Old rate snapshots remain unchanged.
-    pub fn repair_metadata_batch(&mut self) -> Result<bool> {
-        if self.repair_antigravity_batch()? || self.repair_antigravity_retry_batch()? {
-            return Ok(true);
-        }
-        if storage_v12::active(&self.connection) {
-            return Ok(false);
-        }
-        let after: Option<String> = db(self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='repair_v020_after'",
-                [],
-                |r| r.get(0),
-            )
-            .optional())?;
-        let Some(after) = after else {
-            return Ok(false);
-        };
-        let tx = db(self.connection.transaction())?;
-        let rows = {
-            let mut statement =
-                db(tx.prepare("SELECT id,body FROM records WHERE id>?1 ORDER BY id LIMIT 64"))?;
-            let rows = db(statement.query_map([&after], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }))?;
-            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-        };
-        if rows.is_empty() {
-            db(tx.execute("DELETE FROM metadata WHERE key='repair_v020_after'", []))?;
-        } else {
-            for (id, body) in &rows {
-                let mut record: Record = bodies::decode(&tx, body)?;
-                for attempt in &mut record.attempts {
-                    attempt.annotate_availability(&record.source);
-                }
-                if let Some(attempt) = &mut record.gateway_reported {
-                    attempt.annotate_availability("proxy");
-                }
-                db(tx.execute(
-                    "UPDATE records SET body=?2 WHERE id=?1",
-                    params![id, bodies::encode(&tx, &record)?],
-                ))?;
-                if record.source == "proxy" {
-                    dedup::supplement(&tx, id)?;
-                }
-                let body: String =
-                    db(tx.query_row("SELECT body FROM records WHERE id=?1", [id], |r| r.get(0)))?;
-                let repaired: Record = bodies::decode(&tx, &body)?;
-                query::project(&tx, 0, id, &repaired, 1, None)?;
-            }
-            db(tx.execute(
-                "UPDATE metadata SET value=?1 WHERE key='repair_v020_after'",
-                [&rows.last().unwrap().0],
-            ))?;
-            query::changed(&tx)?;
-        }
-        db(tx.commit())?;
-        Ok(!rows.is_empty())
-    }
-    fn repair_antigravity_batch(&mut self) -> Result<bool> {
-        if storage_v12::pending(&self.connection) {
-            return Ok(false);
-        }
-        let progress: Option<String> = db(self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='antigravity_fields_v02619'",
-                [],
-                |r| r.get(0),
-            )
-            .optional())?;
-        if progress.as_deref() == Some("complete") {
-            return Ok(false);
-        }
-        let mut initialize = None;
-        let after = if let Some(after) = progress.as_deref().and_then(|p| p.strip_prefix("after:"))
-        {
-            Some(after.to_owned())
-        } else {
-            // v0.26.19's "done" meant the old repair was reset, not completed.
-            let legacy: Option<String> = if progress.as_deref() == Some("done") {
-                db(self
-                    .connection
-                    .query_row(
-                        "SELECT value FROM metadata WHERE key='antigravity_fields_v02614'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .optional())?
-            } else {
-                None
-            };
-            let next = match legacy.as_deref() {
-                Some("done") => "complete".to_owned(),
-                Some(after) => format!("after:{after}"),
-                None => "after:".to_owned(),
-            };
-            initialize = Some(next);
-            legacy
-        };
-        let ag_home = crate::antigravity::home().ok();
-        let has_vault = self
-            .data_dir()
-            .is_some_and(|d| d.join("antigravity-accounts.json").exists());
-        let timeline = self
-            .data_dir()
-            .map(|d| crate::antigravity::auth::provider_timeline(d, ag_home.as_deref()))
-            .unwrap_or_default();
-        let tx = db(self.connection.transaction())?;
-        if let Some(next) = initialize {
-            db(tx.execute(
-                "INSERT OR REPLACE INTO metadata VALUES('antigravity_fields_v02619',?1)",
-                [&next],
-            ))?;
-            db(tx.execute("DELETE FROM metadata WHERE key IN ('antigravity_fields_v02614','antigravity_fields_v02617','antigravity_fields_v02618')", []))?;
-            if next == "complete" {
-                db(tx.commit())?;
-                return Ok(false);
-            }
-        }
-        let rows = if storage_v12::active(&tx) {
-            let mut stmt = db(tx.prepare("SELECT usage_text(key),rid FROM v12_rows WHERE source=usage_label('antigravity') AND usage_text(key)>?1 ORDER BY usage_text(key) LIMIT 128"))?;
-            let rows = db(stmt.query_map([after.as_deref().unwrap_or("")], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            }))?;
-            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-                .into_iter()
-                .map(|(id, rid)| Ok((id, storage_v12::load_record(&tx, rid)?)))
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            let mut stmt = db(tx.prepare("SELECT id,body FROM records WHERE source='antigravity' AND id>?1 ORDER BY id LIMIT 128"))?;
-            let rows = db(stmt.query_map([after.as_deref().unwrap_or("")], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }))?;
-            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-                .into_iter()
-                .map(|(id, body)| Ok((id, bodies::decode::<Record>(&tx, &body)?)))
-                .collect::<Result<Vec<_>>>()?
-        };
-        if after.as_deref().unwrap_or("").is_empty() && !rows.is_empty() {
-            db(tx.execute(
-                "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
-                [],
-            ))?;
-        }
-        let mut changed = false;
-        for (id, record) in &rows {
-            let mut r = record.clone();
-            let normalized = super::antigravity::normalize_record(&mut r);
-            let mut provider_changed = false;
-            for a in &mut r.attempts {
-                let expected = timeline.provider_at(a.started_at).map(str::to_owned);
-                let legacy_placeholder = a.provider.as_deref() == Some("antigravity");
-                if (has_vault || legacy_placeholder || expected.is_some()) && a.provider != expected
-                {
-                    a.provider = expected;
-                    provider_changed = true;
-                }
-            }
-            let generation_changed = r
-                .attempts
-                .iter()
-                .any(|a| a.transport == "local_api" && a.generation_ms.is_none_or(|ms| ms <= 50));
-            if normalized || generation_changed || provider_changed {
-                query::project(&tx, 0, id, &r, 1, None)?;
-                if normalized || provider_changed {
-                    storage_v12::update(&tx, &r)?;
-                }
-                changed = true;
-            }
-        }
-        db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02619',?1)",
-            [rows
-                .last()
-                .map_or_else(|| "complete".to_owned(), |(id, _)| format!("after:{id}"))],
-        ))?;
-        if changed {
-            query::changed(&tx)?;
-        }
-        db(tx.commit())?;
-        Ok(!rows.is_empty())
-    }
-    fn repair_antigravity_retry_batch(&mut self) -> Result<bool> {
-        if storage_v12::pending(&self.connection) {
-            return Ok(false);
-        }
-        let progress: Option<String> = db(self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='antigravity_fields_v02633'",
-                [],
-                |r| r.get(0),
-            )
-            .optional())?;
-        if progress.as_deref() == Some("complete") {
-            return Ok(false);
-        }
-        let after = progress
-            .as_deref()
-            .and_then(|p| p.strip_prefix("after:"))
-            .unwrap_or("");
-        let tx = db(self.connection.transaction())?;
-        let rows = if storage_v12::active(&tx) {
-            let mut stmt = db(tx.prepare(
-                "SELECT usage_text(row.key),row.rid FROM v12_rows row \
-                 JOIN v12_records r ON r.rid=row.rid \
-                 WHERE row.source=usage_label('antigravity') AND r.last>0 AND usage_text(row.key)>?1 \
-                 AND EXISTS(SELECT 1 FROM v12_all_attempts a WHERE a.owner=row.rid AND a.model IS NULL) \
-                 ORDER BY usage_text(row.key) LIMIT 128",
-            ))?;
-            let rows = db(stmt.query_map([after], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            }))?;
-            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-                .into_iter()
-                .map(|(id, rid)| Ok((id, storage_v12::load_record(&tx, rid)?)))
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            let mut stmt = db(tx.prepare(
-                "SELECT r.id,r.body FROM records r \
-                 WHERE r.source='antigravity' AND r.id>?1 \
-                 AND EXISTS(SELECT 1 FROM usage_metrics m WHERE m.kind=0 AND m.owner=r.id AND m.model='') \
-                 ORDER BY r.id LIMIT 128",
-            ))?;
-            let rows = db(stmt.query_map([after], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }))?;
-            db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-                .into_iter()
-                .map(|(id, body)| Ok((id, bodies::decode::<Record>(&tx, &body)?)))
-                .collect::<Result<Vec<_>>>()?
-        };
-        if rows.is_empty() {
-            if progress.is_some() {
-                db(tx.execute(
-                    "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02633','complete')",
-                    [],
-                ))?;
-                db(tx.commit())?;
-            }
-            return Ok(false);
-        }
-        let mut changed = false;
-        for (id, record) in &rows {
-            let mut r = record.clone();
-            if super::antigravity::normalize_record(&mut r) {
-                query::project(&tx, 0, id, &r, 1, None)?;
-                storage_v12::update(&tx, &r)?;
-                changed = true;
-            }
-        }
-        let next = if rows.len() < 128 {
-            "complete".to_owned()
-        } else {
-            format!("after:{}", rows.last().unwrap().0)
-        };
-        db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('antigravity_fields_v02633',?1)",
-            [next],
-        ))?;
-        if changed {
-            db(tx.execute(
-                "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
-                [],
-            ))?;
-            query::changed(&tx)?;
-        }
-        db(tx.commit())?;
-        Ok(true)
-    }
-    /// Revisit retained evidence once after the cache-read correlation change.
-    /// Daily summaries have no one-to-one evidence and are deliberately untouched.
-    pub fn repair_correlations_batch(&mut self) -> Result<bool> {
-        if storage_v12::pending(&self.connection) {
-            return Ok(false);
-        }
-        let cursor: Option<String> = db(self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='correlation_zero_cache'",
-                [],
-                |r| r.get(0),
-            )
-            .optional())?;
-        if cursor.as_deref() == Some("done") {
-            return Ok(false);
-        }
-        let compact = storage_v12::active(&self.connection);
-        let prefix = if compact { "v12:" } else { "v11:" };
-        let after = cursor
-            .as_deref()
-            .and_then(|s| s.strip_prefix(prefix))
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
-        let tx = db(self.connection.transaction())?;
-        let rows = if compact {
-            storage_v12::correlation_repair_rows(&tx, after)?
-        } else {
-            let mut statement = db(tx.prepare(
-                "SELECT rowid,body FROM records WHERE rowid>?1 ORDER BY rowid LIMIT 128",
-            ))?;
-            let rows = db(statement.query_map([after], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            }))?;
-            rows.map(|r| {
-                let (id, body) = db(r)?;
-                Ok((id, bodies::decode(&tx, &body)?))
-            })
-            .collect::<Result<Vec<(i64, Record)>>>()?
-        };
-        for (_, record) in &rows {
-            if !matches!(record.source.as_str(), "proxy" | "grok")
-                && record
-                    .final_attempt()
-                    .is_some_and(|a| a.tokens.cache_read.is_none_or(|n| n == 0))
-            {
-                dedup::reconcile(&tx, record)?;
-            }
-        }
-        let next = if rows.len() < 128 {
-            "done".into()
-        } else {
-            format!("{prefix}{}", rows.last().unwrap().0)
-        };
-        db(tx.execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('correlation_zero_cache',?1)",
-            [next],
-        ))?;
-        if !rows.is_empty() {
-            storage_v12::flush(&tx)?;
-            query::changed(&tx)?;
-        }
-        db(tx.commit())?;
-        Ok(!rows.is_empty())
-    }
     pub fn needs_repair(&self, source: &str) -> Result<bool> {
         db(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1 AND value='1')",
@@ -876,14 +224,11 @@ impl Store {
         ))
     }
     pub fn source_counts(&self, source: &str) -> Result<(u64, u64, i64)> {
-        let sql = if storage_v12::active(&self.connection) {
-            "SELECT count(*) FILTER (WHERE effective=0),count(*) FILTER (WHERE effective=2) FROM v12_rows WHERE source=usage_label(?1)"
-        } else {
-            "SELECT count(*) FILTER (WHERE effective=0),count(*) FILTER (WHERE effective=2) FROM records WHERE source=?1"
-        };
-        let (merged, pending) = db(self
-            .connection
-            .query_row(sql, [source], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let (merged, pending) = db(self.connection.query_row(
+            "SELECT count(*) FILTER (WHERE effective=0),count(*) FILTER (WHERE effective=2) FROM v12_rows WHERE source=usage_label(?1)",
+            [source],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ))?;
         let historical = db(self.connection.query_row(
             "SELECT coalesce((SELECT cast(value as integer) FROM metadata WHERE key=?1),0)",
             [format!("historical_{source}")],
@@ -935,7 +280,6 @@ impl Store {
         for r in records {
             changed |= insert(&tx, r)?;
         }
-        storage_v12::flush(&tx)?;
         changed |= Self::remove_superseded_in_tx(&tx, superseded_ids)?;
         if let Some((id, body)) = cursor {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
@@ -946,8 +290,6 @@ impl Store {
         db(tx.commit())
     }
     pub fn detail(&self, id: &str) -> Result<Record> {
-        // Keep the record and its immutable shared shape in one read snapshot,
-        // including while background pruning removes unreferenced shapes.
         let _snapshot = self.read_snapshot()?;
         storage_v12::record(&self.connection, id)?.ok_or_else(|| failure("用量记录不存在"))
     }
@@ -970,20 +312,11 @@ impl Store {
             |r| r.get(0),
         ))?;
         let page = f.page.max(1).min((total.div_ceil(20) as u32).max(1));
-        let native = storage_v12::active(&self.connection);
-        let projection = if native { "rid" } else { "body,duplicate_of" };
-        let mut stmt=db(self.connection.prepare(&format!("SELECT {projection} FROM records r WHERE {where_sql} ORDER BY time DESC,local_sequence DESC,id DESC LIMIT 20 OFFSET {}",(page-1)*20)))?;
+        let mut stmt=db(self.connection.prepare(&format!("SELECT rid FROM records r WHERE {where_sql} ORDER BY time DESC,local_sequence DESC,id DESC LIMIT 20 OFFSET {}",(page-1)*20)))?;
         let mut rows = db(stmt.query(rusqlite::params_from_iter(args.iter())))?;
         let mut records = Vec::new();
         while let Some(row) = db(rows.next())? {
-            let mut r: Record = if native {
-                storage_v12::load_record(&self.connection, db(row.get(0))?)?
-            } else {
-                let mut r: Record =
-                    bodies::decode(&self.connection, &db(row.get::<_, String>(0))?)?;
-                r.duplicate_of = db(row.get(1))?;
-                r
-            };
+            let mut r: Record = storage_v12::load_record(&self.connection, db(row.get(0))?)?;
             if f.source.as_deref() == Some("proxy") {
                 r.gateway_only();
             }
@@ -1102,80 +435,17 @@ impl Store {
             }
             agg.accounts.insert(id, (order, acc));
         }
-        if storage_v12::active(&self.connection) {
-            storage_v12::scan_client_attempts(
-                &self.connection,
-                client,
-                min_time,
-                max_time,
-                f.operation.as_deref(),
-                |row| {
-                    agg.ingest(row);
-                    Ok(())
-                },
-            )?;
-        } else {
-            let mut stmt = db(self.connection.prepare(
-                "SELECT body FROM records WHERE client=?3 AND effective=1 AND time>=?1 AND time<=?2 ORDER BY rowid",
-            ))?;
-            let mut rows = db(stmt.query(params![min_time, max_time, client]))?;
-            while let Some(row) = db(rows.next())? {
-                let body: String = db(row.get(0))?;
-                let r: Record = bodies::decode(&self.connection, &body)?;
-                let operation = r.final_attempt().map(|a| {
-                    if a.operation == Operation::WebSearch {
-                        "web_search"
-                    } else if a.operation == Operation::Compaction || a.compaction_kind.is_some() {
-                        "compaction"
-                    } else {
-                        "model"
-                    }
-                });
-                if f.operation
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .is_some_and(|wanted| Some(wanted) != operation)
-                {
-                    continue;
-                }
-                let last_idx = r.attempts.len().saturating_sub(1);
-                let mut attempts = Vec::with_capacity(r.attempts.len());
-                let time = r.event_time();
-                for (idx, a) in r.attempts.iter().enumerate() {
-                    let is_final = idx == last_idx;
-                    attempts.push(storage_v12::AntigravityAttemptRow {
-                        final_provider: None,
-                        session_id: r.session_id.clone(),
-                        provider: a.provider.clone(),
-                        time,
-                        started_at: a.started_at,
-                        is_final,
-                        model: a
-                            .grouping_model()
-                            .map(str::to_owned)
-                            .or_else(|| a.response_model.clone())
-                            .or_else(|| a.requested_model.clone()),
-                        display_name: a.model_display_name.clone(),
-                        tokens: a.tokens.clone(),
-                        cache_savings_rates: a.price.as_ref().and_then(|p| {
-                            super::pricing::cache_savings_rates(&p.rates, &p.multiplier)
-                        }),
-                        cost: a.price.as_ref().map(|p| p.cost.clone()),
-                        request_unpriced: a.unpriced_count() > 0,
-                        provider_unpriced: false,
-                        duration_ms: if is_final {
-                            a.measured_duration_ms().unwrap_or(0)
-                        } else {
-                            0
-                        },
-                    });
-                }
-                storage_v12::visit_request_attempts(&mut attempts, |row| {
-                    agg.ingest(row);
-                    Ok(())
-                })?;
-            }
-        }
+        storage_v12::scan_client_attempts(
+            &self.connection,
+            client,
+            min_time,
+            max_time,
+            f.operation.as_deref(),
+            |row| {
+                agg.ingest(row);
+                Ok(())
+            },
+        )?;
         let mut stats = agg.finish();
         if !stats.top_sessions.is_empty() {
             let mut stmt = db(self.connection.prepare("SELECT json_extract(body,'$.session_id'),json_extract(body,'$.title') FROM cursors WHERE json_extract(body,'$.title') IS NOT NULL"))?;
@@ -1205,28 +475,14 @@ impl Store {
         storage_v12::cold_batch(&mut self.connection, at)
     }
     pub fn compact(&mut self, at: i64) -> Result<()> {
-        if storage_v12::pending(&self.connection) {
-            return Ok(());
-        }
-        self.repair_correlations_batch()?;
-        if !db(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='correlation_zero_cache' AND value='done')",
-            [], |r| r.get::<_, bool>(0),
-        ))? {
-            // Keep the remaining evidence until its bounded repair has run.
-            return Ok(());
-        }
         self.archive_details_batch(at)?;
         let cutoff = query::bucket(at - 30 * DAY, DAY);
         let tx = db(self.connection.transaction())?;
         loop {
             let ids = {
-                let sql = if storage_v12::active(&tx) {
-                    "SELECT usage_text(key) FROM v12_rows WHERE time<?1 AND client NOT IN (usage_label('claude'),usage_label('antigravity')) ORDER BY time,key LIMIT 128"
-                } else {
-                    "SELECT id FROM records WHERE time<?1 AND client NOT IN ('claude','antigravity') ORDER BY time,id LIMIT 128"
-                };
-                let mut statement = db(tx.prepare(sql))?;
+                let mut statement = db(tx.prepare(
+                    "SELECT usage_text(key) FROM v12_rows WHERE time<?1 AND client NOT IN (usage_label('claude'),usage_label('antigravity')) ORDER BY time,key LIMIT 128",
+                ))?;
                 let rows = db(statement.query_map([cutoff], |r| r.get::<_, String>(0)))?;
                 db(rows.collect::<rusqlite::Result<Vec<_>>>())?
             };
@@ -1235,7 +491,6 @@ impl Store {
             }
             Self::archive_into(&tx, &ids)?;
         }
-        bodies::prune_shapes(&tx)?;
         db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=max(cast(value AS INTEGER),cast(excluded.value AS INTEGER))",[cutoff.to_string()]))?;
         db(tx.commit())
     }
@@ -1248,14 +503,10 @@ impl Store {
         db(tx.commit())
     }
     fn archive_into(tx: &rusqlite::Transaction<'_>, ids: &[String]) -> Result<()> {
-        let native = storage_v12::active(tx);
         db(tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS archive_ids(id TEXT PRIMARY KEY,rid INTEGER); DELETE FROM archive_ids;"))?;
-        let sql = if native {
-            "INSERT OR IGNORE INTO archive_ids SELECT usage_text(key),rid FROM v12_rows WHERE usage_hint(key)=usage_hint(usage_key(?1)) AND key=usage_key(?1)"
-        } else {
-            "INSERT OR IGNORE INTO archive_ids SELECT id,NULL FROM records WHERE id=?1"
-        };
-        let mut selected = db(tx.prepare_cached(sql))?;
+        let mut selected = db(tx.prepare_cached(
+            "INSERT OR IGNORE INTO archive_ids SELECT usage_text(key),rid FROM v12_rows WHERE usage_hint(key)=usage_hint(usage_key(?1)) AND key=usage_key(?1)",
+        ))?;
         for id in ids {
             db(selected.execute([id]))?;
         }
@@ -1278,31 +529,20 @@ impl Store {
                 format!("CASE WHEN {eligible} THEN 1 ELSE 0 END")
             })
             .collect();
-        let (table, key, projection) = if native {
-            ("(SELECT rid,usage_text(key) id,source source_code,time,effective,duplicate,archived_duplicate FROM v12_rows)", "rid", "rid")
-        } else {
-            ("records", "id", "body,duplicate_of")
-        };
+        let table = "(SELECT rid,usage_text(key) id,source source_code,time,effective,duplicate,archived_duplicate FROM v12_rows)";
         let mut statement = db(tx.prepare(&format!(
-            "SELECT {projection},{} FROM {table} r WHERE r.{key} IN (SELECT {key} FROM archive_ids)",
+            "SELECT rid,{} FROM {table} r WHERE r.rid IN (SELECT rid FROM archive_ids)",
             eligible.join(",")
         )))?;
         let mut rows = db(statement.query([]))?;
         while let Some(row) = db(rows.next())? {
-            let offset = if native { 1 } else { 2 };
             let selected = (0..scopes.len())
-                .map(|i| db(row.get::<_, bool>(offset + i)))
+                .map(|i| db(row.get::<_, bool>(1 + i)))
                 .collect::<Result<Vec<_>>>()?;
             if !selected.iter().any(|selected| *selected) {
                 continue;
             }
-            let record: Record = if native {
-                storage_v12::load_record(tx, db(row.get(0))?)?
-            } else {
-                let mut r: Record = bodies::decode(tx, &db(row.get::<_, String>(0))?)?;
-                r.duplicate_of = db(row.get(1))?;
-                r
-            };
+            let record: Record = storage_v12::load_record(tx, db(row.get(0))?)?;
             for (scope, selected) in scopes.into_iter().zip(selected) {
                 if !selected {
                     continue;
@@ -1373,16 +613,7 @@ impl Store {
         }
         drop(rows);
         drop(statement);
-        if native {
-            storage_v12::archive_selected(tx)?;
-        } else {
-            db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE id IN (SELECT id FROM archive_ids)",[]))?;
-            db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM archive_ids)",[]))?;
-            db(tx.execute(
-                "DELETE FROM records WHERE id IN (SELECT id FROM archive_ids)",
-                [],
-            ))?;
-        }
+        storage_v12::archive_selected(tx)?;
         query::changed(tx)
     }
     pub(super) fn clean_exported_bill_batch(
@@ -1407,33 +638,18 @@ impl Store {
             }
             verified_ids.push(id.clone());
         }
-        let native = storage_v12::active(&tx);
         if !verified_ids.is_empty() {
             db(tx.execute_batch(
                 "CREATE TEMP TABLE IF NOT EXISTS archive_ids(id TEXT PRIMARY KEY,rid INTEGER); DELETE FROM archive_ids;",
             ))?;
-            let sql = if native {
-                "INSERT OR IGNORE INTO archive_ids SELECT usage_text(key),rid FROM v12_rows WHERE usage_hint(key)=usage_hint(usage_key(?1)) AND key=usage_key(?1)"
-            } else {
-                "INSERT OR IGNORE INTO archive_ids SELECT id,NULL FROM records WHERE id=?1"
-            };
-            let mut selected = db(tx.prepare_cached(sql))?;
+            let mut selected = db(tx.prepare_cached(
+                "INSERT OR IGNORE INTO archive_ids SELECT usage_text(key),rid FROM v12_rows WHERE usage_hint(key)=usage_hint(usage_key(?1)) AND key=usage_key(?1)",
+            ))?;
             for id in &verified_ids {
                 db(selected.execute([id]))?;
             }
             drop(selected);
-            if native {
-                storage_v12::archive_selected(&tx)?;
-            } else {
-                db(tx.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) SELECT id,client,source,time,provider,response,signature,time,effective,coalesce(json_extract(body,'$.attempts[#-1].operation'),'model') FROM records WHERE id IN (SELECT id FROM archive_ids)", []))?;
-                db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM archive_ids)", []))?;
-                db(tx.execute(
-                    "DELETE FROM records WHERE id IN (SELECT id FROM archive_ids)",
-                    [],
-                ))?;
-            }
-        }
-        if !verified_ids.is_empty() {
+            storage_v12::archive_selected(&tx)?;
             query::changed(&tx)?;
         }
         db(tx.commit())?;
@@ -1443,18 +659,12 @@ impl Store {
         &mut self,
         request: &super::billing::Request,
     ) -> Result<()> {
-        let native = storage_v12::active(&self.connection);
         let tx = db(self.connection.transaction())?;
         let window_end = request.end.saturating_add(1_000);
-        let daily_metrics = if native {
-            "usage_daily_metrics"
-        } else {
-            "usage_metrics"
-        };
         let mut daily_deleted = 0usize;
         for client in &request.clients {
             db(tx.execute(
-                &format!("DELETE FROM {daily_metrics} WHERE kind=1 AND owner IN (SELECT id FROM daily WHERE day>=?1 AND day+?3<=?2 AND usage_day_end(day)<=?2 AND json_extract(body,'$.client')=?4)"),
+                "DELETE FROM usage_daily_metrics WHERE kind=1 AND owner IN (SELECT id FROM daily WHERE day>=?1 AND day+?3<=?2 AND usage_day_end(day)<=?2 AND json_extract(body,'$.client')=?4)",
                 params![request.start, window_end, DAY, client],
             ))?;
             daily_deleted += db(tx.execute(
@@ -1480,36 +690,26 @@ impl Store {
         pricing: &Pricing,
         cursor: &mut BackfillCursor,
     ) -> Result<bool> {
-        if storage_v12::pending(&self.connection) {
-            db(self.connection.execute(
-                "INSERT OR REPLACE INTO metadata VALUES('backfill_after_storage','1')",
-                [],
-            ))?;
-            return Ok(false);
-        }
-        let native = storage_v12::active(&self.connection);
         let tx = db(self.connection.transaction())?;
         let sql = if cursor.daily {
             "SELECT id,body FROM daily WHERE id>?1 AND json_extract(body,'$.totals.unpriced')>0 ORDER BY id LIMIT 128"
-        } else if native {
-            "SELECT cast(r.rid as text),r.rid FROM v12_rows r WHERE r.rid>cast(?1 as integer) AND (EXISTS(SELECT 1 FROM v12_attempts a WHERE a.owner=r.rid AND a.unpriced>0) OR EXISTS(SELECT 1 FROM v12_sessions a WHERE a.owner=r.rid AND a.unpriced>0)) ORDER BY r.rid LIMIT 128"
         } else {
-            super::pending_prices::SELECT
+            "SELECT cast(r.rid as text),r.rid FROM v12_rows r WHERE r.rid>cast(?1 as integer) AND (EXISTS(SELECT 1 FROM v12_attempts a WHERE a.owner=r.rid AND a.unpriced>0) OR EXISTS(SELECT 1 FROM v12_sessions a WHERE a.owner=r.rid AND a.unpriced>0)) ORDER BY r.rid LIMIT 128"
         };
         let rows = {
             let mut stmt = db(tx.prepare_cached(sql))?;
             let rows = db(stmt.query_map([&cursor.after], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    if native && !cursor.daily {
-                        None
-                    } else {
+                    if cursor.daily {
                         Some(r.get::<_, String>(1)?)
-                    },
-                    if native && !cursor.daily {
-                        Some(r.get::<_, i64>(1)?)
                     } else {
                         None
+                    },
+                    if cursor.daily {
+                        None
+                    } else {
+                        Some(r.get::<_, i64>(1)?)
                     },
                 ))
             }))?;
@@ -1518,11 +718,7 @@ impl Store {
         let mut changed = false;
         for (id, body, rid) in &rows {
             if !cursor.daily {
-                let mut r: Record = if let Some(rid) = rid {
-                    storage_v12::load_record(&tx, *rid)?
-                } else {
-                    bodies::decode(&tx, body.as_deref().unwrap())?
-                };
+                let mut r: Record = storage_v12::load_record(&tx, rid.unwrap())?;
                 let mut updated = false;
                 for a in &mut r.attempts {
                     if a.price.is_none() && a.compacted_unpriced.is_none() {
@@ -1531,7 +727,6 @@ impl Store {
                     }
                 }
                 if updated {
-                    query::project(&tx, 0, &r.id, &r, 1, None)?;
                     storage_v12::update(&tx, &r)?;
                     changed = true;
                 }
@@ -1616,15 +811,7 @@ impl Store {
                 }
                 verified_sessions.insert(session_id.to_owned());
             }
-            if storage_v12::active(tx) {
-                storage_v12::remove_record(tx, id)?;
-            } else {
-                db(tx.execute(
-                    "DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner=?1",
-                    [id],
-                ))?;
-                db(tx.execute("DELETE FROM records WHERE id=?1", [id]))?;
-            }
+            storage_v12::remove_record(tx, id)?;
             changed = true;
         }
         Ok(changed)
@@ -1642,9 +829,6 @@ impl Store {
     pub fn begin_rebuild(&mut self, source: &str) -> Result<()> {
         if !matches!(source, "codex" | "claude" | "grok") {
             return Err(failure("只可重建会话来源"));
-        }
-        if storage_v12::pending(&self.connection) {
-            return Err(failure("用量存储整理中，请稍后重建来源"));
         }
         let tx = db(self.connection.transaction())?;
         db(tx.execute_batch("CREATE TABLE IF NOT EXISTS source_stage(source TEXT NOT NULL,id TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(source,id)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS source_stage_cursors(source TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(source,id)) WITHOUT ROWID;"))?;
@@ -1682,9 +866,6 @@ impl Store {
         db(tx.commit())
     }
     pub fn finish_rebuild(&mut self, source: &str) -> Result<()> {
-        if storage_v12::pending(&self.connection) {
-            return Err(failure("用量存储整理中，请稍后重建来源"));
-        }
         let tx = db(self.connection.transaction())?;
         let archived: bool = db(tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM receipts WHERE source=?1)",
@@ -1693,13 +874,7 @@ impl Store {
         ))?;
         let cutoff:i64=db(tx.query_row("SELECT coalesce((SELECT cast(value AS INTEGER) FROM metadata WHERE key='detail_since'),0)",[],|r|r.get(0)))?;
         dedup::reset_source_supplements(&tx, source)?;
-        if storage_v12::active(&tx) {
-            storage_v12::remove_source(&tx, source)?;
-        } else {
-            db(tx.execute("DELETE FROM usage_metrics WHERE kind IN (0,2) AND owner IN (SELECT id FROM records WHERE source=?1)",[source]))?;
-            db(tx.execute("DELETE FROM records WHERE source=?1", [source]))?;
-            db(tx.execute("UPDATE records SET effective=1,duplicate_of=NULL WHERE duplicate_of NOT IN (SELECT id FROM records UNION SELECT id FROM receipts)",[]))?;
-        }
+        storage_v12::remove_source(&tx, source)?;
         let mut after = String::new();
         loop {
             let rows = {
@@ -1785,26 +960,13 @@ fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<bool> {
     }
     dedup::prepare_session(tx, &mut r)?;
     let r = &r;
-    let a = r.final_attempt();
-    let response = a.and_then(|v| v.response_id.as_deref());
-    let signature = r.signature();
-    let provider = a.and_then(|v| v.provider.as_deref());
-    let model = a.and_then(|v| v.grouping_model());
-    let status = a.and_then(|v| v.status);
-    if storage_v12::active(tx) {
-        db(tx.execute("INSERT INTO metadata(key,value) VALUES('record_sequence','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1", []))?;
-        let sequence: i64 = db(tx.query_row(
-            "SELECT cast(value AS INTEGER) FROM metadata WHERE key='record_sequence'",
-            [],
-            |r| r.get(0),
-        ))?;
-        storage_v12::save(tx, r, 1, sequence)?;
-    } else {
-        let body = bodies::encode(tx, r)?;
-        db(tx.execute("INSERT INTO metadata(key,value) VALUES('record_sequence','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1", []))?;
-        db(tx.execute("INSERT INTO records(id,client,source,time,provider,model,status,response,signature,body,local_sequence) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT cast(value as integer) FROM metadata WHERE key='record_sequence')) ON CONFLICT(id) DO UPDATE SET body=excluded.body,time=excluded.time,provider=excluded.provider,model=excluded.model,status=excluded.status,response=excluded.response,signature=excluded.signature,effective=1,duplicate_of=NULL",params![r.id,r.client,r.source,r.event_time(),provider,model,status,response,signature,body]))?;
-    }
-    query::project(tx, 0, &r.id, r, 1, None)?;
+    db(tx.execute("INSERT INTO metadata(key,value) VALUES('record_sequence','1') ON CONFLICT(key) DO UPDATE SET value=cast(value as integer)+1", []))?;
+    let sequence: i64 = db(tx.query_row(
+        "SELECT cast(value AS INTEGER) FROM metadata WHERE key='record_sequence'",
+        [],
+        |r| r.get(0),
+    ))?;
+    storage_v12::save(tx, r, 1, sequence)?;
     if let Some(old) = previous {
         if old.signature() != r.signature() {
             dedup::reconcile(tx, &old)?;

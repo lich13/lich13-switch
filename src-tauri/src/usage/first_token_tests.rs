@@ -1,6 +1,6 @@
 // 覆盖首 Token 延迟与会话统计来源。
 use super::{model::*, store::Store, Service};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde_json::json;
 
 const DAY: i64 = 86_400_000;
@@ -443,125 +443,6 @@ fn daily_rollup_stores_sum_and_count_and_keeps_unknown_samples_out_of_the_diviso
     assert_eq!(totals.tokens.output, Some(8));
 }
 
-const V5_METRIC_COLUMNS: &str = "kind,owner,ordinal,provider,model,requests,attempts,success,status_known,sessions,input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,cost,unpriced,duration_ms,measured_outputs,generation_ms";
-
-fn downgrade_fixture_metrics_to_v5(database: &Connection) {
-    database
-        .execute_batch(&format!(
-            "ALTER TABLE usage_metrics RENAME TO fixture_v018_metrics;
-             ALTER TABLE records DROP COLUMN local_sequence;
-             CREATE TABLE usage_metrics(
-               kind INTEGER NOT NULL,owner TEXT NOT NULL,ordinal INTEGER NOT NULL,
-               provider TEXT,model TEXT,requests INTEGER NOT NULL,attempts INTEGER NOT NULL,
-               success INTEGER NOT NULL,status_known INTEGER NOT NULL,sessions INTEGER NOT NULL,
-               input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,
-               cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
-               cost TEXT NOT NULL,unpriced INTEGER NOT NULL,duration_ms INTEGER NOT NULL,measured_outputs INTEGER NOT NULL,generation_ms INTEGER NOT NULL,
-               PRIMARY KEY(kind,owner,ordinal));
-             INSERT INTO usage_metrics({V5_METRIC_COLUMNS}) SELECT {V5_METRIC_COLUMNS} FROM fixture_v018_metrics;
-             DROP TABLE fixture_v018_metrics;
-             PRAGMA user_version=5;"
-        ))
-        .unwrap();
-}
-
-#[test]
-fn v5_migration_backfills_details_but_never_invents_first_token_samples_for_old_daily_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
-    let mut final_attempt = record("fixture-migration-final", Some(40));
-    let mut prior = final_attempt.attempts[0].clone();
-    prior.id = "fixture-migration-prior".into();
-    prior.first_token_ms = Some(900);
-    final_attempt.attempts.insert(0, prior);
-    let mut nonstream = record("fixture-migration-nonstream", Some(80));
-    nonstream.attempts[0].stream = false;
-    store
-        .write_batch(
-            &[
-                final_attempt,
-                record("fixture-migration-zero", Some(0)),
-                nonstream,
-            ],
-            None,
-        )
-        .unwrap();
-    drop(store);
-
-    let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    downgrade_fixture_metrics_to_v5(&database);
-    let mut example = record("fixture-legacy-example", Some(10));
-    example.started_at = super::query::bucket(BASE - 2 * DAY, DAY);
-    example.attempts[0].started_at = example.started_at;
-    let mut legacy_totals = Totals::default();
-    legacy_totals.add_record(&example);
-    legacy_totals.add_record(&example);
-    let mut legacy_totals = serde_json::to_value(legacy_totals).unwrap();
-    legacy_totals
-        .as_object_mut()
-        .unwrap()
-        .remove("firstTokenSumMs");
-    legacy_totals
-        .as_object_mut()
-        .unwrap()
-        .remove("firstTokenSamples");
-    // A representative example and old duration/throughput fields cannot recover
-    // the number or sum of real first-token observations in historical requests.
-    let daily = json!({
-        "scope": "all",
-        "client": "codex",
-        "provider": "fixture-provider",
-        "model": "fixture-model",
-        "source": "proxy",
-        "status": 200,
-        "totals": legacy_totals,
-        "example": example
-    });
-    database
-        .execute(
-            "INSERT INTO daily(id,day,body) VALUES(?1,?2,?3)",
-            params![
-                "fixture-legacy-daily",
-                example.started_at,
-                serde_json::to_string(&daily).unwrap()
-            ],
-        )
-        .unwrap();
-    drop(database);
-
-    let store = Store::open(dir.path()).unwrap();
-    let totals = store.dashboard(&Filter::default()).unwrap().totals;
-    assert_first_token(&totals, 40, 2);
-    assert_eq!((totals.requests, totals.attempts), (5, 6));
-    assert_eq!(decimal(&totals.cost), decimal("8.4"));
-    assert_eq!(totals.tokens.input, Some(60));
-    assert_eq!(totals.tokens.output, Some(12));
-    let historical = store
-        .dashboard(&Filter {
-            end: Some(BASE - 1),
-            ..Filter::default()
-        })
-        .unwrap();
-    assert_first_token(&historical.totals, 0, 0);
-    assert_eq!(historical.totals.requests, 2);
-    assert_eq!(decimal(&historical.totals.cost), decimal("2.8"));
-    drop(store);
-
-    let database = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    let version: i64 = database
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 13);
-    drop(database);
-    let totals = Store::open(dir.path())
-        .unwrap()
-        .dashboard(&Filter::default())
-        .unwrap()
-        .totals;
-    assert_first_token(&totals, 40, 2);
-    assert_eq!((totals.requests, totals.attempts), (5, 6));
-}
-
 #[test]
 fn legacy_totals_default_to_no_samples_and_new_json_exposes_sum_and_count() {
     let mut encoded = serde_json::to_value(Totals::default()).unwrap();
@@ -579,13 +460,9 @@ fn legacy_totals_default_to_no_samples_and_new_json_exposes_sum_and_count() {
 
 #[test]
 fn detection_counts_persisted_logical_requests_without_retries_or_session_copies() {
-    for legacy in [false, true] {
+    for _ in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if legacy {
-            Store::open_v11_fixture(dir.path()).unwrap()
-        } else {
-            Store::open(dir.path()).unwrap()
-        };
+        let mut store = Store::open(dir.path()).unwrap();
         let mut one = record("fixture-one", Some(10));
         one.attempts[0].repeat_count = 9;
         let mut two = record("fixture-two", Some(20));

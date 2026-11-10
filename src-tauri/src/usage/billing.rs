@@ -1,7 +1,6 @@
 //! Export owns a private disk spool. Source replay, CSV durability and cleanup
 //! are ordered so a cancelled or incomplete export cannot remove accounting data.
 use super::{
-    bodies,
     model::*,
     pricing::Pricing,
     store::{db, Store},
@@ -115,12 +114,11 @@ fn snapshot(
     settings: &Settings,
 ) -> Result<u64> {
     let tx = db(spool.connection.unchecked_transaction())?;
-    let native = super::storage_v12::active(&store.connection);
     let mut pending = 0;
     for client in &request.clients {
         let mut after = String::new();
         loop {
-            let rows = if native {
+            let rows = {
                 let mut statement = db(store.connection.prepare_cached(
                     "SELECT rid,effective FROM v12_rows NOT INDEXED WHERE rid>cast(?4 AS INTEGER) AND client=usage_label(?1) AND time BETWEEN ?2 AND ?3 ORDER BY rid LIMIT 128",
                 ))?;
@@ -136,29 +134,6 @@ fn snapshot(
                             super::storage_v12::load_record(&store.connection, rid)?,
                             effective,
                         ))
-                    })
-                    .collect::<Result<Vec<_>>>()?
-            } else {
-                let mut statement = db(store.connection.prepare_cached(
-                    "SELECT id,body,effective,duplicate_of FROM records WHERE client=?1 AND time BETWEEN ?2 AND ?3 AND id>?4 ORDER BY id LIMIT 128",
-                ))?;
-                let selected = db(statement.query_map(
-                    params![client, request.start, request.end + 999, after],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, i64>(2)?,
-                            r.get::<_, Option<String>>(3)?,
-                        ))
-                    },
-                ))?;
-                db(selected.collect::<rusqlite::Result<Vec<_>>>())?
-                    .into_iter()
-                    .map(|(id, body, effective, duplicate)| {
-                        let mut r: Record = bodies::decode(&store.connection, &body)?;
-                        r.duplicate_of = duplicate;
-                        Ok((id, r, effective))
                     })
                     .collect::<Result<Vec<_>>>()?
             };
@@ -616,13 +591,6 @@ mod tests {
             failed,
         ];
         store.write_batch(&rows, None).unwrap();
-        store
-            .connection
-            .execute(
-                "INSERT OR REPLACE INTO metadata VALUES('correlation_zero_cache','done')",
-                [],
-            )
-            .unwrap();
         store.compact(BASE + 70 * 86_400_000).unwrap();
         assert!(store.detail("old-claude").is_ok());
         assert!(store.detail("old-app").is_ok());
@@ -1026,9 +994,8 @@ mod tests {
     }
 
     #[test]
-    fn numeric_native_and_legacy_pages_export_identical_csv() {
+    fn numeric_native_pages_export_complete_csv() {
         let dir = tempfile::tempdir().unwrap();
-        let mut legacy = Store::open_v11_fixture(&dir.path().join("legacy")).unwrap();
         let mut native = Store::open(&dir.path().join("native")).unwrap();
         let mut rows: Vec<_> = (0..273)
             .rev()
@@ -1049,19 +1016,14 @@ mod tests {
         rows.push(pending);
         let pricing = Pricing::new(dir.path()).unwrap();
         let prices = pricing.frozen();
-        let mut csv = Vec::new();
-        for store in [&mut legacy, &mut native] {
-            store.write_batch(&rows, None).unwrap();
-            let spool = Spool::new(dir.path()).unwrap();
-            assert_eq!(
-                snapshot(store, &spool, &request(), &prices, &Settings::default()).unwrap(),
-                1
-            );
-            let mut bytes = Vec::new();
-            let result = write_csv(&spool, &request(), &mut bytes).unwrap();
-            assert_eq!((result.requests, result.attempts), (273, 273));
-            csv.push(bytes);
-        }
-        assert_eq!(csv[0], csv[1]);
+        native.write_batch(&rows, None).unwrap();
+        let spool = Spool::new(dir.path()).unwrap();
+        assert_eq!(
+            snapshot(&native, &spool, &request(), &prices, &Settings::default()).unwrap(),
+            1
+        );
+        let mut bytes = Vec::new();
+        let result = write_csv(&spool, &request(), &mut bytes).unwrap();
+        assert_eq!((result.requests, result.attempts), (273, 273));
     }
 }

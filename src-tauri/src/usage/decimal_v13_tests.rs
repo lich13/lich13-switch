@@ -222,41 +222,16 @@ fn empty_database_installs_and_reenters_v13_without_downgrade() {
 }
 
 #[test]
-fn v11_pending_and_ready_snapshots_survive_v13_guard_and_reentry() {
+fn ready_v12_snapshots_survive_v13_guard_and_reentry() {
     let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
     let source = priced_record("fixture-v13-migration");
-    old.write_batch(std::slice::from_ref(&source), None)
+    store
+        .write_batch(std::slice::from_ref(&source), None)
         .unwrap();
-    let before = serde_json::to_value(old.detail(&source.id).unwrap()).unwrap();
-    drop(old);
+    let before = serde_json::to_value(store.detail(&source.id).unwrap()).unwrap();
+    drop(store);
 
-    let pending = Store::open(dir.path()).unwrap();
-    assert_eq!(user_version(dir.path()), 13);
-    assert_eq!(storage_state(dir.path()).as_deref(), Some("copy"));
-    assert_eq!(
-        serde_json::to_value(pending.detail(&source.id).unwrap()).unwrap(),
-        before
-    );
-    drop(pending);
-
-    let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    c.pragma_update(None, "user_version", 12).unwrap();
-    drop(c);
-    let mut resumed = Store::open(dir.path()).unwrap();
-    assert_eq!(user_version(dir.path()), 13);
-    assert_eq!(storage_state(dir.path()).as_deref(), Some("copy"));
-    migrate_to_ready(&mut resumed);
-    assert_eq!(user_version(dir.path()), 13);
-    assert_eq!(storage_state(dir.path()).as_deref(), Some("ready"));
-    assert_eq!(
-        serde_json::to_value(resumed.detail(&source.id).unwrap()).unwrap(),
-        before
-    );
-    drop(resumed);
-
-    let ready_v12 = Store::open(dir.path()).unwrap();
-    drop(ready_v12);
     let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
     c.pragma_update(None, "user_version", 12).unwrap();
     drop(c);
@@ -319,12 +294,11 @@ fn replace_price_shape_with_v12(path: &Path) -> bool {
 #[test]
 fn active_v12_reader_accepts_legacy_tag5_shared_value_with_valid_checksum() {
     let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
-    let source = priced_record("fixture-v13-legacy-shared");
-    old.write_batch(std::slice::from_ref(&source), None)
-        .unwrap();
-    drop(old);
     let mut store = Store::open(dir.path()).unwrap();
+    let source = priced_record("fixture-v13-legacy-shared");
+    store
+        .write_batch(std::slice::from_ref(&source), None)
+        .unwrap();
     migrate_to_ready(&mut store);
     drop(store);
 
@@ -342,48 +316,6 @@ fn active_v12_reader_accepts_legacy_tag5_shared_value_with_valid_checksum() {
         source.attempts[0].price.as_ref().unwrap().cost
     );
     assert_eq!(user_version(dir.path()), 13);
-}
-
-#[test]
-fn pending_copy_rolls_back_on_corruption_and_can_resume_with_same_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
-    let source = record("fixture-v13-rollback", None);
-    old.write_batch(std::slice::from_ref(&source), None)
-        .unwrap();
-    let before = serde_json::to_value(old.detail(&source.id).unwrap()).unwrap();
-    drop(old);
-
-    let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    let body: String = c
-        .query_row(
-            "SELECT body FROM records WHERE id=?1",
-            [&source.id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    c.execute("UPDATE records SET body='{}' WHERE id=?1", [&source.id])
-        .unwrap();
-    drop(c);
-
-    let mut pending = Store::open(dir.path()).unwrap();
-    assert!(pending.compact_storage_batch().is_err());
-    drop(pending);
-    assert_eq!(storage_state(dir.path()).as_deref(), Some("copy"));
-
-    let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    c.execute(
-        "UPDATE records SET body=?2 WHERE id=?1",
-        rusqlite::params![source.id, body],
-    )
-    .unwrap();
-    drop(c);
-    let mut resumed = Store::open(dir.path()).unwrap();
-    migrate_to_ready(&mut resumed);
-    assert_eq!(
-        serde_json::to_value(resumed.detail(&source.id).unwrap()).unwrap(),
-        before
-    );
 }
 
 #[test]

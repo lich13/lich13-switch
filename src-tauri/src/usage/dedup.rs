@@ -1,6 +1,6 @@
 //! One-to-one cross-source matching, based on CC Switch 5ae6ad38's ten-minute
 //! fingerprint window. Ambiguous sessions remain inspectable and never double bill.
-use super::{bodies, model::*, pricing::Quote, query, storage_v12};
+use super::{model::*, pricing::Quote, storage_v12};
 use crate::storage::Result;
 use rusqlite::{params, Connection};
 const WINDOW: i64 = 600_000;
@@ -49,25 +49,7 @@ fn fingerprint(a: &Record, b: &Record) -> bool {
         })
 }
 fn rows(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
-    if storage_v12::active(c) {
-        return storage_v12::candidates(c, seed);
-    }
-    let signatures = seed.correlation_signatures();
-    let mut stmt=db(c.prepare("SELECT body FROM records WHERE id=?6 UNION SELECT body FROM records WHERE ?2 IS NOT NULL AND client=?1 AND response=?2 UNION SELECT body FROM records WHERE ?3 IS NOT NULL AND client=?1 AND signature IN (?3,?8) AND source<>'grok' AND source<>?7 AND (source='proxy' OR ?7='proxy') AND time BETWEEN ?4 AND ?5"))?;
-    let rows = db(stmt.query_map(
-        params![
-            seed.client,
-            response(seed),
-            signatures[0],
-            end(seed).saturating_sub(WINDOW * 2 + 86_400_000),
-            end(seed) + WINDOW * 2,
-            seed.id,
-            seed.source,
-            signatures[1]
-        ],
-        |r| r.get::<_, String>(0),
-    ))?;
-    rows.map(|v| bodies::decode(c, &db(v)?)).collect()
+    storage_v12::candidates(c, seed)
 }
 fn state(
     c: &Connection,
@@ -81,14 +63,7 @@ fn state(
     r.duplicate_of = target.map(str::to_string);
     r.deduplication = rule.into();
     r.merged_sources = sources;
-    if storage_v12::active(c) {
-        return storage_v12::set_state(c, &r, effective);
-    }
-    db(c.execute(
-        "UPDATE records SET effective=?2,duplicate_of=?3,body=?4 WHERE id=?1",
-        params![r.id, effective, target, bodies::encode(c, &r)?],
-    ))?;
-    Ok(())
+    storage_v12::set_state(c, &r, effective)
 }
 
 pub(super) fn prepare_session(c: &Connection, record: &mut Record) -> Result<()> {
@@ -233,8 +208,7 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
 }
 
 fn save_projection(c: &Connection, r: &Record) -> Result<()> {
-    storage_v12::update(c, r)?;
-    query::project(c, 0, &r.id, r, 1, None)
+    storage_v12::update(c, r)
 }
 pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
     let mut current = storage_v12::record(c, id)?.ok_or_else(|| failure("用量关联记录缺失"))?;
@@ -245,17 +219,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
             *last = original;
         }
     }
-    let peers = if storage_v12::active(c) {
-        storage_v12::peers(c, id)?
-    } else {
-        let mut stmt = db(c.prepare(
-            "SELECT body FROM records WHERE duplicate_of=?1 AND source<>'proxy' ORDER BY id",
-        ))?;
-        let peers = db(stmt.query_map([id], |r| r.get::<_, String>(0)))?;
-        peers
-            .map(|r| bodies::decode::<Record>(c, &db(r)?))
-            .collect::<Result<Vec<_>>>()?
-    };
+    let peers = storage_v12::peers(c, id)?;
     current.merged_sources = peers.iter().map(|r| r.source.clone()).collect();
     if !peers.is_empty() {
         current.merged_sources.push("proxy".into());
@@ -381,11 +345,13 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
 /// Source rebuilding must not leave session-derived consumption on gateway rows
 /// if the source is removed or no longer matches after re-parsing.
 pub fn reset_source_supplements(c: &Connection, source: &str) -> Result<()> {
-    let mut stmt=db(c.prepare("SELECT body FROM records WHERE source='proxy' AND client=?1 AND (json_type(body,'$.gatewayReported')='object' OR json_array_length(json_extract(body,'$.mergedSources'))>0)"))?;
-    let rows = db(stmt.query_map([source], |r| r.get::<_, String>(0)))?;
+    let mut stmt = db(c.prepare(
+        "SELECT rid FROM v12_records r WHERE r.source=0 AND r.client=usage_label(?1) AND (r.original OR EXISTS(SELECT 1 FROM v12_rows child WHERE child.duplicate=r.rid))",
+    ))?;
+    let rows = db(stmt.query_map([source], |r| r.get::<_, i64>(0)))?;
     let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-    for body in rows {
-        let mut r: Record = bodies::decode(c, &body)?;
+    for rid in rows {
+        let mut r = storage_v12::load_record(c, rid)?;
         if let Some(original) = r.gateway_reported.take() {
             if let Some(last) = r.attempts.last_mut() {
                 *last = original;

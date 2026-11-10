@@ -7,7 +7,7 @@ use super::{
     model::{Attempt, Filter, PriceSnapshot, Record, Tokens, TransferMetadata},
     store::Store,
 };
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -148,106 +148,6 @@ fn store_filters_and_sorts_logs_by_finished_event_time() {
         .unwrap();
     assert_eq!(filtered.total, 1);
     assert_eq!(filtered.rows[0].id, "fixture-finished-late");
-}
-
-#[test]
-fn old_records_migrate_in_batches_and_keep_started_at_and_price_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
-    let priced = record(
-        "fixture-migrate-priced",
-        "proxy",
-        10_000,
-        Some(12_000),
-        Some(12_000),
-        Some(price("0.1234")),
-    );
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
-    store
-        .write_batch(std::slice::from_ref(&priced), None)
-        .unwrap();
-    drop(store);
-
-    let database = dir.path().join("usage.sqlite");
-    let connection = Connection::open(&database).unwrap();
-    let body: String = connection
-        .query_row(
-            "SELECT body FROM records WHERE id=?1",
-            ["fixture-migrate-priced"],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut value = bodies::unpack(&connection, &body).unwrap();
-    value.as_object_mut().unwrap().remove("finishedAt");
-    connection
-        .execute(
-            "UPDATE records SET time=?2,body=?3 WHERE id=?1",
-            params![
-                "fixture-migrate-priced",
-                10_000_i64,
-                serde_json::to_string(&value).unwrap()
-            ],
-        )
-        .unwrap();
-    connection
-        .execute_batch(
-            "ALTER TABLE records DROP COLUMN local_sequence;
-             DELETE FROM metadata WHERE key IN ('record_sequence','finish_time_after');
-             PRAGMA user_version=9;",
-        )
-        .unwrap();
-    drop(connection);
-
-    let mut migrated = Store::open(dir.path()).unwrap();
-    assert!(migrated.repair_finish_times().unwrap());
-    assert!(!migrated.repair_finish_times().unwrap());
-    let restored = migrated.detail("fixture-migrate-priced").unwrap();
-    assert_eq!(restored.started_at, 10_000);
-    assert_eq!(restored.finished_at, Some(12_000));
-    let snapshot = restored.attempts[0].price.as_ref().unwrap();
-    assert_eq!(snapshot.cost, "0.1234");
-    assert_eq!(snapshot.multiplier, "1.5");
-    assert_eq!(
-        snapshot.basis,
-        Some(json!({"input_cost_per_token":"0.00001","fixture":true}))
-    );
-}
-
-#[test]
-fn finish_time_repair_is_restartable_after_the_128_row_batch_boundary() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
-    let rows = (0..130)
-        .map(|index| {
-            record(
-                &format!("fixture-batch-{index:03}"),
-                "proxy",
-                20_000 + index,
-                Some(21_000 + index),
-                Some(21_000 + index),
-                None,
-            )
-        })
-        .collect::<Vec<_>>();
-    store.write_batch(&rows, None).unwrap();
-    drop(store);
-
-    let connection = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('finish_time_after','')",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-
-    let mut migrated = Store::open(dir.path()).unwrap();
-    assert!(migrated.repair_finish_times().unwrap());
-    assert!(migrated.repair_finish_times().unwrap());
-    assert!(!migrated.repair_finish_times().unwrap());
-    assert_eq!(
-        migrated.detail("fixture-batch-129").unwrap().finished_at,
-        Some(21_129)
-    );
 }
 
 #[test]

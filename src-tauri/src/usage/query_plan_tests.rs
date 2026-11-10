@@ -489,7 +489,6 @@ fn sqlite_query_plans_cover_usage_reads_dedup_and_prune() {
         BASE,
     );
     store.write_batch(&[old_proxy], None).unwrap();
-    while store.repair_correlations_batch().unwrap() {}
     let (_, prune_capture) = trace_store(&mut store, |store| {
         store.compact(BASE + 40 * DAY_MS).unwrap()
     });

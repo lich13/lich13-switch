@@ -88,8 +88,6 @@ fn record(id: &str, outcome: RoutingOutcome, at: i64) -> Record {
 }
 
 fn ready_store(dir: &std::path::Path) -> super::store::Store {
-    let legacy = super::store::Store::open_v11_fixture(dir).unwrap();
-    drop(legacy);
     let mut store = super::store::Store::open(dir).unwrap();
     for _ in 0..100 {
         if !store.compact_storage_batch().unwrap() {

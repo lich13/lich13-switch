@@ -167,49 +167,6 @@ fn availability_distinguishes_reported_missing_and_non_applicable_fields() {
 }
 
 #[test]
-fn metadata_repair_processes_at_most_64_rows_and_clears_marker_after_restartable_batches() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
-    let rows: Vec<_> = (0..65)
-        .map(|i| {
-            let mut row = record(
-                &format!("fixture-row-{i:03}"),
-                "proxy",
-                Tokens {
-                    input: Some(1),
-                    output: Some(1),
-                    ..Tokens::default()
-                },
-            );
-            row.attempts[0].availability.clear();
-            row
-        })
-        .collect();
-    store.write_batch(&rows, None).unwrap();
-    assert!(store.repair_metadata_batch().unwrap());
-    assert!(store.repair_metadata_batch().unwrap());
-    assert!(!store.repair_metadata_batch().unwrap());
-    assert_eq!(
-        store
-            .detail("fixture-row-000")
-            .unwrap()
-            .final_attempt()
-            .unwrap()
-            .availability["input"],
-        "reported"
-    );
-    assert_eq!(
-        store
-            .detail("fixture-row-064")
-            .unwrap()
-            .final_attempt()
-            .unwrap()
-            .availability["output"],
-        "reported"
-    );
-}
-
-#[test]
 fn exact_response_donors_fill_agreeing_fields_and_preserve_gateway_price() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path()).unwrap();

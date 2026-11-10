@@ -40,12 +40,7 @@ fn request(id: &str, source: &str, model: &str, operation: Operation) -> Record 
 fn independent_stats_keep_dedup_retries_model_ids_and_filters_aligned() {
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
@@ -272,12 +267,7 @@ fn cache_savings_uses_applied_rates_for_compacted_retries() {
 fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() {
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         let mut row = request(
             "missing-retries",
             "proxy",

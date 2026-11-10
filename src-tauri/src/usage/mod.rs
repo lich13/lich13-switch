@@ -20,9 +20,6 @@ mod first_token_tests;
 mod grok_usage_tests;
 mod maintenance;
 pub mod model;
-mod pending_prices;
-#[cfg(test)]
-mod pending_prices_tests;
 pub mod pricing;
 #[cfg(test)]
 mod pricing_mapping_tests;
@@ -34,10 +31,6 @@ mod routing_outcome_v02513_tests;
 mod sessions;
 #[cfg(test)]
 mod source_dedup_tests;
-#[cfg(test)]
-mod storage_migration_tests;
-#[cfg(test)]
-mod storage_v11_tests;
 mod storage_v12;
 #[cfg(test)]
 mod storage_v12_tests;
@@ -334,28 +327,15 @@ impl Service {
                     Vec::new()
                 };
                 if inner.repairs_active.load(Ordering::Acquire) {
-                    // One bounded metadata batch per writer iteration until complete.
-                    let repair = inner.store.lock().unwrap().as_mut().map(|store| {
-                        let changed =
-                            store.repair_metadata_batch()? | store.repair_finish_times()?;
-                        let migrated = store.compact_storage_batch()?;
-                        let correlated = store.repair_correlations_batch()?;
-                        Ok::<_, storage::AppError>(changed || migrated || correlated)
-                    });
-                    if matches!(repair, Some(Ok(false))) {
-                        inner.repairs_active.store(false, Ordering::Release);
-                    }
-                    if inner
+                    // One bounded storage compaction batch per writer iteration until complete.
+                    let repair = inner
                         .store
                         .lock()
                         .unwrap()
-                        .as_ref()
-                        .is_some_and(|store| store.deferred_backfill())
-                    {
-                        // Do not hold the write lock while traversing historical batches.
-                        if inner.backfilling.load(Ordering::Acquire) == 0 {
-                            Service(inner.clone()).schedule_price_backfill();
-                        }
+                        .as_mut()
+                        .map(|store| store.compact_storage_batch());
+                    if matches!(repair, Some(Ok(false))) {
+                        inner.repairs_active.store(false, Ordering::Release);
                     }
                     let repair_failed = repair
                         .as_ref()

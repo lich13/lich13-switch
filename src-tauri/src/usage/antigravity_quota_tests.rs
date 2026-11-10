@@ -37,12 +37,7 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
     let now = periods["gemini-5h"].start + 2 * 3_600_000;
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = if native {
-            Store::open(dir.path())
-        } else {
-            Store::open_v11_fixture(dir.path())
-        }
-        .unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         if native {
             while store.compact_storage_batch().unwrap() {}
         }

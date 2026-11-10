@@ -434,50 +434,43 @@ fn cache_pair() -> (Record, Record) {
 
 #[test]
 fn missing_and_zero_cache_match_in_both_layouts_and_import_orders_without_changing_raw_usage() {
-    for legacy in [false, true] {
-        for reverse in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let mut store = if legacy {
-                Store::open_v11_fixture(dir.path())
-            } else {
-                Store::open(dir.path())
-            }
-            .unwrap();
-            let (proxy, session) = cache_pair();
-            let rows = if reverse {
-                [session, proxy]
-            } else {
-                [proxy, session]
-            };
-            for row in rows {
-                store.write_batch(&[row], None).unwrap();
-            }
-            let totals = store.dashboard(&all_time()).unwrap().totals;
-            assert_eq!(totals.requests, 1);
-            assert_eq!(totals.tokens.input, Some(100));
-            assert_eq!(totals.tokens.output, Some(20));
-            assert_eq!(totals.cost, "0.06283");
-            let proxy = store.detail("fixture-cache-proxy").unwrap();
-            let session = store.detail("fixture-cache-session").unwrap();
-            assert_eq!(proxy.attempts[0].tokens.cache_read, None);
-            assert_eq!(session.attempts[0].tokens.cache_read, Some(0));
-            assert_eq!(proxy.attempts[0].duration_ms, 1_234);
-            assert_eq!(proxy.attempts[0].first_token_ms, Some(234));
-            assert_eq!(proxy.attempts[0].price.as_ref().unwrap().cost, "0.06283");
-            assert_eq!(session.duplicate_of.as_deref(), Some("fixture-cache-proxy"));
-            for source in ["proxy", "sessions"] {
-                assert_eq!(
-                    store
-                        .dashboard(&Filter {
-                            source: Some(source.into()),
-                            ..all_time()
-                        })
-                        .unwrap()
-                        .totals
-                        .requests,
-                    1
-                );
-            }
+    for reverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let (proxy, session) = cache_pair();
+        let rows = if reverse {
+            [session, proxy]
+        } else {
+            [proxy, session]
+        };
+        for row in rows {
+            store.write_batch(&[row], None).unwrap();
+        }
+        let totals = store.dashboard(&all_time()).unwrap().totals;
+        assert_eq!(totals.requests, 1);
+        assert_eq!(totals.tokens.input, Some(100));
+        assert_eq!(totals.tokens.output, Some(20));
+        assert_eq!(totals.cost, "0.06283");
+        let proxy = store.detail("fixture-cache-proxy").unwrap();
+        let session = store.detail("fixture-cache-session").unwrap();
+        assert_eq!(proxy.attempts[0].tokens.cache_read, None);
+        assert_eq!(session.attempts[0].tokens.cache_read, Some(0));
+        assert_eq!(proxy.attempts[0].duration_ms, 1_234);
+        assert_eq!(proxy.attempts[0].first_token_ms, Some(234));
+        assert_eq!(proxy.attempts[0].price.as_ref().unwrap().cost, "0.06283");
+        assert_eq!(session.duplicate_of.as_deref(), Some("fixture-cache-proxy"));
+        for source in ["proxy", "sessions"] {
+            assert_eq!(
+                store
+                    .dashboard(&Filter {
+                        source: Some(source.into()),
+                        ..all_time()
+                    })
+                    .unwrap()
+                    .totals
+                    .requests,
+                1
+            );
         }
     }
 }
@@ -535,38 +528,6 @@ fn cache_alias_keeps_known_conflicts_identity_guards_and_bidirectional_uniquenes
             "{mismatch}"
         );
     }
-}
-
-#[test]
-fn retained_cache_correlations_are_repaired_once_after_restart() {
-    let (dir, mut store, _) = fixture();
-    let (proxy, session) = cache_pair();
-    // Reproduce a database written before the alias was understood.
-    store
-        .connection
-        .execute(
-            "DELETE FROM metadata WHERE key='correlation_zero_cache'",
-            [],
-        )
-        .unwrap();
-    for (sequence, row) in [proxy, session].iter().enumerate() {
-        super::storage_v12::save(&store.connection, row, 1, sequence as i64 + 1).unwrap();
-    }
-    assert_eq!(store.logs(&Filter::default()).unwrap().total, 2);
-    drop(store);
-    store = Store::open(dir.path()).unwrap();
-    assert!(store.repair_correlations_batch().unwrap());
-    assert!(!store.repair_correlations_batch().unwrap());
-    assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
-    assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 1);
-    assert_eq!(
-        store.detail("fixture-cache-proxy").unwrap().attempts[0]
-            .price
-            .as_ref()
-            .unwrap()
-            .cost,
-        "0.06283"
-    );
 }
 
 #[test]
@@ -885,7 +846,7 @@ fn reader_keeps_a_committed_snapshot_while_writer_transaction_is_open() {
 #[test]
 fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
     let mut gateway = record(
         "fixture-v2-gateway-record",
         "codex",
@@ -912,17 +873,6 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
         .write_batch(&[gateway.clone(), session.clone()], None)
         .unwrap();
     drop(store);
-
-    // Restore the v2 schema before exercising migration to the current version.
-    let database = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    database
-        .execute_batch(
-            "ALTER TABLE receipts DROP COLUMN operation;
-             ALTER TABLE records DROP COLUMN local_sequence;",
-        )
-        .unwrap();
-    database.pragma_update(None, "user_version", 2).unwrap();
-    drop(database);
 
     let mut migrated = Store::open(dir.path()).unwrap();
     while migrated.compact_storage_batch().unwrap() {}

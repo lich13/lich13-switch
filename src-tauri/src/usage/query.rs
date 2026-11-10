@@ -83,15 +83,6 @@ pub fn register(c: &Connection) -> Result<()> {
                 .unwrap_or(at.saturating_add(DAY));
             Ok(next)
         }),
-    )?;
-    db(
-        c.create_scalar_function("usage_v11_session", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
-            let body: String = ctx.get(0)?;
-            let c = unsafe { ctx.get_connection()? };
-            Ok(super::bodies::decode::<Record>(&c, &body)
-                .ok()
-                .and_then(|r| r.session_id))
-        }),
     )
 }
 /// Identical expression for the index and its filters; aliases only qualify columns.
@@ -111,72 +102,6 @@ pub(super) fn metrics_schema(c: &Connection, table: &str) -> Result<()> {
       PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;")))
 }
 
-pub fn schema(c: &Connection) -> Result<()> {
-    metrics_schema(c, "usage_metrics")?;
-    db(c.execute_batch(
-        "      CREATE INDEX IF NOT EXISTS usage_filter_client ON records(client,time DESC);
-      CREATE INDEX IF NOT EXISTS usage_filter_provider ON records(provider,time DESC);
-      CREATE INDEX IF NOT EXISTS usage_filter_model ON records(model,time DESC);
-      CREATE INDEX IF NOT EXISTS usage_page ON records(effective,time DESC);
-      CREATE INDEX IF NOT EXISTS usage_duplicate ON records(duplicate_of,source);
-",
-    ))?;
-    db(c.execute_batch(&format!(
-        "CREATE INDEX IF NOT EXISTS usage_filter_operation ON records({},time DESC);",
-        operation_expression("body", "$")
-    )))
-}
-
-/// The old secondary indexes repeated each 64-character record ID five times.
-/// Time remains indexed; SQLite sorts only equal-time ties by the stable ID.
-pub(super) fn compact_indexes(c: &Connection) -> rusqlite::Result<()> {
-    let tx = c.unchecked_transaction()?;
-    // VACUUM can defer while a reader is active. Do not rebuild these indexes
-    // again on each retry once their redundant ID column has been removed.
-    let operation_columns = format!("{},time DESC", operation_expression("body", "$"));
-    for (name, columns) in [
-        ("usage_filter_client", "client,time DESC"),
-        ("usage_filter_provider", "provider,time DESC"),
-        ("usage_filter_model", "model,time DESC"),
-        ("usage_page", "effective,time DESC"),
-        ("usage_filter_operation", operation_columns.as_str()),
-    ] {
-        let redundant: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_index_xinfo(?1) WHERE name='id' AND key=1)",
-            [name],
-            |row| row.get(0),
-        )?;
-        if redundant {
-            tx.execute_batch(&format!("DROP INDEX {name};"))?;
-        }
-        tx.execute_batch(&format!(
-            "CREATE INDEX IF NOT EXISTS {name} ON records({columns});"
-        ))?;
-    }
-    let without_rowid: bool = tx.query_row(
-        "SELECT wr FROM pragma_table_list WHERE schema='main' AND name='usage_metrics'",
-        [],
-        |row| row.get(0),
-    )?;
-    if !without_rowid {
-        tx.execute_batch("CREATE TABLE usage_metrics_repacked(
-          kind INTEGER NOT NULL,owner TEXT NOT NULL,ordinal INTEGER NOT NULL,
-          provider TEXT,model TEXT,requests INTEGER NOT NULL,attempts INTEGER NOT NULL,
-          success INTEGER NOT NULL,status_known INTEGER NOT NULL,sessions INTEGER NOT NULL,
-          input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,
-          cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
-          cost TEXT NOT NULL,unpriced INTEGER NOT NULL,duration_ms INTEGER NOT NULL,measured_outputs INTEGER NOT NULL,generation_ms INTEGER NOT NULL,
-          first_token_sum_ms INTEGER NOT NULL DEFAULT 0,first_token_samples INTEGER NOT NULL DEFAULT 0,
-          cache_read_eligible INTEGER NOT NULL DEFAULT 0,cache_input_eligible INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;
-          INSERT INTO usage_metrics_repacked SELECT kind,owner,ordinal,provider,model,requests,attempts,success,status_known,sessions,
-          input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,
-          cost,unpriced,duration_ms,measured_outputs,generation_ms,first_token_sum_ms,first_token_samples,cache_read_eligible,cache_input_eligible FROM usage_metrics;
-          DROP TABLE usage_metrics;
-          ALTER TABLE usage_metrics_repacked RENAME TO usage_metrics;")?;
-    }
-    tx.commit()
-}
 pub fn project(
     c: &Connection,
     kind: i64,
@@ -185,15 +110,10 @@ pub fn project(
     count: u64,
     historical: Option<&Totals>,
 ) -> Result<()> {
-    let native = super::storage_v12::active(c);
-    if native && kind != 1 {
+    if kind != 1 {
         return Ok(());
     }
-    let table = if native {
-        "usage_daily_metrics"
-    } else {
-        "usage_metrics"
-    };
+    let table = "usage_daily_metrics";
     db(c.execute(
         &format!("DELETE FROM {table} WHERE kind=?1 AND owner=?2"),
         params![kind, owner],
@@ -294,26 +214,6 @@ pub fn project(
             cache_input
         ]))?;
     }
-    if kind == 0 && r.source == "proxy" {
-        if r.gateway_reported.is_some() {
-            let mut original = r.clone();
-            original.gateway_only();
-            project(c, 2, owner, &original, count, historical)?;
-            // Compare the actual query projection, rather than diagnostic fields
-            // on the attempts. A gateway-only view can share identical metrics.
-            let same: bool = db(c.query_row(
-                "SELECT NOT EXISTS(SELECT 0 AS kind,owner,ordinal,provider,model,requests,attempts,success,status_known,sessions,input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,cost,unpriced,duration_ms,measured_outputs,generation_ms,first_token_sum_ms,first_token_samples,cache_read_eligible,cache_input_eligible FROM usage_metrics WHERE kind=2 AND owner=?1 EXCEPT SELECT * FROM usage_metrics WHERE kind=0 AND owner=?1)",
-                [owner], |row| row.get(0),
-            ))?;
-            if !same {
-                return Ok(());
-            }
-        }
-        db(c.execute(
-            "DELETE FROM usage_metrics WHERE kind=2 AND owner=?1",
-            [owner],
-        ))?;
-    }
     Ok(())
 }
 
@@ -326,12 +226,12 @@ pub fn eligible(c: &Connection, f: &Filter, alias: &str, review: bool) -> String
     } else {
         format!("{alias}.effective=1")
     };
-    if f.source.as_deref() == Some("sessions") && super::storage_v12::active(c) {
+    if f.source.as_deref() == Some("sessions") {
         return format!("{alias}.source_code NOT IN (0,3) AND ({effective} OR ({alias}.effective=0 AND (({alias}.duplicate IS NOT NULL AND EXISTS(SELECT 1 FROM v12_rows target WHERE target.rid={alias}.duplicate AND target.source=0) AND NOT EXISTS(SELECT 1 FROM v12_rows peer WHERE peer.source<>0 AND peer.duplicate={alias}.duplicate AND (peer.time<{alias}.time OR (peer.time={alias}.time AND usage_text(peer.key)<{alias}.id)))) OR ({alias}.duplicate IS NULL AND {alias}.archived_duplicate IS NOT NULL AND EXISTS(SELECT 1 FROM receipts target WHERE target.id={alias}.archived_duplicate AND target.source='proxy') AND NOT EXISTS(SELECT 1 FROM v12_rows peer WHERE peer.source<>0 AND peer.archived_duplicate={alias}.archived_duplicate AND (peer.time<{alias}.time OR (peer.time={alias}.time AND usage_text(peer.key)<{alias}.id)))))))");
     }
     let sql = match f.source.as_deref() {
         Some("proxy") => format!("{effective} AND {alias}.source='proxy'"),
-        Some("sessions") => format!("{alias}.source NOT IN ('proxy','grok') AND ({effective} OR ({alias}.effective=0 AND {alias}.duplicate_of IN (SELECT id FROM records WHERE source='proxy' UNION SELECT id FROM receipts WHERE source='proxy') AND NOT EXISTS(SELECT 1 FROM records peer WHERE peer.source<>'proxy' AND peer.duplicate_of={alias}.duplicate_of AND (peer.time<{alias}.time OR (peer.time={alias}.time AND peer.id<{alias}.id)))))"),
+        Some("sessions") => unreachable!(),
         Some("grok_sessions") => format!("{effective} AND {alias}.source='grok'"),
         _ => format!("{effective} AND {alias}.source<>'grok'"),
     };
@@ -507,11 +407,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     } else {
         SUM.to_owned()
     };
-    let sum = if super::storage_v12::active(c) {
-        sum.replace("sum(measured_outputs)", "sum(CASE WHEN kind=1 THEN measured_outputs WHEN requests>0 AND output>0 AND generation_ms>0 THEN output ELSE 0 END)")
-    } else {
-        sum
-    };
+    let sum = sum.replace("sum(measured_outputs)", "sum(CASE WHEN kind=1 THEN measured_outputs WHEN requests>0 AND output>0 AND generation_ms>0 THEN output ELSE 0 END)");
     let total_sum = if grok_model_filter(f).is_some() {
         sum.clone()
     } else {
@@ -644,10 +540,7 @@ pub fn changed(c: &Connection) -> Result<()> {
 }
 
 /// Only metric owners change internally; public IDs and sort ties stay stable.
-pub(super) fn native_sql(c: &Connection, sql: String) -> String {
-    if !super::storage_v12::active(c) {
-        return sql;
-    }
+pub(super) fn native_sql(_c: &Connection, sql: String) -> String {
     sql.replace(&gateway_kind("r"), "CASE WHEN EXISTS(SELECT 1 FROM v12_original o WHERE o.owner=r.rid AND o.metrics_changed) THEN 2 ELSE 0 END")
     .replace(
         "id owner,time,source FROM records",

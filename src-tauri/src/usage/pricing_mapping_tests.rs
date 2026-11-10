@@ -909,45 +909,6 @@ fn rebuilding_sessions_removes_only_their_supplement_and_preserves_gateway_snaps
 }
 
 #[test]
-fn v4_migration_rebuilds_raw_gateway_projections_without_repricing_saved_attempts() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open_v11_fixture(dir.path()).unwrap();
-    let (gateway, _) = merged_sources(&mut store);
-    let snapshot = serde_json::to_value(
-        store
-            .detail(&gateway.id)
-            .unwrap()
-            .final_attempt()
-            .unwrap()
-            .price
-            .as_ref()
-            .unwrap(),
-    )
-    .unwrap();
-    drop(store);
-    let db = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    db.execute_batch(
-        "DELETE FROM usage_metrics WHERE kind=2;
-         ALTER TABLE records DROP COLUMN local_sequence;
-         PRAGMA user_version=4;",
-    )
-    .unwrap();
-    drop(db);
-    let migrated = Store::open(dir.path()).unwrap();
-    check_source_totals(&migrated);
-    let detail = migrated.detail(&gateway.id).unwrap();
-    assert_eq!(
-        serde_json::to_value(detail.final_attempt().unwrap().price.as_ref().unwrap()).unwrap(),
-        snapshot
-    );
-    let db = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    let version: i64 = db
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(version, 13);
-}
-
-#[test]
 fn compacted_unknown_prices_stay_unknown_after_backfill_and_daily_rollup() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path()).unwrap();

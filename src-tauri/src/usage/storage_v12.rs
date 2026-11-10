@@ -62,17 +62,9 @@ fn db<T>(v: rusqlite::Result<T>) -> Result<T> {
 fn json_error(_: serde_json::Error) -> crate::storage::AppError {
     failure("用量 v12 元数据无效，原数据已保留")
 }
-pub(super) fn active(c: &Connection) -> bool {
+pub(super) fn ready(c: &Connection) -> bool {
     c.query_row(
         "SELECT value='ready' FROM metadata WHERE key='storage_v12'",
-        [],
-        |r| r.get(0),
-    )
-    .unwrap_or(false)
-}
-pub(super) fn pending(c: &Connection) -> bool {
-    c.query_row(
-        "SELECT value<>'ready' FROM metadata WHERE key='storage_v12'",
         [],
         |r| r.get(0),
     )
@@ -693,27 +685,6 @@ pub(super) fn protect_encoding(c: &Connection) -> Result<()> {
     db(tx.commit())
 }
 
-pub(super) fn install(c: &Connection) -> Result<()> {
-    protect_encoding(c)?;
-    if active(c) || pending(c) {
-        return Ok(());
-    }
-    let tx = db(c.unchecked_transaction())?;
-    create_tables(&tx)?;
-    db(tx.execute_batch(
-        "CREATE TABLE v12_dirty(id TEXT PRIMARY KEY) WITHOUT ROWID;
-      INSERT OR REPLACE INTO metadata VALUES('storage_v12','copy'),('storage_v12_after','');
-      PRAGMA user_version=13;",
-    ))?;
-    for (name, event, id) in [
-        ("insert", "INSERT", "NEW.id"),
-        ("update", "UPDATE", "NEW.id"),
-        ("delete", "DELETE", "OLD.id"),
-    ] {
-        db(tx.execute_batch(&format!("CREATE TRIGGER v12_track_{name} AFTER {event} ON records BEGIN INSERT OR IGNORE INTO v12_dirty VALUES({id}); END;")))?;
-    }
-    db(tx.commit())
-}
 fn create_tables(c: &Connection) -> Result<()> {
     db(c.execute_batch("CREATE TABLE v12_dictionary(id INTEGER PRIMARY KEY,value BLOB NOT NULL);
       CREATE INDEX v12_dictionary_hint ON v12_dictionary(usage_hint(value));
@@ -791,8 +762,7 @@ pub(super) fn initialize(c: &Connection) -> Result<()> {
     query::metrics_schema(c, "usage_daily_metrics")?;
     create_views(c)?;
     db(c.execute_batch("CREATE INDEX v12_daily_unpacked ON daily(id) WHERE json_extract(body,'$._usageArchive') IS NULL;
-      INSERT INTO metadata VALUES('storage_v12','ready'),('record_sequence','0'),
-        ('billing_success_completed','done'),('correlation_zero_cache','done'),('antigravity_fields_v02619','complete');
+      INSERT INTO metadata VALUES('storage_v12','ready'),('record_sequence','0');
       PRAGMA user_version=13;"))
 }
 
@@ -1251,51 +1221,6 @@ pub(super) fn owner(c: &Connection, id: &str) -> Result<Option<i64>> {
     )
     .optional())
 }
-pub(super) fn delete(c: &Connection, id: &str) -> Result<()> {
-    if let Some(owner) = owner(c, id)? {
-        for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
-            db(c.execute(&format!("DELETE FROM {table} WHERE owner=?1"), [owner]))?;
-        }
-        db(c.execute("DELETE FROM v12_records WHERE rid=?1", [owner]))?;
-    }
-    Ok(())
-}
-pub(super) fn flush(c: &Connection) -> Result<()> {
-    if !pending(c) {
-        return Ok(());
-    }
-    if !has_room(c)? {
-        // The old layout and this transactional dirty ledger remain authoritative.
-        // A deferred migration must not disable otherwise successful usage writes.
-        return Ok(());
-    }
-    while flush_batch(c)? {}
-    Ok(())
-}
-fn flush_batch(c: &Connection) -> Result<bool> {
-    let ids = {
-        let mut stmt = db(c.prepare("SELECT id FROM v12_dirty ORDER BY id LIMIT 2000"))?;
-        let values = db(stmt.query_map([], |r| r.get::<_, String>(0)))?;
-        db(values.collect::<rusqlite::Result<Vec<_>>>())?
-    };
-    for id in ids {
-        let old: Option<(String, i64, i64)> = db(c
-            .query_row(
-                "SELECT body,effective,local_sequence FROM records WHERE id=?1",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional())?;
-        if let Some((body, effective, sequence)) = old {
-            let r = bodies::decode(c, &body)?;
-            save(c, &r, effective, sequence)?;
-        } else {
-            delete(c, &id)?;
-        }
-        db(c.execute("DELETE FROM v12_dirty WHERE id=?1", [&id]))?;
-    }
-    db(c.query_row("SELECT EXISTS(SELECT 1 FROM v12_dirty)", [], |r| r.get(0)))
-}
 
 fn metric_select(table: &str, kind: i64) -> String {
     let generation = "CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,0) ELSE duration-first_token END";
@@ -1385,104 +1310,16 @@ pub(super) fn register_values(c: &Connection) -> Result<()> {
 fn has_room(c: &Connection) -> Result<bool> {
     super::maintenance::has_room(c, 2)
 }
-pub(super) fn copy_batch(c: &mut Connection) -> Result<bool> {
-    if !pending(c) {
-        return Ok(false);
-    }
-    if !has_room(c)? {
-        return Err(failure("用量存储整理等待可用磁盘空间，现有记录继续保存"));
-    }
-    let tx = db(c.transaction())?;
-    let after: String = db(tx.query_row(
-        "SELECT value FROM metadata WHERE key='storage_v12_after'",
-        [],
-        |r| r.get(0),
-    ))?;
-    let rows = {
-        let mut s=db(tx.prepare("SELECT id,body,effective,local_sequence FROM records WHERE id>?1 ORDER BY id LIMIT 2000"))?;
-        let it = db(s.query_map([&after], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        }))?;
-        db(it.collect::<rusqlite::Result<Vec<_>>>())?
-    };
-    for (_, body, effective, sequence) in &rows {
-        let r: Record = bodies::decode(&tx, body)?;
-        save(&tx, &r, *effective, *sequence)?;
-    }
-    if let Some(last) = rows.last() {
-        db(tx.execute(
-            "UPDATE metadata SET value=?1 WHERE key='storage_v12_after'",
-            [&last.0],
-        ))?;
-    } else {
-        if flush_batch(&tx)? {
-            db(tx.commit())?;
-            return Ok(true);
-        }
-        db(tx.execute_batch("UPDATE v12_rows AS r SET duplicate=target.rid,archived_duplicate=NULL FROM v12_rows AS target WHERE r.archived_duplicate IS NOT NULL AND usage_hint(target.key)=usage_hint(usage_key(r.archived_duplicate)) AND target.key=usage_key(r.archived_duplicate); DROP TABLE IF EXISTS v12_links;
-          DROP TRIGGER v12_track_insert; DROP TRIGGER v12_track_update; DROP TRIGGER v12_track_delete;
-          DROP TRIGGER IF EXISTS pending_prices_insert; DROP TRIGGER IF EXISTS pending_prices_update; DROP TRIGGER IF EXISTS pending_prices_delete;
-          DROP TABLE pending_prices;
-          DELETE FROM usage_metrics WHERE kind<>1;
-          ALTER TABLE usage_metrics RENAME TO usage_daily_metrics;
-          DROP TABLE records;
-          DROP TABLE v12_dirty;
-          UPDATE metadata SET value='ready' WHERE key='storage_v12';
-          DELETE FROM metadata WHERE key IN ('storage_v12_after','storage_records_after');
-          INSERT OR REPLACE INTO metadata VALUES('storage_repack','1');"))?;
-        create_views(&tx)?;
-        db(tx.execute_batch("CREATE INDEX v12_daily_unpacked ON daily(id) WHERE json_extract(body,'$._usageArchive') IS NULL;"))?;
-        query::changed(&tx)?;
-    }
-    db(tx.commit())?;
-    Ok(true)
-}
 pub(super) fn record(c: &Connection, id: &str) -> Result<Option<Record>> {
-    if active(c) {
-        owner(c, id)?.map(|id| load_record(c, id)).transpose()
-    } else {
-        let row: Option<(String, Option<String>)> = db(c
-            .query_row(
-                "SELECT body,duplicate_of FROM records WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional())?;
-        row.map(|(v, duplicate)| {
-            let mut r: Record = bodies::decode(c, &v)?;
-            r.duplicate_of = duplicate;
-            Ok(r)
-        })
-        .transpose()
-    }
+    owner(c, id)?.map(|id| load_record(c, id)).transpose()
 }
 pub(super) fn update(c: &Connection, r: &Record) -> Result<()> {
-    if active(c) {
-        let (effective, seq): (i64, i64) = db(c.query_row(
-            "SELECT effective,sequence FROM v12_records WHERE usage_hint(key)=usage_hint(?1) AND key=?1",
-            [key(&r.id)],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ))?;
-        save(c, r, effective, seq).map(|_| ())
-    } else {
-        db(c.execute(
-            "UPDATE records SET body=?2,signature=?3,model=?4,time=?5,provider=?6 WHERE id=?1",
-            params![
-                r.id,
-                bodies::encode(c, r)?,
-                r.signature(),
-                r.final_attempt().and_then(|a| a.grouping_model()),
-                r.event_time(),
-                r.final_attempt().and_then(|a| a.provider.as_deref())
-            ],
-        ))?;
-        Ok(())
-    }
+    let (effective, seq): (i64, i64) = db(c.query_row(
+        "SELECT effective,sequence FROM v12_records WHERE usage_hint(key)=usage_hint(?1) AND key=?1",
+        [key(&r.id)],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ))?;
+    save(c, r, effective, seq).map(|_| ())
 }
 pub(super) fn candidates(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
     let response = seed
@@ -1521,19 +1358,6 @@ pub(super) fn candidates(c: &Connection, seed: &Record) -> Result<Vec<Record>> {
     ))?;
     rows.map(|r| serde_json::from_value(load(c, db(r)?)?).map_err(json_error))
         .collect()
-}
-pub(super) fn correlation_repair_rows(c: &Connection, after: i64) -> Result<Vec<(i64, Record)>> {
-    let mut statement =
-        db(c.prepare("SELECT rid FROM v12_records WHERE rid>?1 ORDER BY rid LIMIT 128"))?;
-    let ids = db(statement.query_map([after], |r| r.get::<_, i64>(0)))?;
-    ids.map(|id| {
-        let id = db(id)?;
-        Ok((
-            id,
-            serde_json::from_value(load(c, id)?).map_err(json_error)?,
-        ))
-    })
-    .collect()
 }
 pub(super) fn peers(c: &Connection, id: &str) -> Result<Vec<Record>> {
     let Some(owner) = owner(c, id)? else {
@@ -1580,9 +1404,6 @@ pub(super) fn archive_selected(c: &Connection) -> Result<()> {
     Ok(())
 }
 pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
-    if !active(c) {
-        return Ok(());
-    }
     let sql: String = db(c.query_row(
         "SELECT sql FROM sqlite_master WHERE name='usage_metrics'",
         [],
@@ -1610,9 +1431,6 @@ pub(super) fn compact_diagnostics(c: &Connection) -> Result<bool> {
     diagnostics::compact(c)
 }
 pub(super) fn packing_pending(c: &Connection) -> Result<bool> {
-    if !active(c) {
-        return Ok(false);
-    }
     Ok(db(c.query_row(
         "SELECT EXISTS(SELECT 1 FROM daily WHERE json_extract(body,'$._usageArchive') IS NULL)",
         [],
@@ -1665,31 +1483,17 @@ pub(super) fn has_local_api_for_session(c: &Connection, session_id: &str) -> Res
     if session_id.trim().is_empty() {
         return Ok(false);
     }
-    if active(c) {
-        let mut stmt = db(c.prepare_cached(
-            "SELECT r.rid FROM v12_records r WHERE r.source=usage_label('antigravity') AND r.session=?1",
-        ))?;
-        let rids = db(stmt.query_map([key(session_id)], |r| r.get::<_, i64>(0)))?;
-        for rid in db(rids.collect::<rusqlite::Result<Vec<_>>>())? {
-            let loaded: Record = serde_json::from_value(load(c, rid)?).map_err(json_error)?;
-            if loaded.attempts.iter().any(|a| a.transport == "local_api") {
-                return Ok(true);
-            }
+    let mut stmt = db(c.prepare_cached(
+        "SELECT r.rid FROM v12_records r WHERE r.source=usage_label('antigravity') AND r.session=?1",
+    ))?;
+    let rids = db(stmt.query_map([key(session_id)], |r| r.get::<_, i64>(0)))?;
+    for rid in db(rids.collect::<rusqlite::Result<Vec<_>>>())? {
+        let loaded: Record = serde_json::from_value(load(c, rid)?).map_err(json_error)?;
+        if loaded.attempts.iter().any(|a| a.transport == "local_api") {
+            return Ok(true);
         }
-        Ok(false)
-    } else {
-        let mut stmt = db(c.prepare_cached("SELECT body FROM records WHERE source='antigravity'"))?;
-        let bodies = db(stmt.query_map([], |r| r.get::<_, String>(0)))?;
-        for body in db(bodies.collect::<rusqlite::Result<Vec<_>>>())? {
-            let loaded: Record = bodies::decode(c, &body)?;
-            if loaded.session_id.as_deref() == Some(session_id)
-                && loaded.attempts.iter().any(|a| a.transport == "local_api")
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
+    Ok(false)
 }
 pub(super) fn remove_record(c: &Connection, id: &str) -> Result<()> {
     let Some(rid) = owner(c, id)? else {
@@ -1722,9 +1526,6 @@ pub(super) fn remove_source(c: &Connection, source: &str) -> Result<()> {
     Ok(())
 }
 pub(super) fn cold_batch(c: &mut Connection, at: i64) -> Result<bool> {
-    if !active(c) {
-        return Ok(false);
-    }
     let tx = db(c.transaction())?;
     let after: i64 = db(tx.query_row(
         "SELECT coalesce((SELECT cast(value AS INTEGER) FROM metadata WHERE key='cold_after'),0)",

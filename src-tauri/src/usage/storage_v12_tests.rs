@@ -192,16 +192,8 @@ fn views(store: &Store) -> Value {
 
 fn migrated_empty() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let old = Store::open_v11_fixture(dir.path()).unwrap();
-    drop(old);
-    let mut store = Store::open(dir.path()).unwrap();
-    for _ in 0..100 {
-        if !store.compact_storage_batch().unwrap() {
-            store.reclaim_space().unwrap();
-            return (dir, store);
-        }
-    }
-    panic!("v12 migration did not finish");
+    let store = Store::open(dir.path()).unwrap();
+    (dir, store)
 }
 
 fn compact_diagnostics_until_done(store: &mut Store) {
@@ -243,17 +235,12 @@ fn fresh_database_matches_migrated_schema_and_needs_no_historical_repairs() {
     };
     let before = metadata(&fresh);
     assert!(!fresh.compact_storage_batch().unwrap());
-    assert!(!fresh.repair_metadata_batch().unwrap());
-    assert!(!fresh.repair_correlations_batch().unwrap());
     fresh.reclaim_space().unwrap();
     assert!(fresh.maintenance_status().is_none());
     assert_eq!(metadata(&fresh), before);
     assert_eq!(
         before,
         vec![
-            ("antigravity_fields_v02619".into(), "complete".into()),
-            ("billing_success_completed".into(), "done".into()),
-            ("correlation_zero_cache".into(), "done".into()),
             ("record_sequence".into(), "0".into()),
             ("storage_v12".into(), "ready".into()),
         ]
@@ -422,7 +409,7 @@ fn v12_ready_database_removes_legacy_links_on_open() {
 #[test]
 fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
     let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
+    let mut old = Store::open(dir.path()).unwrap();
     let proxy = record(
         "fixture-v12-merge-proxy",
         "proxy",
@@ -447,26 +434,10 @@ fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
     let before = views(&old);
     drop(old);
 
-    let mut migrated = Store::open(dir.path()).unwrap();
-    assert!(migrated.compact_storage_batch().unwrap());
-    // A previous version may have left this redundant table in a pending copy.
-    migrated.connection.execute_batch("CREATE TABLE v12_links(owner INTEGER PRIMARY KEY,target BLOB NOT NULL); INSERT INTO v12_links VALUES(1,x'00');").unwrap();
-    assert_eq!(views(&migrated), before);
-    drop(migrated);
-
     let mut resumed = Store::open(dir.path()).unwrap();
     while resumed.compact_storage_batch().unwrap() {}
     resumed.reclaim_space().unwrap();
     assert_eq!(views(&resumed), before);
-    let links: bool = resumed
-        .connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='v12_links')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!links);
     assert_eq!(
         resumed.cursor("fixture-v12-cursor").unwrap().as_deref(),
         Some("cursor-before")
@@ -474,147 +445,9 @@ fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
 }
 
 #[test]
-fn v12_migration_write_during_pending_copy_survives_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
-    let first = record(
-        "fixture-v12-pending-first",
-        "codex",
-        BASE,
-        Some("fixture-v12-pending-first-response"),
-        10,
-        2,
-    );
-    old.write_batch(
-        std::slice::from_ref(&first),
-        Some(("fixture-v12-pending-cursor", "before")),
-    )
-    .unwrap();
-    drop(old);
-
-    let mut pending = Store::open(dir.path()).unwrap();
-    let _ = pending.compact_storage_batch().unwrap();
-    let late = record(
-        "fixture-v12-pending-late",
-        "codex",
-        BASE + 1,
-        Some("fixture-v12-pending-late-response"),
-        20,
-        3,
-    );
-    pending
-        .write_batch(
-            std::slice::from_ref(&late),
-            Some(("fixture-v12-pending-cursor", "after")),
-        )
-        .unwrap();
-    drop(pending);
-
-    let mut resumed = Store::open(dir.path()).unwrap();
-    while resumed.compact_storage_batch().unwrap() {}
-    resumed.reclaim_space().unwrap();
-    assert!(resumed.detail(&first.id).is_ok());
-    assert!(resumed.detail(&late.id).is_ok());
-    assert_eq!(resumed.logs(&all_time()).unwrap().total, 2);
-    assert_eq!(
-        resumed
-            .cursor("fixture-v12-pending-cursor")
-            .unwrap()
-            .as_deref(),
-        Some("after")
-    );
-}
-
-#[test]
-fn v12_low_space_defers_copy_but_keeps_old_writes_and_cursor() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
-    let first = record(
-        "fixture-v12-low-space-first",
-        "codex",
-        BASE,
-        Some("fixture-v12-low-space-first-response"),
-        10,
-        2,
-    );
-    old.write_batch(
-        std::slice::from_ref(&first),
-        Some(("fixture-v12-low-space-cursor", "before")),
-    )
-    .unwrap();
-    drop(old);
-
-    let mut pending = Store::open(dir.path()).unwrap();
-    let database_path = dir.path().join("usage.sqlite");
-    let database = Connection::open(&database_path).unwrap();
-    database
-        .execute(
-            "DELETE FROM metadata WHERE key IN ('repair_v020_after','finish_time_after','storage_records_after','storage_daily_after','storage_repack')",
-            [],
-        )
-        .unwrap();
-    database
-        .execute(
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES('fixture_available_bytes','0')",
-            [],
-        )
-        .unwrap();
-    drop(database);
-
-    assert!(pending.compact_storage_batch().is_err());
-    assert_eq!(pending.logs(&all_time()).unwrap().total, 1);
-    assert_eq!(
-        pending
-            .cursor("fixture-v12-low-space-cursor")
-            .unwrap()
-            .as_deref(),
-        Some("before")
-    );
-
-    let late = record(
-        "fixture-v12-low-space-late",
-        "codex",
-        BASE + 1,
-        Some("fixture-v12-low-space-late-response"),
-        20,
-        3,
-    );
-    pending
-        .write_batch(
-            std::slice::from_ref(&late),
-            Some(("fixture-v12-low-space-cursor", "after")),
-        )
-        .unwrap();
-    drop(pending);
-
-    let database = Connection::open(&database_path).unwrap();
-    database
-        .execute(
-            "DELETE FROM metadata WHERE key='fixture_available_bytes'",
-            [],
-        )
-        .unwrap();
-    drop(database);
-
-    let mut resumed = Store::open(dir.path()).unwrap();
-    while resumed.compact_storage_batch().unwrap() {}
-    resumed.reclaim_space().unwrap();
-    assert!(resumed.detail(&first.id).is_ok());
-    assert!(resumed.detail(&late.id).is_ok());
-    assert_eq!(resumed.logs(&all_time()).unwrap().total, 2);
-    assert_eq!(
-        resumed
-            .cursor("fixture-v12-low-space-cursor")
-            .unwrap()
-            .as_deref(),
-        Some("after")
-    );
-}
-
-#[test]
 fn v12_migration_preserves_zero_tokens_and_price_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
+    let mut old = Store::open(dir.path()).unwrap();
     let priced = priced_record("fixture-v12-priced-zero", BASE, 0, 0, "0.1234");
     old.write_batch(std::slice::from_ref(&priced), None)
         .unwrap();
@@ -663,158 +496,6 @@ fn v12_snapshot_stays_on_one_committed_view_while_writer_switches_rows() {
         })
         .unwrap();
     assert_eq!(reader.logs(&all_time()).unwrap().total, 2);
-}
-
-#[test]
-fn v12_migration_switch_keeps_old_reader_snapshot_until_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
-    let row = record(
-        "fixture-v12-switch-snapshot",
-        "codex",
-        BASE,
-        Some("fixture-v12-switch-response"),
-        10,
-        2,
-    );
-    old.write_batch(std::slice::from_ref(&row), None).unwrap();
-    let expected = serde_json::to_value(old.detail(&row.id).unwrap()).unwrap();
-    drop(old);
-
-    let mut writer = Store::open(dir.path()).unwrap();
-    let reader = Store::reader(dir.path()).unwrap();
-    reader
-        .snapshot(|snapshot| {
-            assert_eq!(snapshot.logs(&all_time()).unwrap().total, 1);
-            assert_eq!(
-                serde_json::to_value(snapshot.detail(&row.id).unwrap()).unwrap(),
-                expected
-            );
-            for _ in 0..100 {
-                if !writer.compact_storage_batch()? {
-                    break;
-                }
-            }
-            assert_eq!(snapshot.logs(&all_time()).unwrap().total, 1);
-            assert_eq!(
-                serde_json::to_value(snapshot.detail(&row.id).unwrap()).unwrap(),
-                expected
-            );
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(reader.logs(&all_time()).unwrap().total, 1);
-    assert_eq!(
-        serde_json::to_value(reader.detail(&row.id).unwrap()).unwrap(),
-        expected
-    );
-}
-
-#[test]
-fn v12_batch_restart_preserves_queries_past_one_migration_batch() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
-    let rows = (0..2_001)
-        .map(|index| {
-            let response = format!("fixture-v12-response-{index}");
-            record(
-                &format!("fixture-v12-batch-{index}"),
-                if index % 2 == 0 { "proxy" } else { "codex" },
-                BASE + index as i64,
-                Some(response.as_str()),
-                10 + index,
-                2,
-            )
-        })
-        .collect::<Vec<_>>();
-    old.write_batch(&rows, None).unwrap();
-    let filter = Filter {
-        start: Some(BASE - 1),
-        end: Some(BASE + 2_001),
-        ..Filter::default()
-    };
-    let before = json!({
-        "total": old.logs(&filter).unwrap().total,
-        "dashboard": dashboard_value(&old, &filter),
-    });
-    drop(old);
-
-    let mut migrating = Store::open(dir.path()).unwrap();
-    assert!(migrating.compact_storage_batch().unwrap());
-    assert_eq!(
-        json!({
-            "total": migrating.logs(&filter).unwrap().total,
-            "dashboard": dashboard_value(&migrating, &filter),
-        }),
-        before
-    );
-    drop(migrating);
-
-    let mut resumed = Store::open(dir.path()).unwrap();
-    while resumed.compact_storage_batch().unwrap() {}
-    resumed.reclaim_space().unwrap();
-    assert_eq!(
-        json!({
-            "total": resumed.logs(&filter).unwrap().total,
-            "dashboard": dashboard_value(&resumed, &filter),
-        }),
-        before
-    );
-}
-
-#[test]
-fn v12_corrupt_old_codec_aborts_batch_and_keeps_cursor_and_body() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
-    let row = record(
-        "fixture-v12-corrupt",
-        "codex",
-        BASE,
-        Some("fixture-v12-corrupt-response"),
-        10,
-        2,
-    );
-    old.write_batch(
-        std::slice::from_ref(&row),
-        Some(("fixture-v12-corrupt-cursor", "cursor-before")),
-    )
-    .unwrap();
-    drop(old);
-
-    let database_path = dir.path().join("usage.sqlite");
-    let database = Connection::open(&database_path).unwrap();
-    database
-        .execute(
-            "UPDATE records SET body=?1 WHERE id=?2",
-            params![
-                r#"{"_usageCodec":"fixture-invalid","_usageBody":"x"}"#,
-                row.id
-            ],
-        )
-        .unwrap();
-    drop(database);
-
-    let mut migrating = Store::open(dir.path()).unwrap();
-    assert!(migrating.compact_storage_batch().is_err());
-    assert_eq!(
-        migrating
-            .cursor("fixture-v12-corrupt-cursor")
-            .unwrap()
-            .as_deref(),
-        Some("cursor-before")
-    );
-    let database = Connection::open(database_path).unwrap();
-    let body: String = database
-        .query_row(
-            "SELECT body FROM records WHERE id=?1",
-            [row.id.as_str()],
-            |result| result.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        body,
-        r#"{"_usageCodec":"fixture-invalid","_usageBody":"x"}"#
-    );
 }
 
 #[test]
@@ -1955,27 +1636,16 @@ fn native_reads_backfill_counts_and_archive_match_legacy() {
         .collect();
     let mut results = Vec::new();
     for native in [false, true] {
-        let mut store = if native {
-            Store::open(&dir.path().join("native"))
-        } else {
-            Store::open_v11_fixture(&dir.path().join("legacy"))
-        }
-        .unwrap();
+        let mut store = Store::open(&dir.path().join(if native { "native" } else { "legacy" }))
+            .unwrap();
         store.write_batch(&rows, None).unwrap();
-        let table = if native { "v12_rows" } else { "records" };
         store
             .connection
-            .execute(
-                &format!("UPDATE {table} SET effective=2 WHERE time%3=0"),
-                [],
-            )
+            .execute("UPDATE v12_rows SET effective=2 WHERE time%3=0", [])
             .unwrap();
         store
             .connection
-            .execute(
-                &format!("UPDATE {table} SET effective=0 WHERE time%3=1"),
-                [],
-            )
+            .execute("UPDATE v12_rows SET effective=0 WHERE time%3=1", [])
             .unwrap();
         assert_eq!(store.source_counts("codex").unwrap(), (46, 46, 0));
         assert_eq!(store.source_counts("missing").unwrap(), (0, 0, 0));
@@ -2045,12 +1715,7 @@ fn native_archive_preserves_all_scopes_operations_and_receipts() {
     let mut results = Vec::new();
     for native in [false, true] {
         let root = dir.path().join(if native { "native" } else { "legacy" });
-        let mut store = if native {
-            Store::open(&root)
-        } else {
-            Store::open_v11_fixture(&root)
-        }
-        .unwrap();
+        let mut store = Store::open(&root).unwrap();
         store.write_batch(&rows, None).unwrap();
         assert!(store
             .detail("fixture-archive-duplicate")
@@ -2109,7 +1774,7 @@ fn native_archive_preserves_all_scopes_operations_and_receipts() {
 #[test]
 fn migration_preserves_links_to_already_archived_records() {
     let dir = tempfile::tempdir().unwrap();
-    let mut old = Store::open_v11_fixture(dir.path()).unwrap();
+    let mut old = Store::open(dir.path()).unwrap();
     let proxy = record(
         "fixture-archived-proxy",
         "proxy",
@@ -2136,9 +1801,6 @@ fn migration_preserves_links_to_already_archived_records() {
     let snapshot = |store: &Store| json!({"page":page_value(store,&all_time()),"dashboard":dashboard_value(store,&all_time()),"detail":store.detail(&session.id).unwrap()});
     let before = snapshot(&old);
     drop(old);
-    let mut migrating = Store::open(dir.path()).unwrap();
-    assert!(migrating.compact_storage_batch().unwrap());
-    drop(migrating);
     let mut resumed = Store::open(dir.path()).unwrap();
     while resumed.compact_storage_batch().unwrap() {}
     assert_eq!(
