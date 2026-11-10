@@ -20,9 +20,7 @@ fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping(
     )
     .unwrap();
     fs::write(home.path().join("profiles/web").join(PATCH), "- id: llm-pi-ai\n  config:\n    providers:\n      third: {api: openai-completions, baseURL: 'https://three.example.invalid/v1', apiKey: fixture-three, models: [{id: custom-pro}]}\n").unwrap();
-    let preview = gateway
-        .preview_dsh(home.path(), Some("missing"), Protocol::Responses)
-        .unwrap();
+    let preview = gateway.preview_dsh(home.path(), Some("missing")).unwrap();
     assert_eq!(preview.profile.as_deref(), Some("desktop"));
     assert_eq!(preview.protocol, Protocol::ChatCompletions);
     assert_eq!(preview.models, [models::FLASH, models::PRO]);
@@ -97,9 +95,7 @@ fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
         .unwrap()
         .replace("openai-completions", "openai-responses");
     fs::write(&path, raw).unwrap();
-    let preview = gateway
-        .preview_dsh(home.path(), None, Protocol::ChatCompletions)
-        .unwrap();
+    let preview = gateway.preview_dsh(home.path(), None).unwrap();
     assert!(preview.providers[0]
         .error
         .as_ref()

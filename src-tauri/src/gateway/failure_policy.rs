@@ -381,24 +381,21 @@ fn classification_trace(
             let number = status
                 .as_u64()
                 .or_else(|| status.as_str().and_then(|s| s.parse().ok()));
-            (match number {
-                Some(401) => Some(ErrorBasis::Authentication),
-                Some(402) => Some(ErrorBasis::Billing),
-                Some(403) => Some(ErrorBasis::Permission),
-                Some(429) => Some(ErrorBasis::UnknownRateLimit),
-                Some(413 | 414) => Some(ErrorBasis::RequestTooLarge),
-                Some(400 | 405 | 406 | 409 | 415 | 422 | 426 | 501) => {
-                    Some(ErrorBasis::InvalidRequest)
-                }
-                Some(500 | 502..=599) => Some(ErrorBasis::ServiceError),
-                _ => status.as_str().and_then(|value| {
-                    super::failure_rules::STATUS_CODES
-                        .iter()
-                        .find(|c| c.value == value)
-                        .map(|c| c.category)
-                }),
-            })
-            .map(|b| (b, Source::Status))
+            number
+                .and_then(|n| u16::try_from(n).ok())
+                .and_then(|code| match code {
+                    500 | 502..=599 => Some(ErrorBasis::ServiceError),
+                    other => status_error_basis(other),
+                })
+                .or_else(|| {
+                    status.as_str().and_then(|value| {
+                        super::failure_rules::STATUS_CODES
+                            .iter()
+                            .find(|c| c.value == value)
+                            .map(|c| c.category)
+                    })
+                })
+                .map(|b| (b, Source::Status))
         });
     let basis = matched.map(|m| m.0);
     let explicit = explicit.map(|m| m.0);
@@ -483,6 +480,18 @@ pub(super) fn http_with_rules(
     http_value_with_rules(status, headers, &value, rules)
 }
 
+fn status_error_basis(status: u16) -> Option<ErrorBasis> {
+    match status {
+        401 => Some(ErrorBasis::Authentication),
+        402 => Some(ErrorBasis::Billing),
+        403 => Some(ErrorBasis::Permission),
+        429 => Some(ErrorBasis::UnknownRateLimit),
+        413 | 414 => Some(ErrorBasis::RequestTooLarge),
+        400 | 405 | 406 | 409 | 415 | 422 | 426 | 501 => Some(ErrorBasis::InvalidRequest),
+        _ => None,
+    }
+}
+
 pub(super) fn http_value_with_rules(
     status: u16,
     headers: &hyper::HeaderMap,
@@ -501,15 +510,7 @@ pub(super) fn http_value_with_rules(
         d.health_scope = Some(HealthScope::Request);
     }
     if d.error_basis.is_none() {
-        d.error_basis = match status {
-            401 => Some(ErrorBasis::Authentication),
-            402 => Some(ErrorBasis::Billing),
-            403 => Some(ErrorBasis::Permission),
-            429 => Some(ErrorBasis::UnknownRateLimit),
-            413 | 414 => Some(ErrorBasis::RequestTooLarge),
-            400 | 405 | 406 | 409 | 415 | 422 | 426 | 501 => Some(ErrorBasis::InvalidRequest),
-            _ => None,
-        };
+        d.error_basis = status_error_basis(status);
         if hard_rejection(&d) {
             d.health_scope = Some(HealthScope::Provider);
         }

@@ -366,8 +366,6 @@ pub fn route(
         (Some(ClientId::Grok), "/grok")
     } else if path == "/v1"
         || path.starts_with("/v1/")
-        || path.starts_with("/v1beta/")
-        || path.starts_with("/v1alpha/")
         || path.trim_end_matches('/') == "/alpha/search"
     {
         (None, "")
@@ -396,9 +394,6 @@ pub fn route(
         }
     }
     let client = matched.ok_or(RouteError::Unauthorized)?;
-    if path.starts_with("/v1beta/") || path.starts_with("/v1alpha/") {
-        return Err(RouteError::NotFound);
-    }
     if path.trim_end_matches('/') == "/alpha/search" && client != ClientId::Codex {
         return Err(RouteError::NotFound);
     }

@@ -1,7 +1,44 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ClientId, Provider, ProviderQuota } from "./types";
-import { quotaFixture, quotaPlan } from "./quota-fixtures.v0212";
+import type { ClientId, Provider, ProviderQuota, QuotaPlan } from "./types";
+
+function quotaPlan(overrides: Partial<QuotaPlan> = {}): QuotaPlan {
+  return {
+    name: "每日",
+    remaining: 8,
+    used: 2,
+    total: 10,
+    unit: "USD",
+    unlimited: false,
+    resetAt: null,
+    ...overrides,
+  };
+}
+
+function quotaFixture(
+  provider: Provider,
+  overrides: Partial<ProviderQuota> = {},
+): ProviderQuota {
+  return {
+    providerId: provider.id,
+    version: provider.quotaVersion,
+    state: "ok",
+    source: "sub2api",
+    checkedAt: 1_800_000_000,
+    successAt: 1_800_000_000,
+    retryAt: null,
+    stale: false,
+    error: null,
+    keyStatus: null,
+    plans: [quotaPlan()],
+    subscriptions: [],
+    expiresAt: null,
+    expiresAtUnix: null,
+    today: null,
+    totalUsage: null,
+    ...overrides,
+  };
+}
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
   listeners: new Map<string, (s: unknown) => void>(),

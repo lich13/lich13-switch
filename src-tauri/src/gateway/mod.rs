@@ -1460,7 +1460,7 @@ impl Gateway {
         }
         if direct_select
             && self.0.client == ClientId::Codex
-            && crate::official::blocks_gateway(&self.0.data, home)
+            && crate::official::blocks_gateway(&self.0.data)
         {
             return Err(AppError::new(
                 code::OFFICIAL_MODE,
@@ -1492,7 +1492,7 @@ impl Gateway {
                         "请先关闭 Codex 网关再修改连接方式",
                     ));
                 }
-                if crate::official::blocks_gateway(&self.0.data, home) {
+                if crate::official::blocks_gateway(&self.0.data) {
                     return Err(AppError::new(code::OFFICIAL_MODE, "请先关闭官方账号连接"));
                 }
                 next.connection = match mode.as_str() {
@@ -1662,7 +1662,7 @@ impl Gateway {
         if self.0.client == ClientId::Dsh {
             return self.restart_dsh(home, expected).await;
         }
-        if self.0.client == ClientId::Codex && crate::official::blocks_gateway(&self.0.data, home) {
+        if self.0.client == ClientId::Codex && crate::official::blocks_gateway(&self.0.data) {
             return Err(AppError::new(
                 code::OFFICIAL_MODE,
                 "请先关闭官方账号连接，再启动 Codex 网关",

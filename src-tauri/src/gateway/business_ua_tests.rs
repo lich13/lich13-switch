@@ -19,7 +19,7 @@ fn observed_headers(
 ) {
     let mut protocol = Protocol::new(websocket);
     if business {
-        protocol.business_request(gateway, "fixture-provider", headers);
+        protocol.business_request(gateway, headers);
     }
     protocol.request_headers(headers);
     if websocket {

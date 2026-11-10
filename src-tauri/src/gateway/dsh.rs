@@ -1160,12 +1160,7 @@ impl Gateway {
         }
         Ok(())
     }
-    pub fn preview_dsh(
-        &self,
-        home: &Path,
-        profile: Option<&str>,
-        _protocol: Protocol,
-    ) -> Result<Preview> {
+    pub fn preview_dsh(&self, home: &Path, profile: Option<&str>) -> Result<Preview> {
         let mut profiles = vec![];
         if home.join("profiles").is_dir() {
             for entry in std::fs::read_dir(home.join("profiles"))
@@ -1189,20 +1184,11 @@ impl Gateway {
             .dsh
             .as_ref()
             .and_then(|s| profile.and_then(|p| s.for_profile(p)));
+        let port = self.0.registry.listener.view()?.port;
         let current = profile.map(|profile| {
-            selection::profile_current(
-                home,
-                profile,
-                &store,
-                &[self
-                    .0
-                    .registry
-                    .listener
-                    .view()
-                    .map(|v| v.port)
-                    .unwrap_or(43721)],
-                &|name| std::env::var(name).ok(),
-            )
+            selection::profile_current(home, profile, &store, &[port], &|name| {
+                std::env::var(name).ok()
+            })
         });
         Ok(Preview {
             revision: input.as_ref().map(Input::revision).unwrap_or_default(),
@@ -1212,15 +1198,10 @@ impl Gateway {
                 .iter()
                 .filter_map(|m| m["id"].as_str().map(str::to_owned))
                 .collect(),
-            providers: discover(
-                home,
-                profile.unwrap_or("desktop"),
-                &store,
-                self.0.registry.listener.view()?.port,
-            )?
-            .into_iter()
-            .map(|(view, _)| view)
-            .collect(),
+            providers: discover(home, profile.unwrap_or("desktop"), &store, port)?
+                .into_iter()
+                .map(|(view, _)| view)
+                .collect(),
             attached: snapshot.as_ref().is_some_and(|s| s.active),
             protocol: Protocol::ChatCompletions,
             model: current
@@ -1239,13 +1220,7 @@ impl Gateway {
                 }),
             make_default: snapshot.as_ref().is_none_or(|s| s.options.make_default),
             current: current.clone(),
-            states: status(
-                home,
-                &store,
-                &[self.0.registry.listener.view()?.port],
-                &|name| std::env::var(name).ok(),
-            )
-            .1,
+            states: status(home, &store, &[port], &|name| std::env::var(name).ok()).1,
             warning: if home.join("config.yaml").is_file() && !home.join("profiles").is_dir() {
                 Some("仅发现旧 config.yaml，请先通过 DSH 升级；不会自动迁移".into())
             } else {
@@ -1846,9 +1821,7 @@ mod tests {
                 .unwrap();
             state.editable_mut().store = store;
         }
-        let preview = gateway
-            .preview_dsh(dir.path(), Some("default"), Protocol::ChatCompletions)
-            .unwrap();
+        let preview = gateway.preview_dsh(dir.path(), Some("default")).unwrap();
         assert_eq!(preview.models, vec![models::FLASH, models::PRO]);
         let view = gateway
             .attach_dsh(
@@ -1861,9 +1834,7 @@ mod tests {
             .unwrap();
         assert!(view.running);
         assert_eq!(view.listener.running_clients, vec![ClientId::Dsh]);
-        let preview = gateway
-            .preview_dsh(dir.path(), Some("default"), Protocol::ChatCompletions)
-            .unwrap();
+        let preview = gateway.preview_dsh(dir.path(), Some("default")).unwrap();
         let view = gateway
             .attach_dsh(
                 dir.path(),

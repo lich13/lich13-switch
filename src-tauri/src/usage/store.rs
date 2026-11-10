@@ -253,10 +253,6 @@ impl Store {
         super::pending_prices::ensure(&connection)?;
         if !legacy {
             storage_v12::install(&connection)?;
-            if version == 0 {
-                db(connection.execute("DELETE FROM metadata WHERE key IN ('storage_records_after','storage_daily_after','repair_v020_after','finish_time_after')", []))?;
-                storage_v12::copy_batch(&mut connection)?;
-            }
         }
         Ok(Self {
             connection,

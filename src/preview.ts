@@ -281,7 +281,6 @@ export async function run(
     emit("provider-imports", null);
     return;
   }
-  if (name === "cleanup_retired_data") return;
   if (name === "check_for_updates")
     return {
       hasUpdate: false,
@@ -377,14 +376,18 @@ export async function run(
     emit("gateway-state", gatewayPreview("get_gateway", args));
     return result;
   }
-  if (name === "export_usage_bill")
+  if (name === "export_usage_bill") {
+    const clean = Boolean(
+      (args.request as { clean?: boolean } | undefined)?.clean,
+    );
     return {
       requests: 128,
       attempts: 136,
-      cleaned: 192,
-      retained: 1,
+      cleaned: clean ? 192 : 0,
+      retained: clean ? 1 : 0,
       cleanupError: null,
     };
+  }
   if (name === "read_antigravity_config")
     return structuredClone(antigravityDoc);
   if (name === "validate_antigravity_config") {

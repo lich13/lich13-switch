@@ -41,10 +41,14 @@ fn build_power() {
         );
         result
     };
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => "x86_64",
+        _ => "arm64",
+    };
     let common = [
         "clang",
         "-arch",
-        "arm64",
+        arch,
         "-mmacosx-version-min=12.0",
         "-fobjc-arc",
         "-fblocks",

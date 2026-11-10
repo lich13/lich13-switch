@@ -977,12 +977,7 @@ impl Protocol {
     pub fn thread_identity(&mut self, identity: crate::usage::model::ThreadIdentity) {
         self.identity = Some(identity);
     }
-    pub fn business_request(
-        &mut self,
-        gateway: &super::Gateway,
-        _provider: &str,
-        headers: &hyper::HeaderMap,
-    ) {
+    pub fn business_request(&mut self, gateway: &super::Gateway, headers: &hyper::HeaderMap) {
         self.business = gateway
             .business_identity(headers)
             .map(|identity| (gateway.clone(), identity));
@@ -1684,7 +1679,7 @@ impl Protocol {
         if self.status == Some(101)
             && self.succeeded()
             && self.transfer.terminal_handed_off
-            && matches!(local, "DOWNSTREAM_CLOSED" | code::CLIENT_DISCONNECTED)
+            && local == code::CLIENT_DISCONNECTED
         {
             return false;
         }

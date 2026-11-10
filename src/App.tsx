@@ -237,12 +237,10 @@ export default function App() {
     );
     events.watch("provider-settings", async (p) => {
       if (!(await flushTestPrompt())) return;
-      const target =
-        typeof p === "string" ? { id: p, clientId: "codex" as const } : p;
       if (
         (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
         !(await confirmAction(
-          `${target.action === "testing" ? "打开连接测试" : "打开白名单"}会丢弃未保存的草稿。`,
+          `${p.action === "testing" ? "打开连接测试" : "打开白名单"}会丢弃未保存的草稿。`,
         ))
       )
         return;
@@ -251,7 +249,7 @@ export default function App() {
       setFocusFailure(null);
       setDirty(false);
       setFocusProvider({
-        ...target,
+        ...p,
         sequence: Date.now(),
       });
     });

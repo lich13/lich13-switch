@@ -118,39 +118,17 @@ pub fn clean(data: &Path) -> usize {
 fn owned_by_current_user(path: &Path) -> bool {
     use std::{os::windows::ffi::OsStrExt, ptr};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, LocalFree},
+        Foundation::LocalFree,
         Security::{
             Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
-            EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, TOKEN_QUERY,
-            TOKEN_USER,
+            EqualSid, OWNER_SECURITY_INFORMATION, TOKEN_USER,
         },
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+    let Ok(buffer) = crate::storage::current_user_token() else {
+        return false;
     };
     let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     unsafe {
-        let mut token = ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return false;
-        }
-        let mut length = 0;
-        GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut length);
-        if length == 0 || length > 65536 {
-            CloseHandle(token);
-            return false;
-        }
-        // Word storage provides the alignment required by TOKEN_USER and its SID.
-        let mut buffer = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
-        let read = GetTokenInformation(
-            token,
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            length,
-            &mut length,
-        );
-        CloseHandle(token);
-        if read == 0 {
-            return false;
-        }
         let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
         let mut owner = ptr::null_mut();
         let mut descriptor = ptr::null_mut();

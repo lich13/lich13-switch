@@ -60,17 +60,19 @@ impl Service {
         #[cfg(target_os = "macos")]
         {
             crate::startup_macos::migrate(&executable()?)?;
-            let old = auto_launch(true)?;
-            let legacy = old.is_enabled().map_err(system_error)?;
-            if legacy {
-                let was = registered()?;
-                register(true)?;
-                if let Err(e) = old.disable() {
-                    let _ = register(was);
-                    return Err(system_error(e));
-                }
-                if old.is_enabled().map_err(system_error)? {
-                    return Err(AppError::new(code::STARTUP, "旧登录项未能移除"));
+            if !self.path.exists() {
+                let old = auto_launch()?;
+                let legacy = old.is_enabled().map_err(system_error)?;
+                if legacy {
+                    let was = registered()?;
+                    register(true)?;
+                    if let Err(e) = old.disable() {
+                        let _ = register(was);
+                        return Err(system_error(e));
+                    }
+                    if old.is_enabled().map_err(system_error)? {
+                        return Err(AppError::new(code::STARTUP, "旧登录项未能移除"));
+                    }
                 }
             }
         }
@@ -86,7 +88,7 @@ impl Service {
                     key.get_value::<String, _>("gpt-Switch").is_ok()
                         || key.get_value::<String, _>("lich13-switch").is_ok()
                 });
-            if legacy_present || auto_launch(true)?.is_enabled().map_err(system_error)? {
+            if legacy_present || auto_launch()?.is_enabled().map_err(system_error)? {
                 register(true)?;
                 if !registered()? {
                     return Err(AppError::new(code::STARTUP, "启动项迁移失败"));
@@ -146,7 +148,7 @@ fn registered() -> Result<bool> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let launch = auto_launch(true)?;
+        let launch = auto_launch()?;
         let enabled = launch.is_enabled().map_err(system_error)?;
         #[cfg(windows)]
         if enabled {
@@ -179,7 +181,7 @@ fn register(enabled: bool) -> Result<()> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let launch = auto_launch(true)?;
+        let launch = auto_launch()?;
         if enabled {
             launch.enable()
         } else {
@@ -206,7 +208,7 @@ fn bundle_path(executable: &Path) -> PathBuf {
         .unwrap_or(executable)
         .to_owned()
 }
-fn auto_launch(silent: bool) -> Result<AutoLaunch> {
+fn auto_launch() -> Result<AutoLaunch> {
     let executable = std::env::current_exe().map_err(storage::io_error)?;
     let path = if cfg!(target_os = "macos") {
         bundle_path(&executable)
@@ -230,11 +232,7 @@ fn auto_launch(silent: bool) -> Result<AutoLaunch> {
         ));
     }
     let args = if cfg!(target_os = "macos") {
-        if silent {
-            vec!["--hidden"]
-        } else {
-            vec![]
-        }
+        vec!["--hidden"]
     } else {
         vec![LOGIN_ARG]
     };
@@ -257,7 +255,7 @@ fn registration_path(path: &str, windows: bool) -> String {
 }
 #[cfg(windows)]
 pub fn smoke_registration() -> Result<()> {
-    let entry = auto_launch(true)?;
+    let entry = auto_launch()?;
     if entry.is_enabled().map_err(system_error)? {
         return Ok(());
     }
@@ -319,9 +317,6 @@ fn is_login_event(event: u32, origin: Option<u32>) -> bool {
     [u32::from_be_bytes(*b"oapp"), u32::from_be_bytes(*b"rapp")].contains(&event)
         && origin == Some(u32::from_be_bytes(*b"lgit"))
 }
-pub fn silent(args: &[String]) -> bool {
-    login_source(args)
-}
 
 #[cfg(test)]
 mod tests {
@@ -335,9 +330,9 @@ mod tests {
         let _: Preferences = serde_json::from_str("{}").unwrap();
         let _: Preferences =
             serde_json::from_str(r#"{"launchToTray":false,"restoreGateway":true}"#).unwrap();
-        assert!(silent(&[LOGIN_ARG.into()]));
-        assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
-        assert!(silent(&[LEGACY_LICH13_LOGIN_ARG.into()]));
+        assert!(login_source(&[LOGIN_ARG.into()]));
+        assert!(login_source(&[LEGACY_LOGIN_ARG.into()]));
+        assert!(login_source(&[LEGACY_LICH13_LOGIN_ARG.into()]));
         assert!(is_login_event(
             u32::from_be_bytes(*b"oapp"),
             Some(u32::from_be_bytes(*b"lgit"))
@@ -351,9 +346,6 @@ mod tests {
             registration_path(r"C:\Program Files\Vela\vela.exe", true),
             r#""C:\Program Files\Vela\vela.exe""#
         );
-        assert!(silent(&[LOGIN_ARG.into()]));
-        assert!(silent(&[LEGACY_LOGIN_ARG.into()]));
-        assert!(silent(&[LEGACY_LICH13_LOGIN_ARG.into()]));
     }
 }
 

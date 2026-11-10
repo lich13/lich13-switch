@@ -650,7 +650,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         },
                         delay.as_secs(),
                     );
-                    let _waiting_since = Instant::now();
                     let owner_route = capacity_wait_owner
                         .as_deref()
                         .or_else(|| last_error.as_ref().and_then(|e| e.provider_id.as_deref()))
@@ -908,7 +907,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     });
                 wait_budget.set_intake(intake, owner);
             }
-            let _admission_started = Instant::now();
             if attempted > 0 || !hard_denied.is_empty() {
                 // Admission rechecks policy atomically. Its proactive priority gate
                 // must also yield to the failure queue, without dropping the claim.
@@ -1232,7 +1230,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.attach_thread(wait_budget.thread.clone());
             protocol.request_headers(&parts.headers);
             if !routing::resource(&parts.method, parts.uri.path()) {
-                protocol.business_request(&gateway, &route.provider.id, &parts.headers);
+                protocol.business_request(&gateway, &parts.headers);
             }
             protocol.request_speed(hints.as_ref().ok().and_then(|h| h.speed.clone()));
             protocol.thread_identity(thread_identity);
@@ -1744,7 +1742,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     admission.permits.failure(&settings, cooldown);
                 } else if status == StatusCode::TOO_MANY_REQUESTS {
                     admission.permits.rate_limited(&settings, cooldown);
-                } else if retryable || hard_rejection {
+                } else if retryable {
                     admission.permits.failure(&settings, cooldown);
                 } else {
                     admission.permits.neutral(&settings);
@@ -1793,7 +1791,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     // Release the failed attempt before registering a bounded wait.
                     // Keep the original spool, model, and response cursor untouched.
                     drop(admission);
-                    let _waiting_since = Instant::now();
                     request_budget.describe(None, model.as_deref(), "retry");
                     match gateway
                         .0
@@ -2321,7 +2318,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     // Release the failed attempt before registering a bounded wait.
                     // Keep the original spool, model, and response cursor untouched.
                     drop(admission);
-                    let _waiting_since = Instant::now();
                     request_budget.describe(None, model.as_deref(), "retry");
                     match gateway
                         .0

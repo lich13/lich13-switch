@@ -705,7 +705,6 @@ export type CommandMap = {
     { terminated: number; failed: number; terminalCleanupFailed?: number }
   >;
   get_startup_error: Call<None, AppError | null>;
-  cleanup_retired_data: Call<None, void>;
   get_app_events: Call<
     {
       filter: {
@@ -889,8 +888,10 @@ export type EventMap = {
   "pricing-state": null;
   "app-event": EventRecord;
   "event-log": { id: string; clientId: ClientId; providerId: string | null };
-  "provider-settings":
-    | string
-    | { id: string; clientId: ClientId; action?: ProviderAction };
+  "provider-settings": {
+    id: string;
+    clientId: ClientId;
+    action?: ProviderAction;
+  };
   navigate: string;
 };

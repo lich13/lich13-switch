@@ -170,13 +170,6 @@ pub struct ViewState {
     #[serde(default)]
     pub official_mode: crate::official::OfficialModeView,
 }
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigDocument {
-    pub text: String,
-    pub revision: String,
-    pub path: String,
-}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthSync {
@@ -1173,33 +1166,28 @@ impl Core {
         storage::atomic_write(&path, raw.as_bytes(), Some(expected))?;
         self.state()
     }
-    pub fn read_config(&self) -> Result<ConfigDocument> {
-        let path = self.home().join("config.toml");
-        let bytes = storage::read_optional(&path)?;
-        let revision = storage::revision(bytes.as_deref());
-        let text = String::from_utf8(bytes.unwrap_or_default())
-            .map_err(|_| AppError::new(code::UTF8, "配置必须使用 UTF-8 编码"))?;
-        Ok(ConfigDocument {
-            text,
-            revision,
-            path: path.to_string_lossy().into(),
-        })
+    #[cfg(test)]
+    pub fn read_config(&self) -> Result<crate::configuration::Document> {
+        crate::configuration::read(
+            crate::gateway::ClientId::Codex,
+            &self.home(),
+            &self.data_dir,
+            false,
+        )
     }
-    pub fn save_config(&self, text: &str, expected: &str) -> Result<ConfigDocument> {
-        validate_config(text)?;
-        let path = self.home().join("config.toml");
-        let bytes = storage::read_optional(&path)?;
-        if expected != storage::revision(bytes.as_deref()) {
-            return Err(AppError::new(
-                code::CONFLICT,
-                "配置已被其他程序修改。草稿已保留，请重新读取并合并后保存",
-            ));
-        }
-        if let Some(bytes) = bytes {
-            storage::atomic_write(&self.data_dir.join("previous-config.toml"), &bytes, None)?;
-        }
-        storage::atomic_write(&path, text.as_bytes(), Some(expected))?;
-        self.read_config()
+    pub fn save_config(
+        &self,
+        text: &str,
+        expected: &str,
+    ) -> Result<crate::configuration::Document> {
+        crate::configuration::save(
+            crate::gateway::ClientId::Codex,
+            &self.home(),
+            &self.data_dir,
+            text,
+            expected,
+            false,
+        )
     }
     pub fn set_quota_refresh(&mut self, seconds: u64, expected: u64) -> Result<ViewState> {
         if seconds != 0 && !(10..=86400).contains(&seconds) {

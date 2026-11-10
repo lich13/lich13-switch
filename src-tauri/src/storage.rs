@@ -7,6 +7,8 @@ use std::{
     path::{Path, PathBuf},
 };
 mod private;
+#[cfg(windows)]
+pub(crate) use private::windows::current_user_token;
 pub use private::{private_tempdir, private_tempfile, PrivateTempDir};
 
 pub type Result<T> = std::result::Result<T, AppError>;
@@ -158,6 +160,22 @@ pub fn publish_batch(staged: Vec<(tempfile::NamedTempFile, PathBuf)>) -> Result<
     Ok(())
 }
 
+fn ensure_existing_regular_file(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
+            code::SYMLINK,
+            "目标文件是符号链接，请选择实际文件所在目录",
+        )),
+        Ok(m) if !m.is_file() => Err(AppError::new(
+            code::FILE_TYPE,
+            "文件不是普通文件或超过允许大小",
+        )),
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_error(e)),
+    }
+}
+
 /// Keep corrupt source bytes unchanged. The digest name makes retries idempotent
 /// and no-clobber publication protects an existing diagnostic copy.
 pub fn preserve_corrupt(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -169,18 +187,12 @@ pub fn preserve_corrupt(path: &Path, bytes: &[u8]) -> Result<()> {
         .and_then(|v| v.to_str())
         .ok_or_else(|| AppError::new(code::PATH, "目标路径无效"))?;
     let backup = parent.join(format!("{name}.corrupt-{}", digest(bytes)));
-    let existing = || match fs::symlink_metadata(&backup) {
-        Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
-            code::SYMLINK,
-            "目标文件是符号链接，请选择实际文件所在目录",
-        )),
-        Ok(m) if !m.is_file() => Err(AppError::new(
-            code::FILE_TYPE,
-            "文件不是普通文件或超过允许大小",
-        )),
-        Ok(_) => protect(&backup, false).map(|_| true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(io_error(e)),
+    let existing = || {
+        if ensure_existing_regular_file(&backup)? {
+            protect(&backup, false).map(|_| true)
+        } else {
+            Ok(false)
+        }
     };
     if existing()? {
         return Ok(());
@@ -213,23 +225,7 @@ pub fn atomic_write_bounded(
             ));
         }
     } else {
-        match fs::symlink_metadata(path) {
-            Ok(m) if m.file_type().is_symlink() => {
-                return Err(AppError::new(
-                    code::SYMLINK,
-                    "目标文件是符号链接，请选择实际文件所在目录",
-                ))
-            }
-            Ok(m) if !m.is_file() => {
-                return Err(AppError::new(
-                    code::FILE_TYPE,
-                    "文件不是普通文件或超过允许大小",
-                ))
-            }
-            Ok(_) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(io_error(e)),
-        }
+        ensure_existing_regular_file(path)?;
     }
     let temp = stage_write(parent, bytes, limit)?;
     temp.persist(path).map_err(|e| io_error(e.error))?;
@@ -249,19 +245,7 @@ pub fn atomic_write_stream(
     if !parent.exists() {
         private_dir(parent)?;
     }
-    match fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => Err(AppError::new(
-            code::SYMLINK,
-            "目标文件是符号链接，请选择实际文件所在目录",
-        )),
-        Ok(m) if !m.is_file() => Err(AppError::new(
-            code::FILE_TYPE,
-            "文件不是普通文件或超过允许大小",
-        )),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(io_error(e)),
-    }?;
+    ensure_existing_regular_file(path)?;
     let mut temp = private_tempfile(parent)?;
     {
         let mut writer = BufWriter::new(temp.as_file_mut());

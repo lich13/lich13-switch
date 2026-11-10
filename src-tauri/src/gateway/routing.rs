@@ -125,31 +125,23 @@ pub(super) fn fallback_action(
     // The current request still filters its retained route snapshots before
     // admission revalidates live configuration. A newly relaxed receiver
     // policy cannot make a previously ineligible snapshot a real fallback.
+    let matches_request = |route: &super::Route| {
+        route.provider.id != current
+            && route.accepts_protocol(path)
+            && requirement.allows(route.provider.allowed_models.as_deref())
+    };
+    let candidates = eligible(candidates.into_iter().filter(matches_request).collect());
     let candidates = eligible(
         candidates
             .into_iter()
-            .filter(|route| {
-                route.provider.id != current
-                    && route.accepts_protocol(path)
-                    && requirement.allows(route.provider.allowed_models.as_deref())
+            .filter_map(|route| {
+                gateway
+                    .route(&route.provider.id)
+                    .filter(|live| live.provider.version == route.provider.version)
             })
+            .filter(|route| queued.contains(&route.provider.id) && matches_request(route))
             .collect(),
     );
-    let candidates: Vec<_> = candidates
-        .into_iter()
-        .filter_map(|route| {
-            gateway
-                .route(&route.provider.id)
-                .filter(|live| live.provider.version == route.provider.version)
-        })
-        .filter(|route| {
-            route.provider.id != current
-                && queued.contains(&route.provider.id)
-                && route.accepts_protocol(path)
-                && requirement.allows(route.provider.allowed_models.as_deref())
-        })
-        .collect();
-    let candidates = eligible(candidates);
     if candidates.iter().any(|route| {
         let p = &route.provider;
         route.health_for(requirement).available

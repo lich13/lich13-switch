@@ -51,9 +51,7 @@ pub(super) fn options() -> Options {
 #[tokio::test]
 async fn desktop_without_bundle_is_recognized_imported_and_shared_with_empty_profiles() {
     let (home, _parent, gateway) = fixture();
-    let preview = gateway
-        .preview_dsh(home.path(), None, Protocol::Messages)
-        .unwrap();
+    let preview = gateway.preview_dsh(home.path(), None).unwrap();
     assert_eq!(preview.profile.as_deref(), Some("desktop"));
     assert_eq!(preview.protocol, Protocol::ChatCompletions);
     assert_eq!(preview.model.as_deref(), Some(models::FLASH));
@@ -163,7 +161,7 @@ fn same_unimported_address_with_different_credentials_is_inconsistent() {
     let current = current(home.path(), &Store::default(), &[43721], &|_| None);
     assert_eq!(current.state, Kind::Mixed);
     assert!(gateway
-        .preview_dsh(home.path(), Some("desktop"), Protocol::ChatCompletions)
+        .preview_dsh(home.path(), Some("desktop"))
         .unwrap()
         .current
         .is_some());

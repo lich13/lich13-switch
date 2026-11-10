@@ -343,6 +343,21 @@ fn verify_record(text: &str, record: &Record) -> Result<Scan> {
     Ok(scan)
 }
 
+fn matches_original(scan: &Scan, record: &Record) -> bool {
+    record.fields.iter().enumerate().all(|(n, field)| {
+        match (
+            &field.original,
+            &field.managed,
+            scan.fields[n],
+            scan.comments[n],
+        ) {
+            (Some(expected), Some(_), Some(i), None) => scan.lines[i].raw == *expected,
+            (None, None, None, None) => true,
+            _ => false,
+        }
+    })
+}
+
 #[derive(Default)]
 pub struct ViewCache {
     record: crate::auth_cache::Cache<Option<Result<Record>>>,
@@ -430,6 +445,11 @@ impl ViewCache {
                 account_id: Some(record.account_id.clone()),
                 error: None,
             }
+        } else if matches!(record.stage.as_str(), "disabling" | "enabling")
+            && matches_original(scan, record)
+        {
+            let _ = fs::remove_file(record_path(data));
+            OfficialModeView::default()
         } else {
             OfficialModeView {
                 enabled: record.enabled,
@@ -472,8 +492,7 @@ pub(crate) fn remap_account(
     Ok(Some((before, applied)))
 }
 
-pub fn blocks_gateway(data: &Path, home: &Path) -> bool {
-    let _ = home;
+pub fn blocks_gateway(data: &Path) -> bool {
     match load(data) {
         Ok(Some(_)) | Err(_) => true,
         Ok(None) => false,
@@ -558,7 +577,7 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         return Err(error);
     }
     if let Err(error) = switch_account() {
-        match restore_record(data, home, &record) {
+        match restore_record(home, &record) {
             Ok(()) => {
                 let _ = fs::remove_file(record_path(data));
             }
@@ -577,7 +596,7 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
     record.stage = "enabled".into();
     record.managed_revision = Some(managed_revision);
     if let Err(error) = save(data, &record) {
-        match restore_record(data, home, &record) {
+        match restore_record(home, &record) {
             Ok(()) => {
                 let _ = fs::remove_file(record_path(data));
             }
@@ -600,7 +619,7 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
     })
 }
 
-fn restore_record(_data: &Path, home: &Path, record: &Record) -> Result<()> {
+fn restore_record(home: &Path, record: &Record) -> Result<()> {
     let path = home.join("config.toml");
     let raw = storage::read_optional(&path)?
         .ok_or_else(|| AppError::new(code::CONFLICT, "Codex 配置不存在，无法恢复"))?;
@@ -637,7 +656,14 @@ pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeV
     let text =
         String::from_utf8(raw).map_err(|_| AppError::new(code::CONFIG, "Codex 配置不是 UTF-8"))?;
     let _ = expected; // unrelated edits are allowed; managed lines are checked below
-    let managed_scan = verify_record(&text, &record)?;
+    let current_scan = scan(&text)?;
+    if matches!(record.stage.as_str(), "disabling" | "enabling")
+        && matches_original(&current_scan, &record)
+    {
+        let _ = fs::remove_file(record_path(data));
+        return Ok(OfficialModeView::default());
+    }
+    verify_scan(&current_scan, &record)?;
     if record.stage == "conflict" {
         return Err(AppError::new(
             code::CONFLICT,
@@ -648,11 +674,11 @@ pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeV
     staged.stage = "disabling".into();
     let mut replacements = Vec::new();
     for (n, field) in record.fields.iter().enumerate() {
-        if let (Some(i), Some(original)) = (managed_scan.comments[n], &field.original) {
+        if let (Some(i), Some(original)) = (current_scan.comments[n], &field.original) {
             replacements.push((i, original.clone()));
         }
     }
-    let output = replace_lines(&text, &managed_scan, &replacements);
+    let output = replace_lines(&text, &current_scan, &replacements);
     save(data, &staged)?;
     storage::atomic_write(
         &path,
@@ -827,5 +853,41 @@ mod tests {
         let disabled = cache.view(&data, &home);
         assert!(!disabled.enabled);
         assert_eq!(disabled.state, "disabled");
+    }
+
+    #[test]
+    fn recovers_from_interrupted_disabling_or_enabling_when_config_matches_original() {
+        for stage in ["disabling", "enabling"] {
+            let t = tempfile::tempdir().unwrap();
+            let home = t.path().join("codex");
+            let data = t.path().join("data");
+            fs::create_dir_all(&home).unwrap();
+            storage::private_dir(&data).unwrap();
+            let cfg_path = home.join("config.toml");
+            fs::write(&cfg_path, TEXT).unwrap();
+            let before = storage::revision(Some(TEXT.as_bytes()));
+            enable(&data, &home, "acct", &before).unwrap();
+            let mut record = load(&data).unwrap().unwrap();
+            record.stage = stage.into();
+            record.enabled = stage == "disabling";
+            save(&data, &record).unwrap();
+            fs::write(&cfg_path, TEXT).unwrap();
+            let restored = disable(&data, &home, &before).unwrap();
+            assert!(!restored.enabled);
+            assert_eq!(restored.state, "disabled");
+            assert!(!record_path(&data).exists());
+
+            enable(&data, &home, "acct", &before).unwrap();
+            let mut record = load(&data).unwrap().unwrap();
+            record.stage = stage.into();
+            record.enabled = stage == "disabling";
+            save(&data, &record).unwrap();
+            fs::write(&cfg_path, TEXT).unwrap();
+            let mut cache = ViewCache::default();
+            let viewed = cache.view(&data, &home);
+            assert!(!viewed.enabled);
+            assert_eq!(viewed.state, "disabled");
+            assert!(!record_path(&data).exists());
+        }
     }
 }

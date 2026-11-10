@@ -1079,7 +1079,6 @@ impl Drop for AttemptTrace {
             {
                 self.attempt.usage_status = "ended_early".into();
             }
-            self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
         }
         self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
         self.price();

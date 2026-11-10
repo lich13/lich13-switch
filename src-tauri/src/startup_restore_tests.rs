@@ -186,7 +186,7 @@ fn startup_view_and_silent_mode_have_no_restore_gateway_setting() {
             "revision": "fixture-revision"
         })
     );
-    assert!(silent(&[LOGIN_ARG.into()]));
+    assert!(login_source(&[LOGIN_ARG.into()]));
 }
 
 #[tokio::test]

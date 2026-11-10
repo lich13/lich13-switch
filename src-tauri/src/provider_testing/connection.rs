@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-const OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
+const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const TEXT_LIMIT: usize = 256 * 1024;
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
@@ -272,11 +272,6 @@ impl Service {
         }
     }
     pub(super) async fn run_connection(&self, id: &str, context: &Context) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(300), self.connection_inner(id, context))
-            .await
-            .unwrap_or_else(|_| Err(failure("连接测试超时；上游可能仍在处理，请手动确认后重试")))
-    }
-    async fn connection_inner(&self, id: &str, context: &Context) -> Result<()> {
         let target = &context.target;
         let model = target.model(&context.request.model);
 

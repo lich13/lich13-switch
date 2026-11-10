@@ -2,7 +2,7 @@ use super::{
     compat::{integer, string, truthy},
     modeltrace::{NUMBERS, THOUGHT_TAG},
 };
-use futures_util::{future::BoxFuture, StreamExt};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -608,24 +608,16 @@ impl Collector {
 pub struct Target {
     pub url: String,
     pub headers: reqwest::header::HeaderMap,
-    pub proxy: Option<String>,
     pub model: String,
-    pub oauth: bool,
     pub protocol: String,
     pub client_metadata: Option<Value>,
 }
 impl Target {
     pub fn client(&self) -> TransportResult<reqwest::Client> {
-        let mut client = reqwest::Client::builder()
+        reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10));
-        if let Some(proxy) = &self.proxy {
-            client = client.proxy(
-                reqwest::Proxy::all(proxy).map_err(|_| Failure::new("network_error", false))?,
-            );
-        }
-        client
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| Failure::new("network_error", false))
     }
@@ -658,10 +650,7 @@ impl Target {
         } else if self.protocol == "chat_completions" {
             json!({"model":self.model,"messages":[{"role":"user","content":prompt}],"stream":true,"max_completion_tokens":4096})
         } else {
-            let mut payload = json!({"model":self.model,"input":[{"role":"user","content":[{"type":"input_text","text":prompt}]}],"instructions":"You are a helpful assistant.","stream":true,"store":false});
-            if !self.oauth {
-                payload["max_output_tokens"] = 4096.into();
-            }
+            let mut payload = json!({"model":self.model,"input":[{"role":"user","content":[{"type":"input_text","text":prompt}]}],"instructions":"You are a helpful assistant.","stream":true,"store":false,"max_output_tokens":4096});
             if let Some(metadata) = &self.client_metadata {
                 payload["client_metadata"] = metadata.clone();
             }
@@ -669,9 +658,8 @@ impl Target {
         }
     }
 }
-pub type Progress =
-    Arc<dyn Fn(Value) -> BoxFuture<'static, crate::storage::Result<()>> + Send + Sync>;
-async fn received(
+pub type Progress = Arc<dyn Fn(Value) + Send + Sync>;
+fn received(
     collector: &mut Collector,
     diag: &mut Value,
     event: &Value,
@@ -720,8 +708,9 @@ async fn received(
     });
     if result.is_ok() {
         if let Some(callback) = callback {
-            callback(json!({"text":collector.text(),"returned_model":collector.returned_model,"diagnostics":diag}))
-                .await.map_err(|_| Failure::new("internal_error", false))?;
+            callback(
+                json!({"text":collector.text(),"returned_model":collector.returned_model,"diagnostics":diag}),
+            );
         }
     }
     diag.as_object_mut()
@@ -732,14 +721,12 @@ async fn received(
     if !isolated_answer(&collector.text()).is_empty() && diag.get("ttft_ms").is_none() {
         diag["ttft_ms"] = json!(started.elapsed().as_millis());
         if let Some(callback) = callback {
-            callback(json!({"ttft_ms":diag["ttft_ms"],"diagnostics":diag}))
-                .await
-                .map_err(|_| Failure::new("internal_error", false))?;
+            callback(json!({"ttft_ms":diag["ttft_ms"],"diagnostics":diag}));
         }
     }
     Ok(())
 }
-async fn frame(
+fn frame(
     lines: &[Vec<u8>],
     collector: &mut Collector,
     diag: &mut Value,
@@ -777,7 +764,7 @@ async fn frame(
     }
     let event: Value = serde_json::from_slice(raw)
         .map_err(|_| Failure::new("invalid_stream", true).with_response(200, raw, false))?;
-    received(collector, diag, &event, &name, false, started, callback).await
+    received(collector, diag, &event, &name, false, started, callback)
 }
 pub async fn execute_body(
     target: &Target,
@@ -821,9 +808,7 @@ pub async fn execute_body(
         diag["content_type"] = super::compat::clean(&json!(content_type), 80).into();
         diag["headers_ms"] = json!(started.elapsed().as_millis());
         if let Some(callback) = &callback {
-            callback(json!({"status":"receiving","diagnostics":diag}))
-                .await
-                .map_err(|_| Failure::new("internal_error", false))?;
+            callback(json!({"status":"receiving","diagnostics":diag}));
         }
         if status != 200 {
             let detail = super::errors::response(response).await;
@@ -876,7 +861,7 @@ pub async fn execute_body(
                     return Err(Failure::new("output_limit", true));
                 }
                 if line.is_empty() {
-                    frame(&lines, &mut collector, diag, started, &callback).await?;
+                    frame(&lines, &mut collector, diag, started, &callback)?;
                     lines.clear();
                     frame_size = 0;
                     if collector.completed {
@@ -894,7 +879,7 @@ pub async fn execute_body(
             let event = serde_json::from_slice(&buffer).map_err(|_| {
                 Failure::new("invalid_stream", true).with_response(status, &buffer, false)
             })?;
-            received(&mut collector, diag, &event, "", true, started, &callback).await?;
+            received(&mut collector, diag, &event, "", true, started, &callback)?;
         } else {
             if !buffer.is_empty() {
                 if buffer.last() == Some(&b'\r') {
@@ -902,7 +887,7 @@ pub async fn execute_body(
                 }
                 lines.push(buffer);
             }
-            frame(&lines, &mut collector, diag, started, &callback).await?;
+            frame(&lines, &mut collector, diag, started, &callback)?;
         }
         if collector.completed {
             Ok((collector.text(), collector.returned_model.clone()))

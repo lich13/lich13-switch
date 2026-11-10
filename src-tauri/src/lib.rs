@@ -648,8 +648,7 @@ async fn switch_account(
     let _connection_guard = r.official_tx.lock().await;
     let mut core = lock(&r.core)?;
     let official_view = core.official_view();
-    if official::blocks_gateway(&r.data, &core.home())
-        && official_view.account_id.as_deref() != Some(id.as_str())
+    if official::blocks_gateway(&r.data) && official_view.account_id.as_deref() != Some(id.as_str())
     {
         return Err(AppError::new(
             code::OFFICIAL_MODE,
@@ -804,15 +803,7 @@ fn delete_account(
             ));
         }
     }
-    let mut core = lock(&r.core)?;
-    if core.official_view().account_id.as_deref() == Some(id.as_str()) {
-        return Err(AppError::new(
-            code::OFFICIAL_MODE,
-            "请先关闭官方账号连接，再删除该账号",
-        ));
-    }
-    core.delete(&id)?;
-    drop(core);
+    lock(&r.core)?.delete(&id)?;
     refresh(&app, &r)
 }
 #[tauri::command]
@@ -896,8 +887,7 @@ async fn set_preferences(
     if login_active(&lock(&r.login)?.state) {
         return Err(AppError::new(code::LOGIN_BUSY, "请先完成或取消登录"));
     }
-    if (r.gateway.guarded_home()
-        || official::blocks_gateway(&r.data, &r.home(gateway::ClientId::Codex)?))
+    if (r.gateway.guarded_home() || official::blocks_gateway(&r.data))
         && lock(&r.core)?.preferences().codex_home != preferences.codex_home
     {
         return Err(AppError::new(
@@ -1353,14 +1343,11 @@ async fn dsh_official_models(
 #[tauri::command]
 fn preview_dsh_profile(
     profile: Option<String>,
-    protocol: gateway::grok_config::Protocol,
+    _protocol: gateway::grok_config::Protocol,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::dsh::Preview> {
-    r.dsh.preview_dsh(
-        &r.home(gateway::ClientId::Dsh)?,
-        profile.as_deref(),
-        protocol,
-    )
+    r.dsh
+        .preview_dsh(&r.home(gateway::ClientId::Dsh)?, profile.as_deref())
 }
 #[tauri::command]
 async fn attach_dsh_profile(
@@ -1553,9 +1540,7 @@ async fn start_gateway(
     expected_config_revision: Option<String>,
 ) -> Result<gateway::View> {
     let _official_guard = r.official_tx.lock().await;
-    if client_id == gateway::ClientId::Codex
-        && official::blocks_gateway(&r.data, &r.home(client_id)?)
-    {
+    if client_id == gateway::ClientId::Codex && official::blocks_gateway(&r.data) {
         return Err(AppError::new(
             code::OFFICIAL_MODE,
             "请先关闭官方账号连接，再启动 Codex 网关",
@@ -1662,8 +1647,7 @@ async fn frontend_ready(
             gateway::ClientId::Grok,
             gateway::ClientId::Dsh,
         ] {
-            if (client == gateway::ClientId::Codex
-                && official::blocks_gateway(&r.data, &r.home(client)?))
+            if (client == gateway::ClientId::Codex && official::blocks_gateway(&r.data))
                 || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
             {
                 continue;
@@ -1927,7 +1911,7 @@ pub fn run() {
             let grok = gateway.grok_companion(data.join("grok"))?;
             let dsh = gateway.dsh_companion(data.join("dsh"))?;
             let startup = startup::Service::new(&data);
-            let start_silently = smoke.is_none() && startup::silent(&args);
+            let start_silently = smoke.is_none() && startup::login_source(&args);
             app.manage(quick::Panel::new(&data)?);
             let power = power::Service::new(&data);
             if let Some(fixture) = &fixture {
@@ -2463,7 +2447,6 @@ pub fn run() {
             links::get_provider_imports,
             links::confirm_provider_import,
             links::cancel_provider_import,
-            commands::cleanup_retired_data,
             commands::get_clamshell_state,
             commands::set_clamshell_awake,
             commands::install_power_helper,

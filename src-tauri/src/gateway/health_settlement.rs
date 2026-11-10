@@ -109,7 +109,6 @@ pub(super) fn settle_protocol(
         {
             permits.failure(cfg, None)
         }
-        Some(Terminal::Failure) => permits.neutral(cfg),
         Some(_) => permits.neutral(cfg),
         None => (),
     }

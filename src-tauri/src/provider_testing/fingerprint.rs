@@ -132,25 +132,20 @@ impl Service {
             let service = self.clone();
             let job_id = id.to_owned();
             let callback: fingerprint_stream::Progress = Arc::new(move |progress| {
-                let service = service.clone();
-                let id = job_id.clone();
-                Box::pin(async move {
-                    service.progress(&id, |job, output| {
-                        if job.first_byte_ms.is_none() {
-                            job.first_byte_ms = progress["ttft_ms"].as_u64();
-                        }
-                        if let Some(text) = progress["text"].as_str() {
-                            output.groups.insert(index, text.into());
-                        }
-                        if let Some(model) = progress["returned_model"].as_str() {
-                            job.groups[index].returned_model = Some(model.into());
-                        }
-                        if let Some(diag) = progress.get("diagnostics") {
-                            job.groups[index].diagnostics = diag.clone();
-                        }
-                    });
-                    Ok(())
-                })
+                service.progress(&job_id, |job, output| {
+                    if job.first_byte_ms.is_none() {
+                        job.first_byte_ms = progress["ttft_ms"].as_u64();
+                    }
+                    if let Some(text) = progress["text"].as_str() {
+                        output.groups.insert(index, text.into());
+                    }
+                    if let Some(model) = progress["returned_model"].as_str() {
+                        job.groups[index].returned_model = Some(model.into());
+                    }
+                    if let Some(diag) = progress.get("diagnostics") {
+                        job.groups[index].diagnostics = diag.clone();
+                    }
+                });
             });
             let result = tokio::time::timeout(
                 Duration::from_secs(180),
@@ -338,9 +333,7 @@ pub(super) fn target(context: &Context) -> Result<fingerprint_stream::Target> {
     Ok(fingerprint_stream::Target {
         url: context.target.url(path)?,
         headers: context.target.headers.clone(),
-        proxy: None,
         model: context.target.model(&context.request.model),
-        oauth: false,
         protocol: context.target.protocol.clone(),
         client_metadata: context.target.codex_metadata(),
     })

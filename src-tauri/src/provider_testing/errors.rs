@@ -2,7 +2,7 @@ use super::{types::TestError, Target};
 use serde_json::Value;
 use std::{error::Error, sync::LazyLock};
 
-pub(super) const ERROR_LIMIT: usize = 64 * 1024 * 1024;
+pub(super) const ERROR_LIMIT: usize = 4 * 1024 * 1024;
 pub(super) const CLIENT_RESTRICTED: &str = "上游限制客户端身份";
 
 pub(super) fn is_client_restricted(text: &str) -> bool {

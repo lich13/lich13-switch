@@ -260,7 +260,7 @@ async fn send_to_upstream(upstream: &mut Upstream, frame: Frame) -> Result<(), F
 fn unsupported_status(status: u16) -> bool {
     matches!(status, 400 | 404 | 405 | 406 | 426 | 501)
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct AttemptFailure {
     status: Option<u16>,
     retry: Option<Duration>,
@@ -531,16 +531,7 @@ async fn upstream_native(
 ) -> Result<Peer, AttemptFailure> {
     let mut request = Request::new(replay::empty());
     *request.method_mut() = hyper::Method::GET;
-    *request.uri_mut() = route.target(uri).map_err(|_| AttemptFailure {
-        status: None,
-        retry: None,
-        capacity: false,
-        unsupported: false,
-        model_unavailable: false,
-        context_incompatible: false,
-        model_payload: None,
-        details: Default::default(),
-    })?;
+    *request.uri_mut() = route.target(uri).map_err(|_| AttemptFailure::default())?;
     *request.headers_mut() = original.clone();
     let headers = request.headers_mut();
     forward::clean_headers(headers, true);
@@ -551,29 +542,15 @@ async fn upstream_native(
         header::AUTHORIZATION,
         format!("Bearer {}", route.provider.token)
             .parse()
-            .map_err(|_| AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
-                details: Default::default(),
-            })?,
+            .map_err(|_| AttemptFailure::default())?,
     );
     if let Some(connection) = &route.grok {
         connection
             .authenticate(headers, &route.provider.token)
             .map_err(|_| AttemptFailure {
                 status: Some(400),
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
                 details: local_failure(code::GROK_AUTH),
+                ..Default::default()
             })?;
     }
     let key = STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
@@ -595,31 +572,19 @@ async fn upstream_native(
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
             return Err(AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
                 details: local_failure(super::connector::diagnostic_code(&error)),
+                ..Default::default()
             });
         }
         Err(_) => {
             return Err(AttemptFailure {
-                status: None,
-                retry: None,
-                capacity: false,
-                unsupported: false,
-                model_unavailable: false,
-                context_incompatible: false,
-                model_payload: None,
                 details: Box::new(crate::events::Details {
                     local_code: Some(code::WS_HANDSHAKE_TIMEOUT.into()),
                     timeout_phase: Some("ws_handshake".into()),
                     timeout_seconds: Some(settings.connect_seconds),
                     ..Default::default()
                 }),
+                ..Default::default()
             });
         }
     };
@@ -685,13 +650,8 @@ async fn upstream_native(
     {
         return Err(AttemptFailure {
             status: Some(response.status().as_u16()),
-            retry: None,
-            capacity: false,
             unsupported: true,
-            model_unavailable: false,
-            context_incompatible: false,
-            model_payload: None,
-            details: Default::default(),
+            ..Default::default()
         });
     }
     let extensions = response
@@ -704,13 +664,8 @@ async fn upstream_native(
         .await
         .map_err(|_| AttemptFailure {
             status: Some(101),
-            retry: None,
-            capacity: false,
-            unsupported: false,
-            model_unavailable: false,
-            context_incompatible: false,
-            model_payload: None,
             details: local_failure(code::WS_UPGRADE_FAILED),
+            ..Default::default()
         })?;
     let activity = std::sync::Arc::new(super::wire_progress::Activity::default());
     activity.websocket();
@@ -722,13 +677,9 @@ async fn upstream_native(
     )
     .map_err(|_| AttemptFailure {
         status: Some(101),
-        retry: None,
-        capacity: false,
         unsupported: true,
-        model_unavailable: false,
-        context_incompatible: false,
-        model_payload: None,
         details: local_failure(code::WS_EXTENSION_UNSUPPORTED),
+        ..Default::default()
     })?;
     let mut peer = Peer::new(
         socket,
@@ -1455,8 +1406,7 @@ async fn session_once(
             Ok(admission) => admission,
             Err((code, reason))
                 if capacity_pending
-                    && ((code == 1013 && reason != "RPM ledger unavailable")
-                        || (code == 1008 && reason == code::NO_ELIGIBLE_PROVIDER)) =>
+                    && (code == 1013 || (code == 1008 && reason == code::NO_ELIGIBLE_PROVIDER)) =>
             {
                 ids.clear();
                 continue;
@@ -1524,7 +1474,7 @@ async fn session_once(
         attempt_protocol.attach_routing_log(failover.routing());
         attempt_protocol.attach_thread(budget.thread.clone());
         attempt_protocol.request_headers(&headers);
-        attempt_protocol.business_request(g, &admission.route.provider.id, &headers);
+        attempt_protocol.business_request(g, &headers);
         attempt_protocol.request_received(turn_received_at);
         attempt_protocol
             .request_speed(value(&first).and_then(|v| crate::usage::model::speed(&v["speed"])));
@@ -2243,7 +2193,7 @@ async fn session_once(
             next.attach_routing_log(failover.routing());
             next.attach_thread(thread_request.clone());
             next.request_headers(&headers);
-            next.business_request(g, &route.provider.id, &headers);
+            next.business_request(g, &headers);
             next.request_received(turn_received_at);
             next.request_speed(
                 value(&replay_frame).and_then(|v| crate::usage::model::speed(&v["speed"])),
@@ -2835,7 +2785,7 @@ async fn session_once(
                 next_protocol.attach_routing_log(failover.routing());
                 next_protocol.attach_thread(thread_request.clone());
                 next_protocol.request_headers(&headers);
-                next_protocol.business_request(g, &route.provider.id, &headers);
+                next_protocol.business_request(g, &headers);
                 next_protocol.request_received(turn_received_at);
                 next_protocol.request_speed(hints.as_ref().and_then(|h| h.speed.clone()));
                 if let Some(trace) = &usage_trace {
@@ -3196,8 +3146,11 @@ async fn session_once(
                             if let Some(u)=protocol.as_mut() {
                                 u.finish(Some(101), code::UPSTREAM_ERROR);
                                 terminal_error = !matches!(u.terminal(), Some(super::protocol::Terminal::Success | super::protocol::Terminal::Limited | super::protocol::Terminal::Cancelled));
-                                if route.client_id == super::ClientId::Codex && first_event_failure(&frame, &turn_rules, &error_headers).is_some_and(|failure| failure.capacity) {
-                                    if let Some(failure) = first_event_failure(&frame, &turn_rules, &error_headers) { u.report_failure(|| record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts)); }
+                                let first_failure = (route.client_id == super::ClientId::Codex)
+                                    .then(|| first_event_failure(&frame, &turn_rules, &error_headers))
+                                    .flatten();
+                                if let Some(failure) = first_failure.filter(|failure| failure.capacity) {
+                                    u.report_failure(|| record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts));
                                     admission.permits.capacity_limited(cfg, None);
                                 } else {
                                     super::health_settlement::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
@@ -3268,16 +3221,8 @@ async fn session_once(
                     ticket.waiting();
                     pending_traffic = Some(ticket);
                 } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
-                    if e.0 == 1008 {
-                        if let Some(mut admission) = turn.take() {
-                            admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::Returned, Some(101), attempts,
-                                crate::events::Details { phase: Some(crate::events::Phase::WsSend), counted_failure: Some(false), local_code: Some(code::UNSUPPORTED_EVENT.into()), ..Default::default() });
-                            admission.permits.neutral(cfg);
-                        }
-                    } else {
-                        // A client control/message send failure cannot safely replay a generation.
-                        disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, false, None, crate::events::Phase::WsSend, code::NETWORK);
-                    }
+                    // A client control/message send failure cannot safely replay a generation.
+                    disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, false, None, crate::events::Phase::WsSend, code::NETWORK);
                     return Err(e);
                 }
             },

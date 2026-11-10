@@ -2544,7 +2544,7 @@ async fn tokenizer_reads_late_usage_and_preserves_zero_and_message_cache_counts(
         ("responses","data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"OK\"}}\n\n",None),
     ] {
         let port=server(move |_|async move{response(200,"text/event-stream",body)}).await;
-        let target=fingerprint_stream::Target{url:format!("http://127.0.0.1:{port}"),headers:Default::default(),proxy:None,model:"fixture".into(),oauth:false,protocol:protocol.into(),client_metadata:None};
+        let target=fingerprint_stream::Target{url:format!("http://127.0.0.1:{port}"),headers:Default::default(),model:"fixture".into(),protocol:protocol.into(),client_metadata:None};
         let mut diag=json!({});
         let (text,_)=fingerprint_stream::execute_body(&target,&target.lm_payload("fixture").unwrap(),0,&target.client().unwrap(),None,&mut diag,true).await.unwrap();
         assert_eq!(text,"OK");assert_eq!(diag["input_tokens"].as_i64(),expected);
@@ -3459,9 +3459,7 @@ fn offline_lm_payloads_preserve_sdk_protocol_defaults() {
         let mut target = fingerprint_stream::Target {
             url: "https://example.invalid".into(),
             headers: Default::default(),
-            proxy: None,
             model: " fixture-model ".into(),
-            oauth: false,
             protocol: protocol.into(),
             client_metadata: Some(json!({"fixture":"value"})),
         };

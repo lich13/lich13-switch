@@ -99,7 +99,7 @@ pub(super) mod windows {
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
-    fn creation_sddl() -> io::Result<Vec<u16>> {
+    pub(crate) fn current_user_token() -> io::Result<Vec<usize>> {
         unsafe {
             let mut token = ptr::null_mut();
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
@@ -125,6 +125,13 @@ pub(super) mod windows {
             if read == 0 {
                 return Err(error);
             }
+            Ok(buffer)
+        }
+    }
+
+    fn creation_sddl() -> io::Result<Vec<u16>> {
+        let buffer = current_user_token()?;
+        unsafe {
             let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
             let mut sid = ptr::null_mut();
             if ConvertSidToStringSidW(user.User.Sid, &mut sid) == 0 {
