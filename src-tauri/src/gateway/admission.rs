@@ -413,33 +413,22 @@ impl Scheduler {
                         return;
                     };
                     rpm_persistence::flush(&shared);
-                    let (snapshot, retry_write) = {
+                    let (snapshot, retry_write, rpm_failed) = {
                         let mut state = shared.state.lock().unwrap();
                         state.retention.prune();
                         (
                             state.retention.snapshot_data(),
                             state.retention_write_error || state.retention.error,
+                            state.rpm_error,
                         )
                     };
                     let snapshot = serde_json::to_vec(&snapshot).expect("capacity metadata");
-                    if snapshot == previous && !retry_write {
-                        break;
-                    }
-                    if storage::atomic_write(&path, &snapshot, None).is_err() {
+                    let retention_ok = if snapshot == previous && !retry_write {
+                        true
+                    } else if storage::atomic_write(&path, &snapshot, None).is_err() {
                         shared.state.lock().unwrap().retention_write_error = true;
                         let _ = shared.events.send(());
-                        let Some(delay) = delays.get(retry) else {
-                            break;
-                        };
-                        drop(shared);
-                        // New state can wake the same retry early. Each attempt
-                        // snapshots memory again, never republishes a stale copy.
-                        if matches!(
-                            updates.recv_timeout(Duration::from_millis(*delay)),
-                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-                        ) {
-                            return;
-                        }
+                        false
                     } else {
                         previous = snapshot;
                         let recovered = {
@@ -451,7 +440,22 @@ impl Scheduler {
                             shared.wake.notify_waiters();
                             let _ = shared.events.send(());
                         }
+                        true
+                    };
+                    if retention_ok && !rpm_failed {
                         break;
+                    }
+                    let Some(delay) = delays.get(retry) else {
+                        break;
+                    };
+                    drop(shared);
+                    // New state can wake the same retry early. Each attempt
+                    // snapshots memory again, never republishes a stale copy.
+                    if matches!(
+                        updates.recv_timeout(Duration::from_millis(*delay)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                    ) {
+                        return;
                     }
                 }
             }

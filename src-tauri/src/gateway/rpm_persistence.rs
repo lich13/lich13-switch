@@ -43,7 +43,7 @@ pub(super) struct WriteGate {
 pub(super) fn flush(shared: &Shared) {
     let (mut snapshot, path, pending) = {
         let mut state = shared.state.lock().unwrap();
-        if !state.rpm_writes.dirty {
+        if !state.rpm_writes.dirty && !state.rpm_error {
             return;
         }
         let pending = std::mem::take(&mut state.rpm_writes);
@@ -75,6 +75,7 @@ pub(super) fn flush(shared: &Shared) {
             }
         } else {
             state.rpm_error = true;
+            state.rpm_writes.dirty = true;
             for receipt in &pending.receipts {
                 if receipt.limited {
                     if let Some(charge) = &receipt.charge {
@@ -82,6 +83,9 @@ pub(super) fn flush(shared: &Shared) {
                     }
                 }
             }
+            let mut settlements = pending.settlements;
+            settlements.append(&mut state.rpm_writes.settlements);
+            state.rpm_writes.settlements = settlements;
         }
     }
     for receipt in pending.receipts {

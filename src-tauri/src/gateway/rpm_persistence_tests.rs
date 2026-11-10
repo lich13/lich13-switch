@@ -148,6 +148,10 @@ async fn failed_release_keeps_the_inflight_guard_and_reports_failure() {
     ));
     std::fs::remove_dir(&path).unwrap();
     assert!(scheduler.flush_rpm().await);
+    assert!(read_ledger(&dir)["protection"]["fixture"]["inflight"]
+        .as_object()
+        .unwrap()
+        .is_empty());
     assert!(!scheduler.rpm_status("fixture", 1).3);
 }
 

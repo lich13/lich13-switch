@@ -492,9 +492,26 @@ pub(crate) fn remap_account(
     Ok(Some((before, applied)))
 }
 
+fn cleanup_settled_stage(data: &Path, record: &Record) -> bool {
+    if matches!(record.stage.as_str(), "disabling" | "enabling")
+        && storage::read_optional(&record.path)
+            .ok()
+            .flatten()
+            .and_then(|raw| String::from_utf8(raw).ok())
+            .and_then(|text| scan(&text).ok())
+            .is_some_and(|scan| matches_original(&scan, record))
+    {
+        let _ = fs::remove_file(record_path(data));
+        true
+    } else {
+        false
+    }
+}
+
 pub fn blocks_gateway(data: &Path) -> bool {
     match load(data) {
-        Ok(Some(_)) | Err(_) => true,
+        Ok(Some(record)) => !cleanup_settled_stage(data, &record),
+        Err(_) => true,
         Ok(None) => false,
     }
 }
@@ -516,11 +533,13 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
     expected: &str,
     switch_account: F,
 ) -> Result<OfficialModeView> {
-    if load(data)?.is_some() {
-        return Err(AppError::new(
-            code::OFFICIAL_MODE,
-            "已有官方账号事务，请先处理现有状态",
-        ));
+    if let Some(record) = load(data)? {
+        if !cleanup_settled_stage(data, &record) {
+            return Err(AppError::new(
+                code::OFFICIAL_MODE,
+                "已有官方账号事务，请先处理现有状态",
+            ));
+        }
     }
     let path = home.join("config.toml");
     let prior = storage::read_optional(&path)?;
@@ -887,6 +906,15 @@ mod tests {
             let viewed = cache.view(&data, &home);
             assert!(!viewed.enabled);
             assert_eq!(viewed.state, "disabled");
+            assert!(!record_path(&data).exists());
+
+            enable(&data, &home, "acct", &before).unwrap();
+            let mut record = load(&data).unwrap().unwrap();
+            record.stage = stage.into();
+            record.enabled = stage == "disabling";
+            save(&data, &record).unwrap();
+            fs::write(&cfg_path, TEXT).unwrap();
+            assert!(!blocks_gateway(&data));
             assert!(!record_path(&data).exists());
         }
     }

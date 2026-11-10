@@ -201,11 +201,14 @@ impl Service {
         self.changed();
         let result = async {
             let service = self.clone();
-            // Only a fully loaded resource can justify skipping a same-version download.
+            let has_cache = self.0.path.parent().unwrap().join(CACHE).exists();
             let current = tokio::task::spawn_blocking(move || service.lm_resource().ok())
                 .await
                 .map_err(|_| failure("指纹资源加载失败"))?;
-            let revision = current.as_ref().map(|resource| resource.version());
+            let revision = current
+                .as_ref()
+                .filter(|resource| resource.metadata["source"] == "cache" || !has_cache)
+                .map(|resource| resource.version());
             let raw = download(
                 revision.as_ref().and_then(|v| v["revision"].as_str()),
                 api,
@@ -538,6 +541,24 @@ mod tests {
         }
 
         // An invalid local bundle must not turn a matching revision into false success.
+        std::fs::write(dir.path().join(CACHE), b"corrupt fixture").unwrap();
+        let repaired = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+        assert_eq!(
+            repaired.lm_resource().unwrap().metadata["source"],
+            "builtin"
+        );
+        mode.store(0, Ordering::SeqCst);
+        lock(&requests).clear();
+        let repair_same_rev = repaired
+            .update_lm_bank_from(&source, &source)
+            .await
+            .unwrap();
+        assert_eq!(repair_same_rev["result"], "updated");
+        assert_eq!(
+            repaired.lm_resource().unwrap().metadata["source"],
+            "cache"
+        );
+
         std::fs::write(dir.path().join(CACHE), b"corrupt fixture").unwrap();
         let repaired = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
         mode.store(1, Ordering::SeqCst);

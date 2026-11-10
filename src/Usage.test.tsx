@@ -1723,7 +1723,7 @@ it.each(["sync", "export"])(
         return Promise.resolve({
           requests: 1,
           attempts: 1,
-          cleaned: 1,
+          cleaned: 0,
           retained: 0,
           cleanupError: null,
         });
@@ -1752,6 +1752,7 @@ it.each(["sync", "export"])(
     );
     if (action === "sync")
       expect(calls("get_usage_state")).toHaveLength(stateReads);
+    else expect(screen.getByText("已导出 1 个请求、1 次尝试。")).toBeVisible();
     await act(async () => {
       finish({
         ...dashboard,
@@ -1761,6 +1762,40 @@ it.each(["sync", "export"])(
     expect(screen.queryByText("999,999")).not.toBeInTheDocument();
   },
 );
+
+it("reports export-only or export-and-clean summary based on bill cleanup checkbox", async () => {
+  await renderUsage();
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation((name, args) => {
+    if (name === "export_usage_bill") {
+      const clean = Boolean(
+        (args as { request?: { clean?: boolean } } | undefined)?.request?.clean,
+      );
+      return Promise.resolve({
+        requests: 2,
+        attempts: 3,
+        cleaned: clean ? 4 : 0,
+        retained: clean ? 1 : 0,
+        cleanupError: null,
+      });
+    }
+    return original(name, args);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "导出账单" }));
+  fireEvent.click(screen.getByRole("button", { name: "开始导出" }));
+  expect(await screen.findByText("已导出 2 个请求、3 次尝试。")).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "导出账单" }));
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: /删除历史记录用量/ }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "导出并清理" }));
+  expect(
+    await screen.findByText(
+      "已导出 2 个请求、3 次尝试，清理 4 条已导出记录与对应统计，保留 1 条更新记录。",
+    ),
+  ).toBeVisible();
+});
 
 it("refreshes dashboard and visible request costs after pricing changes", async () => {
   await renderUsage();

@@ -48,7 +48,8 @@ impl Retention {
         let saved: Vec<Saved> = match serde_json::from_slice::<Vec<Saved>>(&raw) {
             Ok(v) if v.len() <= MAX_RESERVATIONS => v,
             _ => {
-                state.error = storage::preserve_corrupt(path, &raw).is_err();
+                state.error = storage::preserve_corrupt(path, &raw).is_err()
+                    || storage::atomic_write(path, b"[]", None).is_err();
                 return state;
             }
         };
@@ -61,7 +62,8 @@ impl Retention {
                 || item.provider.chars().any(char::is_control)
             {
                 state.entries.clear();
-                state.error = storage::preserve_corrupt(path, &raw).is_err();
+                state.error = storage::preserve_corrupt(path, &raw).is_err()
+                    || storage::atomic_write(path, b"[]", None).is_err();
                 return state;
             }
             // A crash never resurrects an in-flight request. Reserve at most one

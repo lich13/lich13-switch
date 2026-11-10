@@ -56,7 +56,7 @@ pub fn failure(status: u16, payload: &Value) -> Failure {
     error
 }
 fn network_failure(error: reqwest::Error) -> Failure {
-    let mut failure = Failure::new("network_error", true);
+    let mut failure = Failure::new("network_error", false);
     failure.detail = Some(super::errors::network(error));
     failure
 }
@@ -763,7 +763,7 @@ fn frame(
         return Ok(());
     }
     let event: Value = serde_json::from_slice(raw)
-        .map_err(|_| Failure::new("invalid_stream", true).with_response(200, raw, false))?;
+        .map_err(|_| Failure::new("invalid_stream", false).with_response(200, raw, false))?;
     received(collector, diag, &event, &name, false, started, callback)
 }
 pub async fn execute_body(
@@ -842,7 +842,7 @@ pub async fn execute_body(
             }
             if mode == Some(true) {
                 if buffer.len() > MAX_FRAME {
-                    return Err(Failure::new("output_limit", true).with_response(
+                    return Err(Failure::new("output_limit", false).with_response(
                         status,
                         &buffer[..MAX_FRAME],
                         true,
@@ -858,7 +858,7 @@ pub async fn execute_body(
                 }
                 frame_size += line.len();
                 if frame_size > MAX_FRAME {
-                    return Err(Failure::new("output_limit", true));
+                    return Err(Failure::new("output_limit", false));
                 }
                 if line.is_empty() {
                     frame(&lines, &mut collector, diag, started, &callback)?;
@@ -872,12 +872,12 @@ pub async fn execute_body(
                 }
             }
             if buffer.len() + frame_size > MAX_FRAME {
-                return Err(Failure::new("output_limit", true));
+                return Err(Failure::new("output_limit", false));
             }
         }
         if mode == Some(true) {
             let event = serde_json::from_slice(&buffer).map_err(|_| {
-                Failure::new("invalid_stream", true).with_response(status, &buffer, false)
+                Failure::new("invalid_stream", false).with_response(status, &buffer, false)
             })?;
             received(&mut collector, diag, &event, "", true, started, &callback)?;
         } else {
@@ -898,7 +898,7 @@ pub async fn execute_body(
                 } else {
                     "protocol_mismatch"
                 },
-                collector.recognized,
+                false,
             ))
         }
     }
