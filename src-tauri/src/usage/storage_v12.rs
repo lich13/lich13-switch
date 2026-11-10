@@ -598,14 +598,33 @@ pub(super) fn scan_client_attempts(
             is_final,
             model: db(row.get(5))?,
             display_name: shape.as_ref().and_then(|s| s.display_name.clone()),
-            tokens: Tokens {
-                inclusive_input: opt_u64(9)?,
-                input: opt_u64(10)?,
-                output,
-                reasoning,
-                cache_read: opt_u64(12)?,
-                cache_write: opt_u64(13)?,
-                ..Default::default()
+            tokens: {
+                let input = opt_u64(10)?;
+                let mut cache_read = opt_u64(12)?;
+                let cache_write = opt_u64(13)?;
+                let mut inclusive_input = opt_u64(9)?;
+                if client == "antigravity" {
+                    if let Some(inp) = input {
+                        if cache_read.is_none() {
+                            cache_read = Some(0);
+                        }
+                        if inclusive_input.is_none() {
+                            inclusive_input = Some(
+                                inp.saturating_add(cache_read.unwrap_or(0))
+                                    .saturating_add(cache_write.unwrap_or(0)),
+                            );
+                        }
+                    }
+                }
+                Tokens {
+                    inclusive_input,
+                    input,
+                    output,
+                    reasoning,
+                    cache_read,
+                    cache_write,
+                    ..Default::default()
+                }
             },
             cache_savings_rates: shape.as_ref().and_then(|s| s.cache_savings_rates),
             cost: db(row.get(14))?,
@@ -1116,6 +1135,27 @@ fn load_attempt(c: &Connection, table: &str, owner: i64, ordinal: i64, r: &Value
     for (i, k) in TOKENS.iter().enumerate() {
         tokens.insert((*k).into(), json!(db(row.get::<_, Option<u64>>(4 + i))?));
     }
+    if r["source"].as_str() == Some("antigravity") {
+        if let Some(inp) = tokens.get("input").and_then(Value::as_u64) {
+            let cr = match tokens.get("cacheRead").and_then(Value::as_u64) {
+                Some(cr) => cr,
+                None => {
+                    tokens.insert("cacheRead".into(), json!(0u64));
+                    0
+                }
+            };
+            let cw = tokens
+                .get("cacheWrite")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if tokens.get("inclusiveInput").is_none_or(Value::is_null) {
+                tokens.insert(
+                    "inclusiveInput".into(),
+                    json!(inp.saturating_add(cr).saturating_add(cw)),
+                );
+            }
+        }
+    }
     obj.insert("tokens".into(), Value::Object(tokens));
     let cost: Option<String> = db(row.get(15))?;
     if let Some(price) = obj.get_mut("price").and_then(Value::as_object_mut) {
@@ -1259,6 +1299,8 @@ fn flush_batch(c: &Connection) -> Result<bool> {
 
 fn metric_select(table: &str, kind: i64) -> String {
     let generation = "CASE WHEN r.source=usage_label('antigravity') THEN usage_generation_ms(a.body,0) ELSE duration-first_token END";
+    let cache_read = "CASE WHEN r.source=usage_label('antigravity') AND input IS NOT NULL THEN coalesce(cache_read,0) ELSE cache_read END";
+    let cache_input = "CASE WHEN r.source=usage_label('antigravity') AND input IS NOT NULL THEN coalesce(inclusive_input,input+coalesce(cache_read,0)+coalesce(cache_write,0)) ELSE coalesce(inclusive_input,input+cache_read+cache_write) END";
     format!("SELECT {kind} kind,a.owner,ordinal,usage_value(p.value) provider,usage_value(m.value) model,
       CASE WHEN ordinal=r.last THEN 1 ELSE 0 END requests,repeat_count attempts,
       CASE WHEN ordinal=r.last AND ((status BETWEEN 200 AND 299 OR status=101) OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value)=1)) AND r.completed THEN 1 ELSE 0 END success,
@@ -1271,8 +1313,8 @@ fn metric_select(table: &str, kind: i64) -> String {
       CASE WHEN ordinal=r.last THEN max(coalesce({generation},0),0) ELSE 0 END generation_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 THEN coalesce(first_token,0) ELSE 0 END first_token_sum_ms,
       CASE WHEN ordinal=r.last AND (r.source=0 OR r.source=usage_label('antigravity')) AND stream AND operation=0 AND first_token IS NOT NULL THEN 1 ELSE 0 END first_token_samples,
-      CASE WHEN cache_read IS NOT NULL AND cache_read<=coalesce(inclusive_input,input+cache_read+cache_write) THEN cache_read ELSE 0 END cache_read_eligible,
-      CASE WHEN cache_read IS NOT NULL AND cache_read<=coalesce(inclusive_input,input+cache_read+cache_write) THEN coalesce(inclusive_input,input+cache_read+cache_write) ELSE 0 END cache_input_eligible
+      CASE WHEN ({cache_read}) IS NOT NULL AND ({cache_read})<=({cache_input}) THEN ({cache_read}) ELSE 0 END cache_read_eligible,
+      CASE WHEN ({cache_read}) IS NOT NULL AND ({cache_read})<=({cache_input}) THEN ({cache_input}) ELSE 0 END cache_input_eligible
       FROM {table} a JOIN v12_records r ON r.rid=a.owner LEFT JOIN v12_dictionary p ON p.id=a.provider LEFT JOIN v12_dictionary m ON m.id=a.model LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape")
 }
 fn create_views(c: &Connection) -> Result<()> {
@@ -1546,7 +1588,7 @@ pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     ))?;
-    if sql.contains("0 measured_outputs,") {
+    if sql.contains("coalesce(cache_read,0)") {
         return Ok(());
     }
     let original = metric_select("v12_raw_attempts", 2)

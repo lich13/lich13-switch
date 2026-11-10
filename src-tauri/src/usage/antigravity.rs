@@ -497,6 +497,24 @@ pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
         changed = true;
     }
 
+    if let Some(inp) = a.tokens.input {
+        if a.tokens.cache_read.is_none() {
+            a.tokens.cache_read = Some(0);
+            changed = true;
+        }
+        let inclusive = inp
+            .saturating_add(a.tokens.cache_read.unwrap_or(0))
+            .saturating_add(a.tokens.cache_write.unwrap_or(0));
+        if a.tokens.inclusive_input != Some(inclusive) {
+            a.tokens.inclusive_input = Some(inclusive);
+            changed = true;
+        }
+        if a.inclusive_input_tokens != Some(inclusive) {
+            a.inclusive_input_tokens = Some(inclusive);
+            changed = true;
+        }
+    }
+
     changed
 }
 
@@ -2313,7 +2331,18 @@ impl UsageStatsAggregator {
             .saturating_add(out.saturating_sub(capped_reasoning));
         self.mix_reasoning = self.mix_reasoning.saturating_add(tok_reasoning);
 
-        if let Some((elig_read, elig_input)) = attempt_tokens.cache_sample() {
+        let cache_sample = attempt_tokens.cache_sample().or_else(|| {
+            if self.full_models {
+                return None;
+            }
+            let inp = attempt_tokens.input?;
+            let read = attempt_tokens.cache_read.unwrap_or(0);
+            let total_inp = inp
+                .saturating_add(read)
+                .saturating_add(attempt_tokens.cache_write.unwrap_or(0));
+            (read <= total_inp).then_some((read, total_inp))
+        });
+        if let Some((elig_read, elig_input)) = cache_sample {
             self.cache_read_eligible = self.cache_read_eligible.saturating_add(elig_read);
             self.cache_input_eligible = self.cache_input_eligible.saturating_add(elig_input);
         }
@@ -2358,7 +2387,7 @@ impl UsageStatsAggregator {
             *sess.family_counts.entry(family.to_owned()).or_insert(0) += 1;
             sess.total_tokens = sess.total_tokens.saturating_add(tok_total);
             sess.reasoning_tokens = sess.reasoning_tokens.saturating_add(tok_reasoning);
-            if let Some((er, ei)) = attempt_tokens.cache_sample() {
+            if let Some((er, ei)) = cache_sample {
                 sess.cache_read_eligible = sess.cache_read_eligible.saturating_add(er);
                 sess.cache_input_eligible = sess.cache_input_eligible.saturating_add(ei);
             }

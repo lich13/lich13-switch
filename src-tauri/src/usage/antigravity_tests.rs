@@ -2481,3 +2481,70 @@ fn settled_transcript_purges_newly_covered_steps_and_inherits_rpc_last_model() {
     .unwrap();
     assert!(store.detail(&step7_id).is_err());
 }
+
+#[test]
+fn antigravity_cache_hit_rate_is_computed_without_cache_write_for_new_and_legacy_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    while store.compact_storage_batch().unwrap() {}
+
+    // 1. Newly parsed RPC record with cacheReadTokens present and cacheWriteTokens omitted,
+    // plus a second RPC record with cacheReadTokens omitted (0 cache hits in Protobuf3 JSON).
+    let hit = parsed(&entry("hit-turn", 0));
+    assert_eq!(hit.attempts[0].tokens.input, Some(100));
+    assert_eq!(hit.attempts[0].tokens.cache_read, Some(40));
+    assert_eq!(hit.attempts[0].tokens.cache_write, None);
+    assert_eq!(hit.attempts[0].tokens.inclusive_input, Some(140));
+    assert_eq!(hit.attempts[0].tokens.cache_sample(), Some((40, 140)));
+
+    let mut miss_json = entry("miss-turn", 0);
+    miss_json["chatModel"]["retryInfos"] = json!([]);
+    miss_json["chatModel"]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cacheReadTokens");
+    let miss = parsed(&miss_json);
+    assert_eq!(miss.attempts[0].tokens.input, Some(100));
+    assert_eq!(miss.attempts[0].tokens.cache_read, Some(0));
+    assert_eq!(miss.attempts[0].tokens.cache_write, None);
+    assert_eq!(miss.attempts[0].tokens.inclusive_input, Some(100));
+    assert_eq!(miss.attempts[0].tokens.cache_sample(), Some((0, 100)));
+
+    // 2. Simulate a pre-existing un-normalized row in v12 where inclusive_input and cache_write are None.
+    let mut legacy = hit.clone();
+    legacy.id = safe_id("antigravity:request:legacy-turn");
+    legacy.attempts[0].id = safe_id("antigravity:request:legacy-turn:final");
+    legacy.attempts[0].response_id = Some("response-legacy-turn".into());
+    legacy.attempts[0].tokens.inclusive_input = None;
+    legacy.attempts[0].inclusive_input_tokens = None;
+
+    store.write_batch(&[hit, miss, legacy], None).unwrap();
+
+    // Total cache_read = 40 + 0 + 40 = 80; total eligible input = 140 + 100 + 140 = 380 -> 21.1%
+    let stats = store.antigravity_stats(&Filter::default(), now()).unwrap();
+    assert_eq!(stats.token_mix.cache_read_eligible, 80);
+    assert_eq!(stats.token_mix.cache_input_eligible, 380);
+    assert_eq!(stats.token_mix.cache_hit_percent, Some(21.1));
+    assert_eq!(stats.top_sessions[0].cache_hit_percent, Some(21.1));
+
+    let dash = store
+        .dashboard(&Filter {
+            client: Some("antigravity".into()),
+            ..Filter::default()
+        })
+        .unwrap();
+    assert_eq!(dash.totals.cache_read_eligible, 80);
+    assert_eq!(dash.totals.cache_input_eligible, 380);
+
+    let logs = store
+        .logs(&Filter {
+            client: Some("antigravity".into()),
+            ..Filter::default()
+        })
+        .unwrap();
+    assert_eq!(logs.rows.len(), 3);
+    assert!(logs
+        .rows
+        .iter()
+        .all(|item| item.tokens().cache_sample().is_some()));
+}
