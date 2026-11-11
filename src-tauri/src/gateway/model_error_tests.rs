@@ -585,6 +585,5 @@ fn protocol_marks_later_model_error_without_losing_first_event_observation() {
         b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"x\"}}\n\ndata: {\"type\":\"error\",\"error\":{\"code\":\"model_not_found\"}}\n\n",
     );
     protocol.finish(Some(200), "OK");
-    assert_eq!(protocol.observation.first_event_model_error, Some(false));
     assert_eq!(protocol.terminal(), Some(Terminal::ModelUnavailable));
 }

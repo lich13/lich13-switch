@@ -186,7 +186,7 @@ async fn established_owner_native_websocket_retries_500_507_without_failover() {
 }
 
 fn finish_upstream_failure(circuit: &Circuit, cfg: &Settings, status: u16, attempt: u32) {
-    let mut permit = circuit.acquire(false).expect("fixture circuit permit");
+    let mut permit = circuit.acquire().expect("fixture circuit permit");
     permit.set_failure_event(Record::new(
         None,
         Some("fixture-provider"),

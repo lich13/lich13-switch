@@ -506,7 +506,7 @@ pub(super) const MSG_0: &[&str] = &[
     "上下文长度超限",
 ];
 pub(super) const MSG_1: &[&str] = &["tokens", "token"];
-pub(super) const MSG_2: &[&str] = &["request too large", "single request exceeds"];
+pub(super) const MSG_2: &[&str] = &["single request exceeds"];
 pub(super) const MSG_3: &[&str] = &[
     "content_policy_violation",
     "content policy",
@@ -677,12 +677,9 @@ pub(super) const BILLING_WORDS: &[&str] = &[
     "api key quota exceeded",
     "credit_balance_too_low",
     "billing_hard_limit_reached",
-    "account_disabled",
-    "account_deactivated",
     "insufficient credits",
     "insufficient balance",
     "credit balance is too low",
-    "account has been disabled",
     "余额不足",
     "余额已耗尽",
     "余额耗尽",
@@ -696,8 +693,6 @@ pub(super) const BILLING_WORDS: &[&str] = &[
     "api key额度已用完",
     "令牌额度已用完",
     "令牌额度不足",
-    "账号已禁用",
-    "账户已禁用",
 ];
 pub(super) const QUOTA_WORDS: &[&str] = &[
     "daily usage limit exceeded",

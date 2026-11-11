@@ -2,107 +2,6 @@ use super::*;
 use std::fs;
 
 #[tokio::test]
-async fn legacy_routes_and_full_snapshots_upgrade_without_false_conflicts() {
-    let (home, _parent, gateway) = tests_v02516::fixture();
-    gateway
-        .attach_dsh_profiles(
-            home.path(),
-            Options {
-                model: Some(models::FLASH.into()),
-                ..tests_v02516::options()
-            },
-            true,
-            &gateway.view().revision,
-            None,
-        )
-        .await
-        .unwrap();
-    let data = home.path().join("data/dsh");
-    let mut store = gateway.0.inner.lock().unwrap().store.clone();
-    let snapshot = store.dsh.as_mut().unwrap();
-    for (name, profile) in &mut snapshot.profiles {
-        let (file, patch) = patch_file(&profile.patch.after).unwrap();
-        let node = owned_route(&patch).unwrap().unwrap();
-        let route = node.as_mapping().unwrap();
-        for key in [
-            "compat",
-            "streamIdleTimeoutMs",
-            "websocketConnectTimeoutMs",
-            "retryPolicy",
-        ] {
-            route.remove(key);
-        }
-        for node in route.get_sequence("models").unwrap().values() {
-            let model = node.as_mapping().unwrap();
-            let input = model.get("input").unwrap();
-            model.remove("input");
-            model.set("inputModalities", input);
-        }
-        profile.patch.after = file.to_string();
-        fs::write(
-            home.path().join("profiles").join(name).join(PATCH),
-            &profile.patch.after,
-        )
-        .unwrap();
-    }
-    snapshot.patch = snapshot.profiles[&snapshot.options.profile].patch.clone();
-    let before = snapshot.credentials.before.clone();
-    let after = snapshot.credentials.after.clone();
-    let mut legacy = serde_json::to_value(&store).unwrap();
-    legacy["dsh"]["credentials"] = serde_json::json!({"before":before, "after":after});
-    legacy["dshCatalog"] =
-        serde_json::json!([{"id":models::FLASH,"inputModalities":["text","image"]}]);
-    legacy["futureSetting"] = "fixture-preserved".into();
-    fs::write(
-        data.join("gateway.json"),
-        serde_json::to_vec(&legacy).unwrap(),
-    )
-    .unwrap();
-    crate::migrations::gateway(&data).unwrap();
-    let once = fs::read(data.join("gateway.json")).unwrap();
-    crate::migrations::gateway(&data).unwrap();
-    assert_eq!(once, fs::read(data.join("gateway.json")).unwrap());
-    let migrated: serde_json::Value = serde_json::from_slice(&once).unwrap();
-    assert_eq!(migrated["futureSetting"], "fixture-preserved");
-    assert!(!migrated["dsh"]
-        .to_string()
-        .contains("fixture-provider-secret"));
-    let (store, revision) = crate::gateway::model::Store::load(&data.join("gateway.json")).unwrap();
-    for snapshot in store.dsh.as_ref().unwrap().active_profiles() {
-        check_owned(
-            &snapshot,
-            &Input::read(home.path(), &snapshot.options.profile).unwrap(),
-        )
-        .unwrap();
-    }
-    {
-        let mut state = gateway.0.inner.lock().unwrap();
-        state.editable_mut().store = store;
-        state.revision = revision;
-    }
-    gateway
-        .restart_dsh(home.path(), &gateway.view().revision)
-        .await
-        .unwrap();
-    for profile in ["desktop", "web", "headless"] {
-        let input = Input::read(home.path(), profile).unwrap();
-        let route = owned_route(&sequence(input.patch.before.as_deref().unwrap()).unwrap())
-            .unwrap()
-            .unwrap();
-        assert!(route.get("compat").is_some());
-        assert_eq!(
-            route.get("streamIdleTimeoutMs").unwrap().to_i64(),
-            Some(300000)
-        );
-        assert!(!route.to_string().contains("inputModalities"));
-    }
-    gateway.stop_dsh(false).await.unwrap();
-    assert!(fs::read_to_string(home.path().join(".credentials.yaml"))
-        .unwrap()
-        .contains("fixture-provider-secret"));
-}
-
-#[tokio::test]
 async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() {
     let (home, _parent, gateway) = tests_v02516::fixture();
     fs::write(home.path().join(".env"), "UNRELATED=fixture-env-secret\n").unwrap();
@@ -119,7 +18,7 @@ async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() 
     {
         let mut state = gateway.0.inner.lock().unwrap();
         state.editable_mut().store.dsh_catalog =
-            vec![serde_json::json!({"id":models::FLASH,"inputModalities":["text","image"]})];
+            vec![serde_json::json!({"id":models::FLASH,"input":["text","image"]})];
     }
     gateway
         .attach_dsh_profiles(
@@ -239,18 +138,16 @@ async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() 
 
 #[test]
 fn catalog_normalization_is_idempotent_and_prefers_explicit_input() {
-    let mut old = serde_json::json!({"id":models::FLASH, "inputModalities":["text","image"]});
+    let mut old = serde_json::json!({"id":models::FLASH});
     models::normalize(&mut old);
     assert_eq!(old["input"], serde_json::json!(["text", "image"]));
     assert_eq!(old["reasoningEfforts"]["off"], "none");
     assert_eq!(old["reasoningEfforts"]["max"], "max");
-    assert!(old.get("inputModalities").is_none());
     let once = old.clone();
     models::normalize(&mut old);
     assert_eq!(old, once);
     assert_eq!(models::catalog()[1]["input"], serde_json::json!(["text"]));
-    let mut explicit =
-        serde_json::json!({"id":"fixture-model", "input":["text"], "inputModalities":["image"]});
+    let mut explicit = serde_json::json!({"id":"fixture-model", "input":["text"]});
     models::normalize(&mut explicit);
     assert_eq!(explicit["input"], serde_json::json!(["text"]));
     let mut custom_effort =

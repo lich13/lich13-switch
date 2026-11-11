@@ -32,7 +32,7 @@ fn fail(
     retry_after: Option<Duration>,
     cause_wait_seconds: Option<u64>,
 ) -> Option<Record> {
-    let mut permit = circuit.acquire(false).expect("closed fixture circuit");
+    let mut permit = circuit.acquire().expect("closed fixture circuit");
     let mut cause = Record::new(
         Some(ClientId::Codex),
         Some(PROVIDER),
@@ -96,8 +96,8 @@ fn concurrent_failures_preserve_a_long_retry_after_over_a_short_cause_wait() {
     let cfg = settings(2);
 
     // Both requests are already in flight before the first Retry-After arrives.
-    let mut first = circuit.acquire(false).expect("first concurrent permit");
-    let mut second = circuit.acquire(false).expect("second concurrent permit");
+    let mut first = circuit.acquire().expect("first concurrent permit");
+    let mut second = circuit.acquire().expect("second concurrent permit");
     first.set_failure_event(Record::new(
         Some(ClientId::Codex),
         Some(PROVIDER),

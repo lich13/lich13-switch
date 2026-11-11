@@ -215,6 +215,7 @@ impl RpmReservation {
             self.committed_limit = limit;
             drop(s);
             self.scheduler.signal();
+            return Ok(());
         }
         let s = self.scheduler.0.state.lock().unwrap();
         self.revalidate(&s)?;
@@ -993,7 +994,7 @@ impl Scheduler {
                             // slot or RPM; the next admission rechecks all gates.
                             break 'admission Err(Rejected::Reconnect);
                         }
-                        if let Some(permits) = Permits::acquire_for(route, manual, requirement) {
+                        if let Some(permits) = Permits::acquire_for(route, requirement) {
                             if budget.traffic.as_ref().is_some_and(|t| !t.dispatch()) {
                                 drop(permits);
                                 continue 'admission;
@@ -1070,26 +1071,6 @@ impl Scheduler {
                     if immediate {
                         break Err(Rejected::RateLimited(retry));
                     }
-                    if waiting.is_none() {
-                        if s.waiting.len() + s.capacity_waits.len() >= max_waiting {
-                            break Err(Rejected::Full);
-                        }
-                        s.next += 1;
-                        let ticket = s.next;
-                        s.waiting.push_back((
-                            ticket,
-                            eligible
-                                .iter()
-                                .filter(|r| r.health_for(requirement).available)
-                                .map(|r| r.provider.id.clone())
-                                .collect(),
-                        ));
-                        waiting = Some(Waiting {
-                            scheduler: self.clone(),
-                            ticket,
-                        });
-                        let _ = self.0.events.send(());
-                    }
                 }
                 if immediate {
                     break Err(cooling.map_or(Rejected::Timeout, Rejected::Cooling));
@@ -1125,7 +1106,7 @@ impl Scheduler {
                 biased;
                 _ = super::freeze::changed(&mut freeze_changes) => {},
                 _ = notified => {},
-                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(if let Some(retry) = rate_retry { Rejected::RateLimited(retry) } else { cooling.map_or(Rejected::Timeout, Rejected::Cooling) }),
+                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(cooling.map_or(Rejected::Timeout, Rejected::Cooling)),
                 _ = async {
                     if let Some(at) = next_wake { tokio::time::sleep_until(at).await; }
                     else { std::future::pending::<()>().await; }

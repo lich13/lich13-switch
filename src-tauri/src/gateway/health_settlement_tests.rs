@@ -35,7 +35,7 @@ fn fixture() -> (tempfile::TempDir, Gateway, Route) {
 }
 
 fn permits(route: &Route) -> settlement::Permits {
-    settlement::Permits::acquire_for(route, false, &Requirement::Model(MODEL.into()))
+    settlement::Permits::acquire_for(route, &Requirement::Model(MODEL.into()))
         .expect("fixture provider and model permits")
 }
 
@@ -360,7 +360,7 @@ fn dropping_settlement_permits_releases_retry_probes() {
     };
     for circuit in [&provider, &model] {
         circuit
-            .acquire(false)
+            .acquire()
             .expect("initial permit")
             .finish(Outcome::RateLimited(Some(Duration::ZERO)), &cfg);
     }

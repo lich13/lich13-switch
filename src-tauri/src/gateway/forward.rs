@@ -262,9 +262,6 @@ pub(super) fn clean_headers(headers: &mut HeaderMap, upgrade: bool) {
         headers.remove(header::UPGRADE);
     }
 }
-fn authorized(headers: &HeaderMap, token: &str) -> bool {
-    super::listener::authorized(headers, token)
-}
 #[cfg(test)]
 pub(super) fn capacity_message(status: StatusCode, body: &[u8]) -> bool {
     super::failure_policy::decision(
@@ -303,7 +300,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     if !running {
         return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
     }
-    if !authorized(request.headers(), &token) {
+    if !super::listener::authorized(request.headers(), &token) {
         return error(
             StatusCode::UNAUTHORIZED,
             code::LOCAL_AUTH,
@@ -579,8 +576,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         } else {
             routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref())
         };
-        let usage_trace = if (matches!(requirement, Requirement::Resource)
-            && operation != crate::usage::model::Operation::WebSearch)
+        let usage_trace = if matches!(requirement, Requirement::Resource)
+            && operation != crate::usage::model::Operation::WebSearch
         {
             None
         } else {
@@ -1485,7 +1482,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
             };
             let status = response.status();
-            let response_stream = response
+            let stream = response
                 .headers()
                 .get(header::CONTENT_TYPE)
                 .and_then(|h| h.to_str().ok())
@@ -1499,7 +1496,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .get(header::CONTENT_ENCODING)
                 .and_then(|h| h.to_str().ok())
                 .unwrap_or("");
-            protocol.response(status.as_u16(), response_stream, encoding);
+            protocol.response(status.as_u16(), stream, encoding);
             protocol.response_headers(response.headers());
             if status == StatusCode::SWITCHING_PROTOCOLS && websocket {
                 failover.finish(super::failover::Exit::Forwarded);
@@ -1828,15 +1825,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 }
                 continue;
             }
-            let stream = response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| {
-                    v.split(';')
-                        .next()
-                        .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
-                });
             let (mut response_parts, body) = response.into_parts();
             let mut body = body
                 .map_err(|error| Box::new(error) as BoxError)

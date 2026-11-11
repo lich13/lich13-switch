@@ -1017,9 +1017,6 @@ pub(super) fn permanent_rejection(body: &[u8]) -> bool {
 }
 
 fn hard_message(text: &str) -> bool {
-    if quota_message(text) {
-        return true;
-    }
     let text = text.to_ascii_lowercase();
     super::failure_rules::BILLING_WORDS
         .iter()
@@ -1111,7 +1108,8 @@ fn global_fault(text: &str) -> bool {
         return false;
     }
     let lower = text.to_lowercase();
-    hard_message(text)
+    quota_message(text)
+        || hard_message(text)
         || [
             "invalid_api_key",
             "invalid api key",
@@ -1226,17 +1224,11 @@ fn apply_custom(
         return;
     }
 }
-pub(super) fn details_with_rules(
-    value: &Value,
-    http_error: bool,
-    rules: &[super::failure_rules::Rule],
-) -> Details {
-    let mut details = details_value(value, http_error);
-    if let Some(error) = envelope(value, http_error, 0) {
+pub(super) fn details_with_rules(value: &Value, rules: &[super::failure_rules::Rule]) -> Details {
+    let mut details = details_value(value, false);
+    if let Some(error) = envelope(value, false, 0) {
         apply_custom(&mut details, error, &hyper::HeaderMap::new(), rules);
-        if !http_error {
-            details.error_basis.get_or_insert(ErrorBasis::ServiceError);
-        }
+        details.error_basis.get_or_insert(ErrorBasis::ServiceError);
     }
     details
 }

@@ -41,7 +41,6 @@ fn only_circuit_open_and_thread_handoff_reasons_are_notifiable() {
         Action::Returned,
         Action::Waiting,
         Action::Stopped,
-        Action::Recovered,
         Action::Routed,
         Action::Reconnecting,
         Action::RetryingSame,

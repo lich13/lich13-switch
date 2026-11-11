@@ -163,7 +163,7 @@ fn code_message_and_status_match_live_classification() {
             )
             .0
         } else {
-            failure_policy::details_with_rules(&value, false, &[])
+            failure_policy::details_with_rules(&value, &[])
         };
         assert_eq!(found.category, live.error_basis);
     }

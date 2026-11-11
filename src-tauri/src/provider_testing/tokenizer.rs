@@ -54,7 +54,6 @@ struct Probe {
 #[derive(Deserialize)]
 struct Class {
     id: String,
-    lab: String,
     lab_name: String,
     aliases: Vec<String>,
     counts: Vec<i64>,
@@ -99,16 +98,13 @@ pub(super) struct Score {
     pub exact: f64,
     pub related: f64,
     matched: usize,
-    compared: usize,
-    overhead: i64,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 pub(super) struct Posterior {
     pub classes: Vec<Score>,
     pub unknown: f64,
     pub alien: f64,
     pub answered: usize,
-    labs: Vec<Value>,
 }
 fn logsum(values: &[f64]) -> f64 {
     let top = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -305,7 +301,6 @@ impl Bank {
                 .collect::<Vec<_>>(),
         );
         let answered = rows.iter().filter(|r| r.probe.is_some()).count();
-        let mut labs: Vec<Value> = Vec::new();
         let mut classes: Vec<_> = self
             .raw
             .classes
@@ -314,18 +309,10 @@ impl Bank {
             .map(|(c, item)| {
                 let exact = (k[c] - norm).exp();
                 let related = (r[c] - norm).exp();
-                if let Some(l) = labs.iter_mut().find(|l| l["lab"] == item.lab) {
-                    l["total"] = json!(l["total"].as_f64().unwrap() + exact + related);
-                } else {
-                    labs.push(
-                        json!({"lab":item.lab,"lab_name":item.lab_name,"total":exact+related}),
-                    );
-                }
                 Score {
                     id: item.id.clone(),
                     exact,
                     related,
-                    compared: answered,
                     matched: rows
                         .iter()
                         .filter(|r| {
@@ -334,17 +321,10 @@ impl Bank {
                             })
                         })
                         .count(),
-                    overhead: known[c].1,
                 }
             })
             .collect();
         classes.sort_by(|a, b| (b.exact + b.related).total_cmp(&(a.exact + a.related)));
-        labs.sort_by(|a, b| {
-            b["total"]
-                .as_f64()
-                .unwrap()
-                .total_cmp(&a["total"].as_f64().unwrap())
-        });
         let alien = (alien - norm).exp();
         let unknown = alien + classes.iter().map(|c| c.related).sum::<f64>();
         Some(Posterior {
@@ -352,7 +332,6 @@ impl Bank {
             alien,
             unknown,
             answered,
-            labs,
         })
     }
     fn roots(&self, j: usize) -> &Vec<Vec<f64>> {
@@ -384,29 +363,23 @@ impl Bank {
                 .collect()
         })
     }
-    pub fn next(&self, posterior: Option<&Posterior>, asked: &HashSet<usize>) -> Option<usize> {
+    pub fn next(&self, p: &Posterior, asked: &HashSet<usize>) -> Option<usize> {
         // (predictive-distribution index, hypothesis group, posterior weight)
         let mut atoms = Vec::new();
-        if let Some(p) = posterior {
-            for score in p.classes.iter().take(24) {
-                let c = self
-                    .raw
-                    .classes
-                    .iter()
-                    .position(|c| c.id == score.id)
-                    .unwrap();
-                atoms.push((2 * c, Some(c), score.exact));
-                if score.related > 0.0 {
-                    atoms.push((2 * c + 1, None, score.related));
-                }
+        for score in p.classes.iter().take(24) {
+            let c = self
+                .raw
+                .classes
+                .iter()
+                .position(|c| c.id == score.id)
+                .unwrap();
+            atoms.push((2 * c, Some(c), score.exact));
+            if score.related > 0.0 {
+                atoms.push((2 * c + 1, None, score.related));
             }
-            if p.alien > 0.0 {
-                atoms.push((2 * self.raw.classes.len(), None, p.alien));
-            }
-        } else {
-            for c in 0..self.raw.classes.len() {
-                atoms.push((2 * c, Some(c), 1.0));
-            }
+        }
+        if p.alien > 0.0 {
+            atoms.push((2 * self.raw.classes.len(), None, p.alien));
         }
         let total = atoms
             .iter()
@@ -586,11 +559,10 @@ impl Service {
             let (p, chosen) = tokio::task::spawn_blocking(move || {
                 let bank = &resource2.tokenizer;
                 let p = bank.posterior(&observations);
-                let chosen = if p.as_ref().is_some_and(Bank::done) {
-                    None
-                } else {
-                    bank.next(p.as_ref(), &seen)
-                };
+                let chosen = p
+                    .as_ref()
+                    .filter(|p| !Bank::done(p))
+                    .and_then(|p| bank.next(p, &seen));
                 (p, chosen)
             })
             .await
@@ -613,7 +585,7 @@ impl Service {
             .filter(|r| r.probe.is_none())
             .map(|r| r.tokens)
             .collect();
-        self.update(id,|job,_|job.tokenizer_result=Some(json!({"status":"completed","steps":steps,"verdict":verdict,"baselineDrift":baseline.first()!=baseline.last(),"posterior":posterior})))?;
+        self.update(id,|job,_|job.tokenizer_result=Some(json!({"status":"completed","steps":steps,"verdict":verdict,"baselineDrift":baseline.first()!=baseline.last()})))?;
         Ok(())
     }
 }
@@ -654,10 +626,7 @@ mod tests {
                     assert!((a.related - b["related"].as_f64().unwrap()).abs() < 1e-10);
                     assert_eq!(a.matched as u64, b["matched"].as_u64().unwrap());
                 }
-                let next = bank.next(
-                    Some(&posterior),
-                    &rows.iter().filter_map(|r| r.probe).collect(),
-                );
+                let next = bank.next(&posterior, &rows.iter().filter_map(|r| r.probe).collect());
                 assert_eq!(
                     next.map(|j| bank.raw.probes[j].id.as_str()),
                     round["next"].as_str()

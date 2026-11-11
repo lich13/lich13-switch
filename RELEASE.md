@@ -2,6 +2,12 @@
 
 最新版本置顶。每个版本只记录功能变化、修复、兼容性和必要的已知限制；下载文件请以对应 GitHub Release 为准。
 
+## v0.26.38 · 2026-11-11
+
+- 移除冗余 IPC 命令、下发字段与本地状态文件：精简更新检查返回值为 `hasUpdate`／`latestVersion`，移除 6 个无调用方的 IPC 命令（`resize_quick`、`get_gateway_listener`、`set_gateway_listener`、`attach_dsh_profile`、`import_auth_file`、`pick_path`）、`AuthSource` 冗余字段、`startup.json` 状态文件、Grok 环境变量导入死分支及冗余 IPC 参数；主窗口失焦时若系统已隐藏窗口同步派发可见性变更通知。
+- 精简用量聚合查询与对齐存储边界：移除 Antigravity／Claude Code 统计中前端未消费的会话排行聚合与游标题题 SQL，移除用量总览 `Dashboard` 的 `reviewCount` 附加 `COUNT` 查询与 `precision` 固定字段；补齐 `atomic_write_bounded` 写入大小上限校验、对齐诊断字段解包字典与存储／网关文档说明。
+- 清理网关历史迁移、冗余事件分支与供应商指纹探针死路径：移除已完成收敛的网关 `Store::load_migrated` 旧字段迁移、无生产触发的 `Action::Recovered`／`Phase::WsWait`／`RpmWaitReason::Pacing` 事件分支、`catalog.rs` 重复自检与 `protocol.rs`／`circuit.rs`／`failure_policy.rs`／`tokenizer.rs`／`modeltrace.rs` 冗余状态；修正网关准入 RPM 窗口重算重复推送与等待超时分支，并将上游配额耗尽短语归入全局冷却避免无效单渠道重试。
+
 ## v0.26.37 · 2026-11-11
 
 - 补齐 DeepSeek 模型家族别名与官方北京时间工作日峰谷计价（`09:00–12:00`、`14:00–18:00` 峰值 2x、其余时段平峰 1x）：内置定价表支持连字符与日期后缀变体（如 `deepseek-v4-1-flash-261017`、`deepseek-v4.1-pro`、`deepseek-v4-1-pro`、`deepseek-v3`、`deepseek-r1` 等），启动时自动调度历史未计价与 `models.dev` 静态单价记录的峰谷价格回填。

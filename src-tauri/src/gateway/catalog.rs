@@ -66,15 +66,7 @@ impl Service {
                 })
                 .transpose()?
                 .unwrap_or_default();
-            if file.version != 1
-                || file.providers.iter().any(|(id, v)| {
-                    id != &v.provider_id
-                        || v.models.len() > 4096
-                        || v.models.iter().any(|id| {
-                            id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
-                        })
-                })
-            {
+            if file.version != 1 {
                 return Err(AppError::new(code::MODELS, UNAVAILABLE));
             }
             Ok(file)

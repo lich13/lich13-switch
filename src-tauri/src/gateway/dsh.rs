@@ -1228,6 +1228,7 @@ impl Gateway {
             },
         })
     }
+    #[cfg(test)]
     pub async fn attach_dsh(
         &self,
         home: &Path,

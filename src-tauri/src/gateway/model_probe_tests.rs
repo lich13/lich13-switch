@@ -22,7 +22,7 @@ fn model_health_retains_half_open_probe_until_success_threshold() {
         ..Settings::default()
     };
 
-    let mut failure = circuit.acquire(false).expect("initial circuit permit");
+    let mut failure = circuit.acquire().expect("initial circuit permit");
     failure.set_failure_event(Record::new(
         Some(ClientId::Codex),
         Some(PROVIDER),
@@ -36,7 +36,7 @@ fn model_health_retains_half_open_probe_until_success_threshold() {
     assert_eq!(circuit.health().state, CircuitState::Open);
 
     circuit
-        .acquire(false)
+        .acquire()
         .expect("expired circuit permits a recovery probe")
         .finish(Outcome::Success, &settings);
     let after_first_success = models.states();
@@ -47,7 +47,7 @@ fn model_health_retains_half_open_probe_until_success_threshold() {
     assert!(after_first_success[0].health.cause.is_none());
 
     circuit
-        .acquire(false)
+        .acquire()
         .expect("half-open circuit permits the second recovery probe")
         .finish(Outcome::Success, &settings);
     assert_eq!(circuit.health().state, CircuitState::Closed);

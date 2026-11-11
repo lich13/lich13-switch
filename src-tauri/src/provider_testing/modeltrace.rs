@@ -23,7 +23,7 @@ pub fn bundled() -> Result<(Value, Value)> {
     let manifest = manifest();
     let raw = include_str!("../../resources/modeltrace/unified_bank.json");
     let data: Value = serde_json::from_str(raw).map_err(|_| failure("内置指纹库数据无效"))?;
-    let version = json!({"revision":manifest["revision"],"sha256":manifest["files"]["bank"]["sha256"],"built_at":data["built_at"],"analyzer_version":manifest.get("analyzerVersion").unwrap_or(&json!(1))});
+    let version = json!({"revision":manifest["revision"],"sha256":manifest["files"]["bank"]["sha256"],"built_at":data["built_at"],"analyzer_version":manifest["analyzerVersion"]});
     Ok((data, version))
 }
 fn choose(n: usize) -> usize {
@@ -209,9 +209,6 @@ pub fn scores(numbers: &[usize], data: &Value) -> Vec<f64> {
     let marginal = standardize(similarities(&unit, &artifact["centroids"]));
     let artifact = &data["robust"]["ordered_blocks"];
     let weight = artifact["weight"].as_f64().unwrap_or(0.0);
-    if weight == 0.0 {
-        return marginal;
-    }
     let mut feature = vec![];
     let mut start = 0;
     for i in 0..4 {

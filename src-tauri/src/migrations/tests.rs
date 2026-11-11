@@ -2,11 +2,11 @@ use super::*;
 use serde_json::{json, Value};
 use std::{fs, path::Path};
 
-fn legacy_gateway(data: &Path) -> Vec<u8> {
+fn saved_gateway(data: &Path) -> Vec<u8> {
     let mut value = serde_json::to_value(crate::gateway::Store::default()).unwrap();
     value.as_object_mut().unwrap().extend(
         json!({
-            "schema": 1,
+            "schema": 2,
             "providers": [{
                 "id": "fixture-provider",
                 "name": "fixture provider",
@@ -28,9 +28,9 @@ fn legacy_gateway(data: &Path) -> Vec<u8> {
 }
 
 #[test]
-fn gateway_recovers_before_migrating_and_preserves_unknown_fields_idempotently() {
+fn gateway_recovers_before_loading_and_preserves_unknown_fields_idempotently() {
     let data = tempfile::tempdir().unwrap();
-    let original = legacy_gateway(data.path());
+    let original = saved_gateway(data.path());
 
     let config = data.path().join("config.toml");
     let base_url = "https://example.invalid/v1";
@@ -60,17 +60,11 @@ fn gateway_recovers_before_migrating_and_preserves_unknown_fields_idempotently()
         "successful recovery should settle its journal"
     );
 
-    let migrated = fs::read(data.path().join("gateway.json")).unwrap();
-    let value: Value = serde_json::from_slice(&migrated).unwrap();
+    let loaded = fs::read(data.path().join("gateway.json")).unwrap();
+    let value: Value = serde_json::from_slice(&loaded).unwrap();
     assert_eq!(value["schema"], 2);
     assert_eq!(value["providers"][0]["id"], "fixture-provider");
     assert_eq!(value["providers"][0]["futureProviderField"]["keep"], true);
     assert_eq!(value["futureRootField"]["keep"], true);
-
-    gateway(data.path()).unwrap();
-    assert_eq!(
-        fs::read(data.path().join("gateway.json")).unwrap(),
-        migrated
-    );
-    assert_ne!(original, migrated);
+    assert_eq!(original, loaded);
 }

@@ -446,7 +446,7 @@ fn custom_rules_fill_only_ambiguous_evidence_and_code_precedes_keyword() {
     assert_eq!(parse(limited, &headers).error_basis, Some(B::Tpm));
     let success = json!({"type":"response.completed","response":{"output":"fixture window","status":"completed"}});
     assert_eq!(
-        policy::details_with_rules(&success, false, &rules),
+        policy::details_with_rules(&success, &rules),
         crate::events::Details::default()
     );
     let concrete =
@@ -459,17 +459,13 @@ fn custom_rules_fill_only_ambiguous_evidence_and_code_precedes_keyword() {
     let value =
         json!({"error":{"code":"usage_limit_exceeded","message":"content policy violation"}});
     assert_eq!(
-        policy::details_with_rules(&value, false, &rules).custom_rule_id,
+        policy::details_with_rules(&value, &rules).custom_rule_id,
         None
     );
     let value = json!({"error":{"code":"fixture_throttled","status":"PERMISSION_DENIED","message":"fixture"}});
     assert_eq!(
-        policy::details_with_rules(
-            &value,
-            false,
-            &[custom(Code, "fixture_throttled", B::Concurrency)]
-        )
-        .custom_rule_id,
+        policy::details_with_rules(&value, &[custom(Code, "fixture_throttled", B::Concurrency)])
+            .custom_rule_id,
         None
     );
 }
@@ -481,7 +477,7 @@ fn custom_conflicts_keep_original_and_streams_share_the_snapshot() {
         custom(Keyword, "window", B::Billing),
     ];
     let value = json!({"type":"error","error":{"code":"fixture_throttled","message":"fixture window","type":"rate_limit_error"}});
-    let result = policy::details_with_rules(&value, false, &conflict);
+    let result = policy::details_with_rules(&value, &conflict);
     assert_eq!(result.rule_conflict, Some(true));
     assert_eq!(result.custom_rule_id, None);
     let rules = [custom(Code, "fixture_throttled", B::Concurrency)];
@@ -490,7 +486,6 @@ fn custom_conflicts_keep_original_and_streams_share_the_snapshot() {
     stream.response(200, true, "identity");
     stream.feed(format!("data: {value}\n\n").as_bytes());
     assert_eq!(stream.observation.error.error_basis, Some(B::Concurrency));
-    assert_eq!(stream.observation.first_event_capacity_error, Some(true));
     let mut ws = super::protocol::Protocol::new(true);
     ws.attach_failure_rules(&rules);
     ws.value(&value);

@@ -482,7 +482,7 @@ async fn protection_uses_actual_queue_and_updates_existing_circuit() {
     let circuit = g.route(&first).unwrap().provider_circuit;
     // A context-pinned request does not make a two-provider queue a sole-provider queue.
     circuit
-        .acquire(false)
+        .acquire()
         .unwrap()
         .finish(circuit::Outcome::Failure(None), &g.view().settings);
     assert_eq!(circuit.health().state, circuit::CircuitState::Open);

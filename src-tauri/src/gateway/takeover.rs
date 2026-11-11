@@ -688,19 +688,9 @@ pub fn detach(data: &Path) -> Result<()> {
 }
 pub fn recover(data: &Path) -> Result<()> {
     codex_api::recover_write(data)?;
-    let Some(raw) = storage::read_optional(&data.join(FILE))? else {
+    let Some(record) = load(data)? else {
         return Ok(());
     };
-    let v: serde_json::Value =
-        serde_json::from_slice(&raw).map_err(|_| AppError::new(code::RECOVERY, "恢复记录损坏"))?;
-    if v.get("version").and_then(|v| v.as_u64()) != Some(2) {
-        return Err(AppError::new(
-            code::RECOVERY,
-            "旧恢复记录不受支持，已保留配置，请通过配置编辑器处理",
-        ));
-    }
-    let record =
-        serde_json::from_value(v).map_err(|_| AppError::new(code::RECOVERY, "恢复记录格式无效"))?;
     detach_record(data, record)
 }
 

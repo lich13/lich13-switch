@@ -11,7 +11,6 @@ pub enum Phase {
     WsHandshake,
     WsSend,
     WsReceive,
-    WsWait,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,7 +88,6 @@ pub struct QuotaCheck {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RpmWaitReason {
-    Pacing,
     SendWindow,
     CompletionWindow,
     UpstreamBackoff,

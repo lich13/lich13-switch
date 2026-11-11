@@ -6,7 +6,6 @@ const phases: Record<string, string> = {
   headers: "等待首字节",
   capacity: "容量等待",
   retry: "等待重试",
-  ws_wait: "等待重连",
   compaction: "压缩中",
   frozen: "已暂存",
 };

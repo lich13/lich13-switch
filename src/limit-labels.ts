@@ -57,7 +57,6 @@ export function rpmWaitLabel(reason?: string | null): string {
   return (
     (
       {
-        pacing: "RPM 均匀发送",
         send_window: "RPM 分钟额度已满",
         completion_window: "RPM 完成窗口保护",
         upstream_backoff: "上游 RPM 退避",

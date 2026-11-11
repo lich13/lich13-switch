@@ -306,12 +306,11 @@ impl Permits {
     }
     pub(super) fn acquire_for(
         route: &Route,
-        manual: bool,
         requirement: &super::routing::Requirement,
     ) -> Option<Self> {
-        let provider = route.provider_circuit.acquire(manual)?;
+        let provider = route.provider_circuit.acquire()?;
         let model = match route.model_circuit(requirement) {
-            Some(circuit) => Some(circuit.acquire(manual)?),
+            Some(circuit) => Some(circuit.acquire()?),
             None => None,
         };
         let scope = if model.is_some() {

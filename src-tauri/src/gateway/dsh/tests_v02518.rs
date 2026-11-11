@@ -160,7 +160,7 @@ fn canonical_mapping_preserves_explicit_empty_and_canonical_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("gateway.json");
     storage::atomic_write(&path, &serde_json::to_vec(&value).unwrap(), Some("missing")).unwrap();
-    let (loaded, revision) = Store::load_migrated(&path).unwrap();
+    let (loaded, revision) = Store::load(&path).unwrap();
     let store: Store = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(loaded.dsh_models, store.dsh_models);
     loaded.persist(&path, &revision).unwrap();

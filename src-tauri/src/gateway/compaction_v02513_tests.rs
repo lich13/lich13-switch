@@ -280,11 +280,11 @@ fn two_legal_receivers_remain_candidates_during_cooldown_and_capacity() {
 
     let first = route(queued[0].clone());
     let second = route(queued[1].clone());
-    first.provider_circuit.acquire(false).unwrap().finish(
+    first.provider_circuit.acquire().unwrap().finish(
         Outcome::CapacityLimited(Some(Duration::from_secs(60))),
         &Settings::default(),
     );
-    second.provider_circuit.acquire(false).unwrap().finish(
+    second.provider_circuit.acquire().unwrap().finish(
         Outcome::RateLimited(Some(Duration::from_secs(60))),
         &Settings::default(),
     );

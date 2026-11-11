@@ -72,7 +72,6 @@ const actions = {
   waiting: "等待后重试",
   stopped: "需要处理",
   routed: "已切换供应商",
-  recovered: "已恢复可用",
   reconnecting: "等待后重新连接",
   retrying_same: "原供应商等待重试",
   not_retried: "响应已开始，未重试",
@@ -225,7 +224,6 @@ const phases: Record<string, string> = {
   ws_handshake: "WebSocket 握手",
   ws_send: "WebSocket 发送",
   ws_receive: "WebSocket 接收",
-  ws_wait: "等待重连",
 };
 const timeoutPhases: Record<string, string> = {
   response_headers: "等待响应头",

@@ -618,15 +618,8 @@ impl Gateway {
         shared: Option<Arc<registry::Registry>>,
     ) -> Result<Self> {
         storage::private_dir(&data)?;
-        let (store, revision, upgrade_error) = match recover_for_migration(&data)
-            .and_then(|()| Store::load_migrated(&data.join("gateway.json")))
-        {
-            Ok((store, revision)) => (store, revision, None),
-            Err(error) => {
-                let (store, revision) = Store::load(&data.join("gateway.json"))?;
-                (store, revision, Some(error))
-            }
-        };
+        let upgrade_error = recover_for_migration(&data).err();
+        let (store, revision) = Store::load(&data.join("gateway.json"))?;
         let error = upgrade_error.as_ref().map(|e| e.message.clone());
         let registry = match shared {
             Some(n) => n,
@@ -866,6 +859,7 @@ impl Gateway {
     pub fn try_listener_view(&self) -> Result<ListenerView> {
         self.0.registry.listener.view()
     }
+    #[cfg(test)]
     pub fn set_listener_port(&self, port: u16, expected: &str) -> Result<ListenerView> {
         let _lifecycle = self
             .0
@@ -1314,8 +1308,8 @@ impl Gateway {
         home: &Path,
         config_revision: Option<&str>,
     ) -> Result<View> {
-        // Compatibility for callers of the pre-shared Settings API. The listener
-        // file remains authoritative, including when the later client save fails.
+        // Edit::Settings updates the shared listener file first; it remains
+        // authoritative even if the later client state save fails.
         let port_change = match &edit {
             Edit::Settings { settings } if settings.port != self.try_listener_view()?.port => {
                 Some(settings.port)
@@ -1832,7 +1826,7 @@ impl Gateway {
                     ));
                 }
             }
-            let known_legacy = {
+            let gateway_after_unclean_exit = {
                 let state = self.0.inner.lock().unwrap();
                 self.0.client != ClientId::Grok
                     && pair.is_gateway(
@@ -1845,7 +1839,7 @@ impl Gateway {
                             == intent.pair_hash
                     })
             };
-            if pair.fingerprint() != intent.pair_hash && !known_legacy {
+            if pair.fingerprint() != intent.pair_hash && !gateway_after_unclean_exit {
                 return Err(AppError::new(
                     code::RESUME_CONFLICT,
                     "受管地址或 Token 在退出后已被修改，自动恢复已停止",

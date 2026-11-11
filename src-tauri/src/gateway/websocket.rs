@@ -1565,13 +1565,6 @@ async fn session_once(
                                 &admission.route.provider.id,
                                 ids.iter()
                                     .filter_map(|id| routes.get(id).cloned())
-                                    .filter(|r| {
-                                        !failure.context_incompatible
-                                            || ownership
-                                                .as_ref()
-                                                .and_then(|lease| lease.owner.as_deref())
-                                                == Some(r.provider.id.as_str())
-                                    })
                                     .collect(),
                                 &requirement,
                                 uri.path(),
@@ -1618,13 +1611,6 @@ async fn session_once(
                                 &admission.route.provider.id,
                                 ids.iter()
                                     .filter_map(|id| routes.get(id).cloned())
-                                    .filter(|r| {
-                                        !failure.context_incompatible
-                                            || ownership
-                                                .as_ref()
-                                                .and_then(|lease| lease.owner.as_deref())
-                                                == Some(r.provider.id.as_str())
-                                    })
                                     .collect(),
                                 &requirement,
                                 uri.path(),
@@ -1703,13 +1689,6 @@ async fn session_once(
                                 &admission.route.provider.id,
                                 ids.iter()
                                     .filter_map(|id| routes.get(id).cloned())
-                                    .filter(|r| {
-                                        !failure.context_incompatible
-                                            || ownership
-                                                .as_ref()
-                                                .and_then(|lease| lease.owner.as_deref())
-                                                == Some(r.provider.id.as_str())
-                                    })
                                     .collect(),
                                 &requirement,
                                 uri.path(),
@@ -3074,7 +3053,7 @@ async fn session_once(
                         if ordinary_attempts <= cfg.max_retries {
                             if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value_raw(&v, frame.payload()); } u.finish(Some(101), code::CLIENT_ERROR); }
                             if let Some(mut admission) = turn.take() {
-                                let details = value(&frame).map(|v| super::failure_policy::details_with_rules(&v, false, &turn_rules)).unwrap_or_default();
+                                let details = value(&frame).map(|v| super::failure_policy::details_with_rules(&v, &turn_rules)).unwrap_or_default();
                                 let emit = || admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::TryingNext, Some(101), attempts, crate::events::Details { counted_failure: Some(false), ..details });
                                 if let Some(u) = &protocol { u.report_failure(emit); } else { emit(); }
                                 admission.permits.neutral(cfg);

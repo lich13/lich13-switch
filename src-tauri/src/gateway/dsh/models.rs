@@ -94,10 +94,9 @@ pub fn for_store(store: &super::super::model::Store) -> Vec<serde_json::Value> {
                                 model[key] = value.into();
                             }
                         }
-                        if let Some(inputs) = entry.as_mapping().and_then(|m| {
-                            m.get_sequence("input")
-                                .or_else(|| m.get_sequence("inputModalities"))
-                        }) {
+                        if let Some(inputs) =
+                            entry.as_mapping().and_then(|m| m.get_sequence("input"))
+                        {
                             let values: Vec<_> = inputs
                                 .values()
                                 .filter_map(|v| string(Some(v)))
@@ -178,16 +177,11 @@ pub(super) fn require_chat(protocol: Protocol) -> Result<()> {
     Ok(())
 }
 
-/// Normalize old saved catalogs while keeping official capabilities authoritative.
 pub(crate) fn normalize(model: &mut serde_json::Value) -> bool {
     let Some(fields) = model.as_object_mut() else {
         return false;
     };
     let mut changed = false;
-    if let Some(old) = fields.remove("inputModalities") {
-        fields.entry("input").or_insert(old);
-        changed = true;
-    }
     if !fields.contains_key("input") {
         let input = if fields.get("id").and_then(|v| v.as_str()) == Some(FLASH) {
             serde_json::json!(["text", "image"])

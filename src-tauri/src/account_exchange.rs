@@ -846,7 +846,6 @@ fn export_account(profile: &Profile, format: &str, prototype: Option<&Value>) ->
         }
         for (from, to) in [
             ("chatgpt_user_id", "chatgpt_user_id"),
-            ("organization_id", "organization_id"),
             ("chatgpt_plan_type", "plan_type"),
         ] {
             if let Some(value) = claim(from).or_else(|| {

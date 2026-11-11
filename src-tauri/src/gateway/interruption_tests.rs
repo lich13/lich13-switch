@@ -241,7 +241,6 @@ async fn request_interruption_is_never_notifiable_and_only_same_codes_merge_for_
         Action::Returned,
         Action::Waiting,
         Action::Stopped,
-        Action::Recovered,
         Action::Routed,
         Action::Reconnecting,
         Action::RetryingSame,

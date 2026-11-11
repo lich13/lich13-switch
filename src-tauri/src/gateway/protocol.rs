@@ -20,10 +20,6 @@ pub struct Observation {
     pub terminal_status: Option<String>,
     pub incomplete_reason: Option<String>,
     pub expects_terminal: bool,
-    pub first_event_model_error: Option<bool>,
-    pub first_event_capacity_error: Option<bool>,
-    pub first_event_account_error: Option<bool>,
-    pub first_event_service_error: Option<bool>,
     pub retry_after: Option<std::time::Duration>,
     pub capacity_error: bool,
     pub search_content: bool,
@@ -98,13 +94,6 @@ impl FaultReports {
     fn covered(&self) -> bool {
         self.generation != 0 && self.generation == self.reported && !self.unreported_before
     }
-}
-#[derive(Clone, Copy)]
-enum DownstreamClose {
-    Closed,
-    Reset,
-    BrokenPipe,
-    Cancelled,
 }
 pub fn identifier(v: Option<&Value>) -> Option<String> {
     v.and_then(Value::as_str)
@@ -463,15 +452,6 @@ impl Sink {
             self.observation.raw_headers.clone(),
             Some(self.event.clone()),
         );
-        let first = self.observation.first_event_model_error.is_none();
-        if first {
-            // A complete non-JSON SSE event must also release the response
-            // prefix. Observation failure cannot stall transparent forwarding.
-            self.observation.first_event_model_error = Some(false);
-            self.observation.first_event_capacity_error = Some(false);
-            self.observation.first_event_account_error = Some(false);
-            self.observation.first_event_service_error = Some(false);
-        }
         if self.data_len <= 16 && self.data_prefix.trim_ascii() == b"[DONE]" {
             self.observation.done();
         } else if let Some(mut v) = json.finish().or_else(|| {
@@ -499,24 +479,6 @@ impl Sink {
             self.observation.value_projected(&v, true);
             if self.observation.fault_sequence != sequence {
                 self.observation.error.raw = Some(std::sync::Arc::new(wire));
-            }
-            if first {
-                self.observation.first_event_model_error = Some(
-                    self.observation.error.error_basis
-                        == Some(crate::events::ErrorBasis::ModelUnavailable),
-                );
-                self.observation.first_event_capacity_error =
-                    Some(super::failure_policy::temporary(&self.observation.error));
-                self.observation.first_event_account_error = Some(
-                    super::failure_policy::hard_rejection(&self.observation.error),
-                );
-            }
-            if first {
-                self.observation.first_event_service_error = Some(
-                    self.observation.terminal == Some(Terminal::Failure)
-                        && self.observation.error.error_basis
-                            == Some(crate::events::ErrorBasis::ServiceError),
-                );
             }
         } else {
             self.observation.incomplete = true;
@@ -1639,7 +1601,7 @@ impl Protocol {
     }
     fn emit_interruption(&self) -> bool {
         use crate::events::{Action, Details, HealthScope, Level, Phase, Reason, Record};
-        if self.downstream_close().is_some() {
+        if self.downstream_close() {
             return false;
         }
         let Some((service, client, provider, model)) = &self.diagnostics else {
@@ -1727,28 +1689,26 @@ impl Protocol {
         };
         service.emit_checked(record)
     }
-    fn downstream_close(&self) -> Option<DownstreamClose> {
-        if matches!(
+    fn downstream_close(&self) -> bool {
+        !matches!(
             self.end_reason.as_deref(),
             Some(code::CANCELLED | code::GATEWAY_STOPPED)
-        ) {
-            return None;
-        }
-        match self.transfer.downstream_error.as_deref() {
-            Some("DOWNSTREAM_CLOSED") => Some(DownstreamClose::Closed),
-            Some("DOWNSTREAM_PEER_RESET") => Some(DownstreamClose::Reset),
-            Some("DOWNSTREAM_WRITE_FAILED") => Some(DownstreamClose::BrokenPipe),
-            Some("DOWNSTREAM_CANCELLED") => Some(DownstreamClose::Cancelled),
-            _ => None,
-        }
+        ) && matches!(
+            self.transfer.downstream_error.as_deref(),
+            Some(
+                "DOWNSTREAM_CLOSED"
+                    | "DOWNSTREAM_PEER_RESET"
+                    | "DOWNSTREAM_WRITE_FAILED"
+                    | "DOWNSTREAM_CANCELLED"
+            )
+        )
     }
     fn routing_settlement(&self, interruption_reported: bool) -> RoutingSettlement {
         let Ok(reports) = self.fault_reports.lock() else {
             return RoutingSettlement::Failed;
         };
         let upstream_fault = reports.observed.is_some();
-        let interruption = (self.transfer.downstream_error.is_some()
-            && self.downstream_close().is_none())
+        let interruption = (self.transfer.downstream_error.is_some() && !self.downstream_close())
             || matches!(
                 self.end_reason.as_deref(),
                 Some(code::CANCELLED | code::GATEWAY_STOPPED)
@@ -1766,7 +1726,7 @@ impl Protocol {
                 .load(std::sync::atomic::Ordering::Relaxed)
         {
             RoutingSettlement::Delivered
-        } else if self.downstream_close().is_some() {
+        } else if self.downstream_close() {
             RoutingSettlement::DownstreamClosed
         } else {
             RoutingSettlement::Failed

@@ -252,7 +252,7 @@ impl Circuit {
             cause: s.cause.clone(),
         }
     }
-    pub fn acquire(&self, _manual: bool) -> Option<Permit> {
+    pub fn acquire(&self) -> Option<Permit> {
         let mut s = self.0.lock().unwrap();
         if !s.available() {
             return None;
@@ -647,18 +647,16 @@ mod tests {
         let c = Circuit::default();
         let cfg = Settings::default();
         for _ in 0..4 {
-            c.acquire(false)
-                .unwrap()
-                .finish(Outcome::Failure(None), &cfg);
+            c.acquire().unwrap().finish(Outcome::Failure(None), &cfg);
         }
-        assert!(c.acquire(false).is_none());
+        assert!(c.acquire().is_none());
         c.0.lock().unwrap().until = Some(Instant::now());
-        let p = c.acquire(false).unwrap();
-        assert!(c.acquire(false).is_none());
+        let p = c.acquire().unwrap();
+        assert!(c.acquire().is_none());
         drop(p);
-        c.acquire(false).unwrap().finish(Outcome::Success, &cfg);
+        c.acquire().unwrap().finish(Outcome::Success, &cfg);
         assert_eq!(c.health().state, CircuitState::HalfOpen);
-        c.acquire(false).unwrap().finish(Outcome::Success, &cfg);
+        c.acquire().unwrap().finish(Outcome::Success, &cfg);
         assert_eq!(c.health().state, CircuitState::Closed);
     }
     #[test]
@@ -668,9 +666,9 @@ mod tests {
             failure_threshold: 20,
             ..Default::default()
         };
-        let stale = c.acquire(false).unwrap();
+        let stale = c.acquire().unwrap();
         for i in 0..10 {
-            c.acquire(false).unwrap().finish(
+            c.acquire().unwrap().finish(
                 if i < 4 {
                     Outcome::Success
                 } else {
@@ -692,7 +690,7 @@ mod tests {
             assert!(retryable(s));
         }
         let c = Circuit::default();
-        c.acquire(false)
+        c.acquire()
             .unwrap()
             .finish(Outcome::Failure(retry_after("120")), &Settings::default());
         assert!(c.health().retry_in >= 119);
@@ -707,23 +705,22 @@ mod cooldown_tests {
     fn hard_rejection_allows_only_one_on_demand_probe_and_recools_on_failure() {
         let c = Circuit::default();
         let cfg = Settings::default();
-        let earlier = c.acquire(false).unwrap();
-        c.acquire(false)
+        let earlier = c.acquire().unwrap();
+        c.acquire()
             .unwrap()
             .finish(Outcome::HardRejected(None), &cfg);
         assert_eq!(c.health().retry_in, 300);
         assert_eq!(c.health().failures, 0);
-        assert!(c.acquire(true).is_none());
+        assert!(c.acquire().is_none());
         earlier.finish(Outcome::Success, &cfg);
         assert!(!c.health().available);
         c.0.lock().unwrap().retry_until = Some(Instant::now());
-        let probe = c.acquire(false).unwrap();
-        assert!(c.acquire(false).is_none());
-        assert!(c.acquire(true).is_none());
+        let probe = c.acquire().unwrap();
+        assert!(c.acquire().is_none());
         probe.finish(Outcome::HardRejected(None), &cfg);
         assert_eq!(c.health().retry_in, 300);
         c.0.lock().unwrap().retry_until = Some(Instant::now());
-        c.acquire(false).unwrap().finish(Outcome::Success, &cfg);
+        c.acquire().unwrap().finish(Outcome::Success, &cfg);
         assert!(c.health().available);
         assert!(c.health().cooldown_reason.is_none());
     }
@@ -731,8 +728,8 @@ mod cooldown_tests {
     fn rate_limit_respects_local_floor_and_does_not_poison_fault_statistics() {
         let c = Circuit::default();
         let cfg = Settings::default();
-        let stale = c.acquire(false).unwrap();
-        c.acquire(false)
+        let stale = c.acquire().unwrap();
+        c.acquire()
             .unwrap()
             .finish(Outcome::RateLimited(Some(Duration::from_secs(2))), &cfg);
         assert!((5..=6).contains(&c.health().retry_in));
@@ -742,12 +739,12 @@ mod cooldown_tests {
         stale.finish(Outcome::Success, &cfg);
         assert!(!c.health().available);
         assert_eq!(c.health().requests, 1);
-        assert!(c.acquire(true).is_none());
+        assert!(c.acquire().is_none());
         c.0.lock().unwrap().retry_until = Some(Instant::now());
-        let probe = c.acquire(false).unwrap();
-        assert!(c.acquire(false).is_none());
+        let probe = c.acquire().unwrap();
+        assert!(c.acquire().is_none());
         drop(probe);
-        c.acquire(false).unwrap().finish(Outcome::Success, &cfg);
+        c.acquire().unwrap().finish(Outcome::Success, &cfg);
         assert!(c.health().available);
         assert!(c.health().cooldown_reason.is_none());
     }
@@ -755,34 +752,28 @@ mod cooldown_tests {
     fn default_cooldown_zero_hint_and_fault_retry_after_are_independent() {
         let c = Circuit::default();
         let cfg = Settings::default();
-        c.acquire(false)
+        c.acquire()
             .unwrap()
             .finish(Outcome::RateLimited(None), &cfg);
         assert!((5..=6).contains(&c.health().retry_in));
         c.reset();
-        c.acquire(false)
+        c.acquire()
             .unwrap()
             .finish(Outcome::RateLimited(retry_after("0")), &cfg);
         assert!(!c.health().available);
         assert!((5..=6).contains(&c.health().retry_in));
         c.reset();
-        c.acquire(false)
+        c.acquire()
             .unwrap()
             .finish(Outcome::Failure(Some(Duration::from_secs(120))), &cfg);
         assert_eq!(c.health().failures, 1);
         assert_eq!(c.health().retry_in, 120);
         assert_eq!(c.health().state, CircuitState::Closed);
         c.0.lock().unwrap().retry_until = Some(Instant::now());
-        c.acquire(false)
-            .unwrap()
-            .finish(Outcome::Failure(None), &cfg);
+        c.acquire().unwrap().finish(Outcome::Failure(None), &cfg);
         assert_eq!(c.health().state, CircuitState::Closed);
-        c.acquire(false)
-            .unwrap()
-            .finish(Outcome::Failure(None), &cfg);
-        c.acquire(false)
-            .unwrap()
-            .finish(Outcome::Failure(None), &cfg);
+        c.acquire().unwrap().finish(Outcome::Failure(None), &cfg);
+        c.acquire().unwrap().finish(Outcome::Failure(None), &cfg);
         assert_eq!(c.health().state, CircuitState::Open);
         assert_eq!(c.health().retry_in, 60);
     }
@@ -797,9 +788,7 @@ mod cooldown_tests {
         for _ in 0..8 {
             c.set_single_provider_protection(Some(Duration::from_secs(1)));
             c.0.lock().unwrap().retry_until = Some(Instant::now());
-            c.acquire(false)
-                .unwrap()
-                .finish(Outcome::Failure(None), &cfg);
+            c.acquire().unwrap().finish(Outcome::Failure(None), &cfg);
             assert_eq!(c.health().state, CircuitState::Closed);
             c.0.lock().unwrap().retry_until = Some(Instant::now());
         }
@@ -815,18 +804,16 @@ mod cooldown_tests {
         let c = Circuit::default();
         let cfg = Settings::default();
         c.set_single_provider_protection(Some(Duration::from_secs(60)));
-        let stale = c.acquire(false).unwrap();
-        c.acquire(false)
-            .unwrap()
-            .finish(Outcome::Failure(None), &cfg);
+        let stale = c.acquire().unwrap();
+        c.acquire().unwrap().finish(Outcome::Failure(None), &cfg);
         stale.finish(Outcome::Success, &cfg);
         assert!(c.health().protected_single_provider);
         assert_eq!(c.health().failures, 1);
         c.0.lock().unwrap().retry_until = Some(Instant::now());
-        let probe = c.acquire(false).unwrap();
-        assert!(c.acquire(false).is_none());
+        let probe = c.acquire().unwrap();
+        assert!(c.acquire().is_none());
         drop(probe);
-        c.acquire(false).unwrap().finish(Outcome::Success, &cfg);
+        c.acquire().unwrap().finish(Outcome::Success, &cfg);
         assert!(c.health().available);
         assert!(!c.health().protected_single_provider);
         assert!(c.health().cooldown_reason.is_none());
@@ -858,7 +845,7 @@ mod v020_tolerance_tests {
         status: Option<u16>,
         retry: Option<Duration>,
     ) {
-        let mut permit = circuit.acquire(false).expect("fixture circuit permit");
+        let mut permit = circuit.acquire().expect("fixture circuit permit");
         permit.set_failure_event(event(reason, status));
         permit.finish(Outcome::Failure(retry), cfg);
     }
@@ -896,7 +883,7 @@ mod v020_tolerance_tests {
                 Phase::Connect
             });
             record.details.local_code = Some(local_code.into());
-            let mut permit = circuit.acquire(false).unwrap();
+            let mut permit = circuit.acquire().unwrap();
             permit.set_failure_event(record);
             permit.finish(Outcome::Failure(None), &cfg);
             assert_eq!(circuit.health().state, CircuitState::Closed);
@@ -909,7 +896,7 @@ mod v020_tolerance_tests {
         let mut record = event(Reason::Network, None);
         record.details.phase = Some(Phase::Connect);
         record.details.local_code = Some(code::CONNECTION_FAILED.into());
-        let mut permit = circuit.acquire(false).unwrap();
+        let mut permit = circuit.acquire().unwrap();
         permit.set_failure_event(record);
         permit.finish(Outcome::Failure(None), &cfg);
         assert_eq!(circuit.health().state, CircuitState::Open);
@@ -934,7 +921,7 @@ mod v020_tolerance_tests {
             let mut record = event(Reason::Network, None);
             record.details.phase = Some(phase);
             record.details.local_code = Some(local_code.into());
-            let mut permit = circuit.acquire(false).unwrap();
+            let mut permit = circuit.acquire().unwrap();
             permit.set_failure_event(record);
             permit.finish(Outcome::Failure(None), &cfg);
             assert_eq!(circuit.health().state, CircuitState::Open);
@@ -971,10 +958,7 @@ mod v020_tolerance_tests {
         let spaced = Circuit::default();
         for status in [502, 503, 502, 503, 502, 503, 502] {
             finish_transient(&spaced, &cfg, status);
-            spaced
-                .acquire(false)
-                .unwrap()
-                .finish(Outcome::Success, &cfg);
+            spaced.acquire().unwrap().finish(Outcome::Success, &cfg);
         }
         let health = spaced.health();
         assert_eq!(health.state, CircuitState::Closed);
@@ -1010,7 +994,7 @@ mod v020_tolerance_tests {
         let retry = Circuit::default();
         finish_transient(&retry, &cfg, 502);
         expire_retry(&retry);
-        let mut permit = retry.acquire(false).unwrap();
+        let mut permit = retry.acquire().unwrap();
         permit.set_failure_event(event(Reason::UpstreamService, Some(503)));
         permit.finish(Outcome::Failure(retry_after("30")), &cfg);
         assert_eq!(retry.health().state, CircuitState::Closed);
@@ -1057,7 +1041,7 @@ mod v020_tolerance_tests {
         assert_eq!(network.health().state, CircuitState::Open);
 
         let capacity = Circuit::default();
-        let permit = capacity.acquire(false).unwrap();
+        let permit = capacity.acquire().unwrap();
         permit.finish(
             Outcome::CapacityLimited(Some(Duration::from_secs(30))),
             &cfg,
@@ -1068,10 +1052,7 @@ mod v020_tolerance_tests {
         assert_eq!(health.failures, 0);
         assert_eq!(health.cooldown_reason.as_deref(), Some("capacity_retry"));
         expire_retry(&capacity);
-        capacity
-            .acquire(false)
-            .unwrap()
-            .finish(Outcome::Neutral, &cfg);
+        capacity.acquire().unwrap().finish(Outcome::Neutral, &cfg);
         assert_eq!(capacity.health().requests, 0);
     }
 
