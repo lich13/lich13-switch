@@ -120,7 +120,6 @@ const dashboard: Dashboard = {
     modelGroup("fixture-grok-model-one", 0, 2),
     modelGroup("fixture-grok-model-two", 1, 1),
   ],
-  precision: "millisecond",
   detailSince: 0,
   sources: { grok: 1 },
 };

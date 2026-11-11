@@ -162,10 +162,8 @@ fn dashboard_value(store: &Store, filter: &Filter) -> Value {
         "totals": dashboard.totals,
         "providers": dashboard.providers,
         "models": dashboard.models,
-        "precision": dashboard.precision,
         "detailSince": dashboard.detail_since,
         "sources": dashboard.sources,
-        "reviewCount": dashboard.review_count,
         "sourceHistoryIncomplete": dashboard.source_history_incomplete,
     })
 }
@@ -537,7 +535,6 @@ fn v12_zero_and_ambiguous_merges_are_reversible_by_source_rebuild() {
             .deduplication,
         "ambiguous"
     );
-    assert_eq!(store.dashboard(&all_time()).unwrap().review_count, 1);
 
     store.rebuild("codex", &[], &[]).unwrap();
     assert!(store.detail("fixture-v12-zero-session").is_err());
@@ -552,7 +549,6 @@ fn v12_zero_and_ambiguous_merges_are_reversible_by_source_rebuild() {
             .input,
         Some(0)
     );
-    assert_eq!(store.dashboard(&all_time()).unwrap().review_count, 0);
 }
 
 #[test]

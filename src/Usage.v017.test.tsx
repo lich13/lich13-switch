@@ -118,7 +118,6 @@ function dashboard(source?: Source): Dashboard {
     },
     providers: [],
     models: [],
-    precision: "millisecond",
     detailSince: 0,
     sources: {},
   };

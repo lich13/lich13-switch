@@ -233,6 +233,9 @@ pub fn atomic_write_bounded(
     expected: Option<&str>,
     limit: u64,
 ) -> Result<()> {
+    if bytes.len() as u64 > limit {
+        return Err(AppError::new(code::FILE_SIZE, "文件内容超过允许大小"));
+    }
     let parent = path
         .parent()
         .ok_or_else(|| AppError::new(code::PATH, "目标路径无效"))?;

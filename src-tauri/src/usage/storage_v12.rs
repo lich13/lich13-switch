@@ -229,18 +229,12 @@ fn unpack(bytes: &[u8]) -> Result<Value> {
     if bytes == [0] {
         return Ok(json!({}));
     }
-    if !matches!(bytes.first(), Some(1..=4)) || bytes.len() > LIMIT {
+    if !matches!(bytes.first(), Some(2..=4)) || bytes.len() > LIMIT {
         return Err(failure("用量诊断编码无效，原数据已保留"));
     }
-    let decoder = zstd::stream::read::Decoder::with_dictionary(
-        &bytes[1..],
-        if bytes[0] == 1 {
-            &[]
-        } else {
-            diagnostic_dictionary()
-        },
-    )
-    .map_err(|_| failure("用量诊断损坏，原数据已保留"))?;
+    let decoder =
+        zstd::stream::read::Decoder::with_dictionary(&bytes[1..], diagnostic_dictionary())
+            .map_err(|_| failure("用量诊断损坏，原数据已保留"))?;
     let mut plain = Vec::new();
     decoder
         .take((LIMIT + 1) as u64)
@@ -444,7 +438,6 @@ pub(super) struct AntigravityAttemptRow {
     pub session_id: Option<String>,
     pub provider: Option<String>,
     pub time: i64,
-    pub started_at: i64,
     pub is_final: bool,
     pub model: Option<String>,
     pub display_name: Option<String>,
@@ -453,7 +446,6 @@ pub(super) struct AntigravityAttemptRow {
     pub cost: Option<String>,
     pub request_unpriced: bool,
     pub provider_unpriced: bool,
-    pub duration_ms: u64,
 }
 
 #[cfg(test)]
@@ -588,7 +580,6 @@ pub(super) fn scan_client_attempts(
             session_id: identifier(db(row.get(1))?)?,
             provider: db(row.get(17))?,
             time: db(row.get(2))?,
-            started_at: db(row.get(3))?,
             is_final,
             model: db(row.get(5))?,
             display_name: shape.as_ref().and_then(|s| s.display_name.clone()),
@@ -624,7 +615,6 @@ pub(super) fn scan_client_attempts(
             cost: db(row.get(14))?,
             request_unpriced: opt_u64(15)?.unwrap_or(0) > 0,
             provider_unpriced: false,
-            duration_ms: opt_u64(16)?.unwrap_or(0),
         });
     }
     flush(&mut attempts, request_operation, &mut visit)

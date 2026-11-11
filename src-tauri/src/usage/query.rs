@@ -397,7 +397,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     // Each aggregate reads the same narrow materialized projection, rather than
     // repeating the indexed record/attempt join for every panel.
     let cte = cte.replace("m AS (", "m AS MATERIALIZED (");
-    let rolled = "EXISTS(SELECT 1 FROM selected WHERE kind=1)";
     // Only the final attempt has a request count. Attribute a missing price to
     // that row once, consulting earlier attempts only if its own price exists.
     // This avoids sorting every request ID for a second logical aggregation.
@@ -421,10 +420,10 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     };
     let source_sum=format!("coalesce(sum({count}),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0,0,0,0,0");
     let sql=format!("{cte}
-      SELECT 'totals','',{total_sum},{rolled} FROM m
-      UNION ALL SELECT 'provider',coalesce(provider,'session'),{sum},0 FROM m GROUP BY coalesce(provider,'session')
-      UNION ALL SELECT 'model',coalesce(model,'unknown'),{sum},0 FROM m GROUP BY coalesce(model,'unknown')
-      UNION ALL SELECT 'source',source,{source_sum},0 FROM m GROUP BY source");
+      SELECT 'totals','',{total_sum} FROM m
+      UNION ALL SELECT 'provider',coalesce(provider,'session'),{sum} FROM m GROUP BY coalesce(provider,'session')
+      UNION ALL SELECT 'model',coalesce(model,'unknown'),{sum} FROM m GROUP BY coalesce(model,'unknown')
+      UNION ALL SELECT 'source',source,{source_sum} FROM m GROUP BY source");
     let mut stmt = db(c.prepare(&sql))?;
     let rows = db(
         stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
@@ -432,7 +431,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 totals(r, 2)?,
-                r.get::<_, bool>(26)?,
             ))
         }),
     )?;
@@ -440,14 +438,10 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     let mut providers = Vec::new();
     let mut models = Vec::new();
     let mut sources = BTreeMap::new();
-    let mut rolled = false;
     for row in rows {
-        let (kind, id, value, flag) = db(row)?;
+        let (kind, id, value) = db(row)?;
         match kind.as_str() {
-            "totals" => {
-                total = value;
-                rolled = flag;
-            }
+            "totals" => total = value,
             "provider" => providers.push(Group { id, totals: value }),
             "model" => models.push(Group { id, totals: value }),
             "source" => {
@@ -464,14 +458,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     };
     providers.sort_by(order);
     models.sort_by(order);
-    let (condition, review_args) = conditions(f, "r", false);
-    let condition = native_sql(c, condition);
-    let eligible = eligible(c, f, "r", true);
-    let review_count = db(c.query_row(
-        &format!("SELECT count(*) FROM records r WHERE effective=2 AND {eligible} AND {condition}"),
-        rusqlite::params_from_iter(review_args.iter()),
-        |r| r.get(0),
-    ))?;
     // Old daily totals have already lost the original source associations.
     // Keep them in the combined view and explicitly flag source-only history.
     let source_history_incomplete = if f.source.is_some() {
@@ -486,10 +472,8 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
         totals: total,
         providers,
         models,
-        precision: if rolled { "day" } else { "millisecond" }.into(),
         detail_since,
         sources,
-        review_count,
         source_history_incomplete,
         data_version: version(c)?,
     })

@@ -123,7 +123,7 @@ Grok 使用普通请求准入，不套用 Codex 的新线程／压缩接管开�
 
 DSH 只展示两个官方入口：`deepseek-flash`（DeepSeek-V4.1-Flash）和 `deepseek-v4-pro`（DeepSeek-V4-Pro）。每家 DSH 供应商独立保存 Flash／Pro 映射，可从已发现模型下拉选择或手填；唯一匹配时预填，无法确定时留空。每次上游尝试按目标供应商重新写入实际模型 ID，切换供应商后重新映射。Pro 不自动降级为 Flash；没有可用映射时返回明确错误。手动模式固定当前供应商，自动模式复用队列、冷却和熔断，在余额耗尽、账号禁用、认证失败、限流、服务错误且可安全重放时尝试下一家；已发送请求的首字节超时不自动重发；已经输出后不重放。
 
-DSH 受管路由使用 `input` 声明输入能力：Flash 为文本和图片，Pro 为文本；旧 `inputModalities` 目录自动迁移。Chat Completions 明确设置 `maxTokensField: max_tokens`、`requiresReasoningContentOnAssistantMessages: true`、`thinkingFormat: deepseek`、`supportsStore: false`、`supportsDeveloperRole: false`，官方模型缺少思考能力声明时补齐 off／low／high／max。字段依据 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/) 与[思考及工具回合说明](https://api-docs.deepseek.com/guides/thinking_mode/)；工具回合保留 `reasoning_content`。
+DSH 受管路由使用 `input` 声明输入能力：Flash 为文本和图片，Pro 为文本。Chat Completions 明确设置 `maxTokensField: max_tokens`、`requiresReasoningContentOnAssistantMessages: true`、`thinkingFormat: deepseek`、`supportsStore: false`、`supportsDeveloperRole: false`，官方模型缺少思考能力声明时补齐 off／low／high／max。字段依据 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/) 与[思考及工具回合说明](https://api-docs.deepseek.com/guides/thinking_mode/)；工具回合保留 `reasoning_content`。
 
 保存设置、同步及重启通过现有事务更新全部已接入 profile（desktop、web、headless），先按旧快照检查受管归属，再同时更新配置和快照。DSH 流静默默认 `streamIdleTimeoutMs: 300000`，`retryPolicy.maxRetries: 0`，由网关统一重试。DSH 与 Grok 长期快照只保留受管字段及恢复所需信息，恢复时合并当前文件并保留其他凭据与未知字段；旧快照先完成遗留事务恢复，临时完整恢复日志仍按事务完成流程清除。
 

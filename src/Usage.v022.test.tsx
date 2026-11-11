@@ -122,7 +122,6 @@ function dashboard(): Dashboard {
     },
     providers: [],
     models: [],
-    precision: "millisecond",
     detailSince: 0,
     sources: {},
   };

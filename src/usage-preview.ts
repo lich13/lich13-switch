@@ -686,7 +686,6 @@ export function usagePreview(
       totals: total(selected),
       providers: group((r) => r.attempts.at(-1)!.provider ?? "session"),
       models: group((r) => r.attempts.at(-1)!.pricingModel ?? "unknown"),
-      precision: "millisecond",
       detailSince: 0,
       sources: Object.fromEntries(
         group((r) => r.source).map((g) => [g.id, g.totals.requests]),

@@ -300,8 +300,6 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
         assert_eq!(stats.token_mix.thinking_share_percent, Some(40.0));
         assert!(decimal(&stats.token_mix.cache_savings_usd).unwrap() > rust_decimal::Decimal::ZERO);
         assert!(stats.families[0].reasoning_reported);
-        assert!(stats.top_sessions[0].reasoning_reported);
-        assert_eq!(stats.top_sessions[0].reasoning_tokens, 8);
         assert!(
             !stats
                 .providers
@@ -319,7 +317,6 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
                 .reasoning_reported
         );
         assert_eq!(stats.unpriced_requests, 1);
-        assert_eq!(stats.top_sessions[0].unpriced_requests, 1);
         assert_eq!(
             stats
                 .providers

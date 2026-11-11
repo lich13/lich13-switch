@@ -317,12 +317,10 @@ export type ClaudeUsageQuota = {
 };
 export type Dashboard = {
   dataVersion?: number;
-  reviewCount?: number;
   sourceHistoryIncomplete?: boolean;
   totals: Totals;
   providers: Group[];
   models: Group[];
-  precision: string;
   detailSince: number;
   sources: Record<string, number>;
 };

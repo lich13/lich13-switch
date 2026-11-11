@@ -349,7 +349,6 @@ describe("Usage Antigravity statistics tab", () => {
       },
       providers: [],
       models: [],
-      precision: "millisecond",
       detailSince: 0,
       sources: { antigravity: 15 },
     };

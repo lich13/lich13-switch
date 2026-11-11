@@ -94,8 +94,13 @@ fn unconditional_replacement_accepts_oversized_old_cache_but_keeps_limits_and_ty
     );
     atomic_write_bounded(&path, b"new", None, 3).unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"new");
-    atomic_write_bounded(&path, b"large", None, 3).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), b"large");
+    assert_eq!(
+        atomic_write_bounded(&path, b"large", None, 3)
+            .unwrap_err()
+            .code,
+        code::FILE_SIZE
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"new");
     assert_eq!(
         atomic_write_bounded(temp.path(), b"new", None, 3)
             .unwrap_err()
@@ -112,9 +117,9 @@ fn unconditional_replacement_accepts_oversized_old_cache_but_keeps_limits_and_ty
                 .code,
             code::SYMLINK
         );
-        assert_eq!(fs::read(&path).unwrap(), b"large");
-        assert_eq!(read_user_optional(&link).unwrap().unwrap(), b"large");
-        atomic_write_user(&link, b"updated via symlink", Some(&digest(b"large"))).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(read_user_optional(&link).unwrap().unwrap(), b"new");
+        atomic_write_user(&link, b"updated via symlink", Some(&digest(b"new"))).unwrap();
         assert!(fs::symlink_metadata(&link)
             .unwrap()
             .file_type()

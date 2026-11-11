@@ -143,7 +143,6 @@ beforeEach(() => {
     },
     providers: [],
     models: [],
-    precision: "millisecond",
     detailSince: 0,
     sources: { proxy: 1 },
   };
@@ -194,15 +193,6 @@ beforeEach(() => {
               codexHome: "/fixture/codex",
               cliPath: "",
               theme: "dark",
-            },
-            authSource: {
-              provider: "openai",
-              credentialStore: "file",
-              inlineToken: false,
-              envKey: false,
-              commandAuth: false,
-              requiresOpenaiAuth: true,
-              warning: null,
             },
             error: null,
           };

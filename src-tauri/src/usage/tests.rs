@@ -1008,7 +1008,6 @@ fn thirty_day_compaction_keeps_boundary_details_and_does_not_double_count() {
         assert!(store.detail("fixture-before").is_err());
         assert!(store.detail("fixture-boundary").is_ok());
         let dashboard = store.dashboard(&all_time()).unwrap();
-        assert_eq!(dashboard.precision, "day");
         assert_eq!(dashboard.totals.requests, 4);
         assert_eq!(dashboard.totals.tokens.input, Some(400));
         assert_eq!(
@@ -1927,7 +1926,6 @@ fn maintenance_compacts_history_when_session_auto_sync_is_disabled() {
                 ("claude".into(), 1),
             ])
         );
-        assert_eq!(after.precision, "day");
         let state = service.state();
         assert!(!state.settings.auto_sync);
         assert!(state.settings.recording);

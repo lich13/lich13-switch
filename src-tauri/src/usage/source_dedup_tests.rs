@@ -581,7 +581,6 @@ fn ambiguous_cross_source_candidate_is_reviewable_but_not_effective() {
     let ambiguous = store.detail("fixture-session-ambiguous").unwrap();
     assert_eq!(ambiguous.deduplication, "ambiguous");
     let dashboard = store.dashboard(&all_time()).unwrap();
-    assert_eq!(dashboard.review_count, 1);
     assert_eq!(dashboard.totals.requests, 2);
     assert_eq!(dashboard.totals.tokens.input, Some(200));
     assert_eq!(dashboard.totals.tokens.output, Some(40));

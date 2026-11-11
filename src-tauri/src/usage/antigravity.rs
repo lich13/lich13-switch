@@ -2001,25 +2001,6 @@ pub struct AntigravityFamilyGroup {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AntigravitySessionRow {
-    pub session_id: String,
-    pub title: Option<String>,
-    pub requests: u64,
-    pub primary_model: String,
-    pub family: String,
-    pub total_tokens: u64,
-    pub reasoning_tokens: u64,
-    pub reasoning_reported: bool,
-    pub cache_hit_percent: Option<f64>,
-    pub duration_ms: u64,
-    pub cost_usd: String,
-    pub unpriced_requests: u64,
-    pub started_at: i64,
-    pub last_active_at: i64,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct AntigravityUsageStats {
     pub requests: u64,
     pub sessions: u64,
@@ -2031,7 +2012,6 @@ pub struct AntigravityUsageStats {
     #[serde(default)]
     pub providers: Vec<AntigravityProviderGroup>,
     pub families: Vec<AntigravityFamilyGroup>,
-    pub top_sessions: Vec<AntigravitySessionRow>,
 }
 
 fn classify_model_family(
@@ -2143,23 +2123,6 @@ struct FamilyAcc {
     cost: rust_decimal::Decimal,
 }
 
-#[derive(Default)]
-struct SessionAcc {
-    requests: u64,
-    models: BTreeMap<String, u64>,
-    family_counts: BTreeMap<String, u64>,
-    total_tokens: u64,
-    reasoning_tokens: u64,
-    reasoning_reported: bool,
-    cache_read_eligible: u64,
-    cache_input_eligible: u64,
-    duration_ms: u64,
-    cost: rust_decimal::Decimal,
-    unpriced_requests: u64,
-    started_at: Option<i64>,
-    last_active_at: Option<i64>,
-}
-
 pub(super) struct UsageStatsAggregator {
     filter_start: i64,
     filter_end: i64,
@@ -2183,7 +2146,7 @@ pub(super) struct UsageStatsAggregator {
     cache_savings: rust_decimal::Decimal,
     providers: BTreeMap<String, ProviderAcc>,
     families: BTreeMap<String, FamilyAcc>,
-    sessions: BTreeMap<String, SessionAcc>,
+    sessions: BTreeSet<String>,
 }
 
 impl UsageStatsAggregator {
@@ -2224,7 +2187,7 @@ impl UsageStatsAggregator {
             cache_savings: rust_decimal::Decimal::ZERO,
             providers: BTreeMap::new(),
             families: BTreeMap::new(),
-            sessions: BTreeMap::new(),
+            sessions: BTreeSet::new(),
         }
     }
 
@@ -2374,34 +2337,7 @@ impl UsageStatsAggregator {
         fam.reasoning_reported |= reported_reasoning;
 
         if let Some(sid) = row.session_id.filter(|s| !s.is_empty()) {
-            let sess = self.sessions.entry(sid).or_default();
-            if row.is_final {
-                sess.requests += 1;
-                sess.duration_ms = sess.duration_ms.saturating_add(row.duration_ms);
-                if is_unpriced_final {
-                    sess.unpriced_requests += 1;
-                }
-            }
-            if let Some(m) = resolved_model {
-                *sess.models.entry(m.to_owned()).or_insert(0) += 1;
-            }
-            *sess.family_counts.entry(family.to_owned()).or_insert(0) += 1;
-            sess.total_tokens = sess.total_tokens.saturating_add(tok_total);
-            sess.reasoning_tokens = sess.reasoning_tokens.saturating_add(tok_reasoning);
-            if let Some((er, ei)) = cache_sample {
-                sess.cache_read_eligible = sess.cache_read_eligible.saturating_add(er);
-                sess.cache_input_eligible = sess.cache_input_eligible.saturating_add(ei);
-            }
-            sess.cost += row_cost;
-            sess.reasoning_reported |= reported_reasoning;
-            sess.started_at = Some(
-                sess.started_at
-                    .map_or(row.started_at, |prev| prev.min(row.started_at)),
-            );
-            sess.last_active_at = Some(
-                sess.last_active_at
-                    .map_or(row.time, |prev| prev.max(row.time)),
-            );
+            self.sessions.insert(sid);
         }
     }
 
@@ -2461,49 +2397,6 @@ impl UsageStatsAggregator {
         });
 
         let total_sessions = self.sessions.len() as u64;
-        let mut top_sessions: Vec<AntigravitySessionRow> = self
-            .sessions
-            .into_iter()
-            .map(|(session_id, acc)| {
-                let primary_model = acc
-                    .models
-                    .into_iter()
-                    .max_by(|(ma, ca), (mb, cb)| ca.cmp(cb).then_with(|| mb.cmp(ma)))
-                    .map(|(m, _)| m)
-                    .unwrap_or_else(|| "未识别".into());
-                let family = acc
-                    .family_counts
-                    .into_iter()
-                    .max_by(|(fa, ca), (fb, cb)| ca.cmp(cb).then_with(|| fb.cmp(fa)))
-                    .map(|(f, _)| f)
-                    .unwrap_or_else(|| "other".into())
-                    .to_owned();
-                AntigravitySessionRow {
-                    session_id,
-                    title: None,
-                    requests: acc.requests,
-                    primary_model,
-                    family,
-                    total_tokens: acc.total_tokens,
-                    reasoning_tokens: acc.reasoning_tokens,
-                    reasoning_reported: acc.reasoning_reported,
-                    cache_hit_percent: round_pct(acc.cache_read_eligible, acc.cache_input_eligible),
-                    duration_ms: acc.duration_ms,
-                    cost_usd: fmt_usd(acc.cost),
-                    unpriced_requests: acc.unpriced_requests,
-                    started_at: acc.started_at.unwrap_or(0),
-                    last_active_at: acc.last_active_at.unwrap_or(0),
-                }
-            })
-            .collect();
-        top_sessions.sort_by(|a, b| {
-            b.total_tokens
-                .cmp(&a.total_tokens)
-                .then_with(|| b.requests.cmp(&a.requests))
-                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        });
-        top_sessions.truncate(20);
 
         AntigravityUsageStats {
             requests: self.requests,
@@ -2533,7 +2426,6 @@ impl UsageStatsAggregator {
             quota_error: None,
             providers: provider_rows,
             families: family_rows,
-            top_sessions,
         }
     }
 }

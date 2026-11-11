@@ -50,10 +50,8 @@ pub struct Dashboard {
     pub totals: Totals,
     pub providers: Vec<Group>,
     pub models: Vec<Group>,
-    pub precision: String,
     pub detail_since: i64,
     pub sources: BTreeMap<String, u64>,
-    pub review_count: u64,
     pub source_history_incomplete: bool,
     pub data_version: u64,
 }
@@ -434,19 +432,7 @@ impl Store {
                 Ok(())
             },
         )?;
-        let mut stats = agg.finish();
-        if !stats.top_sessions.is_empty() {
-            let mut stmt = db(self.connection.prepare("SELECT json_extract(body,'$.session_id'),json_extract(body,'$.title') FROM cursors WHERE json_extract(body,'$.title') IS NOT NULL"))?;
-            let titles =
-                db(stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-            for title in titles {
-                let (id, title) = db(title)?;
-                if let Some(row) = stats.top_sessions.iter_mut().find(|r| r.session_id == id) {
-                    row.title = Some(title);
-                }
-            }
-        }
-        Ok(stats)
+        Ok(agg.finish())
     }
     pub fn detail_since(&self) -> Result<i64> {
         let value: Option<String> = db(self

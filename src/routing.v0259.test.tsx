@@ -116,7 +116,6 @@ function dashboard(records: UsageRecord[]): Dashboard {
     },
     providers: [],
     models: [],
-    precision: "millisecond",
     detailSince: 0,
     sources: {},
   };

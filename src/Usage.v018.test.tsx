@@ -143,7 +143,6 @@ beforeEach(() => {
     totals: totals(),
     providers: [],
     models: [],
-    precision: "millisecond",
     detailSince: 0,
     sources: { proxy: 1, codex: 2 },
   };
@@ -448,7 +447,6 @@ describe("v0.19 usage overview", () => {
 
   it("keeps review and historical-source information in sources and request details", async () => {
     const user = userEvent.setup();
-    dashboard.reviewCount = 3;
     dashboard.sourceHistoryIncomplete = true;
     state.reports = {
       codex: {

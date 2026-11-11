@@ -1316,9 +1316,7 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
         assert_eq!(stats.accounts[0].tracks[1].weekly_7d.requests, 1);
 
         assert_eq!(stats.families.len(), 2);
-        assert_eq!(stats.top_sessions.len(), 2);
-        assert!(stats.top_sessions[0].title.is_none());
-        assert!(!stats.top_sessions[0].session_id.contains("session-"));
+        assert_eq!(stats.sessions, 2);
 
         // Verify session_id filter isolates logs cleanly in both v11 and v12.
         let alpha_logs = store
@@ -1374,7 +1372,6 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
             session_id: None,
             provider: None,
             time: at,
-            started_at: at,
             is_final: true,
             model: a.response_model.clone(),
             display_name: None,
@@ -1386,7 +1383,6 @@ fn antigravity_stats_aggregate_token_mix_savings_dual_tracks_and_sessions() {
             cost: a.price.as_ref().map(|p| p.cost.clone()),
             request_unpriced: false,
             provider_unpriced: false,
-            duration_ms: 1000,
         }
     };
     let mut single_off_peak = UsageStatsAggregator::new(&Filter::default(), peak_ms + 1_000);
@@ -2154,9 +2150,10 @@ async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
     );
     drop(store);
     let store = Store::open(dir.path()).unwrap();
-    let stats = store.antigravity_stats(&Filter::default(), now()).unwrap();
-    assert_eq!(stats.top_sessions[0].title.as_deref(), Some("修改后的会话"));
-    assert_eq!(stats.top_sessions[0].session_id, safe_id("z-good"));
+    let saved_cursor: Value =
+        serde_json::from_str(&store.cursor(&cursor_id).unwrap().unwrap()).unwrap();
+    assert_eq!(saved_cursor["title"].as_str(), Some("修改后的会话"));
+    assert_eq!(saved_cursor["session_id"], safe_id("z-good"));
 }
 
 #[test]
@@ -2356,7 +2353,6 @@ fn antigravity_cache_hit_rate_is_computed_without_cache_write_for_new_and_legacy
     assert_eq!(stats.token_mix.cache_read_eligible, 80);
     assert_eq!(stats.token_mix.cache_input_eligible, 380);
     assert_eq!(stats.token_mix.cache_hit_percent, Some(21.1));
-    assert_eq!(stats.top_sessions[0].cache_hit_percent, Some(21.1));
 
     let dash = store
         .dashboard(&Filter {
