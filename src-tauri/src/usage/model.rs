@@ -277,6 +277,10 @@ pub struct Meter {
     pub model: Option<String>,
     pub service_tier: Option<String>,
     pub first_token_ms: Option<u64>,
+    /// Non-empty text, reasoning or tool arguments were observed. Replay and
+    /// ownership boundaries use this; the first-token metric starts earlier.
+    #[serde(skip)]
+    pub(crate) content_seen: bool,
     pub parse_incomplete: bool,
     pub compaction_kind: Option<String>,
     pub requested_speed: Option<String>,
@@ -580,7 +584,40 @@ impl Meter {
                 }),
             })
             && outer.get("error").is_none_or(Value::is_null);
-        if generated && self.first_token_ms.is_none() {
+        if generated {
+            self.content_seen = true;
+        }
+        // The model has started producing output once it opens a content block,
+        // an output item or a tool call, even when omitted reasoning streams no
+        // text. Envelopes, roles, heartbeats and errors still do not count.
+        let started = generated
+            || (outer.get("error").is_none_or(Value::is_null)
+                && (matches!(
+                    event,
+                    "content_block_start"
+                        | "response.output_item.added"
+                        | "response.content_part.added"
+                        | "response.reasoning_summary_part.added"
+                ) || (event == "response.custom_tool_call_input.delta"
+                    && nonempty(&outer["delta"]))
+                    || (event == "content_block_delta"
+                        && (nonempty(&outer["delta"]["signature"])
+                            || outer["delta"]["citation"].is_object()))
+                    || outer["choices"].as_array().is_some_and(|choices| {
+                        choices.iter().any(|choice| {
+                            let delta = &choice["delta"];
+                            delta["reasoning_details"]
+                                .as_array()
+                                .is_some_and(|details| !details.is_empty())
+                                || nonempty(&delta["function_call"]["name"])
+                                || delta["tool_calls"].as_array().is_some_and(|tools| {
+                                    tools.iter().any(|tool| {
+                                        nonempty(&tool["id"]) || nonempty(&tool["function"]["name"])
+                                    })
+                                })
+                        })
+                    })));
+        if started && self.first_token_ms.is_none() {
             self.first_token_ms = Some(elapsed);
         }
     }

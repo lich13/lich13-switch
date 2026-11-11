@@ -516,3 +516,22 @@ fn sse_error_wire_is_exact_at_every_crlf_boundary() {
         }
     }
 }
+
+#[test]
+fn opened_reasoning_block_starts_the_first_token_clock_without_closing_the_replay_window() {
+    let mut protocol = Protocol::new(true);
+    protocol.response(200, true, "identity");
+    protocol.feed(b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\"}}\n\n");
+    assert!(protocol.observation.meter.first_token_ms.is_none());
+    protocol.feed(
+        b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+    );
+    assert!(protocol.observation.meter.first_token_ms.is_some());
+    assert!(!protocol.business_observed());
+    assert!(!protocol.search_content_observed());
+    protocol.feed(
+        b"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"x\"}}\n\n",
+    );
+    assert!(protocol.business_observed());
+    assert!(protocol.search_content_observed());
+}

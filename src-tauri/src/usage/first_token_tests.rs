@@ -68,7 +68,7 @@ fn assert_first_token(totals: &Totals, sum: u64, samples: u64) {
 }
 
 #[test]
-fn meter_waits_through_empty_deltas_roles_heartbeats_errors_and_full_responses() {
+fn meter_waits_through_envelopes_empty_deltas_roles_heartbeats_errors_and_full_responses() {
     let ignored = [
         json!({"type": "response.created"}),
         json!({"type": "response.in_progress"}),
@@ -77,11 +77,9 @@ fn meter_waits_through_empty_deltas_roles_heartbeats_errors_and_full_responses()
         json!({"type": "response.reasoning_text.delta", "delta": ""}),
         json!({"type": "response.reasoning_summary_text.delta", "delta": ""}),
         json!({"type": "response.function_call_arguments.delta", "delta": ""}),
-        json!({"type": "content_block_start", "content_block": {"type": "text", "text": ""}}),
         json!({"type": "content_block_delta", "delta": {"type": "text_delta", "text": ""}}),
         json!({"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": ""}}),
         json!({"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": ""}}),
-        json!({"type": "content_block_delta", "delta": {"type": "signature_delta", "signature": "fixture-signature"}}),
         json!({"type": "content_block_delta", "delta": {}}),
         json!({"type": "ping"}),
         json!({"type": "heartbeat"}),
@@ -91,8 +89,6 @@ fn meter_waits_through_empty_deltas_roles_heartbeats_errors_and_full_responses()
         json!({"choices": [{"delta": {"content": ""}}]}),
         json!({"choices": [{"delta": {"content": null}}]}),
         json!({"choices": [{"delta": {"reasoning_content": "", "reasoning": ""}}]}),
-        json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "fixture_tool", "arguments": ""}}]}}]}),
-        json!({"choices": [{"delta": {"function_call": {"name": "fixture_tool", "arguments": ""}}}]}),
         json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
         json!({"choices": [{"delta": {"content": "fixture"}}], "error": {"message": "fixture.example.invalid"}}),
         json!({"choices": [{"message": {"content": "fixture.example.invalid"}}], "usage": {"completion_tokens": 2}}),
@@ -110,6 +106,59 @@ fn meter_waits_through_empty_deltas_roles_heartbeats_errors_and_full_responses()
         80,
     );
     assert_eq!(meter.first_token_ms, Some(80));
+}
+
+#[test]
+fn meter_counts_output_that_starts_without_streaming_text() {
+    let started = [
+        json!({"type": "content_block_start", "content_block": {"type": "thinking", "thinking": ""}}),
+        json!({"type": "content_block_start", "content_block": {"type": "redacted_thinking", "data": "fixture"}}),
+        json!({"type": "content_block_start", "content_block": {"type": "tool_use", "id": "tool-1", "name": "fixture_tool", "input": {}}}),
+        json!({"type": "content_block_start", "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "delta": {"type": "signature_delta", "signature": "fixture-signature"}}),
+        json!({"type": "response.output_item.added", "item": {"type": "reasoning", "id": "item-1"}}),
+        json!({"type": "response.output_item.added", "item": {"type": "custom_tool_call", "id": "item-2"}}),
+        json!({"type": "response.custom_tool_call_input.delta", "delta": "fixture"}),
+        json!({"type": "response.content_part.added", "part": {"type": "output_text", "text": ""}}),
+        json!({"type": "response.reasoning_summary_part.added", "part": {"type": "summary_text", "text": ""}}),
+        json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "fixture_tool", "arguments": ""}}]}}]}),
+        json!({"choices": [{"delta": {"function_call": {"name": "fixture_tool", "arguments": ""}}}]}),
+        json!({"choices": [{"delta": {"reasoning_details": [{"type": "reasoning.text", "text": ""}]}}]}),
+    ];
+    for event in started {
+        let mut meter = Meter::default();
+        meter.observe(&event, 42);
+        assert_eq!(meter.first_token_ms, Some(42), "{event}");
+        meter.observe(&event, 90);
+        assert_eq!(meter.first_token_ms, Some(42), "replayed {event}");
+    }
+    let mut errored = Meter::default();
+    errored.observe(
+        &json!({"type": "response.output_item.added", "error": {"code": "fixture_error"}}),
+        7,
+    );
+    assert_eq!(errored.first_token_ms, None);
+}
+
+#[test]
+fn content_boundary_still_waits_for_nonempty_output() {
+    let mut meter = Meter::default();
+    meter.observe(
+        &json!({"type": "content_block_start", "content_block": {"type": "thinking", "thinking": ""}}),
+        10,
+    );
+    assert_eq!(meter.first_token_ms, Some(10));
+    assert!(!meter.content_seen);
+    meter.observe(
+        &json!({"type": "content_block_delta", "delta": {"type": "signature_delta", "signature": "fixture-signature"}}),
+        20,
+    );
+    assert!(!meter.content_seen);
+    meter.observe(
+        &json!({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "fixture"}}),
+        30,
+    );
+    assert!(meter.content_seen);
 }
 
 #[test]

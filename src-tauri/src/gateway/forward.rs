@@ -2113,7 +2113,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     }
                 }
             }
-            let before_output = protocol.observation.meter.first_token_ms.is_none()
+            let before_output = !protocol.observation.meter.content_seen
                 && !protocol.observation.search_content
                 && !protocol.observation.opaque_output;
             let initial_model_error = before_output

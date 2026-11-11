@@ -1078,7 +1078,7 @@ impl Protocol {
     pub fn search_content_observed(&self) -> bool {
         self.observation.search_content
             || self.observation.opaque_output
-            || self.observation.meter.first_token_ms.is_some()
+            || self.observation.meter.content_seen
             || self.succeeded()
     }
     pub fn explicit_failure(&self) -> bool {
@@ -1090,7 +1090,7 @@ impl Protocol {
     }
     pub fn business_observed(&self) -> bool {
         !self.stream
-            || self.observation.meter.first_token_ms.is_some()
+            || self.observation.meter.content_seen
             || self.observation.search_content
             || self.observation.opaque_output
             || self.terminal_received
@@ -1251,7 +1251,7 @@ impl Protocol {
                 .terminal_at
                 .get_or_insert_with(crate::usage::model::now);
         }
-        if self.observation.meter.first_token_ms.is_some() || self.succeeded() {
+        if self.observation.meter.content_seen || self.succeeded() {
             self.effective_output();
         }
         if self.observation.meter.first_token_ms.is_some() && self.first_usage_ms.is_none() {
