@@ -21,7 +21,7 @@ pub struct Service {
     lock: Mutex<()>,
 }
 impl Service {
-    pub fn new(_data: &Path) -> Self {
+    pub fn new() -> Self {
         Self {
             lock: Mutex::new(()),
         }

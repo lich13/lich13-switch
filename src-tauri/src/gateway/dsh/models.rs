@@ -177,11 +177,10 @@ pub(super) fn require_chat(protocol: Protocol) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn normalize(model: &mut serde_json::Value) -> bool {
+pub(crate) fn normalize(model: &mut serde_json::Value) {
     let Some(fields) = model.as_object_mut() else {
-        return false;
+        return;
     };
-    let mut changed = false;
     if !fields.contains_key("input") {
         let input = if fields.get("id").and_then(|v| v.as_str()) == Some(FLASH) {
             serde_json::json!(["text", "image"])
@@ -189,7 +188,6 @@ pub(crate) fn normalize(model: &mut serde_json::Value) -> bool {
             serde_json::json!(["text"])
         };
         fields.insert("input".into(), input);
-        changed = true;
     }
     if matches!(fields.get("id").and_then(|v| v.as_str()), Some(FLASH | PRO))
         && !fields.contains_key("reasoningEfforts")
@@ -199,7 +197,5 @@ pub(crate) fn normalize(model: &mut serde_json::Value) -> bool {
             "reasoningEfforts".into(),
             serde_json::json!({"off":"none", "low":"low", "high":"high", "max":"max"}),
         );
-        changed = true;
     }
-    changed
 }

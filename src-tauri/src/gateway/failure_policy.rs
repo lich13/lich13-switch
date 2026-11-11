@@ -150,7 +150,11 @@ fn explicit_type(error: &Value) -> Option<ErrorBasis> {
     // Generic wrappers do not override concrete reasons inside the envelope.
     (!matches!(
         kind,
-        "invalid_request_error" | "invalid_request" | "rate_limit_error"
+        "invalid_request_error"
+            | "invalid_request"
+            | "rate_limit_error"
+            | "api_error"
+            | "server_error"
     ))
     .then(|| code_kind(kind))
     .flatten()
@@ -1110,23 +1114,9 @@ fn global_fault(text: &str) -> bool {
     let lower = text.to_lowercase();
     quota_message(text)
         || hard_message(text)
-        || [
-            "invalid_api_key",
-            "invalid api key",
-            "incorrect api key",
-            "api_key_expired",
-            "api_key_revoked",
-            "api_key_disabled",
-            "authentication_error",
-            "account_suspended",
-            "api key is invalid",
-            "api key has expired",
-            "密钥无效",
-            "密钥已过期",
-            "密钥已撤销",
-        ]
-        .iter()
-        .any(|s| lower.contains(s))
+        || super::failure_rules::MSG_6
+            .iter()
+            .any(|s| lower.contains(s))
 }
 
 fn vague(basis: ErrorBasis) -> bool {

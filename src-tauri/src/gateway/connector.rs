@@ -173,7 +173,7 @@ impl Connector {
             && (host.eq_ignore_ascii_case("localhost")
                 || host
                     .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback()))
+                    .is_ok_and(super::model::is_local_ip))
         {
             return Err(ConnectError::Loop);
         }
@@ -192,7 +192,7 @@ impl Connector {
     ) -> Result<Transport, ConnectError> {
         if addresses
             .iter()
-            .any(|a| self.is_gateway_port(a.port()) && a.ip().is_loopback())
+            .any(|a| self.is_gateway_port(a.port()) && super::model::is_local_ip(a.ip()))
         {
             return Err(ConnectError::Loop);
         }

@@ -905,163 +905,138 @@ impl Scheduler {
                     .intake
                     .as_ref()
                     .is_some_and(|(intake, _)| *intake == super::compaction::Intake::NewThread);
-                let mut retry_selection = true;
-                'selection: loop {
-                    for (position, route) in eligible.iter().enumerate() {
-                        let id = &route.provider.id;
+                for route in &eligible {
+                    let id = &route.provider.id;
 
-                        let health = route.health_for(requirement);
-                        if !health.available {
-                            if first_turn && route.provider.take_new_threads {
-                                intake_skip = Some(if route.provider_circuit.health().available {
-                                    crate::usage::model::RoutingDecision::NewThreadModelCooling
-                                } else {
-                                    crate::usage::model::RoutingDecision::NewThreadProviderUnavailable
-                                });
-                            }
-                            retry_in = retry_in.min(health.retry_in.max(1));
-                            continue;
+                    let health = route.health_for(requirement);
+                    if !health.available {
+                        if first_turn && route.provider.take_new_threads {
+                            intake_skip = Some(if route.provider_circuit.health().available {
+                                crate::usage::model::RoutingDecision::NewThreadModelCooling
+                            } else {
+                                crate::usage::model::RoutingDecision::NewThreadProviderUnavailable
+                            });
                         }
-                        any_ready = true;
-                        if !Self::available(&s, id, request, manual) {
-                            if first_turn && route.provider.take_new_threads {
-                                intake_skip = Some(
-                                    crate::usage::model::RoutingDecision::NewThreadCapacityFull,
-                                );
-                            }
-                            capacity_blocked |= budget
-                                .handoff_owner
-                                .as_ref()
-                                .is_some_and(|owner| owner != id);
-                            continue;
+                        retry_in = retry_in.min(health.retry_in.max(1));
+                        continue;
+                    }
+                    any_ready = true;
+                    if !Self::available(&s, id, request, manual) {
+                        if first_turn && route.provider.take_new_threads {
+                            intake_skip =
+                                Some(crate::usage::model::RoutingDecision::NewThreadCapacityFull);
                         }
-                        // A waiter pinned to another provider never blocks this provider.
-                        if s.waiting
-                            .iter()
-                            .take_while(|(id, _)| Some(*id) != ticket)
-                            .any(|(_, ids)| ids.contains(id))
-                        {
-                            // A FIFO follower also waits for this provider's RPM
-                            // budget. It must not time out before the head waiter
-                            // gets a chance to send when the minute rolls forward.
-                            s.rpm.prune();
-                            let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
-                            let pending = s.rpm_pending.get(id).copied().unwrap_or_default();
-                            if let Some((delay, _)) = s.rpm.gate(id, limit, pending) {
-                                let retry = delay.as_millis().div_ceil(1000).max(1) as u64;
-                                rate_retry = Some(rate_retry.unwrap_or(0).max(retry));
-                            }
-                            if first_turn && route.provider.take_new_threads {
-                                intake_skip = Some(
-                                    crate::usage::model::RoutingDecision::NewThreadQueueWaiting,
-                                );
-                            }
-                            continue;
-                        }
-                        // Capacity cannot change under this lock, but a higher-priority
-                        // circuit may recover between its health read and this reservation.
-                        if retry_selection
-                            && eligible[..position].iter().any(|earlier| {
-                                let id = &earlier.provider.id;
-                                Self::available(&s, id, request, manual)
-                                    && earlier.health_for(requirement).available
-                                    && !s
-                                        .waiting
-                                        .iter()
-                                        .take_while(|(n, _)| Some(*n) != ticket)
-                                        .any(|(_, ids)| ids.contains(id))
-                            })
-                        {
-                            retry_selection = false;
-                            continue 'selection;
-                        }
-                        let rpm_limit = s.rpm_limits.get(id).copied().unwrap_or_default();
+                        capacity_blocked |= budget
+                            .handoff_owner
+                            .as_ref()
+                            .is_some_and(|owner| owner != id);
+                        continue;
+                    }
+                    // A waiter pinned to another provider never blocks this provider.
+                    if s.waiting
+                        .iter()
+                        .take_while(|(id, _)| Some(*id) != ticket)
+                        .any(|(_, ids)| ids.contains(id))
+                    {
+                        // A FIFO follower also waits for this provider's RPM
+                        // budget. It must not time out before the head waiter
+                        // gets a chance to send when the minute rolls forward.
                         s.rpm.prune();
-                        if let Some((delay, _)) = s.rpm.gate(
+                        let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
+                        let pending = s.rpm_pending.get(id).copied().unwrap_or_default();
+                        if let Some((delay, _)) = s.rpm.gate(id, limit, pending) {
+                            let retry = delay.as_millis().div_ceil(1000).max(1) as u64;
+                            rate_retry = Some(rate_retry.unwrap_or(0).max(retry));
+                        }
+                        if first_turn && route.provider.take_new_threads {
+                            intake_skip =
+                                Some(crate::usage::model::RoutingDecision::NewThreadQueueWaiting);
+                        }
+                        continue;
+                    }
+                    let rpm_limit = s.rpm_limits.get(id).copied().unwrap_or_default();
+                    s.rpm.prune();
+                    if let Some((delay, _)) = s.rpm.gate(
+                        id,
+                        rpm_limit,
+                        s.rpm_pending.get(id).copied().unwrap_or_default(),
+                    ) {
+                        rate_retry = Some(delay.as_millis().div_ceil(1000).max(1) as u64);
+                        break;
+                    }
+                    if budget
+                        .reconnect_from
+                        .as_ref()
+                        .is_some_and(|current| current != id)
+                    {
+                        // Re-enter connection selection before reserving a
+                        // slot or RPM; the next admission rechecks all gates.
+                        break 'admission Err(Rejected::Reconnect);
+                    }
+                    if let Some(permits) = Permits::acquire_for(route, requirement) {
+                        if budget.traffic.as_ref().is_some_and(|t| !t.dispatch()) {
+                            drop(permits);
+                            continue 'admission;
+                        }
+                        match self.reserve_rpm(
+                            &mut s,
                             id,
                             rpm_limit,
-                            s.rpm_pending.get(id).copied().unwrap_or_default(),
+                            !manual && !budget.fixed_provider,
                         ) {
-                            rate_retry = Some(delay.as_millis().div_ceil(1000).max(1) as u64);
-                            break 'selection;
-                        }
-                        if budget
-                            .reconnect_from
-                            .as_ref()
-                            .is_some_and(|current| current != id)
-                        {
-                            // Re-enter connection selection before reserving a
-                            // slot or RPM; the next admission rechecks all gates.
-                            break 'admission Err(Rejected::Reconnect);
-                        }
-                        if let Some(permits) = Permits::acquire_for(route, requirement) {
-                            if budget.traffic.as_ref().is_some_and(|t| !t.dispatch()) {
+                            Ok(rpm) => {
+                                let retain = budget
+                                    .handoff_owner
+                                    .as_ref()
+                                    .is_none_or(|owner| owner == id);
+                                if let Some(request) = request {
+                                    let retain = retain
+                                        && budget.thread.as_ref().is_none_or(|t| t.retains(id));
+                                    if !s.retention.admit(request, id, retain) {
+                                        // RpmReservation locks on drop; release it outside the lock.
+                                        drop(s);
+                                        drop(rpm);
+                                        drop(permits);
+                                        return Err(Rejected::Full);
+                                    }
+                                }
+                                *s.active.entry(id.clone()).or_default() += 1;
+                                accepted = Some(Admission {
+                                    handoff_wait: (capacity_blocked
+                                        && budget.handoff_owner.as_deref() == Some(id))
+                                    .then_some(
+                                        crate::usage::model::RoutingDecision::ReceiverCapacityFull,
+                                    )
+                                    .or(intake_skip),
+                                    route: (**route).clone(),
+                                    permits,
+                                    rpm: Some(rpm),
+                                    reset_generation: s.resets.get(id).copied().unwrap_or(0),
+                                    slot: Slot {
+                                        scheduler: self.clone(),
+                                        id: id.clone(),
+                                        thread: budget.thread.clone(),
+                                        success: false,
+                                    },
+                                });
+                                break;
+                            }
+                            Err(Rejected::RateLimited(retry)) => {
+                                if let Some(t) = &budget.traffic {
+                                    t.waiting();
+                                }
+                                rate_retry = Some(retry);
                                 drop(permits);
-                                continue 'admission;
+                                break;
                             }
-                            match self.reserve_rpm(
-                                &mut s,
-                                id,
-                                rpm_limit,
-                                !manual && !budget.fixed_provider,
-                            ) {
-                                Ok(rpm) => {
-                                    let retain = budget
-                                        .handoff_owner
-                                        .as_ref()
-                                        .is_none_or(|owner| owner == id);
-                                    if let Some(request) = request {
-                                        let retain = retain
-                                            && budget.thread.as_ref().is_none_or(|t| t.retains(id));
-                                        if !s.retention.admit(request, id, retain) {
-                                            // RpmReservation locks on drop; release it outside the lock.
-                                            drop(s);
-                                            drop(rpm);
-                                            drop(permits);
-                                            return Err(Rejected::Full);
-                                        }
-                                    }
-                                    *s.active.entry(id.clone()).or_default() += 1;
-                                    accepted = Some(Admission {
-                                        handoff_wait: (capacity_blocked && budget.handoff_owner.as_deref() == Some(id)).then_some(crate::usage::model::RoutingDecision::ReceiverCapacityFull).or(intake_skip),
-                                        route: (**route).clone(),
-                                        permits,
-                                        rpm: Some(rpm),
-                                        reset_generation: s.resets.get(id).copied().unwrap_or(0),
-                                        slot: Slot {
-                                            scheduler: self.clone(),
-                                            id: id.clone(),
-                                            thread: budget.thread.clone(),
-                                            success: false,
-                                        },
-                                    });
-                                    break;
+                            Err(_) => {
+                                if let Some(t) = &budget.traffic {
+                                    t.waiting();
                                 }
-                                Err(Rejected::RateLimited(retry)) => {
-                                    if let Some(t) = &budget.traffic {
-                                        t.waiting();
-                                    }
-                                    rate_retry = Some(retry);
-                                    drop(permits);
-                                    break 'selection;
-                                }
-                                Err(_) => {
-                                    if let Some(t) = &budget.traffic {
-                                        t.waiting();
-                                    }
-                                    drop(permits);
-                                }
+                                drop(permits);
                             }
-                        }
-
-                        if retry_selection {
-                            retry_selection = false;
-                            any_ready = false;
-                            retry_in = u64::MAX;
-                            continue 'selection;
                         }
                     }
-                    break;
                 }
                 cooling = (!any_ready).then_some(if retry_in == u64::MAX { 1 } else { retry_in });
                 if let Some(admission) = accepted {

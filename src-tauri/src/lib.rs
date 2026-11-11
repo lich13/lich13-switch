@@ -1370,7 +1370,7 @@ fn preview_grok_import(
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::GrokImportPreview> {
     r.grok
-        .preview_grok_import(&r.home(gateway::ClientId::Grok)?, selected.as_deref(), true)
+        .preview_grok_import(&r.home(gateway::ClientId::Grok)?, selected.as_deref())
 }
 #[tauri::command]
 fn cancel_grok_import(token: Option<String>, r: tauri::State<'_, Arc<Runtime>>) {
@@ -1630,7 +1630,7 @@ pub fn run() {
             let claude = gateway.companion(data.join("claude"))?;
             let grok = gateway.grok_companion(data.join("grok"))?;
             let dsh = gateway.dsh_companion(data.join("dsh"))?;
-            let startup = startup::Service::new(&data);
+            let startup = startup::Service::new();
             let start_silently = smoke.is_none() && startup::login_source(&args);
             app.manage(quick::Panel::new(&data)?);
             let power = power::Service::new();

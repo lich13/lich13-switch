@@ -364,6 +364,13 @@ pub fn name(value: &str) -> Result<String> {
         Ok(value.to_owned())
     }
 }
+pub(super) fn is_local_ip(ip: std::net::IpAddr) -> bool {
+    let ip = match ip {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
+        _ => ip,
+    };
+    ip.is_loopback() || ip.is_unspecified()
+}
 pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
     let mut u = url::Url::parse(value.trim())
         .map_err(|_| AppError::new(code::URL, "请输入完整的 HTTP 或 HTTPS base_url"))?;
@@ -381,9 +388,7 @@ pub fn base_url(value: &str, port: u16) -> Result<url::Url> {
     }
     let host = u.host_str().unwrap_or_default().trim_matches(['[', ']']);
     if (host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback()))
+        || host.parse::<std::net::IpAddr>().is_ok_and(is_local_ip))
         && u.port_or_known_default() == Some(port)
     {
         return Err(AppError::new(code::LOOP, "上游不能指向本网关"));

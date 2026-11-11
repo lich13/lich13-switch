@@ -90,14 +90,11 @@ fn valid_rule_keyword(value: &str) -> bool {
             || s.split(':')
                 .next()
                 .is_some_and(|v| v.parse::<std::net::IpAddr>().is_ok())
-            || s.rsplit_once('.').is_some_and(|(host, tld)| {
-                !host.is_empty()
-                    && (2..=24).contains(&tld.len())
-                    && tld.chars().all(|c| c.is_ascii_alphabetic())
-            })
-            || [".com", ".net", ".org", ".xyz", ".invalid", ".cn", ".io"]
-                .iter()
-                .any(|v| lower.contains(v))
+            || [
+                ".com", ".net", ".org", ".xyz", ".invalid", ".cn", ".io", ".dev", ".app", ".ai",
+            ]
+            .iter()
+            .any(|v| lower.contains(v))
             || s.as_bytes()
                 .windows(24)
                 .any(|w| w.iter().all(u8::is_ascii_hexdigit))
@@ -222,7 +219,7 @@ pub(super) const CODES: &[Code] = &[
     },
     Code {
         value: "api_key_quota_exhausted",
-        category: QuotaExhausted,
+        category: Billing,
         platform: "通用兼容",
     },
     Code {
@@ -533,11 +530,14 @@ pub(super) const MSG_6: &[&str] = &[
     "incorrect api key",
     "api_key_expired",
     "api_key_revoked",
+    "api_key_disabled",
     "authentication_error",
     "account_disabled",
     "account_deactivated",
     "account_suspended",
     "account has been disabled",
+    "api key is invalid",
+    "api key has expired",
     "密钥无效",
     "密钥已过期",
     "密钥已撤销",

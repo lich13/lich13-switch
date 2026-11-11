@@ -66,7 +66,7 @@ it("shows only long waits and cancels the selected request on its platform", asy
       startedAt: start - seconds,
       elapsedSeconds: seconds,
       remainingSeconds: 300 - seconds,
-      phase: "headers",
+      phase: i === 1 ? "ws_wait" : "headers",
     })),
   };
   mock.command.mockResolvedValueOnce(false);
@@ -81,6 +81,7 @@ it("shows only long waits and cancels the selected request on its platform", asy
     />,
   );
   expect(screen.queryByText("model-0")).not.toBeInTheDocument();
+  expect(screen.getByText("等待重连")).toBeInTheDocument();
   const row = screen
     .getByText("model-2")
     .closest(".quick-wait-row") as HTMLElement;

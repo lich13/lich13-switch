@@ -229,7 +229,9 @@ impl Fixture {
             config.as_bytes()
         );
         if import_native_profile {
-            let preview = gateway.preview_grok_import(&home, None, false).unwrap();
+            let preview = gateway
+                .preview_grok_import_with_env(&home, None, false, &|_| None)
+                .unwrap();
             let token = preview
                 .token
                 .as_deref()

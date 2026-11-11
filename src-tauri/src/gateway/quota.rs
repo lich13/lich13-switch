@@ -519,7 +519,7 @@ fn subscriptions(value: &Value, unit: &str) -> Vec<Subscription> {
                     ));
                 }
             }
-            if let Some(total) = n(sub, "amount_total") {
+            if let Some(total) = n(sub, "amount_total").filter(|v| *v >= 0.) {
                 let used = n(sub, "amount_used");
                 plans.push(plan(
                     "套餐额度",
@@ -757,7 +757,7 @@ fn convert(d: &mut Data, status: &Value) {
     let (unit, rate) = match kind {
         Some("USD") => ("USD".to_string(), Some(1.)),
         Some("CNY") => ("CNY".to_string(), n(s, "usd_exchange_rate")),
-        Some(code::CUSTOM) => (
+        Some("CUSTOM") => (
             string(s, "custom_currency_symbol").unwrap_or_else(|| "自定义单位".into()),
             n(s, "custom_currency_exchange_rate"),
         ),

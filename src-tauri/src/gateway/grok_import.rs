@@ -412,15 +412,8 @@ pub fn recover(data: &Path) -> Result<()> {
     Ok(())
 }
 impl Gateway {
-    pub fn preview_grok_import(
-        &self,
-        home: &Path,
-        selected: Option<&str>,
-        use_environment: bool,
-    ) -> Result<Preview> {
-        self.preview_grok_import_with_env(home, selected, use_environment, &|name| {
-            std::env::var(name).ok()
-        })
+    pub fn preview_grok_import(&self, home: &Path, selected: Option<&str>) -> Result<Preview> {
+        self.preview_grok_import_with_env(home, selected, true, &|name| std::env::var(name).ok())
     }
     pub(super) fn preview_grok_import_with_env(
         &self,

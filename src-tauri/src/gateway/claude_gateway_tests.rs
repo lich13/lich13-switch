@@ -604,7 +604,14 @@ async fn peer_gateway_urls_and_port_changes_that_create_cross_client_loops_are_r
     ] {
         let revision = gateway.view().revision;
         let before = file_hash(gateway.0.data.join("gateway.json"));
-        for host in ["127.0.0.1", "localhost", "[::1]"] {
+        for host in [
+            "127.0.0.1",
+            "localhost",
+            "[::1]",
+            "0.0.0.0",
+            "[::]",
+            "[::ffff:127.0.0.1]",
+        ] {
             let error = gateway
                 .edit(
                     Edit::SaveProvider {

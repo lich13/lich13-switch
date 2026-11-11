@@ -468,6 +468,18 @@ fn custom_rules_fill_only_ambiguous_evidence_and_code_precedes_keyword() {
             .custom_rule_id,
         None
     );
+    let wrapped = json!({"error":{"type":"api_error","message":"fixture window"}});
+    assert_eq!(
+        policy::details_with_rules(&wrapped, &[custom(Keyword, "fixture window", B::Billing)])
+            .error_basis,
+        Some(B::Billing)
+    );
+    assert!(custom(Code, "rate_limit.exceeded", B::Rpm)
+        .validate()
+        .is_ok());
+    assert!(custom(Keyword, "api.example.invalid", B::Rpm)
+        .validate()
+        .is_err());
 }
 #[test]
 fn custom_conflicts_keep_original_and_streams_share_the_snapshot() {
