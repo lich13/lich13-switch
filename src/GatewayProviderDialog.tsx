@@ -203,7 +203,21 @@ export default function GatewayDialog({
             </label>
           )}
           <label>
-            {clientId === "claude" ? "ANTHROPIC_BASE_URL" : "base_url"}
+            <span className="field-label-row">
+              <span>{clientId === "claude" ? "ANTHROPIC_BASE_URL" : "base_url"}</span>
+              {clientId === "dsh" && !dialog.item && (
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => {
+                    if (!name.trim()) setName("DeepSeek Official");
+                    setBaseUrl("https://api.deepseek.com/v1");
+                  }}
+                >
+                  填入 DeepSeek 官方地址
+                </button>
+              )}
+            </span>
             <input
               required
               type="url"
@@ -213,7 +227,9 @@ export default function GatewayDialog({
               placeholder={
                 clientId === "claude"
                   ? "https://api.example.invalid"
-                  : "https://api.example.com/v1"
+                  : clientId === "dsh"
+                    ? "https://api.deepseek.com/v1"
+                    : "https://api.example.com/v1"
               }
             />
           </label>

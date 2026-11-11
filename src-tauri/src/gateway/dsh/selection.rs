@@ -175,70 +175,78 @@ pub(super) fn read_provider(
         Current::new(Kind::Official)
     } else if let Some(route) = route {
         let base = string(route.get("baseURL"));
-        if base.as_ref().is_some_and(|b| {
+        let official_host = base.as_ref().is_some_and(|b| {
             url::Url::parse(b).is_ok_and(|u| u.host_str() == Some("api.deepseek.com"))
-        }) {
-            Current::new(Kind::Official)
-        } else {
-            let credential = credentials(input.credentials.before.as_deref())?;
-            let record = credential
-                .get_mapping("records")
-                .and_then(|r| r.get_mapping(format!("llm-pi-ai/{provider}")));
-            let mut token = string(route.get("apiKey"));
-            if token.is_some() {
-                credential_source = Some("provider apiKey".into());
-            }
-            if token.is_none() {
-                token = record
-                    .as_ref()
-                    .filter(|r| string(r.get("kind")).as_deref() == Some("api-key"))
-                    .and_then(|r| string(r.get("key")));
-                if token.is_some() {
-                    credential_source = Some("凭据库 records".into());
-                }
-            }
-            if token.is_none() {
-                if let Some(key) = string(route.get("apiKeyEnv")) {
-                    token = credential
-                        .get_mapping("refs")
-                        .and_then(|r| string(r.get(&key)));
-                    if token.is_some() {
-                        credential_source = Some("凭据库 refs".into());
-                    }
-                    // A launch/project environment is not observable in another process.
-                    // Preserve a known mismatch; warn when a launch/project environment
-                    // could differ from the visible fallback.
-                    if token.is_none() {
-                        let fallback = resolve(&key).or_else(|| {
-                            super::super::grok_import::environment(
-                                input.environment.before.as_deref().unwrap_or(""),
-                            )
-                            .ok()
-                            .and_then(|v| v.get(&key).cloned())
-                        });
-                        if fallback.is_some() {
-                            warning.push_str(
-                                "；环境凭据匹配仅适用于当前可见环境，启动环境或项目可能覆盖",
-                            );
-                        }
-                        token = fallback;
-                        if token.is_some() {
-                            credential_source = Some("环境变量".into());
-                        }
-                    }
-                }
-            }
-            if record
+        });
+        let credential = credentials(input.credentials.before.as_deref())?;
+        let record = credential
+            .get_mapping("records")
+            .and_then(|r| r.get_mapping(format!("llm-pi-ai/{provider}")));
+        let mut token = string(route.get("apiKey"));
+        if token.is_some() {
+            credential_source = Some("provider apiKey".into());
+        }
+        if token.is_none() {
+            token = record
                 .as_ref()
-                .is_some_and(|r| string(r.get("kind")).as_deref() == Some("grant"))
-            {
-                Current::unknown("DSH 选择了授权记录，无法静态确定访问凭据")
+                .filter(|r| string(r.get("kind")).as_deref() == Some("api-key"))
+                .and_then(|r| string(r.get("key")));
+            if token.is_some() {
+                credential_source = Some("凭据库 records".into());
+            }
+        }
+        if token.is_none() {
+            if let Some(key) = string(route.get("apiKeyEnv")) {
+                token = credential
+                    .get_mapping("refs")
+                    .and_then(|r| string(r.get(&key)));
+                if token.is_some() {
+                    credential_source = Some("凭据库 refs".into());
+                }
+                // A launch/project environment is not observable in another process.
+                // Preserve a known mismatch; warn when a launch/project environment
+                // could differ from the visible fallback.
+                if token.is_none() {
+                    let fallback = resolve(&key).or_else(|| {
+                        super::super::grok_import::environment(
+                            input.environment.before.as_deref().unwrap_or(""),
+                        )
+                        .ok()
+                        .and_then(|v| v.get(&key).cloned())
+                    });
+                    if fallback.is_some() {
+                        warning
+                            .push_str("；环境凭据匹配仅适用于当前可见环境，启动环境或项目可能覆盖");
+                    }
+                    token = fallback;
+                    if token.is_some() {
+                        credential_source = Some("环境变量".into());
+                    }
+                }
+            }
+        }
+        if record
+            .as_ref()
+            .is_some_and(|r| string(r.get("kind")).as_deref() == Some("grant"))
+        {
+            if official_host || provider == "deepseek-official" {
+                Current::new(Kind::Official)
             } else {
-                selected_pair = Pair {
-                    base_url: base,
-                    token,
-                };
-                current::pair(ClientId::Dsh, &selected_pair, store, ports)
+                Current::unknown("DSH 选择了授权记录，无法静态确定访问凭据")
+            }
+        } else {
+            selected_pair = Pair {
+                base_url: base,
+                token,
+            };
+            let matched = current::pair(ClientId::Dsh, &selected_pair, store, ports);
+            if official_host
+                && selected_pair.token.is_none()
+                && matches!(matched.state, Kind::Unmatched { .. })
+            {
+                Current::new(Kind::Official)
+            } else {
+                matched
             }
         }
     } else {

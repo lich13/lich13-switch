@@ -24,6 +24,22 @@ fn account_token(home: &Path) -> Result<String> {
         .ok_or_else(|| error("请先在 DSH 登录官方账号，再刷新模型"))
 }
 
+fn official_token(home: &Path, store: &super::super::model::Store) -> Result<String> {
+    if let Ok(token) = account_token(home) {
+        return Ok(token);
+    }
+    store
+        .providers
+        .iter()
+        .find(|p| {
+            !p.token.trim().is_empty()
+                && url::Url::parse(&p.base_url)
+                    .is_ok_and(|u| u.host_str() == Some("api.deepseek.com"))
+        })
+        .map(|p| p.token.clone())
+        .ok_or_else(|| error("请先在 DSH 登录官方账号，再刷新模型"))
+}
+
 fn installed_version(home: &Path) -> Option<semver::Version> {
     let mut roots = vec![home.to_owned(), home.join("runtime")];
     if let Some(paths) = std::env::var_os("PATH") {
@@ -182,6 +198,7 @@ async fn request_catalog(
     let mut response = client
         .get(url)
         .header("x-dsh-auth-token", token)
+        .bearer_auth(token)
         .header("Accept", "application/json")
         .header(
             "User-Agent",
@@ -227,7 +244,7 @@ impl Gateway {
         }
         let mut failure = None;
         if refresh {
-            let token = account_token(home);
+            let token = official_token(home, &self.0.inner.lock().unwrap().store);
             let result = match &token {
                 Ok(token) => fetch_catalog(home, token).await,
                 Err(e) => Err(e.clone()),
@@ -255,7 +272,8 @@ impl Gateway {
         let _lifecycle = self.0.lifecycle.lock().await;
         let _mutation = self.0.registry.mutation.lock().unwrap();
         self.recover_dsh_state()?;
-        if account_token(home).as_deref().ok() != Some(token) {
+        let current_token = official_token(home, &self.0.inner.lock().unwrap().store);
+        if current_token.as_deref().ok() != Some(token) {
             return Err(error("DSH 官方登录已变化，请重新刷新模型"));
         }
         let mut state = self.0.inner.lock().unwrap();

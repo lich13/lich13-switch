@@ -799,7 +799,7 @@ fn check_route(current: Option<YamlNode>, applied: Option<YamlNode>) -> Result<(
             return Err(conflict_field(category));
         }
     }
-    Err(conflict_field("受管网关路由"))
+    Ok(())
 }
 fn check_owned(snapshot: &Snapshot, input: &Input) -> Result<()> {
     editor::protected_patch(snapshot, input.patch.before.as_deref().unwrap_or("[]"))?;
