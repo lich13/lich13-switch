@@ -255,14 +255,10 @@ async fn fetch_probe(input: &Query) -> std::result::Result<QuotaCheck, Failure> 
     Ok(unknown())
 }
 
-// Bounded decimal comparison, without binary floats or scale truncation. Values
-// outside these generous limits remain unknown, rather than becoming zero.
+// Exact decimal comparison without binary floats. Values the decimal type
+// cannot represent stay unknown rather than becoming zero.
 #[derive(Debug)]
-struct Number {
-    negative: bool,
-    digits: Vec<u8>,
-    exponent: i32,
-}
+struct Number(rust_decimal::Decimal);
 impl Number {
     fn parse(value: &Value) -> Option<Self> {
         let text = match value {
@@ -270,66 +266,20 @@ impl Number {
             Value::String(s) => s.clone(),
             _ => return None,
         };
-        if text.len() > 256 || text.trim() != text {
+        if text.trim() != text {
             return None;
         }
         serde_json::from_str::<serde_json::Number>(&text).ok()?;
-        let negative = text.starts_with('-');
-        let text = text.strip_prefix('-').unwrap_or(&text);
-        let (mantissa, exp) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
-        let exp: i32 = exp.parse().ok()?;
-        if exp.unsigned_abs() > 4096 {
-            return None;
-        }
-        let scale = mantissa.split_once('.').map_or(0, |(_, s)| s.len() as i32);
-        let digits: Vec<_> = mantissa
-            .bytes()
-            .filter(|b| *b != b'.')
-            .skip_while(|b| *b == b'0')
-            .collect();
-        Some(Self {
-            negative: negative && !digits.is_empty(),
-            digits,
-            exponent: exp - scale,
-        })
+        text.parse()
+            .or_else(|_| rust_decimal::Decimal::from_scientific(&text))
+            .ok()
+            .map(Self)
     }
     fn sign(&self) -> Cmp {
-        if self.digits.is_empty() {
-            Cmp::Equal
-        } else if self.negative {
-            Cmp::Less
-        } else {
-            Cmp::Greater
-        }
+        self.0.cmp(&rust_decimal::Decimal::ZERO)
     }
     fn cmp(&self, other: &Self) -> Cmp {
-        let sign = self.sign().cmp(&other.sign());
-        if sign != Cmp::Equal {
-            return sign;
-        }
-        if self.digits.is_empty() {
-            return Cmp::Equal;
-        }
-        let order = (self.digits.len() as i32 + self.exponent)
-            .cmp(&(other.digits.len() as i32 + other.exponent));
-        let order = if order == Cmp::Equal {
-            (0..self.digits.len().max(other.digits.len()))
-                .map(|i| {
-                    self.digits
-                        .get(i)
-                        .unwrap_or(&b'0')
-                        .cmp(other.digits.get(i).unwrap_or(&b'0'))
-                })
-                .find(|v| *v != Cmp::Equal)
-                .unwrap_or(Cmp::Equal)
-        } else {
-            order
-        };
-        if self.negative {
-            order.reverse()
-        } else {
-            order
-        }
+        self.0.cmp(&other.0)
     }
 }
 fn remaining(value: &Value) -> Option<QuotaVerdict> {

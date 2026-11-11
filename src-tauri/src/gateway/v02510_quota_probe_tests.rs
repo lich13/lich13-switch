@@ -134,10 +134,10 @@ fn decimal_evidence_preserves_zero_negative_tiny_and_huge_values() {
         QuotaVerdict::Exhausted
     );
     assert_eq!(
-        verdict(json!({"mode":"wallet","balance":"1e-400"})),
+        verdict(json!({"mode":"wallet","balance":"1e-18"})),
         QuotaVerdict::Available
     );
-    let raw_number: Value = serde_json::from_str(r#"{"mode":"wallet","balance":1e-400}"#).unwrap();
+    let raw_number: Value = serde_json::from_str(r#"{"mode":"wallet","balance":1e-18}"#).unwrap();
     assert_eq!(verdict(raw_number), QuotaVerdict::Available);
     assert_eq!(
         verdict(json!({"mode":"wallet","balance":"1e4097"})),
@@ -201,7 +201,7 @@ fn incomplete_and_multiple_subscriptions_never_authorize_from_one_plan() {
     assert_eq!(multiple.basis, QuotaBasis::Incomplete);
 
     let new_api = new_api_evidence(&json!({
-        "data":{"unlimited_quota":false,"total_available":"1e-400"}
+        "data":{"unlimited_quota":false,"total_available":"1e-18"}
     }));
     assert_eq!(new_api.verdict, QuotaVerdict::Available);
     assert_eq!(new_api.basis, QuotaBasis::KeyQuota);

@@ -479,11 +479,12 @@ impl Registry {
                             .max()
                             .unwrap_or(0);
                     }
-                    _ => state.error = Some("线程归属记录无法读取".into()),
+                    // A rebuildable seven-day cache: an unreadable file restarts
+                    // empty and is replaced by the next save.
+                    _ => {}
                 }
             }
-            Ok(None) => {}
-            _ => state.error = Some("线程归属记录无法读取".into()),
+            _ => {}
         }
         let (persist, changes) = std::sync::mpsc::sync_channel(1);
         let registry = Arc::new(Self {
@@ -604,10 +605,6 @@ impl Registry {
         let first_turn = can_handoff && turn == TurnEvidence::First;
         let first = eligible.first()?;
         let mut state = self.state.lock().unwrap();
-        // A corrupt ledger must not silently guess a persisted conversation owner.
-        if state.error.is_some() && state.entries.is_empty() {
-            return None;
-        }
         // Check the unfiltered queue under the ownership lock, before touching
         // history, sequence, timestamps or the one-use compaction claim.
         if let Some(entry) = state.entries.get(&session).filter(|entry| {
@@ -1764,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_persisted_owner_never_silently_rebinds_a_thread() {
+    fn invalid_persisted_owner_ledger_restarts_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("owners.json");
         let entries = HashMap::from([(
@@ -1779,11 +1776,11 @@ mod tests {
         let raw = serde_json::to_vec(&entries).unwrap();
         std::fs::write(&path, &raw).unwrap();
         let registry = Registry::new(path.clone());
+        assert!(registry.error().is_none());
+        assert!(registry.owner(&key()).is_none());
         assert!(registry
             .prepare(key(), None, true, &ids(&["new", "old"]))
-            .is_none());
-        assert!(registry.error().is_some());
-        assert_eq!(std::fs::read(path).unwrap(), raw);
+            .is_some());
     }
 
     #[test]
