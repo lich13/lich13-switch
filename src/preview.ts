@@ -510,7 +510,6 @@ export async function run(
       const filter = (args.filter ?? {}) as Record<string, unknown>;
       const rows = demoEvents.filter(
         (r) =>
-          r.reason !== "recovered" &&
           Object.entries(filter).every(
             ([key, v]) =>
               !v ||

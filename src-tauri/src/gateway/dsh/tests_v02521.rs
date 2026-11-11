@@ -52,11 +52,6 @@ async fn legacy_routes_and_full_snapshots_upgrade_without_false_conflicts() {
     legacy["dsh"]["credentials"] = serde_json::json!({"before":before, "after":after});
     legacy["dshCatalog"] =
         serde_json::json!([{"id":models::FLASH,"inputModalities":["text","image"]}]);
-    legacy["settings"]
-        .as_object_mut()
-        .unwrap()
-        .remove("retryBudgetSeconds");
-    legacy["settings"]["totalSeconds"] = 600.into();
     legacy["futureSetting"] = "fixture-preserved".into();
     fs::write(
         data.join("gateway.json"),

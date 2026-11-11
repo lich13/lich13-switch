@@ -211,7 +211,6 @@ export type CurrentConnection = {
 export type DshProfileCurrent = { profile: string; current: CurrentConnection };
 export type GatewayState = {
   listener?: GatewayListener;
-  grokModels?: GrokModel[];
   grokManaged?: boolean;
   dshProfile?: {
     profile: string;
@@ -219,7 +218,6 @@ export type GatewayState = {
     model: string | null;
     makeDefault: boolean;
   } | null;
-  dshProfiles?: DshProfileCurrent[];
   clientId: ClientId;
   revision: string;
   running: boolean;
@@ -229,7 +227,6 @@ export type GatewayState = {
   lastSuccessful: string | null;
   configRevision: string | null;
   configProvider: string | null;
-  configState: string;
   current?: CurrentConnection;
   configError: string | null;
   configWarning?: string | null;

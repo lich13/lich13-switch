@@ -801,15 +801,6 @@ it.each(["codex", "claude", "grok", "dsh"] as const)(
       addressSource: "fixture-source",
       credentialSource: "fixture-credential-source",
     };
-    state.dshProfiles =
-      clientId === "dsh"
-        ? [
-            {
-              profile: "fixture",
-              current: { ...state.current, model: "fixture-profile-model" },
-            },
-          ]
-        : [];
     mock.command.mockImplementation(async (name) =>
       name === "get_gateway" ? structuredClone(state) : null,
     );

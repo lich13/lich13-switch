@@ -427,30 +427,6 @@ describe("event log", () => {
     ).toHaveTextContent("是");
   });
 
-  it("filters legacy recovered records from the visible journal", async () => {
-    eventRecords = [
-      record,
-      {
-        ...record,
-        id: "legacy-recovered-event",
-        reason: "recovered",
-        action: "recovered",
-        level: "info",
-        status: null,
-        errorCode: "RECOVERED",
-      },
-    ];
-    render(<EventLog />);
-    await screen.findByRole("button", { name: /模型不支持/ });
-
-    expect(
-      screen.queryByRole("button", { name: /供应商恢复/ }),
-    ).not.toBeInTheDocument();
-    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(
-      2,
-    );
-  });
-
   it("clears the journal only after confirmation", async () => {
     const user = userEvent.setup();
     render(<EventLog />);

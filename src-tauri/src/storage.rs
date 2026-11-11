@@ -65,7 +65,7 @@ pub fn read_user_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     read_bounded(&target, limit)
 }
 pub fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    read_bounded(path, 2 * 1024 * 1024)
+    read_bounded(path, 16 * 1024 * 1024)
 }
 pub fn read_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
@@ -127,7 +127,7 @@ pub fn atomic_write_user(path: &Path, bytes: &[u8], expected: Option<&str>) -> R
     atomic_write(&target, bytes, expected)
 }
 pub fn atomic_write(path: &Path, bytes: &[u8], expected: Option<&str>) -> Result<()> {
-    atomic_write_bounded(path, bytes, expected, 2 * 1024 * 1024)
+    atomic_write_bounded(path, bytes, expected, 16 * 1024 * 1024)
 }
 /// Fully write and sync private bytes before either replacement or batch publish.
 pub fn stage_write(parent: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile> {

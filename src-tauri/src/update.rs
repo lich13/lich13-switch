@@ -108,16 +108,7 @@ fn select_asset(assets: &[ReleaseAsset], platform: &str) -> Option<Asset> {
             _ => false,
         }
     });
-    let asset = preferred.or_else(|| {
-        assets.iter().find(|asset| {
-            !trusted_github_url(
-                asset.browser_download_url.as_deref(),
-                "",
-                "/lich13/vela/releases/download/",
-            )
-            .is_empty()
-        })
-    })?;
+    let asset = preferred?;
     let name = asset.name.as_deref()?.trim();
     let url = trusted_github_url(
         asset.browser_download_url.as_deref(),
@@ -289,5 +280,12 @@ mod tests {
             ),
             RELEASES_URL
         );
+        let assets = vec![ReleaseAsset {
+            name: Some("SHA256SUMS.txt".into()),
+            browser_download_url: Some(
+                "https://github.com/lich13/vela/releases/download/v1.0.0/SHA256SUMS.txt".into(),
+            ),
+        }];
+        assert!(select_asset(&assets, "macos").is_none());
     }
 }

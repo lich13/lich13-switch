@@ -38,7 +38,6 @@ export const reasons = {
   failover_exhausted: "请求未完成",
   failover: "自动换商",
   circuit_open: "供应商熔断",
-  recovered: "供应商恢复",
   thread_handoff: "线程已接管",
   thread_routing: "线程路由结果",
   config_conflict: "配置冲突",
@@ -58,7 +57,6 @@ export const errorCodes: Record<keyof typeof reasons, string> = {
   failover_exhausted: "FAILOVER_EXHAUSTED",
   failover: "FAILOVER",
   circuit_open: "CIRCUIT_OPEN",
-  recovered: "RECOVERED",
   thread_handoff: "THREAD_HANDOFF",
   thread_routing: "THREAD_ROUTING",
   config_conflict: "CONFIG_CONFLICT",
@@ -289,7 +287,7 @@ function category(r: EventRecord): keyof typeof categories {
     r.level === "info"
   )
     return "status";
-  return ["failover", "thread_handoff", "recovered"].includes(r.reason)
+  return ["failover", "thread_handoff"].includes(r.reason)
     ? "status"
     : "ordinary_error";
 }
@@ -823,13 +821,11 @@ export default function EventLog({
           onChange={(e) => change("reason", e.target.value)}
         >
           <option value="">全部原因</option>
-          {Object.entries(reasons)
-            .filter(([key]) => key !== "recovered")
-            .map(([key, label]) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
+          {Object.entries(reasons).map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
         </select>
       </div>
       {(error || data.error) && (
@@ -849,11 +845,9 @@ export default function EventLog({
             </tr>
           </thead>
           <tbody>
-            {data.items
-              .filter((r) => r.reason !== "recovered")
-              .map((r) => {
-                const cat = category(r);
-                return (
+            {data.items.map((r) => {
+              const cat = category(r);
+              return (
                 <tr key={r.id} data-category={cat}>
                   <td>
                     <time title={new Date(r.lastAt * 1000).toISOString()}>

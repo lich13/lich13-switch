@@ -173,10 +173,8 @@ pub struct ProviderView {
 #[serde(rename_all = "camelCase")]
 pub struct View {
     pub listener: ListenerView,
-    pub grok_models: Vec<grok_import::ModelView>,
     pub grok_managed: bool,
     pub dsh_profile: Option<dsh::Options>,
-    pub dsh_profiles: Vec<dsh::ProfileCurrent>,
     pub client_id: ClientId,
     pub revision: String,
     pub running: bool,
@@ -186,7 +184,6 @@ pub struct View {
     pub last_successful: Option<String>,
     pub config_revision: Option<String>,
     pub config_provider: Option<String>,
-    pub config_state: String,
     pub current: current::Current,
     pub config_error: Option<String>,
     pub config_warning: Option<String>,
@@ -906,13 +903,10 @@ impl Gateway {
         let view = View {
             listener: listener.clone(),
             grok_managed: s.store.grok_api_model.is_some(),
-            grok_models: vec![],
             dsh_profile: s.store.dsh.as_ref().map(|d| d.options.clone()),
-            dsh_profiles: vec![],
             client_id: self.0.client,
             config_revision: None,
             config_provider: None,
-            config_state: String::new(),
             config_error: None,
             connection_mode: match &s.store.connection {
                 codex_api::Connection::Bearer => "bearer",
@@ -1112,21 +1106,11 @@ impl Gateway {
                     .map_err(Clone::clone)
                     .and_then(|entry| grok_layers::read_with_config(home, &resolve, &entry.0));
                 match effective {
-                    Ok(effective) => {
-                        view.grok_models = grok_import::discover(&effective.text, &|name| {
-                            effective.resolve(name, &resolve)
-                        })
-                        .unwrap_or_default();
-                        current::grok_effective(&effective, store, &ports, &resolve)
-                    }
+                    Ok(effective) => current::grok_effective(&effective, store, &ports, &resolve),
                     Err(error) => current::Current::unknown(&error.message),
                 }
             }
-            (ClientId::Dsh, Some(home)) => {
-                let (current, profiles) = dsh::status(home, store, &ports, &resolve);
-                view.dsh_profiles = profiles;
-                current
-            }
+            (ClientId::Dsh, Some(home)) => dsh::status(home, store, &ports, &resolve).0,
             _ => match &config {
                 Some(Ok((_, pair))) => current::pair(self.0.client, pair, store, &ports),
                 Some(Err(e)) => current::Current::unknown(&e.message),
@@ -1136,9 +1120,10 @@ impl Gateway {
         if self.0.client == ClientId::Claude {
             current.warning = claude_warning;
         }
-        let (state, provider) = current.legacy();
-        view.config_state = state.into();
-        view.config_provider = provider;
+        view.config_provider = match &current.state {
+            current::Kind::Provider { id, .. } => Some(id.clone()),
+            _ => None,
+        };
         view.config_error = match &current.state {
             current::Kind::Unknown { reason } => Some(reason.clone()),
             _ => None,

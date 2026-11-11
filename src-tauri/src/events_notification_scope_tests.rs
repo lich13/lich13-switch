@@ -30,7 +30,6 @@ fn only_circuit_open_and_thread_handoff_reasons_are_notifiable() {
         Reason::FailoverExhausted,
         Reason::Failover,
         Reason::CircuitOpen,
-        Reason::Recovered,
         Reason::ConfigConflict,
         Reason::StartupRecovery,
         Reason::AccountSync,

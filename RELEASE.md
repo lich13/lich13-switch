@@ -2,6 +2,13 @@
 
 最新版本置顶。每个版本只记录功能变化、修复、兼容性和必要的已知限制；下载文件请以对应 GitHub Release 为准。
 
+## v0.26.37 · 2026-11-11
+
+- 补齐 DeepSeek 模型家族别名与官方北京时间工作日峰谷计价（`09:00–12:00`、`14:00–18:00` 峰值 2x、其余时段平峰 1x）：内置定价表支持连字符与日期后缀变体（如 `deepseek-v4-1-flash-261017`、`deepseek-v4.1-pro`、`deepseek-v4-1-pro`、`deepseek-v3`、`deepseek-r1` 等），启动时自动调度历史未计价与 `models.dev` 静态单价记录的峰谷价格回填。
+- 支持添加与导入 DeepSeek 官方 API Key：允许将 `https://api.deepseek.com/v1` 作为 DSH 供应商发现、导入与匹配，新增 DSH 供应商弹窗「填入 DeepSeek 官方地址」快捷按钮，并在未配置 OAuth 授权时支持复用已保存的官方 API Key 拉取模型目录与查询余额。
+- 修复更新资源选择、DSH 路由冲突误报与存储边界：平台安装包后缀不匹配时不再兜底选取首个下载资源；DSH 受管网关路由在 5 个受管字段一致时不再因外部附加字段误报冲突；对齐自写私有文件读写上限（16 MiB）；用量库打开前先设置 `busy_timeout` 且在校验失败时直接报错保留原库，不再改名 `.bak`。
+- 精简网关视图、事件与历史兼容分支：移除前端未消费的 `grokModels`、`dshProfiles`、`configState` 下发字段及 `Reason::Recovered`／3 个未引用错误码，移除旧版 `v0.2` 接管恢复分支、用量库打开时的空操作清理与已收敛的 `gateway.json` 旧键迁移，并优化 `storage_v12_diagnostics::pending` 缓存预编译查询。
+
 ## v0.26.36 · 2026-11-11
 
 - 修复 Antigravity App 用量面板缓存命中率偏低与统计缺失：当本地 `modelUsage` 日志未显式上报 `cacheWriteTokens`（或将零值 `cacheReadTokens` 省略）时，以已知输入与缓存读取之和作为可衡量缓存分母，并在打开数据库时自动刷新历史 `v12_records` 的缓存命中统计。

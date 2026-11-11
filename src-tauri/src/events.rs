@@ -41,7 +41,6 @@ pub enum Reason {
     FailoverExhausted,
     Failover,
     CircuitOpen,
-    Recovered,
     ConfigConflict,
     StartupRecovery,
     AccountSync,
@@ -65,7 +64,6 @@ impl Reason {
             Self::FailoverExhausted => "请求未完成",
             Self::Failover => "自动换商",
             Self::CircuitOpen => "供应商已熔断",
-            Self::Recovered => "供应商已恢复",
             Self::ConfigConflict => "配置发生冲突",
             Self::StartupRecovery => "启动恢复失败",
             Self::AccountSync => "账号同步异常",
@@ -86,7 +84,6 @@ impl Reason {
             Self::FailoverExhausted => ErrorCode::FailoverExhausted,
             Self::Failover => ErrorCode::Failover,
             Self::CircuitOpen => ErrorCode::CircuitOpen,
-            Self::Recovered => ErrorCode::Recovered,
             Self::ConfigConflict => ErrorCode::ConfigConflict,
             Self::StartupRecovery => ErrorCode::StartupRecoveryFailed,
             Self::AccountSync => ErrorCode::AccountSyncError,
@@ -271,9 +268,6 @@ impl Record {
         Some(record)
     }
     fn visible(&self) -> bool {
-        if self.reason == Reason::Recovered {
-            return false;
-        }
         if self.reason != Reason::ThreadRouting {
             return true;
         }
@@ -425,10 +419,7 @@ impl Record {
             action,
             level: if matches!(
                 reason,
-                Reason::Recovered
-                    | Reason::Failover
-                    | Reason::ThreadHandoff
-                    | Reason::ThreadRouting
+                Reason::Failover | Reason::ThreadHandoff | Reason::ThreadRouting
             ) {
                 Level::Info
             } else if matches!(
@@ -880,10 +871,7 @@ fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
     if record.reason == Reason::CircuitOpen || causes.contains(record.id.as_str()) {
         Category::CircuitError
     } else if (record.details.quota_check.is_some() && record.level == Level::Info)
-        || matches!(
-            record.reason,
-            Reason::Failover | Reason::Recovered | Reason::ThreadHandoff
-        )
+        || matches!(record.reason, Reason::Failover | Reason::ThreadHandoff)
         || (matches!(
             record.reason,
             Reason::RequestInterrupted | Reason::ThreadRouting
@@ -1657,7 +1645,7 @@ mod v016_tests {
         assert!(!a.same(&b));
     }
     #[test]
-    fn legacy_records_read_without_details_and_recoveries_are_hidden() {
+    fn legacy_records_read_without_details() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.jsonl");
         let a = Record::new(
@@ -1671,20 +1659,7 @@ mod v016_tests {
         );
         let mut old = serde_json::to_value(&a).unwrap();
         old.as_object_mut().unwrap().remove("details");
-        let recovered = Record::new(
-            None,
-            None,
-            None,
-            Reason::Recovered,
-            Action::Recovered,
-            None,
-            None,
-        );
-        std::fs::write(
-            &path,
-            format!("{}\n{}\n", old, serde_json::to_string(&recovered).unwrap()),
-        )
-        .unwrap();
+        std::fs::write(&path, format!("{}\n", old)).unwrap();
         let loaded = load(&path);
         assert!(loaded.error.is_none());
         assert_eq!(loaded.records.len(), 1);

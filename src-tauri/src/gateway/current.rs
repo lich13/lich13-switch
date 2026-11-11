@@ -52,14 +52,6 @@ impl Current {
             reason: reason.into(),
         })
     }
-    pub fn legacy(&self) -> (&'static str, Option<String>) {
-        match &self.state {
-            Kind::Gateway => ("gateway", None),
-            Kind::Provider { id, .. } => ("provider", Some(id.clone())),
-            Kind::Official | Kind::Unmatched { .. } | Kind::Mixed => ("unsaved", None),
-            Kind::Unknown { .. } => ("unknown", None),
-        }
-    }
 }
 pub fn normalize_base(raw: &str) -> Option<String> {
     let mut url = url::Url::parse(raw.trim()).ok()?;

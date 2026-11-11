@@ -33,7 +33,6 @@ export const gatewayDemo: GatewayState = {
   lastSuccessful: null,
   configRevision: "preview-config",
   configProvider: "primary",
-  configState: "provider",
   configError: null,
   settings: {
     customFailureRules: [],
@@ -148,7 +147,6 @@ export const claudeGatewayDemo: GatewayState = {
 if (densePreview) {
   gatewayDemo.mode = "auto";
   gatewayDemo.running = true;
-  gatewayDemo.configState = "gateway";
   gatewayDemo.configProvider = null;
   const [primary, backup, receiver] = gatewayDemo.providers;
   Object.assign(primary, {
@@ -615,13 +613,11 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
   }
   if (name === "start_gateway") {
     s.running = true;
-    s.configState = "gateway";
     s.configProvider = null;
     syncListener();
   }
   if (name === "stop_gateway") {
     s.running = false;
-    s.configState = "provider";
     s.configProvider = s.selected;
     syncListener();
   }
@@ -774,7 +770,6 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       s.selected = id;
       s.mode = "manual";
       if (!s.running) {
-        s.configState = "provider";
         s.configProvider = id;
       }
     }

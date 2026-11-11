@@ -693,51 +693,15 @@ pub fn recover(data: &Path) -> Result<()> {
     };
     let v: serde_json::Value =
         serde_json::from_slice(&raw).map_err(|_| AppError::new(code::RECOVERY, "恢复记录损坏"))?;
-    if v.get("version").and_then(|v| v.as_u64()) == Some(2) {
-        let record = serde_json::from_value(v)
-            .map_err(|_| AppError::new(code::RECOVERY, "恢复记录格式无效"))?;
-        return detach_record(data, record);
-    }
-    // v0.2 could leave a journal after the user already restored custom. Do not replay it.
-    let path = v
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(Path::new)
-        .ok_or_else(|| AppError::new(code::RECOVERY, "旧恢复记录无效"))?;
-    let text = fs::read_to_string(path).map_err(storage::io_error)?;
-    let doc = parse(&text)?;
-    let current = pair(&doc)?;
-    let applied = v
-        .get("applied")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::new(code::RECOVERY, "旧恢复记录无效"))?;
-    let old = parse(applied)?;
-    let managed = old
-        .get("model_providers")
-        .and_then(|p| {
-            p.get("gpt_switch_gateway")
-                .or_else(|| p.get("vela_gateway"))
-        })
-        .ok_or_else(|| AppError::new(code::RECOVERY, "无法确认旧恢复记录的来源，已保留现场"))?;
-    let still_managed = doc
-        .get("model_providers")
-        .and_then(|p| {
-            p.get("gpt_switch_gateway")
-                .or_else(|| p.get("vela_gateway"))
-        })
-        .is_some()
-        || managed.get("base_url").and_then(Item::as_str) == current.base_url.as_deref()
-        || managed
-            .get("experimental_bearer_token")
-            .and_then(Item::as_str)
-            == current.token.as_deref();
-    if still_managed {
+    if v.get("version").and_then(|v| v.as_u64()) != Some(2) {
         return Err(AppError::new(
             code::RECOVERY,
-            "旧版接管尚未解除，已保留配置，请通过配置编辑器处理",
+            "旧恢复记录不受支持，已保留配置，请通过配置编辑器处理",
         ));
     }
-    fs::remove_file(data.join(FILE)).map_err(storage::io_error)
+    let record =
+        serde_json::from_value(v).map_err(|_| AppError::new(code::RECOVERY, "恢复记录格式无效"))?;
+    detach_record(data, record)
 }
 
 #[cfg(test)]
@@ -899,12 +863,9 @@ mod tests {
         let old =
             serde_json::json!({"path":path,"original":ORIGINAL,"applied":applied,"profile":null});
         fs::write(t.path().join(FILE), old.to_string()).unwrap();
-        recover(t.path()).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), ORIGINAL);
-        fs::write(t.path().join(FILE), old.to_string()).unwrap();
-        fs::write(&path, applied).unwrap();
         assert!(recover(t.path()).is_err());
-        assert_eq!(fs::read_to_string(path).unwrap(), applied);
+        assert_eq!(fs::read_to_string(&path).unwrap(), ORIGINAL);
+        assert!(t.path().join(FILE).exists());
     }
     #[test]
     fn journal_write_failure_never_changes_config() {

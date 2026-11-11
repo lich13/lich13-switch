@@ -190,7 +190,7 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
             &claude_home,
         )
         .unwrap();
-    assert_eq!(claude_v1.config_state, "provider");
+    assert!(claude_v1.config_provider.is_some());
     storage::atomic_write(
         &claude_cfg,
         br#"{"env":{"ANTHROPIC_BASE_URL":"https://other.example.invalid","ANTHROPIC_AUTH_TOKEN":"c-other"}}"#,
@@ -199,7 +199,7 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     .unwrap();
     let claude_v2 = claude.try_view().unwrap();
     assert_ne!(claude_v2.config_revision, claude_v1.config_revision);
-    assert_eq!(claude_v2.config_state, "unsaved");
+    assert!(claude_v2.config_provider.is_none());
 }
 
 #[test]
@@ -310,7 +310,7 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
     codex.import_initial(&codex_home).unwrap();
     let v1 = codex.try_view().unwrap();
     assert_eq!(v1.connection_mode, "apiKey");
-    assert_eq!(v1.config_state, "provider");
+    assert!(v1.config_provider.is_some());
     assert_eq!(
         v1.config_revision.as_deref(),
         Some(codex_api::read(&codex_home, "relay_a").unwrap().0.as_str())
@@ -358,7 +358,7 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
     .unwrap();
     let v2 = codex.try_view().unwrap();
     assert_ne!(v2.config_revision, v1.config_revision);
-    assert_eq!(v2.config_state, "unsaved");
+    assert!(v2.config_provider.is_none());
 
     // Modifying config.toml and switching connection provider invalidates codex_api_toml cache.
     storage::atomic_write(

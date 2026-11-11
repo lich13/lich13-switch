@@ -45,14 +45,14 @@ pub struct Prepared {
     pub revision: String,
 }
 impl Listener {
-    pub fn load(path: PathBuf, legacy_codex_port: Option<u16>) -> Result<Self> {
+    pub fn load(path: PathBuf, initial_port: Option<u16>) -> Result<Self> {
         let raw = storage::read_optional(&path)?;
         let config = match raw.as_deref() {
             Some(raw) => serde_json::from_slice::<Config>(raw)
                 .map_err(|_| AppError::new(code::SETTINGS, "共享网关配置损坏，已保留原文件"))?,
             None => Config {
                 version: 2,
-                port: legacy_codex_port.unwrap_or(DEFAULT_SHARED_PORT),
+                port: initial_port.unwrap_or(DEFAULT_SHARED_PORT),
             },
         };
         if config.version != 2 || config.port == 0 {

@@ -55,7 +55,7 @@ fn snapshot_entry(bytes: &[u8], provider: &str) -> Value {
 }
 
 #[test]
-fn settings_defaults_and_legacy_phase_timeout_migration_are_idempotent() {
+fn settings_defaults_and_load_migrated_are_idempotent() {
     let defaults = Settings::default();
     assert_eq!(defaults.first_byte_seconds, 300);
     assert_eq!(defaults.idle_seconds, 300);
@@ -64,19 +64,14 @@ fn settings_defaults_and_legacy_phase_timeout_migration_are_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gateway.json");
     let mut value = serde_json::to_value(Store::default()).unwrap();
-    value["settings"]
-        .as_object_mut()
-        .unwrap()
-        .remove("retryBudgetSeconds");
-    value["settings"]["totalSeconds"] = 600.into();
     value["settings"]["firstByteSeconds"] = 60.into();
     value["settings"]["idleSeconds"] = 120.into();
     value["settings"]["threadIdleReleaseSeconds"] = 17.into();
     std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
     let (migrated, old_revision) = Store::load_migrated(&path).unwrap();
-    assert_eq!(migrated.settings.first_byte_seconds, 300);
-    assert_eq!(migrated.settings.idle_seconds, 300);
+    assert_eq!(migrated.settings.first_byte_seconds, 60);
+    assert_eq!(migrated.settings.idle_seconds, 120);
     assert_eq!(migrated.settings.thread_idle_release_seconds, 17);
     let new_revision = migrated.persist(&path, &old_revision).unwrap();
 

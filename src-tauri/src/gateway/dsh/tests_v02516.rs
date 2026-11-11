@@ -80,11 +80,7 @@ async fn desktop_without_bundle_is_recognized_imported_and_shared_with_empty_pro
     assert!(result.results.iter().all(|r| r.status == "success"));
     assert_eq!(result.state.providers.len(), 1);
     assert_eq!(result.state.providers[0].name, "Fixture Relay");
-    assert!(result
-        .state
-        .dsh_profiles
-        .iter()
-        .all(|p| p.current.state == Kind::Gateway));
+    assert_eq!(result.state.current.state, Kind::Gateway);
     gateway.stop_dsh(false).await.unwrap();
     let restored = fs::read_to_string(home.path().join("profiles/desktop").join(PATCH)).unwrap();
     assert!(
@@ -117,10 +113,7 @@ async fn shared_overrides_restore_only_owned_fields_and_refuse_external_changes(
         .await
         .unwrap();
     let current = gateway.try_view().unwrap();
-    assert!(current
-        .dsh_profiles
-        .iter()
-        .all(|p| p.current.state == Kind::Gateway));
+    assert_eq!(current.current.state, Kind::Gateway);
     let path = home.path().join(PATCH);
     let managed = fs::read_to_string(&path).unwrap();
     fs::write(&path, managed.replace("keep: true", "keep: false")).unwrap();

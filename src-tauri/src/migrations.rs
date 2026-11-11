@@ -13,51 +13,9 @@ pub(crate) fn gateway(data: &Path) -> Result<(crate::gateway::Store, String)> {
 #[cfg(test)]
 mod tests;
 
-/// v0.25.18: convert the two original slots to stable official model IDs.
-pub(crate) fn dsh_model_mappings(value: &mut serde_json::Value) -> bool {
-    let mut changed = false;
-    if let Some(providers) = value.get_mut("dshModels").and_then(|v| v.as_object_mut()) {
-        for mapping in providers.values_mut().filter_map(|v| v.as_object_mut()) {
-            for (old, id) in [
-                ("flash", crate::gateway::dsh::models::FLASH),
-                ("pro", crate::gateway::dsh::models::PRO),
-            ] {
-                if let Some(model) = mapping.remove(old) {
-                    mapping.entry(id).or_insert(model);
-                    changed = true;
-                }
-            }
-        }
-    }
-    changed
-}
-
-/// Missing retryBudgetSeconds identifies the old, ineffective totalSeconds setting.
-/// No separate migration marker: once persisted, explicit user values remain intact.
-pub(crate) fn gateway_wait_budget(value: &mut serde_json::Value) -> bool {
-    let Some(settings) = value.get_mut("settings").and_then(|v| v.as_object_mut()) else {
-        return false;
-    };
-    let changed = !settings.contains_key("retryBudgetSeconds");
-    if changed {
-        for key in [
-            "connectSeconds",
-            "firstByteSeconds",
-            "idleSeconds",
-            "queueSeconds",
-            "websocketRetrySeconds",
-            "retryBudgetSeconds",
-        ] {
-            settings.insert(key.into(), 300.into());
-        }
-    }
-    settings.remove("totalSeconds").is_some() || changed
-}
-
 /// Persistent compatibility applied during `Store::load_migrated`.
 pub(crate) fn gateway_fields(value: &mut serde_json::Value) -> bool {
-    let mut changed = gateway_wait_budget(value);
-    changed |= dsh_model_mappings(value);
+    let mut changed = false;
     if let Some(models) = value.get_mut("dshCatalog").and_then(|v| v.as_array_mut()) {
         for model in models {
             changed |= crate::gateway::dsh::models::normalize(model);
