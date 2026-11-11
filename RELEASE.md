@@ -2,11 +2,17 @@
 
 最新版本置顶。每个版本只记录功能变化、修复、兼容性和必要的已知限制；下载文件请以对应 GitHub Release 为准。
 
+## v0.26.39 · 2026-11-12
+
+- 修复快捷面板长等待阶段文案与网关错误分类规则：恢复快捷面板 WebSocket 重连等待阶段（`ws_wait`）的「等待重连」中文标签；允许通用 `api_error`／`server_error` 外层包装下的具体错误消息与用户自定义规则生效，放行带点号的合法协议错误码（如 `rate_limit.exceeded`、`response.failed`）保存为自定义规则，统一 `api_key_quota_exhausted` 错误码与消息分类为 `Billing`，并合并 `global_fault` 与 `MSG_6` 鉴权词表。
+- 补齐网关防自环地址检查与配额边界：上游地址与连接器回环检测覆盖全零未指定地址（`0.0.0.0`、`[::]`）及 IPv4 映射回环地址（`[::ffff:127.0.0.1]`）；移除网关准入同一锁临界区内的 `retry_selection` 重复扫描；补齐订阅 `amount_total` 非负过滤并解耦 New API 自定义货币单位常量。
+- 精简用量查询、内部签名与外联门禁：复用 `Record::gateway_only()` 与 `Pricing::view_unlocked()`，移除 `scan_client_attempts` 未读取的 2 个 SQL 列、`native_sql`／`eligible`／`selection`／`startup::Service::new`／`preview_grok_import` 未使用参数及 `dsh::models::normalize` 未使用返回值；收紧 `check-network-hosts.py` 对部分模板化域名的白名单校验，并同步 `provider-tests.json`（仅识别 `schema 3`）文档说明。
+
 ## v0.26.38 · 2026-11-11
 
 - 移除冗余 IPC 命令、下发字段与本地状态文件：精简更新检查返回值为 `hasUpdate`／`latestVersion`，移除 6 个无调用方的 IPC 命令（`resize_quick`、`get_gateway_listener`、`set_gateway_listener`、`attach_dsh_profile`、`import_auth_file`、`pick_path`）、`AuthSource` 冗余字段、`startup.json` 状态文件、Grok 环境变量导入死分支及冗余 IPC 参数；主窗口失焦时若系统已隐藏窗口同步派发可见性变更通知。
 - 精简用量聚合查询与对齐存储边界：移除 Antigravity／Claude Code 统计中前端未消费的会话排行聚合与游标题题 SQL，移除用量总览 `Dashboard` 的 `reviewCount` 附加 `COUNT` 查询与 `precision` 固定字段；补齐 `atomic_write_bounded` 写入大小上限校验、对齐诊断字段解包字典与存储／网关文档说明。
-- 清理网关历史迁移、冗余事件分支与供应商指纹探针死路径：移除已完成收敛的网关 `Store::load_migrated` 旧字段迁移、无生产触发的 `Action::Recovered`／`Phase::WsWait`／`RpmWaitReason::Pacing` 事件分支、`catalog.rs` 重复自检与 `protocol.rs`／`circuit.rs`／`failure_policy.rs`／`tokenizer.rs`／`modeltrace.rs` 冗余状态；修正网关准入 RPM 窗口重算重复推送与等待超时分支，并将上游配额耗尽短语归入全局冷却避免无效单渠道重试。
+- 清理网关历史迁移、冗余事件分支与供应商指纹探针死路径（网关存储需为 `schema 2`，即 `≥ v0.26.14` 升级后自动满足）：移除已完成收敛的网关 `Store::load_migrated` 旧字段迁移、无生产触发的 `Action::Recovered`／`Phase::WsWait`／`RpmWaitReason::Pacing` 事件分支、`catalog.rs` 重复自检与 `protocol.rs`／`circuit.rs`／`failure_policy.rs`／`tokenizer.rs`／`modeltrace.rs` 冗余状态；修正网关准入 RPM 窗口重算重复推送与等待超时分支，并将上游配额耗尽短语归入全局冷却避免无效单渠道重试。
 
 ## v0.26.37 · 2026-11-11
 

@@ -288,9 +288,9 @@ impl Store {
     pub fn logs(&self, f: &Filter) -> Result<Page> {
         let _snapshot = self.read_snapshot()?;
         let (condition, args) = query::conditions(f, "r", true);
-        let condition = query::native_sql(&self.connection, condition);
+        let condition = query::native_sql(condition);
         // Ambiguous records remain inspectable, but are excluded from aggregates.
-        let eligible = query::eligible(&self.connection, f, "r", true);
+        let eligible = query::eligible(f, "r", true);
         let where_sql = format!("{eligible} AND {condition}");
         let total: u64 = db(self.connection.query_row(
             &format!("SELECT count(*) FROM records r WHERE {where_sql}"),
@@ -323,7 +323,7 @@ impl Store {
     ) -> Result<BTreeMap<String, u64>> {
         // A logical gateway record counts once, regardless of retry attempts or
         // correlated client-session records. The existing time index bounds this read.
-        let sql = query::native_sql(&self.connection,
+        let sql = query::native_sql(
             "SELECT r.provider,count(*) FROM records r WHERE r.client=? AND r.source='proxy' AND r.effective=1 AND r.time>? AND r.time<=? AND r.provider IS NOT NULL GROUP BY r.provider".into());
         let mut stmt = db(self.connection.prepare(&sql))?;
         let rows = db(stmt.query_map(params![client, at - 3_600_000, at], |row| {
@@ -490,7 +490,6 @@ impl Store {
             .iter()
             .map(|scope| {
                 let eligible = query::eligible(
-                    tx,
                     &Filter {
                         source: scope.map(str::to_owned),
                         ..Filter::default()

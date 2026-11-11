@@ -128,7 +128,7 @@ LM Detector 使用固定提交 `fd9b4caf6feafbec64d45a1552432515bf4efa39` 的离
 
 判定支持“严格模式 · 家族与版本层级”与“宽松模式 · 仅匹配指定降智模型”（默认目标 `gpt-5.6-luna`，仅允许当前指纹库非合并已知模型）两种本地策略。严格模式下使用实际发往上游的型号（DSH 使用映射后型号）：跨家族按本项目处置顺序 Claude ＞ GPT ＞ Grok ＞ DeepSeek，优先于家族内特例；未知家族或无法识别的别名不猜测。同家族：Claude 为 Opus ＞ Sonnet ＞ Haiku，同档旧版本降级，Fable 暂不定档；GPT 为 Astra ＞ Sol ＞ Luna，Sol 跨版本同级，Astra／Luna 同档旧版本降级，保留 gpt-5.6-luna 特例，其余未定档型号无法判定；Grok 同系列比较版本，fast、code 等不同系列不互比；DeepSeek 为 Pro ＞ Flash，同档比较主次版本，日期后缀不同不降级。合并类别仅在所有成员都降级时退队，其余显示无法确定。所有指纹结果均为参考库内的闭集统计分布排序，降级判定与自动退队仅作为本机网关路由调度策略，不构成对任何第三方服务商的模型真实性鉴定（详见 [README.md](../README.md) 与 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)）。
 
-“未命中降智规则”与“无法判定”均不清除旧标记；退队失败保留标记和错误。schema 3 将旧检测配置、计时和标记归入 Codex，旧历史按 ModelTrace 解释且不重算，保留模型缓存和旧设置。迁移原子写入，失败保留原文件。
+“未命中降智规则”与“无法判定”均不清除旧标记；退队失败保留标记和错误。`provider-tests.json` 仅识别 schema 3；其它版本或无法解析的文件会保留一份诊断副本并重置为默认设置。
 
 ## Codex 搜索备用
 

@@ -353,22 +353,7 @@ impl Pricing {
         }
     }
     pub fn view(&self) -> View {
-        let s = self.state.read().unwrap();
-        let mut models = builtin_pricing::catalog().clone();
-        models.extend(s.cache.catalog.clone());
-        models.extend(s.config.fixed.clone());
-        models.remove("sample_spec");
-        View {
-            config: s.config.clone(),
-            models,
-            version: s.cache.hash.clone(),
-            source: "Sub2API · Wei-Shaw/model-price-repo",
-            checked_at: s.cache.checked_at,
-            updated_at: s.cache.updated_at,
-            error: s.config_error.clone().or_else(|| s.error.clone()),
-            syncing: s.syncing,
-            revision: s.revision.clone(),
-        }
+        self.view_unlocked(&self.state.read().unwrap())
     }
     pub(super) fn content_version(&self) -> String {
         self.state.read().unwrap().cache.catalog_hash.clone()

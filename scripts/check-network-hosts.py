@@ -52,10 +52,12 @@ def check(root: Path) -> list[str]:
         for match in URL.finditer(source):
             # Templated authorities are supplied by configuration, not literals.
             authority = match.group().split("://", 1)[1].split("/", 1)[0]
-            if "{" in authority or "$" in authority:
+            host_part = authority.rsplit("@", 1)[-1].split(":", 1)[0].lower()
+            if re.fullmatch(r"\$?\{[^{}]*\}", host_part):
                 continue
+            candidate = re.sub(r"\$?\{[^{}]*\}", "x", match.group())
             try:
-                host = urlsplit(match.group()).hostname
+                host = urlsplit(candidate).hostname
             except ValueError:
                 host = None
             if host and local_or_fixture(host, policy["local_hosts"]):

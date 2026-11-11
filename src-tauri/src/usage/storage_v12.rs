@@ -495,10 +495,10 @@ pub(super) fn scan_client_attempts(
     mut visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
 ) -> Result<()> {
     let mut stmt = db(c.prepare_cached(
-        "SELECT r.rid,r.session,r.time,r.time+r.started,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
+        "SELECT r.rid,r.session,r.time,CASE WHEN a.ordinal=r.last THEN 1 ELSE 0 END,
          usage_value(m.value),a.shape,shape_value.value,a.body,
          a.inclusive_input,a.input,a.output,a.cache_read,a.cache_write,a.cost,a.unpriced,
-         CASE WHEN a.ordinal=r.last THEN a.duration ELSE 0 END,usage_value(p.value),a.operation,r.compaction
+         usage_value(p.value),a.operation,r.compaction
          FROM v12_records r
          JOIN v12_all_attempts a ON a.owner=r.rid
          LEFT JOIN v12_dictionary m ON m.id=a.model
@@ -534,12 +534,12 @@ pub(super) fn scan_client_attempts(
         let opt_u64 = |idx: usize| -> Result<Option<u64>> {
             Ok(db(row.get::<_, Option<i64>>(idx))?.and_then(|n| u64::try_from(n).ok()))
         };
-        let shape_id = db(row.get::<_, Option<i64>>(6))?;
+        let shape_id = db(row.get::<_, Option<i64>>(5))?;
         let shape = if let Some(sid) = shape_id {
             if let Some(cached) = shapes.get(&sid) {
                 Some(cached.clone())
             } else {
-                let value = db(row.get::<_, Option<Vec<u8>>>(7))?
+                let value = db(row.get::<_, Option<Vec<u8>>>(6))?
                     .as_deref()
                     .and_then(shared_value)
                     .unwrap_or_else(|| json!({}));
@@ -560,34 +560,34 @@ pub(super) fn scan_client_attempts(
         } else {
             None
         };
-        let output = opt_u64(11)?;
+        let output = opt_u64(10)?;
         let reasoning = if output.is_some_and(|n| n > 0) {
-            diagnostic_u64(c, db(row.get(8))?, &mut diagnostics, "reasoningTokens")?
+            diagnostic_u64(c, db(row.get(7))?, &mut diagnostics, "reasoningTokens")?
         } else {
             None
         };
-        let is_final = db(row.get::<_, i64>(4))? != 0;
+        let is_final = db(row.get::<_, i64>(3))? != 0;
         if is_final {
-            request_operation = match db(row.get::<_, i64>(18))? {
+            request_operation = match db(row.get::<_, i64>(16))? {
                 2 => "web_search",
                 1 => "compaction",
-                _ if db(row.get::<_, bool>(19))? => "compaction",
+                _ if db(row.get::<_, bool>(17))? => "compaction",
                 _ => "model",
             };
         }
         attempts.push(AntigravityAttemptRow {
             final_provider: None,
             session_id: identifier(db(row.get(1))?)?,
-            provider: db(row.get(17))?,
+            provider: db(row.get(15))?,
             time: db(row.get(2))?,
             is_final,
-            model: db(row.get(5))?,
+            model: db(row.get(4))?,
             display_name: shape.as_ref().and_then(|s| s.display_name.clone()),
             tokens: {
-                let input = opt_u64(10)?;
-                let mut cache_read = opt_u64(12)?;
-                let cache_write = opt_u64(13)?;
-                let mut inclusive_input = opt_u64(9)?;
+                let input = opt_u64(9)?;
+                let mut cache_read = opt_u64(11)?;
+                let cache_write = opt_u64(12)?;
+                let mut inclusive_input = opt_u64(8)?;
                 if client == "antigravity" {
                     if let Some(inp) = input {
                         if cache_read.is_none() {
@@ -612,8 +612,8 @@ pub(super) fn scan_client_attempts(
                 }
             },
             cache_savings_rates: shape.as_ref().and_then(|s| s.cache_savings_rates),
-            cost: db(row.get(14))?,
-            request_unpriced: opt_u64(15)?.unwrap_or(0) > 0,
+            cost: db(row.get(13))?,
+            request_unpriced: opt_u64(14)?.unwrap_or(0) > 0,
             provider_unpriced: false,
         });
     }

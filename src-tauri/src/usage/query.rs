@@ -220,7 +220,7 @@ pub fn project(
 fn gateway_kind(alias: &str) -> String {
     format!("CASE WHEN EXISTS(SELECT 1 FROM usage_metrics original_kind WHERE original_kind.kind=2 AND original_kind.owner={alias}.id) THEN 2 ELSE 0 END")
 }
-pub fn eligible(c: &Connection, f: &Filter, alias: &str, review: bool) -> String {
+pub fn eligible(f: &Filter, alias: &str, review: bool) -> String {
     let effective = if review {
         format!("{alias}.effective IN (1,2)")
     } else {
@@ -231,11 +231,10 @@ pub fn eligible(c: &Connection, f: &Filter, alias: &str, review: bool) -> String
     }
     let sql = match f.source.as_deref() {
         Some("proxy") => format!("{effective} AND {alias}.source='proxy'"),
-        Some("sessions") => unreachable!(),
         Some("grok_sessions") => format!("{effective} AND {alias}.source='grok'"),
         _ => format!("{effective} AND {alias}.source<>'grok'"),
     };
-    native_sql(c, sql)
+    native_sql(sql)
 }
 pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>) {
     let mut terms = vec![format!("{alias}.time>=?"), format!("{alias}.time<=?")];
@@ -325,7 +324,7 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
         cache_input_eligible: row.get(i + 23)?,
     })
 }
-fn selection(c: &Connection, f: &Filter) -> (String, Vec<Value>) {
+fn selection(f: &Filter) -> (String, Vec<Value>) {
     let (condition, mut args) = conditions(f, "r", false);
     let mut daily = vec![
         "d.day>=?".to_string(),
@@ -358,7 +357,7 @@ fn selection(c: &Connection, f: &Filter) -> (String, Vec<Value>) {
         daily.push(format!("{}=?", operation_expression("d.body", "$.example")));
         args.push(Value::Text(operation.into()));
     }
-    let eligible = eligible(c, f, "r", false);
+    let eligible = eligible(f, "r", false);
     let kind = if f.source.as_deref() == Some("proxy") {
         gateway_kind("r")
     } else {
@@ -392,8 +391,8 @@ fn grok_model_filter(f: &Filter) -> Option<&str> {
 pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
     let start = f.start.unwrap_or(0);
     let end = f.end.unwrap_or_else(now);
-    let (cte, args) = selection(c, f);
-    let cte = native_sql(c, cte);
+    let (cte, args) = selection(f);
+    let cte = native_sql(cte);
     // Each aggregate reads the same narrow materialized projection, rather than
     // repeating the indexed record/attempt join for every panel.
     let cte = cte.replace("m AS (", "m AS MATERIALIZED (");
@@ -524,7 +523,7 @@ pub fn changed(c: &Connection) -> Result<()> {
 }
 
 /// Only metric owners change internally; public IDs and sort ties stay stable.
-pub(super) fn native_sql(_c: &Connection, sql: String) -> String {
+pub(super) fn native_sql(sql: String) -> String {
     sql.replace(&gateway_kind("r"), "CASE WHEN EXISTS(SELECT 1 FROM v12_original o WHERE o.owner=r.rid AND o.metrics_changed) THEN 2 ELSE 0 END")
     .replace(
         "id owner,time,source FROM records",

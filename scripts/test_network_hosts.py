@@ -136,6 +136,18 @@ class NetworkHostsTests(unittest.TestCase):
 
         self.assertEqual(self.check(), [])
 
+    def test_rejects_templated_subdomain_on_unregistered_host(self):
+        self.write_manifest()
+        self.write_source(
+            "src-tauri/src/client.rs",
+            'fn url(sub: &str) -> String { format!("https://{sub}.unlisted-vendor.com/v1") }\n',
+        )
+
+        self.assertEqual(
+            self.check(),
+            ["src-tauri/src/client.rs:1: unregistered hard-coded URL host"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

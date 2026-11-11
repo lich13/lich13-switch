@@ -28,7 +28,6 @@ pub struct Request {
 impl Request {
     pub fn validate(&self) -> Result<()> {
         if self.clients.is_empty()
-            || self.clients.len() > 2
             || self
                 .clients
                 .iter()

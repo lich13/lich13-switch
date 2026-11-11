@@ -214,11 +214,7 @@ pub(super) fn supplement(c: &Connection, id: &str) -> Result<()> {
     let mut current = storage_v12::record(c, id)?.ok_or_else(|| failure("用量关联记录缺失"))?;
     let before = serde_json::to_value(&current).map_err(|_| failure("用量元数据无效"))?;
     let previous_price = current.final_attempt().and_then(|a| a.price.clone());
-    if let Some(original) = current.gateway_reported.take() {
-        if let Some(last) = current.attempts.last_mut() {
-            *last = original;
-        }
-    }
+    current.gateway_only();
     let peers = storage_v12::peers(c, id)?;
     current.merged_sources = peers.iter().map(|r| r.source.clone()).collect();
     if !peers.is_empty() {
@@ -352,11 +348,7 @@ pub fn reset_source_supplements(c: &Connection, source: &str) -> Result<()> {
     let rows = db(rows.collect::<rusqlite::Result<Vec<_>>>())?;
     for rid in rows {
         let mut r = storage_v12::load_record(c, rid)?;
-        if let Some(original) = r.gateway_reported.take() {
-            if let Some(last) = r.attempts.last_mut() {
-                *last = original;
-            }
-        }
+        r.gateway_only();
         r.merged_sources.clear();
         r.deduplication.clear();
         save_projection(c, &r)?;
