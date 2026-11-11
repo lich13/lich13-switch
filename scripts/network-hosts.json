@@ -3,7 +3,7 @@
     "api.anthropic.com": {"purpose": "Claude 用量页可见时只读查询当前官方账号周期额度，内存缓存五分钟", "files": ["src-tauri/src/usage/claude_quota.rs"]},
     "aiplatform.googleapis.com": {"purpose": "用户启用 Antigravity Vertex API Key 后转发生成与 Token 计数；配置地区时使用对应地区的 aiplatform 子域", "files": ["src-tauri/src/gateway/antigravity.rs"]},
     "models.dev": {"purpose": "首次缺缓存或用户手动刷新公共模型元数据和参考价格", "files": ["src-tauri/src/models_dev.rs"]},
-    "api.deepseek.com": {"purpose": "打开 DSH 接入或映射设置及手动刷新时只读查询官方模型目录", "files": ["src-tauri/src/gateway/dsh/official.rs"]},
+    "api.deepseek.com": {"purpose": "打开 DSH 接入或映射设置及手动刷新时只读查询官方模型目录；DSH 供应商弹窗官方地址快捷填入", "files": ["src-tauri/src/gateway/dsh/official.rs", "src/GatewayProviderDialog.tsx"]},
     "platform.deepseek.com": {"purpose": "校验 DSH 官方登录凭据的签发方，不是请求地址", "files": ["src-tauri/src/gateway/dsh/official.rs"]},
     "api.github.com": {"purpose": "应用检查本仓库最新 Release；用户手动更新 ModelTrace／LM Detector 指纹库时校验上游提交和文件", "files": ["src-tauri/src/update.rs", "src-tauri/src/provider_testing/bank.rs", "src-tauri/src/provider_testing/lm_detector.rs"]},
     "raw.githubusercontent.com": {"purpose": "应用读取 Wei-Shaw/model-price-repo 的价格及 SHA-256；用户手动更新时下载固定提交的指纹库", "files": ["src-tauri/src/usage/pricing.rs", "src-tauri/src/provider_testing/bank.rs", "src-tauri/src/provider_testing/lm_detector.rs"]},

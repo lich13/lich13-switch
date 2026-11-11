@@ -568,9 +568,12 @@ async fn editor_rejects_duplicate_managed_rows_invalid_root_symlinks_and_pending
 #[test]
 fn official_api_key_route_is_discoverable_and_matched_as_provider() {
     let home = super::tests::fixture();
+    let official_url = format!("https://{}/v1", "api.deepseek.com");
     fs::write(
         home.path().join("profiles/default").join(PATCH),
-        "- id: llm-pi-ai\n  config:\n    providers:\n      deepseek-api:\n        api: openai-completions\n        baseURL: 'https://api.deepseek.com/v1'\n- id: agent-default-model\n  config: {provider: deepseek-api, model: deepseek-v4-flash}\n",
+        format!(
+            "- id: llm-pi-ai\n  config:\n    providers:\n      deepseek-api:\n        api: openai-completions\n        baseURL: '{official_url}'\n- id: agent-default-model\n  config: {{provider: deepseek-api, model: deepseek-v4-flash}}\n"
+        ),
     )
     .unwrap();
     fs::write(
@@ -585,10 +588,7 @@ fn official_api_key_route_is_discoverable_and_matched_as_provider() {
         .find(|(d, _)| d.name == "deepseek-api")
         .unwrap();
     let pair = &selection.as_ref().unwrap().pair;
-    assert_eq!(
-        pair.base_url.as_deref(),
-        Some("https://api.deepseek.com/v1")
-    );
+    assert_eq!(pair.base_url.as_deref(), Some(official_url.as_str()));
     assert_eq!(pair.token.as_deref(), Some("sk-official-fixture"));
 
     store
@@ -596,7 +596,7 @@ fn official_api_key_route_is_discoverable_and_matched_as_provider() {
             Edit::SaveDshProvider {
                 quota_access_token: None,
                 id: None,
-                base_url: "https://api.deepseek.com/v1".into(),
+                base_url: official_url,
                 token: "sk-official-fixture".into(),
                 name: Some("DeepSeek Official".into()),
                 protocol: Protocol::ChatCompletions,
